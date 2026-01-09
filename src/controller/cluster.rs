@@ -19,7 +19,7 @@ use mockall::automock;
 use crate::agent::connection::SharedAgentRegistry;
 use crate::capi::{ensure_capi_installed_with, CapiDetector, CapiInstaller};
 use crate::crd::{
-    ClusterCondition, ClusterPhase, ConditionStatus, LatticeCluster, LatticeClusterStatus,
+    Condition, ClusterPhase, ConditionStatus, LatticeCluster, LatticeClusterStatus,
     ProviderType,
 };
 use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
@@ -1144,7 +1144,7 @@ pub fn error_policy(cluster: Arc<LatticeCluster>, error: &Error, _ctx: Arc<Conte
 async fn update_status_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
     let name = cluster.name_any();
 
-    let condition = ClusterCondition::new(
+    let condition = Condition::new(
         "Provisioning",
         ConditionStatus::True,
         "StartingProvisioning",
@@ -1165,7 +1165,7 @@ async fn update_status_provisioning(cluster: &LatticeCluster, ctx: &Context) -> 
 async fn update_status_pivoting(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
     let name = cluster.name_any();
 
-    let condition = ClusterCondition::new(
+    let condition = Condition::new(
         "Pivoting",
         ConditionStatus::True,
         "StartingPivot",
@@ -1186,7 +1186,7 @@ async fn update_status_pivoting(cluster: &LatticeCluster, ctx: &Context) -> Resu
 async fn update_status_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
     let name = cluster.name_any();
 
-    let condition = ClusterCondition::new(
+    let condition = Condition::new(
         "Ready",
         ConditionStatus::True,
         "ClusterReady",
@@ -1212,7 +1212,7 @@ async fn update_status_failed(
     let name = cluster.name_any();
 
     let condition =
-        ClusterCondition::new("Ready", ConditionStatus::False, "ValidationFailed", message);
+        Condition::new("Ready", ConditionStatus::False, "ValidationFailed", message);
 
     let status = LatticeClusterStatus::with_phase(ClusterPhase::Failed)
         .message(message.to_string())
@@ -1424,13 +1424,13 @@ mod tests {
 
         #[test]
         fn test_multiple_condition_types_are_preserved() {
-            let provisioning = ClusterCondition::new(
+            let provisioning = Condition::new(
                 "Provisioning",
                 ConditionStatus::True,
                 "InProgress",
                 "Infrastructure provisioning",
             );
-            let ready = ClusterCondition::new(
+            let ready = Condition::new(
                 "Ready",
                 ConditionStatus::False,
                 "NotReady",

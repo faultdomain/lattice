@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    CellSpec, ClusterCondition, ClusterPhase, NetworkingSpec, NodeSpec, ProviderSpec, WorkloadSpec,
+    CellSpec, Condition, ClusterPhase, NetworkingSpec, NodeSpec, ProviderSpec, WorkloadSpec,
 };
 
 /// Specification for a LatticeCluster
@@ -104,7 +104,7 @@ pub struct LatticeClusterStatus {
 
     /// Conditions representing the cluster state
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conditions: Vec<ClusterCondition>,
+    pub conditions: Vec<Condition>,
 
     /// Number of ready control plane nodes
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,7 +141,7 @@ impl LatticeClusterStatus {
     }
 
     /// Add a condition and return self for chaining
-    pub fn condition(mut self, condition: ClusterCondition) -> Self {
+    pub fn condition(mut self, condition: Condition) -> Self {
         // Remove existing condition of the same type
         self.conditions.retain(|c| c.type_ != condition.type_);
         self.conditions.push(condition);
@@ -354,7 +354,7 @@ mod tests {
     fn story_controller_builds_complete_status_fluently() {
         use crate::crd::types::ConditionStatus;
 
-        let condition = ClusterCondition::new(
+        let condition = Condition::new(
             "Ready",
             ConditionStatus::False,
             "Provisioning",
@@ -379,13 +379,13 @@ mod tests {
     fn story_new_condition_replaces_old_condition_of_same_type() {
         use crate::crd::types::ConditionStatus;
 
-        let provisioning = ClusterCondition::new(
+        let provisioning = Condition::new(
             "Ready",
             ConditionStatus::False,
             "Provisioning",
             "Cluster is being provisioned",
         );
-        let ready = ClusterCondition::new(
+        let ready = Condition::new(
             "Ready",
             ConditionStatus::True,
             "ClusterReady",

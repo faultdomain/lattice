@@ -212,9 +212,12 @@ impl std::fmt::Display for ConditionStatus {
     }
 }
 
-/// Cluster condition following Kubernetes conventions
+/// Kubernetes-style condition for status reporting
+///
+/// This type follows Kubernetes API conventions and can be used
+/// for any resource status (clusters, services, etc.)
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ClusterCondition {
+pub struct Condition {
     /// Type of condition (e.g., Ready, Provisioning)
     #[serde(rename = "type")]
     pub type_: String,
@@ -233,7 +236,7 @@ pub struct ClusterCondition {
     pub last_transition_time: DateTime<Utc>,
 }
 
-impl ClusterCondition {
+impl Condition {
     /// Create a new condition with the current timestamp
     pub fn new(
         type_: impl Into<String>,
@@ -380,7 +383,7 @@ mod tests {
         #[test]
         fn test_new_sets_timestamp() {
             let before = Utc::now();
-            let condition = ClusterCondition::new(
+            let condition = Condition::new(
                 "Ready",
                 ConditionStatus::True,
                 "ClusterReady",
@@ -497,7 +500,7 @@ mod tests {
             let before = Utc::now();
 
             // Create a "Ready" condition
-            let condition = ClusterCondition::new(
+            let condition = Condition::new(
                 "Ready",
                 ConditionStatus::True,
                 "ClusterReady",
@@ -524,7 +527,7 @@ mod tests {
         #[test]
         fn story_condition_status_meanings() {
             // True = condition is definitely met
-            let ready = ClusterCondition::new(
+            let ready = Condition::new(
                 "Ready",
                 ConditionStatus::True,
                 "AllHealthy",
@@ -533,7 +536,7 @@ mod tests {
             assert_eq!(ready.status.to_string(), "True");
 
             // False = condition is definitely NOT met
-            let not_ready = ClusterCondition::new(
+            let not_ready = Condition::new(
                 "Ready",
                 ConditionStatus::False,
                 "ComponentsFailed",
@@ -542,7 +545,7 @@ mod tests {
             assert_eq!(not_ready.status.to_string(), "False");
 
             // Unknown = can't determine (e.g., during startup)
-            let unknown = ClusterCondition::new(
+            let unknown = Condition::new(
                 "Ready",
                 ConditionStatus::Unknown,
                 "Checking",

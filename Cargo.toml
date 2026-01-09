@@ -104,6 +104,12 @@ tempfile = "3.14"
 # HTTP testing
 tower = { version = "0.5", features = ["util"] }
 
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Random number generation for benchmarks
+rand = "0.8"
+
 [[bin]]
 name = "lattice"
 path = "src/main.rs"
@@ -111,3 +117,8 @@ path = "src/main.rs"
 [lib]
 name = "lattice"
 path = "src/lib.rs"
+
+[[bench]]
+name = "service_graph"
+harness = false
+

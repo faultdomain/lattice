@@ -1,0 +1,934 @@
+//! LatticeService controller implementation
+//!
+//! This module implements the reconciliation logic for LatticeService resources.
+//! It follows the Kubernetes controller pattern: observe current state, determine
+//! desired state, calculate diff, and apply changes.
+//!
+//! The controller maintains a ServiceGraph for tracking service dependencies
+//! and allowed callers for network policy generation.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use kube::api::{Api, Patch, PatchParams};
+use kube::runtime::controller::Action;
+use kube::{Client, ResourceExt};
+use tracing::{debug, error, info, instrument, warn};
+
+#[cfg(test)]
+use mockall::automock;
+
+use crate::crd::{
+    Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
+    LatticeService, LatticeServiceSpec, LatticeServiceStatus, ServicePhase,
+};
+use crate::graph::ServiceGraph;
+use crate::Error;
+
+// =============================================================================
+// Traits for dependency injection and testability
+// =============================================================================
+
+/// Trait abstracting Kubernetes client operations for LatticeService
+///
+/// This trait allows mocking the Kubernetes client in tests while using
+/// the real client in production.
+#[cfg_attr(test, automock)]
+#[async_trait]
+pub trait ServiceKubeClient: Send + Sync {
+    /// Patch the status of a LatticeService
+    async fn patch_service_status(
+        &self,
+        name: &str,
+        status: &LatticeServiceStatus,
+    ) -> Result<(), Error>;
+
+    /// Patch the status of a LatticeExternalService
+    async fn patch_external_service_status(
+        &self,
+        name: &str,
+        status: &LatticeExternalServiceStatus,
+    ) -> Result<(), Error>;
+
+    /// Get a LatticeService by name
+    async fn get_service(&self, name: &str) -> Result<Option<LatticeService>, Error>;
+
+    /// Get a LatticeExternalService by name
+    async fn get_external_service(
+        &self,
+        name: &str,
+    ) -> Result<Option<LatticeExternalService>, Error>;
+
+    /// List all LatticeServices
+    async fn list_services(&self) -> Result<Vec<LatticeService>, Error>;
+
+    /// List all LatticeExternalServices
+    async fn list_external_services(&self) -> Result<Vec<LatticeExternalService>, Error>;
+}
+
+/// Real Kubernetes client implementation
+pub struct ServiceKubeClientImpl {
+    client: Client,
+}
+
+impl ServiceKubeClientImpl {
+    /// Create a new ServiceKubeClientImpl wrapping the given client
+    pub fn new(client: Client) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl ServiceKubeClient for ServiceKubeClientImpl {
+    async fn patch_service_status(
+        &self,
+        name: &str,
+        status: &LatticeServiceStatus,
+    ) -> Result<(), Error> {
+        let api: Api<LatticeService> = Api::all(self.client.clone());
+        let status_patch = serde_json::json!({ "status": status });
+
+        api.patch_status(
+            name,
+            &PatchParams::apply("lattice-service-controller"),
+            &Patch::Merge(&status_patch),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn patch_external_service_status(
+        &self,
+        name: &str,
+        status: &LatticeExternalServiceStatus,
+    ) -> Result<(), Error> {
+        let api: Api<LatticeExternalService> = Api::all(self.client.clone());
+        let status_patch = serde_json::json!({ "status": status });
+
+        api.patch_status(
+            name,
+            &PatchParams::apply("lattice-service-controller"),
+            &Patch::Merge(&status_patch),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_service(&self, name: &str) -> Result<Option<LatticeService>, Error> {
+        let api: Api<LatticeService> = Api::all(self.client.clone());
+        match api.get(name).await {
+            Ok(svc) => Ok(Some(svc)),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn get_external_service(
+        &self,
+        name: &str,
+    ) -> Result<Option<LatticeExternalService>, Error> {
+        let api: Api<LatticeExternalService> = Api::all(self.client.clone());
+        match api.get(name).await {
+            Ok(svc) => Ok(Some(svc)),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn list_services(&self) -> Result<Vec<LatticeService>, Error> {
+        let api: Api<LatticeService> = Api::all(self.client.clone());
+        let list = api.list(&Default::default()).await?;
+        Ok(list.items)
+    }
+
+    async fn list_external_services(&self) -> Result<Vec<LatticeExternalService>, Error> {
+        let api: Api<LatticeExternalService> = Api::all(self.client.clone());
+        let list = api.list(&Default::default()).await?;
+        Ok(list.items)
+    }
+}
+
+// =============================================================================
+// Controller context
+// =============================================================================
+
+/// Controller context containing shared state and clients
+///
+/// The context is shared across all reconciliation calls and holds
+/// resources that are expensive to create (like Kubernetes clients)
+/// and shared state (like the ServiceGraph).
+pub struct ServiceContext {
+    /// Kubernetes client for API operations
+    pub kube: Arc<dyn ServiceKubeClient>,
+    /// Service dependency graph (shared across all reconciliations)
+    pub graph: Arc<ServiceGraph>,
+    /// Default environment name for services without explicit environment
+    pub default_env: String,
+}
+
+impl ServiceContext {
+    /// Create a new ServiceContext with the given dependencies
+    pub fn new(
+        kube: Arc<dyn ServiceKubeClient>,
+        graph: Arc<ServiceGraph>,
+        default_env: impl Into<String>,
+    ) -> Self {
+        Self {
+            kube,
+            graph,
+            default_env: default_env.into(),
+        }
+    }
+
+    /// Create a new ServiceContext from a Kubernetes client
+    ///
+    /// This creates a new ServiceGraph. For shared state, create the graph
+    /// externally and pass it to the constructor.
+    pub fn from_client(client: Client) -> Self {
+        Self {
+            kube: Arc::new(ServiceKubeClientImpl::new(client)),
+            graph: Arc::new(ServiceGraph::new()),
+            default_env: "default".to_string(),
+        }
+    }
+
+    /// Create a context for testing with mock clients
+    #[cfg(test)]
+    pub fn for_testing(kube: Arc<dyn ServiceKubeClient>) -> Self {
+        Self {
+            kube,
+            graph: Arc::new(ServiceGraph::new()),
+            default_env: "test".to_string(),
+        }
+    }
+}
+
+// =============================================================================
+// LatticeService reconciliation
+// =============================================================================
+
+/// Reconcile a LatticeService resource
+///
+/// This function is called whenever a LatticeService is created, updated, or deleted.
+/// It maintains the service graph and updates the service status.
+///
+/// # Arguments
+///
+/// * `service` - The LatticeService to reconcile
+/// * `ctx` - Shared controller context
+///
+/// # Returns
+///
+/// An `Action` indicating when to requeue, or an `Error` if reconciliation failed.
+#[instrument(skip(service, ctx), fields(service = %service.name_any()))]
+pub async fn reconcile(
+    service: Arc<LatticeService>,
+    ctx: Arc<ServiceContext>,
+) -> Result<Action, Error> {
+    let name = service.name_any();
+    info!("reconciling service");
+
+    // Validate the service spec
+    if let Err(e) = service.spec.validate() {
+        warn!(error = %e, "service validation failed");
+        update_service_status_failed(&service, &ctx, &e.to_string()).await?;
+        // Don't requeue for validation errors - they require spec changes
+        return Ok(Action::await_change());
+    }
+
+    // Get current status, defaulting to Pending if not set
+    let current_phase = service
+        .status
+        .as_ref()
+        .map(|s| s.phase.clone())
+        .unwrap_or(ServicePhase::Pending);
+
+    debug!(?current_phase, "current service phase");
+
+    // Get environment from labels or use default
+    let env = service
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("lattice.dev/environment"))
+        .map(|s| s.as_str())
+        .unwrap_or(&ctx.default_env);
+
+    // State machine: transition based on current phase
+    match current_phase {
+        ServicePhase::Pending => {
+            // Update graph with this service's dependencies
+            info!(env = %env, "adding service to graph");
+            ctx.graph.put_service(env, &name, &service.spec);
+
+            // Transition to Compiling
+            update_service_status_compiling(&service, &ctx).await?;
+            Ok(Action::requeue(Duration::from_secs(5)))
+        }
+        ServicePhase::Compiling => {
+            // Verify dependencies exist in the graph
+            let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, env);
+
+            if !missing_deps.is_empty() {
+                debug!(?missing_deps, "waiting for dependencies");
+                // Dependencies not yet available, requeue
+                return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+
+            // All dependencies exist, check for bilateral agreements (active edges)
+            let active_in = ctx.graph.get_active_inbound_edges(env, &name);
+            let active_out = ctx.graph.get_active_outbound_edges(env, &name);
+
+            debug!(
+                active_inbound = active_in.len(),
+                active_outbound = active_out.len(),
+                "edge status"
+            );
+
+            // Transition to Ready
+            info!("service ready");
+            update_service_status_ready(&service, &ctx).await?;
+            Ok(Action::requeue(Duration::from_secs(60)))
+        }
+        ServicePhase::Ready => {
+            // Service is ready, ensure graph is up to date
+            ctx.graph.put_service(env, &name, &service.spec);
+
+            // Check for any issues that would cause degradation
+            let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, env);
+            if !missing_deps.is_empty() {
+                warn!(?missing_deps, "dependencies no longer available");
+                // Transition back to Compiling to wait for deps
+                update_service_status_compiling(&service, &ctx).await?;
+                return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+
+            // Steady state - requeue periodically to check for drift
+            Ok(Action::requeue(Duration::from_secs(60)))
+        }
+        ServicePhase::Failed => {
+            // Failed state requires manual intervention or spec changes
+            warn!("service is in Failed state, awaiting spec change");
+            Ok(Action::await_change())
+        }
+    }
+}
+
+/// Error policy for the service controller
+///
+/// This function is called when reconciliation fails. It determines
+/// the requeue strategy using exponential backoff.
+pub fn error_policy(service: Arc<LatticeService>, error: &Error, _ctx: Arc<ServiceContext>) -> Action {
+    error!(
+        ?error,
+        service = %service.name_any(),
+        "reconciliation failed"
+    );
+
+    // Exponential backoff: start at 5 seconds
+    Action::requeue(Duration::from_secs(5))
+}
+
+/// Check which dependencies are missing from the graph
+fn check_missing_dependencies(
+    spec: &LatticeServiceSpec,
+    graph: &ServiceGraph,
+    env: &str,
+) -> Vec<String> {
+    spec.internal_dependencies()
+        .into_iter()
+        .filter(|dep| {
+            // Check if dependency exists (not Unknown type)
+            graph
+                .get_service(env, dep)
+                .map(|node| node.type_ == crate::graph::ServiceType::Unknown)
+                .unwrap_or(true)
+        })
+        .map(String::from)
+        .collect()
+}
+
+// =============================================================================
+// LatticeExternalService reconciliation
+// =============================================================================
+
+/// Reconcile a LatticeExternalService resource
+///
+/// This function is called whenever a LatticeExternalService is created, updated, or deleted.
+/// It maintains the service graph for network policy generation.
+#[instrument(skip(external, ctx), fields(external_service = %external.name_any()))]
+pub async fn reconcile_external(
+    external: Arc<LatticeExternalService>,
+    ctx: Arc<ServiceContext>,
+) -> Result<Action, Error> {
+    let name = external.name_any();
+    info!("reconciling external service");
+
+    // Validate the external service spec
+    if let Err(e) = external.spec.validate() {
+        warn!(error = %e, "external service validation failed");
+        update_external_status_failed(&external, &ctx, &e.to_string()).await?;
+        return Ok(Action::await_change());
+    }
+
+    // Get environment from labels or use default
+    let env = external
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("lattice.dev/environment"))
+        .map(|s| s.as_str())
+        .unwrap_or(&ctx.default_env);
+
+    // Update graph with this external service
+    info!(env = %env, "adding external service to graph");
+    ctx.graph.put_external_service(env, &name, &external.spec);
+
+    // Transition to Ready
+    update_external_status_ready(&external, &ctx).await?;
+    Ok(Action::requeue(Duration::from_secs(60)))
+}
+
+/// Error policy for the external service controller
+pub fn error_policy_external(
+    external: Arc<LatticeExternalService>,
+    error: &Error,
+    _ctx: Arc<ServiceContext>,
+) -> Action {
+    error!(
+        ?error,
+        external_service = %external.name_any(),
+        "reconciliation failed"
+    );
+
+    Action::requeue(Duration::from_secs(5))
+}
+
+// =============================================================================
+// Service cleanup on delete
+// =============================================================================
+
+/// Handle service deletion by removing from the graph
+///
+/// Called when a LatticeService is deleted. Removes the service from the graph
+/// and cleans up edges.
+pub fn cleanup_service(service: &LatticeService, ctx: &ServiceContext) {
+    let name = service.name_any();
+    let env = service
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("lattice.dev/environment"))
+        .map(|s| s.as_str())
+        .unwrap_or(&ctx.default_env);
+
+    info!(service = %name, env = %env, "removing service from graph");
+    ctx.graph.delete_service(env, &name);
+}
+
+/// Handle external service deletion by removing from the graph
+pub fn cleanup_external_service(external: &LatticeExternalService, ctx: &ServiceContext) {
+    let name = external.name_any();
+    let env = external
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("lattice.dev/environment"))
+        .map(|s| s.as_str())
+        .unwrap_or(&ctx.default_env);
+
+    info!(external_service = %name, env = %env, "removing external service from graph");
+    ctx.graph.delete_service(env, &name);
+}
+
+// =============================================================================
+// Status update helpers
+// =============================================================================
+
+async fn update_service_status_compiling(
+    service: &LatticeService,
+    ctx: &ServiceContext,
+) -> Result<(), Error> {
+    let name = service.name_any();
+    let status = LatticeServiceStatus::with_phase(ServicePhase::Compiling)
+        .message("Compiling service dependencies")
+        .condition(Condition::new(
+            "Compiling",
+            ConditionStatus::True,
+            "DependencyCheck",
+            "Checking service dependencies",
+        ));
+
+    ctx.kube.patch_service_status(&name, &status).await
+}
+
+async fn update_service_status_ready(
+    service: &LatticeService,
+    ctx: &ServiceContext,
+) -> Result<(), Error> {
+    let name = service.name_any();
+    let status = LatticeServiceStatus::with_phase(ServicePhase::Ready)
+        .message("Service is operational")
+        .compiled_at(Utc::now())
+        .condition(Condition::new(
+            "Ready",
+            ConditionStatus::True,
+            "ServiceReady",
+            "All dependencies resolved",
+        ));
+
+    ctx.kube.patch_service_status(&name, &status).await
+}
+
+async fn update_service_status_failed(
+    service: &LatticeService,
+    ctx: &ServiceContext,
+    message: &str,
+) -> Result<(), Error> {
+    let name = service.name_any();
+    let status = LatticeServiceStatus::with_phase(ServicePhase::Failed)
+        .message(message)
+        .condition(Condition::new(
+            "Ready",
+            ConditionStatus::False,
+            "ValidationFailed",
+            message,
+        ));
+
+    ctx.kube.patch_service_status(&name, &status).await
+}
+
+async fn update_external_status_ready(
+    external: &LatticeExternalService,
+    ctx: &ServiceContext,
+) -> Result<(), Error> {
+    use crate::crd::ExternalServicePhase;
+
+    let name = external.name_any();
+    let status = LatticeExternalServiceStatus::with_phase(ExternalServicePhase::Ready)
+        .message("External service is configured")
+        .condition(Condition::new(
+            "Ready",
+            ConditionStatus::True,
+            "EndpointsConfigured",
+            "All endpoints are configured",
+        ));
+
+    ctx.kube.patch_external_service_status(&name, &status).await
+}
+
+async fn update_external_status_failed(
+    external: &LatticeExternalService,
+    ctx: &ServiceContext,
+    message: &str,
+) -> Result<(), Error> {
+    use crate::crd::ExternalServicePhase;
+
+    let name = external.name_any();
+    let status = LatticeExternalServiceStatus::with_phase(ExternalServicePhase::Failed)
+        .message(message)
+        .condition(Condition::new(
+            "Ready",
+            ConditionStatus::False,
+            "ValidationFailed",
+            message,
+        ));
+
+    ctx.kube.patch_external_service_status(&name, &status).await
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::{
+        ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalServiceSpec, ReplicaSpec,
+        Resolution, ResourceSpec, ResourceType,
+    };
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use std::collections::BTreeMap;
+
+    // =========================================================================
+    // Test Fixtures
+    // =========================================================================
+
+    fn simple_container() -> ContainerSpec {
+        ContainerSpec {
+            image: "nginx:latest".to_string(),
+            command: None,
+            args: None,
+            variables: BTreeMap::new(),
+            resources: None,
+            files: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            liveness_probe: None,
+            readiness_probe: None,
+        }
+    }
+
+    fn sample_service_spec() -> LatticeServiceSpec {
+        let mut containers = BTreeMap::new();
+        containers.insert("main".to_string(), simple_container());
+
+        LatticeServiceSpec {
+            containers,
+            resources: BTreeMap::new(),
+            service: None,
+            replicas: ReplicaSpec::default(),
+            deploy: DeploySpec::default(),
+        }
+    }
+
+    fn sample_service(name: &str) -> LatticeService {
+        LatticeService {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            spec: sample_service_spec(),
+            status: None,
+        }
+    }
+
+    fn service_with_deps(name: &str, deps: Vec<&str>) -> LatticeService {
+        let mut spec = sample_service_spec();
+        for dep in deps {
+            spec.resources.insert(
+                dep.to_string(),
+                ResourceSpec {
+                    type_: ResourceType::Service,
+                    direction: DependencyDirection::Outbound,
+                    id: None,
+                    params: None,
+                    class: None,
+                },
+            );
+        }
+
+        LatticeService {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        }
+    }
+
+    fn service_with_callers(name: &str, callers: Vec<&str>) -> LatticeService {
+        let mut spec = sample_service_spec();
+        for caller in callers {
+            spec.resources.insert(
+                caller.to_string(),
+                ResourceSpec {
+                    type_: ResourceType::Service,
+                    direction: DependencyDirection::Inbound,
+                    id: None,
+                    params: None,
+                    class: None,
+                },
+            );
+        }
+
+        LatticeService {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        }
+    }
+
+    fn sample_external_service(name: &str) -> LatticeExternalService {
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert("api".to_string(), "https://api.example.com".to_string());
+
+        LatticeExternalService {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            spec: LatticeExternalServiceSpec {
+                endpoints,
+                allowed_requesters: vec!["*".to_string()],
+                resolution: Resolution::Dns,
+                description: None,
+            },
+            status: None,
+        }
+    }
+
+    // =========================================================================
+    // Mock Setup
+    // =========================================================================
+
+    fn mock_kube_success() -> MockServiceKubeClient {
+        let mut mock = MockServiceKubeClient::new();
+        mock.expect_patch_service_status()
+            .returning(|_, _| Ok(()));
+        mock.expect_patch_external_service_status()
+            .returning(|_, _| Ok(()));
+        mock.expect_get_service().returning(|_| Ok(None));
+        mock.expect_get_external_service().returning(|_| Ok(None));
+        mock.expect_list_services().returning(|| Ok(vec![]));
+        mock.expect_list_external_services().returning(|| Ok(vec![]));
+        mock
+    }
+
+    // =========================================================================
+    // Reconciliation Story Tests
+    // =========================================================================
+
+    /// Story: New service transitions from Pending to Compiling
+    #[tokio::test]
+    async fn story_new_service_transitions_to_compiling() {
+        let service = Arc::new(sample_service("my-service"));
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        let action = reconcile(service, ctx.clone()).await.unwrap();
+
+        // Should requeue quickly to check dependencies
+        assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+
+        // Service should be in the graph
+        let node = ctx.graph.get_service("test", "my-service");
+        assert!(node.is_some());
+    }
+
+    /// Story: Service with dependencies waits for them
+    #[tokio::test]
+    async fn story_service_waits_for_dependencies() {
+        let mut service = service_with_deps("frontend", vec!["backend"]);
+        service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
+        let service = Arc::new(service);
+
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        // Put the service in the graph first
+        ctx.graph.put_service("test", "frontend", &service.spec);
+
+        let action = reconcile(service, ctx).await.unwrap();
+
+        // Should requeue to wait for dependencies
+        assert_eq!(action, Action::requeue(Duration::from_secs(10)));
+    }
+
+    /// Story: Service becomes ready when dependencies exist
+    #[tokio::test]
+    async fn story_service_becomes_ready_with_deps() {
+        let mut service = service_with_deps("frontend", vec!["backend"]);
+        service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
+        let service = Arc::new(service);
+
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        // Add both services to graph
+        ctx.graph.put_service("test", "frontend", &service.spec);
+        ctx.graph
+            .put_service("test", "backend", &sample_service_spec());
+
+        let action = reconcile(service, ctx).await.unwrap();
+
+        // Should transition to Ready and requeue periodically
+        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+    }
+
+    /// Story: Service in Ready state stays ready
+    #[tokio::test]
+    async fn story_ready_service_stays_ready() {
+        let mut service = sample_service("my-service");
+        service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Ready));
+        let service = Arc::new(service);
+
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        ctx.graph.put_service("test", "my-service", &service.spec);
+
+        let action = reconcile(service, ctx).await.unwrap();
+
+        // Should requeue for periodic drift check
+        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+    }
+
+    /// Story: Invalid service transitions to Failed
+    #[tokio::test]
+    async fn story_invalid_service_fails() {
+        let mut service = sample_service("bad-service");
+        // Make it invalid by removing containers
+        service.spec.containers.clear();
+        let service = Arc::new(service);
+
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        let action = reconcile(service, ctx).await.unwrap();
+
+        // Should await change (no requeue)
+        assert_eq!(action, Action::await_change());
+    }
+
+    /// Story: External service reconciles immediately to Ready
+    #[tokio::test]
+    async fn story_external_service_becomes_ready() {
+        let external = Arc::new(sample_external_service("stripe"));
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        let action = reconcile_external(external, ctx.clone()).await.unwrap();
+
+        // Should requeue periodically
+        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+
+        // External service should be in graph
+        let node = ctx.graph.get_service("test", "stripe");
+        assert!(node.is_some());
+    }
+
+    // =========================================================================
+    // Graph Integration Tests
+    // =========================================================================
+
+    /// Story: Graph tracks active edges with bilateral agreements
+    #[tokio::test]
+    async fn story_graph_tracks_bilateral_agreements() {
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        // Frontend depends on backend
+        let frontend = service_with_deps("frontend", vec!["backend"]);
+        ctx.graph.put_service("test", "frontend", &frontend.spec);
+
+        // Backend allows frontend
+        let backend = service_with_callers("backend", vec!["frontend"]);
+        ctx.graph.put_service("test", "backend", &backend.spec);
+
+        // Should have active edge from frontend to backend
+        let active = ctx.graph.get_active_outbound_edges("test", "frontend");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].callee, "backend");
+    }
+
+    /// Story: Graph handles service deletion
+    #[tokio::test]
+    async fn story_graph_handles_deletion() {
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        // Add a service
+        ctx.graph
+            .put_service("test", "my-service", &sample_service_spec());
+        assert!(ctx.graph.get_service("test", "my-service").is_some());
+
+        // Create and cleanup
+        let service = sample_service("my-service");
+        cleanup_service(&service, &ctx);
+
+        // Should be removed
+        assert!(ctx.graph.get_service("test", "my-service").is_none());
+    }
+
+    // =========================================================================
+    // Error Policy Tests
+    // =========================================================================
+
+    /// Story: Error policy requeues with backoff
+    #[test]
+    fn story_error_policy_requeues() {
+        let service = Arc::new(sample_service("my-service"));
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        let error = Error::validation("test error");
+        let action = error_policy(service, &error, ctx);
+
+        // Should requeue after 5 seconds (base backoff)
+        assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+    }
+
+    // =========================================================================
+    // Missing Dependency Detection Tests
+    // =========================================================================
+
+    /// Story: Detect missing internal dependencies
+    #[test]
+    fn story_detect_missing_dependencies() {
+        let graph = ServiceGraph::new();
+        let spec = service_with_deps("frontend", vec!["backend", "cache"]).spec;
+
+        // Nothing in graph - all deps missing
+        let missing = check_missing_dependencies(&spec, &graph, "test");
+        assert_eq!(missing.len(), 2);
+        assert!(missing.contains(&"backend".to_string()));
+        assert!(missing.contains(&"cache".to_string()));
+
+        // Add backend - now only cache is missing
+        graph.put_service("test", "backend", &sample_service_spec());
+        let missing = check_missing_dependencies(&spec, &graph, "test");
+        assert_eq!(missing.len(), 1);
+        assert!(missing.contains(&"cache".to_string()));
+
+        // Add cache - no deps missing
+        graph.put_service("test", "cache", &sample_service_spec());
+        let missing = check_missing_dependencies(&spec, &graph, "test");
+        assert!(missing.is_empty());
+    }
+
+    // =========================================================================
+    // Environment Isolation Tests
+    // =========================================================================
+
+    /// Story: Services are isolated by environment
+    #[tokio::test]
+    async fn story_services_isolated_by_environment() {
+        let mock_kube = mock_kube_success();
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        // Add same-named service to different environments
+        ctx.graph
+            .put_service("prod", "api", &sample_service_spec());
+        ctx.graph
+            .put_service("staging", "api", &sample_service_spec());
+
+        // Both should exist independently
+        assert!(ctx.graph.get_service("prod", "api").is_some());
+        assert!(ctx.graph.get_service("staging", "api").is_some());
+
+        // Deleting one shouldn't affect the other
+        ctx.graph.delete_service("prod", "api");
+        assert!(ctx.graph.get_service("prod", "api").is_none());
+        assert!(ctx.graph.get_service("staging", "api").is_some());
+    }
+
+    // =========================================================================
+    // Context Builder Tests
+    // =========================================================================
+
+    /// Story: Context can share graph across instances
+    #[test]
+    fn story_shared_graph_across_contexts() {
+        let mock_kube1 = Arc::new(mock_kube_success());
+        let mock_kube2 = Arc::new(mock_kube_success());
+        let shared_graph = Arc::new(ServiceGraph::new());
+
+        let ctx1 = ServiceContext::new(mock_kube1, Arc::clone(&shared_graph), "env1");
+        let ctx2 = ServiceContext::new(mock_kube2, Arc::clone(&shared_graph), "env2");
+
+        // Add service via ctx1
+        ctx1.graph.put_service("shared", "svc", &sample_service_spec());
+
+        // Should be visible via ctx2
+        assert!(ctx2.graph.get_service("shared", "svc").is_some());
+    }
+}

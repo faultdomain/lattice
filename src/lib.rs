@@ -12,7 +12,7 @@
 //!
 //! # Modules
 //!
-//! - [`crd`] - Custom Resource Definitions (LatticeCluster, etc.)
+//! - [`crd`] - Custom Resource Definitions (LatticeCluster, LatticeService, etc.)
 //! - [`controller`] - Kubernetes controller reconciliation logic
 //! - [`provider`] - Infrastructure provider abstractions (Docker, AWS, etc.)
 //! - [`proto`] - gRPC protocol definitions for agent-cell communication
@@ -20,6 +20,7 @@
 //! - [`pki`] - PKI operations for mTLS certificates
 //! - [`bootstrap`] - Bootstrap endpoint for kubeadm callback
 //! - [`capi`] - CAPI installation and management
+//! - [`graph`] - Service dependency graph for network policy generation
 //! - [`error`] - Error types for the operator
 
 #![deny(missing_docs)]
@@ -30,6 +31,7 @@ pub mod capi;
 pub mod controller;
 pub mod crd;
 pub mod error;
+pub mod graph;
 pub mod pivot;
 pub mod pki;
 pub mod proto;

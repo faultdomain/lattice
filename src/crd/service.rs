@@ -1,0 +1,942 @@
+//! LatticeService Custom Resource Definition
+//!
+//! The LatticeService CRD represents a workload deployed by Lattice.
+//! Services declare their dependencies and allowed callers for automatic
+//! network policy generation.
+
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Utc};
+use kube::CustomResource;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use super::types::Condition;
+
+/// Direction of a service dependency
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DependencyDirection {
+    /// This service calls the target (outbound traffic)
+    #[default]
+    Outbound,
+    /// The target calls this service (inbound traffic)
+    Inbound,
+    /// Bidirectional communication
+    Both,
+}
+
+impl DependencyDirection {
+    /// Returns true if this direction includes outbound traffic
+    pub fn is_outbound(&self) -> bool {
+        matches!(self, Self::Outbound | Self::Both)
+    }
+
+    /// Returns true if this direction includes inbound traffic
+    pub fn is_inbound(&self) -> bool {
+        matches!(self, Self::Inbound | Self::Both)
+    }
+}
+
+/// Type of resource dependency
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ResourceType {
+    /// Internal service (another LatticeService)
+    #[default]
+    Service,
+    /// External service (LatticeExternalService)
+    ExternalService,
+    /// HTTP route (future: for ingress)
+    Route,
+    /// PostgreSQL database
+    Postgres,
+    /// Redis cache
+    Redis,
+}
+
+/// Resource dependency specification
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceSpec {
+    /// Type of resource
+    #[serde(rename = "type")]
+    pub type_: ResourceType,
+
+    /// Direction of the dependency
+    #[serde(default)]
+    pub direction: DependencyDirection,
+
+    /// Optional identifier for resource sharing
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Resource-specific parameters
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+
+    /// Optional specialization class
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+}
+
+/// Container resource limits and requests
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct ResourceRequirements {
+    /// Resource requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests: Option<ResourceQuantity>,
+
+    /// Resource limits
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ResourceQuantity>,
+}
+
+/// Resource quantity for CPU and memory
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct ResourceQuantity {
+    /// CPU quantity (e.g., "100m", "1")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<String>,
+
+    /// Memory quantity (e.g., "128Mi", "1Gi")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+}
+
+/// HTTP probe configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpGetProbe {
+    /// Path to probe
+    pub path: String,
+
+    /// Port to probe
+    pub port: u16,
+
+    /// HTTP scheme (HTTP or HTTPS)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+
+    /// Optional host header
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+
+    /// Optional HTTP headers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_headers: Option<Vec<HttpHeader>>,
+}
+
+/// HTTP header for probes
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct HttpHeader {
+    /// Header name
+    pub name: String,
+    /// Header value
+    pub value: String,
+}
+
+/// Exec probe configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct ExecProbe {
+    /// Command to execute
+    pub command: Vec<String>,
+}
+
+/// Probe configuration (liveness or readiness)
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Probe {
+    /// HTTP GET probe
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_get: Option<HttpGetProbe>,
+
+    /// Exec probe
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<ExecProbe>,
+}
+
+/// File mount specification
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMount {
+    /// Inline file content (UTF-8)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+
+    /// Base64-encoded binary content
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_content: Option<String>,
+
+    /// Path to content file
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+
+    /// File mode in octal
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+
+    /// Disable placeholder expansion
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_expand: Option<bool>,
+}
+
+/// Volume mount specification
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeMount {
+    /// External volume reference
+    pub source: String,
+
+    /// Sub path in the volume
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+
+    /// Mount as read-only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+}
+
+/// Container specification (Score-compatible)
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerSpec {
+    /// Container image
+    pub image: String,
+
+    /// Override container entrypoint
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+
+    /// Override container arguments
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+
+    /// Environment variables
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, String>,
+
+    /// Resource requirements
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+
+    /// Files to mount in the container
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, FileMount>,
+
+    /// Volumes to mount
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub volumes: BTreeMap<String, VolumeMount>,
+
+    /// Liveness probe
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_probe: Option<Probe>,
+
+    /// Readiness probe
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_probe: Option<Probe>,
+}
+
+/// Service port specification
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortSpec {
+    /// Service port
+    pub port: u16,
+
+    /// Target port (defaults to port)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_port: Option<u16>,
+
+    /// Protocol (TCP or UDP)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+}
+
+/// Service exposure specification
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct ServicePortsSpec {
+    /// Named network ports
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ports: BTreeMap<String, PortSpec>,
+}
+
+/// Replica scaling specification
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct ReplicaSpec {
+    /// Minimum replicas
+    #[serde(default)]
+    pub min: u32,
+
+    /// Maximum replicas
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u32>,
+}
+
+impl Default for ReplicaSpec {
+    fn default() -> Self {
+        Self { min: 1, max: None }
+    }
+}
+
+/// Deployment strategy
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DeployStrategy {
+    /// Rolling update strategy
+    #[default]
+    Rolling,
+    /// Canary deployment with progressive traffic shifting
+    Canary,
+}
+
+/// Canary deployment configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CanarySpec {
+    /// Interval between steps
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+
+    /// Error threshold before rollback
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<u32>,
+
+    /// Maximum traffic weight
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_weight: Option<u32>,
+
+    /// Weight increment per step
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_weight: Option<u32>,
+}
+
+/// Deployment specification
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct DeploySpec {
+    /// Deployment strategy
+    #[serde(default)]
+    pub strategy: DeployStrategy,
+
+    /// Canary configuration (only if strategy is canary)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary: Option<CanarySpec>,
+}
+
+/// Service lifecycle phase
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ServicePhase {
+    /// Service is waiting for configuration
+    #[default]
+    Pending,
+    /// Service manifests are being compiled
+    Compiling,
+    /// Service is fully operational
+    Ready,
+    /// Service has encountered an error
+    Failed,
+}
+
+impl std::fmt::Display for ServicePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "Pending"),
+            Self::Compiling => write!(f, "Compiling"),
+            Self::Ready => write!(f, "Ready"),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
+/// Specification for a LatticeService
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[kube(
+    group = "lattice.dev",
+    version = "v1alpha1",
+    kind = "LatticeService",
+    plural = "latticeservices",
+    shortname = "ls",
+    status = "LatticeServiceStatus",
+    namespaced = false,
+    printcolumn = r#"{"name":"Strategy","type":"string","jsonPath":".spec.deploy.strategy"}"#,
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+)]
+#[serde(rename_all = "camelCase")]
+pub struct LatticeServiceSpec {
+    /// Named container specifications (Score-compatible)
+    pub containers: BTreeMap<String, ContainerSpec>,
+
+    /// External dependencies (service, route, postgres, redis, etc.)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, ResourceSpec>,
+
+    /// Service port configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServicePortsSpec>,
+
+    /// Replica scaling configuration
+    #[serde(default)]
+    pub replicas: ReplicaSpec,
+
+    /// Deployment strategy configuration
+    #[serde(default)]
+    pub deploy: DeploySpec,
+}
+
+impl LatticeServiceSpec {
+    /// Extract service names that this service depends on (outbound)
+    pub fn dependencies(&self) -> Vec<&str> {
+        self.resources
+            .iter()
+            .filter(|(_, spec)| {
+                spec.direction.is_outbound()
+                    && matches!(spec.type_, ResourceType::Service | ResourceType::ExternalService)
+            })
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Extract service names that are allowed to call this service (inbound)
+    pub fn allowed_callers(&self) -> Vec<&str> {
+        self.resources
+            .iter()
+            .filter(|(_, spec)| {
+                spec.direction.is_inbound() && matches!(spec.type_, ResourceType::Service)
+            })
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Extract external service dependencies
+    pub fn external_dependencies(&self) -> Vec<&str> {
+        self.resources
+            .iter()
+            .filter(|(_, spec)| {
+                spec.direction.is_outbound() && matches!(spec.type_, ResourceType::ExternalService)
+            })
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Extract internal service dependencies
+    pub fn internal_dependencies(&self) -> Vec<&str> {
+        self.resources
+            .iter()
+            .filter(|(_, spec)| {
+                spec.direction.is_outbound() && matches!(spec.type_, ResourceType::Service)
+            })
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Get the ports this service exposes
+    pub fn ports(&self) -> BTreeMap<&str, u16> {
+        self.service
+            .as_ref()
+            .map(|s| {
+                s.ports
+                    .iter()
+                    .map(|(name, spec)| (name.as_str(), spec.port))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get the primary container image
+    pub fn primary_image(&self) -> Option<&str> {
+        self.containers
+            .get("main")
+            .or_else(|| self.containers.values().next())
+            .map(|c| c.image.as_str())
+    }
+
+    /// Validate the service specification
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if self.containers.is_empty() {
+            return Err(crate::Error::validation(
+                "service must have at least one container",
+            ));
+        }
+
+        // Validate replica counts
+        if let Some(max) = self.replicas.max {
+            if self.replicas.min > max {
+                return Err(crate::Error::validation(
+                    "min replicas cannot exceed max replicas",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Status for a LatticeService
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LatticeServiceStatus {
+    /// Current phase of the service lifecycle
+    #[serde(default)]
+    pub phase: ServicePhase,
+
+    /// Human-readable message about current state
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+
+    /// Conditions representing the service state
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+
+    /// Last time manifests were compiled
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compiled_at: Option<DateTime<Utc>>,
+
+    /// Observed generation for optimistic concurrency
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+
+    /// Resolved dependency URLs
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resolved_dependencies: BTreeMap<String, String>,
+}
+
+impl LatticeServiceStatus {
+    /// Create a new status with the given phase
+    pub fn with_phase(phase: ServicePhase) -> Self {
+        Self {
+            phase,
+            ..Default::default()
+        }
+    }
+
+    /// Set the phase and return self for chaining
+    pub fn phase(mut self, phase: ServicePhase) -> Self {
+        self.phase = phase;
+        self
+    }
+
+    /// Set the message and return self for chaining
+    pub fn message(mut self, msg: impl Into<String>) -> Self {
+        self.message = Some(msg.into());
+        self
+    }
+
+    /// Add a condition and return self for chaining
+    pub fn condition(mut self, condition: Condition) -> Self {
+        self.conditions.retain(|c| c.type_ != condition.type_);
+        self.conditions.push(condition);
+        self
+    }
+
+    /// Set the last compiled timestamp
+    pub fn compiled_at(mut self, time: DateTime<Utc>) -> Self {
+        self.last_compiled_at = Some(time);
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::types::ConditionStatus;
+
+    // =========================================================================
+    // Test Fixtures
+    // =========================================================================
+
+    fn simple_container() -> ContainerSpec {
+        ContainerSpec {
+            image: "nginx:latest".to_string(),
+            command: None,
+            args: None,
+            variables: BTreeMap::new(),
+            resources: None,
+            files: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            liveness_probe: None,
+            readiness_probe: None,
+        }
+    }
+
+    fn sample_service_spec() -> LatticeServiceSpec {
+        let mut containers = BTreeMap::new();
+        containers.insert("main".to_string(), simple_container());
+
+        LatticeServiceSpec {
+            containers,
+            resources: BTreeMap::new(),
+            service: None,
+            replicas: ReplicaSpec::default(),
+            deploy: DeploySpec::default(),
+        }
+    }
+
+    // =========================================================================
+    // Dependency Direction Tests
+    // =========================================================================
+
+    #[test]
+    fn test_dependency_direction_outbound() {
+        let dir = DependencyDirection::Outbound;
+        assert!(dir.is_outbound());
+        assert!(!dir.is_inbound());
+    }
+
+    #[test]
+    fn test_dependency_direction_inbound() {
+        let dir = DependencyDirection::Inbound;
+        assert!(!dir.is_outbound());
+        assert!(dir.is_inbound());
+    }
+
+    #[test]
+    fn test_dependency_direction_both() {
+        let dir = DependencyDirection::Both;
+        assert!(dir.is_outbound());
+        assert!(dir.is_inbound());
+    }
+
+    // =========================================================================
+    // Dependency Extraction Stories
+    // =========================================================================
+
+    /// Story: Service declares outbound dependencies on other services
+    #[test]
+    fn story_service_declares_outbound_dependencies() {
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "redis".to_string(),
+            ResourceSpec {
+                type_: ResourceType::ExternalService,
+                direction: DependencyDirection::Outbound,
+                id: None,
+                params: None,
+                class: None,
+            },
+        );
+        resources.insert(
+            "api-gateway".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Outbound,
+                id: None,
+                params: None,
+                class: None,
+            },
+        );
+
+        let mut spec = sample_service_spec();
+        spec.resources = resources;
+
+        let deps = spec.dependencies();
+        assert_eq!(deps.len(), 2);
+        assert!(deps.contains(&"redis"));
+        assert!(deps.contains(&"api-gateway"));
+    }
+
+    /// Story: Service declares which callers are allowed
+    #[test]
+    fn story_service_declares_allowed_callers() {
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "curl-tester".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Inbound,
+                id: None,
+                params: None,
+                class: None,
+            },
+        );
+        resources.insert(
+            "frontend".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Inbound,
+                id: None,
+                params: None,
+                class: None,
+            },
+        );
+
+        let mut spec = sample_service_spec();
+        spec.resources = resources;
+
+        let callers = spec.allowed_callers();
+        assert_eq!(callers.len(), 2);
+        assert!(callers.contains(&"curl-tester"));
+        assert!(callers.contains(&"frontend"));
+    }
+
+    /// Story: Bidirectional relationships are counted in both directions
+    #[test]
+    fn story_bidirectional_relationships() {
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "cache".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Both,
+                id: None,
+                params: None,
+                class: None,
+            },
+        );
+
+        let mut spec = sample_service_spec();
+        spec.resources = resources;
+
+        // Should appear in both dependencies and allowed_callers
+        assert!(spec.dependencies().contains(&"cache"));
+        assert!(spec.allowed_callers().contains(&"cache"));
+    }
+
+    /// Story: External services are separated from internal
+    #[test]
+    fn story_external_vs_internal_dependencies() {
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "google".to_string(),
+            ResourceSpec {
+                type_: ResourceType::ExternalService,
+                direction: DependencyDirection::Outbound,
+                id: None,
+                params: None,
+                class: None,
+            },
+        );
+        resources.insert(
+            "backend".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Outbound,
+                id: None,
+                params: None,
+                class: None,
+            },
+        );
+
+        let mut spec = sample_service_spec();
+        spec.resources = resources;
+
+        let external = spec.external_dependencies();
+        let internal = spec.internal_dependencies();
+
+        assert_eq!(external, vec!["google"]);
+        assert_eq!(internal, vec!["backend"]);
+    }
+
+    // =========================================================================
+    // Validation Stories
+    // =========================================================================
+
+    /// Story: Valid service passes validation
+    #[test]
+    fn story_valid_service_passes_validation() {
+        let spec = sample_service_spec();
+        assert!(spec.validate().is_ok());
+    }
+
+    /// Story: Service without containers fails validation
+    #[test]
+    fn story_service_without_containers_fails() {
+        let spec = LatticeServiceSpec {
+            containers: BTreeMap::new(),
+            resources: BTreeMap::new(),
+            service: None,
+            replicas: ReplicaSpec::default(),
+            deploy: DeploySpec::default(),
+        };
+
+        let result = spec.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("at least one container"));
+    }
+
+    /// Story: Invalid replica configuration fails validation
+    #[test]
+    fn story_invalid_replicas_fails() {
+        let mut spec = sample_service_spec();
+        spec.replicas = ReplicaSpec {
+            min: 5,
+            max: Some(3),
+        };
+
+        let result = spec.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("min replicas"));
+    }
+
+    // =========================================================================
+    // YAML Serialization Stories
+    // =========================================================================
+
+    /// Story: User defines simple nginx service
+    #[test]
+    fn story_yaml_simple_service() {
+        let yaml = r#"
+containers:
+  main:
+    image: nginx:latest
+service:
+  ports:
+    http:
+      port: 80
+replicas:
+  min: 1
+  max: 3
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(spec.containers.len(), 1);
+        assert_eq!(spec.containers["main"].image, "nginx:latest");
+        assert_eq!(spec.replicas.min, 1);
+        assert_eq!(spec.replicas.max, Some(3));
+
+        let ports = spec.ports();
+        assert_eq!(ports.get("http"), Some(&80));
+    }
+
+    /// Story: User defines service with dependencies and callers
+    #[test]
+    fn story_yaml_service_with_dependencies() {
+        let yaml = r#"
+containers:
+  main:
+    image: my-api:v1.0
+    variables:
+      LOG_LEVEL: info
+resources:
+  curl-tester:
+    type: service
+    direction: inbound
+  google:
+    type: external-service
+    direction: outbound
+  cache:
+    type: service
+    direction: both
+service:
+  ports:
+    http:
+      port: 8080
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+
+        // Check dependencies
+        let deps = spec.dependencies();
+        assert!(deps.contains(&"google"));
+        assert!(deps.contains(&"cache"));
+
+        // Check allowed callers
+        let callers = spec.allowed_callers();
+        assert!(callers.contains(&"curl-tester"));
+        assert!(callers.contains(&"cache"));
+
+        // Check variables
+        assert_eq!(
+            spec.containers["main"].variables.get("LOG_LEVEL"),
+            Some(&"info".to_string())
+        );
+    }
+
+    /// Story: Service with canary deployment
+    #[test]
+    fn story_yaml_canary_deployment() {
+        let yaml = r#"
+containers:
+  main:
+    image: app:v2.0
+deploy:
+  strategy: canary
+  canary:
+    interval: "1m"
+    threshold: 5
+    maxWeight: 50
+    stepWeight: 10
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(spec.deploy.strategy, DeployStrategy::Canary);
+        let canary = spec.deploy.canary.unwrap();
+        assert_eq!(canary.interval, Some("1m".to_string()));
+        assert_eq!(canary.threshold, Some(5));
+        assert_eq!(canary.max_weight, Some(50));
+        assert_eq!(canary.step_weight, Some(10));
+    }
+
+    /// Story: Spec survives serialization roundtrip
+    #[test]
+    fn story_spec_survives_yaml_roundtrip() {
+        let spec = sample_service_spec();
+        let yaml = serde_yaml::to_string(&spec).unwrap();
+        let parsed: LatticeServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(spec, parsed);
+    }
+
+    // =========================================================================
+    // Status Builder Stories
+    // =========================================================================
+
+    /// Story: Controller builds status fluently
+    #[test]
+    fn story_controller_builds_status_fluently() {
+        let condition = Condition::new(
+            "Ready",
+            ConditionStatus::True,
+            "ServiceReady",
+            "All replicas are healthy",
+        );
+
+        let status = LatticeServiceStatus::default()
+            .phase(ServicePhase::Ready)
+            .message("Service is operational")
+            .condition(condition)
+            .compiled_at(Utc::now());
+
+        assert_eq!(status.phase, ServicePhase::Ready);
+        assert_eq!(status.message.as_deref(), Some("Service is operational"));
+        assert_eq!(status.conditions.len(), 1);
+        assert!(status.last_compiled_at.is_some());
+    }
+
+    // =========================================================================
+    // Helper Method Tests
+    // =========================================================================
+
+    #[test]
+    fn test_primary_image() {
+        let spec = sample_service_spec();
+        assert_eq!(spec.primary_image(), Some("nginx:latest"));
+    }
+
+    #[test]
+    fn test_primary_image_without_main() {
+        let mut containers = BTreeMap::new();
+        containers.insert("worker".to_string(), simple_container());
+
+        let spec = LatticeServiceSpec {
+            containers,
+            resources: BTreeMap::new(),
+            service: None,
+            replicas: ReplicaSpec::default(),
+            deploy: DeploySpec::default(),
+        };
+
+        assert_eq!(spec.primary_image(), Some("nginx:latest"));
+    }
+
+    #[test]
+    fn test_service_phase_display() {
+        assert_eq!(ServicePhase::Pending.to_string(), "Pending");
+        assert_eq!(ServicePhase::Compiling.to_string(), "Compiling");
+        assert_eq!(ServicePhase::Ready.to_string(), "Ready");
+        assert_eq!(ServicePhase::Failed.to_string(), "Failed");
+    }
+}
