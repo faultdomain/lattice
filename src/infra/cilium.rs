@@ -8,6 +8,8 @@
 use std::process::Command;
 use tracing::info;
 
+use crate::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT};
+
 /// Default charts directory (set by LATTICE_CHARTS_DIR env var in container)
 const DEFAULT_CHARTS_DIR: &str = "/charts";
 
@@ -194,17 +196,19 @@ spec:
     matchLabels:
       app: lattice-operator
   egress:
-{}
+{egress}
   ingress:
-    # Allow ingress for bootstrap and gRPC ports (cells only)
+    # Allow ingress for bootstrap webhook and gRPC
     - toPorts:
         - ports:
-            - port: "8080"
+            - port: "{bootstrap_port}"
               protocol: TCP
-            - port: "50051"
+            - port: "{grpc_port}"
               protocol: TCP
 "#,
-        egress_rules.join("\n")
+        egress = egress_rules.join("\n"),
+        bootstrap_port = DEFAULT_BOOTSTRAP_PORT,
+        grpc_port = DEFAULT_GRPC_PORT,
     )
 }
 
@@ -248,7 +252,7 @@ mod tests {
         assert!(!policy.contains("toFQDNs"));
 
         // Should have ingress for cell ports
-        assert!(policy.contains("port: \"8080\""));
+        assert!(policy.contains("port: \"8443\""));
         assert!(policy.contains("port: \"50051\""));
     }
 
