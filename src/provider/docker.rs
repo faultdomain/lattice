@@ -398,20 +398,23 @@ impl DockerProvider {
         let mut commands = Vec::new();
         let name = cluster.metadata.name.as_deref().unwrap_or("unknown");
 
-        // For workload clusters with bootstrap info, call the bootstrap endpoint
+        // Untaint control plane so pods can schedule (all clusters need this)
+        commands.push(
+            r#"kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-"#
+                .to_string(),
+        );
+
+        // If cluster has bootstrap info, fetch and apply manifests from parent
         if let (Some(ref endpoint), Some(ref token), Some(ref ca_cert)) = (
             &bootstrap.bootstrap_endpoint,
             &bootstrap.bootstrap_token,
             &bootstrap.ca_cert_pem,
         ) {
-            // Call the cell's manifests endpoint with the one-time token
-            // This returns CNI + agent manifests as raw YAML
-            // We retry fetching forever since the agent can't start without these manifests
             commands.push(format!(
                 r#"echo "Bootstrapping cluster {name} from {endpoint}""#
             ));
 
-            // Write CA cert to verify TLS connection to cell
+            // Write CA cert to verify TLS connection to parent
             commands.push(format!(
                 r#"cat > /tmp/cell-ca.crt << 'CACERT'
 {ca_cert}
@@ -419,9 +422,8 @@ CACERT"#
             ));
 
             // Retry fetching manifests until success (with backoff)
-            // We must get these manifests - the agent and CNI are included
             commands.push(format!(
-                r#"echo "Fetching bootstrap manifests from cell..."
+                r#"echo "Fetching bootstrap manifests from parent..."
 MANIFEST_FILE=/tmp/bootstrap-manifests.yaml
 RETRY_DELAY=5
 while true; do
@@ -437,7 +439,7 @@ while true; do
 done"#,
             ));
 
-            // Apply manifests with retry (separate from fetch so we can retry just apply)
+            // Apply manifests with retry
             commands.push(
                 r#"echo "Applying bootstrap manifests..."
 RETRY_DELAY=5
@@ -455,14 +457,9 @@ done"#
 
             // Clean up temp files
             commands.push(r#"rm -f /tmp/cell-ca.crt /tmp/bootstrap-manifests.yaml"#.to_string());
-        }
 
-        // Untaint control plane so it can run workloads (single-node clusters)
-        // This is critical for the pivot flow - the agent needs to run on the CP
-        commands.push(
-            r#"kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- || true"#
-                .to_string(),
-        );
+            // Note: Control plane re-taint happens after pivot completes, not here
+        }
 
         commands
     }
@@ -595,7 +592,7 @@ mod tests {
         cluster.spec.cell = Some(CellSpec {
             host: "172.18.255.1".to_string(),
             grpc_port: 50051,
-            bootstrap_port: 443,
+            bootstrap_port: 8443,
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
@@ -1122,7 +1119,6 @@ mod tests {
             let bootstrap = BootstrapInfo::new(
                 "https://mgmt.example.com:8080".to_string(),
                 "test-token-123".to_string(),
-                "mgmt.example.com:50051".to_string(),
                 "-----BEGIN CERTIFICATE-----\nTEST_CA_CERT\n-----END CERTIFICATE-----".to_string(),
             );
 

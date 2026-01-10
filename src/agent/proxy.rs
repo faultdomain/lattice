@@ -109,8 +109,9 @@ impl KubeProxy {
         };
 
         // Build router - catch all paths
+        // Note: axum 0.8 uses {*path} syntax for wildcards
         let app = Router::new()
-            .route("/*path", any(proxy_handler))
+            .route("/{*path}", any(proxy_handler))
             .route("/", any(proxy_handler))
             .with_state(Arc::new(state));
 

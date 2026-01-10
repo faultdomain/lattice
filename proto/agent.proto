@@ -109,12 +109,13 @@ message AgentReady {
   string api_server_endpoint = 4;
 }
 
-// Sent when bootstrap phase completes successfully
+// Sent when agent has completed initial setup
+// (CAPI provider installed, controller reconciling)
 message BootstrapComplete {
-  // Flux successfully reconciled
-  bool flux_ready = 1;
-  // Cilium successfully installed
-  bool cilium_ready = 2;
+  // CAPI provider successfully installed based on LatticeCluster spec
+  bool capi_ready = 1;
+  // List of installed providers (e.g., ["docker", "kubeadm"])
+  repeated string installed_providers = 2;
 }
 
 // Sent when agent begins pivot (CAPI import starting)
@@ -210,21 +211,21 @@ message CellCommand {
   string command_id = 1;
 
   oneof command {
-    BootstrapCommand bootstrap = 2;
+    ApplyManifestsCommand apply_manifests = 2;
     StartPivotCommand start_pivot = 3;
-    ReconcileCommand reconcile = 4;
-    StatusRequest status_request = 5;
+    StatusRequest status_request = 4;
   }
 }
 
-// Command to bootstrap the cluster with Flux/GitOps
-message BootstrapCommand {
-  // Flux GitRepository manifest (YAML)
-  bytes git_repository = 1;
-  // Flux Kustomization manifest (YAML)
-  bytes kustomization = 2;
-  // Additional manifests to apply
-  repeated bytes additional_manifests = 3;
+// Command to apply Kubernetes manifests
+//
+// Used for:
+// - Post-pivot setup: LatticeCluster CRD + self-referential resource
+// - The controller on the workload cluster will reconcile the LatticeCluster
+//   and lazily install CAPI based on spec.provider.type
+message ApplyManifestsCommand {
+  // YAML manifests to apply (will be kubectl apply -f)
+  repeated bytes manifests = 1;
 }
 
 // Command to start pivot - cell will use K8s proxy for clusterctl move
@@ -242,14 +243,6 @@ message StartPivotCommand {
   string target_namespace = 2;
   // Name of the cluster being pivoted
   string cluster_name = 3;
-}
-
-// Command to trigger Flux reconciliation
-message ReconcileCommand {
-  // Optional: specific Kustomization to reconcile (empty = all)
-  string kustomization_name = 1;
-  // Optional: specific namespace
-  string namespace = 2;
 }
 
 // Request current cluster status

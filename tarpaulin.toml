@@ -1,0 +1,6 @@
+[default]
+# Exclude integration/e2e code from coverage
+exclude-files = [
+    "src/install/*",
+    "src/main.rs",
+]

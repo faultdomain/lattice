@@ -222,11 +222,13 @@ async fn run_pivot_e2e_test() -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to create LatticeCluster: {e}"))?;
 
-    // Register cluster for bootstrap
+    // Register cluster for bootstrap (format: host:http_port:grpc_port)
+    let cluster_manifest = serde_json::to_string(&cluster).expect("serialize cluster");
     let token = bootstrap_state.register_cluster(
         WORKLOAD_CLUSTER_NAME.to_string(),
-        format!("https://{}", grpc_addr),
+        format!("{}:8443:{}", grpc_addr.ip(), grpc_addr.port()),
         ca.ca_cert_pem().to_string(),
+        cluster_manifest,
         None,
     );
     println!("  Bootstrap token generated: {}...", &token.as_str()[..16]);
@@ -339,25 +341,22 @@ async fn run_pivot_e2e_test() -> Result<(), String> {
 
     sleep(Duration::from_millis(500)).await;
 
-    // Step 13: Verify agent received post-pivot BootstrapCommand
-    println!("Step 13: Verifying post-pivot BootstrapCommand...");
-    let bootstrap_cmd = timeout(Duration::from_secs(5), agent_commands.recv())
+    // Step 13: Verify agent received post-pivot ApplyManifestsCommand
+    println!("Step 13: Verifying post-pivot ApplyManifestsCommand...");
+    let apply_cmd = timeout(Duration::from_secs(5), agent_commands.recv())
         .await
-        .map_err(|_| "Timeout waiting for BootstrapCommand")?
+        .map_err(|_| "Timeout waiting for ApplyManifestsCommand")?
         .ok_or("Agent command channel closed")?;
 
-    match bootstrap_cmd.command {
-        Some(CellCommandType::Bootstrap(b)) => {
-            assert!(
-                !b.additional_manifests.is_empty(),
-                "Should have additional manifests"
-            );
+    match apply_cmd.command {
+        Some(CellCommandType::ApplyManifests(a)) => {
+            assert!(!a.manifests.is_empty(), "Should have manifests");
             println!(
-                "  Received BootstrapCommand with {} manifests",
-                b.additional_manifests.len()
+                "  Received ApplyManifestsCommand with {} manifests",
+                a.manifests.len()
             );
         }
-        _ => return Err("Expected BootstrapCommand after pivot".to_string()),
+        _ => return Err("Expected ApplyManifestsCommand after pivot".to_string()),
     }
 
     // Step 14: Verify agent state is Ready
@@ -409,6 +408,8 @@ async fn setup_cell_infrastructure() -> Result<
         DefaultManifestGenerator::new().unwrap(),
         Duration::from_secs(3600),
         ca.clone(),
+        "test:latest".to_string(),
+        None,
     ));
 
     // Create agent registry and gRPC server

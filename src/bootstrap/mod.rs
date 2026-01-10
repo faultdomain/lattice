@@ -39,9 +39,8 @@ use axum::Json;
 use dashmap::DashMap;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ConfigMapKeySelector, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource,
-    LocalObjectReference, Namespace, PodSpec, PodTemplateSpec, Secret, SecretVolumeSource,
-    ServiceAccount, Volume, VolumeMount,
+    Container, ContainerPort, EnvVar, LocalObjectReference, Namespace, PodSpec, PodTemplateSpec,
+    Secret, SecretVolumeSource, ServiceAccount, Volume, VolumeMount,
 };
 use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -50,7 +49,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info};
 
+use crate::crd::LatticeCluster;
 use crate::pki::{CertificateAuthority, PkiError};
+use kube::CustomResourceExt;
 
 pub use token::{BootstrapToken, TokenStore};
 
@@ -147,9 +148,38 @@ pub trait ManifestGenerator: Send + Sync {
     /// Generate bootstrap manifests for a cluster
     ///
     /// These manifests are applied during initial bootstrap (before pivot).
-    /// They include CNI and agent - NOT LatticeCluster CRD (that comes post-pivot
-    /// via BootstrapCommand to avoid fighting with pivot).
-    fn generate(&self, cluster_id: &str, cell_endpoint: &str, ca_cert: &str) -> Vec<String>;
+    /// They include CNI and operator - NOT LatticeCluster CRD (that comes post-pivot
+    /// via ApplyManifestsCommand to avoid fighting with pivot).
+    ///
+    /// The cluster_name is set as LATTICE_CLUSTER_NAME env var so the controller
+    /// knows which cluster it's running on (to avoid trying to provision itself).
+    fn generate(
+        &self,
+        image: &str,
+        registry_credentials: Option<&str>,
+        cluster_name: Option<&str>,
+    ) -> Vec<String>;
+}
+
+/// Generate all bootstrap manifests including LB-IPAM resources if networking is configured
+///
+/// This is the single entry point for manifest generation - both CRS (management cluster)
+/// and bootstrap webhook (workload clusters) should call this function to avoid drift.
+pub fn generate_all_manifests<G: ManifestGenerator>(
+    generator: &G,
+    image: &str,
+    registry_credentials: Option<&str>,
+    networking: Option<&crate::crd::NetworkingSpec>,
+    cluster_name: Option<&str>,
+) -> Vec<String> {
+    let mut manifests = generator.generate(image, registry_credentials, cluster_name);
+
+    // Add Cilium LB-IPAM resources if networking is configured
+    if let Some(networking) = networking {
+        manifests.extend(crate::cilium::generate_lb_resources(networking));
+    }
+
+    manifests
 }
 
 /// Cilium chart configuration
@@ -282,37 +312,22 @@ impl DefaultManifestGenerator {
         Ok(manifests)
     }
 
-    /// Generate the agent manifests (non-Cilium)
-    fn generate_agent_manifests(
+    /// Generate the Lattice operator manifests (non-Cilium)
+    ///
+    /// Every cluster runs the same deployment - the controller reads its
+    /// LatticeCluster CRD to determine behavior (cell vs leaf, parent connection, etc.)
+    ///
+    /// If cluster_name is provided, it's set as LATTICE_CLUSTER_NAME env var so the
+    /// controller knows which cluster it's running on and won't try to provision itself.
+    pub fn generate_operator_manifests(
         &self,
-        cluster_id: &str,
-        cell_endpoint: &str,
-        ca_cert: &str,
+        image: &str,
+        registry_credentials: Option<&str>,
+        cluster_name: Option<&str>,
     ) -> Vec<String> {
         const NAMESPACE: &str = "lattice-system";
 
-        // Parse cell_endpoint: "host:http_port:grpc_port" (e.g., "host.docker.internal:443:50051")
-        let (http_endpoint, grpc_endpoint) = {
-            let parts: Vec<&str> = cell_endpoint.split(':').collect();
-            if parts.len() != 3 {
-                panic!(
-                    "cell_endpoint must be in format 'host:http_port:grpc_port', got: {}",
-                    cell_endpoint
-                );
-            }
-            let host = parts[0];
-            let http_port = parts[1];
-            let grpc_port = parts[2];
-            (
-                format!("https://{}:{}", host, http_port),
-                format!("https://{}:{}", host, grpc_port),
-            )
-        };
-
-        // Read registry credentials if available
-        let registry_creds = std::env::var("REGISTRY_CREDENTIALS_FILE")
-            .ok()
-            .and_then(|path| std::fs::read_to_string(&path).ok());
+        let registry_creds = registry_credentials.map(|s| s.to_string());
 
         // 1. Namespace
         let namespace = Namespace {
@@ -323,21 +338,7 @@ impl DefaultManifestGenerator {
             ..Default::default()
         };
 
-        // 2. CA Secret
-        let ca_secret = Secret {
-            metadata: ObjectMeta {
-                name: Some("lattice-ca".to_string()),
-                namespace: Some(NAMESPACE.to_string()),
-                ..Default::default()
-            },
-            data: Some(BTreeMap::from([(
-                "ca.crt".to_string(),
-                ByteString(ca_cert.as_bytes().to_vec()),
-            )])),
-            ..Default::default()
-        };
-
-        // 2b. Registry credentials secret (if available)
+        // 2. Registry credentials secret (if available)
         let registry_secret = registry_creds.as_ref().map(|creds| Secret {
             metadata: ObjectMeta {
                 name: Some("lattice-registry".to_string()),
@@ -352,35 +353,20 @@ impl DefaultManifestGenerator {
             ..Default::default()
         });
 
-        // 3. Agent ConfigMap
-        let agent_config = ConfigMap {
-            metadata: ObjectMeta {
-                name: Some("lattice-agent-config".to_string()),
-                namespace: Some(NAMESPACE.to_string()),
-                ..Default::default()
-            },
-            data: Some(BTreeMap::from([
-                ("cluster_id".to_string(), cluster_id.to_string()),
-                ("cell_http_endpoint".to_string(), http_endpoint),
-                ("cell_grpc_endpoint".to_string(), grpc_endpoint),
-            ])),
-            ..Default::default()
-        };
-
-        // 4. ServiceAccount
+        // 3. ServiceAccount
         let service_account = ServiceAccount {
             metadata: ObjectMeta {
-                name: Some("lattice-agent".to_string()),
+                name: Some("lattice-operator".to_string()),
                 namespace: Some(NAMESPACE.to_string()),
                 ..Default::default()
             },
             ..Default::default()
         };
 
-        // 5. ClusterRoleBinding (cluster-admin for pivot operations)
+        // 4. ClusterRoleBinding (cluster-admin - we manage everything)
         let cluster_role_binding = ClusterRoleBinding {
             metadata: ObjectMeta {
-                name: Some("lattice-agent-cluster-admin".to_string()),
+                name: Some("lattice-operator".to_string()),
                 ..Default::default()
             },
             role_ref: RoleRef {
@@ -390,19 +376,19 @@ impl DefaultManifestGenerator {
             },
             subjects: Some(vec![Subject {
                 kind: "ServiceAccount".to_string(),
-                name: "lattice-agent".to_string(),
+                name: "lattice-operator".to_string(),
                 namespace: Some(NAMESPACE.to_string()),
                 ..Default::default()
             }]),
         };
 
-        // 6. Agent Deployment
+        // 5. Operator Deployment
         let mut labels = BTreeMap::new();
-        labels.insert("app".to_string(), "lattice-agent".to_string());
+        labels.insert("app".to_string(), "lattice-operator".to_string());
 
-        let agent_deployment = Deployment {
+        let operator_deployment = Deployment {
             metadata: ObjectMeta {
-                name: Some("lattice-agent".to_string()),
+                name: Some("lattice-operator".to_string()),
                 namespace: Some(NAMESPACE.to_string()),
                 ..Default::default()
             },
@@ -418,7 +404,7 @@ impl DefaultManifestGenerator {
                         ..Default::default()
                     }),
                     spec: Some(PodSpec {
-                        service_account_name: Some("lattice-agent".to_string()),
+                        service_account_name: Some("lattice-operator".to_string()),
                         image_pull_secrets: if registry_secret.is_some() {
                             Some(vec![LocalObjectReference {
                                 name: "lattice-registry".to_string(),
@@ -426,83 +412,75 @@ impl DefaultManifestGenerator {
                         } else {
                             None
                         },
+                        // Mount registry credentials so operator can pass them to workload clusters
+                        volumes: if registry_secret.is_some() {
+                            Some(vec![Volume {
+                                name: "registry-creds".to_string(),
+                                secret: Some(SecretVolumeSource {
+                                    secret_name: Some("lattice-registry".to_string()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }])
+                        } else {
+                            None
+                        },
                         containers: vec![Container {
-                            name: "agent".to_string(),
-                            image: Some("ghcr.io/evan-hines-js/lattice:latest".to_string()),
-                            args: Some(vec!["agent".to_string()]),
-                            env: Some(vec![
-                                EnvVar {
-                                    name: "CLUSTER_ID".to_string(),
-                                    value_from: Some(EnvVarSource {
-                                        config_map_key_ref: Some(ConfigMapKeySelector {
-                                            name: "lattice-agent-config".to_string(),
-                                            key: "cluster_id".to_string(),
-                                            ..Default::default()
-                                        }),
+                            name: "operator".to_string(),
+                            image: Some(image.to_string()),
+                            image_pull_policy: Some("Always".to_string()),
+                            // No args needed - controller is default mode
+                            // Controller reads LatticeCluster CRD to determine behavior
+                            env: Some({
+                                let mut envs = vec![EnvVar {
+                                    name: "RUST_LOG".to_string(),
+                                    value: Some("info,lattice=debug".to_string()),
+                                    ..Default::default()
+                                }];
+                                if let Some(name) = cluster_name {
+                                    envs.push(EnvVar {
+                                        name: "LATTICE_CLUSTER_NAME".to_string(),
+                                        value: Some(name.to_string()),
                                         ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                },
-                                EnvVar {
-                                    name: "CELL_HTTP_ENDPOINT".to_string(),
-                                    value_from: Some(EnvVarSource {
-                                        config_map_key_ref: Some(ConfigMapKeySelector {
-                                            name: "lattice-agent-config".to_string(),
-                                            key: "cell_http_endpoint".to_string(),
-                                            ..Default::default()
-                                        }),
+                                    });
+                                }
+                                if registry_secret.is_some() {
+                                    envs.push(EnvVar {
+                                        name: "REGISTRY_CREDENTIALS_FILE".to_string(),
+                                        value: Some("/etc/lattice/registry/.dockerconfigjson".to_string()),
                                         ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                },
-                                EnvVar {
-                                    name: "CELL_GRPC_ENDPOINT".to_string(),
-                                    value_from: Some(EnvVarSource {
-                                        config_map_key_ref: Some(ConfigMapKeySelector {
-                                            name: "lattice-agent-config".to_string(),
-                                            key: "cell_grpc_endpoint".to_string(),
-                                            ..Default::default()
-                                        }),
-                                        ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                },
-                                EnvVar {
-                                    name: "CA_CERT_PATH".to_string(),
-                                    value: Some("/var/run/secrets/lattice/ca/ca.crt".to_string()),
-                                    ..Default::default()
-                                },
-                            ]),
-                            volume_mounts: Some(vec![
-                                VolumeMount {
-                                    name: "ca-cert".to_string(),
-                                    mount_path: "/var/run/secrets/lattice/ca".to_string(),
+                                    });
+                                }
+                                envs
+                            }),
+                            // Mount registry credentials if available
+                            volume_mounts: if registry_secret.is_some() {
+                                Some(vec![VolumeMount {
+                                    name: "registry-creds".to_string(),
+                                    mount_path: "/etc/lattice/registry".to_string(),
                                     read_only: Some(true),
                                     ..Default::default()
+                                }])
+                            } else {
+                                None
+                            },
+                            // Expose cell server ports for LoadBalancer Service
+                            ports: Some(vec![
+                                ContainerPort {
+                                    name: Some("bootstrap".to_string()),
+                                    container_port: crate::DEFAULT_BOOTSTRAP_PORT as i32,
+                                    protocol: Some("TCP".to_string()),
+                                    ..Default::default()
                                 },
-                                VolumeMount {
-                                    name: "tls".to_string(),
-                                    mount_path: "/var/run/secrets/lattice/tls".to_string(),
+                                ContainerPort {
+                                    name: Some("grpc".to_string()),
+                                    container_port: crate::DEFAULT_GRPC_PORT as i32,
+                                    protocol: Some("TCP".to_string()),
                                     ..Default::default()
                                 },
                             ]),
                             ..Default::default()
                         }],
-                        volumes: Some(vec![
-                            Volume {
-                                name: "ca-cert".to_string(),
-                                secret: Some(SecretVolumeSource {
-                                    secret_name: Some("lattice-ca".to_string()),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            },
-                            Volume {
-                                name: "tls".to_string(),
-                                empty_dir: Some(EmptyDirVolumeSource::default()),
-                                ..Default::default()
-                            },
-                        ]),
                         ..Default::default()
                     }),
                 },
@@ -511,35 +489,41 @@ impl DefaultManifestGenerator {
             ..Default::default()
         };
 
-        // Serialize all resources to JSON (more efficient than YAML, K8s accepts both)
+        // Serialize all resources to JSON
         let mut manifests = vec![
             serde_json::to_string(&namespace).expect("serialize namespace"),
-            serde_json::to_string(&ca_secret).expect("serialize secret"),
         ];
         if let Some(ref reg_secret) = registry_secret {
             manifests.push(serde_json::to_string(reg_secret).expect("serialize registry secret"));
         }
         manifests.extend([
-            serde_json::to_string(&agent_config).expect("serialize configmap"),
             serde_json::to_string(&service_account).expect("serialize serviceaccount"),
             serde_json::to_string(&cluster_role_binding).expect("serialize clusterrolebinding"),
-            serde_json::to_string(&agent_deployment).expect("serialize deployment"),
+            serde_json::to_string(&operator_deployment).expect("serialize deployment"),
         ]);
         manifests
     }
 }
 
 impl ManifestGenerator for DefaultManifestGenerator {
-    fn generate(&self, cluster_id: &str, cell_endpoint: &str, ca_cert: &str) -> Vec<String> {
+    fn generate(
+        &self,
+        image: &str,
+        registry_credentials: Option<&str>,
+        cluster_name: Option<&str>,
+    ) -> Vec<String> {
         let mut manifests = Vec::new();
 
         // CNI manifests first (Cilium) - must be applied before other pods can run
         manifests.extend(self.cilium_manifests.clone());
 
-        // Then agent manifests
-        manifests.extend(self.generate_agent_manifests(cluster_id, cell_endpoint, ca_cert));
+        // Then operator manifests - same deployment for all clusters
+        // Controller reads LatticeCluster CRD to determine behavior:
+        // - spec.cell present → starts cell servers, can provision clusters
+        // - spec.cellRef present → connects to parent
+        manifests.extend(self.generate_operator_manifests(image, registry_credentials, cluster_name));
 
-        // Note: LatticeCluster CRD and resource are sent post-pivot via BootstrapCommand
+        // Note: LatticeCluster CRD and resource are sent post-pivot via ApplyManifestsCommand
         // to avoid the local controller fighting with the pivot process
 
         manifests
@@ -551,10 +535,12 @@ impl ManifestGenerator for DefaultManifestGenerator {
 pub struct ClusterBootstrapInfo {
     /// Cluster ID
     pub cluster_id: String,
-    /// Cell endpoint for agent to connect to
+    /// Cell endpoint for agent to connect to (format: "host:http_port:grpc_port")
     pub cell_endpoint: String,
     /// CA certificate PEM
     pub ca_certificate: String,
+    /// The LatticeCluster CRD manifest (JSON) to apply on the workload cluster
+    pub cluster_manifest: String,
     /// Bootstrap token (hashed)
     pub token_hash: String,
     /// When the token was created
@@ -571,6 +557,10 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
     clusters: DashMap<String, ClusterBootstrapInfo>,
     /// Manifest generator
     manifest_generator: G,
+    /// Lattice image to deploy
+    image: String,
+    /// Registry credentials (optional)
+    registry_credentials: Option<String>,
     /// Token TTL
     token_ttl: Duration,
     /// Certificate authority for signing CSRs
@@ -579,10 +569,18 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
 
 impl<G: ManifestGenerator> BootstrapState<G> {
     /// Create a new bootstrap state with a CA
-    pub fn new(generator: G, token_ttl: Duration, ca: Arc<CertificateAuthority>) -> Self {
+    pub fn new(
+        generator: G,
+        token_ttl: Duration,
+        ca: Arc<CertificateAuthority>,
+        image: String,
+        registry_credentials: Option<String>,
+    ) -> Self {
         Self {
             clusters: DashMap::new(),
             manifest_generator: generator,
+            image,
+            registry_credentials,
             token_ttl,
             ca,
         }
@@ -594,11 +592,19 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     }
 
     /// Register a cluster for bootstrap
+    ///
+    /// # Arguments
+    /// * `cluster_id` - Unique cluster identifier
+    /// * `cell_endpoint` - Cell endpoint (format: "host:http_port:grpc_port")
+    /// * `ca_certificate` - CA certificate PEM
+    /// * `cluster_manifest` - The LatticeCluster CRD JSON to apply on the workload cluster
+    /// * `networking` - Optional networking config for Cilium LB-IPAM
     pub fn register_cluster(
         &self,
         cluster_id: String,
         cell_endpoint: String,
         ca_certificate: String,
+        cluster_manifest: String,
         networking: Option<crate::crd::NetworkingSpec>,
     ) -> BootstrapToken {
         let token = BootstrapToken::generate();
@@ -608,6 +614,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             cluster_id: cluster_id.clone(),
             cell_endpoint,
             ca_certificate,
+            cluster_manifest,
             token_hash,
             token_created: Instant::now(),
             token_used: false,
@@ -654,18 +661,48 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     }
 
     /// Generate bootstrap response for a cluster
+    ///
+    /// This generates manifests for workload clusters:
+    /// - CNI (Cilium)
+    /// - Lattice operator
+    /// - LatticeCluster CRD definition (CustomResourceDefinition)
+    /// - LatticeCluster CRD instance (with cellRef pointing to parent)
+    /// - Parent connection config Secret
     pub fn generate_response(&self, info: &ClusterBootstrapInfo) -> BootstrapResponse {
-        let mut manifests = self.manifest_generator.generate(
-            &info.cluster_id,
-            &info.cell_endpoint,
-            &info.ca_certificate,
+        // Use the standard manifest generation - pass cluster_id so operator knows its identity
+        let mut manifests = generate_all_manifests(
+            &self.manifest_generator,
+            &self.image,
+            self.registry_credentials.as_deref(),
+            info.networking.as_ref(),
+            Some(&info.cluster_id),
         );
 
-        // Add Cilium LB-IPAM resources if networking is configured
-        if let Some(ref networking) = info.networking {
-            let lb_resources = crate::cilium::generate_lb_resources(networking);
-            manifests.extend(lb_resources);
-        }
+        // Add the LatticeCluster CRD definition (CustomResourceDefinition)
+        // This must come before the CRD instance so Kubernetes knows the type
+        let crd_definition = serde_yaml::to_string(&LatticeCluster::crd())
+            .expect("serialize CRD definition");
+        manifests.push(crd_definition);
+
+        // Add the LatticeCluster CRD instance - this tells the controller it has a parent
+        manifests.push(info.cluster_manifest.clone());
+
+        // Add parent connection config Secret for agent to use
+        // cell_endpoint format: "host:http_port:grpc_port"
+        let parent_config = Secret {
+            metadata: ObjectMeta {
+                name: Some("lattice-parent-config".to_string()),
+                namespace: Some("lattice-system".to_string()),
+                ..Default::default()
+            },
+            type_: Some("Opaque".to_string()),
+            string_data: Some(BTreeMap::from([
+                ("cell_endpoint".to_string(), info.cell_endpoint.clone()),
+                ("ca.crt".to_string(), info.ca_certificate.clone()),
+            ])),
+            ..Default::default()
+        };
+        manifests.push(serde_json::to_string(&parent_config).expect("serialize parent config"));
 
         BootstrapResponse {
             cluster_id: info.cluster_id.clone(),
@@ -758,20 +795,16 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     // Extract token
     let token = extract_bearer_token(&headers)?;
 
-    // Validate and consume
+    // Validate and consume the token
     let info = state.validate_and_consume(&cluster_id, &token)?;
 
     info!(cluster_id = %cluster_id, "Bootstrap token validated, returning manifests");
 
-    // Generate manifests and concatenate as YAML
-    let manifests = state.manifest_generator.generate(
-        &info.cluster_id,
-        &info.cell_endpoint,
-        &info.ca_certificate,
-    );
+    // Generate full bootstrap response (includes CNI, operator, LatticeCluster CRD, parent config)
+    let response = state.generate_response(&info);
 
     // Join with YAML document separator
-    let yaml_output = manifests.join("\n---\n");
+    let yaml_output = response.manifests.join("\n---\n");
 
     Ok((
         [(axum::http::header::CONTENT_TYPE, "application/x-yaml")],
@@ -806,8 +839,13 @@ mod tests {
     struct TestManifestGenerator;
 
     impl ManifestGenerator for TestManifestGenerator {
-        fn generate(&self, cluster_id: &str, _cell_endpoint: &str, _ca_cert: &str) -> Vec<String> {
-            vec![format!("# Test manifest for {}", cluster_id)]
+        fn generate(
+            &self,
+            image: &str,
+            _registry_credentials: Option<&str>,
+            _cluster_name: Option<&str>,
+        ) -> Vec<String> {
+            vec![format!("# Test manifest with image {}", image)]
         }
     }
 
@@ -816,11 +854,23 @@ mod tests {
     }
 
     fn test_state() -> BootstrapState<TestManifestGenerator> {
-        BootstrapState::new(TestManifestGenerator, Duration::from_secs(3600), test_ca())
+        BootstrapState::new(
+            TestManifestGenerator,
+            Duration::from_secs(3600),
+            test_ca(),
+            "test:latest".to_string(),
+            None,
+        )
     }
 
     fn test_state_with_ttl(ttl: Duration) -> BootstrapState<TestManifestGenerator> {
-        BootstrapState::new(TestManifestGenerator, ttl, test_ca())
+        BootstrapState::new(
+            TestManifestGenerator,
+            ttl,
+            test_ca(),
+            "test:latest".to_string(),
+            None,
+        )
     }
 
     /// Test helper to register cluster without networking config
@@ -830,10 +880,13 @@ mod tests {
         cell_endpoint: impl Into<String>,
         ca_certificate: impl Into<String>,
     ) -> BootstrapToken {
+        // Use a minimal test cluster manifest
+        let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"test"}}"#.to_string();
         state.register_cluster(
             cluster_id.into(),
             cell_endpoint.into(),
             ca_certificate.into(),
+            cluster_manifest,
             None,
         )
     }
@@ -845,7 +898,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "test-cluster".to_string(),
-            "cell.example.com:443:50051".to_string(),
+            "cell.example.com:8443:50051".to_string(),
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
         );
 
@@ -859,7 +912,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "test-cluster".to_string(),
-            "cell.example.com:443:50051".to_string(),
+            "cell.example.com:8443:50051".to_string(),
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
         );
 
@@ -877,7 +930,7 @@ mod tests {
         register_test_cluster(
             &state,
             "test-cluster".to_string(),
-            "cell.example.com:443:50051".to_string(),
+            "cell.example.com:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -893,7 +946,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "test-cluster".to_string(),
-            "cell.example.com:443:50051".to_string(),
+            "cell.example.com:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -914,7 +967,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "test-cluster".to_string(),
-            "cell.example.com:443:50051".to_string(),
+            "cell.example.com:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -940,7 +993,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "test-cluster".to_string(),
-            "cell.example.com:443:50051".to_string(),
+            "cell.example.com:8443:50051".to_string(),
             "ca-cert".to_string(),
         );
 
@@ -950,10 +1003,11 @@ mod tests {
         let response = state.generate_response(&info);
 
         assert_eq!(response.cluster_id, "test-cluster");
-        assert_eq!(response.cell_endpoint, "cell.example.com:443:50051");
+        assert_eq!(response.cell_endpoint, "cell.example.com:8443:50051");
         assert_eq!(response.ca_certificate, "ca-cert");
         assert!(!response.manifests.is_empty());
-        assert!(response.manifests[0].contains("test-cluster"));
+        // Manifest contains image from TestManifestGenerator, not cluster ID
+        assert!(response.manifests[0].contains("# Test manifest"));
     }
 
     // CSR signing tests
@@ -966,7 +1020,7 @@ mod tests {
         register_test_cluster(
             &state,
             "not-bootstrapped".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -997,7 +1051,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "csr-test".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         state
@@ -1022,7 +1076,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "cluster-xyz".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         state
@@ -1053,9 +1107,9 @@ mod tests {
     #[test]
     fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("my-cluster", "cell:443:50051", "ca-pem");
+        let manifests = generator.generate("test:latest", None, None);
 
-        // Agent manifests are JSON, check for JSON format
+        // Operator manifests are JSON, check for JSON format
         let has_namespace = manifests
             .iter()
             .any(|m| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
@@ -1063,33 +1117,33 @@ mod tests {
     }
 
     #[test]
-    fn default_generator_creates_ca_secret() {
+    fn default_generator_creates_operator_deployment() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("my-cluster", "cell:443:50051", "my-ca-cert");
+        let manifests = generator.generate("test:latest", None, None);
 
-        // Agent manifests are JSON, check for JSON format
-        let has_secret = manifests
+        // Operator manifests are JSON, check for JSON format
+        let has_deployment = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"Secret\"") && m.contains("lattice-ca"));
-        assert!(has_secret);
+            .any(|m| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator"));
+        assert!(has_deployment);
     }
 
     #[test]
-    fn default_generator_creates_agent_deployment() {
+    fn default_generator_creates_service_account() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("my-cluster", "cell:443:50051", "ca-pem");
+        let manifests = generator.generate("test:latest", None, None);
 
-        // Agent manifests are JSON, check for JSON format
-        let has_deployment = manifests
+        // Should have ServiceAccount for operator
+        let has_sa = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-agent"));
-        assert!(has_deployment);
+            .any(|m| m.contains("\"kind\":\"ServiceAccount\"") && m.contains("lattice-operator"));
+        assert!(has_sa);
     }
 
     #[test]
     fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("my-cluster", "cell:443:50051", "ca-pem");
+        let manifests = generator.generate("test:latest", None, None);
 
         // Should include Cilium DaemonSet (rendered from helm template)
         let has_cilium_daemonset = manifests
@@ -1157,7 +1211,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "prod-us-west-001".to_string(),
-            "cell.lattice.example.com:443:50051".to_string(),
+            "cell.lattice.example.com:8443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         assert!(state.is_cluster_registered("prod-us-west-001"));
@@ -1170,17 +1224,14 @@ mod tests {
             .validate_and_consume("prod-us-west-001", token.as_str())
             .unwrap();
         assert_eq!(info.cluster_id, "prod-us-west-001");
-        assert_eq!(info.cell_endpoint, "cell.lattice.example.com:443:50051");
+        assert_eq!(info.cell_endpoint, "cell.lattice.example.com:8443:50051");
 
         // Chapter 3: Cell returns bootstrap response with manifests
         // ----------------------------------------------------------
         let response = state.generate_response(&info);
         assert!(!response.manifests.is_empty());
         assert!(!response.ca_certificate.is_empty());
-        assert_eq!(
-            response.cell_endpoint,
-            "cell.lattice.example.com:443:50051"
-        );
+        assert_eq!(response.cell_endpoint, "cell.lattice.example.com:8443:50051");
 
         // Chapter 4: Agent generates keypair and submits CSR
         // ---------------------------------------------------
@@ -1216,7 +1267,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "secure-cluster".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1246,7 +1297,7 @@ mod tests {
         register_test_cluster(
             &state,
             "guarded-cluster".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1258,7 +1309,7 @@ mod tests {
         let other_token = register_test_cluster(
             &state,
             "other-cluster".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
         let cross_cluster_result =
@@ -1281,7 +1332,7 @@ mod tests {
         let _token = register_test_cluster(
             &state,
             "premature-cluster".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1329,7 +1380,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "slow-cluster".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1341,18 +1392,15 @@ mod tests {
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
     }
 
-    /// Story: Manifest generation for agent deployment
+    /// Story: Manifest generation for operator deployment
     ///
     /// The bootstrap response includes Kubernetes manifests that set up
-    /// the Lattice agent on the new cluster.
+    /// the Lattice operator on new clusters. Every cluster runs the same
+    /// deployment - the controller reads LatticeCluster CRD to determine behavior.
     #[test]
     fn story_manifest_generation() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate(
-            "my-workload-cluster",
-            "cell.example.com:443:50051",
-            "---CA CERT PEM---",
-        );
+        let manifests = generator.generate("test:latest", None, None);
 
         // Manifests create the lattice-system namespace (JSON format)
         let has_namespace = manifests
@@ -1360,25 +1408,17 @@ mod tests {
             .any(|m| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
         assert!(has_namespace, "Should create lattice-system namespace");
 
-        // Manifests include CA certificate for verifying cell (JSON format)
-        let has_ca_secret = manifests
+        // Manifests deploy the operator (JSON format)
+        let has_operator = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"Secret\"") && m.contains("lattice-ca"));
-        assert!(has_ca_secret, "Should include CA certificate secret");
+            .any(|m| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator"));
+        assert!(has_operator, "Should deploy lattice-operator");
 
-        // Manifests deploy the agent (JSON format)
-        let has_agent = manifests
+        // Should have cluster-admin binding
+        let has_rbac = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-agent"));
-        assert!(has_agent, "Should deploy lattice-agent");
-
-        // Agent config includes cluster ID and cell endpoint (JSON format)
-        let has_config = manifests.iter().any(|m| {
-            m.contains("\"kind\":\"ConfigMap\"")
-                && m.contains("my-workload-cluster")
-                && m.contains("cell.example.com")
-        });
-        assert!(has_config, "Should include agent configuration");
+            .any(|m| m.contains("\"kind\":\"ClusterRoleBinding\"") && m.contains("cluster-admin"));
+        assert!(has_rbac, "Should have cluster-admin binding");
     }
 
     /// Story: HTTP API - Bearer token extraction
@@ -1472,7 +1512,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "malformed-csr-test".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         state
@@ -1499,7 +1539,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "ca-test".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             ca_cert.to_string(),
         );
         let info = state
@@ -1534,7 +1574,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "http-test".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "ca-cert".to_string(),
         );
 
@@ -1557,7 +1597,7 @@ mod tests {
         let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
 
         // Should contain test manifest from TestManifestGenerator
-        assert!(manifests_yaml.contains("http-test"));
+        assert!(manifests_yaml.contains("# Test manifest"));
     }
 
     /// Integration test: manifests endpoint with missing auth
@@ -1567,7 +1607,7 @@ mod tests {
         register_test_cluster(
             &state,
             "auth-test".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1591,7 +1631,7 @@ mod tests {
         register_test_cluster(
             &state,
             "token-test".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1634,7 +1674,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "csr-http-test".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         state
@@ -1680,7 +1720,7 @@ mod tests {
         register_test_cluster(
             &state,
             "not-bootstrapped".to_string(),
-            "cell:443:50051".to_string(),
+            "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1735,7 +1775,7 @@ mod tests {
         let token = register_test_cluster(
             &state,
             "full-flow-test".to_string(),
-            "cell.example.com:443:50051".to_string(),
+            "cell.example.com:8443:50051".to_string(),
             ca_cert.clone(),
         );
 
@@ -1756,7 +1796,8 @@ mod tests {
             .await
             .unwrap();
         let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
-        assert!(manifests_yaml.contains("full-flow-test"));
+        // Manifest contains image from TestManifestGenerator, not cluster ID
+        assert!(manifests_yaml.contains("# Test manifest"));
 
         // Step 3: CSR signing
         let agent_req = AgentCertRequest::new("full-flow-test").unwrap();

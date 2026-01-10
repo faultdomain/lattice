@@ -70,7 +70,7 @@ impl LatticeClusterSpec {
     }
 
     /// Returns true if this is a workload cluster (has a cell reference)
-    pub fn is_workload_cluster(&self) -> bool {
+    pub fn has_parent(&self) -> bool {
         self.cell_ref.is_some()
     }
 
@@ -179,7 +179,7 @@ mod tests {
         CellSpec {
             host: "172.18.255.1".to_string(),
             grpc_port: 50051,
-            bootstrap_port: 443,
+            bootstrap_port: 8443,
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
@@ -213,7 +213,7 @@ mod tests {
 
         assert!(spec.is_cell(), "Should be recognized as a cell");
         assert!(
-            !spec.is_workload_cluster(),
+            !spec.has_parent(),
             "Cell is not a workload cluster"
         );
     }
@@ -223,7 +223,7 @@ mod tests {
     /// Workload clusters reference their parent cell. They run user workloads
     /// and connect outbound to the cell for management and monitoring.
     #[test]
-    fn story_cluster_with_cell_ref_is_workload_cluster() {
+    fn story_cluster_with_cell_ref_has_parent() {
         let spec = LatticeClusterSpec {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
@@ -236,7 +236,7 @@ mod tests {
         };
 
         assert!(
-            spec.is_workload_cluster(),
+            spec.has_parent(),
             "Should be recognized as workload cluster"
         );
         assert!(!spec.is_cell(), "Workload cluster is not a cell");
@@ -481,7 +481,7 @@ workload:
 "#;
         let spec: LatticeClusterSpec = serde_yaml::from_str(yaml).unwrap();
 
-        assert!(spec.is_workload_cluster(), "Should be workload cluster");
+        assert!(spec.has_parent(), "Should be workload cluster");
         assert_eq!(spec.cell_ref.as_deref(), Some("mgmt"));
         assert_eq!(spec.environment.as_deref(), Some("prod"));
         assert_eq!(spec.region.as_deref(), Some("us-west"));

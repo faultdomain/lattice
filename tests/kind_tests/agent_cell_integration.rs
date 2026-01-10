@@ -37,13 +37,17 @@ async fn integration_bootstrap_http_full_flow() {
         DefaultManifestGenerator::new().unwrap(),
         Duration::from_secs(3600),
         ca.clone(),
+        "test:latest".to_string(),
+        None,
     ));
 
     // Register a cluster
+    let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"integration-cluster"}}"#.to_string();
     let token = state.register_cluster(
         "integration-cluster".to_string(),
-        "https://cell.test:443".to_string(),
+        "cell.test:8443:50051".to_string(),
         ca.ca_cert_pem().to_string(),
+        cluster_manifest,
         None,
     );
 
@@ -104,12 +108,16 @@ async fn integration_bootstrap_token_replay_blocked() {
         DefaultManifestGenerator::new().unwrap(),
         Duration::from_secs(3600),
         ca.clone(),
+        "test:latest".to_string(),
+        None,
     ));
 
+    let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"replay-test"}}"#.to_string();
     let token = state.register_cluster(
         "replay-test".to_string(),
-        "https://cell:443".to_string(),
+        "cell:8443:50051".to_string(),
         ca.ca_cert_pem().to_string(),
+        cluster_manifest,
         None,
     );
 
@@ -151,12 +159,16 @@ async fn integration_full_stack_bootstrap_to_ready() {
         DefaultManifestGenerator::new().unwrap(),
         Duration::from_secs(3600),
         ca.clone(),
+        "test:latest".to_string(),
+        None,
     ));
 
+    let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"full-stack-test"}}"#.to_string();
     let token = bootstrap_state.register_cluster(
         "full-stack-test".to_string(),
-        "https://cell:443".to_string(),
+        "cell:8443:50051".to_string(),
         ca.ca_cert_pem().to_string(),
+        cluster_manifest,
         None,
     );
 

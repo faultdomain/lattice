@@ -96,24 +96,16 @@ pub struct BootstrapInfo {
     pub bootstrap_endpoint: Option<String>,
     /// One-time bootstrap token for authentication
     pub bootstrap_token: Option<String>,
-    /// The parent cell's gRPC endpoint for agent connection
-    pub cell_grpc_endpoint: Option<String>,
     /// CA certificate PEM for verifying the cell's TLS certificate
     pub ca_cert_pem: Option<String>,
 }
 
 impl BootstrapInfo {
     /// Create new bootstrap info for a workload cluster
-    pub fn new(
-        bootstrap_endpoint: String,
-        token: String,
-        grpc_endpoint: String,
-        ca_cert_pem: String,
-    ) -> Self {
+    pub fn new(bootstrap_endpoint: String, token: String, ca_cert_pem: String) -> Self {
         Self {
             bootstrap_endpoint: Some(bootstrap_endpoint),
             bootstrap_token: Some(token),
-            cell_grpc_endpoint: Some(grpc_endpoint),
             ca_cert_pem: Some(ca_cert_pem),
         }
     }

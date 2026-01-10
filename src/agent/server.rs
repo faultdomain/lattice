@@ -64,8 +64,8 @@ async fn handle_agent_message_impl(
         Some(Payload::BootstrapComplete(bc)) => {
             info!(
                 cluster = %cluster_name,
-                flux_ready = bc.flux_ready,
-                cilium_ready = bc.cilium_ready,
+                capi_ready = bc.capi_ready,
+                installed_providers = ?bc.installed_providers,
                 "Bootstrap complete"
             );
         }
@@ -88,42 +88,40 @@ async fn handle_agent_message_impl(
 
                 // Send post-pivot manifests (LatticeCluster CRD + resource)
                 if let Some(manifests) = registry.take_post_pivot_manifests(cluster_name) {
-                    let mut additional_manifests = Vec::new();
+                    let mut manifest_bytes = Vec::new();
 
                     // Clone the YAML strings so we can restore on failure
                     let crd_yaml = manifests.crd_yaml.clone();
                     let cluster_yaml = manifests.cluster_yaml.clone();
 
                     if let Some(ref crd) = crd_yaml {
-                        additional_manifests.push(crd.clone().into_bytes());
+                        manifest_bytes.push(crd.clone().into_bytes());
                     }
                     if let Some(ref cluster) = cluster_yaml {
-                        additional_manifests.push(cluster.clone().into_bytes());
+                        manifest_bytes.push(cluster.clone().into_bytes());
                     }
 
-                    if !additional_manifests.is_empty() {
+                    if !manifest_bytes.is_empty() {
                         info!(
                             cluster = %cluster_name,
-                            manifest_count = additional_manifests.len(),
-                            "Sending post-pivot BootstrapCommand with LatticeCluster"
+                            manifest_count = manifest_bytes.len(),
+                            "Sending post-pivot ApplyManifestsCommand with LatticeCluster"
                         );
 
-                        let bootstrap_cmd = CellCommand {
-                            command_id: format!("post-pivot-bootstrap-{}", cluster_name),
-                            command: Some(crate::proto::cell_command::Command::Bootstrap(
-                                crate::proto::BootstrapCommand {
-                                    git_repository: vec![],
-                                    kustomization: vec![],
-                                    additional_manifests,
+                        let apply_cmd = CellCommand {
+                            command_id: format!("post-pivot-apply-{}", cluster_name),
+                            command: Some(crate::proto::cell_command::Command::ApplyManifests(
+                                crate::proto::ApplyManifestsCommand {
+                                    manifests: manifest_bytes,
                                 },
                             )),
                         };
 
-                        if let Err(e) = command_tx.send(bootstrap_cmd).await {
+                        if let Err(e) = command_tx.send(apply_cmd).await {
                             error!(
                                 cluster = %cluster_name,
                                 error = %e,
-                                "Failed to send post-pivot BootstrapCommand, restoring manifests"
+                                "Failed to send post-pivot ApplyManifestsCommand, restoring manifests"
                             );
                             // Restore manifests so they can be retried on next PivotComplete
                             registry.set_post_pivot_manifests(
@@ -484,8 +482,8 @@ mod tests {
         let msg = AgentMessage {
             cluster_name: "test-cluster".to_string(),
             payload: Some(Payload::BootstrapComplete(BootstrapComplete {
-                flux_ready: true,
-                cilium_ready: true,
+                capi_ready: true,
+                installed_providers: vec!["docker".to_string()],
             })),
         };
 
@@ -910,7 +908,7 @@ mod tests {
     /// Integration test: Cell sends command to agent
     #[tokio::test]
     async fn integration_cell_sends_command_to_agent() {
-        use crate::proto::{cell_command::Command, BootstrapCommand};
+        use crate::proto::{cell_command::Command, ApplyManifestsCommand};
 
         let registry = Arc::new(AgentRegistry::new());
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -964,10 +962,8 @@ mod tests {
         let send_result = conn
             .send_command(CellCommand {
                 command_id: "cmd-1".to_string(),
-                command: Some(Command::Bootstrap(BootstrapCommand {
-                    git_repository: vec![],
-                    kustomization: vec![],
-                    additional_manifests: vec![],
+                command: Some(Command::ApplyManifests(ApplyManifestsCommand {
+                    manifests: vec![],
                 })),
             })
             .await;
@@ -1140,7 +1136,7 @@ mod tests {
     // the workload cluster to become fully self-managing.
 
     /// Story: When pivot completes successfully and post-pivot manifests exist,
-    /// they should be sent to the agent via a BootstrapCommand.
+    /// they should be sent to the agent via an ApplyManifestsCommand.
     ///
     /// This is critical for self-management: after pivot, the workload cluster
     /// needs its own LatticeCluster CRD and resource to manage itself.
@@ -1188,29 +1184,27 @@ mod tests {
         };
         server.handle_agent_message(&pivot_msg, &tx).await;
 
-        // Verify BootstrapCommand was sent with manifests
+        // Verify ApplyManifestsCommand was sent with manifests
         let cmd = rx.try_recv().expect("should have received a command");
         assert!(
-            cmd.command_id.starts_with("post-pivot-bootstrap-"),
-            "command_id should indicate post-pivot bootstrap"
+            cmd.command_id.starts_with("post-pivot-apply-"),
+            "command_id should indicate post-pivot apply"
         );
 
         match cmd.command {
-            Some(crate::proto::cell_command::Command::Bootstrap(bootstrap)) => {
+            Some(crate::proto::cell_command::Command::ApplyManifests(apply)) => {
                 assert_eq!(
-                    bootstrap.additional_manifests.len(),
+                    apply.manifests.len(),
                     2,
                     "should include both CRD and cluster manifests"
                 );
                 // Verify manifest contents
-                let manifest1 =
-                    String::from_utf8(bootstrap.additional_manifests[0].clone()).unwrap();
-                let manifest2 =
-                    String::from_utf8(bootstrap.additional_manifests[1].clone()).unwrap();
+                let manifest1 = String::from_utf8(apply.manifests[0].clone()).unwrap();
+                let manifest2 = String::from_utf8(apply.manifests[1].clone()).unwrap();
                 assert!(manifest1.contains("CustomResourceDefinition"));
                 assert!(manifest2.contains("LatticeCluster"));
             }
-            _ => panic!("expected BootstrapCommand"),
+            _ => panic!("expected ApplyManifestsCommand"),
         }
 
         // Verify manifests were consumed (not available for retry)
@@ -1221,7 +1215,7 @@ mod tests {
     }
 
     /// Story: When pivot completes but no post-pivot manifests exist,
-    /// no BootstrapCommand should be sent.
+    /// no ApplyManifestsCommand should be sent.
     #[tokio::test]
     async fn test_pivot_complete_without_manifests_sends_nothing() {
         let (server, registry) = AgentServer::with_new_registry();
@@ -1424,14 +1418,14 @@ mod tests {
         // Should receive command with only one manifest
         let cmd = rx.try_recv().expect("should have received a command");
         match cmd.command {
-            Some(crate::proto::cell_command::Command::Bootstrap(bootstrap)) => {
+            Some(crate::proto::cell_command::Command::ApplyManifests(apply)) => {
                 assert_eq!(
-                    bootstrap.additional_manifests.len(),
+                    apply.manifests.len(),
                     1,
                     "should include only the CRD manifest"
                 );
             }
-            _ => panic!("expected BootstrapCommand"),
+            _ => panic!("expected ApplyManifestsCommand"),
         }
     }
 }

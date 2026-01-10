@@ -220,7 +220,7 @@ impl AgentRegistry {
     /// Store manifests to send after pivot completes
     ///
     /// These manifests (LatticeCluster CRD and resource) will be sent
-    /// to the agent via BootstrapCommand after PivotComplete is received.
+    /// to the agent via ApplyManifestsCommand after PivotComplete is received.
     pub fn set_post_pivot_manifests(&self, cluster_name: &str, manifests: PostPivotManifests) {
         info!(cluster = %cluster_name, "Stored post-pivot manifests");
         self.post_pivot_manifests

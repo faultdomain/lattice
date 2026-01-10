@@ -22,6 +22,7 @@
 //! - [`capi`] - CAPI installation and management
 //! - [`cell`] - On-demand cell servers (gRPC + bootstrap HTTP)
 //! - [`graph`] - Service dependency graph for network policy generation
+//! - [`install`] - Installer for bootstrapping management clusters
 //! - [`error`] - Error types for the operator
 
 #![deny(missing_docs)]
@@ -35,6 +36,7 @@ pub mod controller;
 pub mod crd;
 pub mod error;
 pub mod graph;
+pub mod install;
 pub mod pivot;
 pub mod pki;
 pub mod proto;
@@ -44,3 +46,19 @@ pub use error::Error;
 
 /// Result type alias using our custom Error type
 pub type Result<T> = std::result::Result<T, Error>;
+
+// =============================================================================
+// Default Configuration Constants
+// =============================================================================
+// These constants define the default values used throughout Lattice.
+// Centralizing them here ensures consistency across CRD defaults, server configs,
+// and test fixtures.
+
+/// Default port for the bootstrap HTTPS server
+///
+/// This is where kubeadm postKubeadmCommands calls to get agent/CNI manifests.
+/// Port 8443 is used instead of 443 to avoid requiring root privileges.
+pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8443;
+
+/// Default port for the gRPC server (agent-cell communication)
+pub const DEFAULT_GRPC_PORT: u16 = 50051;

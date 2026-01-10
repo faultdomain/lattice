@@ -42,7 +42,7 @@ fn sample_cell_spec(name: &str) -> LatticeCluster {
             cell: Some(CellSpec {
                 host: "172.18.255.1".to_string(),
                 grpc_port: 50051,
-                bootstrap_port: 443,
+                bootstrap_port: 8443,
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
@@ -135,7 +135,7 @@ async fn story_operator_creates_management_cluster() {
         "Management cluster should be a cell"
     );
     assert!(
-        !created.spec.is_workload_cluster(),
+        !created.spec.has_parent(),
         "Cell should not be a workload cluster"
     );
 
@@ -189,7 +189,7 @@ async fn story_operator_creates_workload_cluster_for_production() {
     // Assert: The cluster is created as a workload cluster
     assert_eq!(created.metadata.name.as_deref(), Some(name));
     assert!(
-        created.spec.is_workload_cluster(),
+        created.spec.has_parent(),
         "Should be a workload cluster"
     );
     assert!(

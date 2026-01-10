@@ -28,7 +28,8 @@ use crate::pki::AgentCertRequest;
 use crate::proto::lattice_agent_client::LatticeAgentClient;
 use crate::proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
-    BootstrapComplete, CellCommand, Heartbeat, PivotComplete, PivotStarted,
+    BootstrapComplete, CellCommand, Heartbeat, KubeProxyRequest, KubeProxyResponse, PivotComplete,
+    PivotStarted,
 };
 
 use super::mtls::ClientMtlsConfig;
@@ -288,7 +289,7 @@ impl AgentClient {
         &mut self,
         channel: tonic::transport::Channel,
     ) -> Result<(), ClientError> {
-        let mut client = LatticeAgentClient::new(channel);
+        let mut client = LatticeAgentClient::new(channel.clone());
 
         // Create message channel
         let (message_tx, message_rx) = mpsc::channel::<AgentMessage>(32);
@@ -306,6 +307,12 @@ impl AgentClient {
             .map_err(|e| ClientError::StreamFailed(e.to_string()))?;
 
         let mut inbound = response.into_inner();
+
+        // Start the K8s API proxy stream
+        // This allows the cell to run clusterctl move through the gRPC tunnel
+        let cluster_name = self.config.cluster_name.clone();
+        let kube_client = self.kube_client.clone();
+        Self::start_proxy_stream(channel, cluster_name, kube_client).await;
 
         *self.state.write().await = ClientState::Connected;
         info!("Connected to cell");
@@ -448,14 +455,14 @@ impl AgentClient {
     /// Send bootstrap complete notification
     pub async fn send_bootstrap_complete(
         &self,
-        flux_ready: bool,
-        cilium_ready: bool,
+        capi_ready: bool,
+        installed_providers: Vec<String>,
     ) -> Result<(), ClientError> {
         let msg = AgentMessage {
             cluster_name: self.config.cluster_name.clone(),
             payload: Some(Payload::BootstrapComplete(BootstrapComplete {
-                flux_ready,
-                cilium_ready,
+                capi_ready,
+                installed_providers,
             })),
         };
 
@@ -464,7 +471,7 @@ impl AgentClient {
 
     /// Apply a Kubernetes manifest using kubectl
     ///
-    /// This is used to apply manifests received via BootstrapCommand
+    /// This is used to apply manifests received via ApplyManifestsCommand
     /// (e.g., LatticeCluster CRD and resource after pivot).
     async fn apply_manifest(yaml: &str) -> Result<(), std::io::Error> {
         use std::process::Stdio;
@@ -508,15 +515,15 @@ impl AgentClient {
         debug!(command_id = %command.command_id, "Received command");
 
         match &command.command {
-            Some(Command::Bootstrap(cmd)) => {
-                info!("Received bootstrap command");
+            Some(Command::ApplyManifests(cmd)) => {
+                info!("Received apply manifests command");
 
-                // Apply additional manifests (LatticeCluster CRD + resource)
-                let manifests_count = cmd.additional_manifests.len();
+                // Apply manifests (LatticeCluster CRD + resource)
+                let manifests_count = cmd.manifests.len();
                 let mut applied = 0;
                 let mut errors = Vec::new();
 
-                for manifest in &cmd.additional_manifests {
+                for manifest in &cmd.manifests {
                     match String::from_utf8(manifest.clone()) {
                         Ok(yaml) => {
                             if let Err(e) = Self::apply_manifest(&yaml).await {
@@ -537,15 +544,16 @@ impl AgentClient {
                     total = manifests_count,
                     applied = applied,
                     errors = errors.len(),
-                    "Bootstrap manifests applied"
+                    "Manifests applied"
                 );
 
-                // Send BootstrapComplete
+                // Send BootstrapComplete - CAPI will be installed lazily by controller
+                // when it reconciles the LatticeCluster we just applied
                 let msg = AgentMessage {
                     cluster_name: cluster_name.to_string(),
                     payload: Some(Payload::BootstrapComplete(BootstrapComplete {
-                        flux_ready: false,  // Flux not implemented yet
-                        cilium_ready: true, // Cilium was applied during initial bootstrap
+                        capi_ready: false, // Will be ready after controller reconciles
+                        installed_providers: vec![],
                     })),
                 };
                 let _ = message_tx.send(msg).await;
@@ -618,14 +626,6 @@ impl AgentClient {
                     }
                 });
             }
-            Some(Command::Reconcile(cmd)) => {
-                info!(
-                    kustomization = %cmd.kustomization_name,
-                    namespace = %cmd.namespace,
-                    "Received reconcile command"
-                );
-                // TODO: Trigger Flux reconciliation
-            }
             Some(Command::StatusRequest(_req)) => {
                 debug!("Received status request");
                 // TODO: Send status response
@@ -642,6 +642,201 @@ impl AgentClient {
             let _ = tx.send(());
         }
         *self.state.write().await = ClientState::Disconnected;
+    }
+
+    /// Start the K8s API proxy stream
+    ///
+    /// This establishes the ProxyKubernetesAPI stream which allows the cell
+    /// to run clusterctl move through the gRPC tunnel. The agent receives
+    /// K8s API requests and forwards them to the local API server.
+    async fn start_proxy_stream(
+        channel: tonic::transport::Channel,
+        cluster_name: String,
+        kube_client: Option<KubeClient>,
+    ) {
+        tokio::spawn(async move {
+            let mut client = LatticeAgentClient::new(channel);
+
+            // Channel for sending responses back to the cell
+            let (response_tx, response_rx) = mpsc::channel::<KubeProxyResponse>(32);
+            let outbound = ReceiverStream::new(response_rx);
+
+            // Start the proxy stream
+            let response = match client.proxy_kubernetes_api(outbound).await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(error = %e, "Failed to establish proxy stream");
+                    return;
+                }
+            };
+
+            info!("K8s API proxy stream established");
+            let mut inbound = response.into_inner();
+
+            // Send initial handshake response to register proxy channels
+            // The server waits for the first response to identify the cluster
+            let handshake = KubeProxyResponse {
+                request_id: format!("{}:handshake", cluster_name),
+                status_code: 0,
+                headers: vec![],
+                body: vec![],
+                error: String::new(),
+            };
+            if response_tx.send(handshake).await.is_err() {
+                warn!("Failed to send proxy handshake");
+                return;
+            }
+            debug!("Proxy handshake sent");
+
+            // Handle incoming proxy requests
+            while let Some(result) = inbound.next().await {
+                match result {
+                    Ok(request) => {
+                        let request_id = format!("{}:{}", cluster_name, request.request_id);
+                        debug!(
+                            request_id = %request.request_id,
+                            method = %request.method,
+                            path = %request.path,
+                            "Received proxy request"
+                        );
+
+                        // Forward to local K8s API
+                        let response = Self::handle_proxy_request(&request, &kube_client).await;
+                        let response = KubeProxyResponse {
+                            request_id,
+                            status_code: response.status_code,
+                            headers: response.headers,
+                            body: response.body,
+                            error: response.error,
+                        };
+
+                        if response_tx.send(response).await.is_err() {
+                            debug!("Proxy response channel closed");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Error receiving proxy request");
+                        break;
+                    }
+                }
+            }
+
+            info!("K8s API proxy stream closed");
+        });
+    }
+
+    /// Handle a single proxy request by forwarding to local K8s API
+    async fn handle_proxy_request(
+        request: &KubeProxyRequest,
+        _kube_client: &Option<KubeClient>,
+    ) -> KubeProxyResponse {
+        use reqwest::Method;
+
+        // Use reqwest to forward to local K8s API
+        // The agent runs inside the cluster, so we can use the in-cluster config
+        let client = match reqwest::Client::builder()
+            .danger_accept_invalid_certs(true) // Trust in-cluster CA
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return KubeProxyResponse {
+                    request_id: request.request_id.clone(),
+                    status_code: 500,
+                    headers: vec![],
+                    body: vec![],
+                    error: format!("Failed to create HTTP client: {}", e),
+                };
+            }
+        };
+
+        // Build URL to local API server
+        let api_server = std::env::var("KUBERNETES_SERVICE_HOST")
+            .map(|host| {
+                let port = std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
+                format!("https://{}:{}", host, port)
+            })
+            .unwrap_or_else(|_| "https://kubernetes.default.svc".to_string());
+
+        let url = format!("{}{}", api_server, request.path);
+
+        // Parse method
+        let method = match request.method.to_uppercase().as_str() {
+            "GET" => Method::GET,
+            "POST" => Method::POST,
+            "PUT" => Method::PUT,
+            "PATCH" => Method::PATCH,
+            "DELETE" => Method::DELETE,
+            _ => {
+                return KubeProxyResponse {
+                    request_id: request.request_id.clone(),
+                    status_code: 400,
+                    headers: vec![],
+                    body: vec![],
+                    error: format!("Unsupported method: {}", request.method),
+                };
+            }
+        };
+
+        // Read service account token for auth
+        let token = match tokio::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/token").await {
+            Ok(t) => t,
+            Err(e) => {
+                return KubeProxyResponse {
+                    request_id: request.request_id.clone(),
+                    status_code: 500,
+                    headers: vec![],
+                    body: vec![],
+                    error: format!("Failed to read service account token: {}", e),
+                };
+            }
+        };
+
+        // Build request
+        let mut req = client.request(method, &url).bearer_auth(token);
+
+        // Add headers
+        for header in &request.headers {
+            req = req.header(&header.key, &header.value);
+        }
+
+        // Add body if present
+        if !request.body.is_empty() {
+            req = req.body(request.body.clone());
+        }
+
+        // Execute request
+        match req.send().await {
+            Ok(resp) => {
+                let status_code = resp.status().as_u16() as i32;
+                let headers: Vec<_> = resp
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| crate::proto::HttpHeader {
+                        key: k.to_string(),
+                        value: v.to_str().unwrap_or("").to_string(),
+                    })
+                    .collect();
+
+                let body = resp.bytes().await.unwrap_or_default().to_vec();
+
+                KubeProxyResponse {
+                    request_id: request.request_id.clone(),
+                    status_code,
+                    headers,
+                    body,
+                    error: String::new(),
+                }
+            }
+            Err(e) => KubeProxyResponse {
+                request_id: request.request_id.clone(),
+                status_code: 502,
+                headers: vec![],
+                body: vec![],
+                error: format!("Proxy request failed: {}", e),
+            },
+        }
     }
 }
 
@@ -698,7 +893,7 @@ fn extract_domain(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{BootstrapCommand, ReconcileCommand, StartPivotCommand, StatusRequest};
+    use crate::proto::{ApplyManifestsCommand, StartPivotCommand, StatusRequest};
 
     #[test]
     fn test_default_config() {
@@ -968,27 +1163,27 @@ mod tests {
         let config = AgentClientConfig::default();
         let client = AgentClient::new(config);
 
-        let result = client.send_bootstrap_complete(true, true).await;
+        let result = client
+            .send_bootstrap_complete(true, vec!["docker".to_string()])
+            .await;
         assert_eq!(result, Err(ClientError::NotConnected));
     }
 
     // Test handle_command with various command types
     #[tokio::test]
-    async fn test_handle_bootstrap_command() {
+    async fn test_handle_apply_manifests_command() {
         let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
         let (tx, _rx) = mpsc::channel::<AgentMessage>(32);
 
         let command = CellCommand {
             command_id: "cmd-1".to_string(),
-            command: Some(Command::Bootstrap(BootstrapCommand {
-                git_repository: b"test-git-repo".to_vec(),
-                kustomization: b"test-kustomization".to_vec(),
-                additional_manifests: vec![],
+            command: Some(Command::ApplyManifests(ApplyManifestsCommand {
+                manifests: vec![],
             })),
         };
 
         AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster").await;
-        // Bootstrap command doesn't change state yet (TODO in code)
+        // ApplyManifests command doesn't change state - CAPI install is lazy
     }
 
     #[tokio::test]
@@ -1019,23 +1214,6 @@ mod tests {
             }
             _ => panic!("Expected PivotStarted payload"),
         }
-    }
-
-    #[tokio::test]
-    async fn test_handle_reconcile_command() {
-        let agent_state = Arc::new(RwLock::new(AgentState::Ready));
-        let (tx, _rx) = mpsc::channel::<AgentMessage>(32);
-
-        let command = CellCommand {
-            command_id: "cmd-3".to_string(),
-            command: Some(Command::Reconcile(ReconcileCommand {
-                kustomization_name: "flux-system".to_string(),
-                namespace: "flux-system".to_string(),
-            })),
-        };
-
-        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster").await;
-        // Reconcile command doesn't change state (TODO in code)
     }
 
     #[tokio::test]
@@ -1156,14 +1334,16 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
         client.message_tx = Some(tx);
 
-        let result = client.send_bootstrap_complete(true, false).await;
+        let result = client
+            .send_bootstrap_complete(true, vec!["docker".to_string()])
+            .await;
         assert!(result.is_ok());
 
         let received = rx.recv().await.unwrap();
         match received.payload {
             Some(Payload::BootstrapComplete(bc)) => {
-                assert!(bc.flux_ready);
-                assert!(!bc.cilium_ready);
+                assert!(bc.capi_ready);
+                assert_eq!(bc.installed_providers, vec!["docker"]);
             }
             _ => panic!("Expected BootstrapComplete payload"),
         }
@@ -1412,7 +1592,7 @@ mod tests {
         }
     }
 
-    /// Story: Agent sends bootstrap complete after Flux and Cilium are ready
+    /// Story: Agent sends bootstrap complete after CAPI providers are installed
     #[tokio::test]
     async fn story_agent_reports_bootstrap_completion() {
         let config = AgentClientConfig {
@@ -1424,21 +1604,23 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
         client.message_tx = Some(tx);
 
-        // Flux ready, Cilium ready
-        let result = client.send_bootstrap_complete(true, true).await;
+        // CAPI ready with docker provider
+        let result = client
+            .send_bootstrap_complete(true, vec!["docker".to_string(), "kubeadm".to_string()])
+            .await;
         assert!(result.is_ok());
 
         let msg = rx.recv().await.unwrap();
         match msg.payload {
             Some(Payload::BootstrapComplete(bc)) => {
-                assert!(bc.flux_ready);
-                assert!(bc.cilium_ready);
+                assert!(bc.capi_ready);
+                assert_eq!(bc.installed_providers, vec!["docker", "kubeadm"]);
             }
             _ => panic!("Expected BootstrapComplete payload"),
         }
     }
 
-    /// Story: Agent reports partial bootstrap (Flux ready, Cilium pending)
+    /// Story: Agent reports partial bootstrap (CAPI not yet ready)
     #[tokio::test]
     async fn story_agent_reports_partial_bootstrap() {
         let config = AgentClientConfig {
@@ -1450,15 +1632,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
         client.message_tx = Some(tx);
 
-        // Flux ready, Cilium still installing
-        let result = client.send_bootstrap_complete(true, false).await;
+        // CAPI not ready yet, no providers
+        let result = client.send_bootstrap_complete(false, vec![]).await;
         assert!(result.is_ok());
 
         let msg = rx.recv().await.unwrap();
         match msg.payload {
             Some(Payload::BootstrapComplete(bc)) => {
-                assert!(bc.flux_ready);
-                assert!(!bc.cilium_ready);
+                assert!(!bc.capi_ready);
+                assert!(bc.installed_providers.is_empty());
             }
             _ => panic!("Expected BootstrapComplete payload"),
         }
@@ -1492,7 +1674,7 @@ mod tests {
         );
 
         assert_eq!(
-            client.send_bootstrap_complete(true, true).await,
+            client.send_bootstrap_complete(true, vec![]).await,
             Err(ClientError::NotConnected)
         );
     }
@@ -1568,30 +1750,28 @@ mod tests {
     // Story Tests: Command Handling
     // ==========================================================================
 
-    /// Story: When cell sends bootstrap command, agent processes it
+    /// Story: When cell sends apply manifests command, agent processes it
     ///
-    /// After initial connection, the cell may send bootstrap manifests
-    /// for Flux/GitOps setup.
+    /// After initial connection, the cell sends LatticeCluster CRD + resource
+    /// which triggers lazy CAPI installation.
     #[tokio::test]
-    async fn story_agent_handles_bootstrap_command_from_cell() {
+    async fn story_agent_handles_apply_manifests_command_from_cell() {
         let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
         let (tx, _rx) = mpsc::channel::<AgentMessage>(32);
 
         let command = CellCommand {
-            command_id: "boot-123".to_string(),
-            command: Some(Command::Bootstrap(BootstrapCommand {
-                git_repository: b"apiVersion: source.toolkit.fluxcd.io/v1\nkind: GitRepository"
-                    .to_vec(),
-                kustomization: b"apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization"
-                    .to_vec(),
-                additional_manifests: vec![],
+            command_id: "apply-123".to_string(),
+            command: Some(Command::ApplyManifests(ApplyManifestsCommand {
+                manifests: vec![
+                    b"apiVersion: lattice.dev/v1alpha1\nkind: LatticeCluster".to_vec(),
+                ],
             })),
         };
 
         // Should not panic or error
-        AgentClient::handle_command(&command, &agent_state, &tx, "bootstrap-cluster").await;
+        AgentClient::handle_command(&command, &agent_state, &tx, "apply-cluster").await;
 
-        // State should not change (bootstrap doesn't change agent state directly)
+        // State should not change (manifests applied, CAPI install is lazy)
         assert_eq!(*agent_state.read().await, AgentState::Provisioning);
     }
 
@@ -1626,27 +1806,6 @@ mod tests {
             }
             _ => panic!("Expected PivotStarted"),
         }
-    }
-
-    /// Story: When cell sends reconcile command, agent triggers Flux reconciliation
-    #[tokio::test]
-    async fn story_agent_handles_reconcile_command() {
-        let agent_state = Arc::new(RwLock::new(AgentState::Ready));
-        let (tx, _rx) = mpsc::channel::<AgentMessage>(32);
-
-        let command = CellCommand {
-            command_id: "reconcile-789".to_string(),
-            command: Some(Command::Reconcile(ReconcileCommand {
-                kustomization_name: "apps".to_string(),
-                namespace: "flux-system".to_string(),
-            })),
-        };
-
-        // Should handle without error
-        AgentClient::handle_command(&command, &agent_state, &tx, "reconcile-cluster").await;
-
-        // State should remain Ready
-        assert_eq!(*agent_state.read().await, AgentState::Ready);
     }
 
     /// Story: When cell requests status, agent responds with current state
@@ -1892,7 +2051,10 @@ mod tests {
 
         // Send multiple messages in sequence
         client.send_pivot_started("ns1").await.unwrap();
-        client.send_bootstrap_complete(true, false).await.unwrap();
+        client
+            .send_bootstrap_complete(true, vec!["docker".to_string()])
+            .await
+            .unwrap();
         client.send_pivot_complete(true, "", 5).await.unwrap();
 
         // Verify all messages received in order
@@ -1922,7 +2084,10 @@ mod tests {
         assert_eq!(client.agent_state().await, AgentState::Provisioning);
 
         // 2. Bootstrap complete (still provisioning until pivot)
-        client.send_bootstrap_complete(true, true).await.unwrap();
+        client
+            .send_bootstrap_complete(true, vec!["docker".to_string()])
+            .await
+            .unwrap();
         assert_eq!(client.agent_state().await, AgentState::Provisioning);
 
         // 3. Pivot starts - transitions to Pivoting
@@ -2043,7 +2208,7 @@ mod tests {
             cluster_name: "heartbeat-cluster".to_string(),
             payload: Some(Payload::Heartbeat(Heartbeat {
                 state: AgentState::Ready.into(),
-                timestamp: Some(timestamp.clone()),
+                timestamp: Some(timestamp),
                 uptime_seconds: 3600,
             })),
         };
@@ -2131,11 +2296,11 @@ mod tests {
     fn story_client_state_is_copy() {
         let state = ClientState::Connected;
         let copied = state; // Copy
-        let cloned = state.clone(); // Clone
+        let also_copied = state; // Also copy (Copy trait means clone() isn't needed)
 
         assert_eq!(state, copied);
-        assert_eq!(state, cloned);
-        assert_eq!(copied, cloned);
+        assert_eq!(state, also_copied);
+        assert_eq!(copied, also_copied);
     }
 
     // ==========================================================================
@@ -2158,7 +2323,7 @@ mod tests {
     // Story Tests: Command Handling with Various Payload Sizes
     // ==========================================================================
 
-    /// Story: Agent handles bootstrap command with invalid UTF-8 manifests gracefully
+    /// Story: Agent handles apply manifests command with invalid UTF-8 gracefully
     ///
     /// When a manifest contains invalid UTF-8 bytes (corrupted data), the agent
     /// should log the error and continue processing other manifests rather than
@@ -2174,10 +2339,8 @@ mod tests {
 
         let command = CellCommand {
             command_id: "utf8-test".to_string(),
-            command: Some(Command::Bootstrap(BootstrapCommand {
-                git_repository: vec![],
-                kustomization: vec![],
-                additional_manifests: vec![invalid_utf8, valid_manifest],
+            command: Some(Command::ApplyManifests(ApplyManifestsCommand {
+                manifests: vec![invalid_utf8, valid_manifest],
             })),
         };
 
@@ -2194,7 +2357,7 @@ mod tests {
         }
     }
 
-    /// Story: Agent handles bootstrap command with empty manifest list
+    /// Story: Agent handles apply manifests command with empty manifest list
     #[tokio::test]
     async fn story_agent_handles_empty_manifests() {
         let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
@@ -2202,10 +2365,8 @@ mod tests {
 
         let command = CellCommand {
             command_id: "empty-manifests".to_string(),
-            command: Some(Command::Bootstrap(BootstrapCommand {
-                git_repository: vec![],
-                kustomization: vec![],
-                additional_manifests: vec![], // No manifests
+            command: Some(Command::ApplyManifests(ApplyManifestsCommand {
+                manifests: vec![], // No manifests
             })),
         };
 
@@ -2216,9 +2377,9 @@ mod tests {
         assert!(matches!(msg.payload, Some(Payload::BootstrapComplete(_))));
     }
 
-    /// Story: Agent handles bootstrap command with large manifests
+    /// Story: Agent handles apply manifests command with large manifests
     #[tokio::test]
-    async fn story_agent_handles_large_bootstrap_manifests() {
+    async fn story_agent_handles_large_manifests() {
         let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
         let (tx, _rx) = mpsc::channel::<AgentMessage>(32);
 
@@ -2226,11 +2387,9 @@ mod tests {
         let large_manifest = vec![b'x'; 100_000]; // 100KB
 
         let command = CellCommand {
-            command_id: "large-boot".to_string(),
-            command: Some(Command::Bootstrap(BootstrapCommand {
-                git_repository: large_manifest.clone(),
-                kustomization: large_manifest.clone(),
-                additional_manifests: vec![large_manifest],
+            command_id: "large-manifests".to_string(),
+            command: Some(Command::ApplyManifests(ApplyManifestsCommand {
+                manifests: vec![large_manifest],
             })),
         };
 

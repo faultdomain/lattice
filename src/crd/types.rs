@@ -147,14 +147,21 @@ pub struct CellSpec {
 }
 
 fn default_grpc_port() -> u16 {
-    50051
+    crate::DEFAULT_GRPC_PORT
 }
 
 fn default_bootstrap_port() -> u16 {
-    443
+    crate::DEFAULT_BOOTSTRAP_PORT
 }
 
 impl CellSpec {
+    /// Get the combined cell endpoint in format "host:http_port:grpc_port"
+    ///
+    /// This format is used by bootstrap to pass all connection info in a single string.
+    pub fn cell_endpoint(&self) -> String {
+        format!("{}:{}:{}", self.host, self.bootstrap_port, self.grpc_port)
+    }
+
     /// Get the gRPC endpoint URL for agent connections
     pub fn grpc_endpoint(&self) -> String {
         format!("https://{}:{}", self.host, self.grpc_port)
@@ -657,7 +664,7 @@ mod tests {
             let spec = CellSpec {
                 host: "cell.example.com".to_string(),
                 grpc_port: 50051,
-                bootstrap_port: 443,
+                bootstrap_port: 8443,
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
@@ -672,13 +679,13 @@ mod tests {
             let spec = CellSpec {
                 host: "172.18.255.1".to_string(),
                 grpc_port: 50051,
-                bootstrap_port: 443,
+                bootstrap_port: 8443,
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
             };
             assert_eq!(spec.grpc_endpoint(), "https://172.18.255.1:50051");
-            assert_eq!(spec.bootstrap_endpoint(), "https://172.18.255.1:443");
+            assert_eq!(spec.bootstrap_endpoint(), "https://172.18.255.1:8443");
         }
 
         #[test]
@@ -687,7 +694,7 @@ mod tests {
             let json = r#"{"host":"example.com","service":{"type":"LoadBalancer"}}"#;
             let spec: CellSpec = serde_json::from_str(json).unwrap();
             assert_eq!(spec.grpc_port, 50051);
-            assert_eq!(spec.bootstrap_port, 443);
+            assert_eq!(spec.bootstrap_port, 8443);
         }
 
         #[test]

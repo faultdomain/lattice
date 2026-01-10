@@ -48,7 +48,7 @@ fn sample_cluster(name: &str) -> LatticeCluster {
             cell: Some(CellSpec {
                 host: "172.18.255.1".to_string(),
                 grpc_port: 50051,
-                bootstrap_port: 443,
+                bootstrap_port: 8443,
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },

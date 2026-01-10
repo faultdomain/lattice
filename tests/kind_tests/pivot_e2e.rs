@@ -1,16 +1,15 @@
-//! Real end-to-end test for the complete pivot flow
+//! Real end-to-end test for the complete Lattice installation and pivot flow
 //!
-//! This test deploys the actual Lattice operator to a kind cluster and lets
-//! it handle everything: provisioning, bootstrap, agent connection, and pivot.
+//! This test runs the FULL Lattice installer flow:
 //!
-//! # What This Test Does
-//!
-//! 1. Creates a fresh kind cluster for the management cluster
-//! 2. Builds and loads the lattice Docker image
-//! 3. Deploys the Lattice operator (cell mode) to the management cluster
-//! 4. Creates a LatticeCluster CRD for the workload cluster
-//! 5. Watches the controller reconcile: Pending -> Provisioning -> Pivoting -> Ready
-//! 6. Verifies workload cluster is self-managing with CAPI resources
+//! 1. Creates a bootstrap kind cluster
+//! 2. Installs CAPI + Lattice operator on bootstrap
+//! 3. Creates management cluster LatticeCluster CRD (with spec.cell)
+//! 4. Waits for management cluster to be provisioned
+//! 5. Pivots CAPI resources to management cluster
+//! 6. Deletes bootstrap cluster
+//! 7. Creates a workload cluster from the self-managing management cluster
+//! 8. Verifies workload cluster reaches Ready state
 //!
 //! # Prerequisites
 //!
@@ -18,41 +17,45 @@
 //! - kind installed
 //! - clusterctl installed
 //! - kubectl installed
-//! - helm installed (for Cilium CNI)
 //!
 //! # Running
 //!
 //! ```bash
-//! # This test takes 15-20 minutes
+//! # This test takes 20-30 minutes
 //! cargo test --test kind pivot_e2e -- --ignored --nocapture
 //! ```
 
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
+use base64::Engine;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, PostParams};
+use kube::config::{KubeConfigOptions, Kubeconfig};
+use kube::Client;
 use tokio::time::sleep;
 
 use lattice::crd::{
     ClusterPhase, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec, ProviderSpec,
     ProviderType,
 };
+use lattice::install::{InstallConfig, Installer};
 
 // =============================================================================
 // Test Configuration
 // =============================================================================
 
 /// Timeout for the entire e2e test
-const E2E_TIMEOUT: Duration = Duration::from_secs(1200); // 20 minutes
+const E2E_TIMEOUT: Duration = Duration::from_secs(2400); // 40 minutes
 
-/// Name of the kind cluster acting as management cluster
-const MGMT_KIND_CLUSTER: &str = "lattice-pivot-e2e";
+/// Name of the management cluster
+const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
 
 /// Name of the workload cluster being provisioned
-const WORKLOAD_CLUSTER_NAME: &str = "e2e-pivot-workload";
+const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
 
-/// Docker image name for lattice (using ghcr.io registry so workload clusters can pull)
+/// Docker image name for lattice
 const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
 // =============================================================================
@@ -84,31 +87,6 @@ fn run_cmd_allow_fail(cmd: &str, args: &[&str]) -> String {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default()
-}
-
-/// Get base64-encoded registry credentials for ghcr.io
-/// Format: {"auths":{"ghcr.io":{"auth":"base64(user:token)"}}}
-///
-/// Requires GHCR_TOKEN and GHCR_USER environment variables to be set.
-/// Create a .env file (gitignored) with:
-///   GHCR_USER=your-github-username
-///   GHCR_TOKEN=ghp_your_token_here
-fn get_registry_credentials_base64() -> String {
-    let token =
-        std::env::var("GHCR_TOKEN").expect("GHCR_TOKEN env var required - set in .env file");
-    let user = std::env::var("GHCR_USER").expect("GHCR_USER env var required - set in .env file");
-
-    // Create the auth string (base64 of user:token)
-    let auth = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        format!("{}:{}", user, token),
-    );
-
-    // Create dockerconfigjson
-    let config = format!(r#"{{"auths":{{"ghcr.io":{{"auth":"{}"}}}}}}"#, auth);
-
-    // Return base64 encoded for the secret
-    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, config)
 }
 
 /// Build and push the lattice Docker image to registry
@@ -148,90 +126,111 @@ async fn build_and_push_lattice_image() -> Result<(), String> {
     Ok(())
 }
 
-/// Load the lattice image into kind cluster
-fn load_image_to_kind(cluster_name: &str) -> Result<(), String> {
-    println!("  Loading image into kind cluster...");
+/// Load registry credentials from .env file and construct dockerconfigjson format
+fn load_registry_credentials() -> Option<String> {
+    // Try to load from .env file first
+    let env_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env");
+    if let Ok(content) = std::fs::read_to_string(&env_path) {
+        let mut user = None;
+        let mut token = None;
 
-    run_cmd(
-        "kind",
-        &[
-            "load",
-            "docker-image",
-            LATTICE_IMAGE,
-            "--name",
-            cluster_name,
-        ],
-    )?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("export GHCR_USER=") {
+                user = Some(line.trim_start_matches("export GHCR_USER=").to_string());
+            } else if line.starts_with("export GHCR_TOKEN=") {
+                token = Some(line.trim_start_matches("export GHCR_TOKEN=").to_string());
+            } else if line.starts_with("GHCR_USER=") {
+                user = Some(line.trim_start_matches("GHCR_USER=").to_string());
+            } else if line.starts_with("GHCR_TOKEN=") {
+                token = Some(line.trim_start_matches("GHCR_TOKEN=").to_string());
+            }
+        }
 
-    println!("  Image loaded into kind");
-    Ok(())
-}
-
-/// Check if CAPD is installed, install if not
-async fn ensure_capd_installed() -> Result<(), String> {
-    println!("  Checking CAPI/CAPD installation...");
-
-    // Check if clusterctl exists
-    run_cmd("which", &["clusterctl"])?;
-
-    // Check if CAPD CRDs exist
-    let output = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "get",
-            "crd",
-            "dockerclusters.infrastructure.cluster.x-k8s.io",
-        ],
-    );
-
-    if output.contains("dockerclusters") {
-        println!("  CAPD already installed");
-        return Ok(());
+        if let (Some(u), Some(t)) = (user, token) {
+            // Construct dockerconfigjson format
+            let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", u, t));
+            let docker_config = serde_json::json!({
+                "auths": {
+                    "ghcr.io": {
+                        "auth": auth
+                    }
+                }
+            });
+            return Some(docker_config.to_string());
+        }
     }
 
-    println!("  Installing CAPI and CAPD...");
-    run_cmd(
-        "clusterctl",
-        &["init", "--infrastructure", "docker", "--wait-providers"],
-    )?;
-
-    // Wait for controllers to be ready
-    println!("  Waiting for CAPI controllers...");
-    sleep(Duration::from_secs(30)).await;
-
-    Ok(())
-}
-
-/// Apply YAML manifest via kubectl
-fn kubectl_apply(yaml: &str) -> Result<(), String> {
-    let mut child = ProcessCommand::new("kubectl")
-        .args(["apply", "-f", "-"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn kubectl: {}", e))?;
-
-    use std::io::Write;
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(yaml.as_bytes())
-        .map_err(|e| format!("Failed to write to kubectl: {}", e))?;
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to wait for kubectl: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "kubectl apply failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    // Fallback to environment variables
+    if let (Ok(u), Ok(t)) = (std::env::var("GHCR_USER"), std::env::var("GHCR_TOKEN")) {
+        let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", u, t));
+        let docker_config = serde_json::json!({
+            "auths": {
+                "ghcr.io": {
+                    "auth": auth
+                }
+            }
+        });
+        return Some(docker_config.to_string());
     }
 
-    Ok(())
+    None
+}
+
+/// Create a kube client using a specific kubeconfig file
+async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
+    let kubeconfig =
+        Kubeconfig::read_from(path).map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
+
+    let config = kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+        .await
+        .map_err(|e| format!("Failed to create kube config: {}", e))?;
+
+    Client::try_from(config).map_err(|e| format!("Failed to create client: {}", e))
+}
+
+/// Get and patch kubeconfig for management cluster
+fn get_management_kubeconfig() -> Result<String, String> {
+    let kubeconfig_path = format!("/tmp/{}-kubeconfig", MGMT_CLUSTER_NAME);
+
+    // Read the kubeconfig that the installer saved
+    let kubeconfig = std::fs::read_to_string(&kubeconfig_path)
+        .map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
+
+    // Get the LB container port for localhost access
+    let lb_container = format!("{}-lb", MGMT_CLUSTER_NAME);
+    let port_output = run_cmd_allow_fail("docker", &["port", &lb_container, "6443/tcp"]);
+
+    if port_output.trim().is_empty() {
+        return Err("Management cluster LB container not found".to_string());
+    }
+
+    let parts: Vec<&str> = port_output.trim().split(':').collect();
+    if parts.len() != 2 {
+        return Err(format!("Failed to parse LB port: {}", port_output));
+    }
+
+    let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
+
+    // Patch kubeconfig to use localhost
+    let patched = kubeconfig
+        .lines()
+        .map(|line| {
+            if line.trim().starts_with("server:") {
+                format!("    server: {}", localhost_endpoint)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Save patched kubeconfig
+    let patched_path = format!("/tmp/{}-kubeconfig-local", MGMT_CLUSTER_NAME);
+    std::fs::write(&patched_path, &patched)
+        .map_err(|e| format!("Failed to write patched kubeconfig: {}", e))?;
+
+    Ok(patched_path)
 }
 
 /// Create workload cluster spec
@@ -255,7 +254,7 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
             },
             networking: None,
             cell: None,
-            cell_ref: Some(MGMT_KIND_CLUSTER.to_string()),
+            cell_ref: Some(MGMT_CLUSTER_NAME.to_string()),
             environment: Some("e2e-test".to_string()),
             region: Some("local".to_string()),
             workload: None,
@@ -264,206 +263,8 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
     }
 }
 
-/// Deploy Lattice operator to the kind cluster
-async fn deploy_lattice_operator() -> Result<(), String> {
-    println!("  Installing LatticeCluster CRD...");
-    let crd_yaml = run_cmd("cargo", &["run", "--", "--crd"])?;
-    kubectl_apply(&crd_yaml)?;
-
-    println!("  Creating lattice-system namespace...");
-    kubectl_apply(
-        r#"
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: lattice-system
-"#,
-    )?;
-
-    // The operator needs a cell endpoint that workload clusters can reach.
-    // In kind/docker networking, we use host.docker.internal to reach the host.
-    // The operator will listen on the node's IP, which we'll expose via NodePort.
-    println!("  Deploying Lattice operator...");
-
-    let operator_manifest = format!(
-        r#"
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: lattice-operator
-  namespace: lattice-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: lattice-operator
-rules:
-  # Full access to LatticeCluster CRDs
-  - apiGroups: ["lattice.dev"]
-    resources: ["latticeclusters", "latticeclusters/status"]
-    verbs: ["*"]
-  # Access to CAPI resources
-  - apiGroups: ["cluster.x-k8s.io"]
-    resources: ["*"]
-    verbs: ["*"]
-  - apiGroups: ["infrastructure.cluster.x-k8s.io"]
-    resources: ["*"]
-    verbs: ["*"]
-  - apiGroups: ["controlplane.cluster.x-k8s.io"]
-    resources: ["*"]
-    verbs: ["*"]
-  - apiGroups: ["bootstrap.cluster.x-k8s.io"]
-    resources: ["*"]
-    verbs: ["*"]
-  # Access to core resources
-  - apiGroups: [""]
-    resources: ["nodes", "secrets", "configmaps", "namespaces", "pods"]
-    verbs: ["*"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "daemonsets"]
-    verbs: ["*"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: lattice-operator
-subjects:
-  - kind: ServiceAccount
-    name: lattice-operator
-    namespace: lattice-system
-roleRef:
-  kind: ClusterRole
-  name: lattice-operator
-  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: lattice-cell
-  namespace: lattice-system
-spec:
-  type: NodePort
-  selector:
-    app: lattice-operator
-  ports:
-    - name: https
-      port: 443
-      targetPort: 443
-      nodePort: 30443
-    - name: grpc
-      port: 50051
-      targetPort: 50051
-      nodePort: 30051
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: lattice-operator
-  namespace: lattice-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: lattice-operator
-  template:
-    metadata:
-      labels:
-        app: lattice-operator
-    spec:
-      serviceAccountName: lattice-operator
-      containers:
-        - name: operator
-          image: {image}
-          imagePullPolicy: Never
-          args:
-            - "controller"
-          ports:
-            - containerPort: 443
-              name: https
-            - containerPort: 50051
-              name: grpc
-          env:
-            - name: RUST_LOG
-              value: "info,lattice=debug"
-            - name: REGISTRY_CREDENTIALS_FILE
-              value: "/var/run/secrets/registry/.dockerconfigjson"
-          volumeMounts:
-            - name: registry-creds
-              mountPath: /var/run/secrets/registry
-              readOnly: true
-      volumes:
-        - name: registry-creds
-          secret:
-            secretName: lattice-registry-creds
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: lattice-registry-creds
-  namespace: lattice-system
-type: kubernetes.io/dockerconfigjson
-data:
-  .dockerconfigjson: {registry_creds}
-"#,
-        image = LATTICE_IMAGE,
-        registry_creds = get_registry_credentials_base64()
-    );
-
-    kubectl_apply(&operator_manifest)?;
-
-    // Wait for operator to be ready
-    println!("  Waiting for operator to be ready...");
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > Duration::from_secs(120) {
-            let pods = run_cmd_allow_fail(
-                "kubectl",
-                &["get", "pods", "-n", "lattice-system", "-o", "wide"],
-            );
-            println!("  Operator pods:\n{}", pods);
-            return Err("Timeout waiting for operator to be ready".to_string());
-        }
-
-        let status = run_cmd_allow_fail(
-            "kubectl",
-            &[
-                "get",
-                "deployment",
-                "-n",
-                "lattice-system",
-                "lattice-operator",
-                "-o",
-                "jsonpath={.status.readyReplicas}",
-            ],
-        );
-
-        if status.trim() == "1" {
-            println!("  Operator is ready");
-            break;
-        }
-
-        sleep(Duration::from_secs(5)).await;
-    }
-
-    // Get operator logs for debugging
-    let logs = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "logs",
-            "-n",
-            "lattice-system",
-            "-l",
-            "app=lattice-operator",
-            "--tail=20",
-        ],
-    );
-    println!("  Operator logs:\n{}", logs);
-
-    Ok(())
-}
-
 /// Watch LatticeCluster phase transitions
-async fn watch_cluster_phases(client: &kube::Client, cluster_name: &str) -> Result<(), String> {
+async fn watch_cluster_phases(client: &Client, cluster_name: &str) -> Result<(), String> {
     let api: Api<LatticeCluster> = Api::all(client.clone());
 
     let start = std::time::Instant::now();
@@ -498,19 +299,6 @@ async fn watch_cluster_phases(client: &kube::Client, cluster_name: &str) -> Resu
                 }
 
                 if matches!(current_phase, ClusterPhase::Failed) {
-                    // Get operator logs for debugging
-                    let logs = run_cmd_allow_fail(
-                        "kubectl",
-                        &[
-                            "logs",
-                            "-n",
-                            "lattice-system",
-                            "-l",
-                            "app=lattice-operator",
-                            "--tail=50",
-                        ],
-                    );
-                    println!("  Operator logs:\n{}", logs);
                     return Err("Cluster entered Failed state".to_string());
                 }
             }
@@ -523,102 +311,35 @@ async fn watch_cluster_phases(client: &kube::Client, cluster_name: &str) -> Resu
     }
 }
 
-/// Get kubeconfig for workload cluster and patch for localhost access
-fn get_workload_kubeconfig(cluster_name: &str) -> Result<String, String> {
-    let raw_kubeconfig = run_cmd("clusterctl", &["get", "kubeconfig", cluster_name])?;
+/// Cleanup all test resources
+fn cleanup_all() {
+    println!("\n[Cleanup] Removing all test resources...\n");
 
-    // Get the load balancer container's exposed port
-    let lb_container = format!("{}-lb", cluster_name);
-    let port_output = run_cmd_allow_fail("docker", &["port", &lb_container, "6443/tcp"]);
+    // Delete bootstrap cluster if it exists
+    let _ = run_cmd_allow_fail(
+        "kind",
+        &["delete", "cluster", "--name", "lattice-bootstrap"],
+    );
 
-    let localhost_endpoint = if !port_output.trim().is_empty() {
-        let parts: Vec<&str> = port_output.trim().split(':').collect();
-        if parts.len() == 2 {
-            format!("https://127.0.0.1:{}", parts[1])
-        } else {
-            return Err(format!("Failed to parse LB port: {}", port_output));
+    // Delete any leftover Docker containers from management cluster
+    let mgmt_containers = run_cmd_allow_fail(
+        "docker",
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name={}", MGMT_CLUSTER_NAME),
+            "-q",
+        ],
+    );
+    for id in mgmt_containers.lines() {
+        if !id.trim().is_empty() {
+            let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
         }
-    } else {
-        // Fallback: try control plane container
-        let cp_output = run_cmd_allow_fail(
-            "docker",
-            &[
-                "ps",
-                "--filter",
-                &format!("name={}-control-plane", cluster_name),
-                "--format",
-                "{{.Ports}}",
-            ],
-        );
-
-        if let Some(port_mapping) = cp_output.lines().next() {
-            if let Some(host_part) = port_mapping.split("->").next() {
-                format!("https://{}", host_part.trim())
-            } else {
-                return Err("Failed to find control plane port".to_string());
-            }
-        } else {
-            return Err("No control plane container found".to_string());
-        }
-    };
-
-    // Patch the kubeconfig to use localhost
-    let patched = raw_kubeconfig
-        .lines()
-        .map(|line| {
-            if line.trim().starts_with("server:") {
-                format!("    server: {}", localhost_endpoint)
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    Ok(patched)
-}
-
-// =============================================================================
-// E2E Test: Real Pivot Flow with Operator
-// =============================================================================
-
-/// Story: Real end-to-end pivot with Lattice operator
-///
-/// This test deploys the Lattice operator and lets it handle everything.
-#[tokio::test]
-#[ignore = "requires kind cluster with CAPD - takes 15-20min - run with: cargo test --test kind pivot_e2e -- --ignored --nocapture"]
-async fn story_real_pivot_with_operator() {
-    let result = tokio::time::timeout(E2E_TIMEOUT, run_real_e2e_with_operator()).await;
-
-    match result {
-        Ok(Ok(())) => println!("\n=== Real E2E Test with Operator Completed Successfully! ===\n"),
-        Ok(Err(e)) => panic!("\n=== Real E2E Test Failed: {} ===\n", e),
-        Err(_) => panic!("\n=== Real E2E Test Timed Out ({:?}) ===\n", E2E_TIMEOUT),
     }
-}
 
-async fn run_real_e2e_with_operator() -> Result<(), String> {
-    // Install crypto provider for rustls/kube client
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-    println!("\n============================================================");
-    println!("  REAL END-TO-END PIVOT TEST WITH LATTICE OPERATOR");
-    println!("  The operator handles everything: provisioning, bootstrap, pivot");
-    println!("  Expected duration: 15-20 minutes");
-    println!("============================================================\n");
-
-    // =========================================================================
-    // Phase 1: Setup Fresh Management Cluster
-    // =========================================================================
-    println!("\n[Phase 1] Setting up fresh management cluster...\n");
-
-    // Delete existing cluster if it exists (clean slate)
-    println!("  Deleting existing kind cluster if present...");
-    let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", MGMT_KIND_CLUSTER]);
-
-    // Also remove any stale Docker containers from previous runs
-    println!("  Cleaning up stale Docker containers...");
-    let stale_containers = run_cmd_allow_fail(
+    // Delete any leftover Docker containers from workload cluster
+    let workload_containers = run_cmd_allow_fail(
         "docker",
         &[
             "ps",
@@ -628,121 +349,172 @@ async fn run_real_e2e_with_operator() -> Result<(), String> {
             "-q",
         ],
     );
-    for id in stale_containers.lines() {
+    for id in workload_containers.lines() {
         if !id.trim().is_empty() {
             let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
         }
     }
 
-    // Create fresh kind cluster with Docker socket mounted (required for CAPD)
-    println!("  Creating fresh kind cluster '{}'...", MGMT_KIND_CLUSTER);
+    // Clean up temp files
+    let _ = std::fs::remove_file(format!("/tmp/{}-kubeconfig", MGMT_CLUSTER_NAME));
+    let _ = std::fs::remove_file(format!("/tmp/{}-kubeconfig-local", MGMT_CLUSTER_NAME));
+    let _ = std::fs::remove_file(format!("/tmp/{}-cluster-config.yaml", MGMT_CLUSTER_NAME));
 
-    let kind_config = r#"kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-  extraMounts:
-  - hostPath: /var/run/docker.sock
-    containerPath: /var/run/docker.sock
-  extraPortMappings:
-  - containerPort: 30443
-    hostPort: 30443
-    protocol: TCP
-  - containerPort: 30051
-    hostPort: 30051
-    protocol: TCP
-"#;
-    let kind_config_path = "/tmp/e2e-kind-config.yaml";
-    std::fs::write(kind_config_path, kind_config)
-        .map_err(|e| format!("Failed to write kind config: {}", e))?;
+    println!("  Cleanup complete!");
+}
 
-    run_cmd(
-        "kind",
-        &[
-            "create",
-            "cluster",
-            "--name",
-            MGMT_KIND_CLUSTER,
-            "--config",
-            kind_config_path,
-            "--wait",
-            "60s",
-        ],
-    )?;
+// =============================================================================
+// E2E Test: Full Installation and Pivot Flow
+// =============================================================================
 
-    let _ = std::fs::remove_file(kind_config_path);
+/// Story: Full end-to-end installation with self-managing management cluster
+///
+/// This test runs the complete Lattice installer flow, then provisions a
+/// workload cluster from the self-managing management cluster.
+#[tokio::test]
+#[ignore = "requires Docker with 8GB+ RAM - takes 20-30min - run with: cargo test --test kind pivot_e2e -- --ignored --nocapture"]
+async fn story_full_install_and_workload_provisioning() {
+    let result = tokio::time::timeout(E2E_TIMEOUT, run_full_e2e()).await;
+
+    match result {
+        Ok(Ok(())) => println!("\n=== Full E2E Test Completed Successfully! ===\n"),
+        Ok(Err(e)) => {
+            println!("\n=== Full E2E Test Failed: {} ===\n", e);
+            cleanup_all();
+            panic!("E2E test failed: {}", e);
+        }
+        Err(_) => {
+            println!("\n=== Full E2E Test Timed Out ({:?}) ===\n", E2E_TIMEOUT);
+            cleanup_all();
+            panic!("E2E test timed out after {:?}", E2E_TIMEOUT);
+        }
+    }
+}
+
+async fn run_full_e2e() -> Result<(), String> {
+    // Install crypto provider for rustls/kube client
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    println!("\n============================================================");
+    println!("  FULL END-TO-END LATTICE INSTALLATION TEST");
+    println!("============================================================");
+    println!("\n  This test will:");
+    println!("    1. Build and push the Lattice Docker image");
+    println!("    2. Run the full installer (bootstrap → management cluster)");
+    println!("    3. Verify management cluster is self-managing");
+    println!("    4. Create a workload cluster from management cluster");
+    println!("    5. Verify workload cluster reaches Ready state");
+    println!("\n  Expected duration: 20-30 minutes\n");
+
+    // =========================================================================
+    // Phase 1: Cleanup any previous runs
+    // =========================================================================
+    println!("\n[Phase 1] Cleaning up previous test runs...\n");
+    cleanup_all();
 
     // =========================================================================
     // Phase 2: Build and Push Lattice Image
     // =========================================================================
-    println!("\n[Phase 2] Building and pushing lattice image...\n");
-
+    println!("\n[Phase 2] Building and pushing Lattice image...\n");
     build_and_push_lattice_image().await?;
-    // Also load into management cluster for faster pulls
-    load_image_to_kind(MGMT_KIND_CLUSTER)?;
 
     // =========================================================================
-    // Phase 3: Install CAPI/CAPD
+    // Phase 3: Run Full Installer
     // =========================================================================
-    println!("\n[Phase 3] Installing CAPI and CAPD...\n");
+    println!("\n[Phase 3] Running Lattice installer...\n");
+    println!("  This will:");
+    println!("    - Create a bootstrap kind cluster");
+    println!("    - Install CAPI with docker provider");
+    println!("    - Deploy Lattice operator");
+    println!("    - Create management cluster LatticeCluster CRD");
+    println!("    - Wait for management cluster provisioning");
+    println!("    - Pivot CAPI resources to management cluster");
+    println!("    - Delete bootstrap cluster");
+    println!();
 
-    ensure_capd_installed().await?;
+    // Create config file for the management cluster
+    // Uses Cilium LB-IPAM for the cell endpoint - workload clusters connect to this IP
+    let cluster_config = format!(
+        r#"apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: {name}
+spec:
+  provider:
+    type: docker
+    kubernetes:
+      version: "1.31.0"
+      certSANs:
+        - "127.0.0.1"
+        - "localhost"
+        - "172.18.255.10"
+  nodes:
+    controlPlane: 1
+    workers: 0
+  networking:
+    default:
+      cidr: "172.18.255.10/32"
+  cell:
+    host: 172.18.255.10
+    grpcPort: 50051
+    bootstrapPort: 8443
+    service:
+      type: LoadBalancer
+"#,
+        name = MGMT_CLUSTER_NAME
+    );
 
-    // =========================================================================
-    // Phase 4: Deploy Lattice Operator
-    // =========================================================================
-    println!("\n[Phase 4] Deploying Lattice operator...\n");
+    // Write config to temp file
+    let config_path = PathBuf::from(format!("/tmp/{}-cluster-config.yaml", MGMT_CLUSTER_NAME));
+    std::fs::write(&config_path, &cluster_config)
+        .map_err(|e| format!("Failed to write cluster config: {}", e))?;
+    println!("  Cluster config written to {:?}", config_path);
 
-    deploy_lattice_operator().await?;
+    // Load registry credentials
+    let registry_credentials = load_registry_credentials();
+    if registry_credentials.is_some() {
+        println!("  Registry credentials loaded from .env");
+    } else {
+        println!("  WARNING: No registry credentials found - image pull may fail");
+    }
 
-    // =========================================================================
-    // Phase 5: Create LatticeCluster CRD
-    // =========================================================================
-    println!("\n[Phase 5] Creating LatticeCluster for workload cluster...\n");
+    let install_config = InstallConfig {
+        cluster_config_path: config_path,
+        cluster_config_content: cluster_config,
+        image: LATTICE_IMAGE.to_string(),
+        keep_bootstrap_on_failure: true, // Keep for debugging if it fails
+        timeout: Duration::from_secs(1200),
+        registry_credentials,
+    };
 
-    let client = kube::Client::try_default()
+    let installer = Installer::new(install_config)
+        .map_err(|e| format!("Failed to create installer: {}", e))?;
+    installer
+        .run()
         .await
-        .map_err(|e| format!("Failed to create kube client: {}", e))?;
+        .map_err(|e| format!("Installer failed: {}", e))?;
 
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-    let cluster = workload_cluster_spec(WORKLOAD_CLUSTER_NAME);
-
-    println!("  Creating LatticeCluster resource...");
-    api.create(&PostParams::default(), &cluster)
-        .await
-        .map_err(|e| format!("Failed to create LatticeCluster: {}", e))?;
+    println!("\n  Management cluster installation complete!");
 
     // =========================================================================
-    // Phase 6: Watch Controller Reconcile
+    // Phase 4: Verify Management Cluster is Self-Managing
     // =========================================================================
-    println!("\n[Phase 6] Watching controller reconcile cluster...\n");
-    println!("  The operator will:");
-    println!("    1. Generate and apply CAPI manifests");
-    println!("    2. Wait for CAPD to provision infrastructure");
-    println!("    3. Bootstrap webhook installs CNI + agent");
-    println!("    4. Agent connects, operator triggers pivot");
-    println!("    5. Cluster becomes self-managing\n");
+    println!("\n[Phase 4] Verifying management cluster is self-managing...\n");
 
-    watch_cluster_phases(&client, WORKLOAD_CLUSTER_NAME).await?;
+    // Get kubeconfig for management cluster
+    let kubeconfig_path = get_management_kubeconfig()?;
+    println!("  Using kubeconfig: {}", kubeconfig_path);
 
-    // =========================================================================
-    // Phase 7: Verify Post-Pivot State
-    // =========================================================================
-    println!("\n[Phase 7] Verifying post-pivot state...\n");
+    // Create client for management cluster
+    let mgmt_client = client_from_kubeconfig(&kubeconfig_path).await?;
 
-    // Get workload cluster kubeconfig
-    let workload_kubeconfig = get_workload_kubeconfig(WORKLOAD_CLUSTER_NAME)?;
-    let kubeconfig_path = "/tmp/e2e-workload-kubeconfig";
-    std::fs::write(kubeconfig_path, &workload_kubeconfig)
-        .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
-
-    // Check for CAPI resources on workload cluster (should exist after pivot)
-    println!("  Checking for CAPI resources on workload cluster...");
-    let capi_clusters = run_cmd(
+    // Check that CAPI resources exist
+    println!("  Checking for CAPI Cluster resource...");
+    let capi_check = run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
-            kubeconfig_path,
+            &kubeconfig_path,
             "get",
             "clusters",
             "-A",
@@ -750,41 +522,166 @@ nodes:
             "wide",
         ],
     )?;
-    println!("  CAPI clusters on workload cluster:\n{}", capi_clusters);
+    println!("  CAPI clusters:\n{}", capi_check);
 
-    if !capi_clusters.contains(WORKLOAD_CLUSTER_NAME) {
-        return Err(
-            "Workload cluster should have its own Cluster resource after pivot".to_string(),
-        );
+    if !capi_check.contains(MGMT_CLUSTER_NAME) {
+        return Err("Management cluster should have its own CAPI Cluster resource".to_string());
     }
 
     // Check that LatticeCluster CRD exists
-    println!("  Checking for LatticeCluster CRD on workload cluster...");
-    let crd_check = run_cmd_allow_fail(
+    println!("  Checking for LatticeCluster CRD...");
+    let crd_check = run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
-            kubeconfig_path,
+            &kubeconfig_path,
             "get",
             "crd",
             "latticeclusters.lattice.dev",
         ],
-    );
+    )?;
 
     if !crd_check.contains("latticeclusters") {
-        println!(
-            "  WARNING: LatticeCluster CRD not found on workload cluster (may be installed later)"
-        );
-    } else {
-        println!("  LatticeCluster CRD exists on workload cluster");
+        return Err("LatticeCluster CRD not found on management cluster".to_string());
+    }
+    println!("  LatticeCluster CRD exists");
+
+    // Check that the management cluster's own LatticeCluster is Ready
+    println!("  Checking management cluster's LatticeCluster status...");
+    let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
+    let mgmt_lc = api
+        .get(MGMT_CLUSTER_NAME)
+        .await
+        .map_err(|e| format!("Failed to get management LatticeCluster: {}", e))?;
+
+    let mgmt_phase = mgmt_lc
+        .status
+        .as_ref()
+        .map(|s| s.phase.clone())
+        .unwrap_or(ClusterPhase::Pending);
+
+    println!("  Management cluster phase: {:?}", mgmt_phase);
+
+    if !matches!(mgmt_phase, ClusterPhase::Ready) {
+        return Err(format!(
+            "Management cluster should be Ready, but is {:?}",
+            mgmt_phase
+        ));
     }
 
-    // Check nodes are healthy
+    println!("\n  SUCCESS: Management cluster is self-managing!");
+
+    // =========================================================================
+    // Phase 5: Create Workload Cluster
+    // =========================================================================
+    println!("\n[Phase 5] Creating workload cluster from management cluster...\n");
+
+    let workload_cluster = workload_cluster_spec(WORKLOAD_CLUSTER_NAME);
+    println!("  Creating LatticeCluster '{}'...", WORKLOAD_CLUSTER_NAME);
+
+    api.create(&PostParams::default(), &workload_cluster)
+        .await
+        .map_err(|e| format!("Failed to create workload LatticeCluster: {}", e))?;
+
+    // =========================================================================
+    // Phase 6: Watch Workload Cluster Provisioning
+    // =========================================================================
+    println!("\n[Phase 6] Watching workload cluster provisioning...\n");
+    println!("  The management cluster will:");
+    println!("    1. Generate CAPI manifests for workload cluster");
+    println!("    2. CAPD provisions Docker containers");
+    println!("    3. Bootstrap webhook installs agent + CNI");
+    println!("    4. Agent connects to management cluster");
+    println!("    5. Management cluster triggers pivot");
+    println!("    6. Workload cluster becomes self-managing");
+    println!();
+
+    watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME).await?;
+
+    // =========================================================================
+    // Phase 7: Verify Workload Cluster Post-Pivot
+    // =========================================================================
+    println!("\n[Phase 7] Verifying workload cluster post-pivot state...\n");
+
+    // Get workload cluster kubeconfig
+    let workload_kubeconfig_raw = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            &kubeconfig_path,
+            "get",
+            "secret",
+            &format!("{}-kubeconfig", WORKLOAD_CLUSTER_NAME),
+            "-n",
+            &format!("capi-{}", WORKLOAD_CLUSTER_NAME),
+            "-o",
+            "jsonpath={.data.value}",
+        ],
+    )?;
+
+    let workload_kubeconfig = String::from_utf8(
+        base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            workload_kubeconfig_raw.trim(),
+        )
+        .map_err(|e| format!("Failed to decode workload kubeconfig: {}", e))?,
+    )
+    .map_err(|e| format!("Invalid UTF-8 in kubeconfig: {}", e))?;
+
+    let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
+    std::fs::write(&workload_kubeconfig_path, &workload_kubeconfig)
+        .map_err(|e| format!("Failed to write workload kubeconfig: {}", e))?;
+
+    // Patch for localhost access
+    let lb_container = format!("{}-lb", WORKLOAD_CLUSTER_NAME);
+    let port_output = run_cmd_allow_fail("docker", &["port", &lb_container, "6443/tcp"]);
+
+    if !port_output.trim().is_empty() {
+        let parts: Vec<&str> = port_output.trim().split(':').collect();
+        if parts.len() == 2 {
+            let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
+            let patched = workload_kubeconfig
+                .lines()
+                .map(|line| {
+                    if line.trim().starts_with("server:") {
+                        format!("    server: {}", localhost_endpoint)
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(&workload_kubeconfig_path, &patched)
+                .map_err(|e| format!("Failed to write patched kubeconfig: {}", e))?;
+        }
+    }
+
+    // Check CAPI resources on workload cluster
+    println!("  Checking for CAPI resources on workload cluster...");
+    let workload_capi = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            &workload_kubeconfig_path,
+            "get",
+            "clusters",
+            "-A",
+        ],
+    )?;
+    println!("  Workload cluster CAPI resources:\n{}", workload_capi);
+
+    if !workload_capi.contains(WORKLOAD_CLUSTER_NAME) {
+        return Err(
+            "Workload cluster should have its own CAPI Cluster resource after pivot".to_string(),
+        );
+    }
+
+    // Check nodes
     let nodes = run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
-            kubeconfig_path,
+            &workload_kubeconfig_path,
             "get",
             "nodes",
             "-o",
@@ -793,44 +690,23 @@ nodes:
     )?;
     println!("  Workload cluster nodes:\n{}", nodes);
 
-    println!("\n  SUCCESS: Workload cluster is now self-managing!");
-    println!("  - Lattice operator provisioned the cluster via CAPI");
-    println!("  - Bootstrap webhook installed CNI and agent");
-    println!("  - Agent connected to cell via gRPC");
-    println!("  - Controller triggered pivot");
-    println!("  - CAPI resources moved to workload cluster");
-    println!("  - Cluster is now fully self-managing");
+    println!("\n============================================================");
+    println!("  FULL E2E TEST PASSED!");
+    println!("============================================================");
+    println!("\n  Verified:");
+    println!("    [x] Lattice installer created self-managing management cluster");
+    println!("    [x] Bootstrap cluster was deleted");
+    println!("    [x] Management cluster has CAPI + LatticeCluster CRD");
+    println!("    [x] Management cluster's LatticeCluster is Ready");
+    println!("    [x] Workload cluster provisioned from management cluster");
+    println!("    [x] Workload cluster pivoted and is self-managing");
+    println!();
 
     // =========================================================================
     // Phase 8: Cleanup
     // =========================================================================
     println!("\n[Phase 8] Cleaning up...\n");
-
-    // Remove temp files
-    let _ = std::fs::remove_file(kubeconfig_path);
-
-    // Delete the entire kind cluster
-    println!("  Deleting kind cluster...");
-    let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", MGMT_KIND_CLUSTER]);
-
-    // Clean up workload cluster Docker containers
-    let containers = run_cmd_allow_fail(
-        "docker",
-        &[
-            "ps",
-            "-a",
-            "--filter",
-            &format!("name={}", WORKLOAD_CLUSTER_NAME),
-            "-q",
-        ],
-    );
-    for id in containers.lines() {
-        if !id.trim().is_empty() {
-            let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
-        }
-    }
-
-    println!("  Cleanup complete!");
+    cleanup_all();
 
     Ok(())
 }

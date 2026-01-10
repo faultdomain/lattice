@@ -35,9 +35,10 @@ RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
     chmod +x kubectl && \
     mv kubectl /usr/local/bin/
 
-# Install clusterctl for pivot operations
+# Install clusterctl for pivot operations (latest version)
 RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
-    curl -L "https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.9.4/clusterctl-linux-${ARCH}" -o /usr/local/bin/clusterctl && \
+    CLUSTERCTL_VERSION=$(curl -s https://api.github.com/repos/kubernetes-sigs/cluster-api/releases/latest | grep '"tag_name"' | cut -d'"' -f4) && \
+    curl -L "https://github.com/kubernetes-sigs/cluster-api/releases/download/${CLUSTERCTL_VERSION}/clusterctl-linux-${ARCH}" -o /usr/local/bin/clusterctl && \
     chmod +x /usr/local/bin/clusterctl
 
 # Install helm for CNI manifest generation
