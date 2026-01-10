@@ -7,6 +7,12 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use dashmap::DashMap;
+use thiserror::Error;
+
+/// Error type for token generation failures
+#[derive(Debug, Error)]
+#[error("failed to generate cryptographically secure random bytes: FIPS RNG unavailable")]
+pub struct TokenGenerationError;
 
 /// A bootstrap token for cluster registration
 #[derive(Clone)]
@@ -19,14 +25,35 @@ pub struct BootstrapToken {
 
 impl BootstrapToken {
     /// Generate a new random bootstrap token
+    ///
+    /// # Panics
+    ///
+    /// Panics if the FIPS-validated cryptographic RNG fails. This is a
+    /// catastrophic system failure - if the RNG doesn't work, the system
+    /// cannot operate securely. Use [`try_generate`] if you need to handle
+    /// this error explicitly.
     pub fn generate() -> Self {
+        Self::try_generate().unwrap_or_else(|e| {
+            panic!(
+                "CRITICAL: {}. The system cannot operate securely without \
+                 a working cryptographic random number generator.",
+                e
+            )
+        })
+    }
+
+    /// Try to generate a new random bootstrap token
+    ///
+    /// Returns an error if the FIPS-validated cryptographic RNG fails.
+    /// This is rare and typically indicates a serious system problem.
+    pub fn try_generate() -> Result<Self, TokenGenerationError> {
         // Use aws-lc-rs for FIPS-compliant random generation
         let mut raw = vec![0u8; 32];
-        aws_lc_rs::rand::fill(&mut raw).expect("random generation failed");
+        aws_lc_rs::rand::fill(&mut raw).map_err(|_| TokenGenerationError)?;
 
         let string = URL_SAFE_NO_PAD.encode(&raw);
 
-        Self { raw, string }
+        Ok(Self { raw, string })
     }
 
     /// Create a token from an existing string (for validation)

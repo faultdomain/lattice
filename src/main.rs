@@ -12,8 +12,12 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lattice::agent::client::{AgentClient, AgentClientConfig};
 use lattice::cell::{CellConfig, CellServers};
-use lattice::controller::{error_policy, reconcile, Context};
-use lattice::crd::LatticeCluster;
+use lattice::controller::{
+    error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
+    service_reconcile, Context, ServiceContext,
+};
+use lattice::crd::{LatticeCluster, LatticeExternalService, LatticeService};
+use lattice::infra::IstioReconciler;
 use lattice::install::{InstallConfig, Installer};
 
 /// Lattice - CRD-driven Kubernetes operator for multi-cluster lifecycle management
@@ -81,10 +85,19 @@ struct InstallArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Install crypto provider
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .expect("Failed to install crypto provider");
+    // Install crypto provider - FIPS-validated aws-lc-rs
+    // This MUST succeed for the application to operate securely.
+    // Failure here indicates a serious system configuration issue.
+    if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
+        eprintln!(
+            "CRITICAL: Failed to install FIPS-validated crypto provider: {:?}. \
+             The application cannot operate securely without a working TLS implementation. \
+             This may indicate aws-lc-rs was not compiled correctly or there is a \
+             conflict with another crypto provider.",
+            e
+        );
+        std::process::exit(1);
+    }
 
     // Initialize tracing
     tracing_subscriber::registry()
@@ -161,26 +174,173 @@ async fn run_install(args: InstallArgs) -> anyhow::Result<()> {
     installer.run().await.map_err(|e| anyhow::anyhow!("{}", e))
 }
 
-/// Ensure the LatticeCluster CRD is installed
+/// Ensure all Lattice CRDs are installed
 ///
-/// The operator installs its own CRD on startup using server-side apply.
-/// This ensures the CRD version always matches the operator version.
-async fn ensure_crd_installed(client: &Client) -> anyhow::Result<()> {
+/// The operator installs its own CRDs on startup using server-side apply.
+/// This ensures the CRD versions always match the operator version.
+async fn ensure_crds_installed(client: &Client) -> anyhow::Result<()> {
     use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
     use kube::api::{Patch, PatchParams};
 
-    tracing::info!("Ensuring LatticeCluster CRD is installed...");
-
     let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
+    let params = PatchParams::apply("lattice-controller").force();
+
+    // Install LatticeCluster CRD
+    tracing::info!("Installing LatticeCluster CRD...");
     crds.patch(
         "latticeclusters.lattice.dev",
-        &PatchParams::apply("lattice-controller").force(),
+        &params,
         &Patch::Apply(&LatticeCluster::crd()),
     )
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to install CRD: {}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to install LatticeCluster CRD: {}", e))?;
 
-    tracing::info!("LatticeCluster CRD installed/updated");
+    // Install LatticeService CRD
+    tracing::info!("Installing LatticeService CRD...");
+    crds.patch(
+        "latticeservices.lattice.dev",
+        &params,
+        &Patch::Apply(&LatticeService::crd()),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to install LatticeService CRD: {}", e))?;
+
+    // Install LatticeExternalService CRD
+    tracing::info!("Installing LatticeExternalService CRD...");
+    crds.patch(
+        "latticeexternalservices.lattice.dev",
+        &params,
+        &Patch::Apply(&LatticeExternalService::crd()),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to install LatticeExternalService CRD: {}", e))?;
+
+    tracing::info!("All Lattice CRDs installed/updated");
+    Ok(())
+}
+
+/// Reconcile infrastructure components
+///
+/// Ensures Istio is installed at the correct version. Cilium is deployed at bootstrap.
+/// This runs on every controller startup, enabling version upgrades when
+/// Lattice is upgraded (new binary has new component versions).
+async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
+    use k8s_openapi::api::apps::v1::Deployment;
+    use kube::api::{Api, Patch, PatchParams};
+
+    let reconciler = IstioReconciler::new();
+    let expected_version = reconciler.version();
+
+    // Check current Istio version
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), "istio-system");
+    let current_version = match deployments.get("istiod").await {
+        Ok(deploy) => {
+            // Extract version from image tag (e.g., "docker.io/istio/pilot:1.24.2")
+            deploy
+                .spec
+                .and_then(|s| s.template.spec)
+                .and_then(|s| s.containers.into_iter().next())
+                .and_then(|c| c.image)
+                .and_then(|img| img.split(':').next_back().map(String::from))
+        }
+        Err(_) => None,
+    };
+
+    // Decide action based on current state
+    match current_version {
+        Some(ref v) if v == expected_version => {
+            tracing::debug!(version = %v, "Istio at expected version, skipping");
+            return Ok(());
+        }
+        Some(ref v) => {
+            tracing::info!(from = %v, to = %expected_version, "Upgrading Istio");
+        }
+        None => {
+            tracing::info!(version = %expected_version, "Installing Istio");
+        }
+    }
+
+    // Get manifests and apply them
+    let manifests = reconciler
+        .manifests()
+        .map_err(|e| anyhow::anyhow!("Failed to generate Istio manifests: {}", e))?;
+
+    tracing::info!(count = manifests.len(), "Applying Istio manifests");
+
+    // Ensure istio-system namespace exists
+    let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
+    let ns = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": { "name": "istio-system" }
+    });
+    let params = PatchParams::apply("lattice").force();
+    namespaces
+        .patch("istio-system", &params, &Patch::Apply(&ns))
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create istio-system namespace: {}", e))?;
+
+    // Apply manifests (server-side apply handles create or update)
+    for manifest in manifests {
+        apply_manifest(client, manifest).await?;
+    }
+
+    // Apply PeerAuthentication for STRICT mTLS
+    let peer_auth = IstioReconciler::generate_peer_authentication();
+    apply_manifest(client, &peer_auth).await?;
+
+    tracing::info!(version = %expected_version, "Istio reconciliation complete");
+    Ok(())
+}
+
+/// Apply a single YAML manifest to the cluster
+async fn apply_manifest(client: &Client, manifest: &str) -> anyhow::Result<()> {
+    use kube::api::{Api, DynamicObject, Patch, PatchParams};
+    use kube::discovery::ApiResource;
+
+    let obj: serde_json::Value =
+        serde_yaml::from_str(manifest).map_err(|e| anyhow::anyhow!("Invalid YAML: {}", e))?;
+
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing kind"))?;
+    let api_version = obj
+        .get("apiVersion")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing apiVersion"))?;
+    let name = obj
+        .pointer("/metadata/name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing metadata.name"))?;
+    let namespace = obj.pointer("/metadata/namespace").and_then(|v| v.as_str());
+
+    // Parse apiVersion into group/version
+    let (group, version) = if api_version.contains('/') {
+        let parts: Vec<&str> = api_version.splitn(2, '/').collect();
+        (parts[0].to_string(), parts[1].to_string())
+    } else {
+        (String::new(), api_version.to_string())
+    };
+
+    let gvk = kube::api::GroupVersionKind {
+        group,
+        version,
+        kind: kind.to_string(),
+    };
+    let api_resource = ApiResource::from_gvk(&gvk);
+
+    let api: Api<DynamicObject> = match namespace {
+        Some(ns) => Api::namespaced_with(client.clone(), ns, &api_resource),
+        None => Api::all_with(client.clone(), &api_resource),
+    };
+
+    let params = PatchParams::apply("lattice").force();
+    api.patch(name, &params, &Patch::Apply(&obj))
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to apply {}/{}: {}", kind, name, e))?;
+
+    tracing::debug!(kind = kind, name = name, "Applied manifest");
     Ok(())
 }
 
@@ -199,8 +359,15 @@ async fn run_controller() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create Kubernetes client: {}", e))?;
 
-    // Operator installs its own CRD on startup
-    ensure_crd_installed(&client).await?;
+    // Operator installs its own CRDs on startup
+    ensure_crds_installed(&client).await?;
+
+    // Ensure infrastructure components are installed (Istio)
+    // This enables day-2 upgrades: new Lattice version has new component versions
+    if let Err(e) = ensure_infrastructure(&client).await {
+        tracing::warn!(error = %e, "Failed to install infrastructure, continuing anyway");
+        // Don't fail startup - controllers can still run, services just won't have mesh
+    }
 
     // Create cell servers (starts on-demand when Pending CRDs detected)
     let cell_servers = Arc::new(
@@ -240,29 +407,78 @@ async fn run_controller() -> anyhow::Result<()> {
         None
     };
 
-    // Create API for LatticeCluster (cluster-scoped)
-    let clusters: Api<LatticeCluster> = Api::all(client);
+    // Create APIs for all CRDs (cluster-scoped)
+    let clusters: Api<LatticeCluster> = Api::all(client.clone());
+    let services: Api<LatticeService> = Api::all(client.clone());
+    let external_services: Api<LatticeExternalService> = Api::all(client.clone());
 
-    tracing::info!("Starting LatticeCluster controller...");
-    tracing::info!("Cell config will be read from LatticeCluster CRD spec.cell");
+    // Create service context for service controllers
+    let service_ctx = Arc::new(ServiceContext::from_client(client, "cluster.local"));
 
-    // Run the controller
-    let controller = Controller::new(clusters, WatcherConfig::default())
+    tracing::info!("Starting Lattice controllers...");
+    tracing::info!("  - LatticeCluster controller");
+    tracing::info!("  - LatticeService controller");
+    tracing::info!("  - LatticeExternalService controller");
+
+    // Create all controllers
+    let cluster_controller = Controller::new(clusters, WatcherConfig::default())
         .shutdown_on_signal()
         .run(reconcile, error_policy, ctx.clone())
         .for_each(|result| async move {
             match result {
                 Ok(action) => {
-                    tracing::debug!(?action, "Reconciliation completed");
+                    tracing::debug!(?action, "Cluster reconciliation completed");
                 }
                 Err(e) => {
-                    tracing::error!(error = ?e, "Reconciliation error");
+                    tracing::error!(error = ?e, "Cluster reconciliation error");
                 }
             }
         });
 
-    // Run controller and wait for shutdown
-    controller.await;
+    let service_controller = Controller::new(services, WatcherConfig::default())
+        .shutdown_on_signal()
+        .run(service_reconcile, service_error_policy, service_ctx.clone())
+        .for_each(|result| async move {
+            match result {
+                Ok(action) => {
+                    tracing::debug!(?action, "Service reconciliation completed");
+                }
+                Err(e) => {
+                    tracing::error!(error = ?e, "Service reconciliation error");
+                }
+            }
+        });
+
+    let external_service_controller = Controller::new(external_services, WatcherConfig::default())
+        .shutdown_on_signal()
+        .run(
+            reconcile_external,
+            error_policy_external,
+            service_ctx.clone(),
+        )
+        .for_each(|result| async move {
+            match result {
+                Ok(action) => {
+                    tracing::debug!(?action, "External service reconciliation completed");
+                }
+                Err(e) => {
+                    tracing::error!(error = ?e, "External service reconciliation error");
+                }
+            }
+        });
+
+    // Run all controllers concurrently
+    tokio::select! {
+        _ = cluster_controller => {
+            tracing::info!("Cluster controller completed");
+        }
+        _ = service_controller => {
+            tracing::info!("Service controller completed");
+        }
+        _ = external_service_controller => {
+            tracing::info!("External service controller completed");
+        }
+    }
 
     // Shutdown agent if running
     if let Some(mut agent) = agent_handle {

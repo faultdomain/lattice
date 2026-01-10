@@ -20,6 +20,7 @@ use tracing::{debug, error, info, instrument, warn};
 #[cfg(test)]
 use mockall::automock;
 
+use crate::compiler::{CompiledService, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
     LatticeService, LatticeServiceSpec, LatticeServiceStatus, ServicePhase,
@@ -66,6 +67,14 @@ pub trait ServiceKubeClient: Send + Sync {
 
     /// List all LatticeExternalServices
     async fn list_external_services(&self) -> Result<Vec<LatticeExternalService>, Error>;
+
+    /// Apply compiled workloads and policies to the cluster
+    async fn apply_compiled_service(
+        &self,
+        service_name: &str,
+        namespace: &str,
+        compiled: &CompiledService,
+    ) -> Result<(), Error>;
 }
 
 /// Real Kubernetes client implementation
@@ -150,6 +159,116 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let list = api.list(&Default::default()).await?;
         Ok(list.items)
     }
+
+    async fn apply_compiled_service(
+        &self,
+        service_name: &str,
+        namespace: &str,
+        compiled: &CompiledService,
+    ) -> Result<(), Error> {
+        use k8s_openapi::api::apps::v1::Deployment as K8sDeployment;
+        use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler as K8sHpa;
+        use k8s_openapi::api::core::v1::{Service as K8sService, ServiceAccount as K8sSA};
+        use kube::api::DynamicObject;
+        use kube::discovery::ApiResource;
+
+        let params = PatchParams::apply("lattice-service-controller").force();
+
+        // Apply ServiceAccount
+        if let Some(ref sa) = compiled.workloads.service_account {
+            debug!(name = %sa.metadata.name, "applying ServiceAccount");
+            let json = serde_json::to_value(sa)
+                .map_err(|e| Error::serialization(format!("ServiceAccount: {}", e)))?;
+            let api: Api<K8sSA> = Api::namespaced(self.client.clone(), namespace);
+            api.patch(&sa.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        // Apply Deployment
+        if let Some(ref deployment) = compiled.workloads.deployment {
+            debug!(name = %deployment.metadata.name, "applying Deployment");
+            let json = serde_json::to_value(deployment)
+                .map_err(|e| Error::serialization(format!("Deployment: {}", e)))?;
+            let api: Api<K8sDeployment> = Api::namespaced(self.client.clone(), namespace);
+            api.patch(&deployment.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        // Apply Service
+        if let Some(ref service) = compiled.workloads.service {
+            debug!(name = %service.metadata.name, "applying Service");
+            let json = serde_json::to_value(service)
+                .map_err(|e| Error::serialization(format!("Service: {}", e)))?;
+            let api: Api<K8sService> = Api::namespaced(self.client.clone(), namespace);
+            api.patch(&service.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        // Apply HPA
+        if let Some(ref hpa) = compiled.workloads.hpa {
+            debug!(name = %hpa.metadata.name, "applying HPA");
+            let json = serde_json::to_value(hpa)
+                .map_err(|e| Error::serialization(format!("HPA: {}", e)))?;
+            let api: Api<K8sHpa> = Api::namespaced(self.client.clone(), namespace);
+            api.patch(&hpa.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        // Apply CiliumNetworkPolicies using DynamicObject
+        for cnp in &compiled.policies.cilium_policies {
+            debug!(name = %cnp.metadata.name, "applying CiliumNetworkPolicy");
+            let json = serde_json::to_value(cnp)
+                .map_err(|e| Error::serialization(format!("CiliumNetworkPolicy: {}", e)))?;
+
+            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+                group: "cilium.io".to_string(),
+                version: "v2".to_string(),
+                kind: "CiliumNetworkPolicy".to_string(),
+            });
+            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+            api.patch(&cnp.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        // Apply AuthorizationPolicies using DynamicObject
+        for authz in &compiled.policies.authorization_policies {
+            debug!(name = %authz.metadata.name, "applying AuthorizationPolicy");
+            let json = serde_json::to_value(authz)
+                .map_err(|e| Error::serialization(format!("AuthorizationPolicy: {}", e)))?;
+
+            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+                group: "security.istio.io".to_string(),
+                version: "v1beta1".to_string(),
+                kind: "AuthorizationPolicy".to_string(),
+            });
+            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+            api.patch(&authz.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        // Apply ServiceEntries using DynamicObject
+        for entry in &compiled.policies.service_entries {
+            debug!(name = %entry.metadata.name, "applying ServiceEntry");
+            let json = serde_json::to_value(entry)
+                .map_err(|e| Error::serialization(format!("ServiceEntry: {}", e)))?;
+
+            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+                group: "networking.istio.io".to_string(),
+                version: "v1beta1".to_string(),
+                kind: "ServiceEntry".to_string(),
+            });
+            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+            api.patch(&entry.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        info!(
+            service = %service_name,
+            namespace = %namespace,
+            "applied compiled resources"
+        );
+        Ok(())
+    }
 }
 
 // =============================================================================
@@ -168,6 +287,8 @@ pub struct ServiceContext {
     pub graph: Arc<ServiceGraph>,
     /// Default environment name for services without explicit environment
     pub default_env: String,
+    /// SPIFFE trust domain for policy generation
+    pub trust_domain: String,
 }
 
 impl ServiceContext {
@@ -176,11 +297,13 @@ impl ServiceContext {
         kube: Arc<dyn ServiceKubeClient>,
         graph: Arc<ServiceGraph>,
         default_env: impl Into<String>,
+        trust_domain: impl Into<String>,
     ) -> Self {
         Self {
             kube,
             graph,
             default_env: default_env.into(),
+            trust_domain: trust_domain.into(),
         }
     }
 
@@ -188,11 +311,12 @@ impl ServiceContext {
     ///
     /// This creates a new ServiceGraph. For shared state, create the graph
     /// externally and pass it to the constructor.
-    pub fn from_client(client: Client) -> Self {
+    pub fn from_client(client: Client, trust_domain: impl Into<String>) -> Self {
         Self {
             kube: Arc::new(ServiceKubeClientImpl::new(client)),
             graph: Arc::new(ServiceGraph::new()),
             default_env: "default".to_string(),
+            trust_domain: trust_domain.into(),
         }
     }
 
@@ -203,6 +327,7 @@ impl ServiceContext {
             kube,
             graph: Arc::new(ServiceGraph::new()),
             default_env: "test".to_string(),
+            trust_domain: "test.local".to_string(),
         }
     }
 }
@@ -288,6 +413,22 @@ pub async fn reconcile(
                 active_outbound = active_out.len(),
                 "edge status"
             );
+
+            // Compile workloads and policies
+            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain);
+            let compiled = compiler.compile(&service);
+
+            // Get namespace from service metadata or default
+            let namespace = service.metadata.namespace.as_deref().unwrap_or("default");
+
+            // Apply compiled resources to the cluster
+            info!(
+                resources = compiled.resource_count(),
+                "applying compiled resources"
+            );
+            ctx.kube
+                .apply_compiled_service(&name, namespace, &compiled)
+                .await?;
 
             // Transition to Ready
             info!("service ready");
@@ -684,6 +825,8 @@ mod tests {
         mock.expect_list_services().returning(|| Ok(vec![]));
         mock.expect_list_external_services()
             .returning(|| Ok(vec![]));
+        mock.expect_apply_compiled_service()
+            .returning(|_, _, _| Ok(()));
         mock
     }
 
@@ -925,8 +1068,8 @@ mod tests {
         let mock_kube2 = Arc::new(mock_kube_success());
         let shared_graph = Arc::new(ServiceGraph::new());
 
-        let ctx1 = ServiceContext::new(mock_kube1, Arc::clone(&shared_graph), "env1");
-        let ctx2 = ServiceContext::new(mock_kube2, Arc::clone(&shared_graph), "env2");
+        let ctx1 = ServiceContext::new(mock_kube1, Arc::clone(&shared_graph), "env1", "test.local");
+        let ctx2 = ServiceContext::new(mock_kube2, Arc::clone(&shared_graph), "env2", "test.local");
 
         // Add service via ctx1
         ctx1.graph

@@ -13,6 +13,24 @@ use serde::{Deserialize, Serialize};
 
 use super::types::Condition;
 
+/// Generate a schema for arbitrary JSON objects
+///
+/// This is used for fields like `params` that can contain any JSON structure.
+/// Kubernetes requires a type to be specified, so we use "object" with
+/// x-kubernetes-preserve-unknown-fields to allow arbitrary content.
+fn arbitrary_json_object(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    schemars::schema::Schema::Object(schemars::schema::SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::Object.into()),
+        extensions: [(
+            "x-kubernetes-preserve-unknown-fields".to_string(),
+            true.into(),
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    })
+}
+
 /// Direction of a service dependency
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -72,8 +90,9 @@ pub struct ResourceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
-    /// Resource-specific parameters
+    /// Resource-specific parameters (arbitrary JSON object)
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "arbitrary_json_object")]
     pub params: Option<serde_json::Value>,
 
     /// Optional specialization class

@@ -10,12 +10,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use lattice::provider::{Provider, DockerProvider};
-//! use lattice::crd::LatticeCluster;
-//!
+//! ```text
 //! let provider = DockerProvider::new();
-//! let cluster: LatticeCluster = /* ... */;
+//! let cluster: LatticeCluster = ...;
 //! let manifests = provider.generate_capi_manifests(&cluster).await?;
 //! ```
 
@@ -180,7 +177,10 @@ pub struct ControlPlaneConfig {
 /// This is shared across ALL providers. MachineDeployment is always created with
 /// replicas=0 during initial provisioning. After pivot, the cluster's local
 /// controller scales up to match spec.nodes.workers.
-pub fn generate_machine_deployment(config: &ClusterConfig, infra: &InfrastructureRef) -> CAPIManifest {
+pub fn generate_machine_deployment(
+    config: &ClusterConfig,
+    infra: &InfrastructureRef,
+) -> CAPIManifest {
     let deployment_name = format!("{}-md-0", config.name);
     let spec = serde_json::json!({
         "clusterName": config.name,
@@ -278,9 +278,14 @@ pub fn generate_cluster(config: &ClusterConfig, infra: &InfrastructureRef) -> CA
         }
     });
 
-    CAPIManifest::new(CAPI_CLUSTER_API_VERSION, "Cluster", config.name, config.namespace)
-        .with_labels(config.labels.clone())
-        .with_spec(spec)
+    CAPIManifest::new(
+        CAPI_CLUSTER_API_VERSION,
+        "Cluster",
+        config.name,
+        config.namespace,
+    )
+    .with_labels(config.labels.clone())
+    .with_spec(spec)
 }
 
 /// Generate the KubeadmControlPlane resource
@@ -521,10 +526,7 @@ pub trait Provider: Send + Sync {
 /// # Returns
 ///
 /// A boxed provider instance, or an error if the provider type is not supported
-pub fn create_provider(
-    provider_type: ProviderType,
-    namespace: &str,
-) -> Result<Box<dyn Provider>> {
+pub fn create_provider(provider_type: ProviderType, namespace: &str) -> Result<Box<dyn Provider>> {
     match provider_type {
         ProviderType::Docker => Ok(Box::new(DockerProvider::with_namespace(namespace))),
         ProviderType::Aws => Err(crate::Error::provider(

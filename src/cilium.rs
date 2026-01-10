@@ -44,7 +44,13 @@ fn generate_ip_pool(name: &str, cidr: &str) -> String {
         },
     };
 
-    serde_yaml::to_string(&pool).expect("failed to serialize IP pool")
+    serde_yaml::to_string(&pool).unwrap_or_else(|e| {
+        panic!(
+            "BUG: failed to serialize CiliumLoadBalancerIPPool to YAML: {}. \
+             This indicates a bug in the struct definition.",
+            e
+        )
+    })
 }
 
 /// Generate CiliumL2AnnouncementPolicy resource
@@ -62,7 +68,13 @@ fn generate_l2_policy() -> String {
         },
     };
 
-    serde_yaml::to_string(&policy).expect("failed to serialize L2 policy")
+    serde_yaml::to_string(&policy).unwrap_or_else(|e| {
+        panic!(
+            "BUG: failed to serialize CiliumL2AnnouncementPolicy to YAML: {}. \
+             This indicates a bug in the struct definition.",
+            e
+        )
+    })
 }
 
 fn managed_by_labels() -> std::collections::BTreeMap<String, String> {

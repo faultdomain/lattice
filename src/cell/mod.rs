@@ -46,10 +46,10 @@ impl Default for CellConfig {
         Self {
             bootstrap_addr: format!("0.0.0.0:{}", crate::DEFAULT_BOOTSTRAP_PORT)
                 .parse()
-                .unwrap(),
+                .expect("hardcoded socket address is valid"),
             grpc_addr: format!("0.0.0.0:{}", crate::DEFAULT_GRPC_PORT)
                 .parse()
-                .unwrap(),
+                .expect("hardcoded socket address is valid"),
             token_ttl: Duration::from_secs(3600),
             server_sans: vec![
                 "localhost".to_string(),

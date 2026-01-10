@@ -17,12 +17,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use lattice::provider::{Provider, DockerProvider};
-//! use lattice::crd::LatticeCluster;
-//!
+//! ```text
 //! let provider = DockerProvider::new();
-//! let cluster = /* create LatticeCluster */;
+//! let cluster: LatticeCluster = ...;
 //! let manifests = provider.generate_capi_manifests(&cluster).await?;
 //! ```
 
@@ -32,8 +29,8 @@ use std::collections::BTreeMap;
 
 use super::{
     build_post_kubeadm_commands, generate_cluster, generate_control_plane,
-    generate_kubeadm_config_template, generate_machine_deployment, CAPIManifest,
-    ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
+    generate_kubeadm_config_template, generate_machine_deployment, CAPIManifest, ClusterConfig,
+    ControlPlaneConfig, InfrastructureRef, Provider,
 };
 use crate::crd::{LatticeCluster, ProviderSpec, ProviderType};
 use crate::Result;

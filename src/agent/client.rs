@@ -311,8 +311,7 @@ impl AgentClient {
         // Start the K8s API proxy stream
         // This allows the cell to run clusterctl move through the gRPC tunnel
         let cluster_name = self.config.cluster_name.clone();
-        let kube_client = self.kube_client.clone();
-        Self::start_proxy_stream(channel, cluster_name, kube_client).await;
+        Self::start_proxy_stream(channel, cluster_name).await;
 
         *self.state.write().await = ClientState::Connected;
         info!("Connected to cell");
@@ -726,11 +725,7 @@ impl AgentClient {
     /// This establishes the ProxyKubernetesAPI stream which allows the cell
     /// to run clusterctl move through the gRPC tunnel. The agent receives
     /// K8s API requests and forwards them to the local API server.
-    async fn start_proxy_stream(
-        channel: tonic::transport::Channel,
-        cluster_name: String,
-        kube_client: Option<KubeClient>,
-    ) {
+    async fn start_proxy_stream(channel: tonic::transport::Channel, cluster_name: String) {
         tokio::spawn(async move {
             let mut client = LatticeAgentClient::new(channel);
 
@@ -777,7 +772,7 @@ impl AgentClient {
                         );
 
                         // Forward to local K8s API
-                        let response = Self::handle_proxy_request(&request, &kube_client).await;
+                        let response = Self::handle_proxy_request(&request).await;
                         let response = KubeProxyResponse {
                             // Pass through the original request_id unchanged
                             request_id: request.request_id.clone(),
@@ -804,10 +799,7 @@ impl AgentClient {
     }
 
     /// Handle a single proxy request by forwarding to local K8s API
-    async fn handle_proxy_request(
-        request: &KubeProxyRequest,
-        _kube_client: &Option<KubeClient>,
-    ) -> KubeProxyResponse {
+    async fn handle_proxy_request(request: &KubeProxyRequest) -> KubeProxyResponse {
         use reqwest::Method;
 
         // Use reqwest to forward to local K8s API

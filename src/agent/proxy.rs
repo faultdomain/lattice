@@ -348,15 +348,13 @@ impl std::error::Error for ProxyError {}
 /// The port number the proxy is listening on, or an error if binding fails.
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// let port = start_persistent_proxy(
 ///     "workload-cluster".to_string(),
 ///     request_tx,
 ///     response_rx,
 /// ).await?;
-///
 /// // Proxy is now running at 127.0.0.1:{port}
-/// // Generate kubeconfig pointing to it
 /// ```
 pub async fn start_persistent_proxy(
     cluster_name: String,

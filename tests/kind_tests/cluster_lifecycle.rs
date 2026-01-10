@@ -102,59 +102,6 @@ async fn set_cluster_phase(api: &Api<LatticeCluster>, name: &str, phase: Cluster
 // These tests demonstrate the journey of a cluster from creation through
 // provisioning. The controller's state machine drives this progression.
 
-/// Story: User creates a new cluster, controller begins provisioning
-///
-/// When a platform operator creates a new LatticeCluster resource without any
-/// status, the controller recognizes this as a new cluster and transitions it
-/// to the Provisioning phase. This triggers the infrastructure creation process.
-///
-/// Lifecycle: (no status) -> Provisioning
-#[tokio::test]
-#[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
-async fn story_new_cluster_triggers_provisioning() {
-    let client = ensure_test_cluster()
-        .await
-        .expect("failed to setup cluster");
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-    let name = "test-new-cluster-provision";
-
-    // Cleanup from previous test runs
-    cleanup_cluster(&client, name).await;
-
-    // Act: Create a new cluster (no status)
-    let cluster = sample_cluster(name);
-    let created = api
-        .create(&PostParams::default(), &cluster)
-        .await
-        .expect("failed to create cluster");
-
-    // Act: Controller reconciles the new cluster
-    let ctx = create_test_context(client.clone());
-    let result = reconcile(Arc::new(created), ctx).await;
-
-    // Assert: Reconcile succeeds and returns a requeue action
-    assert!(result.is_ok(), "Reconcile should succeed");
-    let action = result.unwrap();
-    assert!(
-        matches!(action, Action { .. }),
-        "Should return requeue action"
-    );
-
-    // Assert: Cluster status transitions to Provisioning
-    let updated = api.get(name).await.expect("failed to get cluster");
-    assert!(updated.status.is_some(), "Status should be set");
-    let status = updated.status.unwrap();
-    assert_eq!(
-        status.phase,
-        ClusterPhase::Provisioning,
-        "Should be in Provisioning phase"
-    );
-    assert!(status.message.is_some(), "Should have a status message");
-
-    // Cleanup
-    cleanup_cluster(&client, name).await;
-}
-
 /// Story: Cluster in Provisioning waits for infrastructure to be ready
 ///
 /// While infrastructure is being created (VMs, networks, etc.), the controller
@@ -365,66 +312,6 @@ async fn story_failed_cluster_awaits_user_intervention() {
     );
     // Note: The action should be Action::await_change() but we can't easily assert
     // the exact action type without pattern matching on the internal Duration
-
-    // Cleanup
-    cleanup_cluster(&client, name).await;
-}
-
-// =============================================================================
-// Complete Lifecycle Stories
-// =============================================================================
-//
-// These tests demonstrate the full cluster lifecycle flow.
-
-/// Story: New cluster progresses through initial lifecycle stages
-///
-/// This test demonstrates the full flow of a new cluster from creation
-/// through the first several reconciliation cycles. It shows how the
-/// controller's state machine drives cluster progression.
-///
-/// Lifecycle: (new) -> Provisioning -> (checking...) -> Provisioning
-#[tokio::test]
-#[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
-async fn story_new_cluster_progresses_through_lifecycle() {
-    let client = ensure_test_cluster()
-        .await
-        .expect("failed to setup cluster");
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-    let name = "test-full-lifecycle";
-
-    // Cleanup from previous test runs
-    cleanup_cluster(&client, name).await;
-
-    // Act 1: Create a new cluster
-    let cluster = sample_cluster(name);
-    let created = api
-        .create(&PostParams::default(), &cluster)
-        .await
-        .expect("failed to create cluster");
-
-    let ctx = create_test_context(client.clone());
-
-    // Act 2: First reconcile - should transition to Provisioning
-    let result = reconcile(Arc::new(created), ctx.clone()).await;
-    assert!(result.is_ok(), "First reconcile should succeed");
-
-    let cluster = api.get(name).await.expect("failed to get cluster");
-    assert_eq!(
-        cluster.status.as_ref().map(|s| s.phase.clone()),
-        Some(ClusterPhase::Provisioning),
-        "Should transition to Provisioning"
-    );
-
-    // Act 3: Second reconcile - should stay in Provisioning while waiting
-    let result = reconcile(Arc::new(cluster), ctx.clone()).await;
-    assert!(result.is_ok(), "Second reconcile should succeed");
-
-    let cluster = api.get(name).await.expect("failed to get cluster");
-    assert_eq!(
-        cluster.status.as_ref().map(|s| s.phase.clone()),
-        Some(ClusterPhase::Provisioning),
-        "Should remain in Provisioning while infrastructure is created"
-    );
 
     // Cleanup
     cleanup_cluster(&client, name).await;

@@ -12,18 +12,11 @@
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use lattice::compiler::ServiceCompiler;
-//! use lattice::graph::ServiceGraph;
-//!
+//! ```text
 //! let graph = ServiceGraph::new();
-//! // ... populate graph ...
-//!
 //! let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
 //! let output = compiler.compile(&lattice_service);
-//!
-//! // output.workloads.deployment, output.workloads.service, etc.
-//! // output.policies.authorization_policies, output.policies.cilium_policies, etc.
+//! // output.workloads, output.policies
 //! ```
 //!
 //! # Environment Resolution
@@ -117,19 +110,18 @@ impl<'a> ServiceCompiler<'a> {
     /// The environment is derived from the `lattice.dev/environment` label (or namespace).
     pub fn compile(&self, service: &LatticeService) -> CompiledService {
         let name = service.metadata.name.as_deref().unwrap_or("unknown");
-        let namespace = service
-            .metadata
-            .namespace
-            .as_deref()
-            .unwrap_or("default");
+        let namespace = service.metadata.namespace.as_deref().unwrap_or("default");
         let env = self.get_environment(service);
 
         // Delegate to specialized compilers
         let workloads = WorkloadCompiler::compile(service);
-        let policies = PolicyCompiler::new(self.graph, &self.trust_domain)
-            .compile(name, namespace, &env);
+        let policies =
+            PolicyCompiler::new(self.graph, &self.trust_domain).compile(name, namespace, &env);
 
-        CompiledService { workloads, policies }
+        CompiledService {
+            workloads,
+            policies,
+        }
     }
 
     /// Compile the mesh-wide default-deny AuthorizationPolicy
@@ -165,8 +157,8 @@ impl<'a> ServiceCompiler<'a> {
 mod tests {
     use super::*;
     use crate::crd::{
-        ContainerSpec, DeploySpec, DependencyDirection, PortSpec, ReplicaSpec,
-        ResourceSpec, ResourceType, ServicePortsSpec,
+        ContainerSpec, DependencyDirection, DeploySpec, PortSpec, ReplicaSpec, ResourceSpec,
+        ResourceType, ServicePortsSpec,
     };
     use std::collections::BTreeMap;
 
@@ -220,7 +212,10 @@ mod tests {
         }
     }
 
-    fn make_service_spec_for_graph(deps: Vec<&str>, callers: Vec<&str>) -> crate::crd::LatticeServiceSpec {
+    fn make_service_spec_for_graph(
+        deps: Vec<&str>,
+        callers: Vec<&str>,
+    ) -> crate::crd::LatticeServiceSpec {
         let mut resources = BTreeMap::new();
         for dep in deps {
             resources.insert(

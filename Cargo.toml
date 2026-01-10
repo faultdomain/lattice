@@ -9,6 +9,8 @@ license = "Apache-2.0"
 default = []
 # Use FIPS-validated crypto (required for production)
 fips = []
+# Enable full E2E tests (20-30 min, requires Docker with 8GB+ RAM)
+e2e = []
 
 [dependencies]
 # Kubernetes

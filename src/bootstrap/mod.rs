@@ -53,7 +53,7 @@ use crate::crd::LatticeCluster;
 use crate::pki::{CertificateAuthority, PkiError};
 use kube::CustomResourceExt;
 
-pub use token::{BootstrapToken, TokenStore};
+pub use token::{BootstrapToken, TokenGenerationError, TokenStore};
 
 /// Bootstrap endpoint errors
 #[derive(Debug, Error)]
@@ -163,156 +163,88 @@ pub trait ManifestGenerator: Send + Sync {
     ) -> Vec<String>;
 }
 
+/// Configuration for generating bootstrap manifests
+///
+/// Groups related parameters for `generate_all_manifests` to improve readability
+/// and allow easier extension without breaking call sites.
+#[derive(Debug, Clone)]
+pub struct ManifestConfig<'a> {
+    /// Container image for the operator
+    pub image: &'a str,
+    /// Optional registry credentials (image pull secret)
+    pub registry_credentials: Option<&'a str>,
+    /// Optional networking configuration (for LB-IPAM)
+    pub networking: Option<&'a crate::crd::NetworkingSpec>,
+    /// Cluster name (for operator identity)
+    pub cluster_name: Option<&'a str>,
+    /// Provider type (docker, aws, etc.)
+    pub provider: Option<&'a str>,
+    /// Parent host (None for root/cell clusters)
+    pub parent_host: Option<&'a str>,
+    /// Parent gRPC port
+    pub parent_grpc_port: u16,
+}
+
 /// Generate all bootstrap manifests including LB-IPAM resources if networking is configured
 ///
 /// This is the single entry point for manifest generation - both CRS (management cluster)
-/// and bootstrap webhook (workload clusters) should call this function to avoid drift.
+/// and bootstrap webhook (child clusters) should call this function to avoid drift.
 pub fn generate_all_manifests<G: ManifestGenerator>(
     generator: &G,
-    image: &str,
-    registry_credentials: Option<&str>,
-    networking: Option<&crate::crd::NetworkingSpec>,
-    cluster_name: Option<&str>,
-    provider: Option<&str>,
+    config: &ManifestConfig<'_>,
 ) -> Vec<String> {
-    let mut manifests = generator.generate(image, registry_credentials, cluster_name, provider);
+    let mut manifests = generator.generate(
+        config.image,
+        config.registry_credentials,
+        config.cluster_name,
+        config.provider,
+    );
 
     // Add Cilium LB-IPAM resources if networking is configured
-    if let Some(networking) = networking {
+    if let Some(networking) = config.networking {
         manifests.extend(crate::cilium::generate_lb_resources(networking));
     }
+
+    // Add CiliumNetworkPolicy for the operator
+    // - Root clusters (no parent): egress to DNS + API server only
+    // - Child clusters (have parent): also include parent for gRPC connection
+    manifests.push(crate::infra::generate_operator_network_policy(
+        config.parent_host,
+        config.parent_grpc_port,
+    ));
 
     manifests
 }
 
-/// Cilium chart configuration
-pub struct CiliumConfig {
-    /// Helm chart repository URL
-    pub repo_url: &'static str,
-    /// Chart version
-    pub version: &'static str,
-}
-
-impl Default for CiliumConfig {
-    fn default() -> Self {
-        Self {
-            repo_url: "https://helm.cilium.io/",
-            version: "1.16.5",
-        }
-    }
-}
-
 /// Default manifest generator that creates agent and CNI manifests
+///
+/// Uses the shared CiliumReconciler from infra module to ensure bootstrap
+/// and day-2 reconciliation use the same manifest generation.
 pub struct DefaultManifestGenerator {
-    /// Pre-rendered Cilium manifests (from helm template)
-    cilium_manifests: Vec<String>,
+    /// Cilium reconciler (shared with agent for consistent manifests)
+    cilium: crate::infra::CiliumReconciler,
 }
 
 impl DefaultManifestGenerator {
     /// Create a new generator, pre-rendering Cilium manifests via helm template
     pub fn new() -> Result<Self, BootstrapError> {
-        Self::with_config(CiliumConfig::default())
+        let cilium = crate::infra::CiliumReconciler::new().map_err(|e| {
+            BootstrapError::Internal(format!("failed to create Cilium reconciler: {}", e))
+        })?;
+        Ok(Self { cilium })
     }
 
     /// Create with custom Cilium configuration
-    pub fn with_config(config: CiliumConfig) -> Result<Self, BootstrapError> {
-        let cilium_manifests = Self::render_cilium(&config)?;
-        Ok(Self { cilium_manifests })
+    pub fn with_cilium_config(config: crate::infra::CiliumConfig) -> Result<Self, BootstrapError> {
+        let cilium = crate::infra::CiliumReconciler::with_config(config).map_err(|e| {
+            BootstrapError::Internal(format!("failed to create Cilium reconciler: {}", e))
+        })?;
+        Ok(Self { cilium })
     }
 
-    /// Render Cilium manifests using helm template
-    fn render_cilium(config: &CiliumConfig) -> Result<Vec<String>, BootstrapError> {
-        use std::process::Command;
-
-        // Add the Cilium helm repo (idempotent - helm handles if already exists)
-        let repo_add = Command::new("helm")
-            .args(["repo", "add", "cilium", config.repo_url])
-            .output()
-            .map_err(|e| BootstrapError::Internal(format!("failed to run helm repo add: {}", e)))?;
-
-        // Ignore "already exists" errors, fail on other errors
-        if !repo_add.status.success() {
-            let stderr = String::from_utf8_lossy(&repo_add.stderr);
-            if !stderr.contains("already exists") {
-                return Err(BootstrapError::Internal(format!(
-                    "helm repo add failed: {}",
-                    stderr
-                )));
-            }
-        }
-
-        // Update the repo to get latest index
-        let _ = Command::new("helm")
-            .args(["repo", "update", "cilium"])
-            .output();
-
-        // Cilium helm values for Istio compatibility (matching Elixir POC)
-        let values = [
-            "--set",
-            "hubble.enabled=false",
-            "--set",
-            "hubble.relay.enabled=false",
-            "--set",
-            "hubble.ui.enabled=false",
-            "--set",
-            "prometheus.enabled=false",
-            "--set",
-            "operator.prometheus.enabled=false",
-            "--set",
-            "cni.exclusive=false", // Istio compatibility
-            "--set",
-            "kubeProxyReplacement=false",
-            "--set",
-            "l2announcements.enabled=true",
-            "--set",
-            "externalIPs.enabled=true",
-        ];
-
-        let output = Command::new("helm")
-            .args([
-                "template",
-                "cilium",
-                "cilium",
-                "--repo",
-                config.repo_url,
-                "--version",
-                config.version,
-                "--namespace",
-                "kube-system",
-            ])
-            .args(values)
-            .output()
-            .map_err(|e| BootstrapError::Internal(format!("failed to run helm: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(BootstrapError::Internal(format!(
-                "helm template failed: {}",
-                stderr
-            )));
-        }
-
-        let yaml_str = String::from_utf8_lossy(&output.stdout);
-
-        // Split on document separators and filter out empty documents
-        // We avoid serde_yaml round-trip because it corrupts octal values like defaultMode: 0400
-        // by converting them to quoted strings '0400' which K8s rejects
-        let manifests: Vec<String> = yaml_str
-            .split("\n---")
-            .map(|doc| doc.trim())
-            .filter(|doc| !doc.is_empty() && doc.contains("kind:"))
-            .map(|doc| {
-                // Ensure each document starts with ---
-                if doc.starts_with("---") {
-                    doc.to_string()
-                } else {
-                    format!("---\n{}", doc)
-                }
-            })
-            .collect();
-
-        info!(count = manifests.len(), "Rendered Cilium manifests");
-        Ok(manifests)
+    /// Get the Cilium reconciler (for shared use with agent)
+    pub fn cilium(&self) -> &crate::infra::CiliumReconciler {
+        &self.cilium
     }
 
     /// Generate the Lattice operator manifests (non-Cilium)
@@ -323,13 +255,13 @@ impl DefaultManifestGenerator {
     /// Environment variables set:
     /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on
     /// - LATTICE_PROVIDER: So agent knows which CAPI provider to install
-    pub fn generate_operator_manifests(
+    fn generate_operator_manifests(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<&str>,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>, serde_json::Error> {
         const NAMESPACE: &str = "lattice-system";
 
         let registry_creds = registry_credentials.map(|s| s.to_string());
@@ -504,16 +436,16 @@ impl DefaultManifestGenerator {
         };
 
         // Serialize all resources to JSON
-        let mut manifests = vec![serde_json::to_string(&namespace).expect("serialize namespace")];
+        let mut manifests = vec![serde_json::to_string(&namespace)?];
         if let Some(ref reg_secret) = registry_secret {
-            manifests.push(serde_json::to_string(reg_secret).expect("serialize registry secret"));
+            manifests.push(serde_json::to_string(reg_secret)?);
         }
         manifests.extend([
-            serde_json::to_string(&service_account).expect("serialize serviceaccount"),
-            serde_json::to_string(&cluster_role_binding).expect("serialize clusterrolebinding"),
-            serde_json::to_string(&operator_deployment).expect("serialize deployment"),
+            serde_json::to_string(&service_account)?,
+            serde_json::to_string(&cluster_role_binding)?,
+            serde_json::to_string(&operator_deployment)?,
         ]);
-        manifests
+        Ok(manifests)
     }
 }
 
@@ -528,18 +460,30 @@ impl ManifestGenerator for DefaultManifestGenerator {
         let mut manifests = Vec::new();
 
         // CNI manifests first (Cilium) - must be applied before other pods can run
-        manifests.extend(self.cilium_manifests.clone());
+        // Uses the same generator as agent reconciliation to prevent drift
+        manifests.extend(self.cilium.manifests().iter().cloned());
 
         // Then operator manifests - same deployment for all clusters
         // Controller reads LatticeCluster CRD to determine behavior:
         // - spec.cell present → starts cell servers, can provision clusters
         // - spec.cellRef present → connects to parent
-        manifests.extend(self.generate_operator_manifests(
-            image,
-            registry_credentials,
-            cluster_name,
-            provider,
-        ));
+        //
+        // Note: generate_operator_manifests returns Result, but serialization of
+        // well-known k8s types should never fail. If it does, it indicates a
+        // serious bug in the struct definitions.
+        manifests.extend(
+            self.generate_operator_manifests(image, registry_credentials, cluster_name, provider)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "BUG: failed to serialize operator manifests to JSON: {}. \
+                         This indicates a bug in the Kubernetes resource definitions.",
+                        e
+                    )
+                }),
+        );
+
+        // Note: CiliumNetworkPolicy is added by generate_all_manifests()
+        // based on whether parent_host is provided.
 
         // Note: LatticeCluster CRD and resource are sent post-pivot via ApplyManifestsCommand
         // to avoid the local controller fighting with the pivot process
@@ -685,34 +629,45 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
     /// Generate bootstrap response for a cluster
     ///
-    /// This generates manifests for workload clusters:
+    /// This generates manifests for clusters with a parent:
     /// - CNI (Cilium)
     /// - Lattice operator
+    /// - CiliumNetworkPolicy (with parent for egress)
     /// - LatticeCluster CRD definition (CustomResourceDefinition)
-    /// - LatticeCluster CRD instance (with cellRef pointing to parent)
+    /// - LatticeCluster CRD instance (with parent reference)
     /// - Parent connection config Secret
     pub fn generate_response(&self, info: &ClusterBootstrapInfo) -> BootstrapResponse {
-        // Use the standard manifest generation - pass cluster_id and provider so operator knows its identity
-        let mut manifests = generate_all_manifests(
-            &self.manifest_generator,
-            &self.image,
-            self.registry_credentials.as_deref(),
-            info.networking.as_ref(),
-            Some(&info.cluster_id),
-            Some(&info.provider),
-        );
+        // Parse parent endpoint for network policy
+        // Format: "host:http_port:grpc_port"
+        let (parent_host, grpc_port) = parse_parent_endpoint(&info.cell_endpoint);
+
+        // Use the standard manifest generation - pass cluster_id, provider, and parent info
+        let config = ManifestConfig {
+            image: &self.image,
+            registry_credentials: self.registry_credentials.as_deref(),
+            networking: info.networking.as_ref(),
+            cluster_name: Some(&info.cluster_id),
+            provider: Some(&info.provider),
+            parent_host: parent_host.as_deref(),
+            parent_grpc_port: grpc_port,
+        };
+        let mut manifests = generate_all_manifests(&self.manifest_generator, &config);
 
         // Add the LatticeCluster CRD definition (CustomResourceDefinition)
         // This must come before the CRD instance so Kubernetes knows the type
-        let crd_definition =
-            serde_yaml::to_string(&LatticeCluster::crd()).expect("serialize CRD definition");
+        let crd_definition = serde_yaml::to_string(&LatticeCluster::crd()).unwrap_or_else(|e| {
+            panic!(
+                "BUG: failed to serialize LatticeCluster CRD to YAML: {}. \
+                 This indicates a bug in the CRD definition.",
+                e
+            )
+        });
         manifests.push(crd_definition);
 
         // Add the LatticeCluster CRD instance - this tells the controller it has a parent
         manifests.push(info.cluster_manifest.clone());
 
         // Add parent connection config Secret for agent to use
-        // cell_endpoint format: "host:http_port:grpc_port"
         let parent_config = Secret {
             metadata: ObjectMeta {
                 name: Some("lattice-parent-config".to_string()),
@@ -726,7 +681,13 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             ])),
             ..Default::default()
         };
-        manifests.push(serde_json::to_string(&parent_config).expect("serialize parent config"));
+        manifests.push(serde_json::to_string(&parent_config).unwrap_or_else(|e| {
+            panic!(
+                "BUG: failed to serialize parent config Secret to JSON: {}. \
+                 This indicates a bug in the Secret definition.",
+                e
+            )
+        }));
 
         BootstrapResponse {
             cluster_id: info.cluster_id.clone(),
@@ -766,6 +727,19 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// Check if a cluster is registered
     pub fn is_cluster_registered(&self, cluster_id: &str) -> bool {
         self.clusters.contains_key(cluster_id)
+    }
+}
+
+/// Parse parent endpoint into host and gRPC port
+/// Format: "host:http_port:grpc_port"
+fn parse_parent_endpoint(endpoint: &str) -> (Option<String>, u16) {
+    let parts: Vec<&str> = endpoint.split(':').collect();
+    match parts.as_slice() {
+        [host, _http_port, grpc_port] => {
+            let port = grpc_port.parse().unwrap_or(crate::DEFAULT_GRPC_PORT);
+            (Some((*host).to_string()), port)
+        }
+        _ => (None, crate::DEFAULT_GRPC_PORT),
     }
 }
 

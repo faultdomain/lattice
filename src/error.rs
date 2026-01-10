@@ -456,5 +456,32 @@ mod tests {
 
         // CAPI installation does NOT have cluster
         assert_eq!(Error::capi_installation("msg").cluster(), None);
+
+        // Bootstrap does NOT have cluster
+        assert_eq!(
+            Error::Bootstrap("bootstrap failed".to_string()).cluster(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_capi_installation_for_provider() {
+        let err = Error::capi_installation_for_provider("docker", "daemon not running");
+        // Check error message includes the message
+        assert!(err.to_string().contains("daemon not running"));
+        // Check provider is stored in the struct
+        match &err {
+            Error::CapiInstallation { provider, .. } => {
+                assert_eq!(provider.as_deref(), Some("docker"));
+            }
+            _ => panic!("Expected CapiInstallation variant"),
+        }
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_bootstrap_error_is_retryable() {
+        let err = Error::Bootstrap("connection timeout".to_string());
+        assert!(err.is_retryable());
     }
 }

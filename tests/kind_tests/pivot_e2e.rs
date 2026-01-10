@@ -10,6 +10,7 @@
 //! 6. Deletes bootstrap cluster
 //! 7. Creates a workload cluster from the self-managing management cluster
 //! 8. Verifies workload cluster reaches Ready state
+//! 9. Deploys test services and verifies bilateral agreement pattern
 //!
 //! # Prerequisites
 //!
@@ -22,8 +23,11 @@
 //!
 //! ```bash
 //! # This test takes 20-30 minutes
-//! cargo test --test kind pivot_e2e -- --ignored --nocapture
+//! cargo test --features e2e --test kind pivot_e2e -- --nocapture
 //! ```
+
+// Only compile this module when the e2e feature is enabled
+#![cfg(feature = "e2e")]
 
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
@@ -37,10 +41,12 @@ use kube::Client;
 use tokio::time::sleep;
 
 use lattice::crd::{
-    ClusterPhase, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec, ProviderSpec,
-    ProviderType,
+    ClusterPhase, ContainerSpec, DependencyDirection, DeploySpec, KubernetesSpec, LatticeCluster,
+    LatticeClusterSpec, LatticeService, LatticeServiceSpec, NodeSpec, PortSpec, ProviderSpec,
+    ProviderType, ReplicaSpec, ResourceSpec, ResourceType, ServicePortsSpec,
 };
 use lattice::install::{InstallConfig, Installer};
+use std::collections::BTreeMap;
 
 // =============================================================================
 // Test Configuration
@@ -263,6 +269,474 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
     }
 }
 
+// =============================================================================
+// Service Mesh Test Services
+// =============================================================================
+//
+// We create 4 services to test the bilateral agreement pattern:
+//
+// - service-a (traffic-generator): Depends on B, C, D. Runs curl tests.
+// - service-b (allows-a): Allows inbound from A. Bilateral agreement = WORKS.
+// - service-c (no-inbound): No inbound allowed. Unilateral = BLOCKED.
+// - service-d (standalone): No relationship to A. BLOCKED.
+//
+// Expected results:
+// - A → B: SUCCESS (bilateral agreement)
+// - A → C: BLOCKED (A wants C, but C doesn't allow A)
+// - A → D: BLOCKED (no dependency declared)
+
+/// Namespace for test services
+const TEST_SERVICES_NAMESPACE: &str = "mesh-test";
+
+/// Create service-a: traffic generator that tests connectivity
+///
+/// This service depends on B, C, D and runs curl tests to verify
+/// which connections are allowed by the bilateral agreement pattern.
+fn create_service_a() -> LatticeService {
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: "curlimages/curl:latest".to_string(),
+            command: Some(vec!["/bin/sh".to_string()]),
+            args: Some(vec![
+                "-c".to_string(),
+                // Infinite loop: test each service and log results
+                r#"
+while true; do
+    echo "=== Traffic Test Run $(date) ==="
+
+    # Test service-b (should SUCCEED - bilateral agreement)
+    if curl -s --connect-timeout 3 http://service-b.mesh-test.svc.cluster.local/health > /dev/null 2>&1; then
+        echo "service-b: ALLOWED (expected)"
+    else
+        echo "service-b: BLOCKED (unexpected!)"
+    fi
+
+    # Test service-c (should FAIL - unilateral)
+    if curl -s --connect-timeout 3 http://service-c.mesh-test.svc.cluster.local/health > /dev/null 2>&1; then
+        echo "service-c: ALLOWED (unexpected!)"
+    else
+        echo "service-c: BLOCKED (expected)"
+    fi
+
+    # Test service-d (should FAIL - no relationship)
+    if curl -s --connect-timeout 3 http://service-d.mesh-test.svc.cluster.local/health > /dev/null 2>&1; then
+        echo "service-d: ALLOWED (unexpected!)"
+    else
+        echo "service-d: BLOCKED (expected)"
+    fi
+
+    echo "=== End Test Run ==="
+    sleep 10
+done
+"#
+                .to_string(),
+            ]),
+            variables: BTreeMap::new(),
+            files: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+        },
+    );
+
+    // Declare dependencies: A depends on B, C, D (outbound)
+    let mut resources = BTreeMap::new();
+    resources.insert(
+        "service-b".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            params: None,
+            class: None,
+        },
+    );
+    resources.insert(
+        "service-c".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            params: None,
+            class: None,
+        },
+    );
+    resources.insert(
+        "service-d".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            params: None,
+            class: None,
+        },
+    );
+
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        "lattice.dev/environment".to_string(),
+        TEST_SERVICES_NAMESPACE.to_string(),
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some("service-a".to_string()),
+            namespace: Some(TEST_SERVICES_NAMESPACE.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            containers,
+            resources,
+            service: None, // No port needed - just runs curl tests
+            replicas: ReplicaSpec { min: 1, max: None },
+            deploy: DeploySpec::default(),
+        },
+        status: None,
+    }
+}
+
+/// Create service-b: allows inbound from A (bilateral agreement)
+fn create_service_b() -> LatticeService {
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: "nginx:alpine".to_string(),
+            command: None,
+            args: None,
+            variables: BTreeMap::new(),
+            files: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+        },
+    );
+
+    // B allows inbound from A
+    let mut resources = BTreeMap::new();
+    resources.insert(
+        "service-a".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Inbound,
+            id: None,
+            params: None,
+            class: None,
+        },
+    );
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 80,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        "lattice.dev/environment".to_string(),
+        TEST_SERVICES_NAMESPACE.to_string(),
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some("service-b".to_string()),
+            namespace: Some(TEST_SERVICES_NAMESPACE.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            containers,
+            resources,
+            service: Some(ServicePortsSpec { ports }),
+            replicas: ReplicaSpec { min: 1, max: None },
+            deploy: DeploySpec::default(),
+        },
+        status: None,
+    }
+}
+
+/// Create service-c: does NOT allow inbound from A (unilateral blocked)
+fn create_service_c() -> LatticeService {
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: "nginx:alpine".to_string(),
+            command: None,
+            args: None,
+            variables: BTreeMap::new(),
+            files: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+        },
+    );
+
+    // C does NOT allow anyone - no inbound resources
+    let resources = BTreeMap::new();
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 80,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        "lattice.dev/environment".to_string(),
+        TEST_SERVICES_NAMESPACE.to_string(),
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some("service-c".to_string()),
+            namespace: Some(TEST_SERVICES_NAMESPACE.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            containers,
+            resources,
+            service: Some(ServicePortsSpec { ports }),
+            replicas: ReplicaSpec { min: 1, max: None },
+            deploy: DeploySpec::default(),
+        },
+        status: None,
+    }
+}
+
+/// Create service-d: standalone, no relationship to A
+fn create_service_d() -> LatticeService {
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: "nginx:alpine".to_string(),
+            command: None,
+            args: None,
+            variables: BTreeMap::new(),
+            files: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+        },
+    );
+
+    // D has no relationship to A at all
+    let resources = BTreeMap::new();
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 80,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        "lattice.dev/environment".to_string(),
+        TEST_SERVICES_NAMESPACE.to_string(),
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some("service-d".to_string()),
+            namespace: Some(TEST_SERVICES_NAMESPACE.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            containers,
+            resources,
+            service: Some(ServicePortsSpec { ports }),
+            replicas: ReplicaSpec { min: 1, max: None },
+            deploy: DeploySpec::default(),
+        },
+        status: None,
+    }
+}
+
+/// Deploy test services to the workload cluster
+async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
+    println!("  Creating namespace {}...", TEST_SERVICES_NAMESPACE);
+    let _ = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "create",
+            "namespace",
+            TEST_SERVICES_NAMESPACE,
+        ],
+    );
+
+    // Create client for workload cluster
+    // LatticeService is cluster-scoped, so we use Api::all
+    let client = client_from_kubeconfig(kubeconfig_path).await?;
+    let api: Api<LatticeService> = Api::all(client);
+
+    println!("  Deploying service-a (traffic generator)...");
+    api.create(&PostParams::default(), &create_service_a())
+        .await
+        .map_err(|e| format!("Failed to create service-a: {}", e))?;
+
+    println!("  Deploying service-b (allows A)...");
+    api.create(&PostParams::default(), &create_service_b())
+        .await
+        .map_err(|e| format!("Failed to create service-b: {}", e))?;
+
+    println!("  Deploying service-c (no inbound)...");
+    api.create(&PostParams::default(), &create_service_c())
+        .await
+        .map_err(|e| format!("Failed to create service-c: {}", e))?;
+
+    println!("  Deploying service-d (standalone)...");
+    api.create(&PostParams::default(), &create_service_d())
+        .await
+        .map_err(|e| format!("Failed to create service-d: {}", e))?;
+
+    Ok(())
+}
+
+/// Wait for all deployments to be ready
+async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(180); // 3 minutes for pods to start
+
+    println!("  Waiting for pods to be ready...");
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err("Timeout waiting for test pods to be ready".to_string());
+        }
+
+        let pods_output = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "pods",
+                "-n",
+                TEST_SERVICES_NAMESPACE,
+                "-o",
+                "jsonpath={range .items[*]}{.metadata.name},{.status.phase}{\"\\n\"}{end}",
+            ],
+        );
+
+        let mut running_count = 0;
+        let total_expected = 4; // service-a, b, c, d
+
+        for line in pods_output.lines() {
+            if line.contains("Running") {
+                running_count += 1;
+            }
+        }
+
+        println!("    {}/{} pods running", running_count, total_expected);
+
+        if running_count >= total_expected {
+            println!("  All test pods are running!");
+            return Ok(());
+        }
+
+        sleep(Duration::from_secs(10)).await;
+    }
+}
+
+/// Verify traffic patterns by checking service-a logs
+async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
+    println!("  Waiting for traffic tests to run (30 seconds)...");
+    sleep(Duration::from_secs(30)).await;
+
+    println!("  Checking service-a logs for traffic test results...");
+
+    let logs = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "logs",
+            "-n",
+            TEST_SERVICES_NAMESPACE,
+            "-l",
+            "app.kubernetes.io/name=service-a",
+            "--tail",
+            "50",
+        ],
+    )?;
+
+    println!("\n  === Service-A Traffic Test Logs ===\n{}\n", logs);
+
+    // Verify expected patterns
+    let mut b_allowed = false;
+    let mut c_blocked = false;
+    let mut d_blocked = false;
+
+    for line in logs.lines() {
+        if line.contains("service-b: ALLOWED") {
+            b_allowed = true;
+        }
+        if line.contains("service-c: BLOCKED") {
+            c_blocked = true;
+        }
+        if line.contains("service-d: BLOCKED") {
+            d_blocked = true;
+        }
+    }
+
+    println!("  Traffic verification results:");
+    println!(
+        "    - service-b (bilateral): {} (expected: ALLOWED)",
+        if b_allowed { "ALLOWED" } else { "BLOCKED" }
+    );
+    println!(
+        "    - service-c (unilateral): {} (expected: BLOCKED)",
+        if c_blocked { "BLOCKED" } else { "ALLOWED" }
+    );
+    println!(
+        "    - service-d (no relation): {} (expected: BLOCKED)",
+        if d_blocked { "BLOCKED" } else { "ALLOWED" }
+    );
+
+    if !b_allowed {
+        return Err(
+            "FAIL: service-b should be reachable (bilateral agreement not working)".to_string(),
+        );
+    }
+
+    if !c_blocked {
+        return Err(
+            "FAIL: service-c should be blocked (unilateral dependency not enforced)".to_string(),
+        );
+    }
+
+    if !d_blocked {
+        return Err("FAIL: service-d should be blocked (no dependency)".to_string());
+    }
+
+    println!("\n  SUCCESS: Bilateral agreement pattern is working correctly!");
+    Ok(())
+}
+
 /// Watch worker nodes scaling up on a cluster
 ///
 /// Polls kubectl to count ready worker nodes until the desired count is reached.
@@ -440,8 +914,8 @@ fn cleanup_all() {
 ///
 /// This test runs the complete Lattice installer flow, then provisions a
 /// workload cluster from the self-managing management cluster.
+/// Run with: cargo test --features e2e --test kind pivot_e2e -- --nocapture
 #[tokio::test]
-#[ignore = "requires Docker with 8GB+ RAM - takes 20-30min - run with: cargo test --test kind pivot_e2e -- --ignored --nocapture"]
 async fn story_full_install_and_workload_provisioning() {
     let result = tokio::time::timeout(E2E_TIMEOUT, run_full_e2e()).await;
 
@@ -449,12 +923,14 @@ async fn story_full_install_and_workload_provisioning() {
         Ok(Ok(())) => println!("\n=== Full E2E Test Completed Successfully! ===\n"),
         Ok(Err(e)) => {
             println!("\n=== Full E2E Test Failed: {} ===\n", e);
-            cleanup_all();
+            println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
+            println!("    kind delete clusters --all");
             panic!("E2E test failed: {}", e);
         }
         Err(_) => {
             println!("\n=== Full E2E Test Timed Out ({:?}) ===\n", E2E_TIMEOUT);
-            cleanup_all();
+            println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
+            println!("    kind delete clusters --all");
             panic!("E2E test timed out after {:?}", E2E_TIMEOUT);
         }
     }
@@ -778,6 +1254,26 @@ spec:
     println!("  Waiting for workload cluster workers to scale...");
     watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 2).await?;
 
+    // =========================================================================
+    // Phase 9: Service Mesh Testing
+    // =========================================================================
+    println!("\n[Phase 9] Testing service mesh bilateral agreement pattern...\n");
+    println!("  This test verifies the network policy bilateral agreement pattern:");
+    println!("    - service-a: Traffic generator, depends on B, C, D");
+    println!("    - service-b: Allows inbound from A (bilateral = WORKS)");
+    println!("    - service-c: No inbound allowed (unilateral = BLOCKED)");
+    println!("    - service-d: No relationship to A (BLOCKED)");
+    println!();
+
+    // Deploy test services
+    deploy_test_services(&workload_kubeconfig_path).await?;
+
+    // Wait for pods to be ready
+    wait_for_deployments(&workload_kubeconfig_path).await?;
+
+    // Verify traffic patterns
+    verify_traffic_patterns(&workload_kubeconfig_path).await?;
+
     println!("\n============================================================");
     println!("  FULL E2E TEST PASSED!");
     println!("============================================================");
@@ -790,12 +1286,15 @@ spec:
     println!("    [x] Workload cluster pivoted and is self-managing");
     println!("    [x] Management cluster scaled to 1 worker");
     println!("    [x] Workload cluster scaled to 2 workers");
+    println!("    [x] Service mesh bilateral agreement: A->B ALLOWED");
+    println!("    [x] Service mesh unilateral blocked: A->C BLOCKED");
+    println!("    [x] Service mesh no relationship: A->D BLOCKED");
     println!();
 
     // =========================================================================
-    // Phase 9: Cleanup
+    // Phase 10: Cleanup
     // =========================================================================
-    println!("\n[Phase 9] Cleaning up...\n");
+    println!("\n[Phase 10] Cleaning up...\n");
     cleanup_all();
 
     Ok(())

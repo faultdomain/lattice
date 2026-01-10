@@ -351,11 +351,63 @@ impl ServiceGraph {
     }
 
     /// Get all active edges in an environment (all bilateral agreements)
+    ///
+    /// This is optimized for performance by:
+    /// 1. Iterating directly over edges_out instead of cloning all services
+    /// 2. Avoiding redundant service lookups
+    /// 3. Minimizing allocations
     pub fn list_active_edges(&self, env: &str) -> Vec<ActiveEdge> {
-        self.list_services(env)
-            .into_iter()
-            .flat_map(|service| self.get_active_outbound_edges(env, &service.name))
-            .collect()
+        // Pre-collect service names to avoid holding DashMap references during iteration
+        let service_names: Vec<String> = self
+            .env_index
+            .get(env)
+            .map(|index| index.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let mut edges = Vec::new();
+
+        for caller_name in service_names {
+            let key = (env.to_string(), caller_name.clone());
+
+            // Get caller node and its outbound edges in one lookup each
+            let (caller_node, outbound) = match (self.vertices.get(&key), self.edges_out.get(&key))
+            {
+                (Some(node), Some(out)) => (node, out),
+                _ => continue,
+            };
+
+            // Skip non-local services
+            if caller_node.type_ != ServiceType::Local {
+                continue;
+            }
+
+            // Cache caller ports for all edges from this caller
+            let caller_ports = caller_node.ports.clone();
+
+            for callee_name in outbound.iter() {
+                let callee_key = (env.to_string(), callee_name.clone());
+                let Some(callee) = self.vertices.get(&callee_key) else {
+                    continue;
+                };
+
+                // Check bilateral agreement based on callee type
+                let allowed = match callee.type_ {
+                    ServiceType::Local | ServiceType::External => callee.allows(&caller_name),
+                    ServiceType::Unknown => false,
+                };
+
+                if allowed {
+                    edges.push(ActiveEdge {
+                        caller: caller_name.clone(),
+                        callee: callee_name.clone(),
+                        caller_ports: caller_ports.clone(),
+                        callee_ports: callee.ports.clone(),
+                    });
+                }
+            }
+        }
+
+        edges
     }
 
     /// Get all services affected by a change to a service (transitive closure)
@@ -1413,5 +1465,55 @@ mod tests {
 
         // Should have 50 services remaining
         assert_eq!(graph.service_count("prod"), 50);
+    }
+
+    // =========================================================================
+    // Default Impl and Edge Case Tests
+    // =========================================================================
+
+    #[test]
+    fn test_default_impl() {
+        let graph: ServiceGraph = Default::default();
+        assert_eq!(graph.service_count("any"), 0);
+    }
+
+    #[test]
+    fn test_delete_service_cleans_incoming_edges() {
+        let graph = ServiceGraph::new();
+
+        // api -> cache (api depends on cache)
+        // worker -> cache (worker also depends on cache)
+        let api_spec = make_service_spec(vec!["cache"], vec![]);
+        graph.put_service("prod", "api", &api_spec);
+
+        let worker_spec = make_service_spec(vec!["cache"], vec![]);
+        graph.put_service("prod", "worker", &worker_spec);
+
+        let cache_spec = make_service_spec(vec![], vec!["api", "worker"]);
+        graph.put_service("prod", "cache", &cache_spec);
+
+        // cache has both api and worker as dependents
+        let deps = graph.get_dependents("prod", "cache");
+        assert_eq!(deps.len(), 2);
+
+        // Delete cache - should clean up outgoing edges from api and worker
+        graph.delete_service("prod", "cache");
+
+        // api and worker should no longer list cache as dependency
+        assert!(graph.get_dependencies("prod", "api").is_empty());
+        assert!(graph.get_dependencies("prod", "worker").is_empty());
+    }
+
+    #[test]
+    fn test_active_edges_skip_nonexistent_callee() {
+        let graph = ServiceGraph::new();
+
+        // api depends on cache, but cache doesn't exist
+        let api_spec = make_service_spec(vec!["cache"], vec![]);
+        graph.put_service("prod", "api", &api_spec);
+
+        // Should return empty - callee doesn't exist
+        let edges = graph.get_active_outbound_edges("prod", "api");
+        assert!(edges.is_empty());
     }
 }

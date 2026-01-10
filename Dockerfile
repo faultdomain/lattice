@@ -8,6 +8,13 @@ RUN apt-get update && apt-get install -y \
     cmake \
     && rm -rf /var/lib/apt/lists/*
 
+# Install helm for chart download during build
+ARG TARGETARCH
+RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
+    curl -fsSL https://get.helm.sh/helm-v3.16.0-linux-${ARCH}.tar.gz | tar xz && \
+    mv linux-${ARCH}/helm /usr/local/bin/helm && \
+    rm -rf linux-${ARCH}
+
 WORKDIR /app
 
 # Copy everything needed for build
@@ -16,7 +23,7 @@ COPY proto ./proto
 COPY src ./src
 COPY benches ./benches
 
-# Build the binary
+# Build the binary (build.rs will download helm charts to test-charts/)
 RUN cargo build --release
 
 # Runtime stage - rust:latest is Debian trixie, so use matching runtime
@@ -50,14 +57,16 @@ RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
 # Copy binary from builder
 COPY --from=builder /app/target/release/lattice /usr/local/bin/lattice
 
-# Create non-root user with home directory for helm cache
-RUN useradd -r -u 1000 -m lattice
+# Copy helm charts from builder (downloaded by build.rs)
+COPY --from=builder /app/test-charts /charts
+
+# Create non-root user
+RUN useradd -r -u 1000 -m lattice && \
+    chown -R lattice:lattice /charts
+
 USER lattice
 
-# Set writable locations for helm and kubectl cache
-ENV HOME=/home/lattice
-ENV HELM_CACHE_HOME=/home/lattice/.cache/helm
-ENV HELM_CONFIG_HOME=/home/lattice/.config/helm
-ENV HELM_DATA_HOME=/home/lattice/.local/share/helm
+# Set chart location for runtime
+ENV LATTICE_CHARTS_DIR=/charts
 
 ENTRYPOINT ["/usr/local/bin/lattice"]

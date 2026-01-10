@@ -109,6 +109,8 @@ pub struct Installer {
     config: InstallConfig,
     /// Parsed LatticeCluster from config file
     cluster: LatticeCluster,
+    /// Cluster name (extracted during validation)
+    cluster_name: String,
 }
 
 impl Installer {
@@ -121,23 +123,21 @@ impl Installer {
                 InstallError::InvalidConfig(format!("failed to parse LatticeCluster YAML: {}", e))
             })?;
 
-        // Validate required fields
-        if cluster.metadata.name.is_none() {
-            return Err(InstallError::InvalidConfig(
-                "LatticeCluster must have metadata.name".to_string(),
-            ));
-        }
+        // Validate required fields and extract cluster name
+        let cluster_name = cluster.metadata.name.clone().ok_or_else(|| {
+            InstallError::InvalidConfig("LatticeCluster must have metadata.name".to_string())
+        })?;
 
-        Ok(Self { config, cluster })
+        Ok(Self {
+            config,
+            cluster,
+            cluster_name,
+        })
     }
 
     /// Get the cluster name from the parsed config
     fn cluster_name(&self) -> &str {
-        self.cluster
-            .metadata
-            .name
-            .as_deref()
-            .expect("validated in new()")
+        &self.cluster_name
     }
 
     /// Get the provider type from the parsed config
@@ -387,7 +387,7 @@ nodes:
     /// via webhook. CRS applies these to new clusters. Every cluster runs the same
     /// deployment - the controller reads LatticeCluster CRD to determine behavior.
     async fn create_bootstrap_crs(&self) -> Result<(), InstallError> {
-        use crate::bootstrap::{generate_all_manifests, DefaultManifestGenerator};
+        use crate::bootstrap::{generate_all_manifests, DefaultManifestGenerator, ManifestConfig};
 
         // Get all manifests using the same function as bootstrap webhook
         let generator =
@@ -396,18 +396,21 @@ nodes:
                 message: e.to_string(),
             })?;
 
-        // Generate all manifests (Cilium YAML + operator JSON + LB-IPAM if networking configured)
+        // Generate all manifests (Cilium YAML + operator JSON + LB-IPAM + CiliumNetworkPolicy)
         // Pass cluster name and provider so management cluster's operator knows its identity
+        // Management cluster has no parent, so pass None for parent_host
         let cluster_name = self.cluster.metadata.name.as_deref();
         let provider_str = self.cluster.spec.provider.type_.to_string();
-        let all_manifests = generate_all_manifests(
-            &generator,
-            &self.config.image,
-            self.config.registry_credentials.as_deref(),
-            self.cluster.spec.networking.as_ref(),
+        let config = ManifestConfig {
+            image: &self.config.image,
+            registry_credentials: self.config.registry_credentials.as_deref(),
+            networking: self.cluster.spec.networking.as_ref(),
             cluster_name,
-            Some(&provider_str),
-        );
+            provider: Some(&provider_str),
+            parent_host: None, // Cells have no parent
+            parent_grpc_port: crate::DEFAULT_GRPC_PORT,
+        };
+        let all_manifests = generate_all_manifests(&generator, &config);
 
         // Split into YAML (Cilium + LB-IPAM) and JSON (operator)
         // YAML starts with "---" or "apiVersion:", JSON starts with "{"

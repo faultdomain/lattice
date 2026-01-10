@@ -40,6 +40,7 @@ pub mod controller;
 pub mod crd;
 pub mod error;
 pub mod graph;
+pub mod infra;
 pub mod install;
 pub mod pivot;
 pub mod pki;

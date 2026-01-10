@@ -527,16 +527,8 @@ pub struct WorkloadCompiler;
 impl WorkloadCompiler {
     /// Compile a LatticeService into workload resources
     pub fn compile(service: &LatticeService) -> GeneratedWorkloads {
-        let name = service
-            .metadata
-            .name
-            .as_deref()
-            .unwrap_or("unknown");
-        let namespace = service
-            .metadata
-            .namespace
-            .as_deref()
-            .unwrap_or("default");
+        let name = service.metadata.name.as_deref().unwrap_or("unknown");
+        let namespace = service.metadata.namespace.as_deref().unwrap_or("default");
 
         let mut output = GeneratedWorkloads::new();
 
@@ -606,8 +598,10 @@ impl WorkloadCompiler {
                     .unwrap_or_default();
 
                 // Convert resources
-                let resources = container_spec.resources.as_ref().map(|r| {
-                    ResourceRequirements {
+                let resources = container_spec
+                    .resources
+                    .as_ref()
+                    .map(|r| ResourceRequirements {
                         requests: r.requests.as_ref().map(|req| ResourceQuantity {
                             cpu: req.cpu.clone(),
                             memory: req.memory.clone(),
@@ -616,38 +610,33 @@ impl WorkloadCompiler {
                             cpu: lim.cpu.clone(),
                             memory: lim.memory.clone(),
                         }),
-                    }
-                });
+                    });
 
                 // Convert probes
-                let liveness_probe = container_spec.liveness_probe.as_ref().map(|p| {
-                    ProbeSpec {
-                        http_get: p.http_get.as_ref().map(|h| HttpGetAction {
-                            path: h.path.clone(),
-                            port: h.port,
-                            scheme: h.scheme.clone(),
-                        }),
-                        exec: p.exec.as_ref().map(|e| ExecAction {
-                            command: e.command.clone(),
-                        }),
-                        initial_delay_seconds: None,
-                        period_seconds: None,
-                    }
+                let liveness_probe = container_spec.liveness_probe.as_ref().map(|p| ProbeSpec {
+                    http_get: p.http_get.as_ref().map(|h| HttpGetAction {
+                        path: h.path.clone(),
+                        port: h.port,
+                        scheme: h.scheme.clone(),
+                    }),
+                    exec: p.exec.as_ref().map(|e| ExecAction {
+                        command: e.command.clone(),
+                    }),
+                    initial_delay_seconds: None,
+                    period_seconds: None,
                 });
 
-                let readiness_probe = container_spec.readiness_probe.as_ref().map(|p| {
-                    ProbeSpec {
-                        http_get: p.http_get.as_ref().map(|h| HttpGetAction {
-                            path: h.path.clone(),
-                            port: h.port,
-                            scheme: h.scheme.clone(),
-                        }),
-                        exec: p.exec.as_ref().map(|e| ExecAction {
-                            command: e.command.clone(),
-                        }),
-                        initial_delay_seconds: None,
-                        period_seconds: None,
-                    }
+                let readiness_probe = container_spec.readiness_probe.as_ref().map(|p| ProbeSpec {
+                    http_get: p.http_get.as_ref().map(|h| HttpGetAction {
+                        path: h.path.clone(),
+                        port: h.port,
+                        scheme: h.scheme.clone(),
+                    }),
+                    exec: p.exec.as_ref().map(|e| ExecAction {
+                        command: e.command.clone(),
+                    }),
+                    initial_delay_seconds: None,
+                    period_seconds: None,
                 });
 
                 Container {
@@ -740,7 +729,11 @@ impl WorkloadCompiler {
         }
     }
 
-    fn compile_hpa(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> HorizontalPodAutoscaler {
+    fn compile_hpa(
+        name: &str,
+        namespace: &str,
+        spec: &LatticeServiceSpec,
+    ) -> HorizontalPodAutoscaler {
         HorizontalPodAutoscaler {
             api_version: "autoscaling/v2".to_string(),
             kind: "HorizontalPodAutoscaler".to_string(),
@@ -775,9 +768,7 @@ impl WorkloadCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{
-        ContainerSpec, DeploySpec, PortSpec, ReplicaSpec, ServicePortsSpec,
-    };
+    use crate::crd::{ContainerSpec, DeploySpec, PortSpec, ReplicaSpec, ServicePortsSpec};
 
     fn make_service(name: &str, namespace: &str) -> LatticeService {
         let mut containers = BTreeMap::new();
@@ -863,11 +854,20 @@ mod tests {
 
         let deployment = output.deployment.unwrap();
         assert_eq!(
-            deployment.spec.selector.match_labels.get("app.kubernetes.io/name"),
+            deployment
+                .spec
+                .selector
+                .match_labels
+                .get("app.kubernetes.io/name"),
             Some(&"my-app".to_string())
         );
         assert_eq!(
-            deployment.spec.template.metadata.labels.get("app.kubernetes.io/managed-by"),
+            deployment
+                .spec
+                .template
+                .metadata
+                .labels
+                .get("app.kubernetes.io/managed-by"),
             Some(&"lattice".to_string())
         );
     }
@@ -913,7 +913,10 @@ mod tests {
     #[test]
     fn story_generates_hpa_with_max_replicas() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec { min: 2, max: Some(10) };
+        service.spec.replicas = ReplicaSpec {
+            min: 2,
+            max: Some(10),
+        };
 
         let output = WorkloadCompiler::compile(&service);
 
@@ -971,13 +974,17 @@ mod tests {
     fn story_container_environment_variables() {
         let mut service = make_service("my-app", "default");
         let container = service.spec.containers.get_mut("main").unwrap();
-        container.variables.insert("LOG_LEVEL".to_string(), "debug".to_string());
+        container
+            .variables
+            .insert("LOG_LEVEL".to_string(), "debug".to_string());
 
         let output = WorkloadCompiler::compile(&service);
 
         let containers = &output.deployment.unwrap().spec.template.spec.containers;
         let env = &containers.iter().find(|c| c.name == "main").unwrap().env;
-        assert!(env.iter().any(|e| e.name == "LOG_LEVEL" && e.value == "debug"));
+        assert!(env
+            .iter()
+            .any(|e| e.name == "LOG_LEVEL" && e.value == "debug"));
     }
 
     #[test]

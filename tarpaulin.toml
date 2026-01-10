@@ -1,6 +1,14 @@
 [default]
-# Exclude integration/e2e code from coverage
+# Exclude code that requires real infrastructure (tested by E2E tests)
 exclude-files = [
-    "src/install/*",
+    # Entry points - tested by E2E
     "src/main.rs",
+    "src/install/*",
+    # Agent gRPC - requires real network connections
+    "src/agent/client.rs",
+    "src/agent/server.rs",
+    # CAPI - requires clusterctl binary
+    "src/capi/*",
+    # Controllers - require real k8s API, tested by E2E
+    "src/controller/*",
 ]

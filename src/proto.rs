@@ -14,24 +14,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use lattice::proto::lattice_agent_client::LatticeAgentClient;
-//!
+//! ```text
 //! // Agent connects to cell
-//! let mut client = LatticeAgentClient::connect("https://cell.example.com:443").await?;
-//!
-//! // Establish bidirectional stream
+//! let mut client = LatticeAgentClient::connect("https://cell:443").await?;
 //! let (tx, rx) = mpsc::channel(32);
 //! let response = client.connect(ReceiverStream::new(rx)).await?;
-//! let mut inbound = response.into_inner();
-//!
-//! // Send ready message
-//! tx.send(AgentMessage { ... }).await?;
-//!
-//! // Receive commands
-//! while let Some(command) = inbound.message().await? {
-//!     handle_command(command);
-//! }
+//! // Send messages via tx, receive commands from response stream
 //! ```
 
 #![allow(missing_docs)] // Generated code doesn't have docs

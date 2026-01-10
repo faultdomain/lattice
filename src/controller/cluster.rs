@@ -22,9 +22,7 @@ use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
 use crate::capi::{ensure_capi_installed_with, CapiInstaller};
 use crate::cell::CellServers;
-use crate::crd::{
-    ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus,
-};
+use crate::crd::{ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus};
 use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
 use crate::provider::{create_provider, CAPIManifest};
 use crate::Error;
@@ -290,27 +288,7 @@ impl KubeClient for KubeClientImpl {
         let ready_workers = nodes
             .items
             .iter()
-            .filter(|node| {
-                // Check if it's NOT a control plane node
-                let labels = node.metadata.labels.as_ref();
-                let is_control_plane = labels
-                    .map(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
-                    .unwrap_or(false);
-
-                if is_control_plane {
-                    return false;
-                }
-
-                // Check if node is Ready
-                let conditions = node.status.as_ref().and_then(|s| s.conditions.as_ref());
-                conditions
-                    .map(|conds| {
-                        conds
-                            .iter()
-                            .any(|c| c.type_ == "Ready" && c.status == "True")
-                    })
-                    .unwrap_or(false)
-            })
+            .filter(|node| is_ready_worker_node(node))
             .count() as u32;
 
         Ok(ready_workers)
@@ -324,27 +302,11 @@ impl KubeClient for KubeClientImpl {
 
         // Check all control plane nodes have the NoSchedule taint
         for node in nodes.items.iter() {
-            let labels = node.metadata.labels.as_ref();
-            let is_control_plane = labels
-                .map(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
-                .unwrap_or(false);
-
-            if !is_control_plane {
+            if !is_control_plane_node(node) {
                 continue;
             }
 
-            // Check for NoSchedule taint
-            let taints = node.spec.as_ref().and_then(|s| s.taints.as_ref());
-            let has_no_schedule = taints
-                .map(|t| {
-                    t.iter().any(|taint| {
-                        taint.key == "node-role.kubernetes.io/control-plane"
-                            && taint.effect == "NoSchedule"
-                    })
-                })
-                .unwrap_or(false);
-
-            if !has_no_schedule {
+            if !has_control_plane_taint(node) {
                 return Ok(false);
             }
         }
@@ -359,12 +321,7 @@ impl KubeClient for KubeClientImpl {
         let nodes = api.list(&Default::default()).await?;
 
         for node in nodes.items.iter() {
-            let labels = node.metadata.labels.as_ref();
-            let is_control_plane = labels
-                .map(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
-                .unwrap_or(false);
-
-            if !is_control_plane {
+            if !is_control_plane_node(node) {
                 continue;
             }
 
@@ -375,17 +332,7 @@ impl KubeClient for KubeClientImpl {
                 .ok_or_else(|| Error::provider("node has no name".to_string()))?;
 
             // Check if already tainted
-            let taints = node.spec.as_ref().and_then(|s| s.taints.as_ref());
-            let has_no_schedule = taints
-                .map(|t| {
-                    t.iter().any(|taint| {
-                        taint.key == "node-role.kubernetes.io/control-plane"
-                            && taint.effect == "NoSchedule"
-                    })
-                })
-                .unwrap_or(false);
-
-            if has_no_schedule {
+            if has_control_plane_taint(node) {
                 debug!(node = %node_name, "control plane node already tainted");
                 continue;
             }
@@ -697,7 +644,7 @@ impl CAPIClient for CAPIClientImpl {
                 .annotations
                 .as_ref()
                 .and_then(|a| a.get("lattice.dev/pivot-complete"))
-                .map_or(false, |v| v == "true")),
+                .is_some_and(|v| v == "true")),
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
             Err(e) => Err(e.into()),
         }
@@ -884,6 +831,112 @@ fn pluralize_kind(kind: &str) -> String {
     }
 }
 
+// =============================================================================
+// Pure Functions - Extracted for Unit Testability
+// =============================================================================
+// These functions contain pure decision logic with no I/O. They can be
+// thoroughly unit tested without mocking Kubernetes or network connections.
+
+/// Check if the cluster being reconciled is the cluster we're running on.
+///
+/// When true, we skip provisioning since we ARE this cluster.
+pub fn is_self_cluster(cluster_name: &str, self_cluster_name: Option<&str>) -> bool {
+    self_cluster_name
+        .map(|self_name| self_name == cluster_name)
+        .unwrap_or(false)
+}
+
+/// Check if a cluster is the root cluster (no parent cell).
+///
+/// Root clusters were bootstrapped by the installer which already ran
+/// clusterctl move - they don't need agent-based pivot.
+pub fn is_root_cluster(cluster: &LatticeCluster) -> bool {
+    cluster.spec.cell_ref.is_none()
+}
+
+/// Check if a node is a control plane node based on labels.
+pub fn is_control_plane_node(node: &k8s_openapi::api::core::v1::Node) -> bool {
+    node.metadata
+        .labels
+        .as_ref()
+        .map(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
+        .unwrap_or(false)
+}
+
+/// Check if a node has the Ready condition set to True.
+pub fn is_node_ready(node: &k8s_openapi::api::core::v1::Node) -> bool {
+    node.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .map(|conds| {
+            conds
+                .iter()
+                .any(|c| c.type_ == "Ready" && c.status == "True")
+        })
+        .unwrap_or(false)
+}
+
+/// Check if a node is a ready worker (not control plane and Ready).
+///
+/// This is used to count ready workers for scaling decisions.
+pub fn is_ready_worker_node(node: &k8s_openapi::api::core::v1::Node) -> bool {
+    !is_control_plane_node(node) && is_node_ready(node)
+}
+
+/// Check if a control plane node has the NoSchedule taint.
+pub fn has_control_plane_taint(node: &k8s_openapi::api::core::v1::Node) -> bool {
+    node.spec
+        .as_ref()
+        .and_then(|s| s.taints.as_ref())
+        .map(|taints| {
+            taints.iter().any(|t| {
+                t.key == "node-role.kubernetes.io/control-plane" && t.effect == "NoSchedule"
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Actions that can be taken during the pivot phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PivotAction {
+    /// Pivot is complete, transition to Ready
+    Complete,
+    /// Execute clusterctl move (agent ready with proxy)
+    ExecuteMove,
+    /// Wait for agent proxy to become available
+    WaitForProxy,
+    /// Send StartPivotCommand to agent
+    SendPivotCommand,
+    /// Wait for agent to connect
+    WaitForAgent,
+}
+
+/// Determine what pivot action to take based on current state.
+///
+/// This encapsulates the pivot state machine logic in a pure function.
+pub fn determine_pivot_action(
+    is_pivot_complete: bool,
+    is_pivot_in_progress: bool,
+    is_proxy_available: bool,
+    is_agent_connected: bool,
+) -> PivotAction {
+    if is_pivot_complete {
+        PivotAction::Complete
+    } else if is_pivot_in_progress && is_proxy_available {
+        PivotAction::ExecuteMove
+    } else if is_pivot_in_progress {
+        PivotAction::WaitForProxy
+    } else if is_agent_connected {
+        PivotAction::SendPivotCommand
+    } else {
+        PivotAction::WaitForAgent
+    }
+}
+
+// =============================================================================
+// End Pure Functions
+// =============================================================================
+
 /// Trait abstracting pivot operations for testability
 #[cfg_attr(test, automock)]
 #[async_trait]
@@ -971,7 +1024,7 @@ impl CellCapabilities {
 ///
 /// Use [`ContextBuilder`] to construct instances:
 ///
-/// ```ignore
+/// ```text
 /// let ctx = Context::builder(client)
 ///     .cell_capabilities(cell_caps)
 ///     .build();
@@ -1083,19 +1136,19 @@ impl Context {
 /// # Examples
 ///
 /// Basic context for agent mode:
-/// ```ignore
+/// ```text
 /// let ctx = Context::builder(client).build();
 /// ```
 ///
 /// Full cell context:
-/// ```ignore
+/// ```text
 /// let ctx = Context::builder(client)
 ///     .cell_capabilities(CellCapabilities::new(bootstrap, registry, pivot_ops))
 ///     .build();
 /// ```
 ///
 /// Testing with mock clients:
-/// ```ignore
+/// ```text
 /// let ctx = Context::builder(client)
 ///     .kube_client(mock_kube)
 ///     .capi_client(mock_capi)
@@ -1205,7 +1258,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // Validate the cluster spec
     if let Err(e) = cluster.spec.validate() {
         warn!(error = %e, "cluster validation failed");
-        update_status_failed(&cluster, &ctx, &e.to_string()).await?;
+        update_cluster_status(&cluster, &ctx, ClusterPhase::Failed, Some(&e.to_string())).await?;
         // Don't requeue for validation errors - they require spec changes
         return Ok(Action::await_change());
     }
@@ -1225,11 +1278,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Check if we're the management cluster (have cell spec) and need cell servers
             // This must happen BEFORE the self-cluster check so the management cluster
             // gets its LoadBalancer service created even when reconciling itself.
-            let is_self_cluster = ctx
-                .self_cluster_name
-                .as_ref()
-                .map(|self_name| self_name == &name)
-                .unwrap_or(false);
+            let is_self = is_self_cluster(&name, ctx.self_cluster_name.as_deref());
 
             // Start cell servers if we have them configured AND this cluster has a cell spec
             // This makes this cluster a "cell" that can provision child clusters
@@ -1275,9 +1324,9 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Check if we're reconciling our own cluster (the one we're running on)
             // If so, skip provisioning - we ARE this cluster, we don't need to create it
             // Cell servers and LoadBalancer are already set up above.
-            if is_self_cluster {
+            if is_self {
                 info!("reconciling self-cluster, transitioning directly to Ready");
-                update_status_ready(&cluster, &ctx).await?;
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
                 return Ok(Action::requeue(Duration::from_secs(60)));
             }
 
@@ -1306,7 +1355,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Update status to Provisioning
             info!("transitioning to Provisioning phase");
-            update_status_provisioning(&cluster, &ctx).await?;
+            update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None).await?;
             Ok(Action::requeue(Duration::from_secs(5)))
         }
         ClusterPhase::Provisioning => {
@@ -1324,7 +1373,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             if is_ready {
                 // Infrastructure is ready, transition to Pivoting
                 info!("infrastructure ready, transitioning to Pivoting phase");
-                update_status_pivoting(&cluster, &ctx).await?;
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None).await?;
                 Ok(Action::requeue(Duration::from_secs(5)))
             } else {
                 // Still provisioning, requeue
@@ -1339,9 +1388,9 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Clusters with cell_ref were provisioned by a parent cell and need agent-based pivot.
             // The root cluster (no cell_ref) was bootstrapped by the installer which
             // already ran clusterctl move - just transition to Ready.
-            if cluster.spec.cell_ref.is_none() {
+            if is_root_cluster(&cluster) {
                 info!("root cluster pivot complete (via installer), transitioning to Ready");
-                update_status_ready(&cluster, &ctx).await?;
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
                 return Ok(Action::requeue(Duration::from_secs(60)));
             }
 
@@ -1364,79 +1413,85 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Check if we have pivot operations configured (cell mode)
             if let Some(pivot_ops) = pivot_ops {
-                // Step 1: Check if agent reports pivot complete (Ready state)
-                // After clusterctl move, the CAPI Cluster is on the workload cluster,
-                // not the management cluster - so we can't annotate it here.
-                // Just trust the agent's Ready state.
-                if pivot_ops.is_pivot_complete(&name) {
-                    info!("agent reports pivot complete, transitioning to Ready phase");
-                    update_status_ready(&cluster, &ctx).await?;
-                    return Ok(Action::requeue(Duration::from_secs(60)));
-                }
+                // Determine pivot action using pure function
+                let action = determine_pivot_action(
+                    pivot_ops.is_pivot_complete(&name),
+                    pivot_ops.is_pivot_in_progress(&name),
+                    pivot_ops.is_proxy_available(&name),
+                    pivot_ops.is_agent_ready(&name),
+                );
 
-                // Step 3: Check if agent is in Pivoting state with proxy available
-                // This means StartPivotCommand was sent, agent is ready - execute clusterctl move
-                if pivot_ops.is_pivot_in_progress(&name) && pivot_ops.is_proxy_available(&name) {
-                    info!(
-                        "agent in pivoting state with proxy available, executing clusterctl move"
-                    );
-                    match pivot_ops
-                        .execute_clusterctl_move(&name, &capi_namespace)
-                        .await
-                    {
-                        Ok(()) => {
-                            info!("clusterctl move completed, waiting for agent to confirm");
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "clusterctl move failed, will retry");
-                        }
+                match action {
+                    PivotAction::Complete => {
+                        // Agent reports pivot complete (Ready state)
+                        info!("agent reports pivot complete, transitioning to Ready phase");
+                        update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
+                        Ok(Action::requeue(Duration::from_secs(60)))
                     }
-                    return Ok(Action::requeue(Duration::from_secs(10)));
-                }
-
-                // Step 4: Check if pivot is in progress but proxy not ready yet
-                if pivot_ops.is_pivot_in_progress(&name) {
-                    debug!("pivot in progress, waiting for agent proxy to be available");
-                    return Ok(Action::requeue(Duration::from_secs(5)));
-                }
-
-                // Step 5: Check if agent is ready for pivot - trigger it
-                if pivot_ops.is_agent_ready(&name) {
-                    // Store post-pivot manifests before triggering pivot
-                    // These will be sent to the agent after PivotComplete
-                    use kube::CustomResourceExt;
-                    let crd_yaml = serde_yaml::to_string(&LatticeCluster::crd())
-                        .map_err(|e| Error::serialization(e.to_string()))?;
-                    let cluster_yaml = serde_yaml::to_string(cluster.as_ref())
-                        .map_err(|e| Error::serialization(e.to_string()))?;
-
-                    pivot_ops.store_post_pivot_manifests(&name, Some(crd_yaml), Some(cluster_yaml));
-
-                    // Agent is ready, trigger pivot (sends StartPivotCommand)
-                    // Target namespace is same as source - clusterctl move preserves namespace
-                    info!("agent ready, triggering pivot");
-                    match pivot_ops
-                        .trigger_pivot(&name, &capi_namespace, &capi_namespace)
-                        .await
-                    {
-                        Ok(()) => {
-                            debug!("pivot triggered successfully, waiting for agent to enter pivoting state");
+                    PivotAction::ExecuteMove => {
+                        // Agent in pivoting state with proxy available - execute clusterctl move
+                        info!(
+                            "agent in pivoting state with proxy available, executing clusterctl move"
+                        );
+                        match pivot_ops
+                            .execute_clusterctl_move(&name, &capi_namespace)
+                            .await
+                        {
+                            Ok(()) => {
+                                info!("clusterctl move completed, waiting for agent to confirm");
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "clusterctl move failed, will retry");
+                            }
                         }
-                        Err(e) => {
-                            warn!(error = %e, "pivot trigger failed, will retry");
-                        }
+                        Ok(Action::requeue(Duration::from_secs(10)))
                     }
-                    return Ok(Action::requeue(Duration::from_secs(5)));
-                }
+                    PivotAction::WaitForProxy => {
+                        // Pivot in progress but proxy not ready yet
+                        debug!("pivot in progress, waiting for agent proxy to be available");
+                        Ok(Action::requeue(Duration::from_secs(5)))
+                    }
+                    PivotAction::SendPivotCommand => {
+                        // Agent ready for pivot - trigger it
+                        // Store post-pivot manifests before triggering pivot
+                        use kube::CustomResourceExt;
+                        let crd_yaml = serde_yaml::to_string(&LatticeCluster::crd())
+                            .map_err(|e| Error::serialization(e.to_string()))?;
+                        let cluster_yaml = serde_yaml::to_string(cluster.as_ref())
+                            .map_err(|e| Error::serialization(e.to_string()))?;
 
-                // Step 6: No agent connected yet, wait
-                debug!("waiting for agent to connect and be ready for pivot");
-                Ok(Action::requeue(Duration::from_secs(10)))
+                        pivot_ops.store_post_pivot_manifests(
+                            &name,
+                            Some(crd_yaml),
+                            Some(cluster_yaml),
+                        );
+
+                        // Trigger pivot (sends StartPivotCommand)
+                        info!("agent ready, triggering pivot");
+                        match pivot_ops
+                            .trigger_pivot(&name, &capi_namespace, &capi_namespace)
+                            .await
+                        {
+                            Ok(()) => {
+                                debug!("pivot triggered successfully, waiting for agent to enter pivoting state");
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "pivot trigger failed, will retry");
+                            }
+                        }
+                        Ok(Action::requeue(Duration::from_secs(5)))
+                    }
+                    PivotAction::WaitForAgent => {
+                        // No agent connected yet, wait
+                        debug!("waiting for agent to connect and be ready for pivot");
+                        Ok(Action::requeue(Duration::from_secs(10)))
+                    }
+                }
             } else {
                 // No pivot operations - this is a non-cell mode
                 // Just transition to Ready since pivot is not applicable
                 debug!("no pivot operations configured, transitioning to Ready");
-                update_status_ready(&cluster, &ctx).await?;
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
                 Ok(Action::requeue(Duration::from_secs(60)))
             }
         }
@@ -1684,86 +1739,65 @@ pub fn error_policy(cluster: Arc<LatticeCluster>, error: &Error, _ctx: Arc<Conte
     Action::requeue(Duration::from_secs(5))
 }
 
-/// Update cluster status to Provisioning phase
-async fn update_status_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
-    let name = cluster.name_any();
-
-    let condition = Condition::new(
-        "Provisioning",
-        ConditionStatus::True,
-        "StartingProvisioning",
-        "Cluster provisioning has started",
-    );
-
-    let status = LatticeClusterStatus::with_phase(ClusterPhase::Provisioning)
-        .message("Provisioning cluster infrastructure")
-        .condition(condition);
-
-    ctx.kube.patch_status(&name, &status).await?;
-
-    info!("updated status to Provisioning");
-    Ok(())
-}
-
-/// Update cluster status to Pivoting phase
-async fn update_status_pivoting(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
-    let name = cluster.name_any();
-
-    let condition = Condition::new(
-        "Pivoting",
-        ConditionStatus::True,
-        "StartingPivot",
-        "Cluster pivot has started",
-    );
-
-    let status = LatticeClusterStatus::with_phase(ClusterPhase::Pivoting)
-        .message("Pivoting cluster to self-managed")
-        .condition(condition);
-
-    ctx.kube.patch_status(&name, &status).await?;
-
-    info!("updated status to Pivoting");
-    Ok(())
-}
-
-/// Update cluster status to Ready phase
-async fn update_status_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
-    let name = cluster.name_any();
-
-    let condition = Condition::new(
-        "Ready",
-        ConditionStatus::True,
-        "ClusterReady",
-        "Cluster is self-managed and ready",
-    );
-
-    let status = LatticeClusterStatus::with_phase(ClusterPhase::Ready)
-        .message("Cluster is self-managed and ready")
-        .condition(condition);
-
-    ctx.kube.patch_status(&name, &status).await?;
-
-    info!("updated status to Ready");
-    Ok(())
-}
-
-/// Update cluster status to Failed phase
-async fn update_status_failed(
+/// Update cluster status to the specified phase
+///
+/// This consolidates the status update logic for all phases. For Failed phase,
+/// pass a custom error message. For other phases, pass None for the message.
+async fn update_cluster_status(
     cluster: &LatticeCluster,
     ctx: &Context,
-    message: &str,
+    phase: ClusterPhase,
+    error_message: Option<&str>,
 ) -> Result<(), Error> {
     let name = cluster.name_any();
 
-    let condition = Condition::new("Ready", ConditionStatus::False, "ValidationFailed", message);
+    let (condition_type, condition_status, reason, message) = match phase {
+        ClusterPhase::Pending => (
+            "Pending",
+            ConditionStatus::Unknown,
+            "AwaitingProvisioning",
+            "Cluster is pending provisioning",
+        ),
+        ClusterPhase::Provisioning => (
+            "Provisioning",
+            ConditionStatus::True,
+            "StartingProvisioning",
+            "Provisioning cluster infrastructure",
+        ),
+        ClusterPhase::Pivoting => (
+            "Pivoting",
+            ConditionStatus::True,
+            "StartingPivot",
+            "Pivoting cluster to self-managed",
+        ),
+        ClusterPhase::Ready => (
+            "Ready",
+            ConditionStatus::True,
+            "ClusterReady",
+            "Cluster is self-managed and ready",
+        ),
+        ClusterPhase::Failed => (
+            "Ready",
+            ConditionStatus::False,
+            "ValidationFailed",
+            error_message.unwrap_or("Unknown error"),
+        ),
+    };
 
-    let status = LatticeClusterStatus::with_phase(ClusterPhase::Failed)
-        .message(message.to_string())
+    let condition = Condition::new(condition_type, condition_status, reason, message);
+
+    let status = LatticeClusterStatus::with_phase(phase.clone())
+        .message(message)
         .condition(condition);
 
     ctx.kube.patch_status(&name, &status).await?;
 
-    warn!(message, "updated status to Failed");
+    if phase == ClusterPhase::Failed {
+        warn!(message, "updated status to Failed");
+    } else {
+        info!("updated status to {:?}", phase);
+    }
+
     Ok(())
 }
 
@@ -1844,7 +1878,7 @@ impl PivotOperations for PivotOperationsImpl {
     fn is_agent_ready(&self, cluster_name: &str) -> bool {
         self.agent_registry
             .get(cluster_name)
-            .map_or(false, |a| a.is_ready_for_pivot())
+            .is_some_and(|a| a.is_ready_for_pivot())
     }
 
     fn is_pivot_in_progress(&self, cluster_name: &str) -> bool {
@@ -1853,13 +1887,13 @@ impl PivotOperations for PivotOperationsImpl {
             || self
                 .agent_registry
                 .get(cluster_name)
-                .map_or(false, |a| matches!(a.state, AgentState::Pivoting))
+                .is_some_and(|a| matches!(a.state, AgentState::Pivoting))
     }
 
     fn is_pivot_complete(&self, cluster_name: &str) -> bool {
         self.agent_registry
             .get(cluster_name)
-            .map_or(false, |a| matches!(a.state, AgentState::Ready))
+            .is_some_and(|a| matches!(a.state, AgentState::Ready))
     }
 
     fn store_post_pivot_manifests(
@@ -1881,7 +1915,7 @@ impl PivotOperations for PivotOperationsImpl {
     fn is_proxy_available(&self, cluster_name: &str) -> bool {
         self.agent_registry
             .get(cluster_name)
-            .map_or(false, |a| a.has_proxy())
+            .is_some_and(|a| a.has_proxy())
     }
 
     async fn execute_clusterctl_move(
@@ -2445,7 +2479,8 @@ mod tests {
             let ctx =
                 Context::for_testing(Arc::new(mock), Arc::new(capi_mock), Arc::new(installer));
 
-            let result = update_status_provisioning(&cluster, &ctx).await;
+            let result =
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None).await;
 
             assert!(result.is_err());
             assert!(result
@@ -3151,7 +3186,9 @@ mod tests {
                 Arc::new(installer),
             );
 
-            update_status_provisioning(&cluster, &ctx).await.unwrap();
+            update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None)
+                .await
+                .unwrap();
 
             let status = captured_status.lock().unwrap().clone().unwrap();
             assert_eq!(status.phase, ClusterPhase::Provisioning);
@@ -3187,7 +3224,9 @@ mod tests {
                 Arc::new(installer),
             );
 
-            update_status_pivoting(&cluster, &ctx).await.unwrap();
+            update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None)
+                .await
+                .unwrap();
 
             let status = captured_status.lock().unwrap().clone().unwrap();
             assert_eq!(status.phase, ClusterPhase::Pivoting);
@@ -3223,7 +3262,7 @@ mod tests {
             );
 
             let error_msg = "control plane count must be at least 1";
-            update_status_failed(&cluster, &ctx, error_msg)
+            update_cluster_status(&cluster, &ctx, ClusterPhase::Failed, Some(error_msg))
                 .await
                 .unwrap();
 
@@ -3709,6 +3748,180 @@ mod tests {
 
             // Should succeed because it recognizes pivot is already in progress
             assert!(result.is_ok());
+        }
+    }
+
+    // =========================================================================
+    // Pure Function Tests
+    // =========================================================================
+    // These tests cover the extracted pure functions that contain decision logic.
+
+    mod pure_functions {
+        use super::*;
+        use k8s_openapi::api::core::v1::{Node, NodeCondition, NodeSpec, NodeStatus, Taint};
+
+        // --- is_self_cluster tests ---
+
+        #[test]
+        fn is_self_cluster_returns_true_when_names_match() {
+            assert!(is_self_cluster("mgmt", Some("mgmt")));
+        }
+
+        #[test]
+        fn is_self_cluster_returns_false_when_names_differ() {
+            assert!(!is_self_cluster("workload", Some("mgmt")));
+        }
+
+        #[test]
+        fn is_self_cluster_returns_false_when_no_self_name() {
+            assert!(!is_self_cluster("mgmt", None));
+        }
+
+        // --- is_root_cluster tests ---
+
+        #[test]
+        fn is_root_cluster_returns_true_when_no_cell_ref() {
+            let cluster = sample_cluster("root");
+            assert!(is_root_cluster(&cluster));
+        }
+
+        #[test]
+        fn is_root_cluster_returns_false_when_has_cell_ref() {
+            let mut cluster = sample_cluster("child");
+            cluster.spec.cell_ref = Some("parent".to_string());
+            assert!(!is_root_cluster(&cluster));
+        }
+
+        // --- Node helper function tests ---
+
+        fn make_node(name: &str, is_control_plane: bool, is_ready: bool, has_taint: bool) -> Node {
+            let mut labels = std::collections::BTreeMap::new();
+            if is_control_plane {
+                labels.insert(
+                    "node-role.kubernetes.io/control-plane".to_string(),
+                    "".to_string(),
+                );
+            }
+
+            let conditions = if is_ready {
+                Some(vec![NodeCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    ..Default::default()
+                }])
+            } else {
+                Some(vec![NodeCondition {
+                    type_: "Ready".to_string(),
+                    status: "False".to_string(),
+                    ..Default::default()
+                }])
+            };
+
+            let taints = if has_taint {
+                Some(vec![Taint {
+                    key: "node-role.kubernetes.io/control-plane".to_string(),
+                    effect: "NoSchedule".to_string(),
+                    ..Default::default()
+                }])
+            } else {
+                None
+            };
+
+            Node {
+                metadata: ObjectMeta {
+                    name: Some(name.to_string()),
+                    labels: Some(labels),
+                    ..Default::default()
+                },
+                spec: Some(NodeSpec {
+                    taints,
+                    ..Default::default()
+                }),
+                status: Some(NodeStatus {
+                    conditions,
+                    ..Default::default()
+                }),
+            }
+        }
+
+        #[test]
+        fn is_control_plane_node_detects_control_plane_label() {
+            let cp_node = make_node("cp-0", true, true, true);
+            let worker = make_node("worker-0", false, true, false);
+
+            assert!(is_control_plane_node(&cp_node));
+            assert!(!is_control_plane_node(&worker));
+        }
+
+        #[test]
+        fn is_node_ready_checks_ready_condition() {
+            let ready_node = make_node("ready", false, true, false);
+            let not_ready = make_node("not-ready", false, false, false);
+
+            assert!(is_node_ready(&ready_node));
+            assert!(!is_node_ready(&not_ready));
+        }
+
+        #[test]
+        fn is_ready_worker_node_excludes_control_plane() {
+            let ready_worker = make_node("worker", false, true, false);
+            let ready_cp = make_node("cp", true, true, true);
+            let not_ready_worker = make_node("worker-sick", false, false, false);
+
+            assert!(is_ready_worker_node(&ready_worker));
+            assert!(!is_ready_worker_node(&ready_cp)); // Control plane excluded
+            assert!(!is_ready_worker_node(&not_ready_worker)); // Not ready excluded
+        }
+
+        #[test]
+        fn has_control_plane_taint_detects_no_schedule() {
+            let tainted = make_node("cp", true, true, true);
+            let untainted = make_node("cp-no-taint", true, true, false);
+
+            assert!(has_control_plane_taint(&tainted));
+            assert!(!has_control_plane_taint(&untainted));
+        }
+
+        // --- determine_pivot_action tests ---
+
+        #[test]
+        fn pivot_action_complete_when_pivot_done() {
+            assert_eq!(
+                determine_pivot_action(true, false, false, false),
+                PivotAction::Complete
+            );
+        }
+
+        #[test]
+        fn pivot_action_execute_move_when_proxy_ready() {
+            assert_eq!(
+                determine_pivot_action(false, true, true, true),
+                PivotAction::ExecuteMove
+            );
+        }
+
+        #[test]
+        fn pivot_action_wait_for_proxy_when_in_progress_no_proxy() {
+            assert_eq!(
+                determine_pivot_action(false, true, false, true),
+                PivotAction::WaitForProxy
+            );
+        }
+
+        #[test]
+        fn pivot_action_send_command_when_agent_connected() {
+            assert_eq!(
+                determine_pivot_action(false, false, false, true),
+                PivotAction::SendPivotCommand
+            );
+        }
+
+        #[test]
+        fn pivot_action_wait_for_agent_when_nothing_ready() {
+            assert_eq!(
+                determine_pivot_action(false, false, false, false),
+                PivotAction::WaitForAgent
+            );
         }
     }
 }
