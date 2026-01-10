@@ -32,7 +32,8 @@ use std::collections::BTreeMap;
 
 use super::{
     build_post_kubeadm_commands, generate_cluster, generate_control_plane,
-    generate_kubeadm_config_template, generate_machine_deployment, CAPIManifest, Provider,
+    generate_kubeadm_config_template, generate_machine_deployment, CAPIManifest,
+    ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
 };
 use crate::crd::{LatticeCluster, ProviderSpec, ProviderType};
 use crate::Result;
@@ -201,9 +202,7 @@ impl Provider for DockerProvider {
     ) -> Result<Vec<CAPIManifest>> {
         let name = Self::get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
-        let labels = Self::create_labels(name);
         let k8s_version = &cluster.spec.provider.kubernetes.version;
-        let cp_replicas = cluster.spec.nodes.control_plane;
 
         // Build certSANs - always include localhost/127.0.0.1 for local access
         let mut cert_sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
@@ -215,50 +214,38 @@ impl Provider for DockerProvider {
             }
         }
 
-        // Build postKubeadmCommands using shared function
-        let post_kubeadm_commands = build_post_kubeadm_commands(name, bootstrap);
+        // Build config structs
+        let config = ClusterConfig {
+            name,
+            namespace: &namespace,
+            k8s_version,
+            labels: Self::create_labels(name),
+        };
+
+        let infra = InfrastructureRef {
+            api_group: DOCKER_INFRASTRUCTURE_API_GROUP,
+            cluster_kind: "DockerCluster",
+            machine_template_kind: "DockerMachineTemplate",
+        };
+
+        let cp_config = ControlPlaneConfig {
+            replicas: cluster.spec.nodes.control_plane,
+            cert_sans,
+            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap),
+        };
 
         // Use shared functions for provider-agnostic resources
         let mut manifests = vec![
-            // Cluster resource (shared, just pass Docker-specific infrastructure ref)
-            generate_cluster(
-                name,
-                &namespace,
-                DOCKER_INFRASTRUCTURE_API_GROUP,
-                "DockerCluster",
-                labels.clone(),
-            ),
-            // DockerCluster (Docker-specific)
+            generate_cluster(&config, &infra),
             self.generate_docker_cluster(cluster)?,
-            // KubeadmControlPlane (shared, just pass Docker-specific machine template ref)
-            generate_control_plane(
-                name,
-                &namespace,
-                k8s_version,
-                cp_replicas,
-                cert_sans,
-                post_kubeadm_commands,
-                DOCKER_INFRASTRUCTURE_API_GROUP,
-                "DockerMachineTemplate",
-                labels.clone(),
-            ),
-            // DockerMachineTemplate for control plane (Docker-specific)
+            generate_control_plane(&config, &infra, &cp_config),
             self.generate_control_plane_machine_template(cluster)?,
         ];
 
         // Worker resources - use shared functions (replicas=0, scaling after pivot)
-        manifests.push(generate_machine_deployment(
-            name,
-            &namespace,
-            k8s_version,
-            DOCKER_INFRASTRUCTURE_API_GROUP,
-            "DockerMachineTemplate",
-            labels.clone(),
-        ));
-        // DockerMachineTemplate for workers (Docker-specific)
+        manifests.push(generate_machine_deployment(&config, &infra));
         manifests.push(self.generate_worker_machine_template(cluster)?);
-        // KubeadmConfigTemplate for workers (shared)
-        manifests.push(generate_kubeadm_config_template(name, &namespace, labels));
+        manifests.push(generate_kubeadm_config_template(&config));
 
         Ok(manifests)
     }

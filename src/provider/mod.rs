@@ -140,41 +140,69 @@ pub const CAPI_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta2
 /// CAPI Control Plane API version for KubeadmControlPlane (shared across all providers)
 pub const CAPI_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta2";
 
+/// Common cluster configuration for CAPI manifest generation
+#[derive(Clone, Debug)]
+pub struct ClusterConfig<'a> {
+    /// Cluster name
+    pub name: &'a str,
+    /// Kubernetes namespace for CAPI resources
+    pub namespace: &'a str,
+    /// Kubernetes version (e.g., "1.31.0")
+    pub k8s_version: &'a str,
+    /// Labels to apply to all resources
+    pub labels: std::collections::BTreeMap<String, String>,
+}
+
+/// Infrastructure provider reference configuration
+#[derive(Clone, Debug)]
+pub struct InfrastructureRef<'a> {
+    /// API group for infrastructure resources (e.g., "infrastructure.cluster.x-k8s.io")
+    pub api_group: &'a str,
+    /// Kind for the infrastructure cluster (e.g., "DockerCluster")
+    pub cluster_kind: &'a str,
+    /// Kind for machine templates (e.g., "DockerMachineTemplate")
+    pub machine_template_kind: &'a str,
+}
+
+/// Control plane specific configuration
+#[derive(Clone, Debug)]
+pub struct ControlPlaneConfig {
+    /// Number of control plane replicas
+    pub replicas: u32,
+    /// Additional SANs for the API server certificate
+    pub cert_sans: Vec<String>,
+    /// Commands to run after kubeadm completes
+    pub post_kubeadm_commands: Vec<String>,
+}
+
 /// Generate a MachineDeployment manifest
 ///
 /// This is shared across ALL providers. MachineDeployment is always created with
 /// replicas=0 during initial provisioning. After pivot, the cluster's local
 /// controller scales up to match spec.nodes.workers.
-pub fn generate_machine_deployment(
-    cluster_name: &str,
-    namespace: &str,
-    k8s_version: &str,
-    infrastructure_api_group: &str,
-    infrastructure_kind: &str,
-    labels: std::collections::BTreeMap<String, String>,
-) -> CAPIManifest {
-    let deployment_name = format!("{}-md-0", cluster_name);
+pub fn generate_machine_deployment(config: &ClusterConfig, infra: &InfrastructureRef) -> CAPIManifest {
+    let deployment_name = format!("{}-md-0", config.name);
     let spec = serde_json::json!({
-        "clusterName": cluster_name,
+        "clusterName": config.name,
         "replicas": 0,  // ALWAYS 0 - scaling happens after pivot
         "selector": {
             "matchLabels": {}
         },
         "template": {
             "spec": {
-                "clusterName": cluster_name,
-                "version": format!("v{}", k8s_version.trim_start_matches('v')),
+                "clusterName": config.name,
+                "version": format!("v{}", config.k8s_version.trim_start_matches('v')),
                 "bootstrap": {
                     "configRef": {
                         "apiGroup": "bootstrap.cluster.x-k8s.io",
                         "kind": "KubeadmConfigTemplate",
-                        "name": format!("{}-md-0", cluster_name)
+                        "name": format!("{}-md-0", config.name)
                     }
                 },
                 "infrastructureRef": {
-                    "apiGroup": infrastructure_api_group,
-                    "kind": infrastructure_kind,
-                    "name": format!("{}-md-0", cluster_name)
+                    "apiGroup": infra.api_group,
+                    "kind": infra.machine_template_kind,
+                    "name": format!("{}-md-0", config.name)
                 }
             }
         }
@@ -184,21 +212,17 @@ pub fn generate_machine_deployment(
         CAPI_CLUSTER_API_VERSION,
         "MachineDeployment",
         &deployment_name,
-        namespace,
+        config.namespace,
     )
-    .with_labels(labels)
+    .with_labels(config.labels.clone())
     .with_spec(spec)
 }
 
 /// Generate a KubeadmConfigTemplate manifest for workers
 ///
 /// This is shared across ALL providers since worker kubeadm config is provider-agnostic.
-pub fn generate_kubeadm_config_template(
-    cluster_name: &str,
-    namespace: &str,
-    labels: std::collections::BTreeMap<String, String>,
-) -> CAPIManifest {
-    let template_name = format!("{}-md-0", cluster_name);
+pub fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
+    let template_name = format!("{}-md-0", config.name);
 
     // In CAPI v1beta2, kubeletExtraArgs is a list of {name, value} objects
     let spec = serde_json::json!({
@@ -220,9 +244,9 @@ pub fn generate_kubeadm_config_template(
         CAPI_BOOTSTRAP_API_VERSION,
         "KubeadmConfigTemplate",
         &template_name,
-        namespace,
+        config.namespace,
     )
-    .with_labels(labels)
+    .with_labels(config.labels.clone())
     .with_spec(spec)
 }
 
@@ -231,13 +255,7 @@ pub fn generate_kubeadm_config_template(
 /// This is shared across ALL providers. The only provider-specific part is the
 /// infrastructureRef which points to the provider's infrastructure cluster resource
 /// (DockerCluster, AWSCluster, etc.)
-pub fn generate_cluster(
-    cluster_name: &str,
-    namespace: &str,
-    infrastructure_api_group: &str,
-    infrastructure_kind: &str,
-    labels: std::collections::BTreeMap<String, String>,
-) -> CAPIManifest {
+pub fn generate_cluster(config: &ClusterConfig, infra: &InfrastructureRef) -> CAPIManifest {
     // In CAPI v1beta2, refs use apiGroup (not apiVersion) and no namespace
     let spec = serde_json::json!({
         "clusterNetwork": {
@@ -251,17 +269,17 @@ pub fn generate_cluster(
         "controlPlaneRef": {
             "apiGroup": "controlplane.cluster.x-k8s.io",
             "kind": "KubeadmControlPlane",
-            "name": format!("{}-control-plane", cluster_name)
+            "name": format!("{}-control-plane", config.name)
         },
         "infrastructureRef": {
-            "apiGroup": infrastructure_api_group,
-            "kind": infrastructure_kind,
-            "name": cluster_name
+            "apiGroup": infra.api_group,
+            "kind": infra.cluster_kind,
+            "name": config.name
         }
     });
 
-    CAPIManifest::new(CAPI_CLUSTER_API_VERSION, "Cluster", cluster_name, namespace)
-        .with_labels(labels)
+    CAPIManifest::new(CAPI_CLUSTER_API_VERSION, "Cluster", config.name, config.namespace)
+        .with_labels(config.labels.clone())
         .with_spec(spec)
 }
 
@@ -271,23 +289,17 @@ pub fn generate_cluster(
 /// machineTemplate.infrastructureRef which points to the provider's machine template
 /// (DockerMachineTemplate, AWSMachineTemplate, etc.)
 pub fn generate_control_plane(
-    cluster_name: &str,
-    namespace: &str,
-    k8s_version: &str,
-    replicas: u32,
-    cert_sans: Vec<String>,
-    post_kubeadm_commands: Vec<String>,
-    infrastructure_api_group: &str,
-    infrastructure_machine_template_kind: &str,
-    labels: std::collections::BTreeMap<String, String>,
+    config: &ClusterConfig,
+    infra: &InfrastructureRef,
+    cp_config: &ControlPlaneConfig,
 ) -> CAPIManifest {
-    let cp_name = format!("{}-control-plane", cluster_name);
+    let cp_name = format!("{}-control-plane", config.name);
 
     // In CAPI v1beta2, extraArgs changed from map to list of {name, value} objects
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
             "apiServer": {
-                "certSANs": cert_sans
+                "certSANs": cp_config.cert_sans
             },
             "controllerManager": {
                 "extraArgs": [
@@ -318,20 +330,21 @@ pub fn generate_control_plane(
         }
     });
 
-    if !post_kubeadm_commands.is_empty() {
-        kubeadm_config_spec["postKubeadmCommands"] = serde_json::json!(post_kubeadm_commands);
+    if !cp_config.post_kubeadm_commands.is_empty() {
+        kubeadm_config_spec["postKubeadmCommands"] =
+            serde_json::json!(cp_config.post_kubeadm_commands);
     }
 
     // In CAPI v1beta2, infrastructureRef is nested under machineTemplate.spec
     let spec = serde_json::json!({
-        "replicas": replicas,
-        "version": format!("v{}", k8s_version.trim_start_matches('v')),
+        "replicas": cp_config.replicas,
+        "version": format!("v{}", config.k8s_version.trim_start_matches('v')),
         "machineTemplate": {
             "spec": {
                 "infrastructureRef": {
-                    "apiGroup": infrastructure_api_group,
-                    "kind": infrastructure_machine_template_kind,
-                    "name": format!("{}-control-plane", cluster_name)
+                    "apiGroup": infra.api_group,
+                    "kind": infra.machine_template_kind,
+                    "name": format!("{}-control-plane", config.name)
                 }
             }
         },
@@ -342,9 +355,9 @@ pub fn generate_control_plane(
         CAPI_CONTROLPLANE_API_VERSION,
         "KubeadmControlPlane",
         &cp_name,
-        namespace,
+        config.namespace,
     )
-    .with_labels(labels)
+    .with_labels(config.labels.clone())
     .with_spec(spec)
 }
 
