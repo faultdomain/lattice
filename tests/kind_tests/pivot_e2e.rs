@@ -1250,6 +1250,11 @@ spec:
     println!("    - service-d: No relationship to A (BLOCKED)");
     println!();
 
+    // Wait for workload cluster to be Ready (webhook must be up before deploying services)
+    println!("  Waiting for workload cluster to be Ready (webhook must be up)...");
+    let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
+    watch_cluster_phases(&workload_client, WORKLOAD_CLUSTER_NAME).await?;
+
     // Deploy test services
     deploy_test_services(&workload_kubeconfig_path).await?;
 

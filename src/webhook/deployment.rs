@@ -122,9 +122,11 @@ async fn mutate_deployment(
             warn!(
                 uid = %uid,
                 service = %service_name,
-                "LatticeService not found, allowing deployment unchanged"
+                "LatticeService not found, denying to allow retry"
             );
-            return AdmissionResponse::from(&request.clone());
+            // Deny so the controller retries - LatticeService may not be created yet
+            return AdmissionResponse::from(&request.clone())
+                .deny(format!("LatticeService '{}' not found, will retry", service_name));
         }
         Err(e) => {
             error!(

@@ -69,6 +69,9 @@ pub trait KubeClient: Send + Sync {
         bootstrap_port: u16,
         grpc_port: u16,
     ) -> Result<(), Error>;
+
+    /// Check if the MutatingWebhookConfiguration for LatticeService deployments exists
+    async fn is_webhook_config_ready(&self) -> Result<bool, Error>;
 }
 
 /// Trait for cluster bootstrap registration
@@ -424,6 +427,17 @@ impl KubeClient for KubeClientImpl {
         }
 
         Ok(())
+    }
+
+    async fn is_webhook_config_ready(&self) -> Result<bool, Error> {
+        use k8s_openapi::api::admissionregistration::v1::MutatingWebhookConfiguration;
+
+        let api: Api<MutatingWebhookConfiguration> = Api::all(self.client.clone());
+        match api.get("lattice-deployment-mutator").await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -1235,9 +1249,8 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     .unwrap_or(false);
 
                 if capi_ready {
-                    info!("self-cluster has CAPI resources ready, transitioning to Ready");
-                    update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, true).await?;
-                    return Ok(Action::requeue(Duration::from_secs(60)));
+                    info!("self-cluster has CAPI resources ready");
+                    return try_transition_to_ready(&cluster, &ctx, true).await;
                 } else {
                     debug!("self-cluster waiting for CAPI resources (pivot not complete yet)");
                     return Ok(Action::requeue(Duration::from_secs(10)));
@@ -1307,18 +1320,16 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 .map(|s| s.pivot_complete)
                 .unwrap_or(false)
             {
-                info!("pivot already complete (from status), transitioning to Ready");
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, false).await?;
-                return Ok(Action::requeue(Duration::from_secs(60)));
+                info!("pivot already complete (from status)");
+                return try_transition_to_ready(&cluster, &ctx, false).await;
             }
 
             // Clusters with cell_ref were provisioned by a parent cell and need agent-based pivot.
             // The root cluster (no cell_ref) was bootstrapped by the installer which
             // already ran clusterctl move - just transition to Ready.
             if is_root_cluster(&cluster) {
-                info!("root cluster pivot complete (via installer), transitioning to Ready");
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, true).await?;
-                return Ok(Action::requeue(Duration::from_secs(60)));
+                info!("root cluster pivot complete (via installer)");
+                return try_transition_to_ready(&cluster, &ctx, true).await;
             }
 
             // This cluster has a parent (cell_ref) - needs agent-based pivot
@@ -1350,11 +1361,9 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
                 match action {
                     PivotAction::Complete => {
-                        // Agent reports pivot complete (Ready state)
-                        // Set pivot_complete=true to persist completion across restarts
-                        info!("agent reports pivot complete, transitioning to Ready phase");
-                        update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, true).await?;
-                        Ok(Action::requeue(Duration::from_secs(60)))
+                        // Agent reports pivot complete - try to transition to Ready
+                        info!("agent reports pivot complete");
+                        try_transition_to_ready(&cluster, &ctx, true).await
                     }
                     PivotAction::ExecuteMove => {
                         // Agent in pivoting state with proxy available - execute clusterctl move
@@ -1417,10 +1426,8 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 }
             } else {
                 // No pivot operations - this is a non-cell mode
-                // Just transition to Ready since pivot is not applicable
-                debug!("no pivot operations configured, transitioning to Ready");
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, false).await?;
-                Ok(Action::requeue(Duration::from_secs(60)))
+                debug!("no pivot operations configured");
+                try_transition_to_ready(&cluster, &ctx, false).await
             }
         }
         ClusterPhase::Ready => {
@@ -1523,6 +1530,47 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             Ok(Action::await_change())
         }
     }
+}
+
+/// Try to transition cluster to Ready phase
+///
+/// Returns Ok(Action) if transitioned or needs requeue, Err if status update failed.
+/// The cluster should not transition to Ready until:
+/// 1. Cell servers are running (webhook endpoint is listening)
+/// 2. MutatingWebhookConfiguration exists (K8s will route to webhook)
+async fn try_transition_to_ready(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+    set_pivot_complete: bool,
+) -> Result<Action, Error> {
+    // Check cell servers are running (only if configured)
+    // If cell_servers is None, we're in test mode or special configuration - skip check
+    if let Some(ref cell_servers) = ctx.cell_servers {
+        if !cell_servers.is_running() {
+            debug!("cell servers not running yet, waiting before Ready");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+    }
+
+    // Check MutatingWebhookConfiguration exists
+    match ctx.kube.is_webhook_config_ready().await {
+        Ok(true) => {
+            debug!("webhook configuration ready");
+        }
+        Ok(false) => {
+            debug!("webhook configuration not found yet, waiting before Ready");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to check webhook configuration, waiting");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+    }
+
+    // Webhook is ready, transition to Ready
+    info!("webhook ready, transitioning cluster to Ready phase");
+    update_cluster_status(cluster, ctx, ClusterPhase::Ready, None, set_pivot_complete).await?;
+    Ok(Action::requeue(Duration::from_secs(60)))
 }
 
 /// Generate CAPI manifests for a cluster based on its provider type
@@ -3478,6 +3526,8 @@ mod tests {
                 capture_clone.record(status.clone());
                 Ok(())
             });
+            // Webhook is ready in tests
+            mock.expect_is_webhook_config_ready().returning(|| Ok(true));
 
             let capi_mock = MockCAPIClient::new();
 
@@ -3590,6 +3640,8 @@ mod tests {
                 capture_clone.record(status.clone());
                 Ok(())
             });
+            // Webhook is ready in tests
+            mock.expect_is_webhook_config_ready().returning(|| Ok(true));
 
             let capi_mock = MockCAPIClient::new();
             let installer = MockCapiInstaller::new();
