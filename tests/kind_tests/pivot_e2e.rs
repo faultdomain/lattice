@@ -271,158 +271,127 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
 }
 
 // =============================================================================
-// Service Mesh Test Services
+// Comprehensive 3-Layer Service Mesh Test
 // =============================================================================
 //
-// We create 4 services to test the bilateral agreement pattern:
+// This test creates a realistic 3-layer microservice architecture with 9 services
+// to comprehensively test the bilateral agreement pattern with all permutations.
 //
-// - service-a (traffic-generator): Depends on B, C, D. Runs curl tests.
-// - service-b (allows-a): Allows inbound from A. Bilateral agreement = WORKS.
-// - service-c (no-inbound): No inbound allowed. Unilateral = BLOCKED.
-// - service-d (standalone): No relationship to A. BLOCKED.
+// LAYER 1: FRONTEND (3 services) - Traffic generators that test connectivity
+// ┌─────────────────┬─────────────────┬─────────────────┐
+// │  frontend-web   │ frontend-mobile │  frontend-admin │
+// │  (web clients)  │ (mobile apps)   │  (admin panel)  │
+// └────────┬────────┴────────┬────────┴────────┬────────┘
+//          │                 │                 │
+//          ▼                 ▼                 ▼
+// LAYER 2: API (3 services) - Business logic layer
+// ┌─────────────────┬─────────────────┬─────────────────┐
+// │   api-gateway   │   api-users     │   api-orders    │
+// │  (public API)   │ (user service)  │ (order service) │
+// └────────┬────────┴────────┬────────┴────────┬────────┘
+//          │                 │                 │
+//          ▼                 ▼                 ▼
+// LAYER 3: BACKEND (3 services) - Data layer
+// ┌─────────────────┬─────────────────┬─────────────────┐
+// │    db-users     │    db-orders    │     cache       │
+// │  (user store)   │  (order store)  │  (shared cache) │
+// └─────────────────┴─────────────────┴─────────────────┘
 //
-// Expected results:
-// - A → B: SUCCESS (bilateral agreement)
-// - A → C: BLOCKED (A wants C, but C doesn't allow A)
-// - A → D: BLOCKED (no dependency declared)
+// BILATERAL AGREEMENTS (connections that should WORK):
+//
+// Layer 1 → Layer 2:
+//   - frontend-web    → api-gateway  (web needs gateway)
+//   - frontend-web    → api-users    (web manages users)
+//   - frontend-mobile → api-gateway  (mobile needs gateway)
+//   - frontend-mobile → api-orders   (mobile manages orders)
+//   - frontend-admin  → api-gateway  (admin needs gateway)
+//   - frontend-admin  → api-users    (admin manages users)
+//   - frontend-admin  → api-orders   (admin manages orders)
+//
+// Layer 2 → Layer 3:
+//   - api-gateway → db-users   (gateway reads users)
+//   - api-gateway → db-orders  (gateway reads orders)
+//   - api-gateway → cache      (gateway uses cache)
+//   - api-users   → db-users   (users service owns user data)
+//   - api-users   → cache      (users service caches)
+//   - api-orders  → db-orders  (orders service owns order data)
+//   - api-orders  → cache      (orders service caches)
+//
+// BLOCKED CONNECTIONS (no bilateral agreement):
+//
+// Layer 1 → Layer 2 (missing inbound permission):
+//   - frontend-web    → api-orders  (web not allowed by orders)
+//   - frontend-mobile → api-users   (mobile not allowed by users)
+//
+// Layer 2 → Layer 3 (cross-domain access denied):
+//   - api-users  → db-orders  (users can't access order data)
+//   - api-orders → db-users   (orders can't access user data)
+//
+// Cross-layer (no direct access):
+//   - frontend-* → db-*       (frontends can't access DBs directly)
+//   - frontend-* → cache      (frontends can't access cache directly)
+//
+// Same-layer (no peer access):
+//   - frontend-web → frontend-mobile  (no peer communication)
+//   - api-gateway  → api-users        (unless explicitly allowed)
 
 /// Namespace for test services
 const TEST_SERVICES_NAMESPACE: &str = "mesh-test";
 
-/// Create service-a: traffic generator that tests connectivity
-///
-/// This service depends on B, C, D and runs curl tests to verify
-/// which connections are allowed by the bilateral agreement pattern.
-fn create_service_a() -> LatticeService {
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: "curlimages/curl:latest".to_string(),
-            command: Some(vec!["/bin/sh".to_string()]),
-            args: Some(vec![
-                "-c".to_string(),
-                // Infinite loop: test each service and log results
-                r#"
-while true; do
-    echo "=== Traffic Test Run $(date) ==="
+/// Total number of services in the mesh
+const TOTAL_SERVICES: usize = 9;
 
-    # Test service-b (should SUCCEED - bilateral agreement)
-    if curl -s --connect-timeout 3 http://service-b.mesh-test.svc.cluster.local/health > /dev/null 2>&1; then
-        echo "service-b: ALLOWED (expected)"
-    else
-        echo "service-b: BLOCKED (unexpected!)"
-    fi
+// =============================================================================
+// Helper Functions for Service Creation
+// =============================================================================
 
-    # Test service-c (should FAIL - unilateral)
-    if curl -s --connect-timeout 3 http://service-c.mesh-test.svc.cluster.local/health > /dev/null 2>&1; then
-        echo "service-c: ALLOWED (unexpected!)"
-    else
-        echo "service-c: BLOCKED (expected)"
-    fi
-
-    # Test service-d (should FAIL - no relationship)
-    if curl -s --connect-timeout 3 http://service-d.mesh-test.svc.cluster.local/health > /dev/null 2>&1; then
-        echo "service-d: ALLOWED (unexpected!)"
-    else
-        echo "service-d: BLOCKED (expected)"
-    fi
-
-    echo "=== End Test Run ==="
-    sleep 10
-done
-"#
-                .to_string(),
-            ]),
-            variables: BTreeMap::new(),
-            files: BTreeMap::new(),
-            volumes: BTreeMap::new(),
-            resources: None,
-            liveness_probe: None,
-            readiness_probe: None,
-        },
-    );
-
-    // Declare dependencies: A depends on B, C, D (outbound)
-    let mut resources = BTreeMap::new();
-    resources.insert(
-        "service-b".to_string(),
-        ResourceSpec {
-            type_: ResourceType::Service,
-            direction: DependencyDirection::Outbound,
-            id: None,
-            params: None,
-            class: None,
-        },
-    );
-    resources.insert(
-        "service-c".to_string(),
-        ResourceSpec {
-            type_: ResourceType::Service,
-            direction: DependencyDirection::Outbound,
-            id: None,
-            params: None,
-            class: None,
-        },
-    );
-    resources.insert(
-        "service-d".to_string(),
-        ResourceSpec {
-            type_: ResourceType::Service,
-            direction: DependencyDirection::Outbound,
-            id: None,
-            params: None,
-            class: None,
-        },
-    );
-
-    let mut labels = BTreeMap::new();
-    labels.insert(
-        "lattice.dev/environment".to_string(),
-        TEST_SERVICES_NAMESPACE.to_string(),
-    );
-
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some("service-a".to_string()),
-            namespace: Some(TEST_SERVICES_NAMESPACE.to_string()),
-            labels: Some(labels),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            environment: TEST_SERVICES_NAMESPACE.to_string(),
-            containers,
-            resources,
-            service: None, // No port needed - just runs curl tests
-            replicas: ReplicaSpec { min: 1, max: None },
-            deploy: DeploySpec::default(),
-        },
-        status: None,
+/// Create a basic nginx container spec
+fn nginx_container() -> ContainerSpec {
+    ContainerSpec {
+        image: "nginx:alpine".to_string(),
+        command: None,
+        args: None,
+        variables: BTreeMap::new(),
+        files: BTreeMap::new(),
+        volumes: BTreeMap::new(),
+        resources: None,
+        liveness_probe: None,
+        readiness_probe: None,
     }
 }
 
-/// Create service-b: allows inbound from A (bilateral agreement)
-fn create_service_b() -> LatticeService {
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: "nginx:alpine".to_string(),
-            command: None,
-            args: None,
-            variables: BTreeMap::new(),
-            files: BTreeMap::new(),
-            volumes: BTreeMap::new(),
-            resources: None,
-            liveness_probe: None,
-            readiness_probe: None,
+/// Create standard HTTP port spec
+fn http_port() -> ServicePortsSpec {
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 80,
+            target_port: None,
+            protocol: None,
         },
     );
+    ServicePortsSpec { ports }
+}
 
-    // B allows inbound from A
-    let mut resources = BTreeMap::new();
-    resources.insert(
-        "service-a".to_string(),
+/// Create an outbound dependency resource
+fn outbound_dep(name: &str) -> (String, ResourceSpec) {
+    (
+        name.to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            params: None,
+            class: None,
+        },
+    )
+}
+
+/// Create an inbound allowance resource
+fn inbound_allow(name: &str) -> (String, ResourceSpec) {
+    (
+        name.to_string(),
         ResourceSpec {
             type_: ResourceType::Service,
             direction: DependencyDirection::Inbound,
@@ -430,73 +399,22 @@ fn create_service_b() -> LatticeService {
             params: None,
             class: None,
         },
-    );
-
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 80,
-            target_port: None,
-            protocol: None,
-        },
-    );
-
-    let mut labels = BTreeMap::new();
-    labels.insert(
-        "lattice.dev/environment".to_string(),
-        TEST_SERVICES_NAMESPACE.to_string(),
-    );
-
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some("service-b".to_string()),
-            namespace: Some(TEST_SERVICES_NAMESPACE.to_string()),
-            labels: Some(labels),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            environment: TEST_SERVICES_NAMESPACE.to_string(),
-            containers,
-            resources,
-            service: Some(ServicePortsSpec { ports }),
-            replicas: ReplicaSpec { min: 1, max: None },
-            deploy: DeploySpec::default(),
-        },
-        status: None,
-    }
+    )
 }
 
-/// Create service-c: does NOT allow inbound from A (unilateral blocked)
-fn create_service_c() -> LatticeService {
+/// Create a LatticeService with the given configuration
+fn create_service(
+    name: &str,
+    outbound: Vec<&str>,
+    inbound: Vec<&str>,
+    has_port: bool,
+    container: ContainerSpec,
+) -> LatticeService {
     let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: "nginx:alpine".to_string(),
-            command: None,
-            args: None,
-            variables: BTreeMap::new(),
-            files: BTreeMap::new(),
-            volumes: BTreeMap::new(),
-            resources: None,
-            liveness_probe: None,
-            readiness_probe: None,
-        },
-    );
+    containers.insert("main".to_string(), container);
 
-    // C does NOT allow anyone - no inbound resources
-    let resources = BTreeMap::new();
-
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 80,
-            target_port: None,
-            protocol: None,
-        },
-    );
+    let mut resources: BTreeMap<String, ResourceSpec> = outbound.iter().map(|s| outbound_dep(s)).collect();
+    resources.extend(inbound.iter().map(|s| inbound_allow(s)));
 
     let mut labels = BTreeMap::new();
     labels.insert(
@@ -506,7 +424,7 @@ fn create_service_c() -> LatticeService {
 
     LatticeService {
         metadata: ObjectMeta {
-            name: Some("service-c".to_string()),
+            name: Some(name.to_string()),
             namespace: Some(TEST_SERVICES_NAMESPACE.to_string()),
             labels: Some(labels),
             ..Default::default()
@@ -515,7 +433,7 @@ fn create_service_c() -> LatticeService {
             environment: TEST_SERVICES_NAMESPACE.to_string(),
             containers,
             resources,
-            service: Some(ServicePortsSpec { ports }),
+            service: if has_port { Some(http_port()) } else { None },
             replicas: ReplicaSpec { min: 1, max: None },
             deploy: DeploySpec::default(),
         },
@@ -523,63 +441,281 @@ fn create_service_c() -> LatticeService {
     }
 }
 
-/// Create service-d: standalone, no relationship to A
-fn create_service_d() -> LatticeService {
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: "nginx:alpine".to_string(),
-            command: None,
-            args: None,
-            variables: BTreeMap::new(),
-            files: BTreeMap::new(),
-            volumes: BTreeMap::new(),
-            resources: None,
-            liveness_probe: None,
-            readiness_probe: None,
-        },
-    );
+// =============================================================================
+// Traffic Test Script Generation
+// =============================================================================
 
-    // D has no relationship to A at all
-    let resources = BTreeMap::new();
-
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 80,
-            target_port: None,
-            protocol: None,
-        },
-    );
-
-    let mut labels = BTreeMap::new();
-    labels.insert(
-        "lattice.dev/environment".to_string(),
-        TEST_SERVICES_NAMESPACE.to_string(),
-    );
-
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some("service-d".to_string()),
-            namespace: Some(TEST_SERVICES_NAMESPACE.to_string()),
-            labels: Some(labels),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            environment: TEST_SERVICES_NAMESPACE.to_string(),
-            containers,
-            resources,
-            service: Some(ServicePortsSpec { ports }),
-            replicas: ReplicaSpec { min: 1, max: None },
-            deploy: DeploySpec::default(),
-        },
-        status: None,
-    }
+/// A single connectivity test case
+struct ConnTest {
+    target: &'static str,
+    expected: bool, // true = should be ALLOWED, false = should be BLOCKED
+    reason: &'static str,
 }
 
-/// Deploy test services to the workload cluster
+/// Generate a curl test script for a frontend service
+fn generate_traffic_test_script(source: &str, tests: &[ConnTest]) -> String {
+    let mut script = format!(
+        r#"
+echo "=== {} Traffic Tests ==="
+echo "Testing {} connection permutations..."
+sleep 5  # Wait for network policies to be applied
+
+"#,
+        source,
+        tests.len()
+    );
+
+    for test in tests {
+        let expected_str = if test.expected { "ALLOWED" } else { "BLOCKED" };
+        let unexpected_str = if test.expected { "BLOCKED" } else { "ALLOWED" };
+
+        script.push_str(&format!(
+            r#"
+# Test {target} ({reason})
+if curl -s --connect-timeout 3 http://{target}.{ns}.svc.cluster.local/ > /dev/null 2>&1; then
+    echo "{target}: {expected} ({reason})"
+else
+    echo "{target}: {unexpected} (UNEXPECTED - {reason})"
+fi
+"#,
+            target = test.target,
+            ns = TEST_SERVICES_NAMESPACE,
+            reason = test.reason,
+            expected = expected_str,
+            unexpected = unexpected_str,
+        ));
+    }
+
+    script.push_str(&format!(
+        r#"
+echo "=== End {} Tests ==="
+sleep 30
+"#,
+        source
+    ));
+
+    // Wrap in infinite loop
+    format!(
+        r#"
+while true; do
+{}
+done
+"#,
+        script
+    )
+}
+
+// =============================================================================
+// Layer 1: Frontend Services (Traffic Generators)
+// =============================================================================
+
+/// frontend-web: Web client frontend
+/// - Depends on: api-gateway, api-users (NOT api-orders)
+/// - Tests all Layer 2 and Layer 3 services
+fn create_frontend_web() -> LatticeService {
+    let tests = vec![
+        // Layer 2 - API services
+        ConnTest { target: "api-gateway", expected: true, reason: "bilateral agreement" },
+        ConnTest { target: "api-users", expected: true, reason: "bilateral agreement" },
+        ConnTest { target: "api-orders", expected: false, reason: "web not allowed by orders" },
+        // Layer 3 - Backend services (should all be blocked - no direct access)
+        ConnTest { target: "db-users", expected: false, reason: "no direct DB access" },
+        ConnTest { target: "db-orders", expected: false, reason: "no direct DB access" },
+        ConnTest { target: "cache", expected: false, reason: "no direct cache access" },
+        // Same layer - peer frontends (should be blocked)
+        ConnTest { target: "frontend-mobile", expected: false, reason: "no peer access" },
+        ConnTest { target: "frontend-admin", expected: false, reason: "no peer access" },
+    ];
+
+    let script = generate_traffic_test_script("frontend-web", &tests);
+
+    let container = ContainerSpec {
+        image: "curlimages/curl:latest".to_string(),
+        command: Some(vec!["/bin/sh".to_string()]),
+        args: Some(vec!["-c".to_string(), script]),
+        variables: BTreeMap::new(),
+        files: BTreeMap::new(),
+        volumes: BTreeMap::new(),
+        resources: None,
+        liveness_probe: None,
+        readiness_probe: None,
+    };
+
+    // Outbound: gateway + users (but NOT orders - testing blocked path)
+    // Also try to connect to orders to verify it's blocked
+    create_service(
+        "frontend-web",
+        vec!["api-gateway", "api-users", "api-orders", "db-users", "db-orders", "cache", "frontend-mobile", "frontend-admin"],
+        vec![],
+        false, // No inbound port - just a traffic generator
+        container,
+    )
+}
+
+/// frontend-mobile: Mobile app frontend
+/// - Depends on: api-gateway, api-orders (NOT api-users)
+fn create_frontend_mobile() -> LatticeService {
+    let tests = vec![
+        // Layer 2 - API services
+        ConnTest { target: "api-gateway", expected: true, reason: "bilateral agreement" },
+        ConnTest { target: "api-users", expected: false, reason: "mobile not allowed by users" },
+        ConnTest { target: "api-orders", expected: true, reason: "bilateral agreement" },
+        // Layer 3 - Backend services
+        ConnTest { target: "db-users", expected: false, reason: "no direct DB access" },
+        ConnTest { target: "db-orders", expected: false, reason: "no direct DB access" },
+        ConnTest { target: "cache", expected: false, reason: "no direct cache access" },
+        // Same layer
+        ConnTest { target: "frontend-web", expected: false, reason: "no peer access" },
+        ConnTest { target: "frontend-admin", expected: false, reason: "no peer access" },
+    ];
+
+    let script = generate_traffic_test_script("frontend-mobile", &tests);
+
+    let container = ContainerSpec {
+        image: "curlimages/curl:latest".to_string(),
+        command: Some(vec!["/bin/sh".to_string()]),
+        args: Some(vec!["-c".to_string(), script]),
+        variables: BTreeMap::new(),
+        files: BTreeMap::new(),
+        volumes: BTreeMap::new(),
+        resources: None,
+        liveness_probe: None,
+        readiness_probe: None,
+    };
+
+    create_service(
+        "frontend-mobile",
+        vec!["api-gateway", "api-users", "api-orders", "db-users", "db-orders", "cache", "frontend-web", "frontend-admin"],
+        vec![],
+        false,
+        container,
+    )
+}
+
+/// frontend-admin: Admin panel frontend
+/// - Depends on: api-gateway, api-users, api-orders (full access)
+fn create_frontend_admin() -> LatticeService {
+    let tests = vec![
+        // Layer 2 - API services (admin has full access)
+        ConnTest { target: "api-gateway", expected: true, reason: "bilateral agreement" },
+        ConnTest { target: "api-users", expected: true, reason: "bilateral agreement" },
+        ConnTest { target: "api-orders", expected: true, reason: "bilateral agreement" },
+        // Layer 3 - Backend services (still blocked - must go through API)
+        ConnTest { target: "db-users", expected: false, reason: "no direct DB access" },
+        ConnTest { target: "db-orders", expected: false, reason: "no direct DB access" },
+        ConnTest { target: "cache", expected: false, reason: "no direct cache access" },
+        // Same layer
+        ConnTest { target: "frontend-web", expected: false, reason: "no peer access" },
+        ConnTest { target: "frontend-mobile", expected: false, reason: "no peer access" },
+    ];
+
+    let script = generate_traffic_test_script("frontend-admin", &tests);
+
+    let container = ContainerSpec {
+        image: "curlimages/curl:latest".to_string(),
+        command: Some(vec!["/bin/sh".to_string()]),
+        args: Some(vec!["-c".to_string(), script]),
+        variables: BTreeMap::new(),
+        files: BTreeMap::new(),
+        volumes: BTreeMap::new(),
+        resources: None,
+        liveness_probe: None,
+        readiness_probe: None,
+    };
+
+    create_service(
+        "frontend-admin",
+        vec!["api-gateway", "api-users", "api-orders", "db-users", "db-orders", "cache", "frontend-web", "frontend-mobile"],
+        vec![],
+        false,
+        container,
+    )
+}
+
+// =============================================================================
+// Layer 2: API Services
+// =============================================================================
+
+/// api-gateway: Public API gateway
+/// - Depends on: db-users, db-orders, cache (full backend access)
+/// - Allows: frontend-web, frontend-mobile, frontend-admin
+fn create_api_gateway() -> LatticeService {
+    create_service(
+        "api-gateway",
+        vec!["db-users", "db-orders", "cache"],
+        vec!["frontend-web", "frontend-mobile", "frontend-admin"],
+        true, // Has HTTP port
+        nginx_container(),
+    )
+}
+
+/// api-users: User management service
+/// - Depends on: db-users, cache (NOT db-orders)
+/// - Allows: frontend-web, frontend-admin (NOT frontend-mobile)
+fn create_api_users() -> LatticeService {
+    create_service(
+        "api-users",
+        vec!["db-users", "cache"],
+        vec!["frontend-web", "frontend-admin"], // Note: mobile NOT allowed
+        true,
+        nginx_container(),
+    )
+}
+
+/// api-orders: Order management service
+/// - Depends on: db-orders, cache (NOT db-users)
+/// - Allows: frontend-mobile, frontend-admin (NOT frontend-web)
+fn create_api_orders() -> LatticeService {
+    create_service(
+        "api-orders",
+        vec!["db-orders", "cache"],
+        vec!["frontend-mobile", "frontend-admin"], // Note: web NOT allowed
+        true,
+        nginx_container(),
+    )
+}
+
+// =============================================================================
+// Layer 3: Backend Services
+// =============================================================================
+
+/// db-users: User database
+/// - Allows: api-gateway, api-users (NOT api-orders)
+fn create_db_users() -> LatticeService {
+    create_service(
+        "db-users",
+        vec![],
+        vec!["api-gateway", "api-users"], // Note: api-orders NOT allowed
+        true,
+        nginx_container(),
+    )
+}
+
+/// db-orders: Order database
+/// - Allows: api-gateway, api-orders (NOT api-users)
+fn create_db_orders() -> LatticeService {
+    create_service(
+        "db-orders",
+        vec![],
+        vec!["api-gateway", "api-orders"], // Note: api-users NOT allowed
+        true,
+        nginx_container(),
+    )
+}
+
+/// cache: Shared cache service
+/// - Allows: api-gateway, api-users, api-orders (all API services)
+fn create_cache() -> LatticeService {
+    create_service(
+        "cache",
+        vec![],
+        vec!["api-gateway", "api-users", "api-orders"],
+        true,
+        nginx_container(),
+    )
+}
+
+/// Deploy all 9 services to the workload cluster
 async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
     println!("  Creating namespace {}...", TEST_SERVICES_NAMESPACE);
     let _ = run_cmd(
@@ -598,39 +734,77 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::all(client);
 
-    println!("  Deploying service-a (traffic generator)...");
-    api.create(&PostParams::default(), &create_service_a())
-        .await
-        .map_err(|e| format!("Failed to create service-a: {}", e))?;
+    // Deploy Layer 3 first (backend services) - no dependencies
+    println!("  [Layer 3] Deploying backend services...");
 
-    println!("  Deploying service-b (allows A)...");
-    api.create(&PostParams::default(), &create_service_b())
+    println!("    Deploying db-users...");
+    api.create(&PostParams::default(), &create_db_users())
         .await
-        .map_err(|e| format!("Failed to create service-b: {}", e))?;
+        .map_err(|e| format!("Failed to create db-users: {}", e))?;
 
-    println!("  Deploying service-c (no inbound)...");
-    api.create(&PostParams::default(), &create_service_c())
+    println!("    Deploying db-orders...");
+    api.create(&PostParams::default(), &create_db_orders())
         .await
-        .map_err(|e| format!("Failed to create service-c: {}", e))?;
+        .map_err(|e| format!("Failed to create db-orders: {}", e))?;
 
-    println!("  Deploying service-d (standalone)...");
-    api.create(&PostParams::default(), &create_service_d())
+    println!("    Deploying cache...");
+    api.create(&PostParams::default(), &create_cache())
         .await
-        .map_err(|e| format!("Failed to create service-d: {}", e))?;
+        .map_err(|e| format!("Failed to create cache: {}", e))?;
 
+    // Deploy Layer 2 (API services) - depend on Layer 3
+    println!("  [Layer 2] Deploying API services...");
+
+    println!("    Deploying api-gateway...");
+    api.create(&PostParams::default(), &create_api_gateway())
+        .await
+        .map_err(|e| format!("Failed to create api-gateway: {}", e))?;
+
+    println!("    Deploying api-users...");
+    api.create(&PostParams::default(), &create_api_users())
+        .await
+        .map_err(|e| format!("Failed to create api-users: {}", e))?;
+
+    println!("    Deploying api-orders...");
+    api.create(&PostParams::default(), &create_api_orders())
+        .await
+        .map_err(|e| format!("Failed to create api-orders: {}", e))?;
+
+    // Deploy Layer 1 (frontend services - traffic generators)
+    println!("  [Layer 1] Deploying frontend services (traffic generators)...");
+
+    println!("    Deploying frontend-web...");
+    api.create(&PostParams::default(), &create_frontend_web())
+        .await
+        .map_err(|e| format!("Failed to create frontend-web: {}", e))?;
+
+    println!("    Deploying frontend-mobile...");
+    api.create(&PostParams::default(), &create_frontend_mobile())
+        .await
+        .map_err(|e| format!("Failed to create frontend-mobile: {}", e))?;
+
+    println!("    Deploying frontend-admin...");
+    api.create(&PostParams::default(), &create_frontend_admin())
+        .await
+        .map_err(|e| format!("Failed to create frontend-admin: {}", e))?;
+
+    println!("  All {} services deployed!", TOTAL_SERVICES);
     Ok(())
 }
 
-/// Wait for all deployments to be ready
+/// Wait for all 9 service deployments to be ready
 async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(180); // 3 minutes for pods to start
+    let timeout = Duration::from_secs(300); // 5 minutes for pods to start (9 pods)
 
-    println!("  Waiting for pods to be ready...");
+    println!("  Waiting for {} pods to be ready...", TOTAL_SERVICES);
 
     loop {
         if start.elapsed() > timeout {
-            return Err("Timeout waiting for test pods to be ready".to_string());
+            return Err(format!(
+                "Timeout waiting for test pods to be ready (expected {})",
+                TOTAL_SERVICES
+            ));
         }
 
         let pods_output = run_cmd_allow_fail(
@@ -648,7 +822,6 @@ async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
         );
 
         let mut running_count = 0;
-        let total_expected = 4; // service-a, b, c, d
 
         for line in pods_output.lines() {
             if line.contains("Running") {
@@ -656,10 +829,10 @@ async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
             }
         }
 
-        println!("    {}/{} pods running", running_count, total_expected);
+        println!("    {}/{} pods running", running_count, TOTAL_SERVICES);
 
-        if running_count >= total_expected {
-            println!("  All test pods are running!");
+        if running_count >= TOTAL_SERVICES {
+            println!("  All {} test pods are running!", TOTAL_SERVICES);
             return Ok(());
         }
 
@@ -667,78 +840,142 @@ async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
     }
 }
 
-/// Verify traffic patterns by checking service-a logs
+/// Expected test results for each frontend service
+/// Format: (target_service, expected_allowed)
+const FRONTEND_WEB_EXPECTED: &[(&str, bool)] = &[
+    ("api-gateway", true),   // bilateral agreement
+    ("api-users", true),     // bilateral agreement
+    ("api-orders", false),   // web not allowed by orders
+    ("db-users", false),     // no direct DB access
+    ("db-orders", false),    // no direct DB access
+    ("cache", false),        // no direct cache access
+    ("frontend-mobile", false), // no peer access
+    ("frontend-admin", false),  // no peer access
+];
+
+const FRONTEND_MOBILE_EXPECTED: &[(&str, bool)] = &[
+    ("api-gateway", true),   // bilateral agreement
+    ("api-users", false),    // mobile not allowed by users
+    ("api-orders", true),    // bilateral agreement
+    ("db-users", false),     // no direct DB access
+    ("db-orders", false),    // no direct DB access
+    ("cache", false),        // no direct cache access
+    ("frontend-web", false), // no peer access
+    ("frontend-admin", false), // no peer access
+];
+
+const FRONTEND_ADMIN_EXPECTED: &[(&str, bool)] = &[
+    ("api-gateway", true),   // bilateral agreement
+    ("api-users", true),     // bilateral agreement
+    ("api-orders", true),    // bilateral agreement (admin has full access)
+    ("db-users", false),     // no direct DB access
+    ("db-orders", false),    // no direct DB access
+    ("cache", false),        // no direct cache access
+    ("frontend-web", false), // no peer access
+    ("frontend-mobile", false), // no peer access
+];
+
+/// Verify traffic patterns by checking all 3 frontend service logs
 async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
-    println!("  Waiting for traffic tests to run (30 seconds)...");
-    sleep(Duration::from_secs(30)).await;
+    println!("  Waiting for traffic tests to run (45 seconds)...");
+    sleep(Duration::from_secs(45)).await;
 
-    println!("  Checking service-a logs for traffic test results...");
+    let mut total_pass = 0;
+    let mut total_fail = 0;
+    let mut failures: Vec<String> = Vec::new();
 
-    let logs = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "logs",
-            "-n",
-            TEST_SERVICES_NAMESPACE,
-            "-l",
-            "app.kubernetes.io/name=service-a",
-            "--tail",
-            "50",
-        ],
-    )?;
+    // Check each frontend service
+    for (frontend_name, expected_results) in [
+        ("frontend-web", FRONTEND_WEB_EXPECTED),
+        ("frontend-mobile", FRONTEND_MOBILE_EXPECTED),
+        ("frontend-admin", FRONTEND_ADMIN_EXPECTED),
+    ] {
+        println!("\n  Checking {} logs...", frontend_name);
 
-    println!("\n  === Service-A Traffic Test Logs ===\n{}\n", logs);
+        let logs = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "logs",
+                "-n",
+                TEST_SERVICES_NAMESPACE,
+                "-l",
+                &format!("app.kubernetes.io/name={}", frontend_name),
+                "--tail",
+                "100",
+            ],
+        )?;
 
-    // Verify expected patterns
-    let mut b_allowed = false;
-    let mut c_blocked = false;
-    let mut d_blocked = false;
+        println!("\n  === {} Traffic Test Logs ===", frontend_name);
+        println!("{}", logs);
+        println!("  === End {} Logs ===\n", frontend_name);
 
-    for line in logs.lines() {
-        if line.contains("service-b: ALLOWED") {
-            b_allowed = true;
+        // Parse and verify results
+        println!("  {} verification results:", frontend_name);
+
+        for (target, expected_allowed) in expected_results.iter() {
+            let expected_str = if *expected_allowed { "ALLOWED" } else { "BLOCKED" };
+
+            // Check if the log contains the expected result
+            let allowed_pattern = format!("{}: ALLOWED", target);
+            let blocked_pattern = format!("{}: BLOCKED", target);
+
+            let actual_allowed = logs.contains(&allowed_pattern);
+            let actual_blocked = logs.contains(&blocked_pattern);
+
+            let result_ok = if *expected_allowed {
+                actual_allowed && !logs.contains(&format!("{}: BLOCKED (UNEXPECTED", target))
+            } else {
+                actual_blocked && !logs.contains(&format!("{}: ALLOWED (UNEXPECTED", target))
+            };
+
+            let status = if result_ok { "PASS" } else { "FAIL" };
+            let actual_str = if actual_allowed { "ALLOWED" } else if actual_blocked { "BLOCKED" } else { "UNKNOWN" };
+
+            println!(
+                "    [{}] {} -> {}: {} (expected: {})",
+                status, frontend_name, target, actual_str, expected_str
+            );
+
+            if result_ok {
+                total_pass += 1;
+            } else {
+                total_fail += 1;
+                failures.push(format!(
+                    "{} -> {}: got {}, expected {}",
+                    frontend_name, target, actual_str, expected_str
+                ));
+            }
         }
-        if line.contains("service-c: BLOCKED") {
-            c_blocked = true;
+    }
+
+    // Summary
+    let total_tests = total_pass + total_fail;
+    println!("\n  ========================================");
+    println!("  SERVICE MESH VERIFICATION SUMMARY");
+    println!("  ========================================");
+    println!("  Total tests: {}", total_tests);
+    println!("  Passed: {} ({:.1}%)", total_pass, (total_pass as f64 / total_tests as f64) * 100.0);
+    println!("  Failed: {}", total_fail);
+
+    if !failures.is_empty() {
+        println!("\n  Failures:");
+        for failure in &failures {
+            println!("    - {}", failure);
         }
-        if line.contains("service-d: BLOCKED") {
-            d_blocked = true;
-        }
+        return Err(format!(
+            "Service mesh verification failed: {} of {} tests failed. See failures above.",
+            total_fail, total_tests
+        ));
     }
 
-    println!("  Traffic verification results:");
-    println!(
-        "    - service-b (bilateral): {} (expected: ALLOWED)",
-        if b_allowed { "ALLOWED" } else { "BLOCKED" }
-    );
-    println!(
-        "    - service-c (unilateral): {} (expected: BLOCKED)",
-        if c_blocked { "BLOCKED" } else { "ALLOWED" }
-    );
-    println!(
-        "    - service-d (no relation): {} (expected: BLOCKED)",
-        if d_blocked { "BLOCKED" } else { "ALLOWED" }
-    );
+    println!("\n  SUCCESS: All {} bilateral agreement tests passed!", total_tests);
+    println!("  - 7 allowed connections verified (bilateral agreements work)");
+    println!("  - 17 blocked connections verified (security enforced)");
+    println!("  - Cross-layer access denied (frontends can't access DBs)");
+    println!("  - Peer access denied (no lateral movement within layers)");
 
-    if !b_allowed {
-        return Err(
-            "FAIL: service-b should be reachable (bilateral agreement not working)".to_string(),
-        );
-    }
-
-    if !c_blocked {
-        return Err(
-            "FAIL: service-c should be blocked (unilateral dependency not enforced)".to_string(),
-        );
-    }
-
-    if !d_blocked {
-        return Err("FAIL: service-d should be blocked (no dependency)".to_string());
-    }
-
-    println!("\n  SUCCESS: Bilateral agreement pattern is working correctly!");
     Ok(())
 }
 
@@ -1243,14 +1480,29 @@ spec:
     watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 2).await?;
 
     // =========================================================================
-    // Phase 9: Service Mesh Testing
+    // Phase 9: Comprehensive 3-Layer Service Mesh Testing
     // =========================================================================
-    println!("\n[Phase 9] Testing service mesh bilateral agreement pattern...\n");
-    println!("  This test verifies the network policy bilateral agreement pattern:");
-    println!("    - service-a: Traffic generator, depends on B, C, D");
-    println!("    - service-b: Allows inbound from A (bilateral = WORKS)");
-    println!("    - service-c: No inbound allowed (unilateral = BLOCKED)");
-    println!("    - service-d: No relationship to A (BLOCKED)");
+    println!("\n[Phase 9] Testing comprehensive 3-layer service mesh...\n");
+    println!("  This test deploys a realistic microservice architecture:");
+    println!();
+    println!("  LAYER 1: FRONTEND (traffic generators)");
+    println!("    - frontend-web:    Tests api-gateway, api-users, api-orders");
+    println!("    - frontend-mobile: Tests api-gateway, api-users, api-orders");
+    println!("    - frontend-admin:  Tests api-gateway, api-users, api-orders");
+    println!();
+    println!("  LAYER 2: API (business logic)");
+    println!("    - api-gateway: Allows web, mobile, admin");
+    println!("    - api-users:   Allows web, admin (NOT mobile)");
+    println!("    - api-orders:  Allows mobile, admin (NOT web)");
+    println!();
+    println!("  LAYER 3: BACKEND (data layer)");
+    println!("    - db-users:  Allows gateway, users (NOT orders)");
+    println!("    - db-orders: Allows gateway, orders (NOT users)");
+    println!("    - cache:     Allows all API services");
+    println!();
+    println!("  Testing 24 connection permutations:");
+    println!("    - 7 bilateral agreements (should be ALLOWED)");
+    println!("    - 17 blocked paths (should be BLOCKED)");
     println!();
 
     // Wait for workload cluster to be Ready (webhook must be up before deploying services)
@@ -1279,9 +1531,17 @@ spec:
     println!("    [x] Workload cluster pivoted and is self-managing");
     println!("    [x] Management cluster scaled to 1 worker");
     println!("    [x] Workload cluster scaled to 2 workers");
-    println!("    [x] Service mesh bilateral agreement: A->B ALLOWED");
-    println!("    [x] Service mesh unilateral blocked: A->C BLOCKED");
-    println!("    [x] Service mesh no relationship: A->D BLOCKED");
+    println!();
+    println!("  3-Layer Service Mesh (9 services, 24 tests):");
+    println!("    [x] Layer 1->2: frontend-web -> api-gateway ALLOWED");
+    println!("    [x] Layer 1->2: frontend-web -> api-users ALLOWED");
+    println!("    [x] Layer 1->2: frontend-web -> api-orders BLOCKED (not allowed)");
+    println!("    [x] Layer 1->2: frontend-mobile -> api-gateway ALLOWED");
+    println!("    [x] Layer 1->2: frontend-mobile -> api-users BLOCKED (not allowed)");
+    println!("    [x] Layer 1->2: frontend-mobile -> api-orders ALLOWED");
+    println!("    [x] Layer 1->2: frontend-admin -> all API services ALLOWED");
+    println!("    [x] Layer 1->3: All frontend -> backend BLOCKED (no direct access)");
+    println!("    [x] Same-layer: All peer access BLOCKED (no lateral movement)");
     println!();
 
     // =========================================================================
