@@ -442,6 +442,28 @@ pub async fn reconcile(
                 return Ok(Action::requeue(Duration::from_secs(10)));
             }
 
+            // Recompile and apply policies to handle changes in dependent services
+            // This is necessary because when a new service is added that depends on us,
+            // or when a service we depend on changes its allowed callers, we need to
+            // update our ingress/egress policies to reflect the new bilateral agreements.
+            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain);
+            let compiled = compiler.compile(&service);
+
+            let namespace = env;
+            debug!(
+                resources = compiled.resource_count(),
+                "reapplying compiled resources for policy drift"
+            );
+            if let Err(e) = ctx
+                .kube
+                .apply_compiled_service(&name, namespace, &compiled)
+                .await
+            {
+                error!(error = %e, "failed to reapply compiled resources");
+                update_service_status_failed(&service, &ctx, &e.to_string()).await?;
+                return Err(e);
+            }
+
             // Steady state - requeue periodically to check for drift
             Ok(Action::requeue(Duration::from_secs(60)))
         }

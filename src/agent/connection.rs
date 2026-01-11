@@ -69,10 +69,14 @@ impl AgentConnection {
     ///
     /// Agent must be in a valid state AND have CAPI installed.
     /// CAPI is required because clusterctl move needs CAPI CRDs on the target.
+    /// Failed state is included to allow retry after pivot failure.
     pub fn is_ready_for_pivot(&self) -> bool {
         let valid_state = matches!(
             self.state,
-            AgentState::Provisioning | AgentState::Ready | AgentState::Degraded
+            AgentState::Provisioning
+                | AgentState::Ready
+                | AgentState::Degraded
+                | AgentState::Failed
         );
         valid_state && self.capi_ready
     }
@@ -410,8 +414,9 @@ mod tests {
         conn.state = AgentState::Pivoting;
         assert!(!conn.is_ready_for_pivot());
 
+        // Failed state allows retry
         conn.state = AgentState::Failed;
-        assert!(!conn.is_ready_for_pivot());
+        assert!(conn.is_ready_for_pivot());
     }
 
     #[tokio::test]
@@ -710,9 +715,9 @@ mod tests {
         conn.set_state(AgentState::Pivoting);
         assert!(!conn.is_ready_for_pivot(), "Cannot double-pivot");
 
-        // Failed state
+        // Failed state allows retry
         conn.set_state(AgentState::Failed);
-        assert!(!conn.is_ready_for_pivot(), "Cannot pivot failed cluster");
+        assert!(conn.is_ready_for_pivot(), "Can retry pivot after failure");
     }
 
     // Story: Direct agent communication for real-time operations

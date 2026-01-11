@@ -84,6 +84,9 @@ schemars = { version = "0.8", features = ["chrono"] }
 # UUID generation
 uuid = { version = "1.11", features = ["v4"] }
 
+# Random number generation (for retry jitter)
+rand = "0.8"
+
 [build-dependencies]
 tonic-build = "0.12"
 
@@ -114,9 +117,6 @@ tower = { version = "0.5", features = ["util"] }
 
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
-
-# Random number generation for benchmarks
-rand = "0.8"
 
 [[bin]]
 name = "lattice"

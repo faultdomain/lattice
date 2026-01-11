@@ -380,40 +380,39 @@ async fn ensure_webhook_config(
 /// This runs on every controller startup, enabling version upgrades when
 /// Lattice is upgraded (new binary has new component versions).
 async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
-    use k8s_openapi::api::apps::v1::Deployment;
+    use k8s_openapi::api::apps::v1::{DaemonSet, Deployment};
     use kube::api::{Api, Patch, PatchParams};
 
     let reconciler = IstioReconciler::new();
     let expected_version = reconciler.version();
 
-    // Check current Istio version
+    // Check ALL required Istio components, not just istiod
+    // All three must exist at expected version to skip installation
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), "istio-system");
-    let current_version = match deployments.get("istiod").await {
-        Ok(deploy) => {
-            // Extract version from image tag (e.g., "docker.io/istio/pilot:1.24.2")
-            deploy
-                .spec
-                .and_then(|s| s.template.spec)
-                .and_then(|s| s.containers.into_iter().next())
-                .and_then(|c| c.image)
-                .and_then(|img| img.split(':').next_back().map(String::from))
-        }
-        Err(_) => None,
-    };
+    let daemonsets: Api<DaemonSet> = Api::namespaced(client.clone(), "istio-system");
 
-    // Decide action based on current state
-    match current_version {
-        Some(ref v) if v == expected_version => {
-            tracing::debug!(version = %v, "Istio at expected version, skipping");
-            return Ok(());
-        }
-        Some(ref v) => {
-            tracing::info!(from = %v, to = %expected_version, "Upgrading Istio");
-        }
-        None => {
-            tracing::info!(version = %expected_version, "Installing Istio");
-        }
+    let istiod_version = get_deployment_version(&deployments, "istiod").await;
+    let cni_version = get_daemonset_version(&daemonsets, "istio-cni-node").await;
+    let ztunnel_version = get_daemonset_version(&daemonsets, "ztunnel").await;
+
+    // All components must be at expected version to skip
+    let all_at_expected = istiod_version.as_deref() == Some(expected_version)
+        && cni_version.as_deref() == Some(expected_version)
+        && ztunnel_version.as_deref() == Some(expected_version);
+
+    if all_at_expected {
+        tracing::debug!(version = %expected_version, "Istio components at expected version, skipping");
+        return Ok(());
     }
+
+    // Log what we're doing
+    tracing::info!(
+        expected = %expected_version,
+        istiod = ?istiod_version,
+        cni = ?cni_version,
+        ztunnel = ?ztunnel_version,
+        "Installing/upgrading Istio components"
+    );
 
     // Get manifests and apply them
     let manifests = reconciler
@@ -453,14 +452,55 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
     let operator_allow = IstioReconciler::generate_operator_allow_policy();
     apply_manifest(client, &operator_allow).await?;
 
-    // Apply Cilium policy for Istio ambient mode compatibility
-    // This allows ztunnel's SNAT-ed health probes (from 169.254.7.127) to reach pods
-    // Required when using default-deny network policies with Istio ambient
-    let ztunnel_allow = lattice::infra::generate_ztunnel_allowlist();
-    apply_manifest(client, &ztunnel_allow).await?;
+    // Apply Cilium policies only if Cilium is installed (skip on bootstrap cluster)
+    // Bootstrap kind cluster uses default CNI, not Cilium, so these CRDs don't exist
+    let is_bootstrap_cluster = std::env::var("LATTICE_ROOT_INSTALL").is_ok();
+    if !is_bootstrap_cluster {
+        // Apply Cilium policy for Istio ambient mode compatibility
+        // This allows ztunnel's SNAT-ed health probes (from 169.254.7.127) to reach pods
+        // Required when using default-deny network policies with Istio ambient
+        let ztunnel_allow = lattice::infra::generate_ztunnel_allowlist();
+        apply_manifest(client, &ztunnel_allow).await?;
+
+        // Apply Cilium default-deny policy for L4 defense-in-depth
+        // This complements Istio's L7 AuthorizationPolicy - traffic must pass both layers
+        let cilium_default_deny = lattice::infra::generate_default_deny();
+        apply_manifest(client, &cilium_default_deny).await?;
+    } else {
+        tracing::debug!("Skipping Cilium policies on bootstrap cluster (no Cilium CRDs)");
+    }
 
     tracing::info!(version = %expected_version, "Istio reconciliation complete");
     Ok(())
+}
+
+/// Get version from a Deployment's container image tag
+async fn get_deployment_version(
+    api: &kube::Api<k8s_openapi::api::apps::v1::Deployment>,
+    name: &str,
+) -> Option<String> {
+    api.get(name).await.ok().and_then(|deploy| {
+        deploy
+            .spec
+            .and_then(|s| s.template.spec)
+            .and_then(|s| s.containers.into_iter().next())
+            .and_then(|c| c.image)
+            .and_then(|img| img.split(':').next_back().map(String::from))
+    })
+}
+
+/// Get version from a DaemonSet's container image tag
+async fn get_daemonset_version(
+    api: &kube::Api<k8s_openapi::api::apps::v1::DaemonSet>,
+    name: &str,
+) -> Option<String> {
+    api.get(name).await.ok().and_then(|ds| {
+        ds.spec
+            .and_then(|s| s.template.spec)
+            .and_then(|s| s.containers.into_iter().next())
+            .and_then(|c| c.image)
+            .and_then(|img| img.split(':').next_back().map(String::from))
+    })
 }
 
 /// Apply a single YAML manifest to the cluster
@@ -534,10 +574,8 @@ async fn run_controller() -> anyhow::Result<()> {
 
     // Ensure infrastructure components are installed (Istio)
     // This enables day-2 upgrades: new Lattice version has new component versions
-    if let Err(e) = ensure_infrastructure(&client).await {
-        tracing::warn!(error = %e, "Failed to install infrastructure, continuing anyway");
-        // Don't fail startup - controllers can still run, services just won't have mesh
-    }
+    // Infrastructure is required for service mesh - fail startup if it can't be installed
+    ensure_infrastructure(&client).await?;
 
     // Create cell servers (but don't start them yet - wait for LatticeCluster to get SANs)
     // The webhook is always needed for LatticeService → Deployment mutation

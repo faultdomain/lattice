@@ -23,7 +23,9 @@ use tonic::transport::Endpoint;
 use tracing::{debug, error, info, warn};
 
 use crate::bootstrap::{CsrRequest, CsrResponse};
-use crate::pivot::AgentPivotHandler;
+use crate::pivot::{
+    patch_kubeconfig_for_self_management, retry_with_backoff, AgentPivotHandler, RetryConfig,
+};
 use crate::pki::AgentCertRequest;
 use crate::proto::lattice_agent_client::LatticeAgentClient;
 use crate::proto::{
@@ -253,17 +255,16 @@ impl AgentClient {
             .to_tonic_config()
             .map_err(|e| ClientError::TlsError(e.to_string()))?;
 
-        // Create channel with TLS
-        let endpoint = Endpoint::from_shared(self.config.cell_grpc_endpoint.clone())
+        // Create channel with TLS, keep-alive, and lazy connection for auto-reconnect
+        let channel = Endpoint::from_shared(self.config.cell_grpc_endpoint.clone())
             .map_err(|e| ClientError::InvalidEndpoint(e.to_string()))?
             .connect_timeout(self.config.connect_timeout)
+            .keep_alive_timeout(Duration::from_secs(20))
+            .keep_alive_while_idle(true)
+            .http2_keep_alive_interval(Duration::from_secs(30))
             .tls_config(tls_config)
-            .map_err(|e| ClientError::TlsError(e.to_string()))?;
-
-        let channel = endpoint
-            .connect()
-            .await
-            .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
+            .map_err(|e| ClientError::TlsError(e.to_string()))?
+            .connect_lazy();
 
         self.start_streams(channel).await
     }
@@ -702,6 +703,44 @@ impl AgentClient {
                                 resources = resource_count,
                                 "CAPI resources imported successfully"
                             );
+
+                            // Patch kubeconfig secret to use internal endpoint for self-management
+                            // CAPI needs to reach the API server from within the cluster
+                            // This MUST succeed before we can report pivot complete
+                            // Use infinite retries with backoff - this is critical for self-management
+                            let cluster_name_for_patch = cluster_name_clone.clone();
+                            let namespace_for_patch = target_namespace.clone();
+                            let patch_result =
+                                retry_with_backoff(
+                                    &RetryConfig::default(),
+                                    "patch_kubeconfig_for_self_management",
+                                    || {
+                                        let cn = cluster_name_for_patch.clone();
+                                        let ns = namespace_for_patch.clone();
+                                        async move {
+                                            patch_kubeconfig_for_self_management(&cn, &ns).await
+                                        }
+                                    },
+                                )
+                                .await;
+
+                            if let Err(e) = patch_result {
+                                // This should only happen if max_attempts is set and exhausted
+                                error!(error = %e, "Failed to patch kubeconfig for self-management");
+                                *agent_state_clone.write().await = AgentState::Failed;
+
+                                let msg = AgentMessage {
+                                    cluster_name: cluster_name_clone,
+                                    payload: Some(Payload::PivotComplete(PivotComplete {
+                                        success: false,
+                                        error_message: format!("kubeconfig patch failed: {}", e),
+                                        resources_imported: resource_count as i32,
+                                    })),
+                                };
+                                let _ = message_tx_clone.send(msg).await;
+                                return;
+                            }
+
                             *agent_state_clone.write().await = AgentState::Ready;
 
                             let msg = AgentMessage {

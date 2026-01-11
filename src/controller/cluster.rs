@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams};
+use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams, PostParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
@@ -493,36 +493,120 @@ impl CAPIClient for CAPIClientImpl {
         cluster_name: &str,
         namespace: &str,
     ) -> Result<bool, Error> {
-        let api = self.capi_cluster_api(namespace);
-
-        match api.get(cluster_name).await {
+        // Check 1: CAPI Cluster object is Ready/Provisioned
+        let cluster_api = self.capi_cluster_api(namespace);
+        let cluster_ready = match cluster_api.get(cluster_name).await {
             Ok(cluster) => {
-                // Check status.phase == "Provisioned" or status.conditions contains Ready=True
+                let mut ready = false;
                 if let Some(status) = cluster.data.get("status") {
                     if let Some(phase) = status.get("phase").and_then(|p| p.as_str()) {
                         if phase == "Provisioned" {
-                            return Ok(true);
+                            ready = true;
                         }
                     }
-                    // Also check conditions
-                    if let Some(conditions) = status.get("conditions").and_then(|c| c.as_array()) {
-                        for condition in conditions {
-                            if condition.get("type").and_then(|t| t.as_str()) == Some("Ready")
-                                && condition.get("status").and_then(|s| s.as_str()) == Some("True")
-                            {
-                                return Ok(true);
+                    if !ready {
+                        if let Some(conditions) =
+                            status.get("conditions").and_then(|c| c.as_array())
+                        {
+                            for condition in conditions {
+                                if condition.get("type").and_then(|t| t.as_str()) == Some("Ready")
+                                    && condition.get("status").and_then(|s| s.as_str())
+                                        == Some("True")
+                                {
+                                    ready = true;
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-                Ok(false)
+                ready
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => false,
+            Err(e) => return Err(e.into()),
+        };
+
+        if !cluster_ready {
+            debug!(cluster = %cluster_name, "CAPI Cluster not ready yet");
+            return Ok(false);
+        }
+
+        // Check 2: KubeadmControlPlane is Initialized
+        // clusterctl move requires this before it will proceed
+        let kcp_api: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            namespace,
+            &ApiResource::from_gvk(&GroupVersionKind {
+                group: "controlplane.cluster.x-k8s.io".to_string(),
+                version: "v1beta1".to_string(),
+                kind: "KubeadmControlPlane".to_string(),
+            }),
+        );
+
+        let kcp_name = format!("{}-control-plane", cluster_name);
+        let kcp_initialized = match kcp_api.get(&kcp_name).await {
+            Ok(kcp) => {
+                if let Some(status) = kcp.data.get("status") {
+                    status
+                        .get("initialized")
+                        .and_then(|i| i.as_bool())
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
             }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                // Cluster doesn't exist yet
-                Ok(false)
+                debug!(cluster = %cluster_name, "KubeadmControlPlane not found");
+                false
             }
-            Err(e) => Err(e.into()),
+            Err(e) => return Err(e.into()),
+        };
+
+        if !kcp_initialized {
+            debug!(cluster = %cluster_name, "KubeadmControlPlane not initialized yet");
+            return Ok(false);
         }
+
+        // Check 3: No machines are still provisioning
+        // clusterctl move will fail if any machines are in provisioning state
+        let machine_api: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            namespace,
+            &ApiResource::from_gvk(&GroupVersionKind {
+                group: "cluster.x-k8s.io".to_string(),
+                version: "v1beta1".to_string(),
+                kind: "Machine".to_string(),
+            }),
+        );
+
+        let machines = machine_api
+            .list(
+                &ListParams::default()
+                    .labels(&format!("cluster.x-k8s.io/cluster-name={}", cluster_name)),
+            )
+            .await?;
+
+        for machine in &machines.items {
+            if let Some(status) = machine.data.get("status") {
+                if let Some(phase) = status.get("phase").and_then(|p| p.as_str()) {
+                    if phase == "Provisioning" || phase == "Pending" {
+                        debug!(
+                            cluster = %cluster_name,
+                            machine = ?machine.metadata.name,
+                            phase = %phase,
+                            "Machine still provisioning"
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+
+        info!(
+            cluster = %cluster_name,
+            "Infrastructure fully ready (Cluster ready, KCP initialized, all machines running)"
+        );
+        Ok(true)
     }
 
     async fn get_machine_deployment_replicas(
@@ -1082,6 +1166,30 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // But we need to wait for CAPI resources to exist (from pivot) before going Ready
             if is_self {
                 let capi_namespace = format!("capi-{}", name);
+
+                // Ensure kubeconfig uses internal endpoint for self-management
+                // CAPI needs to reach itself via kubernetes.default.svc, not external IP
+                // Use retry with backoff since this is critical for self-management
+                let cluster_name = name.clone();
+                let namespace = capi_namespace.clone();
+                let patch_result =
+                    crate::retry::retry_with_backoff(
+                        &crate::retry::RetryConfig::with_max_attempts(10),
+                        "patch_kubeconfig_for_self_management",
+                        || {
+                            let cn = cluster_name.clone();
+                            let ns = namespace.clone();
+                            async move {
+                                crate::pivot::patch_kubeconfig_for_self_management(&cn, &ns).await
+                            }
+                        },
+                    )
+                    .await;
+
+                if let Err(e) = patch_result {
+                    warn!(error = %e, "Failed to patch kubeconfig for self-management after retries");
+                }
+
                 let capi_ready = ctx
                     .capi
                     .is_infrastructure_ready(&name, &capi_namespace)
@@ -1817,13 +1925,6 @@ mod tests {
         let mut cluster = sample_cluster(name);
         cluster.status = Some(LatticeClusterStatus::with_phase(phase));
         cluster
-    }
-
-    /// Create a workload cluster (no spec.endpoints) with a specific status phase
-    /// Used for testing agent-based pivot flow
-    fn workload_cluster_with_phase(name: &str, phase: ClusterPhase) -> LatticeCluster {
-        // sample_cluster() already creates a workload cluster (no spec.endpoints)
-        cluster_with_phase(name, phase)
     }
 
     /// Create a cluster with invalid spec (zero control plane nodes)

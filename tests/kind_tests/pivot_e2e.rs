@@ -64,6 +64,11 @@ const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
 /// Docker image name for lattice
 const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
+/// Docker network subnet for kind/CAPD clusters
+/// This must be pinned because Cilium LB-IPAM uses IPs from this range (172.18.255.x)
+const DOCKER_KIND_SUBNET: &str = "172.18.0.0/16";
+const DOCKER_KIND_GATEWAY: &str = "172.18.0.1";
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -93,6 +98,90 @@ fn run_cmd_allow_fail(cmd: &str, args: &[&str]) -> String {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default()
+}
+
+/// Ensure the Docker "kind" network exists with the correct subnet
+///
+/// Docker assigns subnets dynamically when creating networks. If the "kind" network
+/// is recreated (e.g., after `docker network rm` or system restart), it may get a
+/// different subnet. This breaks Cilium LB-IPAM which expects IPs in 172.18.255.x.
+///
+/// This function ensures the network exists with the pinned subnet.
+fn ensure_docker_network() -> Result<(), String> {
+    println!(
+        "  Ensuring Docker 'kind' network has correct subnet ({})...",
+        DOCKER_KIND_SUBNET
+    );
+
+    // Check if the network exists
+    let inspect_output = ProcessCommand::new("docker")
+        .args([
+            "network",
+            "inspect",
+            "kind",
+            "--format",
+            "{{range .IPAM.Config}}{{.Subnet}}{{end}}",
+        ])
+        .output();
+
+    match inspect_output {
+        Ok(output) if output.status.success() => {
+            let current_subnet = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if current_subnet == DOCKER_KIND_SUBNET {
+                println!("  Docker 'kind' network already has correct subnet");
+                return Ok(());
+            }
+            // Network exists but with wrong subnet - need to recreate
+            println!(
+                "  Docker 'kind' network has wrong subnet ({}), recreating...",
+                current_subnet
+            );
+
+            // Check if any containers are using the network
+            let containers = run_cmd_allow_fail(
+                "docker",
+                &[
+                    "network",
+                    "inspect",
+                    "kind",
+                    "--format",
+                    "{{range .Containers}}{{.Name}} {{end}}",
+                ],
+            );
+            if !containers.trim().is_empty() {
+                return Err(format!(
+                    "Cannot recreate 'kind' network - containers still attached: {}. Stop them first.",
+                    containers.trim()
+                ));
+            }
+
+            // Remove the network
+            run_cmd("docker", &["network", "rm", "kind"])?;
+        }
+        _ => {
+            // Network doesn't exist
+            println!("  Docker 'kind' network doesn't exist, creating...");
+        }
+    }
+
+    // Create the network with the correct subnet
+    run_cmd(
+        "docker",
+        &[
+            "network",
+            "create",
+            "--driver=bridge",
+            &format!("--subnet={}", DOCKER_KIND_SUBNET),
+            &format!("--gateway={}", DOCKER_KIND_GATEWAY),
+            "kind",
+        ],
+    )?;
+
+    println!(
+        "  Docker 'kind' network created with subnet {}",
+        DOCKER_KIND_SUBNET
+    );
+    Ok(())
 }
 
 /// Build and push the lattice Docker image to registry
@@ -1344,6 +1433,12 @@ async fn run_full_e2e() -> Result<(), String> {
     // =========================================================================
     println!("\n[Phase 1] Cleaning up previous test runs...\n");
     cleanup_all();
+
+    // =========================================================================
+    // Phase 1.5: Ensure Docker network has correct subnet
+    // =========================================================================
+    println!("\n[Phase 1.5] Setting up Docker network...\n");
+    ensure_docker_network()?;
 
     // =========================================================================
     // Phase 2: Build and Push Lattice Image

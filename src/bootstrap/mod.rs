@@ -244,18 +244,16 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
         manifests.extend(crate::cilium::generate_lb_resources(networking));
     }
 
-    // Add CiliumNetworkPolicy for the operator
+    // Add CiliumNetworkPolicy for the operator/agent
+    // This is the ONLY policy applied at bootstrap - just enough for the agent to connect
     // - Root clusters (no parent): egress to DNS + API server only
     // - Child clusters (have parent): also include parent for gRPC connection
+    // All other policies (default-deny, ztunnel allowlist, Istio policies) are applied
+    // by the operator once it starts - single source of truth, no drift.
     manifests.push(crate::infra::generate_operator_network_policy(
         config.parent_host,
         config.parent_grpc_port,
     ));
-
-    // Add CiliumClusterwideNetworkPolicy for ztunnel (required for Istio ambient mode)
-    // This allows traffic from the ztunnel's link-local address (169.254.7.127)
-    // See: https://istio.io/latest/docs/ambient/install/platform-prerequisites/
-    manifests.push(crate::infra::generate_ztunnel_allowlist());
 
     manifests
 }

@@ -49,6 +49,7 @@ pub mod pki;
 pub mod policy;
 pub mod proto;
 pub mod provider;
+pub mod retry;
 pub mod webhook;
 pub mod workload;
 
