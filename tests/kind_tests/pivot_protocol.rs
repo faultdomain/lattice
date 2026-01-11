@@ -226,15 +226,15 @@ async fn run_pivot_e2e_test() -> Result<(), String> {
 
     // Register cluster for bootstrap (format: host:http_port:grpc_port)
     let cluster_manifest = serde_json::to_string(&cluster).expect("serialize cluster");
-    let token = bootstrap_state.register_cluster(
-        WORKLOAD_CLUSTER_NAME.to_string(),
-        format!("{}:8443:{}", grpc_addr.ip(), grpc_addr.port()),
-        ca.ca_cert_pem().to_string(),
+    let token = bootstrap_state.register_cluster(lattice::bootstrap::ClusterRegistration {
+        cluster_id: WORKLOAD_CLUSTER_NAME.to_string(),
+        cell_endpoint: format!("{}:8443:{}", grpc_addr.ip(), grpc_addr.port()),
+        ca_certificate: ca.ca_cert_pem().to_string(),
         cluster_manifest,
-        None,
-        "docker".to_string(),
-        lattice::crd::BootstrapProvider::default(),
-    );
+        networking: None,
+        provider: "docker".to_string(),
+        bootstrap: lattice::crd::BootstrapProvider::default(),
+    });
     println!("  Bootstrap token generated: {}...", &token.as_str()[..16]);
 
     // Step 6: Simulate agent bootstrap and connection

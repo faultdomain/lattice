@@ -30,6 +30,7 @@
 //!         keep_bootstrap_on_failure: false,
 //!         timeout: Duration::from_secs(1200),
 //!         registry_credentials: None,
+//!         bootstrap_override: None,
 //!     };
 //!
 //!     let installer = Installer::new(config).unwrap();

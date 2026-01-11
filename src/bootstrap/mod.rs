@@ -143,6 +143,28 @@ pub struct CsrResponse {
     pub ca_certificate_pem: String,
 }
 
+/// Configuration for registering a cluster for bootstrap
+///
+/// Groups related parameters for `register_cluster` to improve readability
+/// and satisfy clippy's too_many_arguments lint.
+#[derive(Debug, Clone)]
+pub struct ClusterRegistration {
+    /// Unique cluster identifier
+    pub cluster_id: String,
+    /// Cell endpoint (format: "host:http_port:grpc_port")
+    pub cell_endpoint: String,
+    /// CA certificate PEM for the parent cell
+    pub ca_certificate: String,
+    /// LatticeCluster CRD JSON to apply on workload cluster
+    pub cluster_manifest: String,
+    /// Optional networking config for Cilium LB-IPAM
+    pub networking: Option<crate::crd::NetworkingSpec>,
+    /// Infrastructure provider (docker, aws, gcp, azure)
+    pub provider: String,
+    /// Bootstrap mechanism (kubeadm or rke2)
+    pub bootstrap: crate::crd::BootstrapProvider,
+}
+
 /// Bootstrap manifest generator
 pub trait ManifestGenerator: Send + Sync {
     /// Generate bootstrap manifests for a cluster
@@ -577,40 +599,25 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// Register a cluster for bootstrap
     ///
     /// # Arguments
-    /// * `cluster_id` - Unique cluster identifier
-    /// * `cell_endpoint` - Cell endpoint (format: "host:http_port:grpc_port")
-    /// * `ca_certificate` - CA certificate PEM
-    /// * `cluster_manifest` - The LatticeCluster CRD JSON to apply on the workload cluster
-    /// * `networking` - Optional networking config for Cilium LB-IPAM
-    /// * `provider` - Infrastructure provider (docker, aws, gcp, azure)
-    /// * `bootstrap` - Bootstrap mechanism (kubeadm or rke2)
-    pub fn register_cluster(
-        &self,
-        cluster_id: String,
-        cell_endpoint: String,
-        ca_certificate: String,
-        cluster_manifest: String,
-        networking: Option<crate::crd::NetworkingSpec>,
-        provider: String,
-        bootstrap: crate::crd::BootstrapProvider,
-    ) -> BootstrapToken {
+    /// * `registration` - Cluster registration configuration
+    pub fn register_cluster(&self, registration: ClusterRegistration) -> BootstrapToken {
         let token = BootstrapToken::generate();
         let token_hash = token.hash();
 
         let info = ClusterBootstrapInfo {
-            cluster_id: cluster_id.clone(),
-            cell_endpoint,
-            ca_certificate,
-            cluster_manifest,
+            cluster_id: registration.cluster_id.clone(),
+            cell_endpoint: registration.cell_endpoint,
+            ca_certificate: registration.ca_certificate,
+            cluster_manifest: registration.cluster_manifest,
             token_hash,
             token_created: Instant::now(),
             token_used: false,
-            networking,
-            provider,
-            bootstrap,
+            networking: registration.networking,
+            provider: registration.provider,
+            bootstrap: registration.bootstrap,
         };
 
-        self.clusters.insert(cluster_id, info);
+        self.clusters.insert(registration.cluster_id, info);
         token
     }
 
@@ -907,15 +914,15 @@ mod tests {
     ) -> BootstrapToken {
         // Use a minimal test cluster manifest
         let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"test"}}"#.to_string();
-        state.register_cluster(
-            cluster_id.into(),
-            cell_endpoint.into(),
-            ca_certificate.into(),
+        state.register_cluster(ClusterRegistration {
+            cluster_id: cluster_id.into(),
+            cell_endpoint: cell_endpoint.into(),
+            ca_certificate: ca_certificate.into(),
             cluster_manifest,
-            None,
-            "docker".to_string(),
-            crate::crd::BootstrapProvider::default(),
-        )
+            networking: None,
+            provider: "docker".to_string(),
+            bootstrap: crate::crd::BootstrapProvider::default(),
+        })
     }
 
     #[test]

@@ -81,27 +81,12 @@ pub trait ClusterBootstrap: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `cluster_id` - Unique cluster identifier
-    /// * `cell_endpoint` - Cell endpoint (format: "host:http_port:grpc_port")
-    /// * `ca_certificate` - CA certificate PEM for the parent cell
-    /// * `cluster_manifest` - LatticeCluster CRD JSON to apply on workload cluster
-    /// * `networking` - Optional networking config for Cilium LB-IPAM
-    /// * `provider` - Infrastructure provider (docker, aws, gcp, azure)
-    /// * `bootstrap` - Bootstrap mechanism (kubeadm or rke2)
+    /// * `registration` - Cluster registration configuration
     ///
     /// # Returns
     ///
     /// A one-time bootstrap token
-    fn register_cluster(
-        &self,
-        cluster_id: String,
-        cell_endpoint: String,
-        ca_certificate: String,
-        cluster_manifest: String,
-        networking: Option<crate::crd::NetworkingSpec>,
-        provider: String,
-        bootstrap: crate::crd::BootstrapProvider,
-    ) -> String;
+    fn register_cluster(&self, registration: crate::bootstrap::ClusterRegistration) -> String;
 
     /// Check if a cluster is already registered
     fn is_cluster_registered(&self, cluster_id: &str) -> bool;
@@ -151,23 +136,6 @@ pub trait CAPIClient: Send + Sync {
         namespace: &str,
     ) -> Result<bool, Error>;
 
-    /// Check if pivot has been marked complete on the CAPI Cluster
-    ///
-    /// Checks for the `lattice.dev/pivot-complete: "true"` annotation.
-    /// This annotation is set after the agent confirms PivotComplete,
-    /// ensuring the pivot actually succeeded (not just that clusterctl ran).
-    async fn is_pivot_complete_annotated(
-        &self,
-        cluster_name: &str,
-        namespace: &str,
-    ) -> Result<bool, Error>;
-
-    /// Mark pivot as complete on the CAPI Cluster
-    ///
-    /// Sets the `lattice.dev/pivot-complete: "true"` annotation.
-    /// Called after agent confirms PivotComplete.
-    async fn mark_pivot_complete(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
-
     /// Get the current replica count of a cluster's MachineDeployment
     ///
     /// Returns None if no MachineDeployment exists for the cluster.
@@ -213,25 +181,8 @@ impl<G: crate::bootstrap::ManifestGenerator> ClusterBootstrapImpl<G> {
 impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap
     for ClusterBootstrapImpl<G>
 {
-    fn register_cluster(
-        &self,
-        cluster_id: String,
-        cell_endpoint: String,
-        ca_certificate: String,
-        cluster_manifest: String,
-        networking: Option<crate::crd::NetworkingSpec>,
-        provider: String,
-        bootstrap: crate::crd::BootstrapProvider,
-    ) -> String {
-        let token = self.state.register_cluster(
-            cluster_id,
-            cell_endpoint,
-            ca_certificate,
-            cluster_manifest,
-            networking,
-            provider,
-            bootstrap,
-        );
+    fn register_cluster(&self, registration: crate::bootstrap::ClusterRegistration) -> String {
+        let token = self.state.register_cluster(registration);
         token.as_str().to_string()
     }
 
@@ -635,38 +586,6 @@ impl CAPIClient for CAPIClientImpl {
             }
             Err(e) => Err(e.into()),
         }
-    }
-
-    async fn is_pivot_complete_annotated(
-        &self,
-        cluster_name: &str,
-        namespace: &str,
-    ) -> Result<bool, Error> {
-        match self.capi_cluster_api(namespace).get(cluster_name).await {
-            Ok(cluster) => Ok(cluster
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|a| a.get("lattice.dev/pivot-complete"))
-                .is_some_and(|v| v == "true")),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    async fn mark_pivot_complete(&self, cluster_name: &str, namespace: &str) -> Result<(), Error> {
-        use kube::api::{Patch, PatchParams};
-
-        let patch = serde_json::json!({
-            "metadata": { "annotations": { "lattice.dev/pivot-complete": "true" } }
-        });
-
-        self.capi_cluster_api(namespace)
-            .patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
-            .await?;
-
-        info!(cluster = %cluster_name, namespace = %namespace, "Marked CAPI Cluster as pivot-complete");
-        Ok(())
     }
 
     async fn get_machine_deployment_replicas(
@@ -1262,7 +1181,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // Validate the cluster spec
     if let Err(e) = cluster.spec.validate() {
         warn!(error = %e, "cluster validation failed");
-        update_cluster_status(&cluster, &ctx, ClusterPhase::Failed, Some(&e.to_string())).await?;
+        update_cluster_status(&cluster, &ctx, ClusterPhase::Failed, Some(&e.to_string()), false).await?;
         // Don't requeue for validation errors - they require spec changes
         return Ok(Action::await_change());
     }
@@ -1317,7 +1236,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
                 if capi_ready {
                     info!("self-cluster has CAPI resources ready, transitioning to Ready");
-                    update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
+                    update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, true).await?;
                     return Ok(Action::requeue(Duration::from_secs(60)));
                 } else {
                     debug!("self-cluster waiting for CAPI resources (pivot not complete yet)");
@@ -1350,7 +1269,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Update status to Provisioning
             info!("transitioning to Provisioning phase");
-            update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None).await?;
+            update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None, false).await?;
             Ok(Action::requeue(Duration::from_secs(5)))
         }
         ClusterPhase::Provisioning => {
@@ -1368,7 +1287,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             if is_ready {
                 // Infrastructure is ready, transition to Pivoting
                 info!("infrastructure ready, transitioning to Pivoting phase");
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None).await?;
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None, false).await?;
                 Ok(Action::requeue(Duration::from_secs(5)))
             } else {
                 // Still provisioning, requeue
@@ -1380,12 +1299,25 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Each cluster gets its own CAPI namespace
             let capi_namespace = format!("capi-{}", name);
 
+            // Check if pivot was already completed (persisted in status)
+            // This handles controller restarts - we don't need to wait for agent reconnection
+            if cluster
+                .status
+                .as_ref()
+                .map(|s| s.pivot_complete)
+                .unwrap_or(false)
+            {
+                info!("pivot already complete (from status), transitioning to Ready");
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, false).await?;
+                return Ok(Action::requeue(Duration::from_secs(60)));
+            }
+
             // Clusters with cell_ref were provisioned by a parent cell and need agent-based pivot.
             // The root cluster (no cell_ref) was bootstrapped by the installer which
             // already ran clusterctl move - just transition to Ready.
             if is_root_cluster(&cluster) {
                 info!("root cluster pivot complete (via installer), transitioning to Ready");
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, true).await?;
                 return Ok(Action::requeue(Duration::from_secs(60)));
             }
 
@@ -1419,8 +1351,9 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 match action {
                     PivotAction::Complete => {
                         // Agent reports pivot complete (Ready state)
+                        // Set pivot_complete=true to persist completion across restarts
                         info!("agent reports pivot complete, transitioning to Ready phase");
-                        update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
+                        update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, true).await?;
                         Ok(Action::requeue(Duration::from_secs(60)))
                     }
                     PivotAction::ExecuteMove => {
@@ -1486,7 +1419,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 // No pivot operations - this is a non-cell mode
                 // Just transition to Ready since pivot is not applicable
                 debug!("no pivot operations configured, transitioning to Ready");
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None, false).await?;
                 Ok(Action::requeue(Duration::from_secs(60)))
             }
         }
@@ -1624,15 +1557,16 @@ async fn generate_capi_manifests(
             })?;
 
         // Register cluster and get token (with networking config for LB-IPAM)
-        let token = bootstrap_ctx.register_cluster(
-            cluster_name.to_string(),
-            cell_endpoint.clone(),
-            ca_cert.clone(),
+        let registration = crate::bootstrap::ClusterRegistration {
+            cluster_id: cluster_name.to_string(),
+            cell_endpoint: cell_endpoint.clone(),
+            ca_certificate: ca_cert.clone(),
             cluster_manifest,
-            cluster.spec.networking.clone(),
-            cluster.spec.provider.type_.to_string(),
-            cluster.spec.provider.kubernetes.bootstrap.clone(),
-        );
+            networking: cluster.spec.networking.clone(),
+            provider: cluster.spec.provider.type_.to_string(),
+            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+        };
+        let token = bootstrap_ctx.register_cluster(registration);
 
         BootstrapInfo::new(bootstrap_endpoint, token, ca_cert)
     } else if let Some(cell_ref) = &cluster.spec.cell_ref {
@@ -1672,15 +1606,16 @@ async fn generate_capi_manifests(
                         })?;
 
                     // Register cluster and get token
-                    let token = bootstrap_state.register_cluster(
-                        cluster_name.to_string(),
-                        cell_endpoint.clone(),
-                        ca_cert.clone(),
+                    let registration = crate::bootstrap::ClusterRegistration {
+                        cluster_id: cluster_name.to_string(),
+                        cell_endpoint: cell_endpoint.clone(),
+                        ca_certificate: ca_cert.clone(),
                         cluster_manifest,
-                        cluster.spec.networking.clone(),
-                        cluster.spec.provider.type_.to_string(),
-                        cluster.spec.provider.kubernetes.bootstrap.clone(),
-                    );
+                        networking: cluster.spec.networking.clone(),
+                        provider: cluster.spec.provider.type_.to_string(),
+                        bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+                    };
+                    let token = bootstrap_state.register_cluster(registration);
 
                     info!(
                         cluster = %cluster_name,
@@ -1748,11 +1683,20 @@ pub fn error_policy(cluster: Arc<LatticeCluster>, error: &Error, _ctx: Arc<Conte
 ///
 /// This consolidates the status update logic for all phases. For Failed phase,
 /// pass a custom error message. For other phases, pass None for the message.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster to update
+/// * `ctx` - Controller context
+/// * `phase` - The new phase to set
+/// * `error_message` - Optional error message (for Failed phase)
+/// * `set_pivot_complete` - Whether to set pivot_complete=true (for Ready phase after pivot)
 async fn update_cluster_status(
     cluster: &LatticeCluster,
     ctx: &Context,
     phase: ClusterPhase,
     error_message: Option<&str>,
+    set_pivot_complete: bool,
 ) -> Result<(), Error> {
     let name = cluster.name_any();
 
@@ -1791,9 +1735,14 @@ async fn update_cluster_status(
 
     let condition = Condition::new(condition_type, condition_status, reason, message);
 
-    let status = LatticeClusterStatus::with_phase(phase.clone())
+    let mut status = LatticeClusterStatus::with_phase(phase.clone())
         .message(message)
         .condition(condition);
+
+    // Set pivot_complete if requested (persists pivot completion across restarts)
+    if set_pivot_complete {
+        status = status.pivot_complete(true);
+    }
 
     ctx.kube.patch_status(&name, &status).await?;
 
@@ -2486,7 +2435,7 @@ mod tests {
                 Context::for_testing(Arc::new(mock), Arc::new(capi_mock), Arc::new(installer));
 
             let result =
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None).await;
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None, false).await;
 
             assert!(result.is_err());
             assert!(result
@@ -2697,19 +2646,13 @@ mod tests {
         impl ClusterBootstrap for TestClusterBootstrap {
             fn register_cluster(
                 &self,
-                cluster_id: String,
-                _cell_endpoint: String,
-                _ca_certificate: String,
-                _cluster_manifest: String,
-                _networking: Option<crate::crd::NetworkingSpec>,
-                _provider: String,
-                _bootstrap: crate::crd::BootstrapProvider,
+                registration: crate::bootstrap::ClusterRegistration,
             ) -> String {
                 self.registered_clusters
                     .lock()
                     .unwrap()
-                    .push(cluster_id.clone());
-                format!("bootstrap-token-for-{}", cluster_id)
+                    .push(registration.cluster_id.clone());
+                format!("bootstrap-token-for-{}", registration.cluster_id)
             }
 
             fn is_cluster_registered(&self, cluster_id: &str) -> bool {
@@ -3194,7 +3137,7 @@ mod tests {
                 Arc::new(installer),
             );
 
-            update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None)
+            update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None, false)
                 .await
                 .unwrap();
 
@@ -3232,7 +3175,7 @@ mod tests {
                 Arc::new(installer),
             );
 
-            update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None)
+            update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None, false)
                 .await
                 .unwrap();
 
@@ -3270,7 +3213,7 @@ mod tests {
             );
 
             let error_msg = "control plane count must be at least 1";
-            update_cluster_status(&cluster, &ctx, ClusterPhase::Failed, Some(error_msg))
+            update_cluster_status(&cluster, &ctx, ClusterPhase::Failed, Some(error_msg), false)
                 .await
                 .unwrap();
 
@@ -3372,13 +3315,7 @@ mod tests {
         impl ClusterBootstrap for StubClusterBootstrap {
             fn register_cluster(
                 &self,
-                _: String,
-                _: String,
-                _: String,
-                _: String,
-                _: Option<crate::crd::NetworkingSpec>,
-                _: String,
-                _: crate::crd::BootstrapProvider,
+                _registration: crate::bootstrap::ClusterRegistration,
             ) -> String {
                 "stub-token".to_string()
             }
@@ -3542,15 +3479,7 @@ mod tests {
                 Ok(())
             });
 
-            let mut capi_mock = MockCAPIClient::new();
-            // Default: pivot annotation not present
-            capi_mock
-                .expect_is_pivot_complete_annotated()
-                .returning(|_, _| Ok(false));
-            // Default: marking pivot complete succeeds
-            capi_mock
-                .expect_mark_pivot_complete()
-                .returning(|_, _| Ok(()));
+            let capi_mock = MockCAPIClient::new();
 
             let installer = MockCapiInstaller::new();
 

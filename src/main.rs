@@ -719,34 +719,23 @@ async fn start_agent_if_needed(
     use k8s_openapi::api::core::v1::Secret;
     use kube::api::Api;
 
-    // Read our own LatticeCluster CRD to check for cellRef
-    let clusters: Api<LatticeCluster> = Api::all(client.clone());
-    let cluster = match clusters.get(cluster_name).await {
-        Ok(c) => c,
+    // Check for lattice-parent-config secret - this is set by the bootstrap process
+    // and indicates we were provisioned by a parent cell and need to connect back.
+    // If a cluster has a cellRef, this secret will ALWAYS exist (created during bootstrap).
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
+    let parent_config = match secrets.get("lattice-parent-config").await {
+        Ok(config) => config,
         Err(kube::Error::Api(e)) if e.code == 404 => {
-            tracing::debug!("LatticeCluster CRD not found yet, skipping agent");
+            tracing::debug!("No parent config secret, this is a root cluster");
             return Ok(None);
         }
-        Err(e) => return Err(anyhow::anyhow!("Failed to get LatticeCluster: {}", e)),
+        Err(e) => return Err(anyhow::anyhow!("Failed to get parent config secret: {}", e)),
     };
 
-    // Check if we have a parent (cellRef)
-    if cluster.spec.cell_ref.is_none() {
-        tracing::debug!("No cellRef, this is a root cluster");
-        return Ok(None);
-    }
-
     tracing::info!(
-        cell_ref = ?cluster.spec.cell_ref,
-        "Cluster has parent cell, starting agent connection"
+        cluster = %cluster_name,
+        "Found parent config secret, starting agent connection to parent cell"
     );
-
-    // Read parent connection config from secret
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
-    let parent_config = secrets
-        .get("lattice-parent-config")
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get parent config secret: {}", e))?;
 
     let data = parent_config
         .data

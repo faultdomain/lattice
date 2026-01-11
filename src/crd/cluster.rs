@@ -117,6 +117,18 @@ pub struct LatticeClusterStatus {
     /// Kubernetes API server endpoint
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+
+    /// Whether pivot has completed successfully
+    ///
+    /// This is set to true when the agent confirms PivotComplete with success=true.
+    /// It's the authoritative source of truth for pivot completion, persisted in
+    /// the cluster status to survive controller restarts.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pivot_complete: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl LatticeClusterStatus {
@@ -145,6 +157,12 @@ impl LatticeClusterStatus {
         // Remove existing condition of the same type
         self.conditions.retain(|c| c.type_ != condition.type_);
         self.conditions.push(condition);
+        self
+    }
+
+    /// Set pivot_complete and return self for chaining
+    pub fn pivot_complete(mut self, complete: bool) -> Self {
+        self.pivot_complete = complete;
         self
     }
 }
