@@ -8,6 +8,7 @@
 use std::process::Command;
 use tracing::info;
 
+use crate::agent::CENTRAL_PROXY_PORT;
 use crate::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT};
 
 /// Default charts directory (set by LATTICE_CHARTS_DIR env var in container)
@@ -178,7 +179,10 @@ spec:
 /// This provides L4 defense-in-depth alongside Istio's L7 AuthorizationPolicy.
 /// Traffic not explicitly allowed by service-specific policies is denied.
 ///
-/// Note: This is applied AFTER ztunnel allowlist to ensure mesh traffic works.
+/// Per Cilium docs: https://docs.cilium.io/en/latest/network/servicemesh/default-deny-ingress-policy/
+/// - No ingress rules = deny all ingress
+/// - Only allow DNS egress to kube-dns
+/// - Exclude kube-system namespace from policy
 pub fn generate_default_deny() -> String {
     r#"---
 apiVersion: cilium.io/v2
@@ -188,14 +192,40 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: lattice
 spec:
-  description: "Default deny all traffic not explicitly allowed"
-  endpointSelector: {}
-  ingress:
-    - fromEntities:
-        - cluster
+  description: "Block all ingress traffic by default, allow DNS and K8s API egress"
+  endpointSelector:
+    matchExpressions:
+      - key: k8s:io.kubernetes.pod.namespace
+        operator: NotIn
+        values:
+          - kube-system
+          - cilium-system
+          - istio-system
+          - lattice-system
+          - cert-manager
+          - capi-system
+          - capi-kubeadm-bootstrap-system
+          - capi-kubeadm-control-plane-system
+          - capd-system
+          - capo-system
   egress:
+    # Allow DNS to kube-dns
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Allow access to Kubernetes API server (required for all controllers)
     - toEntities:
-        - cluster
+        - kube-apiserver
 "#
     .to_string()
 }
@@ -279,17 +309,20 @@ spec:
   egress:
 {egress}
   ingress:
-    # Allow ingress for bootstrap webhook and gRPC
+    # Allow ingress for bootstrap webhook, gRPC, and central K8s API proxy
     - toPorts:
         - ports:
             - port: "{bootstrap_port}"
               protocol: TCP
             - port: "{grpc_port}"
               protocol: TCP
+            - port: "{proxy_port}"
+              protocol: TCP
 "#,
         egress = egress_rules.join("\n"),
         bootstrap_port = DEFAULT_BOOTSTRAP_PORT,
         grpc_port = DEFAULT_GRPC_PORT,
+        proxy_port = CENTRAL_PROXY_PORT,
     )
 }
 
@@ -417,12 +450,19 @@ mod tests {
         assert!(policy.contains("kind: CiliumClusterwideNetworkPolicy"));
         assert!(policy.contains("name: default-deny"));
 
-        // Should select all endpoints
-        assert!(policy.contains("endpointSelector: {}"));
+        // Should exclude system namespaces via matchExpressions
+        assert!(policy.contains("matchExpressions:"));
+        assert!(policy.contains("k8s:io.kubernetes.pod.namespace"));
+        assert!(policy.contains("operator: NotIn"));
+        assert!(policy.contains("kube-system"));
+        assert!(policy.contains("cert-manager"));
+        assert!(policy.contains("capi-system"));
 
-        // Should allow cluster-internal traffic only
-        assert!(policy.contains("fromEntities:"));
-        assert!(policy.contains("toEntities:"));
-        assert!(policy.contains("- cluster"));
+        // Should allow DNS and K8s API egress, NO ingress (implicit deny)
+        assert!(policy.contains("egress:"));
+        assert!(policy.contains("k8s:k8s-app: kube-dns"));
+        assert!(policy.contains("kube-apiserver")); // Allow K8s API access
+        assert!(!policy.contains("ingress:")); // No ingress = deny all
+        assert!(!policy.contains("fromEntities:")); // No fromEntities allow-all
     }
 }

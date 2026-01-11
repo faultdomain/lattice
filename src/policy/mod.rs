@@ -73,7 +73,8 @@ pub struct AuthorizationPolicySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<WorkloadSelector>,
 
-    /// Action: ALLOW, DENY, AUDIT, CUSTOM
+    /// Action: ALLOW, DENY, AUDIT, CUSTOM (empty = implicit deny-all)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub action: String,
 
     /// Rules defining who can access
@@ -412,16 +413,41 @@ impl<'a> PolicyCompiler<'a> {
     }
 
     /// Compile the mesh-wide default-deny AuthorizationPolicy
+    ///
+    /// Per Istio best practices: https://istio.io/latest/docs/ops/best-practices/security/
+    /// An empty spec `{}` denies all traffic by default.
     pub fn compile_mesh_default_deny() -> AuthorizationPolicy {
         AuthorizationPolicy {
-            api_version: "security.istio.io/v1beta1".to_string(),
+            api_version: "security.istio.io/v1".to_string(),
             kind: "AuthorizationPolicy".to_string(),
             metadata: PolicyMetadata::new("mesh-default-deny", "istio-system"),
             spec: AuthorizationPolicySpec {
                 target_refs: vec![],
                 selector: None,
-                action: "ALLOW".to_string(),
-                rules: vec![], // Empty rules = deny all
+                action: String::new(), // Empty = implicit deny-all
+                rules: vec![],         // Empty = no traffic allowed
+            },
+        }
+    }
+
+    /// Compile the ambient waypoint default-deny AuthorizationPolicy
+    ///
+    /// Per Istio best practices for ambient mode, we need a separate policy
+    /// targeting the waypoint GatewayClass.
+    pub fn compile_waypoint_default_deny() -> AuthorizationPolicy {
+        AuthorizationPolicy {
+            api_version: "security.istio.io/v1".to_string(),
+            kind: "AuthorizationPolicy".to_string(),
+            metadata: PolicyMetadata::new("waypoint-default-deny", "istio-system"),
+            spec: AuthorizationPolicySpec {
+                target_refs: vec![TargetRef {
+                    group: "gateway.networking.k8s.io".to_string(),
+                    kind: "GatewayClass".to_string(),
+                    name: "istio-waypoint".to_string(),
+                }],
+                selector: None,
+                action: String::new(), // Empty = implicit deny-all
+                rules: vec![],
             },
         }
     }
@@ -1032,8 +1058,24 @@ mod tests {
 
         assert_eq!(policy.metadata.name, "mesh-default-deny");
         assert_eq!(policy.metadata.namespace, "istio-system");
-        assert_eq!(policy.spec.action, "ALLOW");
-        assert!(policy.spec.rules.is_empty()); // Empty = deny all
+        // Per Istio best practices: empty spec denies all
+        assert!(policy.spec.action.is_empty()); // Empty = implicit deny
+        assert!(policy.spec.rules.is_empty()); // No rules = no traffic allowed
+    }
+
+    #[test]
+    fn story_waypoint_default_deny() {
+        let policy = PolicyCompiler::compile_waypoint_default_deny();
+
+        assert_eq!(policy.metadata.name, "waypoint-default-deny");
+        assert_eq!(policy.metadata.namespace, "istio-system");
+        // Per Istio best practices: empty spec denies all
+        assert!(policy.spec.action.is_empty());
+        assert!(policy.spec.rules.is_empty());
+        // Targets the waypoint GatewayClass for ambient mode
+        assert_eq!(policy.spec.target_refs.len(), 1);
+        assert_eq!(policy.spec.target_refs[0].kind, "GatewayClass");
+        assert_eq!(policy.spec.target_refs[0].name, "istio-waypoint");
     }
 
     // =========================================================================

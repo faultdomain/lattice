@@ -821,6 +821,8 @@ impl AgentClient {
                 headers: vec![],
                 body: vec![],
                 error: String::new(),
+                is_streaming: false,
+                is_final: true,
             };
             if response_tx.send(handshake).await.is_err() {
                 warn!("Failed to send proxy handshake");
@@ -839,21 +841,11 @@ impl AgentClient {
                             "Received proxy request"
                         );
 
-                        // Forward to local K8s API
-                        let response = Self::handle_proxy_request(&request).await;
-                        let response = KubeProxyResponse {
-                            // Pass through the original request_id unchanged
-                            request_id: request.request_id.clone(),
-                            status_code: response.status_code,
-                            headers: response.headers,
-                            body: response.body,
-                            error: response.error,
-                        };
-
-                        if response_tx.send(response).await.is_err() {
-                            debug!("Proxy response channel closed");
-                            break;
-                        }
+                        // Forward to local K8s API with streaming
+                        let tx = response_tx.clone();
+                        tokio::spawn(async move {
+                            Self::handle_proxy_request_streaming(&request, tx).await;
+                        });
                     }
                     Err(e) => {
                         error!(error = %e, "Error receiving proxy request");
@@ -866,25 +858,37 @@ impl AgentClient {
         });
     }
 
-    /// Handle a single proxy request by forwarding to local K8s API
-    async fn handle_proxy_request(request: &KubeProxyRequest) -> KubeProxyResponse {
+    /// Handle a proxy request by streaming response chunks back
+    async fn handle_proxy_request_streaming(
+        request: &KubeProxyRequest,
+        response_tx: mpsc::Sender<KubeProxyResponse>,
+    ) {
+        use futures::StreamExt;
         use reqwest::Method;
 
-        // Use reqwest to forward to local K8s API
-        // The agent runs inside the cluster, so we can use the in-cluster config
-        let client = match reqwest::Client::builder()
-            .danger_accept_invalid_certs(true) // Trust in-cluster CA
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return KubeProxyResponse {
+        let send_error = |error: String| async {
+            let _ = response_tx
+                .send(KubeProxyResponse {
                     request_id: request.request_id.clone(),
                     status_code: 500,
                     headers: vec![],
                     body: vec![],
-                    error: format!("Failed to create HTTP client: {}", e),
-                };
+                    error,
+                    is_streaming: false,
+                    is_final: true,
+                })
+                .await;
+        };
+
+        // Create HTTP client
+        let client = match reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                send_error(format!("Failed to create HTTP client: {}", e)).await;
+                return;
             }
         };
 
@@ -907,80 +911,123 @@ impl AgentClient {
             "PATCH" => Method::PATCH,
             "DELETE" => Method::DELETE,
             _ => {
-                return KubeProxyResponse {
-                    request_id: request.request_id.clone(),
-                    status_code: 400,
-                    headers: vec![],
-                    body: vec![],
-                    error: format!("Unsupported method: {}", request.method),
-                };
+                send_error(format!("Unsupported method: {}", request.method)).await;
+                return;
             }
         };
 
-        // Read service account token for auth
+        // Read service account token
         let token =
             match tokio::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/token")
                 .await
             {
                 Ok(t) => t,
                 Err(e) => {
-                    return KubeProxyResponse {
-                        request_id: request.request_id.clone(),
-                        status_code: 500,
-                        headers: vec![],
-                        body: vec![],
-                        error: format!("Failed to read service account token: {}", e),
-                    };
+                    send_error(format!("Failed to read service account token: {}", e)).await;
+                    return;
                 }
             };
 
-        // Build request
+        // Build and send request
         let mut req = client.request(method, &url).bearer_auth(token);
-
-        // Add headers
         for header in &request.headers {
             req = req.header(&header.key, &header.value);
         }
-
-        // Add body if present
         if !request.body.is_empty() {
             req = req.body(request.body.clone());
         }
 
-        // Execute request
-        match req.send().await {
-            Ok(resp) => {
-                let status_code = resp.status().as_u16() as i32;
-
-                // Collect all headers - the proxy side will filter as needed
-                let headers: Vec<_> = resp
-                    .headers()
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        v.to_str().ok().map(|val| crate::proto::HttpHeader {
-                            key: k.to_string(),
-                            value: val.to_string(),
-                        })
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = response_tx
+                    .send(KubeProxyResponse {
+                        request_id: request.request_id.clone(),
+                        status_code: 502,
+                        headers: vec![],
+                        body: vec![],
+                        error: format!("Proxy request failed: {}", e),
+                        is_streaming: false,
+                        is_final: true,
                     })
-                    .collect();
+                    .await;
+                return;
+            }
+        };
 
-                let body = resp.bytes().await.unwrap_or_default().to_vec();
+        let status_code = resp.status().as_u16() as i32;
+        let headers: Vec<_> = resp
+            .headers()
+            .iter()
+            .filter_map(|(k, v)| {
+                v.to_str().ok().map(|val| crate::proto::HttpHeader {
+                    key: k.to_string(),
+                    value: val.to_string(),
+                })
+            })
+            .collect();
 
-                KubeProxyResponse {
+        // Check if this is a watch/streaming request
+        let is_watch = request.path.contains("watch=true");
+
+        if is_watch {
+            // Stream response chunks
+            let mut stream = resp.bytes_stream();
+            let mut first_chunk = true;
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        let chunk_bytes: Vec<u8> = chunk.to_vec();
+                        let response = KubeProxyResponse {
+                            request_id: request.request_id.clone(),
+                            status_code: if first_chunk { status_code } else { 0 },
+                            headers: if first_chunk { headers.clone() } else { vec![] },
+                            body: chunk_bytes,
+                            error: String::new(),
+                            is_streaming: true,
+                            is_final: false,
+                        };
+                        first_chunk = false;
+
+                        if response_tx.send(response).await.is_err() {
+                            debug!(request_id = %request.request_id, "Response channel closed during streaming");
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(request_id = %request.request_id, error = %e, "Error reading response chunk");
+                        break;
+                    }
+                }
+            }
+
+            // Send final marker
+            let _ = response_tx
+                .send(KubeProxyResponse {
+                    request_id: request.request_id.clone(),
+                    status_code: 0,
+                    headers: vec![],
+                    body: vec![],
+                    error: String::new(),
+                    is_streaming: true,
+                    is_final: true,
+                })
+                .await;
+        } else {
+            // Non-streaming: read full body and send single response
+            let body = resp.bytes().await.unwrap_or_default().to_vec();
+            let _ = response_tx
+                .send(KubeProxyResponse {
                     request_id: request.request_id.clone(),
                     status_code,
                     headers,
                     body,
                     error: String::new(),
-                }
-            }
-            Err(e) => KubeProxyResponse {
-                request_id: request.request_id.clone(),
-                status_code: 502,
-                headers: vec![],
-                body: vec![],
-                error: format!("Proxy request failed: {}", e),
-            },
+                    is_streaming: false,
+                    is_final: true,
+                })
+                .await;
         }
     }
 }

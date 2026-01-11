@@ -1892,9 +1892,10 @@ impl PivotOperations for PivotOperationsImpl {
     }
 
     fn is_proxy_available(&self, cluster_name: &str) -> bool {
+        // Check for central proxy channels (not per-agent proxy port)
         self.agent_registry
-            .get(cluster_name)
-            .is_some_and(|a| a.has_proxy())
+            .get_proxy_channels(cluster_name)
+            .is_some()
     }
 
     async fn execute_clusterctl_move(

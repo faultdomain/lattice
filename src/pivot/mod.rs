@@ -415,6 +415,17 @@ pub async fn patch_kubeconfig_for_self_management(
 ) -> Result<(), PivotError> {
     info!(cluster = %cluster_name, namespace = %namespace, "Patching kubeconfig for self-management");
 
+    // Read the in-cluster CA certificate
+    // This is mounted by Kubernetes at a well-known path in every pod
+    const IN_CLUSTER_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+    let in_cluster_ca = std::fs::read_to_string(IN_CLUSTER_CA_PATH).map_err(|e| {
+        PivotError::Internal(format!(
+            "failed to read in-cluster CA from {}: {}",
+            IN_CLUSTER_CA_PATH, e
+        ))
+    })?;
+    let in_cluster_ca_b64 = STANDARD.encode(in_cluster_ca.as_bytes());
+
     // Get in-cluster client
     let client = kube::Client::try_default()
         .await
@@ -443,11 +454,11 @@ pub async fn patch_kubeconfig_for_self_management(
     let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
         .map_err(|e| PivotError::Internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
 
-    // Parse as YAML and update the server URL
+    // Parse as YAML and update the server URL and CA
     let mut kubeconfig: serde_yaml::Value = serde_yaml::from_str(&kubeconfig_str)
         .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
 
-    // Update ALL cluster server URLs to internal endpoint
+    // Update ALL cluster server URLs and CA certs to internal endpoint
     let mut updated_count = 0;
     if let Some(clusters) = kubeconfig
         .get_mut("clusters")
@@ -462,11 +473,22 @@ pub async fn patch_kubeconfig_for_self_management(
                         *server = serde_yaml::Value::String(
                             "https://kubernetes.default.svc:443".to_string(),
                         );
+
+                        // Also update the CA certificate to the in-cluster CA
+                        // Remove certificate-authority if present and use certificate-authority-data
+                        cluster_config.as_mapping_mut().map(|m| {
+                            m.remove("certificate-authority");
+                            m.insert(
+                                serde_yaml::Value::String("certificate-authority-data".to_string()),
+                                serde_yaml::Value::String(in_cluster_ca_b64.clone()),
+                            );
+                        });
+
                         info!(
                             cluster = %cluster_name,
                             old_server = %old_server,
                             new_server = "https://kubernetes.default.svc:443",
-                            "Updated kubeconfig server URL"
+                            "Updated kubeconfig server URL and CA"
                         );
                         updated_count += 1;
                     }
@@ -627,6 +649,7 @@ pub async fn patch_kubeconfig_for_child_cluster(
         updated_servers = updated_count,
         "Kubeconfig patched to use central proxy"
     );
+
     Ok(())
 }
 

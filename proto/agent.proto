@@ -54,21 +54,31 @@ message KubeProxyRequest {
 }
 
 // Response from agent to cell - proxied K8s API response
+//
+// For streaming responses (like K8s watch), multiple messages with the same
+// request_id will be sent. The first message contains status_code and headers.
+// Subsequent messages contain body chunks. The final message has is_final=true.
 message KubeProxyResponse {
   // Correlation ID matching the request
   string request_id = 1;
 
-  // HTTP status code (200, 404, 500, etc.)
+  // HTTP status code (200, 404, 500, etc.) - only set in first message
   int32 status_code = 2;
 
-  // Response headers
+  // Response headers - only set in first message
   repeated HttpHeader headers = 3;
 
-  // Response body
+  // Response body (or chunk for streaming responses)
   bytes body = 4;
 
   // Error message if proxy itself failed (not K8s API error)
   string error = 5;
+
+  // True if this is a streaming response (more chunks may follow)
+  bool is_streaming = 6;
+
+  // True if this is the final chunk of a streaming response
+  bool is_final = 7;
 }
 
 // HTTP header key-value pair

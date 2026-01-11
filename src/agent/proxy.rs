@@ -33,20 +33,18 @@
 //! 4. kubectl/clusterctl commands use kubeconfig pointing to `127.0.0.1:{port}`
 //! 5. Proxy runs until agent disconnects
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
 use axum::routing::any;
 use axum::Router;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::proto::{HttpHeader, KubeProxyRequest, KubeProxyResponse};
+use crate::proto::{HttpHeader, KubeProxyRequest};
 
 /// Proxy errors
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,9 +113,13 @@ pub async fn start_central_proxy(
     let state = Arc::new(CentralProxyState { registry });
 
     // Path-based routing: /cluster/{cluster_name}/{*path}
+    // Need all three patterns: with path, trailing slash only, no trailing slash
+    // Fallback catches unmatched requests to debug routing issues
     let app = Router::new()
         .route("/cluster/{cluster}/{*path}", any(central_proxy_handler))
+        .route("/cluster/{cluster}/", any(central_proxy_handler))
         .route("/cluster/{cluster}", any(central_proxy_handler))
+        .fallback(fallback_handler)
         .with_state(state);
 
     // Configure TLS
@@ -163,6 +165,8 @@ pub async fn start_central_proxy(
 }
 
 /// Handle requests routed to a specific cluster via path prefix
+///
+/// Supports streaming responses for K8s watch requests.
 async fn central_proxy_handler(
     State(state): State<Arc<CentralProxyState>>,
     axum::extract::Path(path_params): axum::extract::Path<ClusterPath>,
@@ -171,6 +175,8 @@ async fn central_proxy_handler(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response<Body>, StatusCode> {
+    use tokio_stream::wrappers::ReceiverStream;
+
     let cluster_name = &path_params.cluster;
 
     // Get proxy channels for this cluster
@@ -194,11 +200,14 @@ async fn central_proxy_handler(
         format!("/{}", remaining_path)
     };
 
+    let is_watch = api_path.contains("watch=true");
+
     debug!(
         request_id = %request_id,
         cluster = %cluster_name,
         method = %method,
         path = %api_path,
+        is_watch = is_watch,
         "Central proxy request"
     );
 
@@ -214,7 +223,7 @@ async fn central_proxy_handler(
         .collect();
 
     // Read body
-    let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024) // 10MB limit
+    let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -227,64 +236,115 @@ async fn central_proxy_handler(
         body: body_bytes.to_vec(),
     };
 
-    // Create response channel
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    // Create response channel (mpsc for streaming)
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel(32);
 
     // Register pending request
-    {
-        let mut pending = channels.pending.write().await;
-        pending.insert(request_id.clone(), response_tx);
-    }
+    channels
+        .register_pending(request_id.clone(), response_tx)
+        .await;
 
     // Send request to agent
     if let Err(e) = channels.request_tx.send(proxy_request).await {
         error!(error = %e, "Failed to send central proxy request");
-        let mut pending = channels.pending.write().await;
-        pending.remove(&request_id);
+        channels.remove_pending(&request_id).await;
         return Err(StatusCode::BAD_GATEWAY);
     }
 
-    // Wait for response (with timeout)
-    let response = tokio::time::timeout(std::time::Duration::from_secs(30), response_rx)
-        .await
-        .map_err(|_| {
-            error!(request_id = %request_id, "Central proxy request timeout");
-            StatusCode::GATEWAY_TIMEOUT
-        })?
-        .map_err(|_| {
-            error!(request_id = %request_id, "Response channel closed");
-            StatusCode::BAD_GATEWAY
-        })?;
+    // Wait for first response chunk (with timeout for initial response)
+    let first_response =
+        tokio::time::timeout(std::time::Duration::from_secs(30), response_rx.recv())
+            .await
+            .map_err(|_| {
+                error!(request_id = %request_id, "Central proxy request timeout");
+                StatusCode::GATEWAY_TIMEOUT
+            })?
+            .ok_or_else(|| {
+                error!(request_id = %request_id, "Response channel closed");
+                StatusCode::BAD_GATEWAY
+            })?;
 
     // Check for proxy error
-    if !response.error.is_empty() {
-        error!(error = %response.error, "Central proxy error");
+    if !first_response.error.is_empty() {
+        error!(error = %first_response.error, "Central proxy error");
         return Err(StatusCode::BAD_GATEWAY);
     }
 
-    // Build HTTP response
-    let body_len = response.body.len();
-    let mut builder = Response::builder().status(response.status_code as u16);
+    debug!(
+        request_id = %request_id,
+        status = first_response.status_code,
+        is_streaming = first_response.is_streaming,
+        "Central proxy response"
+    );
 
-    for header in &response.headers {
+    // Build response headers
+    let mut builder = Response::builder().status(first_response.status_code as u16);
+
+    for header in &first_response.headers {
         let key_lower = header.key.to_lowercase();
+        // Skip headers we'll set ourselves for streaming
         if key_lower == "content-length" || key_lower == "transfer-encoding" {
             continue;
         }
         builder = builder.header(&header.key, &header.value);
     }
 
-    builder = builder.header("content-length", body_len.to_string());
+    if first_response.is_streaming {
+        // Streaming response - use chunked transfer encoding
+        builder = builder.header("transfer-encoding", "chunked");
 
-    debug!(
-        request_id = %request_id,
-        status = response.status_code,
-        "Central proxy response"
+        // Create a stream that yields body chunks
+        let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
+
+        // Send first chunk
+        let first_body = first_response.body;
+        let body_tx_clone = body_tx.clone();
+        tokio::spawn(async move {
+            if !first_body.is_empty() {
+                let _ = body_tx_clone.send(Ok(Bytes::from(first_body))).await;
+            }
+        });
+
+        // Spawn task to forward remaining chunks
+        let request_id_clone = request_id.clone();
+        tokio::spawn(async move {
+            while let Some(chunk) = response_rx.recv().await {
+                if !chunk.body.is_empty() {
+                    if body_tx.send(Ok(Bytes::from(chunk.body))).await.is_err() {
+                        debug!(request_id = %request_id_clone, "Body channel closed");
+                        break;
+                    }
+                }
+                if chunk.is_final {
+                    debug!(request_id = %request_id_clone, "Stream complete");
+                    break;
+                }
+            }
+        });
+
+        let body_stream = ReceiverStream::new(body_rx);
+        builder
+            .body(Body::from_stream(body_stream))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    } else {
+        // Non-streaming response
+        let body_len = first_response.body.len();
+        builder = builder.header("content-length", body_len.to_string());
+
+        builder
+            .body(Body::from(first_response.body))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+/// Fallback handler for unmatched routes - logs what's being requested
+async fn fallback_handler(method: Method, uri: Uri) -> StatusCode {
+    warn!(
+        method = %method,
+        uri = %uri,
+        "Unmatched request to central proxy - expected /cluster/{{name}}/..."
     );
-
-    builder
-        .body(Body::from(response.body))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    StatusCode::NOT_FOUND
 }
 
 /// Generate kubeconfig YAML for central proxy

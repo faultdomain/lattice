@@ -556,23 +556,36 @@ sleep 5  # Wait for network policies to be applied
     );
 
     for test in tests {
-        let expected_str = if test.expected { "ALLOWED" } else { "BLOCKED" };
-        let unexpected_str = if test.expected { "BLOCKED" } else { "ALLOWED" };
+        // When curl succeeds (exit 0), connection was ALLOWED
+        // When curl fails (exit non-0), connection was BLOCKED
+        let (success_msg, fail_msg) = if test.expected {
+            // Expected ALLOWED: success is expected, failure is unexpected
+            (
+                format!("{}: ALLOWED ({})", test.target, test.reason),
+                format!("{}: BLOCKED (UNEXPECTED - {})", test.target, test.reason),
+            )
+        } else {
+            // Expected BLOCKED: failure is expected, success is unexpected
+            (
+                format!("{}: ALLOWED (UNEXPECTED - {})", test.target, test.reason),
+                format!("{}: BLOCKED ({})", test.target, test.reason),
+            )
+        };
 
         script.push_str(&format!(
             r#"
 # Test {target} ({reason})
 if curl -s --connect-timeout 3 http://{target}.{ns}.svc.cluster.local/ > /dev/null 2>&1; then
-    echo "{target}: {expected} ({reason})"
+    echo "{success_msg}"
 else
-    echo "{target}: {unexpected} (UNEXPECTED - {reason})"
+    echo "{fail_msg}"
 fi
 "#,
             target = test.target,
             ns = TEST_SERVICES_NAMESPACE,
             reason = test.reason,
-            expected = expected_str,
-            unexpected = unexpected_str,
+            success_msg = success_msg,
+            fail_msg = fail_msg,
         ));
     }
 

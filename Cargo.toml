@@ -52,7 +52,7 @@ prost-types = "0.13"
 # HTTP (for registration webhook)
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 
 # Crypto (aws-lc-rs with optional FIPS)
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }

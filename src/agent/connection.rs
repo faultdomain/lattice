@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 use crate::proto::{AgentState, CellCommand, KubeProxyRequest, KubeProxyResponse};
@@ -24,12 +24,6 @@ pub struct AgentConnection {
     pub state: AgentState,
     /// Channel to send commands to this agent
     pub command_tx: mpsc::Sender<CellCommand>,
-    /// Port number of the K8s API proxy server (if running)
-    ///
-    /// When an agent connects with a proxy stream, a local HTTP proxy server
-    /// is started on a random port. This field stores that port so tools like
-    /// clusterctl can connect to it via kubeconfig pointing to 127.0.0.1:{port}.
-    pub proxy_port: Option<u16>,
     /// Whether CAPI is installed and ready on this cluster
     ///
     /// Set to true when agent reports BootstrapComplete with capi_ready=true.
@@ -52,7 +46,6 @@ impl AgentConnection {
             kubernetes_version,
             state: AgentState::Provisioning,
             command_tx,
-            proxy_port: None,
             capi_ready: false,
         }
     }
@@ -83,16 +76,6 @@ impl AgentConnection {
         valid_state && self.capi_ready
     }
 
-    /// Check if K8s API proxy is available
-    pub fn has_proxy(&self) -> bool {
-        self.proxy_port.is_some()
-    }
-
-    /// Get the proxy port if available
-    pub fn get_proxy_port(&self) -> Option<u16> {
-        self.proxy_port
-    }
-
     /// Send a command to this agent
     pub async fn send_command(&self, command: CellCommand) -> Result<(), SendError> {
         self.command_tx
@@ -107,15 +90,12 @@ impl AgentConnection {
 pub enum SendError {
     /// The agent's channel is closed (disconnected)
     ChannelClosed,
-    /// K8s API proxy is not available for this agent
-    ProxyNotAvailable,
 }
 
 impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SendError::ChannelClosed => write!(f, "agent channel closed"),
-            SendError::ProxyNotAvailable => write!(f, "K8s API proxy not available"),
         }
     }
 }
@@ -131,14 +111,18 @@ pub struct PostPivotManifests {
     pub cluster_yaml: Option<String>,
 }
 
+/// Sender for streaming proxy responses
+pub type ProxyResponseSender = mpsc::Sender<KubeProxyResponse>;
+
 /// Proxy channel state for a single cluster
 ///
 /// Holds the channels needed to proxy K8s API requests to an agent.
+/// Supports streaming responses - multiple response chunks per request.
 pub struct ProxyChannels {
     /// Channel to send proxy requests to the agent
     pub request_tx: mpsc::Sender<KubeProxyRequest>,
-    /// Pending responses keyed by request ID
-    pub pending: Arc<RwLock<HashMap<String, oneshot::Sender<KubeProxyResponse>>>>,
+    /// Pending response senders keyed by request ID (mpsc for streaming)
+    pub pending: Arc<RwLock<HashMap<String, ProxyResponseSender>>>,
     /// Counter for generating unique request IDs
     request_counter: AtomicU64,
 }
@@ -159,15 +143,44 @@ impl ProxyChannels {
         format!("{}-central-{}", cluster_name, id)
     }
 
-    /// Handle a response from the agent
+    /// Register a pending request with its response sender
+    pub async fn register_pending(&self, request_id: String, sender: ProxyResponseSender) {
+        let mut pending = self.pending.write().await;
+        pending.insert(request_id, sender);
+    }
+
+    /// Remove a pending request (e.g., on timeout or completion)
+    pub async fn remove_pending(&self, request_id: &str) {
+        let mut pending = self.pending.write().await;
+        pending.remove(request_id);
+    }
+
+    /// Handle a response chunk from the agent
+    ///
+    /// For streaming responses, multiple chunks may arrive with the same request_id.
+    /// The sender is kept until is_final=true or the channel is closed.
     pub async fn handle_response(&self, response: KubeProxyResponse) {
         let request_id = response.request_id.clone();
+        let is_final = response.is_final || !response.is_streaming;
+
         let sender = {
             let mut pending = self.pending.write().await;
-            pending.remove(&request_id)
+            if is_final {
+                pending.remove(&request_id)
+            } else {
+                pending.get(&request_id).cloned()
+            }
         };
+
         if let Some(tx) = sender {
-            let _ = tx.send(response);
+            if tx.send(response).await.is_err() {
+                debug!(request_id = %request_id, "Response channel closed");
+                // Clean up if send failed
+                let mut pending = self.pending.write().await;
+                pending.remove(&request_id);
+            }
+        } else {
+            debug!(request_id = %request_id, "No pending request for response");
         }
     }
 }
@@ -287,68 +300,6 @@ impl AgentRegistry {
             agent.set_capi_ready(ready);
         } else {
             warn!(cluster = %cluster_name, "Attempted to set CAPI ready for unknown agent");
-        }
-    }
-
-    /// Set proxy port for an agent
-    ///
-    /// Called when a proxy server is started for an agent connection.
-    /// The port is stored so tools like clusterctl can generate kubeconfigs
-    /// pointing to 127.0.0.1:{port}.
-    pub fn set_proxy_port(&self, cluster_name: &str, port: u16) {
-        if let Some(mut agent) = self.agents.get_mut(cluster_name) {
-            debug!(cluster = %cluster_name, port = port, "K8s API proxy port set");
-            agent.proxy_port = Some(port);
-        }
-    }
-
-    /// Set proxy port for an agent, waiting for registration if needed
-    ///
-    /// This handles the race condition where the proxy stream may start
-    /// before the agent's main stream has registered. Waits up to the
-    /// specified timeout for the agent to appear in the registry.
-    pub async fn set_proxy_port_with_retry(
-        &self,
-        cluster_name: &str,
-        port: u16,
-        timeout: std::time::Duration,
-    ) -> bool {
-        use tokio::time::{sleep, Instant};
-
-        let start = Instant::now();
-        let poll_interval = std::time::Duration::from_millis(50);
-
-        loop {
-            if let Some(mut agent) = self.agents.get_mut(cluster_name) {
-                debug!(cluster = %cluster_name, port = port, "K8s API proxy port set");
-                agent.proxy_port = Some(port);
-                return true;
-            }
-
-            if start.elapsed() >= timeout {
-                warn!(
-                    cluster = %cluster_name,
-                    port = port,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "Timeout waiting for agent registration to set proxy port"
-                );
-                return false;
-            }
-
-            sleep(poll_interval).await;
-        }
-    }
-
-    /// Get proxy port for an agent
-    pub fn get_proxy_port(&self, cluster_name: &str) -> Option<u16> {
-        self.agents.get(cluster_name).and_then(|a| a.proxy_port)
-    }
-
-    /// Clear proxy port for an agent (called when proxy disconnects)
-    pub fn clear_proxy_port(&self, cluster_name: &str) {
-        if let Some(mut agent) = self.agents.get_mut(cluster_name) {
-            debug!(cluster = %cluster_name, "K8s API proxy port cleared");
-            agent.proxy_port = None;
         }
     }
 
@@ -676,53 +627,10 @@ mod tests {
         assert!(matches!(result, Err(SendError::ChannelClosed)));
     }
 
-    // Story: K8s API proxy for remote cluster access
-    //
-    // The cell runs a persistent proxy server when the agent connects.
-    // The proxy port is stored in the AgentConnection for tools like clusterctl.
-    #[test]
-    fn story_k8s_api_proxy_lifecycle() {
-        let registry = AgentRegistry::new();
-        let (conn, _cmd_rx) = create_test_connection("remote-cluster");
-        registry.register(conn);
-
-        // Initially, proxy is not available
-        {
-            let agent = registry.get("remote-cluster").unwrap();
-            assert!(!agent.has_proxy());
-            assert!(agent.get_proxy_port().is_none());
-        }
-
-        // No proxy port set yet
-        assert!(registry.get_proxy_port("remote-cluster").is_none());
-
-        // Proxy server starts and sets port
-        registry.set_proxy_port("remote-cluster", 18080);
-
-        // Now proxy is available
-        {
-            let agent = registry.get("remote-cluster").unwrap();
-            assert!(agent.has_proxy());
-            assert_eq!(agent.get_proxy_port(), Some(18080));
-        }
-
-        // Can retrieve port from registry
-        assert_eq!(registry.get_proxy_port("remote-cluster"), Some(18080));
-
-        // When proxy disconnects, port is cleared
-        registry.clear_proxy_port("remote-cluster");
-        assert!(registry.get_proxy_port("remote-cluster").is_none());
-        {
-            let agent = registry.get("remote-cluster").unwrap();
-            assert!(!agent.has_proxy());
-        }
-    }
-
     // Story: Graceful handling of edge cases and errors
     //
     // The registry must handle edge cases without panicking:
     // - Operations on unknown clusters
-    // - Setting port for disconnected agents
     // - State updates during transitions
     #[test]
     fn story_registry_handles_edge_cases_gracefully() {
@@ -736,11 +644,6 @@ mod tests {
         // These should NOT panic - just log and continue
         registry.update_state("ghost-cluster", AgentState::Ready);
         registry.unregister("ghost-cluster");
-
-        // Setting proxy port for unknown cluster should not panic
-        registry.set_proxy_port("ghost-cluster", 18080);
-        registry.clear_proxy_port("ghost-cluster");
-        assert!(registry.get_proxy_port("ghost-cluster").is_none());
 
         // Registry still works after edge cases
         let (conn, _rx) = create_test_connection("real-cluster");
@@ -838,75 +741,6 @@ mod tests {
         assert!(registry.is_empty());
     }
 
-    // Story: Proxy port set with retry handles race with agent registration
-    //
-    // The proxy stream may start before the agent's main stream registers.
-    // set_proxy_port_with_retry waits for the agent to appear.
-    #[tokio::test]
-    async fn story_set_proxy_port_with_retry_handles_race() {
-        use std::sync::Arc;
-        use std::time::Duration;
-
-        let registry = Arc::new(AgentRegistry::new());
-        let registry_clone = registry.clone();
-
-        // Start trying to set proxy port before agent is registered
-        let set_task = tokio::spawn(async move {
-            registry_clone
-                .set_proxy_port_with_retry("delayed-cluster", 18080, Duration::from_secs(2))
-                .await
-        });
-
-        // Simulate delayed agent registration (100ms later)
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let (conn, _rx) = create_test_connection("delayed-cluster");
-        registry.register(conn);
-
-        // The retry should succeed
-        let result = set_task.await.unwrap();
-        assert!(
-            result,
-            "set_proxy_port_with_retry should succeed after agent registers"
-        );
-
-        // Verify port was set
-        assert_eq!(registry.get_proxy_port("delayed-cluster"), Some(18080));
-    }
-
-    #[tokio::test]
-    async fn test_set_proxy_port_with_retry_timeout() {
-        use std::time::Duration;
-
-        let registry = AgentRegistry::new();
-
-        // Try to set port for non-existent agent with short timeout
-        let result = registry
-            .set_proxy_port_with_retry("nonexistent", 18080, Duration::from_millis(100))
-            .await;
-
-        assert!(!result, "should timeout when agent never registers");
-    }
-
-    #[tokio::test]
-    async fn test_set_proxy_port_with_retry_immediate() {
-        use std::time::Duration;
-
-        let registry = AgentRegistry::new();
-        let (conn, _rx) = create_test_connection("immediate-cluster");
-        registry.register(conn);
-
-        // Agent already registered - should succeed immediately
-        let result = registry
-            .set_proxy_port_with_retry("immediate-cluster", 18080, Duration::from_secs(1))
-            .await;
-
-        assert!(
-            result,
-            "should succeed immediately when agent already registered"
-        );
-        assert_eq!(registry.get_proxy_port("immediate-cluster"), Some(18080));
-    }
-
     // ==========================================================================
     // ProxyChannels Tests
     // ==========================================================================
@@ -950,16 +784,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(32);
         let channels = ProxyChannels::new(tx);
 
-        // Create a pending request
+        // Create a pending request with mpsc channel for streaming
         let request_id = channels.next_request_id("test");
-        let (response_tx, response_rx) = oneshot::channel();
+        let (response_tx, mut response_rx) = mpsc::channel(16);
 
-        {
-            let mut pending = channels.pending.write().await;
-            pending.insert(request_id.clone(), response_tx);
-        }
+        channels
+            .register_pending(request_id.clone(), response_tx)
+            .await;
 
-        // Handle the response
+        // Handle a non-streaming response (is_final implied)
         channels
             .handle_response(KubeProxyResponse {
                 request_id: request_id.clone(),
@@ -967,13 +800,65 @@ mod tests {
                 headers: vec![],
                 body: b"test".to_vec(),
                 error: String::new(),
+                is_streaming: false,
+                is_final: false,
             })
             .await;
 
         // Response should be received
-        let response = response_rx.await.expect("should receive response");
+        let response = response_rx.recv().await.expect("should receive response");
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, b"test");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_channels_streaming_response() {
+        use crate::proto::KubeProxyResponse;
+
+        let (tx, _rx) = mpsc::channel(32);
+        let channels = ProxyChannels::new(tx);
+
+        let request_id = channels.next_request_id("test");
+        let (response_tx, mut response_rx) = mpsc::channel(16);
+
+        channels
+            .register_pending(request_id.clone(), response_tx)
+            .await;
+
+        // First chunk (streaming, not final)
+        channels
+            .handle_response(KubeProxyResponse {
+                request_id: request_id.clone(),
+                status_code: 200,
+                headers: vec![],
+                body: b"chunk1".to_vec(),
+                error: String::new(),
+                is_streaming: true,
+                is_final: false,
+            })
+            .await;
+
+        // Second chunk (final)
+        channels
+            .handle_response(KubeProxyResponse {
+                request_id: request_id.clone(),
+                status_code: 0,
+                headers: vec![],
+                body: b"chunk2".to_vec(),
+                error: String::new(),
+                is_streaming: true,
+                is_final: true,
+            })
+            .await;
+
+        // Both chunks should be received
+        let chunk1 = response_rx.recv().await.expect("should receive chunk1");
+        assert_eq!(chunk1.body, b"chunk1");
+        assert!(!chunk1.is_final);
+
+        let chunk2 = response_rx.recv().await.expect("should receive chunk2");
+        assert_eq!(chunk2.body, b"chunk2");
+        assert!(chunk2.is_final);
     }
 
     #[tokio::test]
@@ -991,6 +876,8 @@ mod tests {
                 headers: vec![],
                 body: vec![],
                 error: String::new(),
+                is_streaming: false,
+                is_final: false,
             })
             .await;
         // No assertion needed - just verify it doesn't panic
