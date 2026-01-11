@@ -15,7 +15,7 @@ use super::types::{
 ///
 /// A LatticeCluster can be either:
 /// - A management cluster (cell) with the `cell` field set
-/// - A workload cluster with `cell_ref` pointing to its parent cell
+/// - A workload cluster (without `cell` field)
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "lattice.dev",
@@ -46,10 +46,6 @@ pub struct LatticeClusterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell: Option<CellSpec>,
 
-    /// Reference to parent cell - for workload clusters
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cell_ref: Option<String>,
-
     /// Environment identifier (e.g., prod, staging, dev)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
@@ -69,22 +65,10 @@ impl LatticeClusterSpec {
         self.cell.is_some()
     }
 
-    /// Returns true if this is a workload cluster (has a cell reference)
-    pub fn has_parent(&self) -> bool {
-        self.cell_ref.is_some()
-    }
-
     /// Validate the cluster specification
     pub fn validate(&self) -> Result<(), crate::Error> {
         // Validate node spec
         self.nodes.validate()?;
-
-        // A cluster can't be both a cell and reference another cell
-        if self.cell.is_some() && self.cell_ref.is_some() {
-            return Err(crate::Error::validation(
-                "cluster cannot have both 'cell' and 'cellRef' - it's either a management cluster or a workload cluster",
-            ));
-        }
 
         Ok(())
     }
@@ -224,37 +208,30 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             cell: Some(cell_spec()),
-            cell_ref: None,
             environment: None,
             region: None,
             workload: None,
         };
 
         assert!(spec.is_cell(), "Should be recognized as a cell");
-        assert!(!spec.has_parent(), "Cell is not a workload cluster");
     }
 
-    /// Story: A cluster with cellRef is recognized as a workload cluster
+    /// Story: A cluster without cell configuration is a workload cluster
     ///
-    /// Workload clusters reference their parent cell. They run user workloads
-    /// and connect outbound to the cell for management and monitoring.
+    /// Workload clusters run user workloads and connect outbound to their
+    /// parent cell for management and monitoring.
     #[test]
-    fn story_cluster_with_cell_ref_has_parent() {
+    fn story_cluster_without_cell_is_workload() {
         let spec = LatticeClusterSpec {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
             cell: None,
-            cell_ref: Some("mgmt".to_string()),
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
             workload: None,
         };
 
-        assert!(
-            spec.has_parent(),
-            "Should be recognized as workload cluster"
-        );
         assert!(!spec.is_cell(), "Workload cluster is not a cell");
     }
 
@@ -274,7 +251,6 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             cell: Some(cell_spec()),
-            cell_ref: None,
             environment: None,
             region: None,
             workload: None,
@@ -288,7 +264,7 @@ mod tests {
 
     /// Story: Valid workload cluster configuration passes validation
     ///
-    /// A workload cluster needs a cellRef and valid node topology.
+    /// A workload cluster needs valid node topology.
     #[test]
     fn story_valid_workload_cluster_passes_validation() {
         let spec = LatticeClusterSpec {
@@ -296,7 +272,6 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             cell: None,
-            cell_ref: Some("mgmt".to_string()),
             environment: None,
             region: None,
             workload: None,
@@ -305,31 +280,6 @@ mod tests {
         assert!(
             spec.validate().is_ok(),
             "Valid workload spec should pass validation"
-        );
-    }
-
-    /// Story: Cluster cannot be both a cell AND reference another cell
-    ///
-    /// A cluster must be either a cell OR a workload cluster, never both.
-    /// This prevents confusing hierarchies where a cluster manages itself.
-    #[test]
-    fn story_conflicting_cell_config_fails_validation() {
-        let spec = LatticeClusterSpec {
-            provider: sample_provider_spec(),
-            nodes: sample_node_spec(),
-            networking: None,
-            cell: Some(cell_spec()),
-            cell_ref: Some("other-cell".to_string()),
-            environment: None,
-            region: None,
-            workload: None,
-        };
-
-        let result = spec.validate();
-        assert!(result.is_err(), "Conflicting config should fail validation");
-        assert!(
-            result.unwrap_err().to_string().contains("cannot have both"),
-            "Error message should explain the conflict"
         );
     }
 
@@ -346,7 +296,6 @@ mod tests {
             },
             networking: None,
             cell: None,
-            cell_ref: None,
             environment: None,
             region: None,
             workload: None,
@@ -480,7 +429,6 @@ cell:
         let yaml = r#"
 environment: prod
 region: us-west
-cellRef: mgmt
 provider:
   type: docker
   kubernetes:
@@ -497,8 +445,7 @@ workload:
 "#;
         let spec: LatticeClusterSpec = serde_yaml::from_str(yaml).unwrap();
 
-        assert!(spec.has_parent(), "Should be workload cluster");
-        assert_eq!(spec.cell_ref.as_deref(), Some("mgmt"));
+        assert!(!spec.is_cell(), "Should be workload cluster");
         assert_eq!(spec.environment.as_deref(), Some("prod"));
         assert_eq!(spec.region.as_deref(), Some("us-west"));
 
@@ -519,7 +466,6 @@ workload:
             nodes: sample_node_spec(),
             networking: None,
             cell: None,
-            cell_ref: Some("mgmt".to_string()),
             environment: Some("staging".to_string()),
             region: None,
             workload: None,

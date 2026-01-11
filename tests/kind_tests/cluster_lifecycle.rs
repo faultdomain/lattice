@@ -53,7 +53,6 @@ fn sample_cluster(name: &str) -> LatticeCluster {
                     type_: "LoadBalancer".to_string(),
                 },
             }),
-            cell_ref: None,
             environment: None,
             region: None,
             workload: None,

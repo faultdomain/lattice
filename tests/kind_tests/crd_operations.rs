@@ -48,7 +48,6 @@ fn sample_cell_spec(name: &str) -> LatticeCluster {
                     type_: "LoadBalancer".to_string(),
                 },
             }),
-            cell_ref: None,
             environment: None,
             region: None,
             workload: None,
@@ -57,8 +56,8 @@ fn sample_cell_spec(name: &str) -> LatticeCluster {
     }
 }
 
-/// Create a sample workload cluster spec that references a parent cell
-fn sample_workload_spec(name: &str, cell_ref: &str) -> LatticeCluster {
+/// Create a sample workload cluster spec (no cell configuration)
+fn sample_workload_spec(name: &str) -> LatticeCluster {
     LatticeCluster {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
@@ -79,7 +78,6 @@ fn sample_workload_spec(name: &str, cell_ref: &str) -> LatticeCluster {
             },
             networking: None,
             cell: None,
-            cell_ref: Some(cell_ref.to_string()),
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
             workload: None,
@@ -136,10 +134,6 @@ async fn story_operator_creates_management_cluster() {
         created.spec.is_cell(),
         "Management cluster should be a cell"
     );
-    assert!(
-        !created.spec.has_parent(),
-        "Cell should not be a workload cluster"
-    );
 
     // Assert: Configuration is persisted correctly
     let fetched = api.get(name).await.expect("failed to get cluster");
@@ -182,7 +176,7 @@ async fn story_operator_creates_workload_cluster_for_production() {
     cleanup_cluster(&client, name).await;
 
     // Act: Platform operator creates a production workload cluster
-    let cluster = sample_workload_spec(name, "mgmt");
+    let cluster = sample_workload_spec(name);
     let created = api
         .create(&PostParams::default(), &cluster)
         .await
@@ -190,12 +184,10 @@ async fn story_operator_creates_workload_cluster_for_production() {
 
     // Assert: The cluster is created as a workload cluster
     assert_eq!(created.metadata.name.as_deref(), Some(name));
-    assert!(created.spec.has_parent(), "Should be a workload cluster");
     assert!(
         !created.spec.is_cell(),
         "Workload cluster should not be a cell"
     );
-    assert_eq!(created.spec.cell_ref.as_deref(), Some("mgmt"));
 
     // Assert: Environment metadata is preserved
     let fetched = api.get(name).await.expect("failed to get cluster");
@@ -229,7 +221,7 @@ async fn story_operator_lists_all_managed_clusters() {
 
     // Act: Create a cell and a workload cluster
     let cell = sample_cell_spec("test-list-mgmt");
-    let workload = sample_workload_spec("test-list-prod", "test-list-mgmt");
+    let workload = sample_workload_spec("test-list-prod");
 
     api.create(&PostParams::default(), &cell)
         .await
@@ -364,43 +356,3 @@ async fn story_operator_decommissions_unused_cluster() {
 
 // =============================================================================
 // Validation and Edge Case Stories
-// =============================================================================
-//
-// These tests document current validation behavior and edge cases.
-
-/// Story: Platform operator creates a cluster with conflicting configuration
-///
-/// A cluster cannot be both a cell AND reference another cell. This test
-/// documents that currently K8s accepts this invalid configuration (we don't
-/// have a validating webhook), but application-level validation catches it.
-///
-/// NOTE: This documents current behavior. Future work should add a validating
-/// webhook to reject this at the API level.
-#[tokio::test]
-#[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
-async fn story_operator_creates_cluster_with_conflicting_cell_config() {
-    let client = ensure_test_cluster()
-        .await
-        .expect("failed to setup cluster");
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-    let name = "test-invalid-config";
-
-    // Cleanup from previous runs
-    cleanup_cluster(&client, name).await;
-
-    // Act: Create a cluster that is BOTH a cell AND references another cell
-    // This is an invalid configuration
-    let mut cluster = sample_cell_spec(name);
-    cluster.spec.cell_ref = Some("other-cell".to_string());
-
-    let result = api.create(&PostParams::default(), &cluster).await;
-
-    // Current behavior: K8s accepts it (no validating webhook yet)
-    // The controller's reconcile loop will catch this and set Failed status
-    if result.is_ok() {
-        // Document that K8s accepted it (this is the current limitation)
-        // Application-level validation in the controller will catch this
-        cleanup_cluster(&client, name).await;
-    }
-    // Note: A validating webhook would make this test expect an error
-}

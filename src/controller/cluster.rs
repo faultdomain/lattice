@@ -783,14 +783,6 @@ pub fn is_self_cluster(cluster_name: &str, self_cluster_name: Option<&str>) -> b
         .unwrap_or(false)
 }
 
-/// Check if a cluster is the root cluster (no parent cell).
-///
-/// Root clusters were bootstrapped by the installer which already ran
-/// clusterctl move - they don't need agent-based pivot.
-pub fn is_root_cluster(cluster: &LatticeCluster) -> bool {
-    cluster.spec.cell_ref.is_none()
-}
-
 /// Check if a node is a control plane node based on labels.
 pub fn is_control_plane_node(node: &k8s_openapi::api::core::v1::Node) -> bool {
     node.metadata
@@ -1324,15 +1316,14 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 return try_transition_to_ready(&cluster, &ctx, false).await;
             }
 
-            // Clusters with cell_ref were provisioned by a parent cell and need agent-based pivot.
-            // The root cluster (no cell_ref) was bootstrapped by the installer which
-            // already ran clusterctl move - just transition to Ready.
-            if is_root_cluster(&cluster) {
-                info!("root cluster pivot complete (via installer)");
+            // If we're reconciling our own LatticeCluster, pivot was already completed.
+            // We received this CRD post-pivot (via ApplyManifestsCommand from parent or installer).
+            if is_self_cluster(&name, ctx.self_cluster_name.as_deref()) {
+                info!("reconciling self cluster, pivot already complete");
                 return try_transition_to_ready(&cluster, &ctx, true).await;
             }
 
-            // This cluster has a parent (cell_ref) - needs agent-based pivot
+            // We're the parent cell, orchestrating pivot for a child cluster
             // Get pivot operations - either from pre-configured cell or dynamically from cell_servers
             let pivot_ops: Option<Arc<dyn PivotOperations>> = if let Some(ops) = ctx.pivot_ops() {
                 Some(ops.clone())
@@ -1617,83 +1608,8 @@ async fn generate_capi_manifests(
         let token = bootstrap_ctx.register_cluster(registration);
 
         BootstrapInfo::new(bootstrap_endpoint, token, ca_cert)
-    } else if let Some(cell_ref) = &cluster.spec.cell_ref {
-        // This is a workload cluster - try to get bootstrap info from cell_servers
-        if let Some(ref cell_servers) = ctx.cell_servers {
-            if cell_servers.is_running() {
-                // Get bootstrap state from cell_servers
-                if let Some(bootstrap_state) = cell_servers.bootstrap_state().await {
-                    // Look up parent cluster to get cell endpoints
-                    let parent_cluster = ctx
-                        .kube
-                        .get_cluster(cell_ref)
-                        .await?
-                        .ok_or_else(|| {
-                            Error::validation(format!(
-                                "parent cell '{}' not found - ensure the management cluster's LatticeCluster CRD exists",
-                                cell_ref
-                            ))
-                        })?;
-
-                    let cell_spec = parent_cluster.spec.cell.as_ref().ok_or_else(|| {
-                        Error::validation(format!(
-                            "parent cluster '{}' is not a cell (missing spec.cell)",
-                            cell_ref
-                        ))
-                    })?;
-
-                    let cell_endpoint = cell_spec.cell_endpoint();
-                    let bootstrap_endpoint = cell_spec.bootstrap_endpoint();
-                    let ca_cert = cell_servers.ca().ca_cert_pem().to_string();
-
-                    // Serialize the LatticeCluster CRD to pass to workload cluster
-                    let cluster_manifest =
-                        serde_json::to_string(&cluster).map_err(|e| Error::Serialization {
-                            message: format!("failed to serialize cluster: {}", e),
-                            kind: Some("LatticeCluster".to_string()),
-                        })?;
-
-                    // Register cluster and get token
-                    let registration = crate::bootstrap::ClusterRegistration {
-                        cluster_id: cluster_name.to_string(),
-                        cell_endpoint: cell_endpoint.clone(),
-                        ca_certificate: ca_cert.clone(),
-                        cluster_manifest,
-                        networking: cluster.spec.networking.clone(),
-                        provider: cluster.spec.provider.type_.to_string(),
-                        bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
-                    };
-                    let token = bootstrap_state.register_cluster(registration);
-
-                    info!(
-                        cluster = %cluster_name,
-                        cell = %cell_ref,
-                        cell_endpoint = %cell_endpoint,
-                        "registered workload cluster for bootstrap"
-                    );
-
-                    BootstrapInfo::new(bootstrap_endpoint, token.as_str().to_string(), ca_cert)
-                } else {
-                    // Cell servers running but bootstrap state not ready yet
-                    return Err(Error::Bootstrap(
-                        "cell servers running but bootstrap state not initialized".to_string(),
-                    ));
-                }
-            } else {
-                // Cell servers not running - shouldn't happen if we got here
-                return Err(Error::Bootstrap(
-                    "cell servers not running for workload cluster provisioning".to_string(),
-                ));
-            }
-        } else {
-            // No cell_servers - can't provision workload clusters
-            return Err(Error::Bootstrap(format!(
-                "cannot provision workload cluster '{}' without cell capabilities",
-                cluster_name
-            )));
-        }
     } else {
-        // No cell_ref - this is a management cluster (self-provisioning)
+        // No cell capabilities - this is self-provisioning (management cluster bootstrap)
         BootstrapInfo::default()
     };
 
@@ -2010,7 +1926,6 @@ mod tests {
                 },
                 networking: None,
                 cell: None,
-                cell_ref: None,
                 environment: None,
                 region: None,
                 workload: None,
@@ -2040,12 +1955,11 @@ mod tests {
         cluster
     }
 
-    /// Create a child cluster (has parent via cell_ref) with a specific status phase
+    /// Create a workload cluster (no spec.cell) with a specific status phase
     /// Used for testing agent-based pivot flow
-    fn child_cluster_with_phase(name: &str, phase: ClusterPhase) -> LatticeCluster {
-        let mut cluster = cluster_with_phase(name, phase);
-        cluster.spec.cell_ref = Some("parent-cell".to_string());
-        cluster
+    fn workload_cluster_with_phase(name: &str, phase: ClusterPhase) -> LatticeCluster {
+        // sample_cluster() already creates a workload cluster (no spec.cell)
+        cluster_with_phase(name, phase)
     }
 
     /// Create a cluster with invalid spec (zero control plane nodes)
@@ -2581,7 +2495,6 @@ mod tests {
                     },
                     networking: None,
                     cell: None,
-                    cell_ref: None,
                     environment: None,
                     region: None,
                     workload: None,
@@ -3569,7 +3482,7 @@ mod tests {
         /// post-pivot manifests and trigger the pivot operation.
         #[tokio::test]
         async fn story_agent_ready_triggers_pivot() {
-            let cluster = Arc::new(child_cluster_with_phase(
+            let cluster = Arc::new(workload_cluster_with_phase(
                 "pivot-ready",
                 ClusterPhase::Pivoting,
             ));
@@ -3590,7 +3503,7 @@ mod tests {
         /// and requeue without triggering pivot.
         #[tokio::test]
         async fn story_agent_not_ready_waits() {
-            let cluster = Arc::new(child_cluster_with_phase(
+            let cluster = Arc::new(workload_cluster_with_phase(
                 "waiting-agent",
                 ClusterPhase::Pivoting,
             ));
@@ -3611,7 +3524,7 @@ mod tests {
         /// (error is logged but doesn't fail reconcile).
         #[tokio::test]
         async fn story_pivot_trigger_failure_continues() {
-            let cluster = Arc::new(child_cluster_with_phase(
+            let cluster = Arc::new(workload_cluster_with_phase(
                 "trigger-fail",
                 ClusterPhase::Pivoting,
             ));
@@ -3765,21 +3678,6 @@ mod tests {
         #[test]
         fn is_self_cluster_returns_false_when_no_self_name() {
             assert!(!is_self_cluster("mgmt", None));
-        }
-
-        // --- is_root_cluster tests ---
-
-        #[test]
-        fn is_root_cluster_returns_true_when_no_cell_ref() {
-            let cluster = sample_cluster("root");
-            assert!(is_root_cluster(&cluster));
-        }
-
-        #[test]
-        fn is_root_cluster_returns_false_when_has_cell_ref() {
-            let mut cluster = sample_cluster("child");
-            cluster.spec.cell_ref = Some("parent".to_string());
-            assert!(!is_root_cluster(&cluster));
         }
 
         // --- Node helper function tests ---

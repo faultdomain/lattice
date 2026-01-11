@@ -262,7 +262,6 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
             },
             networking: None,
             cell: None,
-            cell_ref: Some(MGMT_CLUSTER_NAME.to_string()),
             environment: Some("e2e-test".to_string()),
             region: Some("local".to_string()),
             workload: None,

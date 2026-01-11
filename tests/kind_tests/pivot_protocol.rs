@@ -103,7 +103,7 @@ async fn install_capi_capd() -> Result<(), String> {
 }
 
 /// Create a sample workload cluster spec
-fn workload_cluster_spec(name: &str, cell_host: &str) -> LatticeCluster {
+fn workload_cluster_spec(name: &str) -> LatticeCluster {
     LatticeCluster {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
@@ -124,7 +124,6 @@ fn workload_cluster_spec(name: &str, cell_host: &str) -> LatticeCluster {
             },
             networking: None,
             cell: None, // This is a workload cluster, not a cell
-            cell_ref: Some(cell_host.to_string()),
             environment: Some("test".to_string()),
             region: Some("local".to_string()),
             workload: None,
@@ -219,7 +218,7 @@ async fn run_pivot_e2e_test() -> Result<(), String> {
     // Step 5: Create LatticeCluster resource
     println!("Step 5: Creating LatticeCluster resource...");
     let api: Api<LatticeCluster> = Api::all(client.clone());
-    let cluster = workload_cluster_spec(WORKLOAD_CLUSTER_NAME, &grpc_addr.to_string());
+    let cluster = workload_cluster_spec(WORKLOAD_CLUSTER_NAME);
     api.create(&PostParams::default(), &cluster)
         .await
         .map_err(|e| format!("Failed to create LatticeCluster: {e}"))?;

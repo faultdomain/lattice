@@ -330,7 +330,6 @@ mod tests {
                 },
                 networking: None,
                 cell: None,
-                cell_ref: None,
                 environment: None,
                 region: None,
                 workload: None,
@@ -353,11 +352,9 @@ mod tests {
         cluster
     }
 
-    /// Helper to create a workload cluster with cell reference
-    fn sample_workload_cluster(name: &str, cell_ref: &str) -> LatticeCluster {
-        let mut cluster = sample_cluster(name, 3);
-        cluster.spec.cell_ref = Some(cell_ref.to_string());
-        cluster
+    /// Helper to create a workload cluster (no cell configuration)
+    fn sample_workload_cluster(name: &str) -> LatticeCluster {
+        sample_cluster(name, 3)
     }
 
     /// Provider Configuration Tests
@@ -971,7 +968,7 @@ mod tests {
         #[tokio::test]
         async fn workload_cluster_has_consistent_naming() {
             let provider = DockerProvider::new();
-            let cluster = sample_workload_cluster("workload-1", "mgmt");
+            let cluster = sample_workload_cluster("workload-1");
             let bootstrap = BootstrapInfo::default();
 
             // First validate
