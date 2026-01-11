@@ -73,7 +73,6 @@ impl std::error::Error for ProxyError {}
 // =============================================================================
 
 use super::connection::SharedAgentRegistry;
-use axum::extract::Query;
 
 /// Default port for the central proxy service
 pub const CENTRAL_PROXY_PORT: u16 = 8081;
@@ -83,16 +82,17 @@ struct CentralProxyState {
     registry: SharedAgentRegistry,
 }
 
-/// Query parameters for cluster routing
+/// Path parameters for cluster routing
 #[derive(serde::Deserialize)]
-struct ClusterQuery {
+struct ClusterPath {
     cluster: String,
+    path: Option<String>,
 }
 
 /// Start the central proxy server
 ///
-/// Routes requests based on `?cluster=<name>` query parameter.
-/// Example: `https://lattice-proxy.lattice-system.svc:8081/api/v1/nodes?cluster=my-cluster`
+/// Routes requests based on path prefix: `/cluster/{cluster_name}/...`
+/// Example: `https://lattice-proxy.lattice-system.svc:8081/cluster/my-cluster/api/v1/nodes`
 ///
 /// # Arguments
 /// * `registry` - Agent registry for looking up proxy channels
@@ -114,10 +114,10 @@ pub async fn start_central_proxy(
 
     let state = Arc::new(CentralProxyState { registry });
 
-    // Catch-all route - cluster identified by ?cluster= query param
+    // Path-based routing: /cluster/{cluster_name}/{*path}
     let app = Router::new()
-        .route("/{*path}", any(central_proxy_handler))
-        .route("/", any(central_proxy_handler))
+        .route("/cluster/{cluster}/{*path}", any(central_proxy_handler))
+        .route("/cluster/{cluster}", any(central_proxy_handler))
         .with_state(state);
 
     // Configure TLS
@@ -162,16 +162,16 @@ pub async fn start_central_proxy(
     Ok(actual_port)
 }
 
-/// Handle requests routed to a specific cluster via ?cluster= query param
+/// Handle requests routed to a specific cluster via path prefix
 async fn central_proxy_handler(
     State(state): State<Arc<CentralProxyState>>,
-    Query(query): Query<ClusterQuery>,
+    axum::extract::Path(path_params): axum::extract::Path<ClusterPath>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response<Body>, StatusCode> {
-    let cluster_name = &query.cluster;
+    let cluster_name = &path_params.cluster;
 
     // Get proxy channels for this cluster
     let channels = state
@@ -184,8 +184,15 @@ async fn central_proxy_handler(
 
     let request_id = channels.next_request_id(cluster_name);
 
-    // Use the path as-is (strip ?cluster= from query string for forwarding)
-    let api_path = strip_cluster_query(uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"));
+    // Reconstruct the API path from the remaining path + query string
+    let remaining_path = path_params.path.as_deref().unwrap_or("");
+    let api_path = if let Some(query) = uri.query() {
+        format!("/{}?{}", remaining_path, query)
+    } else if remaining_path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", remaining_path)
+    };
 
     debug!(
         request_id = %request_id,
@@ -280,27 +287,10 @@ async fn central_proxy_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Strip the ?cluster= query param from a path, keeping other params
-fn strip_cluster_query(path_and_query: &str) -> String {
-    if let Some((path, query)) = path_and_query.split_once('?') {
-        // Filter out cluster= from query params
-        let filtered: Vec<&str> = query
-            .split('&')
-            .filter(|param| !param.starts_with("cluster="))
-            .collect();
-        if filtered.is_empty() {
-            path.to_string()
-        } else {
-            format!("{}?{}", path, filtered.join("&"))
-        }
-    } else {
-        path_and_query.to_string()
-    }
-}
-
 /// Generate kubeconfig YAML for central proxy
 ///
-/// Points to the central proxy service with ?cluster= query param.
+/// Points to the central proxy service with path-based routing.
+/// Example: `https://lattice-proxy.lattice-system.svc:8081/cluster/my-cluster`
 /// Includes CA cert for TLS verification.
 pub fn generate_central_proxy_kubeconfig(
     cluster_name: &str,
@@ -313,7 +303,7 @@ pub fn generate_central_proxy_kubeconfig(
 kind: Config
 clusters:
 - cluster:
-    server: {service_url}?cluster={cluster}
+    server: {service_url}/cluster/{cluster}
     certificate-authority-data: {ca_cert}
   name: {cluster}
 contexts:
@@ -385,46 +375,12 @@ mod tests {
     // ==========================================================================
 
     #[test]
-    fn test_strip_cluster_query_removes_cluster_param() {
-        assert_eq!(
-            strip_cluster_query("/api/v1/nodes?cluster=my-cluster"),
-            "/api/v1/nodes"
-        );
-    }
-
-    #[test]
-    fn test_strip_cluster_query_preserves_other_params() {
-        assert_eq!(
-            strip_cluster_query("/api/v1/pods?cluster=my-cluster&watch=true"),
-            "/api/v1/pods?watch=true"
-        );
-    }
-
-    #[test]
-    fn test_strip_cluster_query_handles_no_query() {
-        assert_eq!(strip_cluster_query("/api/v1/nodes"), "/api/v1/nodes");
-    }
-
-    #[test]
-    fn test_strip_cluster_query_handles_multiple_params() {
-        assert_eq!(
-            strip_cluster_query("/api/v1/pods?limit=10&cluster=test&watch=false"),
-            "/api/v1/pods?limit=10&watch=false"
-        );
-    }
-
-    #[test]
-    fn test_strip_cluster_query_handles_cluster_only() {
-        assert_eq!(strip_cluster_query("/?cluster=test"), "/");
-    }
-
-    #[test]
     fn test_generate_central_proxy_kubeconfig() {
         let ca_cert = "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----";
         let kubeconfig =
             generate_central_proxy_kubeconfig("my-cluster", "https://proxy.svc:8081", ca_cert);
 
-        assert!(kubeconfig.contains("server: https://proxy.svc:8081?cluster=my-cluster"));
+        assert!(kubeconfig.contains("server: https://proxy.svc:8081/cluster/my-cluster"));
         assert!(kubeconfig.contains("certificate-authority-data:"));
         assert!(kubeconfig.contains("name: my-cluster"));
         assert!(kubeconfig.contains("current-context: my-cluster"));

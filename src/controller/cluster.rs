@@ -70,6 +70,12 @@ pub trait KubeClient: Send + Sync {
         grpc_port: u16,
     ) -> Result<(), Error>;
 
+    /// Ensure the central proxy ClusterIP Service exists
+    ///
+    /// Creates a ClusterIP Service in lattice-system namespace to expose
+    /// the central K8s API proxy. CAPI uses this to reach workload cluster APIs.
+    async fn ensure_proxy_service(&self, proxy_port: u16) -> Result<(), Error>;
+
     /// Check if the MutatingWebhookConfiguration for LatticeService deployments exists
     async fn is_webhook_config_ready(&self) -> Result<bool, Error>;
 }
@@ -344,6 +350,51 @@ impl KubeClient for KubeClientImpl {
             }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
                 info!("creating cell LoadBalancer service");
+                api.create(&PostParams::default(), &service).await?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_proxy_service(&self, proxy_port: u16) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
+        use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+
+        let api: Api<Service> = Api::namespaced(self.client.clone(), "lattice-system");
+
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("app".to_string(), "lattice-operator".to_string());
+
+        let service = Service {
+            metadata: ObjectMeta {
+                name: Some("lattice-proxy".to_string()),
+                namespace: Some("lattice-system".to_string()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                type_: Some("ClusterIP".to_string()),
+                selector: Some(labels),
+                ports: Some(vec![ServicePort {
+                    name: Some("https".to_string()),
+                    port: proxy_port as i32,
+                    target_port: Some(IntOrString::Int(proxy_port as i32)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Check if service exists
+        match api.get("lattice-proxy").await {
+            Ok(_) => {
+                debug!("proxy service already exists");
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                info!("creating central proxy ClusterIP service");
                 api.create(&PostParams::default(), &service).await?;
             }
             Err(e) => return Err(e.into()),
@@ -1159,6 +1210,14 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     )
                     .await?;
                 info!("cell LoadBalancer Service created/updated");
+
+                // Create ClusterIP Service for central K8s API proxy
+                // CAPI uses this to reach workload cluster APIs via their path
+                info!("ensuring ClusterIP Service for central proxy");
+                ctx.kube
+                    .ensure_proxy_service(crate::agent::proxy::CENTRAL_PROXY_PORT)
+                    .await?;
+                info!("central proxy ClusterIP Service created/updated");
             }
 
             // Check if we're reconciling our own cluster (the one we're running on)
@@ -1848,7 +1907,7 @@ impl PivotOperations for PivotOperationsImpl {
 
         info!(cluster = %cluster_name, namespace = %namespace, "Executing clusterctl move via central proxy");
 
-        // Generate kubeconfig pointing to central proxy with ?cluster= routing
+        // Generate kubeconfig pointing to central proxy with path-based routing
         let kubeconfig_content = generate_central_proxy_kubeconfig(
             cluster_name,
             CENTRAL_PROXY_SERVICE_URL,

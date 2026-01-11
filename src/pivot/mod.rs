@@ -514,7 +514,7 @@ pub async fn patch_kubeconfig_for_self_management(
 /// Patch a child cluster's kubeconfig to use the central proxy
 ///
 /// Updates the server URL to point to the internal central proxy service
-/// with ?cluster= query parameter for routing. Includes CA cert for TLS.
+/// with path-based routing: `/cluster/{cluster_name}`. Includes CA cert for TLS.
 ///
 /// # Arguments
 /// * `cluster_name` - Name of the child cluster
@@ -561,8 +561,8 @@ pub async fn patch_kubeconfig_for_child_cluster(
     let mut kubeconfig: serde_yaml::Value = serde_yaml::from_str(&kubeconfig_str)
         .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
 
-    // Build the proxy URL with cluster query param
-    let proxy_server = format!("{}?cluster={}", proxy_url, cluster_name);
+    // Build the proxy URL with path-based cluster routing
+    let proxy_server = format!("{}/cluster/{}", proxy_url, cluster_name);
 
     // Update ALL cluster server URLs to proxy endpoint
     let mut updated_count = 0;
@@ -574,8 +574,8 @@ pub async fn patch_kubeconfig_for_child_cluster(
             if let Some(cluster_config) = cluster.get_mut("cluster") {
                 if let Some(server) = cluster_config.get_mut("server") {
                     let old_server = server.as_str().unwrap_or("unknown").to_string();
-                    // Only patch if not already using the proxy
-                    if !old_server.contains("?cluster=") {
+                    // Only patch if not already using the proxy (check for /cluster/ path)
+                    if !old_server.contains("/cluster/") {
                         *server = serde_yaml::Value::String(proxy_server.clone());
                         // Set certificate-authority-data to our CA cert for TLS
                         let ca_cert_b64 = STANDARD.encode(ca_cert_pem.as_bytes());

@@ -7,6 +7,12 @@ exclude-files = [
     # Agent gRPC - requires real network connections
     "src/agent/client.rs",
     "src/agent/server.rs",
+    # Agent proxy - requires HTTPS server, TLS, network binding
+    "src/agent/proxy.rs",
+    # Parent/Cell server - requires gRPC server, TLS, network binding
+    "src/parent/*",
+    # Pivot - requires real k8s clusters, clusterctl binary
+    "src/pivot/*",
     # CAPI - requires clusterctl binary
     "src/capi/*",
     # Controllers - require real k8s API, tested by E2E
