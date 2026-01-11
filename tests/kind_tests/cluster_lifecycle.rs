@@ -14,7 +14,7 @@ use kube::Client;
 
 use lattice::controller::{reconcile, Context, KubeClientImpl};
 use lattice::crd::{
-    BootstrapProvider, ParentSpec, ClusterPhase, KubernetesSpec, LatticeCluster, LatticeClusterSpec,
+    BootstrapProvider, EndpointsSpec, ClusterPhase, KubernetesSpec, LatticeCluster, LatticeClusterSpec,
     LatticeClusterStatus, NodeSpec, ProviderSpec, ProviderType, ServiceSpec,
 };
 
@@ -45,7 +45,7 @@ fn sample_cluster(name: &str) -> LatticeCluster {
                 workers: 2,
             },
             networking: None,
-            parent: Some(ParentSpec {
+            endpoints: Some(EndpointsSpec {
                 host: "172.18.255.1".to_string(),
                 grpc_port: 50051,
                 bootstrap_port: 8443,

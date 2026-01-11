@@ -499,7 +499,7 @@ async fn apply_manifest(client: &Client, manifest: &str) -> anyhow::Result<()> {
 /// Run in controller mode - manages clusters
 ///
 /// Cell servers (gRPC + bootstrap HTTP) start automatically when needed.
-/// Cell endpoint configuration is read from the local LatticeCluster CRD's spec.parent.
+/// Cell endpoint configuration is read from the local LatticeCluster CRD's spec.endpoints.
 ///
 /// If this cluster has a cellRef (parent), the controller also connects as an agent
 /// to the parent cell for pivot coordination and health reporting.
@@ -523,7 +523,7 @@ async fn run_controller() -> anyhow::Result<()> {
 
     // Create cell servers (but don't start them yet - wait for LatticeCluster to get SANs)
     // The webhook is always needed for LatticeService → Deployment mutation
-    // External exposure (LoadBalancer) is configured per-cluster based on spec.parent
+    // External exposure (LoadBalancer) is configured per-cluster based on spec.endpoints
     let parent_servers = Arc::new(
         ParentServers::new(ParentConfig::default())
             .map_err(|e| anyhow::anyhow!("Failed to create cell servers: {}", e))?,
@@ -534,7 +534,7 @@ async fn run_controller() -> anyhow::Result<()> {
     ensure_webhook_config(&client, parent_servers.ca()).await?;
 
     // Spawn background task to start cell servers once LatticeCluster is available
-    // This ensures TLS certificate has correct SANs (spec.parent.host) before serving manifests
+    // This ensures TLS certificate has correct SANs (spec.endpoints.host) before serving manifests
     // Controllers start immediately - they check parent_servers.is_running() before provisioning
     let parent_servers_clone = parent_servers.clone();
     let client_clone = client.clone();
@@ -557,7 +557,7 @@ async fn run_controller() -> anyhow::Result<()> {
             loop {
                 match clusters.get(cluster_name).await {
                     Ok(cluster) => {
-                        if let Some(ref cell) = cluster.spec.parent {
+                        if let Some(ref cell) = cluster.spec.endpoints {
                             tracing::info!(host = %cell.host, "Adding cell host to server certificate SANs");
                             break vec![cell.host.clone()];
                         } else {

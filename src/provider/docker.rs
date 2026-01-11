@@ -298,7 +298,7 @@ impl Provider for DockerProvider {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, ParentSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
+        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
         ProviderType, ServiceSpec,
     };
     use crate::provider::{
@@ -329,7 +329,7 @@ mod tests {
                     workers,
                 },
                 networking: None,
-                parent: None,
+                endpoints: None,
                 environment: None,
                 region: None,
                 workload: None,
@@ -341,7 +341,7 @@ mod tests {
     /// Helper to create a cell (management) cluster
     fn sample_parent_cluster(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name, 2);
-        cluster.spec.parent = Some(ParentSpec {
+        cluster.spec.endpoints = Some(EndpointsSpec {
             host: "172.18.255.1".to_string(),
             grpc_port: 50051,
             bootstrap_port: 8443,

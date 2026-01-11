@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ClusterPhase, Condition, NetworkingSpec, NodeSpec, ParentSpec, ProviderSpec, WorkloadSpec,
+    ClusterPhase, Condition, NetworkingSpec, NodeSpec, EndpointsSpec, ProviderSpec, WorkloadSpec,
 };
 
 /// Specification for a LatticeCluster
@@ -44,7 +44,7 @@ pub struct LatticeClusterSpec {
 
     /// Parent configuration - if present, this cluster can have children
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<ParentSpec>,
+    pub endpoints: Option<EndpointsSpec>,
 
     /// Environment identifier (e.g., prod, staging, dev)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,8 +61,8 @@ pub struct LatticeClusterSpec {
 
 impl LatticeClusterSpec {
     /// Returns true if this cluster can have children (has parent config)
-    pub fn is_parent(&self) -> bool {
-        self.parent.is_some()
+    pub fn has_endpoints(&self) -> bool {
+        self.endpoints.is_some()
     }
 
     /// Validate the cluster specification
@@ -178,8 +178,8 @@ mod tests {
         }
     }
 
-    fn parent_spec() -> ParentSpec {
-        ParentSpec {
+    fn endpoints_spec() -> EndpointsSpec {
+        EndpointsSpec {
             host: "172.18.255.1".to_string(),
             grpc_port: 50051,
             bootstrap_port: 8443,
@@ -207,13 +207,13 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            parent: Some(parent_spec()),
+            endpoints: Some(endpoints_spec()),
             environment: None,
             region: None,
             workload: None,
         };
 
-        assert!(spec.is_parent(), "Should be recognized as a parent");
+        assert!(spec.has_endpoints(), "Should be recognized as a parent");
     }
 
     /// Story: A cluster without parent configuration is a leaf cluster
@@ -226,13 +226,13 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            parent: None,
+            endpoints: None,
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
             workload: None,
         };
 
-        assert!(!spec.is_parent(), "Leaf cluster cannot have children");
+        assert!(!spec.has_endpoints(), "Leaf cluster cannot have children");
     }
 
     // =========================================================================
@@ -250,7 +250,7 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            parent: Some(parent_spec()),
+            endpoints: Some(endpoints_spec()),
             environment: None,
             region: None,
             workload: None,
@@ -271,7 +271,7 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            parent: None,
+            endpoints: None,
             environment: None,
             region: None,
             workload: None,
@@ -295,7 +295,7 @@ mod tests {
                 workers: 2,
             },
             networking: None,
-            parent: None,
+            endpoints: None,
             environment: None,
             region: None,
             workload: None,
@@ -406,18 +406,18 @@ nodes:
 networking:
   default:
     cidr: "172.18.255.1/32"
-parent:
+endpoints:
   host: "172.18.255.1"
   service:
     type: LoadBalancer
 "#;
         let spec: LatticeClusterSpec = serde_yaml::from_str(yaml).unwrap();
 
-        assert!(spec.is_parent(), "Should be a parent cluster");
+        assert!(spec.has_endpoints(), "Should be a parent cluster");
         assert_eq!(spec.nodes.control_plane, 1);
         assert_eq!(spec.nodes.workers, 2);
         assert_eq!(spec.provider.kubernetes.version, "1.35.0");
-        assert_eq!(spec.parent.as_ref().unwrap().host, "172.18.255.1");
+        assert_eq!(spec.endpoints.as_ref().unwrap().host, "172.18.255.1");
     }
 
     /// Story: User defines production workload cluster in YAML manifest
@@ -445,7 +445,7 @@ workload:
 "#;
         let spec: LatticeClusterSpec = serde_yaml::from_str(yaml).unwrap();
 
-        assert!(!spec.is_parent(), "Should be workload cluster");
+        assert!(!spec.has_endpoints(), "Should be workload cluster");
         assert_eq!(spec.environment.as_deref(), Some("prod"));
         assert_eq!(spec.region.as_deref(), Some("us-west"));
 
@@ -465,7 +465,7 @@ workload:
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            parent: None,
+            endpoints: None,
             environment: Some("staging".to_string()),
             region: None,
             workload: None,

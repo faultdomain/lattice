@@ -181,7 +181,7 @@ pub struct NetworkPool {
 /// When present, this cluster can have children (provision and manage other clusters).
 /// Contains the endpoint configuration for child clusters to connect back.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ParentSpec {
+pub struct EndpointsSpec {
     /// Host address for child agent connections
     pub host: String,
 
@@ -205,7 +205,7 @@ fn default_bootstrap_port() -> u16 {
     crate::DEFAULT_BOOTSTRAP_PORT
 }
 
-impl ParentSpec {
+impl EndpointsSpec {
     /// Get the combined parent endpoint in format "host:http_port:grpc_port"
     ///
     /// This format is used by bootstrap to pass all connection info in a single string.
@@ -714,7 +714,7 @@ mod tests {
 
         #[test]
         fn test_cell_spec_roundtrip() {
-            let spec = ParentSpec {
+            let spec = EndpointsSpec {
                 host: "cell.example.com".to_string(),
                 grpc_port: 50051,
                 bootstrap_port: 8443,
@@ -723,13 +723,13 @@ mod tests {
                 },
             };
             let json = serde_json::to_string(&spec).unwrap();
-            let parsed: ParentSpec = serde_json::from_str(&json).unwrap();
+            let parsed: EndpointsSpec = serde_json::from_str(&json).unwrap();
             assert_eq!(spec, parsed);
         }
 
         #[test]
         fn test_cell_spec_endpoints() {
-            let spec = ParentSpec {
+            let spec = EndpointsSpec {
                 host: "172.18.255.1".to_string(),
                 grpc_port: 50051,
                 bootstrap_port: 8443,
@@ -745,7 +745,7 @@ mod tests {
         fn test_cell_spec_default_ports() {
             // Ports should default when not specified in JSON
             let json = r#"{"host":"example.com","service":{"type":"LoadBalancer"}}"#;
-            let spec: ParentSpec = serde_json::from_str(json).unwrap();
+            let spec: EndpointsSpec = serde_json::from_str(json).unwrap();
             assert_eq!(spec.grpc_port, 50051);
             assert_eq!(spec.bootstrap_port, 8443);
         }

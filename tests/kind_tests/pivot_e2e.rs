@@ -4,7 +4,7 @@
 //!
 //! 1. Creates a bootstrap kind cluster
 //! 2. Installs CAPI + Lattice operator on bootstrap
-//! 3. Creates management cluster LatticeCluster CRD (with spec.parent)
+//! 3. Creates management cluster LatticeCluster CRD (with spec.endpoints)
 //! 4. Waits for management cluster to be provisioned
 //! 5. Pivots CAPI resources to management cluster
 //! 6. Deletes bootstrap cluster
@@ -261,7 +261,7 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
                 workers: 2, // Workers scale up after pivot when cluster self-manages
             },
             networking: None,
-            parent: None,
+            endpoints: None,
             environment: Some("e2e-test".to_string()),
             region: Some("local".to_string()),
             workload: None,

@@ -990,7 +990,7 @@ impl Context {
     /// Create a new controller context with cell servers for dynamic startup
     ///
     /// Cell servers will start automatically when Pending LatticeCluster CRDs are detected.
-    /// Cell endpoint configuration is read from the LatticeCluster CRD's spec.parent.
+    /// Cell endpoint configuration is read from the LatticeCluster CRD's spec.endpoints.
     pub fn new_with_cell(
         client: Client,
         parent_servers: Arc<ParentServers<DefaultManifestGenerator>>,
@@ -1013,8 +1013,8 @@ impl Context {
         self.parent.as_ref().map(|c| &c.pivot_ops)
     }
 
-    /// Check if this context has cell capabilities
-    pub fn is_cell(&self) -> bool {
+    /// Check if this context has parent capabilities (can provision child clusters)
+    pub fn has_parent_capabilities(&self) -> bool {
         self.parent.is_some()
     }
 
@@ -1217,7 +1217,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Create LoadBalancer Service if this cluster has a cell spec
             // This exposes cell servers for workload clusters to reach bootstrap + gRPC endpoints
             // Note: Cell servers are started at application startup, not on-demand
-            if let Some(ref cell_spec) = cluster.spec.parent {
+            if let Some(ref cell_spec) = cluster.spec.endpoints {
                 info!(host = %cell_spec.host, "ensuring LoadBalancer Service for cell servers");
                 ctx.kube
                     .ensure_cell_service(
@@ -1899,7 +1899,7 @@ impl PivotOperations for PivotOperationsImpl {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, ParentSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
+        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
         ProviderType, ServiceSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -1925,7 +1925,7 @@ mod tests {
                     workers: 2,
                 },
                 networking: None,
-                parent: None,
+                endpoints: None,
                 environment: None,
                 region: None,
                 workload: None,
@@ -1937,7 +1937,7 @@ mod tests {
     /// Create a sample cell (management cluster) for testing
     fn sample_parent(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name);
-        cluster.spec.parent = Some(ParentSpec {
+        cluster.spec.endpoints = Some(EndpointsSpec {
             host: "172.18.255.1".to_string(),
             grpc_port: 50051,
             bootstrap_port: 8443,
@@ -1955,10 +1955,10 @@ mod tests {
         cluster
     }
 
-    /// Create a workload cluster (no spec.parent) with a specific status phase
+    /// Create a workload cluster (no spec.endpoints) with a specific status phase
     /// Used for testing agent-based pivot flow
     fn workload_cluster_with_phase(name: &str, phase: ClusterPhase) -> LatticeCluster {
-        // sample_cluster() already creates a workload cluster (no spec.parent)
+        // sample_cluster() already creates a workload cluster (no spec.endpoints)
         cluster_with_phase(name, phase)
     }
 
@@ -1988,7 +1988,7 @@ mod tests {
         fn test_cell_cluster_validation() {
             let cluster = sample_parent("mgmt");
             assert!(cluster.spec.validate().is_ok());
-            assert!(cluster.spec.is_parent());
+            assert!(cluster.spec.has_endpoints());
         }
     }
 
@@ -2494,7 +2494,7 @@ mod tests {
                         workers: 2,
                     },
                     networking: None,
-                    parent: None,
+                    endpoints: None,
                     environment: None,
                     region: None,
                     workload: None,

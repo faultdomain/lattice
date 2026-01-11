@@ -9,7 +9,7 @@ use kube::api::{Api, DeleteParams, PostParams};
 use kube::Client;
 
 use lattice::crd::{
-    BootstrapProvider, ParentSpec, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
+    BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
     ProviderSpec, ProviderType, ServiceSpec,
 };
 
@@ -40,7 +40,7 @@ fn sample_parent_spec(name: &str) -> LatticeCluster {
                 workers: 2,
             },
             networking: None,
-            parent: Some(ParentSpec {
+            endpoints: Some(EndpointsSpec {
                 host: "172.18.255.1".to_string(),
                 grpc_port: 50051,
                 bootstrap_port: 8443,
@@ -77,7 +77,7 @@ fn sample_workload_spec(name: &str) -> LatticeCluster {
                 workers: 3,
             },
             networking: None,
-            parent: None,
+            endpoints: None,
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
             workload: None,
@@ -131,7 +131,7 @@ async fn story_operator_creates_management_cluster() {
     // Assert: The cluster is created and recognized as a cell
     assert_eq!(created.metadata.name.as_deref(), Some(name));
     assert!(
-        created.spec.is_parent(),
+        created.spec.has_endpoints(),
         "Management cluster should be a cell"
     );
 
@@ -140,7 +140,7 @@ async fn story_operator_creates_management_cluster() {
     assert_eq!(fetched.spec.provider.type_, ProviderType::Docker);
     assert_eq!(fetched.spec.nodes.control_plane, 1);
     assert_eq!(fetched.spec.nodes.workers, 2);
-    assert_eq!(fetched.spec.parent.as_ref().unwrap().host, "172.18.255.1");
+    assert_eq!(fetched.spec.endpoints.as_ref().unwrap().host, "172.18.255.1");
 
     // Cleanup
     cleanup_cluster(&client, name).await;
@@ -185,7 +185,7 @@ async fn story_operator_creates_workload_cluster_for_production() {
     // Assert: The cluster is created as a workload cluster
     assert_eq!(created.metadata.name.as_deref(), Some(name));
     assert!(
-        !created.spec.is_parent(),
+        !created.spec.has_endpoints(),
         "Workload cluster should not be a cell"
     );
 
