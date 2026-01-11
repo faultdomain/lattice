@@ -663,7 +663,9 @@ fn validate_memory_quantity(
     field: &str,
 ) -> Result<(), crate::Error> {
     // Memory can have these suffixes: Ki, Mi, Gi, Ti, Pi, Ei, k, M, G, T, P, E
-    let suffixes = ["Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "k", "M", "G", "T", "P", "E"];
+    let suffixes = [
+        "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "k", "M", "G", "T", "P", "E",
+    ];
 
     let is_valid = if let Some(suffix) = suffixes.iter().find(|s| qty.ends_with(*s)) {
         // Has suffix: prefix must be a number
@@ -1215,7 +1217,8 @@ deploy:
     fn test_invalid_memory_quantities() {
         assert!(validate_memory_quantity("", "main", "requests").is_err());
         assert!(validate_memory_quantity("abc", "main", "limits").is_err());
-        assert!(validate_memory_quantity("128Xi", "main", "requests").is_err()); // invalid suffix
+        assert!(validate_memory_quantity("128Xi", "main", "requests").is_err());
+        // invalid suffix
     }
 
     /// Story: Valid file modes pass validation

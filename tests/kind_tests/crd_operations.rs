@@ -140,7 +140,10 @@ async fn story_operator_creates_management_cluster() {
     assert_eq!(fetched.spec.provider.type_, ProviderType::Docker);
     assert_eq!(fetched.spec.nodes.control_plane, 1);
     assert_eq!(fetched.spec.nodes.workers, 2);
-    assert_eq!(fetched.spec.endpoints.as_ref().unwrap().host, "172.18.255.1");
+    assert_eq!(
+        fetched.spec.endpoints.as_ref().unwrap().host,
+        "172.18.255.1"
+    );
 
     // Cleanup
     cleanup_cluster(&client, name).await;

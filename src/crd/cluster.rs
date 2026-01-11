@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ClusterPhase, Condition, NetworkingSpec, NodeSpec, EndpointsSpec, ProviderSpec, WorkloadSpec,
+    ClusterPhase, Condition, EndpointsSpec, NetworkingSpec, NodeSpec, ProviderSpec, WorkloadSpec,
 };
 
 /// Specification for a LatticeCluster

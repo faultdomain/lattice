@@ -569,7 +569,12 @@ impl AgentClient {
             "aws" => ProviderType::Aws,
             "gcp" => ProviderType::Gcp,
             "azure" => ProviderType::Azure,
-            other => return Err(std::io::Error::other(format!("unknown provider: {}", other))),
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "unknown provider: {}",
+                    other
+                )))
+            }
         };
 
         info!(provider = %provider_str, "Installing CAPI with shared installer");

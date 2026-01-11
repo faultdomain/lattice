@@ -252,6 +252,11 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
         config.parent_grpc_port,
     ));
 
+    // Add CiliumClusterwideNetworkPolicy for ztunnel (required for Istio ambient mode)
+    // This allows traffic from the ztunnel's link-local address (169.254.7.127)
+    // See: https://istio.io/latest/docs/ambient/install/platform-prerequisites/
+    manifests.push(crate::infra::generate_ztunnel_allowlist());
+
     manifests
 }
 

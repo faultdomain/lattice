@@ -791,7 +791,10 @@ mod tests {
 
         // The retry should succeed
         let result = set_task.await.unwrap();
-        assert!(result, "set_proxy_port_with_retry should succeed after agent registers");
+        assert!(
+            result,
+            "set_proxy_port_with_retry should succeed after agent registers"
+        );
 
         // Verify port was set
         assert_eq!(registry.get_proxy_port("delayed-cluster"), Some(18080));
@@ -824,7 +827,10 @@ mod tests {
             .set_proxy_port_with_retry("immediate-cluster", 18080, Duration::from_secs(1))
             .await;
 
-        assert!(result, "should succeed immediately when agent already registered");
+        assert!(
+            result,
+            "should succeed immediately when agent already registered"
+        );
         assert_eq!(registry.get_proxy_port("immediate-cluster"), Some(18080));
     }
 }

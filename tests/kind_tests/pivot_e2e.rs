@@ -413,7 +413,8 @@ fn create_service(
     let mut containers = BTreeMap::new();
     containers.insert("main".to_string(), container);
 
-    let mut resources: BTreeMap<String, ResourceSpec> = outbound.iter().map(|s| outbound_dep(s)).collect();
+    let mut resources: BTreeMap<String, ResourceSpec> =
+        outbound.iter().map(|s| outbound_dep(s)).collect();
     resources.extend(inbound.iter().map(|s| inbound_allow(s)));
 
     let mut labels = BTreeMap::new();
@@ -515,16 +516,48 @@ done
 fn create_frontend_web() -> LatticeService {
     let tests = vec![
         // Layer 2 - API services
-        ConnTest { target: "api-gateway", expected: true, reason: "bilateral agreement" },
-        ConnTest { target: "api-users", expected: true, reason: "bilateral agreement" },
-        ConnTest { target: "api-orders", expected: false, reason: "web not allowed by orders" },
+        ConnTest {
+            target: "api-gateway",
+            expected: true,
+            reason: "bilateral agreement",
+        },
+        ConnTest {
+            target: "api-users",
+            expected: true,
+            reason: "bilateral agreement",
+        },
+        ConnTest {
+            target: "api-orders",
+            expected: false,
+            reason: "web not allowed by orders",
+        },
         // Layer 3 - Backend services (should all be blocked - no direct access)
-        ConnTest { target: "db-users", expected: false, reason: "no direct DB access" },
-        ConnTest { target: "db-orders", expected: false, reason: "no direct DB access" },
-        ConnTest { target: "cache", expected: false, reason: "no direct cache access" },
+        ConnTest {
+            target: "db-users",
+            expected: false,
+            reason: "no direct DB access",
+        },
+        ConnTest {
+            target: "db-orders",
+            expected: false,
+            reason: "no direct DB access",
+        },
+        ConnTest {
+            target: "cache",
+            expected: false,
+            reason: "no direct cache access",
+        },
         // Same layer - peer frontends (should be blocked)
-        ConnTest { target: "frontend-mobile", expected: false, reason: "no peer access" },
-        ConnTest { target: "frontend-admin", expected: false, reason: "no peer access" },
+        ConnTest {
+            target: "frontend-mobile",
+            expected: false,
+            reason: "no peer access",
+        },
+        ConnTest {
+            target: "frontend-admin",
+            expected: false,
+            reason: "no peer access",
+        },
     ];
 
     let script = generate_traffic_test_script("frontend-web", &tests);
@@ -545,7 +578,16 @@ fn create_frontend_web() -> LatticeService {
     // Also try to connect to orders to verify it's blocked
     create_service(
         "frontend-web",
-        vec!["api-gateway", "api-users", "api-orders", "db-users", "db-orders", "cache", "frontend-mobile", "frontend-admin"],
+        vec![
+            "api-gateway",
+            "api-users",
+            "api-orders",
+            "db-users",
+            "db-orders",
+            "cache",
+            "frontend-mobile",
+            "frontend-admin",
+        ],
         vec![],
         false, // No inbound port - just a traffic generator
         container,
@@ -557,16 +599,48 @@ fn create_frontend_web() -> LatticeService {
 fn create_frontend_mobile() -> LatticeService {
     let tests = vec![
         // Layer 2 - API services
-        ConnTest { target: "api-gateway", expected: true, reason: "bilateral agreement" },
-        ConnTest { target: "api-users", expected: false, reason: "mobile not allowed by users" },
-        ConnTest { target: "api-orders", expected: true, reason: "bilateral agreement" },
+        ConnTest {
+            target: "api-gateway",
+            expected: true,
+            reason: "bilateral agreement",
+        },
+        ConnTest {
+            target: "api-users",
+            expected: false,
+            reason: "mobile not allowed by users",
+        },
+        ConnTest {
+            target: "api-orders",
+            expected: true,
+            reason: "bilateral agreement",
+        },
         // Layer 3 - Backend services
-        ConnTest { target: "db-users", expected: false, reason: "no direct DB access" },
-        ConnTest { target: "db-orders", expected: false, reason: "no direct DB access" },
-        ConnTest { target: "cache", expected: false, reason: "no direct cache access" },
+        ConnTest {
+            target: "db-users",
+            expected: false,
+            reason: "no direct DB access",
+        },
+        ConnTest {
+            target: "db-orders",
+            expected: false,
+            reason: "no direct DB access",
+        },
+        ConnTest {
+            target: "cache",
+            expected: false,
+            reason: "no direct cache access",
+        },
         // Same layer
-        ConnTest { target: "frontend-web", expected: false, reason: "no peer access" },
-        ConnTest { target: "frontend-admin", expected: false, reason: "no peer access" },
+        ConnTest {
+            target: "frontend-web",
+            expected: false,
+            reason: "no peer access",
+        },
+        ConnTest {
+            target: "frontend-admin",
+            expected: false,
+            reason: "no peer access",
+        },
     ];
 
     let script = generate_traffic_test_script("frontend-mobile", &tests);
@@ -585,7 +659,16 @@ fn create_frontend_mobile() -> LatticeService {
 
     create_service(
         "frontend-mobile",
-        vec!["api-gateway", "api-users", "api-orders", "db-users", "db-orders", "cache", "frontend-web", "frontend-admin"],
+        vec![
+            "api-gateway",
+            "api-users",
+            "api-orders",
+            "db-users",
+            "db-orders",
+            "cache",
+            "frontend-web",
+            "frontend-admin",
+        ],
         vec![],
         false,
         container,
@@ -597,16 +680,48 @@ fn create_frontend_mobile() -> LatticeService {
 fn create_frontend_admin() -> LatticeService {
     let tests = vec![
         // Layer 2 - API services (admin has full access)
-        ConnTest { target: "api-gateway", expected: true, reason: "bilateral agreement" },
-        ConnTest { target: "api-users", expected: true, reason: "bilateral agreement" },
-        ConnTest { target: "api-orders", expected: true, reason: "bilateral agreement" },
+        ConnTest {
+            target: "api-gateway",
+            expected: true,
+            reason: "bilateral agreement",
+        },
+        ConnTest {
+            target: "api-users",
+            expected: true,
+            reason: "bilateral agreement",
+        },
+        ConnTest {
+            target: "api-orders",
+            expected: true,
+            reason: "bilateral agreement",
+        },
         // Layer 3 - Backend services (still blocked - must go through API)
-        ConnTest { target: "db-users", expected: false, reason: "no direct DB access" },
-        ConnTest { target: "db-orders", expected: false, reason: "no direct DB access" },
-        ConnTest { target: "cache", expected: false, reason: "no direct cache access" },
+        ConnTest {
+            target: "db-users",
+            expected: false,
+            reason: "no direct DB access",
+        },
+        ConnTest {
+            target: "db-orders",
+            expected: false,
+            reason: "no direct DB access",
+        },
+        ConnTest {
+            target: "cache",
+            expected: false,
+            reason: "no direct cache access",
+        },
         // Same layer
-        ConnTest { target: "frontend-web", expected: false, reason: "no peer access" },
-        ConnTest { target: "frontend-mobile", expected: false, reason: "no peer access" },
+        ConnTest {
+            target: "frontend-web",
+            expected: false,
+            reason: "no peer access",
+        },
+        ConnTest {
+            target: "frontend-mobile",
+            expected: false,
+            reason: "no peer access",
+        },
     ];
 
     let script = generate_traffic_test_script("frontend-admin", &tests);
@@ -625,7 +740,16 @@ fn create_frontend_admin() -> LatticeService {
 
     create_service(
         "frontend-admin",
-        vec!["api-gateway", "api-users", "api-orders", "db-users", "db-orders", "cache", "frontend-web", "frontend-mobile"],
+        vec![
+            "api-gateway",
+            "api-users",
+            "api-orders",
+            "db-users",
+            "db-orders",
+            "cache",
+            "frontend-web",
+            "frontend-mobile",
+        ],
         vec![],
         false,
         container,
@@ -848,35 +972,35 @@ async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
 /// Expected test results for each frontend service
 /// Format: (target_service, expected_allowed)
 const FRONTEND_WEB_EXPECTED: &[(&str, bool)] = &[
-    ("api-gateway", true),   // bilateral agreement
-    ("api-users", true),     // bilateral agreement
-    ("api-orders", false),   // web not allowed by orders
-    ("db-users", false),     // no direct DB access
-    ("db-orders", false),    // no direct DB access
-    ("cache", false),        // no direct cache access
+    ("api-gateway", true),      // bilateral agreement
+    ("api-users", true),        // bilateral agreement
+    ("api-orders", false),      // web not allowed by orders
+    ("db-users", false),        // no direct DB access
+    ("db-orders", false),       // no direct DB access
+    ("cache", false),           // no direct cache access
     ("frontend-mobile", false), // no peer access
     ("frontend-admin", false),  // no peer access
 ];
 
 const FRONTEND_MOBILE_EXPECTED: &[(&str, bool)] = &[
-    ("api-gateway", true),   // bilateral agreement
-    ("api-users", false),    // mobile not allowed by users
-    ("api-orders", true),    // bilateral agreement
-    ("db-users", false),     // no direct DB access
-    ("db-orders", false),    // no direct DB access
-    ("cache", false),        // no direct cache access
-    ("frontend-web", false), // no peer access
+    ("api-gateway", true),     // bilateral agreement
+    ("api-users", false),      // mobile not allowed by users
+    ("api-orders", true),      // bilateral agreement
+    ("db-users", false),       // no direct DB access
+    ("db-orders", false),      // no direct DB access
+    ("cache", false),          // no direct cache access
+    ("frontend-web", false),   // no peer access
     ("frontend-admin", false), // no peer access
 ];
 
 const FRONTEND_ADMIN_EXPECTED: &[(&str, bool)] = &[
-    ("api-gateway", true),   // bilateral agreement
-    ("api-users", true),     // bilateral agreement
-    ("api-orders", true),    // bilateral agreement (admin has full access)
-    ("db-users", false),     // no direct DB access
-    ("db-orders", false),    // no direct DB access
-    ("cache", false),        // no direct cache access
-    ("frontend-web", false), // no peer access
+    ("api-gateway", true),      // bilateral agreement
+    ("api-users", true),        // bilateral agreement
+    ("api-orders", true),       // bilateral agreement (admin has full access)
+    ("db-users", false),        // no direct DB access
+    ("db-orders", false),       // no direct DB access
+    ("cache", false),           // no direct cache access
+    ("frontend-web", false),    // no peer access
     ("frontend-mobile", false), // no peer access
 ];
 
@@ -920,7 +1044,11 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
         println!("  {} verification results:", frontend_name);
 
         for (target, expected_allowed) in expected_results.iter() {
-            let expected_str = if *expected_allowed { "ALLOWED" } else { "BLOCKED" };
+            let expected_str = if *expected_allowed {
+                "ALLOWED"
+            } else {
+                "BLOCKED"
+            };
 
             // Check if the log contains the expected result
             let allowed_pattern = format!("{}: ALLOWED", target);
@@ -936,7 +1064,13 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
             };
 
             let status = if result_ok { "PASS" } else { "FAIL" };
-            let actual_str = if actual_allowed { "ALLOWED" } else if actual_blocked { "BLOCKED" } else { "UNKNOWN" };
+            let actual_str = if actual_allowed {
+                "ALLOWED"
+            } else if actual_blocked {
+                "BLOCKED"
+            } else {
+                "UNKNOWN"
+            };
 
             println!(
                 "    [{}] {} -> {}: {} (expected: {})",
@@ -961,7 +1095,11 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
     println!("  SERVICE MESH VERIFICATION SUMMARY");
     println!("  ========================================");
     println!("  Total tests: {}", total_tests);
-    println!("  Passed: {} ({:.1}%)", total_pass, (total_pass as f64 / total_tests as f64) * 100.0);
+    println!(
+        "  Passed: {} ({:.1}%)",
+        total_pass,
+        (total_pass as f64 / total_tests as f64) * 100.0
+    );
     println!("  Failed: {}", total_fail);
 
     if !failures.is_empty() {
@@ -975,7 +1113,10 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
         ));
     }
 
-    println!("\n  SUCCESS: All {} bilateral agreement tests passed!", total_tests);
+    println!(
+        "\n  SUCCESS: All {} bilateral agreement tests passed!",
+        total_tests
+    );
     println!("  - 7 allowed connections verified (bilateral agreements work)");
     println!("  - 17 blocked connections verified (security enforced)");
     println!("  - Cross-layer access denied (frontends can't access DBs)");

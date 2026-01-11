@@ -34,7 +34,6 @@
 pub mod agent;
 pub mod bootstrap;
 pub mod capi;
-pub mod parent;
 pub mod cilium;
 pub mod compiler;
 pub mod controller;
@@ -44,6 +43,7 @@ pub mod fips;
 pub mod graph;
 pub mod infra;
 pub mod install;
+pub mod parent;
 pub mod pivot;
 pub mod pki;
 pub mod policy;

@@ -12,7 +12,6 @@ use kube::{Api, Client, CustomResourceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lattice::agent::client::{AgentClient, AgentClientConfig};
-use lattice::parent::{ParentConfig, ParentServers};
 use lattice::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
     service_reconcile, Context, ServiceContext,
@@ -20,6 +19,7 @@ use lattice::controller::{
 use lattice::crd::{LatticeCluster, LatticeExternalService, LatticeService};
 use lattice::infra::IstioReconciler;
 use lattice::install::{InstallConfig, Installer};
+use lattice::parent::{ParentConfig, ParentServers};
 
 /// Lattice - CRD-driven Kubernetes operator for multi-cluster lifecycle management
 #[derive(Parser, Debug)]
@@ -297,9 +297,11 @@ async fn ensure_webhook_config(
             ports: Some(vec![ServicePort {
                 name: Some("https".to_string()),
                 port: 443,
-                target_port: Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(
-                    lattice::DEFAULT_BOOTSTRAP_PORT as i32,
-                )),
+                target_port: Some(
+                    k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(
+                        lattice::DEFAULT_BOOTSTRAP_PORT as i32,
+                    ),
+                ),
                 ..Default::default()
             }]),
             ..Default::default()
@@ -442,6 +444,21 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
     let peer_auth = IstioReconciler::generate_peer_authentication();
     apply_manifest(client, &peer_auth).await?;
 
+    // Apply mesh-wide default-deny AuthorizationPolicy
+    // This is the security baseline - all traffic denied unless explicitly allowed
+    let default_deny = IstioReconciler::generate_default_deny();
+    apply_manifest(client, &default_deny).await?;
+
+    // Apply allow policy for lattice-operator (webhook + gRPC from workload clusters)
+    let operator_allow = IstioReconciler::generate_operator_allow_policy();
+    apply_manifest(client, &operator_allow).await?;
+
+    // Apply Cilium policy for Istio ambient mode compatibility
+    // This allows ztunnel's SNAT-ed health probes (from 169.254.7.127) to reach pods
+    // Required when using default-deny network policies with Istio ambient
+    let ztunnel_allow = lattice::infra::generate_ztunnel_allowlist();
+    apply_manifest(client, &ztunnel_allow).await?;
+
     tracing::info!(version = %expected_version, "Istio reconciliation complete");
     Ok(())
 }
@@ -562,7 +579,9 @@ async fn run_controller() -> anyhow::Result<()> {
                             tracing::info!(host = %cell.host, "Adding cell host to server certificate SANs");
                             break vec![cell.host.clone()];
                         } else {
-                            tracing::debug!("LatticeCluster has no cell spec, no extra SANs needed");
+                            tracing::debug!(
+                                "LatticeCluster has no cell spec, no extra SANs needed"
+                            );
                             break vec![];
                         }
                     }
@@ -662,37 +681,33 @@ async fn run_controller() -> anyhow::Result<()> {
         // depend on B get re-reconciled to update their egress policies. When service A
         // is created with deps, services that A depends on get re-reconciled to update
         // their ingress policies (if they allow A).
-        .watches(
-            services,
-            WatcherConfig::default(),
-            move |service| {
-                let graph = graph_for_watch.clone();
-                let env = &service.spec.environment;
-                let name = service.metadata.name.as_deref().unwrap_or_default();
+        .watches(services, WatcherConfig::default(), move |service| {
+            let graph = graph_for_watch.clone();
+            let env = &service.spec.environment;
+            let name = service.metadata.name.as_deref().unwrap_or_default();
 
-                // Get services that this service depends on (they need to update ingress)
-                let dependencies = graph.get_dependencies(env, name);
-                // Get services that depend on this service (they need to update egress)
-                let dependents = graph.get_dependents(env, name);
+            // Get services that this service depends on (they need to update ingress)
+            let dependencies = graph.get_dependencies(env, name);
+            // Get services that depend on this service (they need to update egress)
+            let dependents = graph.get_dependents(env, name);
 
-                // Combine and deduplicate
-                let mut affected: Vec<String> = dependencies;
-                affected.extend(dependents);
-                affected.sort();
-                affected.dedup();
+            // Combine and deduplicate
+            let mut affected: Vec<String> = dependencies;
+            affected.extend(dependents);
+            affected.sort();
+            affected.dedup();
 
-                tracing::debug!(
-                    service = %name,
-                    env = %env,
-                    affected_count = affected.len(),
-                    "Service changed, triggering re-reconciliation of affected services"
-                );
+            tracing::debug!(
+                service = %name,
+                env = %env,
+                affected_count = affected.len(),
+                "Service changed, triggering re-reconciliation of affected services"
+            );
 
-                affected.into_iter().map(|dep_name| {
-                    ObjectRef::<LatticeService>::new(&dep_name)
-                })
-            },
-        )
+            affected
+                .into_iter()
+                .map(|dep_name| ObjectRef::<LatticeService>::new(&dep_name))
+        })
         .shutdown_on_signal()
         .run(service_reconcile, service_error_policy, service_ctx.clone())
         .for_each(|result| async move {

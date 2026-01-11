@@ -415,8 +415,7 @@ mod tests {
 
     #[test]
     fn test_parse_ipv6_full_address() {
-        let endpoint =
-            ParsedEndpoint::parse("tcp://[2001:db8:85a3::8a2e:370:7334]:5432").unwrap();
+        let endpoint = ParsedEndpoint::parse("tcp://[2001:db8:85a3::8a2e:370:7334]:5432").unwrap();
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "2001:db8:85a3::8a2e:370:7334");
         assert_eq!(endpoint.port, 5432);

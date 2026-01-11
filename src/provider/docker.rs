@@ -28,8 +28,8 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 use super::{
-    build_post_kubeadm_commands, generate_cluster, generate_control_plane,
-    generate_bootstrap_config_template, generate_machine_deployment, CAPIManifest, ClusterConfig,
+    build_post_kubeadm_commands, generate_bootstrap_config_template, generate_cluster,
+    generate_control_plane, generate_machine_deployment, CAPIManifest, ClusterConfig,
     ControlPlaneConfig, InfrastructureRef, Provider,
 };
 use crate::crd::{LatticeCluster, ProviderSpec, ProviderType};
@@ -298,8 +298,8 @@ impl Provider for DockerProvider {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
-        ProviderType, ServiceSpec,
+        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
+        ProviderSpec, ProviderType, ServiceSpec,
     };
     use crate::provider::{
         build_post_kubeadm_commands, CAPI_BOOTSTRAP_API_VERSION, CAPI_CLUSTER_API_VERSION,
@@ -893,7 +893,7 @@ mod tests {
             assert!(!commands.is_empty());
             let commands_str = commands.join("\n");
             assert!(commands_str.contains("mgmt.example.com:8080")); // Bootstrap endpoint
-            // Script sets CLUSTER_NAME variable and uses it in URL
+                                                                     // Script sets CLUSTER_NAME variable and uses it in URL
             assert!(commands_str.contains(r#"CLUSTER_NAME="workload-1""#)); // Cluster name variable
             assert!(commands_str.contains("/api/clusters/$CLUSTER_NAME/manifests")); // Manifests path with bash var
             assert!(commands_str.contains("test-token-123")); // Token in header

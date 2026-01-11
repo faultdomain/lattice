@@ -21,8 +21,8 @@ use mockall::automock;
 use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
 use crate::capi::{ensure_capi_installed_with, CapiInstaller};
-use crate::parent::ParentServers;
 use crate::crd::{ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus};
+use crate::parent::ParentServers;
 use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
 use crate::provider::{create_provider, CAPIManifest};
 use crate::Error;
@@ -73,7 +73,6 @@ pub trait KubeClient: Send + Sync {
     /// Check if the MutatingWebhookConfiguration for LatticeService deployments exists
     async fn is_webhook_config_ready(&self) -> Result<bool, Error>;
 }
-
 
 /// Trait abstracting CAPI resource operations
 ///
@@ -1029,7 +1028,14 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // Validate the cluster spec
     if let Err(e) = cluster.spec.validate() {
         warn!(error = %e, "cluster validation failed");
-        update_cluster_status(&cluster, &ctx, ClusterPhase::Failed, Some(&e.to_string()), false).await?;
+        update_cluster_status(
+            &cluster,
+            &ctx,
+            ClusterPhase::Failed,
+            Some(&e.to_string()),
+            false,
+        )
+        .await?;
         // Don't requeue for validation errors - they require spec changes
         return Ok(Action::await_change());
     }
@@ -1422,53 +1428,54 @@ async fn generate_capi_manifests(
     // Build bootstrap info - if parent_servers is running, we're a cell provisioning a cluster
     // that needs to connect back to us. During root install, LATTICE_ROOT_INSTALL=true skips this.
     let is_root_install = std::env::var("LATTICE_ROOT_INSTALL").is_ok();
-    let bootstrap = if !is_root_install && ctx.parent_servers.as_ref().is_some_and(|s| s.is_running()) {
-        let parent_servers = ctx.parent_servers.as_ref().unwrap();
-        let self_cluster_name = ctx.self_cluster_name.as_ref().ok_or_else(|| {
-            Error::validation("self_cluster_name required when parent_servers is configured")
-        })?;
-        let self_cluster = ctx
-            .kube
-            .get_cluster(self_cluster_name)
-            .await?
-            .ok_or_else(|| Error::Bootstrap("self-cluster LatticeCluster not found".into()))?;
-        let endpoints = self_cluster.spec.endpoints.as_ref().ok_or_else(|| {
-            Error::validation("self-cluster must have spec.endpoints to provision clusters")
-        })?;
-
-        // Get bootstrap state from parent_servers
-        let bootstrap_state = parent_servers.bootstrap_state().await.ok_or_else(|| {
-            Error::Bootstrap("parent_servers running but bootstrap_state not available".into())
-        })?;
-
-        let ca_cert = bootstrap_state.ca_cert_pem().to_string();
-        let cell_endpoint = endpoints.endpoint();
-        let bootstrap_endpoint = endpoints.bootstrap_endpoint();
-
-        // Serialize the LatticeCluster CRD to pass to workload cluster
-        let cluster_manifest =
-            serde_json::to_string(&cluster).map_err(|e| Error::Serialization {
-                message: format!("failed to serialize cluster: {}", e),
-                kind: Some("LatticeCluster".to_string()),
+    let bootstrap =
+        if !is_root_install && ctx.parent_servers.as_ref().is_some_and(|s| s.is_running()) {
+            let parent_servers = ctx.parent_servers.as_ref().unwrap();
+            let self_cluster_name = ctx.self_cluster_name.as_ref().ok_or_else(|| {
+                Error::validation("self_cluster_name required when parent_servers is configured")
+            })?;
+            let self_cluster = ctx
+                .kube
+                .get_cluster(self_cluster_name)
+                .await?
+                .ok_or_else(|| Error::Bootstrap("self-cluster LatticeCluster not found".into()))?;
+            let endpoints = self_cluster.spec.endpoints.as_ref().ok_or_else(|| {
+                Error::validation("self-cluster must have spec.endpoints to provision clusters")
             })?;
 
-        // Register cluster and get token
-        let registration = crate::bootstrap::ClusterRegistration {
-            cluster_id: cluster_name.to_string(),
-            cell_endpoint: cell_endpoint.clone(),
-            ca_certificate: ca_cert.clone(),
-            cluster_manifest,
-            networking: cluster.spec.networking.clone(),
-            provider: cluster.spec.provider.type_.to_string(),
-            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
-        };
-        let token = bootstrap_state.register_cluster(registration);
+            // Get bootstrap state from parent_servers
+            let bootstrap_state = parent_servers.bootstrap_state().await.ok_or_else(|| {
+                Error::Bootstrap("parent_servers running but bootstrap_state not available".into())
+            })?;
 
-        BootstrapInfo::new(bootstrap_endpoint, token.as_str().to_string(), ca_cert)
-    } else {
-        // No parent_servers - self-provisioning (management cluster bootstrap)
-        BootstrapInfo::default()
-    };
+            let ca_cert = bootstrap_state.ca_cert_pem().to_string();
+            let cell_endpoint = endpoints.endpoint();
+            let bootstrap_endpoint = endpoints.bootstrap_endpoint();
+
+            // Serialize the LatticeCluster CRD to pass to workload cluster
+            let cluster_manifest =
+                serde_json::to_string(&cluster).map_err(|e| Error::Serialization {
+                    message: format!("failed to serialize cluster: {}", e),
+                    kind: Some("LatticeCluster".to_string()),
+                })?;
+
+            // Register cluster and get token
+            let registration = crate::bootstrap::ClusterRegistration {
+                cluster_id: cluster_name.to_string(),
+                cell_endpoint: cell_endpoint.clone(),
+                ca_certificate: ca_cert.clone(),
+                cluster_manifest,
+                networking: cluster.spec.networking.clone(),
+                provider: cluster.spec.provider.type_.to_string(),
+                bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+            };
+            let token = bootstrap_state.register_cluster(registration);
+
+            BootstrapInfo::new(bootstrap_endpoint, token.as_str().to_string(), ca_cert)
+        } else {
+            // No parent_servers - self-provisioning (management cluster bootstrap)
+            BootstrapInfo::default()
+        };
 
     let provider = create_provider(cluster.spec.provider.type_.clone(), &capi_namespace)?;
     provider.generate_capi_manifests(cluster, &bootstrap).await
@@ -1756,8 +1763,8 @@ impl PivotOperations for PivotOperationsImpl {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
-        ProviderType, ServiceSpec,
+        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
+        ProviderSpec, ProviderType, ServiceSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
@@ -2254,7 +2261,8 @@ mod tests {
                 Context::for_testing(Arc::new(mock), Arc::new(capi_mock), Arc::new(installer));
 
             let result =
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None, false).await;
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None, false)
+                    .await;
 
             assert!(result.is_err());
             assert!(result

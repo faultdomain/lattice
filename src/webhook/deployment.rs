@@ -128,8 +128,10 @@ async fn mutate_deployment(
                 "LatticeService not found, denying to allow retry"
             );
             // Deny so the controller retries - LatticeService may not be created yet
-            return AdmissionResponse::from(&request.clone())
-                .deny(format!("LatticeService '{}' not found, will retry", service_name));
+            return AdmissionResponse::from(&request.clone()).deny(format!(
+                "LatticeService '{}' not found, will retry",
+                service_name
+            ));
         }
         Err(e) => {
             error!(
@@ -159,7 +161,8 @@ async fn mutate_deployment(
         Ok(response) => response,
         Err(e) => {
             error!(uid = %uid, error = %e, "Failed to serialize patch");
-            AdmissionResponse::from(&request.clone()).deny(format!("patch serialization error: {e}"))
+            AdmissionResponse::from(&request.clone())
+                .deny(format!("patch serialization error: {e}"))
         }
     }
 }
@@ -284,7 +287,10 @@ mod tests {
             .iter()
             .find(|op| matches!(op, json_patch::PatchOperation::Add(a) if a.path == volumes_path));
 
-        assert!(volumes_op.is_some(), "should have volumes patch when volumes present");
+        assert!(
+            volumes_op.is_some(),
+            "should have volumes patch when volumes present"
+        );
     }
 
     #[test]
@@ -303,7 +309,10 @@ mod tests {
             .iter()
             .find(|op| matches!(op, json_patch::PatchOperation::Add(a) if a.path == volumes_path));
 
-        assert!(volumes_op.is_none(), "should not have volumes patch when no volumes");
+        assert!(
+            volumes_op.is_none(),
+            "should not have volumes patch when no volumes"
+        );
     }
 
     #[test]

@@ -14,8 +14,8 @@ use kube::Client;
 
 use lattice::controller::{reconcile, Context, KubeClientImpl};
 use lattice::crd::{
-    BootstrapProvider, EndpointsSpec, ClusterPhase, KubernetesSpec, LatticeCluster, LatticeClusterSpec,
-    LatticeClusterStatus, NodeSpec, ProviderSpec, ProviderType, ServiceSpec,
+    BootstrapProvider, ClusterPhase, EndpointsSpec, KubernetesSpec, LatticeCluster,
+    LatticeClusterSpec, LatticeClusterStatus, NodeSpec, ProviderSpec, ProviderType, ServiceSpec,
 };
 
 use super::helpers::ensure_test_cluster;

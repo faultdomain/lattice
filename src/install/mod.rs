@@ -437,7 +437,13 @@ nodes:
             provider: Some(&provider_str),
             parent_host: None, // Cells have no parent
             parent_grpc_port: crate::DEFAULT_GRPC_PORT,
-            relax_fips: self.cluster.spec.provider.kubernetes.bootstrap.needs_fips_relax(),
+            relax_fips: self
+                .cluster
+                .spec
+                .provider
+                .kubernetes
+                .bootstrap
+                .needs_fips_relax(),
         };
         let all_manifests = generate_all_manifests(&generator, &config);
 

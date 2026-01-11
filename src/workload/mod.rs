@@ -748,8 +748,7 @@ impl WorkloadCompiler {
             api_version: "apps/v1".to_string(),
             kind: "Deployment".to_string(),
             // Deployment metadata must have lattice.dev/service label for webhook objectSelector
-            metadata: ObjectMeta::new(name, namespace)
-                .with_label(LATTICE_SERVICE_LABEL, name),
+            metadata: ObjectMeta::new(name, namespace).with_label(LATTICE_SERVICE_LABEL, name),
             spec: DeploymentSpec {
                 replicas: spec.replicas.min,
                 selector: LabelSelector {
@@ -964,7 +963,12 @@ mod tests {
         assert!(deployment.spec.template.spec.containers.is_empty());
 
         // Skeleton deployment has empty service account (webhook fills this)
-        assert!(deployment.spec.template.spec.service_account_name.is_empty());
+        assert!(deployment
+            .spec
+            .template
+            .spec
+            .service_account_name
+            .is_empty());
 
         // Has the lattice.dev/service label for webhook to find LatticeService
         let labels = &deployment.spec.template.metadata.labels;

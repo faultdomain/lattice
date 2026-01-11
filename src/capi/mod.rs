@@ -51,8 +51,9 @@ pub async fn ensure_capi_installed_with<I: CapiInstaller + ?Sized>(
 
 /// Find a helm chart by prefix in the charts directory
 fn find_chart(charts_dir: &str, prefix: &str) -> Result<String, Error> {
-    let dir = std::fs::read_dir(charts_dir)
-        .map_err(|e| Error::capi_installation(format!("failed to read charts dir {}: {}", charts_dir, e)))?;
+    let dir = std::fs::read_dir(charts_dir).map_err(|e| {
+        Error::capi_installation(format!("failed to read charts dir {}: {}", charts_dir, e))
+    })?;
 
     for entry in dir.flatten() {
         let name = entry.file_name();
@@ -90,10 +91,11 @@ impl ClusterctlInstaller {
     fn install_cert_manager() -> Result<(), Error> {
         info!("Installing cert-manager from local helm chart");
 
-        let charts_dir = std::env::var("LATTICE_CHARTS_DIR")
-            .unwrap_or_else(|_| option_env!("LATTICE_CHARTS_DIR")
+        let charts_dir = std::env::var("LATTICE_CHARTS_DIR").unwrap_or_else(|_| {
+            option_env!("LATTICE_CHARTS_DIR")
                 .unwrap_or("/charts")
-                .to_string());
+                .to_string()
+        });
 
         // Find cert-manager chart dynamically (supports any version)
         let chart_path = find_chart(&charts_dir, "cert-manager")?;
@@ -101,21 +103,35 @@ impl ClusterctlInstaller {
         // Render cert-manager manifests with helm template
         let template_output = Command::new("helm")
             .args([
-                "template", "cert-manager", &chart_path,
-                "--namespace", "cert-manager",
-                "--set", "crds.enabled=true",
+                "template",
+                "cert-manager",
+                &chart_path,
+                "--namespace",
+                "cert-manager",
+                "--set",
+                "crds.enabled=true",
             ])
             .output()
             .map_err(|e| Error::capi_installation(format!("failed to run helm template: {}", e)))?;
 
         if !template_output.status.success() {
             let stderr = String::from_utf8_lossy(&template_output.stderr);
-            return Err(Error::capi_installation(format!("helm template cert-manager failed: {}", stderr)));
+            return Err(Error::capi_installation(format!(
+                "helm template cert-manager failed: {}",
+                stderr
+            )));
         }
 
         // Create namespace first
         let _ = Command::new("kubectl")
-            .args(["create", "namespace", "cert-manager", "--dry-run=client", "-o", "yaml"])
+            .args([
+                "create",
+                "namespace",
+                "cert-manager",
+                "--dry-run=client",
+                "-o",
+                "yaml",
+            ])
             .output()
             .and_then(|ns_output| {
                 Command::new("kubectl")
@@ -145,28 +161,42 @@ impl ClusterctlInstaller {
                 }
                 child.wait_with_output()
             })
-            .map_err(|e| Error::capi_installation(format!("failed to apply cert-manager: {}", e)))?;
+            .map_err(|e| {
+                Error::capi_installation(format!("failed to apply cert-manager: {}", e))
+            })?;
 
         if !apply_output.status.success() {
             let stderr = String::from_utf8_lossy(&apply_output.stderr);
-            return Err(Error::capi_installation(format!("kubectl apply cert-manager failed: {}", stderr)));
+            return Err(Error::capi_installation(format!(
+                "kubectl apply cert-manager failed: {}",
+                stderr
+            )));
         }
 
         // Wait for cert-manager to be ready
         info!("Waiting for cert-manager to be ready");
         let wait_output = Command::new("kubectl")
             .args([
-                "wait", "--for=condition=Available",
-                "deployment/cert-manager", "deployment/cert-manager-webhook", "deployment/cert-manager-cainjector",
-                "-n", "cert-manager",
+                "wait",
+                "--for=condition=Available",
+                "deployment/cert-manager",
+                "deployment/cert-manager-webhook",
+                "deployment/cert-manager-cainjector",
+                "-n",
+                "cert-manager",
                 "--timeout=120s",
             ])
             .output()
-            .map_err(|e| Error::capi_installation(format!("failed to wait for cert-manager: {}", e)))?;
+            .map_err(|e| {
+                Error::capi_installation(format!("failed to wait for cert-manager: {}", e))
+            })?;
 
         if !wait_output.status.success() {
             let stderr = String::from_utf8_lossy(&wait_output.stderr);
-            return Err(Error::capi_installation(format!("cert-manager not ready: {}", stderr)));
+            return Err(Error::capi_installation(format!(
+                "cert-manager not ready: {}",
+                stderr
+            )));
         }
 
         info!("cert-manager installed successfully");
@@ -180,10 +210,11 @@ impl CapiInstaller for ClusterctlInstaller {
         info!(provider, "Installing CAPI with infrastructure provider");
 
         // Get local provider config path (always use local - we're air-gapped by design)
-        let config_path = std::env::var("CLUSTERCTL_CONFIG")
-            .unwrap_or_else(|_| option_env!("CLUSTERCTL_CONFIG")
+        let config_path = std::env::var("CLUSTERCTL_CONFIG").unwrap_or_else(|_| {
+            option_env!("CLUSTERCTL_CONFIG")
                 .unwrap_or("/providers/clusterctl.yaml")
-                .to_string());
+                .to_string()
+        });
 
         info!(config = %config_path, "Using clusterctl config file");
 
@@ -195,7 +226,15 @@ impl CapiInstaller for ClusterctlInstaller {
         // GOPROXY=off prevents Go proxy lookups
         // CLUSTERCTL_DISABLE_VERSIONCHECK=true skips version check requiring internet
         let output = Command::new("timeout")
-            .args(["120", "clusterctl", "init", "--infrastructure", provider, "--config", &config_path])
+            .args([
+                "120",
+                "clusterctl",
+                "init",
+                "--infrastructure",
+                provider,
+                "--config",
+                &config_path,
+            ])
             .env("GOPROXY", "off")
             .env("CLUSTERCTL_DISABLE_VERSIONCHECK", "true")
             .output()

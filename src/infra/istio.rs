@@ -1,7 +1,7 @@
 //! Istio service mesh manifest generation
 //!
 //! Generates Istio manifests using Helm charts with ambient mesh mode.
-//! Installs two charts: base (CRDs) and istiod (control plane).
+//! Installs four charts: base (CRDs), istiod (control plane), istio-cni, and ztunnel.
 
 use std::process::Command;
 use std::sync::OnceLock;
@@ -92,6 +92,55 @@ spec:
         .to_string()
     }
 
+    /// Generate mesh-wide default-deny AuthorizationPolicy
+    ///
+    /// This is the security baseline for the mesh. With this policy in place,
+    /// all traffic is denied unless explicitly allowed by service-specific policies.
+    /// Must be deployed to istio-system to apply mesh-wide.
+    pub fn generate_default_deny() -> String {
+        r#"---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: mesh-default-deny
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  {}
+"#
+        .to_string()
+    }
+
+    /// Generate AuthorizationPolicy allowing traffic to lattice-operator
+    ///
+    /// The lattice-operator needs to accept connections from:
+    /// - Workload cluster bootstrap (postKubeadmCommands calling webhook on 8443)
+    /// - Workload cluster agents (gRPC on 50051)
+    ///
+    /// These connections come from outside the mesh, so we allow any source.
+    pub fn generate_operator_allow_policy() -> String {
+        r#"---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: lattice-operator-allow
+  namespace: lattice-system
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  selector:
+    matchLabels:
+      app: lattice-operator
+  action: ALLOW
+  rules:
+  - to:
+    - operation:
+        ports: ["8443", "50051"]
+"#
+        .to_string()
+    }
+
     fn render_manifests(config: &IstioConfig) -> Result<Vec<String>, String> {
         let mut all_manifests = Vec::new();
 
@@ -99,6 +148,8 @@ spec:
         let charts_dir = get_charts_dir();
         let base_chart = format!("{}/base-{}.tgz", charts_dir, config.version);
         let istiod_chart = format!("{}/istiod-{}.tgz", charts_dir, config.version);
+        let cni_chart = format!("{}/cni-{}.tgz", charts_dir, config.version);
+        let ztunnel_chart = format!("{}/ztunnel-{}.tgz", charts_dir, config.version);
 
         // 1. Render istio base chart (CRDs)
         info!(version = config.version, "Rendering Istio base chart");
@@ -122,7 +173,34 @@ spec:
             &base_output.stdout,
         )));
 
-        // 2. Render istiod chart (control plane with ambient mode)
+        // 2. Render istio-cni chart (must be installed before ztunnel)
+        info!(version = config.version, "Rendering Istio CNI chart");
+        let cni_output = Command::new("helm")
+            .args([
+                "template",
+                "istio-cni",
+                &cni_chart,
+                "--namespace",
+                "istio-system",
+                "--set",
+                "profile=ambient",
+                // Chain with Cilium CNI
+                "--set",
+                "cni.cniConfFileName=05-cilium.conflist",
+            ])
+            .output()
+            .map_err(|e| format!("failed to run helm: {}", e))?;
+
+        if !cni_output.status.success() {
+            let stderr = String::from_utf8_lossy(&cni_output.stderr);
+            return Err(format!("helm template istio-cni failed: {}", stderr));
+        }
+
+        all_manifests.extend(parse_yaml_documents(&String::from_utf8_lossy(
+            &cni_output.stdout,
+        )));
+
+        // 3. Render istiod chart (control plane with ambient mode)
         info!(
             version = config.version,
             "Rendering Istiod chart with ambient mode"
@@ -151,6 +229,28 @@ spec:
 
         all_manifests.extend(parse_yaml_documents(&String::from_utf8_lossy(
             &istiod_output.stdout,
+        )));
+
+        // 4. Render ztunnel chart (L4 data plane for ambient mode)
+        info!(version = config.version, "Rendering ztunnel chart");
+        let ztunnel_output = Command::new("helm")
+            .args([
+                "template",
+                "ztunnel",
+                &ztunnel_chart,
+                "--namespace",
+                "istio-system",
+            ])
+            .output()
+            .map_err(|e| format!("failed to run helm: {}", e))?;
+
+        if !ztunnel_output.status.success() {
+            let stderr = String::from_utf8_lossy(&ztunnel_output.stderr);
+            return Err(format!("helm template ztunnel failed: {}", stderr));
+        }
+
+        all_manifests.extend(parse_yaml_documents(&String::from_utf8_lossy(
+            &ztunnel_output.stdout,
         )));
 
         info!(count = all_manifests.len(), "Rendered Istio manifests");
@@ -220,6 +320,14 @@ mod tests {
             // Should contain istiod deployment
             let has_istiod = manifests.iter().any(|m| m.contains("name: istiod"));
             assert!(has_istiod, "Should contain istiod");
+
+            // Should contain ztunnel daemonset (ambient mode)
+            let has_ztunnel = manifests.iter().any(|m| m.contains("name: ztunnel"));
+            assert!(has_ztunnel, "Should contain ztunnel for ambient mode");
+
+            // Should contain istio-cni daemonset
+            let has_cni = manifests.iter().any(|m| m.contains("name: istio-cni"));
+            assert!(has_cni, "Should contain istio-cni for ambient mode");
         }
     }
 }

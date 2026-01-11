@@ -142,6 +142,64 @@ impl CiliumReconciler {
     }
 }
 
+/// Generate a CiliumClusterwideNetworkPolicy to allow ztunnel/ambient traffic.
+///
+/// This is required for Istio ambient mode when using default-deny policies.
+/// The ztunnel uses link-local address 169.254.7.127 for SNAT-ed kubelet health probes.
+/// See: https://istio.io/latest/docs/ambient/install/platform-prerequisites/
+///
+/// Key fields:
+/// - enableDefaultDeny: false for both egress/ingress to not interfere with other policies
+/// - endpointSelector: {} selects all pods
+/// - fromCIDR: allows health probes from ztunnel's link-local address
+pub fn generate_ztunnel_allowlist() -> String {
+    r#"---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: allow-ambient-hostprobes
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  description: "Allows SNAT-ed kubelet health check probes into ambient pods"
+  enableDefaultDeny:
+    egress: false
+    ingress: false
+  endpointSelector: {}
+  ingress:
+    - fromCIDR:
+        - 169.254.7.127/32
+"#
+    .to_string()
+}
+
+/// Generate a CiliumClusterwideNetworkPolicy for mesh-wide default-deny.
+///
+/// This provides L4 defense-in-depth alongside Istio's L7 AuthorizationPolicy.
+/// Traffic not explicitly allowed by service-specific policies is denied.
+///
+/// Note: This is applied AFTER ztunnel allowlist to ensure mesh traffic works.
+pub fn generate_default_deny() -> String {
+    r#"---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  description: "Default deny all traffic not explicitly allowed"
+  endpointSelector: {}
+  ingress:
+    - fromEntities:
+        - cluster
+  egress:
+    - toEntities:
+        - cluster
+"#
+    .to_string()
+}
+
 /// Generate a CiliumNetworkPolicy for the Lattice operator/agent.
 ///
 /// This policy restricts the operator to only communicate with:
@@ -326,5 +384,45 @@ mod tests {
         assert!(policy.contains("port: \"4001\""));
         assert!(policy.contains("port: \"8443\""));
         assert!(policy.contains("matchName: parent.local"));
+    }
+
+    #[test]
+    fn test_ztunnel_allowlist() {
+        let policy = generate_ztunnel_allowlist();
+
+        // Should be a CiliumClusterwideNetworkPolicy
+        assert!(policy.contains("apiVersion: cilium.io/v2"));
+        assert!(policy.contains("kind: CiliumClusterwideNetworkPolicy"));
+        assert!(policy.contains("name: allow-ambient-hostprobes"));
+
+        // Should allow ztunnel link-local address for health probes
+        assert!(policy.contains("169.254.7.127/32"));
+
+        // Should have enableDefaultDeny set to false (per Istio docs)
+        assert!(policy.contains("enableDefaultDeny:"));
+        assert!(policy.contains("egress: false"));
+        assert!(policy.contains("ingress: false"));
+
+        // Should have ingress rule
+        assert!(policy.contains("ingress:"));
+        assert!(policy.contains("fromCIDR:"));
+    }
+
+    #[test]
+    fn test_default_deny() {
+        let policy = generate_default_deny();
+
+        // Should be a CiliumClusterwideNetworkPolicy
+        assert!(policy.contains("apiVersion: cilium.io/v2"));
+        assert!(policy.contains("kind: CiliumClusterwideNetworkPolicy"));
+        assert!(policy.contains("name: default-deny"));
+
+        // Should select all endpoints
+        assert!(policy.contains("endpointSelector: {}"));
+
+        // Should allow cluster-internal traffic only
+        assert!(policy.contains("fromEntities:"));
+        assert!(policy.contains("toEntities:"));
+        assert!(policy.contains("- cluster"));
     }
 }

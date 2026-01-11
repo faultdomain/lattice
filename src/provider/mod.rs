@@ -952,8 +952,14 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .expect("should have version");
 
-            assert!(version.ends_with("+rke2r1"), "RKE2 version should end with +rke2r1");
-            assert!(version.starts_with("v1.31.0"), "version should start with v1.31.0");
+            assert!(
+                version.ends_with("+rke2r1"),
+                "RKE2 version should end with +rke2r1"
+            );
+            assert!(
+                version.starts_with("v1.31.0"),
+                "version should start with v1.31.0"
+            );
         }
 
         #[test]

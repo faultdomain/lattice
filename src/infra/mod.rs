@@ -20,5 +20,8 @@
 pub mod cilium;
 pub mod istio;
 
-pub use cilium::{generate_operator_network_policy, CiliumConfig, CiliumReconciler};
+pub use cilium::{
+    generate_default_deny, generate_operator_network_policy, generate_ztunnel_allowlist,
+    CiliumConfig, CiliumReconciler,
+};
 pub use istio::{IstioConfig, IstioReconciler};
