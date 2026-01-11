@@ -374,11 +374,11 @@ nodes:
 
         // Generate all manifests but only use operator ones (JSON format)
         // Bootstrap kind cluster already has its own CNI, we don't need Cilium
-        // No cluster_name or provider needed - bootstrap cluster is temporary
+        // Cluster name is required so operator knows which cluster it's managing
         let all_manifests = generator.generate(
             &self.config.image,
             self.config.registry_credentials.as_deref(),
-            None,
+            Some(&self.cluster_name()),
             None,
         );
         let operator_manifests: Vec<String> = all_manifests
