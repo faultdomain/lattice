@@ -29,6 +29,7 @@
 // Only compile this module when the e2e feature is enabled
 #![cfg(feature = "e2e")]
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
@@ -38,6 +39,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, PostParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::Client;
+use rand::prelude::*;
 use tokio::time::sleep;
 
 use lattice::crd::{
@@ -1799,10 +1801,830 @@ spec:
     println!();
 
     // =========================================================================
-    // Phase 10: Cleanup
+    // Phase 10: Prove Workload Cluster Independence
     // =========================================================================
-    println!("\n[Phase 10] Cleaning up...\n");
+    println!("\n[Phase 10] Proving workload cluster is truly self-managing...\n");
+    println!("  This phase will:");
+    println!("    1. Delete the management cluster entirely");
+    println!("    2. Update workload cluster's LatticeCluster spec (scale workers 2 -> 3)");
+    println!("    3. Verify workload cluster self-heals and scales without management cluster");
+    println!();
+
+    // Step 1: Delete management cluster
+    println!("  [Step 1] Deleting management cluster...");
+    let mgmt_containers = run_cmd_allow_fail(
+        "docker",
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name={}", MGMT_CLUSTER_NAME),
+            "-q",
+        ],
+    );
+    for id in mgmt_containers.lines() {
+        if !id.trim().is_empty() {
+            let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
+        }
+    }
+    println!("    Management cluster deleted!");
+
+    // Verify management cluster is gone
+    let mgmt_check = run_cmd_allow_fail(
+        "docker",
+        &[
+            "ps",
+            "--filter",
+            &format!("name={}", MGMT_CLUSTER_NAME),
+            "-q",
+        ],
+    );
+    if !mgmt_check.trim().is_empty() {
+        return Err("Failed to delete management cluster".to_string());
+    }
+    println!("    Verified: management cluster containers no longer exist");
+
+    // Step 2: Update workload cluster spec to scale workers
+    println!("\n  [Step 2] Scaling workload cluster workers 2 -> 3...");
+    let patch_result = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            &workload_kubeconfig_path,
+            "patch",
+            "latticecluster",
+            WORKLOAD_CLUSTER_NAME,
+            "--type=merge",
+            "-p",
+            r#"{"spec":{"nodes":{"workers":3}}}"#,
+        ],
+    )?;
+    println!("    Patch applied: {}", patch_result.trim());
+
+    // Step 3: Watch for the new worker to come up
+    println!("\n  [Step 3] Waiting for workload cluster to self-heal and scale to 3 workers...");
+    println!("    (Management cluster is GONE - workload cluster must do this itself)");
+    watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 3).await?;
+
+    println!("\n  SUCCESS: Workload cluster scaled from 2 to 3 workers WITHOUT management cluster!");
+    println!("  This proves:");
+    println!("    [x] Workload cluster is truly self-managing after pivot");
+    println!("    [x] No dependency on parent cluster for ongoing operations");
+    println!("    [x] CAPI reconciliation works locally");
+    println!();
+
+    // =========================================================================
+    // Phase 11: Randomized Large-Scale Service Mesh Test
+    // =========================================================================
+    println!("\n[Phase 11] Running randomized large-scale service mesh test...\n");
+    println!("  This test generates 50-100 services with random dependency graphs");
+    println!("  to stress test bilateral agreements at scale.\n");
+
+    run_randomized_mesh_test(&workload_kubeconfig_path, None).await?;
+
+    // =========================================================================
+    // Phase 12: Cleanup
+    // =========================================================================
+    println!("\n[Phase 12] Cleaning up...\n");
     cleanup_all();
+
+    Ok(())
+}
+
+// =============================================================================
+// Randomized Service Mesh Testing Module
+// =============================================================================
+//
+// This module generates a randomized service mesh with 50-100 services to stress
+// test the bilateral agreement pattern at scale with unpredictable topologies.
+
+/// Configuration for randomized mesh generation
+#[derive(Debug, Clone)]
+struct RandomMeshConfig {
+    /// Minimum number of services (inclusive)
+    min_services: usize,
+    /// Maximum number of services (inclusive)
+    max_services: usize,
+    /// Number of layers in the service graph (e.g., 5 for frontend->api->backend->db->cache)
+    num_layers: usize,
+    /// Probability that a service depends on another service in a lower layer (0.0-1.0)
+    outbound_probability: f64,
+    /// Probability that a callee allows an inbound caller when caller declares dependency (0.0-1.0)
+    /// This controls how many bilateral agreements form vs blocked paths
+    bilateral_probability: f64,
+    /// Random seed for reproducibility (None = random)
+    seed: Option<u64>,
+}
+
+impl Default for RandomMeshConfig {
+    fn default() -> Self {
+        Self {
+            min_services: 50,
+            max_services: 100,
+            num_layers: 5,
+            outbound_probability: 0.15, // ~15% chance of connecting to each lower-layer service
+            bilateral_probability: 0.6, // ~60% of declared outbounds get bilateral agreement
+            seed: None,
+        }
+    }
+}
+
+/// A service in the randomized mesh
+#[derive(Debug, Clone)]
+struct RandomService {
+    /// Unique service name
+    name: String,
+    /// Layer index (0 = top/frontend, higher = lower layers)
+    #[allow(dead_code)]
+    layer: usize,
+    /// Services this service wants to connect to (outbound dependencies)
+    outbound: HashSet<String>,
+    /// Services this service allows inbound connections from
+    inbound: HashSet<String>,
+    /// Is this a traffic generator (top layer services)
+    is_traffic_generator: bool,
+}
+
+/// A randomized service mesh graph
+#[derive(Debug)]
+struct RandomMesh {
+    /// All services indexed by name
+    services: BTreeMap<String, RandomService>,
+    /// Services organized by layer
+    layers: Vec<Vec<String>>,
+    /// Expected test results: (source, target, should_be_allowed)
+    expected_connections: Vec<(String, String, bool)>,
+}
+
+impl RandomMesh {
+    /// Generate a new randomized service mesh
+    fn generate(config: &RandomMeshConfig) -> Self {
+        let mut rng = match config.seed {
+            Some(seed) => StdRng::seed_from_u64(seed),
+            None => StdRng::from_entropy(),
+        };
+
+        // Determine number of services
+        let num_services = rng.gen_range(config.min_services..=config.max_services);
+        println!(
+            "  Generating {} services across {} layers...",
+            num_services, config.num_layers
+        );
+
+        // Distribute services across layers (more services in middle layers)
+        let mut layer_sizes = Vec::with_capacity(config.num_layers);
+        let base_size = num_services / config.num_layers;
+        let mut remaining = num_services;
+
+        for i in 0..config.num_layers {
+            let size = if i == config.num_layers - 1 {
+                remaining // Last layer gets all remaining
+            } else {
+                // Middle layers get more services
+                let variance = if i == 0 || i == config.num_layers - 1 {
+                    base_size / 2 // Fewer at edges
+                } else {
+                    base_size / 3
+                };
+                let size = base_size + rng.gen_range(0..=variance);
+                remaining -= size;
+                size
+            };
+            layer_sizes.push(size);
+        }
+
+        // Generate service names for each layer
+        let layer_prefixes = ["frontend", "gateway", "api", "backend", "data"];
+        let mut layers: Vec<Vec<String>> = Vec::with_capacity(config.num_layers);
+        let mut services = BTreeMap::new();
+
+        for (layer_idx, &size) in layer_sizes.iter().enumerate() {
+            let prefix = layer_prefixes
+                .get(layer_idx)
+                .unwrap_or(&"svc");
+            let mut layer_services = Vec::with_capacity(size);
+
+            for i in 0..size {
+                let name = format!("{}-{}", prefix, i);
+                layer_services.push(name.clone());
+                services.insert(
+                    name.clone(),
+                    RandomService {
+                        name,
+                        layer: layer_idx,
+                        outbound: HashSet::new(),
+                        inbound: HashSet::new(),
+                        is_traffic_generator: layer_idx == 0, // Top layer generates traffic
+                    },
+                );
+            }
+            layers.push(layer_services);
+        }
+
+        // Generate random dependencies (top layers depend on lower layers)
+        let mut expected_connections = Vec::new();
+
+        for layer_idx in 0..config.num_layers.saturating_sub(1) {
+            for source_name in &layers[layer_idx] {
+                // This service can connect to services in ALL lower layers
+                for target_layer_idx in (layer_idx + 1)..config.num_layers {
+                    for target_name in &layers[target_layer_idx] {
+                        // Random chance to create outbound dependency
+                        if rng.gen::<f64>() < config.outbound_probability {
+                            // Source declares outbound dependency
+                            services
+                                .get_mut(source_name)
+                                .unwrap()
+                                .outbound
+                                .insert(target_name.clone());
+
+                            // Random chance for bilateral agreement
+                            let is_bilateral = rng.gen::<f64>() < config.bilateral_probability;
+                            if is_bilateral {
+                                // Target allows inbound from source
+                                services
+                                    .get_mut(target_name)
+                                    .unwrap()
+                                    .inbound
+                                    .insert(source_name.clone());
+                            }
+
+                            // Track expected result for traffic generators
+                            if services[source_name].is_traffic_generator {
+                                expected_connections.push((
+                                    source_name.clone(),
+                                    target_name.clone(),
+                                    is_bilateral,
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Also test some connections that should ALWAYS be blocked
+                // (services this source didn't declare as dependencies)
+                if services[source_name].is_traffic_generator {
+                    // Pick a few random services from lower layers that we DON'T depend on
+                    for target_layer_idx in (layer_idx + 1)..config.num_layers {
+                        let not_dependent: Vec<_> = layers[target_layer_idx]
+                            .iter()
+                            .filter(|t| !services[source_name].outbound.contains(*t))
+                            .collect();
+
+                        // Test up to 3 random non-dependencies per layer
+                        let sample_size = not_dependent.len().min(3);
+                        let sampled: Vec<_> = not_dependent
+                            .choose_multiple(&mut rng, sample_size)
+                            .collect();
+
+                        for target_name in sampled {
+                            expected_connections.push((
+                                source_name.clone(),
+                                (*target_name).clone(),
+                                false, // Should always be blocked (no outbound declared)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also test same-layer connections (should all be blocked)
+        for layer in &layers {
+            if layer.len() < 2 {
+                continue;
+            }
+            let traffic_generators: Vec<_> = layer
+                .iter()
+                .filter(|s| services[*s].is_traffic_generator)
+                .collect();
+
+            for source in &traffic_generators {
+                // Pick a random peer in the same layer
+                let peers: Vec<_> = layer.iter().filter(|s| *s != *source).collect();
+                if let Some(peer) = peers.choose(&mut rng) {
+                    expected_connections.push(((*source).clone(), (*peer).clone(), false));
+                }
+            }
+        }
+
+        Self {
+            services,
+            layers,
+            expected_connections,
+        }
+    }
+
+    /// Get summary statistics
+    fn stats(&self) -> MeshStats {
+        let total_services = self.services.len();
+        let total_tests = self.expected_connections.len();
+        let expected_allowed = self
+            .expected_connections
+            .iter()
+            .filter(|(_, _, allowed)| *allowed)
+            .count();
+        let expected_blocked = total_tests - expected_allowed;
+
+        let total_outbound: usize = self.services.values().map(|s| s.outbound.len()).sum();
+        let total_inbound: usize = self.services.values().map(|s| s.inbound.len()).sum();
+
+        MeshStats {
+            total_services,
+            services_per_layer: self.layers.iter().map(|l| l.len()).collect(),
+            total_outbound_deps: total_outbound,
+            total_inbound_allows: total_inbound,
+            total_tests,
+            expected_allowed,
+            expected_blocked,
+        }
+    }
+
+    /// Print the full expected connection manifest
+    fn print_manifest(&self) {
+        let allowed: Vec<_> = self
+            .expected_connections
+            .iter()
+            .filter(|(_, _, a)| *a)
+            .collect();
+        let blocked: Vec<_> = self
+            .expected_connections
+            .iter()
+            .filter(|(_, _, a)| !*a)
+            .collect();
+
+        println!("\n  === EXPECTED ALLOWED ({}) ===", allowed.len());
+        for (src, tgt, _) in &allowed {
+            println!("    {} -> {}", src, tgt);
+        }
+
+        println!("\n  === EXPECTED BLOCKED ({}) ===", blocked.len());
+        for (src, tgt, _) in &blocked {
+            println!("    {} -> {}", src, tgt);
+        }
+        println!();
+    }
+
+    /// Create a LatticeService for a service in the mesh
+    fn create_lattice_service(&self, name: &str, namespace: &str) -> LatticeService {
+        let svc = &self.services[name];
+
+        let mut containers = BTreeMap::new();
+        let mut resources: BTreeMap<String, ResourceSpec> = BTreeMap::new();
+
+        // Add outbound dependencies
+        for dep in &svc.outbound {
+            resources.insert(
+                dep.clone(),
+                ResourceSpec {
+                    type_: ResourceType::Service,
+                    direction: DependencyDirection::Outbound,
+                    id: None,
+                    params: None,
+                    class: None,
+                },
+            );
+        }
+
+        // Add inbound allowances
+        // Key is service name (no conflicts since outbound goes to lower layers only)
+        for allow in &svc.inbound {
+            resources.insert(
+                allow.clone(),
+                ResourceSpec {
+                    type_: ResourceType::Service,
+                    direction: DependencyDirection::Inbound,
+                    id: None,
+                    params: None,
+                    class: None,
+                },
+            );
+        }
+
+        if svc.is_traffic_generator {
+            // Traffic generator: runs curl tests
+            let script = self.generate_test_script(name, namespace);
+            containers.insert(
+                "main".to_string(),
+                ContainerSpec {
+                    image: "curlimages/curl:latest".to_string(),
+                    command: Some(vec!["/bin/sh".to_string()]),
+                    args: Some(vec!["-c".to_string(), script]),
+                    variables: BTreeMap::new(),
+                    files: BTreeMap::new(),
+                    volumes: BTreeMap::new(),
+                    resources: None,
+                    liveness_probe: None,
+                    readiness_probe: None,
+                },
+            );
+        } else {
+            // Backend service: runs nginx
+            containers.insert(
+                "main".to_string(),
+                ContainerSpec {
+                    image: "nginx:alpine".to_string(),
+                    command: None,
+                    args: None,
+                    variables: BTreeMap::new(),
+                    files: BTreeMap::new(),
+                    volumes: BTreeMap::new(),
+                    resources: None,
+                    liveness_probe: None,
+                    readiness_probe: None,
+                },
+            );
+        }
+
+        let mut labels = BTreeMap::new();
+        labels.insert("lattice.dev/environment".to_string(), namespace.to_string());
+
+        LatticeService {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            spec: LatticeServiceSpec {
+                environment: namespace.to_string(),
+                containers,
+                resources,
+                service: if svc.is_traffic_generator {
+                    None
+                } else {
+                    // Backend services need HTTP ports
+                    let mut ports = BTreeMap::new();
+                    ports.insert(
+                        "http".to_string(),
+                        PortSpec {
+                            port: 80,
+                            target_port: None,
+                            protocol: None,
+                        },
+                    );
+                    Some(ServicePortsSpec { ports })
+                },
+                replicas: ReplicaSpec { min: 1, max: None },
+                deploy: DeploySpec::default(),
+            },
+            status: None,
+        }
+    }
+
+    /// Generate test script for a traffic generator service
+    fn generate_test_script(&self, source_name: &str, namespace: &str) -> String {
+        let mut script = format!(
+            r#"
+echo "=== {} Traffic Tests ==="
+sleep 10  # Wait for network policies
+
+"#,
+            source_name
+        );
+
+        // Get all expected connections for this source
+        let tests: Vec<_> = self
+            .expected_connections
+            .iter()
+            .filter(|(src, _, _)| src == source_name)
+            .collect();
+
+        for (_, target, expected_allowed) in &tests {
+            let (success_msg, fail_msg) = if *expected_allowed {
+                (
+                    format!("{}->{}:ALLOWED", source_name, target),
+                    format!("{}->{}:BLOCKED(UNEXPECTED)", source_name, target),
+                )
+            } else {
+                (
+                    format!("{}->{}:ALLOWED(UNEXPECTED)", source_name, target),
+                    format!("{}->{}:BLOCKED", source_name, target),
+                )
+            };
+
+            script.push_str(&format!(
+                r#"if curl -s --connect-timeout 3 http://{target}.{ns}.svc.cluster.local/ >/dev/null 2>&1; then
+  echo "{success_msg}"
+else
+  echo "{fail_msg}"
+fi
+"#,
+                target = target,
+                ns = namespace,
+                success_msg = success_msg,
+                fail_msg = fail_msg,
+            ));
+        }
+
+        script.push_str(&format!(
+            r#"
+echo "=== End {} Tests ==="
+sleep 60
+"#,
+            source_name
+        ));
+
+        // Wrap in loop
+        format!("while true; do\n{}\ndone\n", script)
+    }
+}
+
+/// Statistics about a generated mesh
+#[derive(Debug)]
+struct MeshStats {
+    total_services: usize,
+    services_per_layer: Vec<usize>,
+    total_outbound_deps: usize,
+    total_inbound_allows: usize,
+    total_tests: usize,
+    expected_allowed: usize,
+    expected_blocked: usize,
+}
+
+impl std::fmt::Display for MeshStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "  Total services: {}", self.total_services)?;
+        writeln!(
+            f,
+            "  Services per layer: {:?}",
+            self.services_per_layer
+        )?;
+        writeln!(f, "  Total outbound dependencies: {}", self.total_outbound_deps)?;
+        writeln!(f, "  Total inbound allowances: {}", self.total_inbound_allows)?;
+        writeln!(f, "  Total connection tests: {}", self.total_tests)?;
+        writeln!(
+            f,
+            "  Expected ALLOWED: {} ({:.1}%)",
+            self.expected_allowed,
+            (self.expected_allowed as f64 / self.total_tests as f64) * 100.0
+        )?;
+        writeln!(
+            f,
+            "  Expected BLOCKED: {} ({:.1}%)",
+            self.expected_blocked,
+            (self.expected_blocked as f64 / self.total_tests as f64) * 100.0
+        )
+    }
+}
+
+/// Namespace for randomized mesh test
+const RANDOM_MESH_NAMESPACE: &str = "random-mesh";
+
+/// Deploy all services in the randomized mesh
+async fn deploy_random_mesh(
+    mesh: &RandomMesh,
+    kubeconfig_path: &str,
+) -> Result<(), String> {
+    println!("  Creating namespace {}...", RANDOM_MESH_NAMESPACE);
+    let _ = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "create",
+            "namespace",
+            RANDOM_MESH_NAMESPACE,
+        ],
+    );
+
+    let client = client_from_kubeconfig(kubeconfig_path).await?;
+    let api: Api<LatticeService> = Api::all(client);
+
+    // Deploy from bottom layer up (backends first, then APIs, then frontends)
+    for (layer_idx, layer) in mesh.layers.iter().enumerate().rev() {
+        println!(
+            "  [Layer {}] Deploying {} services...",
+            layer_idx,
+            layer.len()
+        );
+
+        for name in layer {
+            let svc = mesh.create_lattice_service(name, RANDOM_MESH_NAMESPACE);
+            api.create(&PostParams::default(), &svc)
+                .await
+                .map_err(|e| format!("Failed to create {}: {}", name, e))?;
+        }
+
+        // Small delay between layers
+        sleep(Duration::from_secs(2)).await;
+    }
+
+    println!("  All {} services deployed!", mesh.services.len());
+    Ok(())
+}
+
+/// Wait for all pods in the random mesh to be ready
+async fn wait_for_random_mesh_pods(
+    mesh: &RandomMesh,
+    kubeconfig_path: &str,
+) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(600); // 10 minutes for many pods
+    let expected_pods = mesh.services.len();
+
+    println!("  Waiting for {} pods to be ready...", expected_pods);
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for pods (expected {})",
+                expected_pods
+            ));
+        }
+
+        let output = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "pods",
+                "-n",
+                RANDOM_MESH_NAMESPACE,
+                "-o",
+                "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}",
+            ],
+        );
+
+        let running = output.lines().filter(|l| l.trim() == "Running").count();
+        println!("    {}/{} pods running", running, expected_pods);
+
+        if running >= expected_pods {
+            return Ok(());
+        }
+
+        sleep(Duration::from_secs(15)).await;
+    }
+}
+
+/// Verify traffic patterns for the randomized mesh - EXACT MATCH REQUIRED
+async fn verify_random_mesh_traffic(
+    mesh: &RandomMesh,
+    kubeconfig_path: &str,
+) -> Result<(), String> {
+    println!("  Waiting for traffic tests to run (60 seconds)...");
+    sleep(Duration::from_secs(60)).await;
+
+    // Build a map of expected results for exact matching
+    let mut results: BTreeMap<(String, String), (bool, Option<bool>)> = BTreeMap::new();
+    for (src, tgt, expected) in &mesh.expected_connections {
+        results.insert((src.clone(), tgt.clone()), (*expected, None));
+    }
+
+    // Get all traffic generator names
+    let traffic_generators: Vec<_> = mesh
+        .services
+        .values()
+        .filter(|s| s.is_traffic_generator)
+        .map(|s| s.name.clone())
+        .collect();
+
+    println!(
+        "  Checking logs from {} traffic generators...",
+        traffic_generators.len()
+    );
+
+    // Collect actual results from logs
+    for source in &traffic_generators {
+        let logs = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "logs",
+                "-n",
+                RANDOM_MESH_NAMESPACE,
+                "-l",
+                &format!("app.kubernetes.io/name={}", source),
+                "--tail",
+                "1000",
+            ],
+        )
+        .unwrap_or_default();
+
+        // Check each expected connection from this source
+        for ((src, tgt), (_, actual)) in results.iter_mut() {
+            if src != source {
+                continue;
+            }
+
+            // Look for result patterns
+            let allowed_ok = format!("{}->{}:ALLOWED\n", src, tgt);
+            let blocked_ok = format!("{}->{}:BLOCKED\n", src, tgt);
+            let allowed_unexpected = format!("{}->{}:ALLOWED(UNEXPECTED)", src, tgt);
+            let blocked_unexpected = format!("{}->{}:BLOCKED(UNEXPECTED)", src, tgt);
+
+            if logs.contains(&allowed_ok) || logs.contains(&allowed_unexpected) {
+                *actual = Some(true); // Connection succeeded
+            } else if logs.contains(&blocked_ok) || logs.contains(&blocked_unexpected) {
+                *actual = Some(false); // Connection blocked
+            }
+        }
+    }
+
+    // Compare expected vs actual - EXACT MATCH REQUIRED
+    let mut mismatches: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+
+    for ((src, tgt), (expected, actual)) in &results {
+        match actual {
+            None => {
+                missing.push(format!("{} -> {}", src, tgt));
+            }
+            Some(got) => {
+                if got != expected {
+                    mismatches.push(format!(
+                        "{} -> {}: expected {}, got {}",
+                        src,
+                        tgt,
+                        if *expected { "ALLOWED" } else { "BLOCKED" },
+                        if *got { "ALLOWED" } else { "BLOCKED" }
+                    ));
+                }
+            }
+        }
+    }
+
+    // Print results
+    let total = results.len();
+    let passed = total - mismatches.len() - missing.len();
+
+    println!("\n  ========================================");
+    println!("  EXACT MATCH VERIFICATION");
+    println!("  ========================================");
+    println!("  Total expected: {}", total);
+    println!("  Matched exactly: {}", passed);
+    println!("  Mismatches: {}", mismatches.len());
+    println!("  Missing results: {}", missing.len());
+
+    if !mismatches.is_empty() || !missing.is_empty() {
+        if !mismatches.is_empty() {
+            println!("\n  MISMATCHES:");
+            for m in &mismatches {
+                println!("    {}", m);
+            }
+        }
+        if !missing.is_empty() {
+            println!("\n  MISSING (no result in logs):");
+            for m in missing.iter().take(20) {
+                println!("    {}", m);
+            }
+            if missing.len() > 20 {
+                println!("    ... and {} more", missing.len() - 20);
+            }
+        }
+        return Err(format!(
+            "EXACT MATCH FAILED: {} mismatches, {} missing out of {} tests",
+            mismatches.len(),
+            missing.len(),
+            total
+        ));
+    }
+
+    println!("\n  SUCCESS: All {} tests matched exactly!", total);
+    Ok(())
+}
+
+/// Run the randomized service mesh test
+///
+/// This deploys 50-100 services with random dependency graphs and verifies
+/// that the bilateral agreement pattern is correctly enforced at scale.
+async fn run_randomized_mesh_test(
+    kubeconfig_path: &str,
+    config: Option<RandomMeshConfig>,
+) -> Result<(), String> {
+    let config = config.unwrap_or_default();
+
+    println!("\n============================================================");
+    println!("  RANDOMIZED SERVICE MESH TEST");
+    println!("============================================================\n");
+
+    // Generate mesh
+    println!("[Step 1] Generating randomized service mesh...\n");
+    let mesh = RandomMesh::generate(&config);
+    let stats = mesh.stats();
+    println!("{}", stats);
+
+    // Print exact manifest of what we expect
+    println!("[Step 1b] Expected connection manifest (EXACT MATCH REQUIRED):");
+    mesh.print_manifest();
+
+    // Deploy services
+    println!("\n[Step 2] Deploying services...\n");
+    deploy_random_mesh(&mesh, kubeconfig_path).await?;
+
+    // Wait for pods
+    println!("\n[Step 3] Waiting for pods to be ready...\n");
+    wait_for_random_mesh_pods(&mesh, kubeconfig_path).await?;
+
+    // Verify traffic
+    println!("\n[Step 4] Verifying traffic patterns...\n");
+    verify_random_mesh_traffic(&mesh, kubeconfig_path).await?;
+
+    println!("\n============================================================");
+    println!("  RANDOMIZED MESH TEST PASSED!");
+    println!("============================================================\n");
 
     Ok(())
 }
