@@ -159,6 +159,7 @@ impl Installer {
     ///
     /// Always installs BOTH kubeadm and RKE2 bootstrap/control-plane providers
     /// to ensure clusterctl move works between any clusters.
+    /// Uses local air-gapped provider config from CLUSTERCTL_CONFIG.
     fn clusterctl_init_args(&self) -> Vec<String> {
         use crate::crd::ProviderType;
 
@@ -169,13 +170,18 @@ impl Installer {
             ProviderType::Azure => "--infrastructure=azure",
         };
 
+        // Get config path from build-time env var (set by build.rs)
+        let config_path = env!("CLUSTERCTL_CONFIG");
+
         // Always install both kubeadm and RKE2 providers
         // Must specify both explicitly - specifying one replaces the default
+        // Uses local air-gapped provider config
         vec![
             "init".to_string(),
             infra_arg.to_string(),
             "--bootstrap=kubeadm,rke2".to_string(),
             "--control-plane=kubeadm,rke2".to_string(),
+            format!("--config={}", config_path),
             "--wait-providers".to_string(),
         ]
     }
@@ -1222,6 +1228,8 @@ spec:
         // Always installs both kubeadm and rke2 for clusterctl move compatibility
         assert!(args.contains(&"--bootstrap=kubeadm,rke2".to_string()));
         assert!(args.contains(&"--control-plane=kubeadm,rke2".to_string()));
+        // Uses air-gapped provider config
+        assert!(args.iter().any(|a| a.starts_with("--config=")));
     }
 
     #[test]
