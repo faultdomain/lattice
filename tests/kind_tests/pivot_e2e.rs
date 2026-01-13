@@ -1326,7 +1326,7 @@ async fn verify_control_plane_taints(
             "-l",
             "node-role.kubernetes.io/control-plane",
             "-o",
-            "jsonpath={range .items[*]}{.metadata.name}: {.spec.taints[*].key}={.spec.taints[*].effect}{\"\\n\"}{end}",
+            "jsonpath={range .items[*]}{.metadata.name}: {range .spec.taints[*]}{.key}={.effect} {end}{\"\\n\"}{end}",
         ],
     );
 
@@ -1350,7 +1350,7 @@ async fn verify_control_plane_taints(
                 "-l",
                 "node-role.kubernetes.io/etcd",
                 "-o",
-                "jsonpath={range .items[*]}{.metadata.name}: {.spec.taints[*].key}={.spec.taints[*].effect}{\"\\n\"}{end}",
+                "jsonpath={range .items[*]}{.metadata.name}: {range .spec.taints[*]}{.key}={.effect} {end}{\"\\n\"}{end}",
             ],
         );
 
