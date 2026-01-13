@@ -14,6 +14,10 @@ version = "1.12.1"
 [capi]
 version = "1.12.1"
 
+[rke2]
+# RKE2 CAPI provider from https://github.com/rancher/cluster-api-provider-rke2
+version = "0.11.0"
+
 [charts]
 cilium = "1.18.5"
 istio = "1.28.2"

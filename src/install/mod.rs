@@ -155,15 +155,29 @@ impl Installer {
         &self.cluster.spec.provider.type_
     }
 
-    /// Get the clusterctl infrastructure provider argument
-    fn provider_arg(&self) -> String {
+    /// Get clusterctl init arguments based on configured providers
+    ///
+    /// Always installs BOTH kubeadm and RKE2 bootstrap/control-plane providers
+    /// to ensure clusterctl move works between any clusters.
+    fn clusterctl_init_args(&self) -> Vec<String> {
         use crate::crd::ProviderType;
-        match self.provider() {
-            ProviderType::Docker => "--infrastructure=docker".to_string(),
-            ProviderType::Aws => "--infrastructure=aws".to_string(),
-            ProviderType::Gcp => "--infrastructure=gcp".to_string(),
-            ProviderType::Azure => "--infrastructure=azure".to_string(),
-        }
+
+        let infra_arg = match self.provider() {
+            ProviderType::Docker => "--infrastructure=docker",
+            ProviderType::Aws => "--infrastructure=aws",
+            ProviderType::Gcp => "--infrastructure=gcp",
+            ProviderType::Azure => "--infrastructure=azure",
+        };
+
+        // Always install both kubeadm and RKE2 providers
+        // Must specify both explicitly - specifying one replaces the default
+        vec![
+            "init".to_string(),
+            infra_arg.to_string(),
+            "--bootstrap=kubeadm,rke2".to_string(),
+            "--control-plane=kubeadm,rke2".to_string(),
+            "--wait-providers".to_string(),
+        ]
     }
 
     /// Run the installation
@@ -375,10 +389,12 @@ nodes:
         // Generate all manifests but only use operator ones (JSON format)
         // Bootstrap kind cluster already has its own CNI, we don't need Cilium
         // Set cluster_name to "lattice-installer" - this is the bootstrap cluster, not the mgmt cluster
+        // No bootstrap provider needed for temporary kind cluster
         let all_manifests = generator.generate(
             &self.config.image,
             self.config.registry_credentials.as_deref(),
             Some("lattice-installer"),
+            None,
             None,
         );
         let operator_manifests: Vec<String> = all_manifests
@@ -429,12 +445,14 @@ nodes:
         // because kubeadm's API server uses non-FIPS cipher suites (X25519)
         let cluster_name = self.cluster.metadata.name.as_deref();
         let provider_str = self.cluster.spec.provider.type_.to_string();
+        let bootstrap_str = self.cluster.spec.provider.kubernetes.bootstrap.to_string();
         let config = ManifestConfig {
             image: &self.config.image,
             registry_credentials: self.config.registry_credentials.as_deref(),
             networking: self.cluster.spec.networking.as_ref(),
             cluster_name,
             provider: Some(&provider_str),
+            bootstrap: Some(&bootstrap_str),
             parent_host: None, // Cells have no parent
             parent_grpc_port: crate::DEFAULT_GRPC_PORT,
             relax_fips: self
@@ -770,10 +788,11 @@ spec:
         // Install CAPI on management cluster (required for pivot)
         // This is the ONE-TIME bootstrap install; after this, the operator handles CAPI
         println!("  Installing CAPI on management cluster...");
-        let provider_arg = self.provider_arg();
+        let init_args = self.clusterctl_init_args();
+        let init_args_ref: Vec<&str> = init_args.iter().map(|s| s.as_str()).collect();
         self.run_command_with_output_env(
             "clusterctl",
-            &["init", &provider_arg, "--wait-providers"],
+            &init_args_ref,
             &[("KUBECONFIG", &kubeconfig_path)],
         )
         .await?;
@@ -1192,12 +1211,17 @@ spec:
     }
 
     #[test]
-    fn test_provider_arg() {
+    fn test_clusterctl_init_args_always_includes_both_providers() {
         let config = sample_config();
         let installer = Installer::new(config).expect("should parse valid config");
 
-        let arg = installer.provider_arg();
-        assert_eq!(arg, "--infrastructure=docker");
+        let args = installer.clusterctl_init_args();
+        assert!(args.contains(&"init".to_string()));
+        assert!(args.contains(&"--infrastructure=docker".to_string()));
+        assert!(args.contains(&"--wait-providers".to_string()));
+        // Always installs both kubeadm and rke2 for clusterctl move compatibility
+        assert!(args.contains(&"--bootstrap=kubeadm,rke2".to_string()));
+        assert!(args.contains(&"--control-plane=kubeadm,rke2".to_string()));
     }
 
     #[test]

@@ -557,15 +557,15 @@ impl AgentClient {
     ///
     /// Uses the shared CAPI installation logic which:
     /// 1. Installs cert-manager from local helm chart
-    /// 2. Runs clusterctl init with air-gapped config
+    /// 2. Runs clusterctl init with air-gapped config (kubeadm + RKE2 providers)
     async fn install_capi() -> Result<String, std::io::Error> {
-        use crate::capi::ensure_capi_installed;
+        use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
         use crate::crd::ProviderType;
 
         let provider_str = std::env::var("LATTICE_PROVIDER")
             .map_err(|_| std::io::Error::other("LATTICE_PROVIDER env var not set"))?;
 
-        let provider = match provider_str.as_str() {
+        let infrastructure = match provider_str.as_str() {
             "docker" => ProviderType::Docker,
             "aws" => ProviderType::Aws,
             "gcp" => ProviderType::Gcp,
@@ -578,13 +578,14 @@ impl AgentClient {
             }
         };
 
-        info!(provider = %provider_str, "Installing CAPI with shared installer");
+        info!(infrastructure = %provider_str, "Installing CAPI providers");
 
-        ensure_capi_installed(&provider)
+        let config = CapiProviderConfig::new(infrastructure);
+        ensure_capi_installed(&ClusterctlInstaller::new(), &config)
             .await
             .map_err(|e| std::io::Error::other(format!("CAPI installation failed: {}", e)))?;
 
-        info!(provider = %provider_str, "clusterctl init completed successfully");
+        info!(infrastructure = %provider_str, "CAPI providers installed successfully");
         Ok(provider_str)
     }
 

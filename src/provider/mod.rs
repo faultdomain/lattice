@@ -161,6 +161,8 @@ pub struct ClusterConfig<'a> {
 pub struct InfrastructureRef<'a> {
     /// API group for infrastructure resources (e.g., "infrastructure.cluster.x-k8s.io")
     pub api_group: &'a str,
+    /// Full API version (e.g., "infrastructure.cluster.x-k8s.io/v1beta1")
+    pub api_version: &'a str,
     /// Kind for the infrastructure cluster (e.g., "DockerCluster")
     pub cluster_kind: &'a str,
     /// Kind for machine templates (e.g., "DockerMachineTemplate")
@@ -457,8 +459,8 @@ fn generate_rke2_control_plane(
 ) -> CAPIManifest {
     let cp_name = format!("{}-control-plane", config.name);
 
-    // RKE2 agent configuration
-    let mut agent_config = serde_json::json!({
+    // RKE2 agent configuration (kubelet settings)
+    let agent_config = serde_json::json!({
         "kubelet": {
             "extraArgs": [
                 "eviction-hard=nodefs.available<0%,imagefs.available<0%"
@@ -466,26 +468,49 @@ fn generate_rke2_control_plane(
         }
     });
 
-    // Add postRKE2Commands if provided (same as postKubeadmCommands but for RKE2)
-    if !cp_config.post_kubeadm_commands.is_empty() {
-        agent_config["postRKE2Commands"] = serde_json::json!(cp_config.post_kubeadm_commands);
-    }
-
-    // RKE2ControlPlane spec structure
-    let spec = serde_json::json!({
+    // Build spec - postRKE2Commands is at the TOP level, not inside agentConfig
+    let mut spec = serde_json::json!({
         "replicas": cp_config.replicas,
         "version": format!("v{}+rke2r1", config.k8s_version.trim_start_matches('v')),
-        "infrastructureRef": {
-            "apiGroup": infra.api_group,
-            "kind": infra.machine_template_kind,
-            "name": format!("{}-control-plane", config.name)
+        // Use control-plane-endpoint for node registration (via CAPD load balancer)
+        "registrationMethod": "control-plane-endpoint",
+        // Use machineTemplate.infrastructureRef (the non-deprecated path)
+        "machineTemplate": {
+            "infrastructureRef": {
+                "apiVersion": infra.api_version,
+                "kind": infra.machine_template_kind,
+                "name": format!("{}-control-plane", config.name)
+            }
         },
         "agentConfig": agent_config,
         "serverConfig": {
             "tlsSan": cp_config.cert_sans,
-            "cni": "none"  // We use Cilium, not built-in CNI
+            "cni": "none",  // We use Cilium, not built-in CNI
+            // Disable cloud controller - we don't use a cloud provider with CAPD
+            "disableComponents": {
+                "kubernetesComponents": ["cloudController"]
+            },
+            // Force FIPS-compliant TLS ciphers - RKE2's BoringCrypto allows X25519
+            // but our GOFIPS140 kubectl rejects it
+            "kubeAPIServer": {
+                "extraArgs": [
+                    "tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+                ]
+            }
+        },
+        // Required by RKE2ControlPlane CRD - matches the default
+        "rolloutStrategy": {
+            "type": "RollingUpdate",
+            "rollingUpdate": {
+                "maxSurge": 1
+            }
         }
     });
+
+    // Add postRKE2Commands at the spec level if provided
+    if !cp_config.post_kubeadm_commands.is_empty() {
+        spec["postRKE2Commands"] = serde_json::json!(cp_config.post_kubeadm_commands);
+    }
 
     CAPIManifest::new(
         RKE2_CONTROLPLANE_API_VERSION,
@@ -813,6 +838,7 @@ mod tests {
         fn test_infra() -> InfrastructureRef<'static> {
             InfrastructureRef {
                 api_group: "infrastructure.cluster.x-k8s.io",
+                api_version: "infrastructure.cluster.x-k8s.io/v1beta1",
                 cluster_kind: "DockerCluster",
                 machine_template_kind: "DockerMachineTemplate",
             }

@@ -20,8 +20,11 @@ use mockall::automock;
 
 use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
-use crate::capi::{ensure_capi_installed_with, CapiInstaller};
-use crate::crd::{ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus};
+use crate::capi::{ensure_capi_installed, CapiInstaller, CapiProviderConfig};
+use crate::crd::{
+    BootstrapProvider, ClusterPhase, Condition, ConditionStatus, LatticeCluster,
+    LatticeClusterStatus,
+};
 use crate::parent::ParentServers;
 use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
 use crate::provider::{create_provider, CAPIManifest};
@@ -105,6 +108,7 @@ pub trait CAPIClient: Send + Sync {
     ///
     /// * `cluster_name` - Name of the cluster to check
     /// * `namespace` - Namespace where CAPI resources exist
+    /// * `bootstrap` - Bootstrap provider (kubeadm or rke2)
     ///
     /// # Returns
     ///
@@ -113,6 +117,7 @@ pub trait CAPIClient: Send + Sync {
         &self,
         cluster_name: &str,
         namespace: &str,
+        bootstrap: BootstrapProvider,
     ) -> Result<bool, Error>;
 
     /// Get the current replica count of a cluster's MachineDeployment
@@ -188,12 +193,15 @@ impl KubeClient for KubeClientImpl {
         let nodes = api.list(&Default::default()).await?;
 
         // Check all control plane nodes have the NoSchedule taint
+        // and all etcd nodes have the NoExecute taint (RKE2)
         for node in nodes.items.iter() {
-            if !is_control_plane_node(node) {
-                continue;
+            // Check control-plane taint
+            if is_control_plane_node(node) && !has_control_plane_taint(node) {
+                return Ok(false);
             }
 
-            if !has_control_plane_taint(node) {
+            // Check etcd taint (RKE2 nodes)
+            if is_etcd_node(node) && !has_etcd_taint(node) {
                 return Ok(false);
             }
         }
@@ -208,7 +216,11 @@ impl KubeClient for KubeClientImpl {
         let nodes = api.list(&Default::default()).await?;
 
         for node in nodes.items.iter() {
-            if !is_control_plane_node(node) {
+            let is_cp = is_control_plane_node(node);
+            let is_etcd = is_etcd_node(node);
+
+            // Skip nodes that aren't control-plane or etcd
+            if !is_cp && !is_etcd {
                 continue;
             }
 
@@ -218,23 +230,34 @@ impl KubeClient for KubeClientImpl {
                 .as_ref()
                 .ok_or_else(|| Error::provider("node has no name".to_string()))?;
 
-            // Check if already tainted
-            if has_control_plane_taint(node) {
-                debug!(node = %node_name, "control plane node already tainted");
+            // Build list of taints to apply based on node roles
+            let mut taints_to_apply = Vec::new();
+
+            if is_cp && !has_control_plane_taint(node) {
+                taints_to_apply.push(serde_json::json!({
+                    "key": "node-role.kubernetes.io/control-plane",
+                    "effect": "NoSchedule"
+                }));
+            }
+
+            if is_etcd && !has_etcd_taint(node) {
+                taints_to_apply.push(serde_json::json!({
+                    "key": "node-role.kubernetes.io/etcd",
+                    "effect": "NoExecute"
+                }));
+            }
+
+            if taints_to_apply.is_empty() {
+                debug!(node = %node_name, "node already has required taints");
                 continue;
             }
 
-            // Add the taint
-            info!(node = %node_name, "applying NoSchedule taint to control plane node");
+            // Apply taints (strategic merge patch adds to existing taints)
+            info!(node = %node_name, taints = ?taints_to_apply, "applying taints to node");
 
             let patch = serde_json::json!({
                 "spec": {
-                    "taints": [
-                        {
-                            "key": "node-role.kubernetes.io/control-plane",
-                            "effect": "NoSchedule"
-                        }
-                    ]
+                    "taints": taints_to_apply
                 }
             });
 
@@ -245,7 +268,7 @@ impl KubeClient for KubeClientImpl {
             )
             .await?;
 
-            info!(node = %node_name, "control plane node tainted");
+            info!(node = %node_name, "node tainted successfully");
         }
 
         Ok(())
@@ -543,6 +566,7 @@ impl CAPIClient for CAPIClientImpl {
         &self,
         cluster_name: &str,
         namespace: &str,
+        bootstrap: BootstrapProvider,
     ) -> Result<bool, Error> {
         // Check 1: CAPI Cluster object is Ready/Provisioned
         let cluster_api = self.capi_cluster_api(namespace);
@@ -582,22 +606,27 @@ impl CAPIClient for CAPIClientImpl {
             return Ok(false);
         }
 
-        // Check 2: KubeadmControlPlane is Initialized
+        // Check 2: Control plane is Initialized (KubeadmControlPlane or RKE2ControlPlane)
         // clusterctl move requires this before it will proceed
-        let kcp_api: Api<DynamicObject> = Api::namespaced_with(
+        let (cp_kind, cp_group) = match bootstrap {
+            BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
+            BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
+        };
+
+        let cp_api: Api<DynamicObject> = Api::namespaced_with(
             self.client.clone(),
             namespace,
             &ApiResource::from_gvk(&GroupVersionKind {
-                group: "controlplane.cluster.x-k8s.io".to_string(),
+                group: cp_group.to_string(),
                 version: "v1beta1".to_string(),
-                kind: "KubeadmControlPlane".to_string(),
+                kind: cp_kind.to_string(),
             }),
         );
 
-        let kcp_name = format!("{}-control-plane", cluster_name);
-        let kcp_initialized = match kcp_api.get(&kcp_name).await {
-            Ok(kcp) => {
-                if let Some(status) = kcp.data.get("status") {
+        let cp_name = format!("{}-control-plane", cluster_name);
+        let cp_initialized = match cp_api.get(&cp_name).await {
+            Ok(cp) => {
+                if let Some(status) = cp.data.get("status") {
                     status
                         .get("initialized")
                         .and_then(|i| i.as_bool())
@@ -607,14 +636,14 @@ impl CAPIClient for CAPIClientImpl {
                 }
             }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                debug!(cluster = %cluster_name, "KubeadmControlPlane not found");
+                debug!(cluster = %cluster_name, cp_kind = %cp_kind, "ControlPlane not found");
                 false
             }
             Err(e) => return Err(e.into()),
         };
 
-        if !kcp_initialized {
-            debug!(cluster = %cluster_name, "KubeadmControlPlane not initialized yet");
+        if !cp_initialized {
+            debug!(cluster = %cluster_name, cp_kind = %cp_kind, "ControlPlane not initialized yet");
             return Ok(false);
         }
 
@@ -655,7 +684,8 @@ impl CAPIClient for CAPIClientImpl {
 
         info!(
             cluster = %cluster_name,
-            "Infrastructure fully ready (Cluster ready, KCP initialized, all machines running)"
+            cp_kind = %cp_kind,
+            "Infrastructure fully ready (Cluster ready, ControlPlane initialized, all machines running)"
         );
         Ok(true)
     }
@@ -879,6 +909,30 @@ pub fn has_control_plane_taint(node: &k8s_openapi::api::core::v1::Node) -> bool 
             taints.iter().any(|t| {
                 t.key == "node-role.kubernetes.io/control-plane" && t.effect == "NoSchedule"
             })
+        })
+        .unwrap_or(false)
+}
+
+/// Check if a node is an etcd node by looking for the etcd role label.
+/// RKE2 uses this label to identify nodes running etcd.
+pub fn is_etcd_node(node: &k8s_openapi::api::core::v1::Node) -> bool {
+    node.metadata
+        .labels
+        .as_ref()
+        .map(|labels| labels.contains_key("node-role.kubernetes.io/etcd"))
+        .unwrap_or(false)
+}
+
+/// Check if an etcd node has the NoExecute taint.
+/// RKE2 applies this taint to etcd nodes by default.
+pub fn has_etcd_taint(node: &k8s_openapi::api::core::v1::Node) -> bool {
+    node.spec
+        .as_ref()
+        .and_then(|s| s.taints.as_ref())
+        .map(|taints| {
+            taints
+                .iter()
+                .any(|t| t.key == "node-role.kubernetes.io/etcd" && t.effect == "NoExecute")
         })
         .unwrap_or(false)
 }
@@ -1249,9 +1303,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     warn!(error = %e, "Failed to patch kubeconfig for self-management after retries");
                 }
 
+                let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
                 let capi_ready = ctx
                     .capi
-                    .is_infrastructure_ready(&name, &capi_namespace)
+                    .is_infrastructure_ready(&name, &capi_namespace, bootstrap)
                     .await
                     .unwrap_or(false);
 
@@ -1266,8 +1321,8 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Ensure CAPI is installed before provisioning
             info!("ensuring CAPI is installed for provider");
-            ensure_capi_installed_with(ctx.capi_installer.as_ref(), &cluster.spec.provider.type_)
-                .await?;
+            let capi_config = CapiProviderConfig::new(cluster.spec.provider.type_.clone());
+            ensure_capi_installed(ctx.capi_installer.as_ref(), &capi_config).await?;
 
             // Generate and apply CAPI manifests, then transition to Provisioning
             info!("generating CAPI manifests for cluster");
@@ -1325,9 +1380,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 }
             }
 
+            let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
             let is_ready = ctx
                 .capi
-                .is_infrastructure_ready(&name, &capi_namespace)
+                .is_infrastructure_ready(&name, &capi_namespace, bootstrap)
                 .await?;
 
             if is_ready {
@@ -2161,7 +2217,7 @@ mod tests {
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
                 .expect_is_infrastructure_ready()
-                .returning(|_, _| Ok(false));
+                .returning(|_, _, _| Ok(false));
             // MachineDeployment has 2 replicas to match spec - no scaling needed
             capi_mock
                 .expect_get_machine_deployment_replicas()
@@ -2187,7 +2243,7 @@ mod tests {
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
                 .expect_is_infrastructure_ready()
-                .returning(|_, _| Ok(true));
+                .returning(|_, _, _| Ok(true));
 
             (
                 Arc::new(Context::for_testing(
@@ -2743,7 +2799,7 @@ mod tests {
             // Infrastructure is NOT ready
             capi_mock
                 .expect_is_infrastructure_ready()
-                .returning(|_, _| Ok(false));
+                .returning(|_, _, _| Ok(false));
 
             let mut installer = MockCapiInstaller::new();
             installer.expect_install().returning(|_| Ok(()));
@@ -2787,7 +2843,7 @@ mod tests {
             // Infrastructure IS ready
             capi_mock
                 .expect_is_infrastructure_ready()
-                .returning(|_, _| Ok(true));
+                .returning(|_, _, _| Ok(true));
 
             let mut installer = MockCapiInstaller::new();
             installer.expect_install().returning(|_| Ok(()));
@@ -2824,7 +2880,7 @@ mod tests {
             // Infrastructure check fails
             capi_mock
                 .expect_is_infrastructure_ready()
-                .returning(|_, _| Err(Error::provider("CAPI API unavailable".to_string())));
+                .returning(|_, _, _| Err(Error::provider("CAPI API unavailable".to_string())));
 
             let mut installer = MockCapiInstaller::new();
             installer.expect_install().returning(|_| Ok(()));

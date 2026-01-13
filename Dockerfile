@@ -88,8 +88,9 @@ RUN if [ -n "$FIPS" ]; then \
 # -----------------------------------------------------------------------------
 FROM debian:trixie-slim
 
-# Re-declare ARG for this stage
+# Re-declare ARGs for this stage
 ARG CAPI_VERSION
+ARG RKE2_VERSION
 
 # Install only CA certificates for TLS
 RUN apt-get update && apt-get install -y \
@@ -113,7 +114,7 @@ COPY --from=rust-builder /app/test-providers /providers
 # Copy scripts for templating
 COPY --from=rust-builder /app/scripts /scripts
 
-# Create clusterctl config with local provider repositories
+# Create clusterctl config with local provider repositories (kubeadm + RKE2)
 RUN echo "providers:" > /providers/clusterctl.yaml && \
     echo "  - name: \"cluster-api\"" >> /providers/clusterctl.yaml && \
     echo "    url: \"file:///providers/cluster-api/v${CAPI_VERSION}/core-components.yaml\"" >> /providers/clusterctl.yaml && \
@@ -124,6 +125,12 @@ RUN echo "providers:" > /providers/clusterctl.yaml && \
     echo "  - name: \"kubeadm\"" >> /providers/clusterctl.yaml && \
     echo "    url: \"file:///providers/control-plane-kubeadm/v${CAPI_VERSION}/control-plane-components.yaml\"" >> /providers/clusterctl.yaml && \
     echo "    type: \"ControlPlaneProvider\"" >> /providers/clusterctl.yaml && \
+    echo "  - name: \"rke2\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/bootstrap-rke2/v${RKE2_VERSION}/bootstrap-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"BootstrapProvider\"" >> /providers/clusterctl.yaml && \
+    echo "  - name: \"rke2\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/control-plane-rke2/v${RKE2_VERSION}/control-plane-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"ControlPlaneProvider\"" >> /providers/clusterctl.yaml && \
     echo "  - name: \"docker\"" >> /providers/clusterctl.yaml && \
     echo "    url: \"file:///providers/infrastructure-docker/v${CAPI_VERSION}/infrastructure-components-development.yaml\"" >> /providers/clusterctl.yaml && \
     echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml
@@ -132,9 +139,10 @@ RUN echo "providers:" > /providers/clusterctl.yaml && \
 ENV GOPROXY=off
 ENV CLUSTERCTL_DISABLE_VERSIONCHECK=true
 
-# Enforce FIPS mode at runtime for Go binaries (kubectl, helm, clusterctl)
-# This ensures only FIPS-approved algorithms are used
-ENV GODEBUG=fips140=only
+# Enable FIPS mode at runtime for Go binaries (kubectl, helm, clusterctl)
+# Using fips140=on (not =only) because =only rejects X25519 in TLS handshakes,
+# which breaks connections to servers that offer X25519 (like RKE2 with BoringCrypto)
+ENV GODEBUG=fips140=on
 
 # Create non-root user
 RUN useradd -r -u 1000 -m lattice && \

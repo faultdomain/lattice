@@ -222,6 +222,7 @@ impl Provider for DockerProvider {
 
         let infra = InfrastructureRef {
             api_group: DOCKER_INFRASTRUCTURE_API_GROUP,
+            api_version: DOCKER_INFRASTRUCTURE_API_VERSION,
             cluster_kind: "DockerCluster",
             machine_template_kind: "DockerMachineTemplate",
         };

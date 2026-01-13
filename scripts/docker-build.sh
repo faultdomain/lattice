@@ -21,17 +21,20 @@ KUBECTL_VERSION=$(get_version "kubernetes" "version")
 HELM_VERSION=$(get_version "helm" "version")
 CLUSTERCTL_VERSION=$(get_version "clusterctl" "version")
 CAPI_VERSION=$(get_version "capi" "version")
+RKE2_VERSION=$(get_version "rke2" "version")
 
 echo "Building with versions from versions.toml:"
 echo "  kubectl: $KUBECTL_VERSION"
 echo "  helm: $HELM_VERSION"
 echo "  clusterctl: $CLUSTERCTL_VERSION"
 echo "  capi: $CAPI_VERSION"
+echo "  rke2: $RKE2_VERSION"
 
 docker build \
     --build-arg KUBECTL_VERSION="$KUBECTL_VERSION" \
     --build-arg HELM_VERSION="$HELM_VERSION" \
     --build-arg CLUSTERCTL_VERSION="$CLUSTERCTL_VERSION" \
     --build-arg CAPI_VERSION="$CAPI_VERSION" \
+    --build-arg RKE2_VERSION="$RKE2_VERSION" \
     "$@" \
     "$PROJECT_ROOT"

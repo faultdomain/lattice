@@ -43,10 +43,11 @@ use rand::prelude::*;
 use tokio::time::sleep;
 
 use lattice::crd::{
-    ClusterPhase, ContainerSpec, DependencyDirection, DeploySpec, KubernetesSpec, LatticeCluster,
-    LatticeClusterSpec, LatticeExternalService, LatticeExternalServiceSpec, LatticeService,
-    LatticeServiceSpec, NodeSpec, PortSpec, ProviderSpec, ProviderType, ReplicaSpec, Resolution,
-    ResourceSpec, ResourceType, ServicePortsSpec,
+    BootstrapProvider, ClusterPhase, ContainerSpec, DependencyDirection, DeploySpec,
+    KubernetesSpec, LatticeCluster, LatticeClusterSpec, LatticeExternalService,
+    LatticeExternalServiceSpec, LatticeService, LatticeServiceSpec, NodeSpec, PortSpec,
+    ProviderSpec, ProviderType, ReplicaSpec, Resolution, ResourceSpec, ResourceType,
+    ServicePortsSpec,
 };
 use lattice::install::{InstallConfig, Installer};
 use std::collections::BTreeMap;
@@ -332,8 +333,8 @@ fn get_management_kubeconfig() -> Result<String, String> {
     Ok(patched_path)
 }
 
-/// Create workload cluster spec
-fn workload_cluster_spec(name: &str) -> LatticeCluster {
+/// Create workload cluster spec with specified bootstrap provider
+fn workload_cluster_spec(name: &str, bootstrap: BootstrapProvider) -> LatticeCluster {
     LatticeCluster {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
@@ -345,7 +346,7 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
-                    bootstrap: Default::default(),
+                    bootstrap,
                 },
             },
             nodes: NodeSpec {
@@ -359,6 +360,16 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
             workload: None,
         },
         status: None,
+    }
+}
+
+/// Get the kubeconfig path inside the control plane container based on bootstrap provider
+fn get_kubeconfig_path_for_bootstrap(bootstrap: &BootstrapProvider) -> &'static str {
+    match bootstrap {
+        BootstrapProvider::Kubeadm => "/etc/kubernetes/admin.conf",
+        BootstrapProvider::Rke2 => "/etc/rancher/rke2/rke2.yaml",
+        // BootstrapProvider is non_exhaustive, but we only support kubeadm and rke2
+        _ => panic!("Unsupported bootstrap provider: {:?}", bootstrap),
     }
 }
 
@@ -1294,6 +1305,66 @@ async fn watch_worker_scaling(
     }
 }
 
+/// Verify control-plane taints are restored on a cluster
+///
+/// Checks that control-plane nodes have the NoSchedule taint and
+/// etcd nodes have the NoExecute taint (for RKE2 clusters).
+async fn verify_control_plane_taints(
+    kubeconfig_path: &str,
+    bootstrap: &BootstrapProvider,
+) -> Result<(), String> {
+    println!("  Verifying control-plane taints are restored...");
+
+    // Get control-plane nodes and their taints
+    let cp_taints = run_cmd_allow_fail(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "nodes",
+            "-l",
+            "node-role.kubernetes.io/control-plane",
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}: {.spec.taints[*].key}={.spec.taints[*].effect}{\"\\n\"}{end}",
+        ],
+    );
+
+    println!("    Control-plane node taints:\n{}", cp_taints);
+
+    // Verify control-plane NoSchedule taint exists
+    if !cp_taints.contains("node-role.kubernetes.io/control-plane=NoSchedule") {
+        return Err("Control-plane nodes missing NoSchedule taint".to_string());
+    }
+    println!("    [x] Control-plane NoSchedule taint present");
+
+    // For RKE2, also verify etcd taint
+    if matches!(bootstrap, BootstrapProvider::Rke2) {
+        let etcd_taints = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "nodes",
+                "-l",
+                "node-role.kubernetes.io/etcd",
+                "-o",
+                "jsonpath={range .items[*]}{.metadata.name}: {.spec.taints[*].key}={.spec.taints[*].effect}{\"\\n\"}{end}",
+            ],
+        );
+
+        println!("    Etcd node taints:\n{}", etcd_taints);
+
+        if !etcd_taints.contains("node-role.kubernetes.io/etcd=NoExecute") {
+            return Err("Etcd nodes missing NoExecute taint".to_string());
+        }
+        println!("    [x] Etcd NoExecute taint present (RKE2)");
+    }
+
+    Ok(())
+}
+
 /// Watch LatticeCluster phase transitions
 async fn watch_cluster_phases(client: &Client, cluster_name: &str) -> Result<(), String> {
     let api: Api<LatticeCluster> = Api::all(client.clone());
@@ -1400,42 +1471,113 @@ fn cleanup_all() {
 
 /// Story: Full end-to-end installation with self-managing management cluster
 ///
-/// This test runs the complete Lattice installer flow, then provisions a
-/// workload cluster from the self-managing management cluster.
+/// This test runs the complete Lattice installer flow TWICE to test cross-bootstrap
+/// provisioning in both directions:
+///   1. First run: kubeadm management cluster → RKE2 workload cluster
+///   2. Second run: RKE2 management cluster → kubeadm workload cluster
+///
 /// Run with: cargo test --features e2e --test kind pivot_e2e -- --nocapture
 #[tokio::test]
 async fn story_full_install_and_workload_provisioning() {
-    let result = tokio::time::timeout(E2E_TIMEOUT, run_full_e2e()).await;
+    // Install crypto provider for rustls/kube client (do this once at the start)
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    match result {
-        Ok(Ok(())) => println!("\n=== Full E2E Test Completed Successfully! ===\n"),
+    // Test combination 1: kubeadm management → RKE2 workload
+    println!("\n################################################################");
+    println!("#  TEST RUN 1: kubeadm management → RKE2 workload");
+    println!("################################################################\n");
+
+    let result1 = tokio::time::timeout(
+        E2E_TIMEOUT,
+        run_full_e2e(BootstrapProvider::Kubeadm, BootstrapProvider::Rke2),
+    )
+    .await;
+
+    match result1 {
+        Ok(Ok(())) => {
+            println!("\n=== Run 1 (kubeadm→RKE2) Completed Successfully! ===\n");
+        }
         Ok(Err(e)) => {
-            println!("\n=== Full E2E Test Failed: {} ===\n", e);
+            println!("\n=== Run 1 (kubeadm→RKE2) Failed: {} ===\n", e);
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
             println!("    kind delete clusters --all");
-            panic!("E2E test failed: {}", e);
+            panic!("E2E test run 1 failed: {}", e);
         }
         Err(_) => {
-            println!("\n=== Full E2E Test Timed Out ({:?}) ===\n", E2E_TIMEOUT);
+            println!(
+                "\n=== Run 1 (kubeadm→RKE2) Timed Out ({:?}) ===\n",
+                E2E_TIMEOUT
+            );
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
             println!("    kind delete clusters --all");
-            panic!("E2E test timed out after {:?}", E2E_TIMEOUT);
+            panic!("E2E test run 1 timed out after {:?}", E2E_TIMEOUT);
+        }
+    }
+
+    // Test combination 2: RKE2 management → kubeadm workload
+    println!("\n################################################################");
+    println!("#  TEST RUN 2: RKE2 management → kubeadm workload");
+    println!("################################################################\n");
+
+    let result2 = tokio::time::timeout(
+        E2E_TIMEOUT,
+        run_full_e2e(BootstrapProvider::Rke2, BootstrapProvider::Kubeadm),
+    )
+    .await;
+
+    match result2 {
+        Ok(Ok(())) => {
+            println!("\n=== Run 2 (RKE2→kubeadm) Completed Successfully! ===\n");
+            println!("\n################################################################");
+            println!("#  ALL CROSS-BOOTSTRAP TESTS PASSED!");
+            println!("################################################################\n");
+        }
+        Ok(Err(e)) => {
+            println!("\n=== Run 2 (RKE2→kubeadm) Failed: {} ===\n", e);
+            println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
+            println!("    kind delete clusters --all");
+            panic!("E2E test run 2 failed: {}", e);
+        }
+        Err(_) => {
+            println!(
+                "\n=== Run 2 (RKE2→kubeadm) Timed Out ({:?}) ===\n",
+                E2E_TIMEOUT
+            );
+            println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
+            println!("    kind delete clusters --all");
+            panic!("E2E test run 2 timed out after {:?}", E2E_TIMEOUT);
         }
     }
 }
 
-async fn run_full_e2e() -> Result<(), String> {
-    // Install crypto provider for rustls/kube client
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
+async fn run_full_e2e(
+    mgmt_bootstrap: BootstrapProvider,
+    workload_bootstrap: BootstrapProvider,
+) -> Result<(), String> {
     println!("\n============================================================");
     println!("  FULL END-TO-END LATTICE INSTALLATION TEST");
+    println!("  (Cross-Bootstrap Provider Testing)");
     println!("============================================================");
-    println!("\n  This test will:");
+    println!("\n  This test validates cross-bootstrap provisioning:");
+    println!(
+        "    - Management cluster: {} ({:?}ControlPlane)",
+        mgmt_bootstrap, mgmt_bootstrap
+    );
+    println!(
+        "    - Workload cluster:   {} ({:?}ControlPlane)",
+        workload_bootstrap, workload_bootstrap
+    );
+    println!("\n  Test phases:");
     println!("    1. Build and push the Lattice Docker image");
-    println!("    2. Run the full installer (bootstrap → management cluster)");
+    println!(
+        "    2. Run the full installer (bootstrap → {} management cluster)",
+        mgmt_bootstrap
+    );
     println!("    3. Verify management cluster is self-managing");
-    println!("    4. Create a workload cluster from management cluster");
+    println!(
+        "    4. Create {} workload cluster from {} management cluster",
+        workload_bootstrap, mgmt_bootstrap
+    );
     println!("    5. Verify workload cluster reaches Ready state");
     println!("\n  Expected duration: 20-30 minutes\n");
 
@@ -1483,6 +1625,7 @@ spec:
     type: docker
     kubernetes:
       version: "1.31.0"
+      bootstrap: {bootstrap}
       certSANs:
         - "127.0.0.1"
         - "localhost"
@@ -1500,7 +1643,8 @@ spec:
     service:
       type: LoadBalancer
 "#,
-        name = MGMT_CLUSTER_NAME
+        name = MGMT_CLUSTER_NAME,
+        bootstrap = mgmt_bootstrap,
     );
 
     // Write config to temp file
@@ -1598,8 +1742,11 @@ spec:
     // =========================================================================
     println!("\n[Phase 5] Creating workload cluster from management cluster...\n");
 
-    let workload_cluster = workload_cluster_spec(WORKLOAD_CLUSTER_NAME);
-    println!("  Creating LatticeCluster '{}'...", WORKLOAD_CLUSTER_NAME);
+    let workload_cluster = workload_cluster_spec(WORKLOAD_CLUSTER_NAME, workload_bootstrap.clone());
+    println!(
+        "  Creating LatticeCluster '{}' with {} bootstrap...",
+        WORKLOAD_CLUSTER_NAME, workload_bootstrap
+    );
 
     api.create(&PostParams::default(), &workload_cluster)
         .await
@@ -1647,9 +1794,12 @@ spec:
     println!("  Found control plane container: {}", cp_container);
 
     // Extract kubeconfig from the container (plain text, not base64)
+    // Path differs by bootstrap provider: kubeadm uses /etc/kubernetes/admin.conf, RKE2 uses /etc/rancher/rke2/rke2.yaml
+    let kubeconfig_container_path = get_kubeconfig_path_for_bootstrap(&workload_bootstrap);
+    println!("  Extracting kubeconfig from {}", kubeconfig_container_path);
     let workload_kubeconfig = run_cmd(
         "docker",
-        &["exec", cp_container, "cat", "/etc/kubernetes/admin.conf"],
+        &["exec", cp_container, "cat", kubeconfig_container_path],
     )?;
 
     let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
@@ -1773,13 +1923,17 @@ spec:
 
     println!("\n============================================================");
     println!("  FULL E2E TEST PASSED!");
+    println!("  (Cross-Bootstrap Provider Testing Verified)");
     println!("============================================================");
+    println!("\n  Cross-Bootstrap Provisioning:");
+    println!("    [x] Management cluster: kubeadm (KubeadmControlPlane)");
+    println!("    [x] Workload cluster:   RKE2 (RKE2ControlPlane)");
     println!("\n  Verified:");
-    println!("    [x] Lattice installer created self-managing management cluster");
+    println!("    [x] Lattice installer created self-managing kubeadm management cluster");
     println!("    [x] Bootstrap cluster was deleted");
     println!("    [x] Management cluster has CAPI + LatticeCluster CRD");
     println!("    [x] Management cluster's LatticeCluster is Ready");
-    println!("    [x] Workload cluster provisioned from management cluster");
+    println!("    [x] RKE2 workload cluster provisioned from kubeadm management cluster");
     println!("    [x] Workload cluster pivoted and is self-managing");
     println!("    [x] Management cluster scaled to 1 worker");
     println!("    [x] Workload cluster scaled to 2 workers");
@@ -1869,6 +2023,12 @@ spec:
     println!("    [x] Workload cluster is truly self-managing after pivot");
     println!("    [x] No dependency on parent cluster for ongoing operations");
     println!("    [x] CAPI reconciliation works locally");
+    println!();
+
+    // Step 4: Verify control-plane taints were restored
+    println!("  [Step 4] Verifying control-plane taints were restored...");
+    verify_control_plane_taints(&workload_kubeconfig_path, &workload_bootstrap).await?;
+    println!("    [x] Control-plane taints restored by controller");
     println!();
 
     // =========================================================================

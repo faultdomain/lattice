@@ -175,13 +175,15 @@ pub trait ManifestGenerator: Send + Sync {
     ///
     /// Environment variables set on the operator:
     /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on
-    /// - LATTICE_PROVIDER: So agent knows which CAPI provider to install
+    /// - LATTICE_PROVIDER: So agent knows which infrastructure provider to install
+    /// - LATTICE_BOOTSTRAP: So agent knows which bootstrap provider to use (kubeadm, rke2)
     fn generate(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<&str>,
+        bootstrap: Option<&str>,
     ) -> Vec<String>;
 }
 
@@ -201,6 +203,8 @@ pub struct ManifestConfig<'a> {
     pub cluster_name: Option<&'a str>,
     /// Provider type (docker, aws, etc.)
     pub provider: Option<&'a str>,
+    /// Bootstrap provider (kubeadm, rke2)
+    pub bootstrap: Option<&'a str>,
     /// Parent host (None for root/cell clusters)
     pub parent_host: Option<&'a str>,
     /// Parent gRPC port
@@ -223,6 +227,7 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
         config.registry_credentials,
         config.cluster_name,
         config.provider,
+        config.bootstrap,
     );
 
     // Apply FIPS relaxation if needed (for kubeadm-based bootstrap or non-FIPS targets)
@@ -296,13 +301,15 @@ impl DefaultManifestGenerator {
     ///
     /// Environment variables set:
     /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on
-    /// - LATTICE_PROVIDER: So agent knows which CAPI provider to install
+    /// - LATTICE_PROVIDER: So agent knows which infrastructure provider to install
+    /// - LATTICE_BOOTSTRAP: So agent knows which bootstrap provider to use
     fn generate_operator_manifests(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<&str>,
+        bootstrap: Option<&str>,
     ) -> Result<Vec<String>, serde_json::Error> {
         const NAMESPACE: &str = "lattice-system";
 
@@ -430,6 +437,13 @@ impl DefaultManifestGenerator {
                                         ..Default::default()
                                     });
                                 }
+                                if let Some(boot) = bootstrap {
+                                    envs.push(EnvVar {
+                                        name: "LATTICE_BOOTSTRAP".to_string(),
+                                        value: Some(boot.to_string()),
+                                        ..Default::default()
+                                    });
+                                }
                                 if registry_secret.is_some() {
                                     envs.push(EnvVar {
                                         name: "REGISTRY_CREDENTIALS_FILE".to_string(),
@@ -498,6 +512,7 @@ impl ManifestGenerator for DefaultManifestGenerator {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<&str>,
+        bootstrap: Option<&str>,
     ) -> Vec<String> {
         let mut manifests = Vec::new();
 
@@ -514,14 +529,20 @@ impl ManifestGenerator for DefaultManifestGenerator {
         // well-known k8s types should never fail. If it does, it indicates a
         // serious bug in the struct definitions.
         manifests.extend(
-            self.generate_operator_manifests(image, registry_credentials, cluster_name, provider)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "BUG: failed to serialize operator manifests to JSON: {}. \
+            self.generate_operator_manifests(
+                image,
+                registry_credentials,
+                cluster_name,
+                provider,
+                bootstrap,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "BUG: failed to serialize operator manifests to JSON: {}. \
                          This indicates a bug in the Kubernetes resource definitions.",
-                        e
-                    )
-                }),
+                    e
+                )
+            }),
         );
 
         // Note: CiliumNetworkPolicy is added by generate_all_manifests()
@@ -676,12 +697,14 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // Use the standard manifest generation - pass cluster_id, provider, and parent info
         // relax_fips is based on bootstrap provider: kubeadm clusters need relaxation,
         // RKE2 clusters are FIPS-compliant out of the box
+        let bootstrap_str = info.bootstrap.to_string();
         let config = ManifestConfig {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
             networking: info.networking.as_ref(),
             cluster_name: Some(&info.cluster_id),
             provider: Some(&info.provider),
+            bootstrap: Some(&bootstrap_str),
             parent_host: parent_host.as_deref(),
             parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
@@ -879,6 +902,7 @@ mod tests {
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
             _provider: Option<&str>,
+            _bootstrap: Option<&str>,
         ) -> Vec<String> {
             vec![format!("# Test manifest with image {}", image)]
         }
@@ -1144,7 +1168,7 @@ mod tests {
     #[test]
     fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Operator manifests are JSON, check for JSON format
         let has_namespace = manifests
@@ -1156,7 +1180,7 @@ mod tests {
     #[test]
     fn default_generator_creates_operator_deployment() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Operator manifests are JSON, check for JSON format
         let has_deployment = manifests
@@ -1168,7 +1192,7 @@ mod tests {
     #[test]
     fn default_generator_creates_service_account() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Should have ServiceAccount for operator
         let has_sa = manifests
@@ -1180,7 +1204,7 @@ mod tests {
     #[test]
     fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Should include Cilium DaemonSet (rendered from helm template)
         let has_cilium_daemonset = manifests
@@ -1440,7 +1464,7 @@ mod tests {
     #[test]
     fn story_manifest_generation() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Manifests create the lattice-system namespace (JSON format)
         let has_namespace = manifests

@@ -4,6 +4,7 @@ use std::process::Command;
 /// Versions loaded from versions.toml - single source of truth
 struct Versions {
     capi: String,
+    rke2: String,
     cilium: String,
     istio: String,
     cert_manager: String,
@@ -18,6 +19,7 @@ fn load_versions() -> Versions {
     // Simple TOML parsing for our flat structure
     let mut versions = Versions {
         capi: String::new(),
+        rke2: String::new(),
         cilium: String::new(),
         istio: String::new(),
         cert_manager: String::new(),
@@ -33,6 +35,7 @@ fn load_versions() -> Versions {
             let value = value.trim().trim_matches('"');
             match (section, key) {
                 ("capi", "version") => versions.capi = value.to_string(),
+                ("rke2", "version") => versions.rke2 = value.to_string(),
                 ("charts", "cilium") => versions.cilium = value.to_string(),
                 ("charts", "istio") => versions.istio = value.to_string(),
                 ("charts", "cert-manager") => versions.cert_manager = value.to_string(),
@@ -254,37 +257,54 @@ fn download_capi_providers(versions: &Versions) -> Result<(), Box<dyn std::error
     );
 
     // Provider directories (clusterctl local repository structure)
+    // Core CAPI providers
     let core_dir = providers_dir
         .join("cluster-api")
         .join(format!("v{}", versions.capi));
-    let bootstrap_dir = providers_dir
+    let bootstrap_kubeadm_dir = providers_dir
         .join("bootstrap-kubeadm")
         .join(format!("v{}", versions.capi));
-    let controlplane_dir = providers_dir
+    let controlplane_kubeadm_dir = providers_dir
         .join("control-plane-kubeadm")
         .join(format!("v{}", versions.capi));
     let docker_dir = providers_dir
         .join("infrastructure-docker")
         .join(format!("v{}", versions.capi));
 
+    // RKE2 providers (from rancher/cluster-api-provider-rke2)
+    let bootstrap_rke2_dir = providers_dir
+        .join("bootstrap-rke2")
+        .join(format!("v{}", versions.rke2));
+    let controlplane_rke2_dir = providers_dir
+        .join("control-plane-rke2")
+        .join(format!("v{}", versions.rke2));
+
     let core = core_dir.join("core-components.yaml");
     let core_metadata = core_dir.join("metadata.yaml");
-    let bootstrap = bootstrap_dir.join("bootstrap-components.yaml");
-    let bootstrap_metadata = bootstrap_dir.join("metadata.yaml");
-    let controlplane = controlplane_dir.join("control-plane-components.yaml");
-    let controlplane_metadata = controlplane_dir.join("metadata.yaml");
+    let bootstrap_kubeadm = bootstrap_kubeadm_dir.join("bootstrap-components.yaml");
+    let bootstrap_kubeadm_metadata = bootstrap_kubeadm_dir.join("metadata.yaml");
+    let controlplane_kubeadm = controlplane_kubeadm_dir.join("control-plane-components.yaml");
+    let controlplane_kubeadm_metadata = controlplane_kubeadm_dir.join("metadata.yaml");
     let docker = docker_dir.join("infrastructure-components-development.yaml");
     let docker_metadata = docker_dir.join("metadata.yaml");
+    let bootstrap_rke2 = bootstrap_rke2_dir.join("bootstrap-components.yaml");
+    let bootstrap_rke2_metadata = bootstrap_rke2_dir.join("metadata.yaml");
+    let controlplane_rke2 = controlplane_rke2_dir.join("control-plane-components.yaml");
+    let controlplane_rke2_metadata = controlplane_rke2_dir.join("metadata.yaml");
 
     // Check if all files exist
     let all_exist = core.exists()
         && core_metadata.exists()
-        && bootstrap.exists()
-        && bootstrap_metadata.exists()
-        && controlplane.exists()
-        && controlplane_metadata.exists()
+        && bootstrap_kubeadm.exists()
+        && bootstrap_kubeadm_metadata.exists()
+        && controlplane_kubeadm.exists()
+        && controlplane_kubeadm_metadata.exists()
         && docker.exists()
         && docker_metadata.exists()
+        && bootstrap_rke2.exists()
+        && bootstrap_rke2_metadata.exists()
+        && controlplane_rke2.exists()
+        && controlplane_rke2_metadata.exists()
         && config_path.exists();
 
     if all_exist {
@@ -301,52 +321,85 @@ fn download_capi_providers(versions: &Versions) -> Result<(), Box<dyn std::error
 
     // Create provider directories
     std::fs::create_dir_all(&core_dir)?;
-    std::fs::create_dir_all(&bootstrap_dir)?;
-    std::fs::create_dir_all(&controlplane_dir)?;
+    std::fs::create_dir_all(&bootstrap_kubeadm_dir)?;
+    std::fs::create_dir_all(&controlplane_kubeadm_dir)?;
     std::fs::create_dir_all(&docker_dir)?;
+    std::fs::create_dir_all(&bootstrap_rke2_dir)?;
+    std::fs::create_dir_all(&controlplane_rke2_dir)?;
 
-    // Download components and metadata from GitHub releases
-    let base_url = format!(
+    // Download core CAPI components from GitHub releases
+    let capi_base_url = format!(
         "https://github.com/kubernetes-sigs/cluster-api/releases/download/v{}",
         versions.capi
     );
 
-    download_file(&format!("{}/core-components.yaml", base_url), &core);
-    download_file(&format!("{}/metadata.yaml", base_url), &core_metadata);
+    download_file(&format!("{}/core-components.yaml", capi_base_url), &core);
+    download_file(&format!("{}/metadata.yaml", capi_base_url), &core_metadata);
     download_file(
-        &format!("{}/bootstrap-components.yaml", base_url),
-        &bootstrap,
+        &format!("{}/bootstrap-components.yaml", capi_base_url),
+        &bootstrap_kubeadm,
     );
-    std::fs::copy(&core_metadata, &bootstrap_metadata).ok();
+    std::fs::copy(&core_metadata, &bootstrap_kubeadm_metadata).ok();
     download_file(
-        &format!("{}/control-plane-components.yaml", base_url),
-        &controlplane,
+        &format!("{}/control-plane-components.yaml", capi_base_url),
+        &controlplane_kubeadm,
     );
-    std::fs::copy(&core_metadata, &controlplane_metadata).ok();
+    std::fs::copy(&core_metadata, &controlplane_kubeadm_metadata).ok();
     download_file(
-        &format!("{}/infrastructure-components-development.yaml", base_url),
+        &format!(
+            "{}/infrastructure-components-development.yaml",
+            capi_base_url
+        ),
         &docker,
     );
     std::fs::copy(&core_metadata, &docker_metadata).ok();
+
+    // Download RKE2 provider components from rancher/cluster-api-provider-rke2
+    eprintln!("Downloading RKE2 CAPI providers v{}...", versions.rke2);
+    let rke2_base_url = format!(
+        "https://github.com/rancher/cluster-api-provider-rke2/releases/download/v{}",
+        versions.rke2
+    );
+
+    download_file(
+        &format!("{}/bootstrap-components.yaml", rke2_base_url),
+        &bootstrap_rke2,
+    );
+    download_file(
+        &format!("{}/metadata.yaml", rke2_base_url),
+        &bootstrap_rke2_metadata,
+    );
+    download_file(
+        &format!("{}/control-plane-components.yaml", rke2_base_url),
+        &controlplane_rke2,
+    );
+    std::fs::copy(&bootstrap_rke2_metadata, &controlplane_rke2_metadata).ok();
 
     // Create clusterctl.yaml with provider definitions using file:// URLs
     let config_content = format!(
         r#"providers:
   - name: "cluster-api"
-    url: "file://{providers_dir}/cluster-api/v{version}/core-components.yaml"
+    url: "file://{providers_dir}/cluster-api/v{capi_version}/core-components.yaml"
     type: "CoreProvider"
   - name: "kubeadm"
-    url: "file://{providers_dir}/bootstrap-kubeadm/v{version}/bootstrap-components.yaml"
+    url: "file://{providers_dir}/bootstrap-kubeadm/v{capi_version}/bootstrap-components.yaml"
     type: "BootstrapProvider"
   - name: "kubeadm"
-    url: "file://{providers_dir}/control-plane-kubeadm/v{version}/control-plane-components.yaml"
+    url: "file://{providers_dir}/control-plane-kubeadm/v{capi_version}/control-plane-components.yaml"
+    type: "ControlPlaneProvider"
+  - name: "rke2"
+    url: "file://{providers_dir}/bootstrap-rke2/v{rke2_version}/bootstrap-components.yaml"
+    type: "BootstrapProvider"
+  - name: "rke2"
+    url: "file://{providers_dir}/control-plane-rke2/v{rke2_version}/control-plane-components.yaml"
     type: "ControlPlaneProvider"
   - name: "docker"
-    url: "file://{providers_dir}/infrastructure-docker/v{version}/infrastructure-components-development.yaml"
+    url: "file://{providers_dir}/infrastructure-docker/v{capi_version}/infrastructure-components-development.yaml"
     type: "InfrastructureProvider"
 "#,
         providers_dir = providers_dir.display(),
-        version = versions.capi,
+        capi_version = versions.capi,
+        rke2_version = versions.rke2,
     );
     std::fs::write(&config_path, config_content)?;
 

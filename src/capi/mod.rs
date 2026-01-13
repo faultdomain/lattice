@@ -1,8 +1,8 @@
-//! CAPI (Cluster API) management
+//! CAPI (Cluster API) provider installation
 //!
-//! Handles ensuring CAPI and infrastructure providers are installed before
-//! attempting to provision clusters. Always runs clusterctl init - it's
-//! idempotent and handles versioning automatically.
+//! Handles installing CAPI providers before provisioning clusters.
+//! Always installs both kubeadm and RKE2 bootstrap/control-plane providers
+//! to ensure clusterctl move works between any clusters.
 
 use std::process::Command;
 
@@ -14,40 +14,35 @@ use tracing::info;
 use crate::crd::ProviderType;
 use crate::Error;
 
-/// Get the clusterctl provider name for installation
-pub fn clusterctl_provider_name(provider: &ProviderType) -> &'static str {
-    match provider {
-        ProviderType::Docker => "docker",
-        ProviderType::Aws => "aws",
-        ProviderType::Gcp => "gcp",
-        ProviderType::Azure => "azure",
+/// Configuration for CAPI provider installation
+#[derive(Debug, Clone)]
+pub struct CapiProviderConfig {
+    /// Infrastructure provider (docker, aws, gcp, azure)
+    pub infrastructure: ProviderType,
+}
+
+impl CapiProviderConfig {
+    /// Create a new CAPI provider configuration
+    pub fn new(infrastructure: ProviderType) -> Self {
+        Self { infrastructure }
     }
 }
 
-/// Trait for installing CAPI and infrastructure providers
-///
-/// This trait abstracts clusterctl command execution for testability.
+/// Trait for installing CAPI providers
 #[cfg_attr(test, automock)]
 #[async_trait]
 pub trait CapiInstaller: Send + Sync {
-    /// Install CAPI with the specified infrastructure provider
-    async fn install(&self, provider: &str) -> Result<(), Error>;
+    /// Install CAPI with the specified providers
+    async fn install(&self, config: &CapiProviderConfig) -> Result<(), Error>;
 }
 
-/// Ensure CAPI and the required provider are installed
-///
-/// Always runs clusterctl init - it's idempotent and handles versioning.
-pub async fn ensure_capi_installed_with<I: CapiInstaller + ?Sized>(
+/// Ensure CAPI providers are installed
+pub async fn ensure_capi_installed<I: CapiInstaller + ?Sized>(
     installer: &I,
-    provider: &ProviderType,
+    config: &CapiProviderConfig,
 ) -> Result<(), Error> {
-    let provider_name = clusterctl_provider_name(provider);
-    installer.install(provider_name).await
+    installer.install(config).await
 }
-
-// =============================================================================
-// Real Implementation
-// =============================================================================
 
 /// Find a helm chart by prefix in the charts directory
 fn find_chart(charts_dir: &str, prefix: &str) -> Result<String, Error> {
@@ -69,25 +64,16 @@ fn find_chart(charts_dir: &str, prefix: &str) -> Result<String, Error> {
     )))
 }
 
-/// CAPI installer that uses clusterctl
+/// CAPI installer using clusterctl
 pub struct ClusterctlInstaller;
 
 impl ClusterctlInstaller {
-    /// Create a new installer
+    /// Create a new clusterctl installer
     pub fn new() -> Self {
         Self
     }
-}
 
-impl Default for ClusterctlInstaller {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ClusterctlInstaller {
-    /// Install cert-manager using local helm chart
-    /// Required before clusterctl can install CAPI providers
+    /// Install cert-manager from local helm chart (required before CAPI providers)
     fn install_cert_manager() -> Result<(), Error> {
         info!("Installing cert-manager from local helm chart");
 
@@ -97,10 +83,9 @@ impl ClusterctlInstaller {
                 .to_string()
         });
 
-        // Find cert-manager chart dynamically (supports any version)
         let chart_path = find_chart(&charts_dir, "cert-manager")?;
 
-        // Render cert-manager manifests with helm template
+        // Render manifests with helm template
         let template_output = Command::new("helm")
             .args([
                 "template",
@@ -115,14 +100,13 @@ impl ClusterctlInstaller {
             .map_err(|e| Error::capi_installation(format!("failed to run helm template: {}", e)))?;
 
         if !template_output.status.success() {
-            let stderr = String::from_utf8_lossy(&template_output.stderr);
             return Err(Error::capi_installation(format!(
                 "helm template cert-manager failed: {}",
-                stderr
+                String::from_utf8_lossy(&template_output.stderr)
             )));
         }
 
-        // Create namespace first
+        // Create namespace
         let _ = Command::new("kubectl")
             .args([
                 "create",
@@ -166,10 +150,9 @@ impl ClusterctlInstaller {
             })?;
 
         if !apply_output.status.success() {
-            let stderr = String::from_utf8_lossy(&apply_output.stderr);
             return Err(Error::capi_installation(format!(
                 "kubectl apply cert-manager failed: {}",
-                stderr
+                String::from_utf8_lossy(&apply_output.stderr)
             )));
         }
 
@@ -192,49 +175,90 @@ impl ClusterctlInstaller {
             })?;
 
         if !wait_output.status.success() {
-            let stderr = String::from_utf8_lossy(&wait_output.stderr);
             return Err(Error::capi_installation(format!(
                 "cert-manager not ready: {}",
-                stderr
+                String::from_utf8_lossy(&wait_output.stderr)
             )));
         }
 
         info!("cert-manager installed successfully");
         Ok(())
     }
+
+    /// Build clusterctl init arguments based on provider config
+    ///
+    /// Always installs BOTH kubeadm and RKE2 bootstrap/control-plane providers,
+    /// regardless of which one this cluster uses. This is required because
+    /// clusterctl move checks that the target cluster has all providers that
+    /// exist on the source cluster.
+    fn build_clusterctl_args(config: &CapiProviderConfig, config_path: &str) -> Vec<String> {
+        let infra_name = match config.infrastructure {
+            ProviderType::Docker => "docker",
+            ProviderType::Aws => "aws",
+            ProviderType::Gcp => "gcp",
+            ProviderType::Azure => "azure",
+        };
+
+        // Always install both kubeadm and RKE2 providers
+        // Must specify both explicitly - specifying one replaces the default
+        let args = vec![
+            "120".to_string(),
+            "clusterctl".to_string(),
+            "init".to_string(),
+            "--infrastructure".to_string(),
+            infra_name.to_string(),
+            "--bootstrap".to_string(),
+            "kubeadm,rke2".to_string(),
+            "--control-plane".to_string(),
+            "kubeadm,rke2".to_string(),
+            "--config".to_string(),
+            config_path.to_string(),
+        ];
+
+        args
+    }
+}
+
+impl Default for ClusterctlInstaller {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 impl CapiInstaller for ClusterctlInstaller {
-    async fn install(&self, provider: &str) -> Result<(), Error> {
-        info!(provider, "Installing CAPI with infrastructure provider");
+    async fn install(&self, config: &CapiProviderConfig) -> Result<(), Error> {
+        // Check if CAPI is already installed by looking for the Cluster CRD
+        let crd_check = Command::new("kubectl")
+            .args(["get", "crd", "clusters.cluster.x-k8s.io"])
+            .output();
 
-        // Get local provider config path (always use local - we're air-gapped by design)
+        if let Ok(output) = crd_check {
+            if output.status.success() {
+                info!("CAPI providers already installed, skipping initialization");
+                return Ok(());
+            }
+        }
+
+        info!(infrastructure = %config.infrastructure, "Installing CAPI providers (kubeadm + RKE2)");
+
         let config_path = std::env::var("CLUSTERCTL_CONFIG").unwrap_or_else(|_| {
             option_env!("CLUSTERCTL_CONFIG")
                 .unwrap_or("/providers/clusterctl.yaml")
                 .to_string()
         });
 
-        info!(config = %config_path, "Using clusterctl config file");
-
-        // First, install cert-manager using our local helm chart
-        // clusterctl expects cert-manager to be ready before installing providers
+        // Install cert-manager first (required by CAPI)
         Self::install_cert_manager()?;
 
-        // Set environment variables for air-gapped operation
-        // GOPROXY=off prevents Go proxy lookups
-        // CLUSTERCTL_DISABLE_VERSIONCHECK=true skips version check requiring internet
+        // Build clusterctl arguments
+        let args = Self::build_clusterctl_args(config, &config_path);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        info!(args = ?args_ref, "Running clusterctl init");
+
         let output = Command::new("timeout")
-            .args([
-                "120",
-                "clusterctl",
-                "init",
-                "--infrastructure",
-                provider,
-                "--config",
-                &config_path,
-            ])
+            .args(&args_ref)
             .env("GOPROXY", "off")
             .env("CLUSTERCTL_DISABLE_VERSIONCHECK", "true")
             .output()
@@ -249,123 +273,61 @@ impl CapiInstaller for ClusterctlInstaller {
             )));
         }
 
-        info!("CAPI installed successfully");
+        info!("CAPI providers installed successfully");
         Ok(())
     }
-}
-
-/// Convenience function to ensure CAPI is installed using default implementation
-pub async fn ensure_capi_installed(provider: &ProviderType) -> Result<(), Error> {
-    let installer = ClusterctlInstaller::new();
-    ensure_capi_installed_with(&installer, provider).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::ProviderType;
-    use mockall::predicate::*;
-
-    // ==========================================================================
-    // Story: Provider Name Mapping
-    // ==========================================================================
 
     #[test]
-    fn when_installing_providers_clusterctl_names_are_lowercase() {
-        assert_eq!(clusterctl_provider_name(&ProviderType::Docker), "docker");
-        assert_eq!(clusterctl_provider_name(&ProviderType::Aws), "aws");
-        assert_eq!(clusterctl_provider_name(&ProviderType::Gcp), "gcp");
-        assert_eq!(clusterctl_provider_name(&ProviderType::Azure), "azure");
+    fn always_installs_both_kubeadm_and_rke2_providers() {
+        let config = CapiProviderConfig::new(ProviderType::Docker);
+        let args = ClusterctlInstaller::build_clusterctl_args(&config, "/test/config.yaml");
+
+        assert!(args.contains(&"--infrastructure".to_string()));
+        assert!(args.contains(&"docker".to_string()));
+        assert!(args.contains(&"--bootstrap".to_string()));
+        assert!(args.contains(&"kubeadm,rke2".to_string()));
+        assert!(args.contains(&"--control-plane".to_string()));
     }
 
-    // ==========================================================================
-    // Story: CAPI Installation
-    //
-    // ensure_capi_installed_with always runs clusterctl init - it's idempotent
-    // and handles versioning automatically.
-    // ==========================================================================
+    #[test]
+    fn all_infrastructure_providers_map_correctly() {
+        for (provider, expected) in [
+            (ProviderType::Docker, "docker"),
+            (ProviderType::Aws, "aws"),
+            (ProviderType::Gcp, "gcp"),
+            (ProviderType::Azure, "azure"),
+        ] {
+            let config = CapiProviderConfig::new(provider);
+            let args = ClusterctlInstaller::build_clusterctl_args(&config, "/test/config.yaml");
+            assert!(args.contains(&expected.to_string()));
+        }
+    }
 
-    /// ensure_capi calls installer with "docker" for Docker provider
     #[tokio::test]
-    async fn when_provider_is_docker_install_with_docker_name() {
+    async fn mock_installer_can_be_used() {
         let mut installer = MockCapiInstaller::new();
-        installer
-            .expect_install()
-            .with(eq("docker"))
-            .times(1)
-            .returning(|_| Ok(()));
+        installer.expect_install().returning(|_| Ok(()));
 
-        let result = ensure_capi_installed_with(&installer, &ProviderType::Docker).await;
+        let config = CapiProviderConfig::new(ProviderType::Docker);
+        let result = ensure_capi_installed(&installer, &config).await;
         assert!(result.is_ok());
     }
 
-    /// ensure_capi calls installer with "aws" for AWS provider
     #[tokio::test]
-    async fn when_provider_is_aws_install_with_aws_name() {
+    async fn mock_installer_propagates_errors() {
         let mut installer = MockCapiInstaller::new();
         installer
             .expect_install()
-            .with(eq("aws"))
-            .times(1)
-            .returning(|_| Ok(()));
+            .returning(|_| Err(Error::capi_installation("test error".to_string())));
 
-        let result = ensure_capi_installed_with(&installer, &ProviderType::Aws).await;
-        assert!(result.is_ok());
-    }
-
-    /// ensure_capi calls installer with "gcp" for GCP provider
-    #[tokio::test]
-    async fn when_provider_is_gcp_install_with_gcp_name() {
-        let mut installer = MockCapiInstaller::new();
-        installer
-            .expect_install()
-            .with(eq("gcp"))
-            .times(1)
-            .returning(|_| Ok(()));
-
-        let result = ensure_capi_installed_with(&installer, &ProviderType::Gcp).await;
-        assert!(result.is_ok());
-    }
-
-    /// ensure_capi calls installer with "azure" for Azure provider
-    #[tokio::test]
-    async fn when_provider_is_azure_install_with_azure_name() {
-        let mut installer = MockCapiInstaller::new();
-        installer
-            .expect_install()
-            .with(eq("azure"))
-            .times(1)
-            .returning(|_| Ok(()));
-
-        let result = ensure_capi_installed_with(&installer, &ProviderType::Azure).await;
-        assert!(result.is_ok());
-    }
-
-    /// When installation fails, the error propagates to the caller
-    #[tokio::test]
-    async fn when_installation_fails_error_propagates() {
-        let mut installer = MockCapiInstaller::new();
-        installer
-            .expect_install()
-            .with(eq("docker"))
-            .returning(|_| {
-                Err(Error::capi_installation(
-                    "clusterctl init failed: timeout".to_string(),
-                ))
-            });
-
-        let result = ensure_capi_installed_with(&installer, &ProviderType::Docker).await;
+        let config = CapiProviderConfig::new(ProviderType::Docker);
+        let result = ensure_capi_installed(&installer, &config).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("timeout"));
-    }
-
-    // ==========================================================================
-    // Story: ClusterctlInstaller Construction
-    // ==========================================================================
-
-    #[test]
-    fn clusterctl_installer_can_be_constructed_via_new_or_default() {
-        let _via_new = ClusterctlInstaller::new();
-        let _via_default = ClusterctlInstaller::default();
+        assert!(result.unwrap_err().to_string().contains("test error"));
     }
 }

@@ -296,18 +296,20 @@ async fn central_proxy_handler(
         // Create a stream that yields body chunks
         let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
 
-        // Send first chunk
+        // Single task to forward ALL chunks in order (first body, then remaining)
+        // This prevents the race condition where two separate tasks could send chunks out of order
         let first_body = first_response.body;
-        let body_tx_clone = body_tx.clone();
-        tokio::spawn(async move {
-            if !first_body.is_empty() {
-                let _ = body_tx_clone.send(Ok(Bytes::from(first_body))).await;
-            }
-        });
-
-        // Spawn task to forward remaining chunks
         let request_id_clone = request_id.clone();
         tokio::spawn(async move {
+            // Send first body chunk BEFORE processing any other chunks
+            if !first_body.is_empty() {
+                if body_tx.send(Ok(Bytes::from(first_body))).await.is_err() {
+                    debug!(request_id = %request_id_clone, "Body channel closed on first chunk");
+                    return;
+                }
+            }
+
+            // Now forward remaining chunks from the agent
             while let Some(chunk) = response_rx.recv().await {
                 if !chunk.body.is_empty()
                     && body_tx.send(Ok(Bytes::from(chunk.body))).await.is_err()

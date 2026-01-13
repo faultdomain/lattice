@@ -16,12 +16,23 @@ TOKEN="{{ token }}"
 CA_CERT="{{ ca_cert_path }}"
 
 MANIFEST_FILE="/tmp/bootstrap-manifests.yaml"
-KUBECONFIG="/etc/kubernetes/admin.conf"
+
+# Auto-detect kubeconfig path based on bootstrap type
+if [ -f "/etc/rancher/rke2/rke2.yaml" ]; then
+  KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
+elif [ -f "/etc/kubernetes/admin.conf" ]; then
+  KUBECONFIG="/etc/kubernetes/admin.conf"
+else
+  echo "ERROR: No kubeconfig found at /etc/rancher/rke2/rke2.yaml or /etc/kubernetes/admin.conf"
+  exit 1
+fi
 
 echo "Bootstrapping cluster $CLUSTER_NAME from $ENDPOINT"
 
-# Untaint control plane so pods can schedule
+# Untaint control plane so pods can schedule (CAPI controllers don't have tolerations)
+# Remove kubeadm taint and RKE2 taints (RKE2 taints both control-plane and etcd nodes)
 kubectl --kubeconfig="$KUBECONFIG" taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- || true
+kubectl --kubeconfig="$KUBECONFIG" taint nodes --all node-role.kubernetes.io/etcd:NoExecute- || true
 
 # Fetch manifests with retry and exponential backoff
 echo "Fetching bootstrap manifests from parent..."

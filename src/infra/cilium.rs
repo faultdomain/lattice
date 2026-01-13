@@ -206,6 +206,8 @@ spec:
           - capi-system
           - capi-kubeadm-bootstrap-system
           - capi-kubeadm-control-plane-system
+          - rke2-bootstrap-system
+          - rke2-control-plane-system
           - capd-system
           - capo-system
   egress:
