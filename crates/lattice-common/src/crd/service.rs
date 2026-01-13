@@ -71,7 +71,7 @@ impl DependencyDirection {
 /// Type of resource dependency
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
-#[non_exhaustive]
+
 pub enum ResourceType {
     /// Internal service (another LatticeService)
     #[default]
@@ -369,7 +369,7 @@ pub struct DeploySpec {
 
 /// Service lifecycle phase
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[non_exhaustive]
+
 pub enum ServicePhase {
     /// Service is waiting for configuration
     #[default]

@@ -67,20 +67,18 @@ COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
 
 WORKDIR /app
 
-# Copy everything needed for build
-COPY Cargo.toml Cargo.lock build.rs versions.toml ./
-COPY proto ./proto
-COPY src ./src
-COPY benches ./benches
+# Copy workspace structure
+COPY Cargo.toml Cargo.lock versions.toml ./
+COPY crates ./crates
 COPY scripts ./scripts
 
 # Build with FIPS if enabled, otherwise standard build
 RUN if [ -n "$FIPS" ]; then \
         echo "Building with FIPS support..." && \
-        cargo build --release --features fips; \
+        cargo build --release --features fips -p lattice-operator; \
     else \
         echo "Building without FIPS..." && \
-        cargo build --release; \
+        cargo build --release -p lattice-operator; \
     fi
 
 # -----------------------------------------------------------------------------
@@ -105,14 +103,14 @@ COPY --from=go-builder /usr/local/bin/clusterctl /usr/local/bin/clusterctl
 # Copy Lattice binary
 COPY --from=rust-builder /app/target/release/lattice /usr/local/bin/lattice
 
-# Copy helm charts from builder (downloaded by build.rs)
-COPY --from=rust-builder /app/test-charts /charts
+# Copy helm charts from source (pre-downloaded)
+COPY test-charts /charts
 
-# Copy CAPI providers from builder (downloaded by build.rs)
-COPY --from=rust-builder /app/test-providers /providers
+# Copy CAPI providers from source (pre-downloaded)
+COPY test-providers /providers
 
 # Copy scripts for templating
-COPY --from=rust-builder /app/scripts /scripts
+COPY scripts /scripts
 
 # Create clusterctl config with local provider repositories (kubeadm + RKE2)
 RUN echo "providers:" > /providers/clusterctl.yaml && \

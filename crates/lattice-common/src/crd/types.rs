@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Supported infrastructure provider types
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-#[non_exhaustive]
+
 pub enum ProviderType {
     /// Docker/Kind provider for local development
     #[default]
@@ -64,7 +64,7 @@ impl std::fmt::Display for ProviderType {
 /// - Rke2: RKE2 bootstrap (FIPS-compliant out of the box)
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-#[non_exhaustive]
+
 pub enum BootstrapProvider {
     /// Standard kubeadm bootstrap (default)
     /// Note: May require FIPS relaxation when communicating with non-FIPS clusters
@@ -249,7 +249,7 @@ pub struct ServiceRef {
 
 /// Cluster lifecycle phase
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[non_exhaustive]
+
 pub enum ClusterPhase {
     /// Cluster is waiting to be provisioned
     #[default]

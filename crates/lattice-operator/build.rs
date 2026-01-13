@@ -10,13 +10,14 @@ struct Versions {
     cert_manager: String,
 }
 
-/// Load versions from versions.toml
+/// Load versions from versions.toml in workspace root
 fn load_versions() -> Versions {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let versions_path = Path::new(&manifest_dir).join("versions.toml");
+    // Go up two levels: crates/lattice-operator -> workspace root
+    let workspace_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
+    let versions_path = workspace_root.join("versions.toml");
     let content = std::fs::read_to_string(&versions_path).expect("Failed to read versions.toml");
 
-    // Simple TOML parsing for our flat structure
     let mut versions = Versions {
         capi: String::new(),
         rke2: String::new(),
@@ -44,49 +45,22 @@ fn load_versions() -> Versions {
         }
     }
 
-    // Re-run if versions.toml changes
-    println!("cargo:rerun-if-changed=versions.toml");
+    println!("cargo:rerun-if-changed={}", versions_path.display());
 
     versions
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
+    let workspace_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
+
     let versions = load_versions();
 
-    // Compile proto files
-    tonic_build::configure()
-        .build_server(true)
-        .build_client(true)
-        .compile_protos(&["proto/agent.proto"], &["proto"])?;
+    // Set env vars pointing to workspace root directories
+    let charts_dir = workspace_root.join("test-charts");
+    let providers_dir = workspace_root.join("test-providers");
+    let scripts_dir = workspace_root.join("scripts");
 
-    // Re-run if proto files change
-    println!("cargo:rerun-if-changed=proto/agent.proto");
-
-    // Download helm charts for local development/testing if they don't exist
-    download_helm_charts(&versions)?;
-
-    // Download CAPI providers for offline clusterctl init
-    download_capi_providers(&versions)?;
-
-    Ok(())
-}
-
-/// Download helm charts for local testing if not present
-fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
-    let charts_dir = Path::new(&manifest_dir).join("test-charts");
-
-    // Check if all required charts exist
-    let cilium_chart = charts_dir.join(format!("cilium-{}.tgz", versions.cilium));
-    let base_chart = charts_dir.join(format!("base-{}.tgz", versions.istio));
-    let istiod_chart = charts_dir.join(format!("istiod-{}.tgz", versions.istio));
-    let cni_chart = charts_dir.join(format!("cni-{}.tgz", versions.istio));
-    let ztunnel_chart = charts_dir.join(format!("ztunnel-{}.tgz", versions.istio));
-    let cert_manager_chart =
-        charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
-
-    // Set env vars for runtime code
-    let scripts_dir = Path::new(&manifest_dir).join("scripts");
     println!(
         "cargo:rustc-env=LATTICE_CHARTS_DIR={}",
         charts_dir.display()
@@ -100,6 +74,31 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
     println!("cargo:rustc-env=CAPI_VERSION={}", versions.capi);
     println!("cargo:rustc-env=RKE2_VERSION={}", versions.rke2);
 
+    let config_path = providers_dir.join("clusterctl.yaml");
+    println!(
+        "cargo:rustc-env=CLUSTERCTL_CONFIG={}",
+        config_path.display()
+    );
+
+    // Download charts and providers if needed
+    download_helm_charts(&versions, &charts_dir)?;
+    download_capi_providers(&versions, &providers_dir)?;
+
+    Ok(())
+}
+
+fn download_helm_charts(
+    versions: &Versions,
+    charts_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cilium_chart = charts_dir.join(format!("cilium-{}.tgz", versions.cilium));
+    let base_chart = charts_dir.join(format!("base-{}.tgz", versions.istio));
+    let istiod_chart = charts_dir.join(format!("istiod-{}.tgz", versions.istio));
+    let cni_chart = charts_dir.join(format!("cni-{}.tgz", versions.istio));
+    let ztunnel_chart = charts_dir.join(format!("ztunnel-{}.tgz", versions.istio));
+    let cert_manager_chart =
+        charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
+
     if cilium_chart.exists()
         && base_chart.exists()
         && istiod_chart.exists()
@@ -110,16 +109,13 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
         return Ok(());
     }
 
-    // Check if helm is available
     if Command::new("helm").arg("version").output().is_err() {
         eprintln!("helm not found, skipping chart download");
         return Ok(());
     }
 
-    // Create charts directory
-    std::fs::create_dir_all(&charts_dir)?;
+    std::fs::create_dir_all(charts_dir)?;
 
-    // Add repos (ignore errors if already added)
     let _ = Command::new("helm")
         .args(["repo", "add", "cilium", "https://helm.cilium.io/"])
         .output();
@@ -136,10 +132,9 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
         .output();
     let _ = Command::new("helm").args(["repo", "update"]).output();
 
-    // Pull charts if not present
     if !cilium_chart.exists() {
         eprintln!("Downloading Cilium chart v{}...", versions.cilium);
-        let status = Command::new("helm")
+        let _ = Command::new("helm")
             .args([
                 "pull",
                 "cilium/cilium",
@@ -147,16 +142,12 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
                 &versions.cilium,
                 "--destination",
             ])
-            .arg(&charts_dir)
-            .status()?;
-        if !status.success() {
-            eprintln!("Failed to download Cilium chart");
-        }
+            .arg(charts_dir)
+            .status();
     }
-
     if !base_chart.exists() {
         eprintln!("Downloading Istio base chart v{}...", versions.istio);
-        let status = Command::new("helm")
+        let _ = Command::new("helm")
             .args([
                 "pull",
                 "istio/base",
@@ -164,16 +155,12 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
                 &versions.istio,
                 "--destination",
             ])
-            .arg(&charts_dir)
-            .status()?;
-        if !status.success() {
-            eprintln!("Failed to download Istio base chart");
-        }
+            .arg(charts_dir)
+            .status();
     }
-
     if !istiod_chart.exists() {
         eprintln!("Downloading Istio istiod chart v{}...", versions.istio);
-        let status = Command::new("helm")
+        let _ = Command::new("helm")
             .args([
                 "pull",
                 "istio/istiod",
@@ -181,16 +168,12 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
                 &versions.istio,
                 "--destination",
             ])
-            .arg(&charts_dir)
-            .status()?;
-        if !status.success() {
-            eprintln!("Failed to download Istio istiod chart");
-        }
+            .arg(charts_dir)
+            .status();
     }
-
     if !cni_chart.exists() {
         eprintln!("Downloading Istio CNI chart v{}...", versions.istio);
-        let status = Command::new("helm")
+        let _ = Command::new("helm")
             .args([
                 "pull",
                 "istio/cni",
@@ -198,16 +181,12 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
                 &versions.istio,
                 "--destination",
             ])
-            .arg(&charts_dir)
-            .status()?;
-        if !status.success() {
-            eprintln!("Failed to download Istio CNI chart");
-        }
+            .arg(charts_dir)
+            .status();
     }
-
     if !ztunnel_chart.exists() {
         eprintln!("Downloading Istio ztunnel chart v{}...", versions.istio);
-        let status = Command::new("helm")
+        let _ = Command::new("helm")
             .args([
                 "pull",
                 "istio/ztunnel",
@@ -215,19 +194,15 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
                 &versions.istio,
                 "--destination",
             ])
-            .arg(&charts_dir)
-            .status()?;
-        if !status.success() {
-            eprintln!("Failed to download Istio ztunnel chart");
-        }
+            .arg(charts_dir)
+            .status();
     }
-
     if !cert_manager_chart.exists() {
         eprintln!(
             "Downloading cert-manager chart v{}...",
             versions.cert_manager
         );
-        let status = Command::new("helm")
+        let _ = Command::new("helm")
             .args([
                 "pull",
                 "jetstack/cert-manager",
@@ -235,30 +210,19 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
                 &versions.cert_manager,
                 "--destination",
             ])
-            .arg(&charts_dir)
-            .status()?;
-        if !status.success() {
-            eprintln!("Failed to download cert-manager chart");
-        }
+            .arg(charts_dir)
+            .status();
     }
 
     Ok(())
 }
 
-/// Download CAPI providers for offline clusterctl init
-fn download_capi_providers(versions: &Versions) -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
-    let providers_dir = Path::new(&manifest_dir).join("test-providers");
-
-    // Set env var for clusterctl config location
+fn download_capi_providers(
+    versions: &Versions,
+    providers_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = providers_dir.join("clusterctl.yaml");
-    println!(
-        "cargo:rustc-env=CLUSTERCTL_CONFIG={}",
-        config_path.display()
-    );
 
-    // Provider directories (clusterctl local repository structure)
-    // Core CAPI providers
     let core_dir = providers_dir
         .join("cluster-api")
         .join(format!("v{}", versions.capi));
@@ -271,8 +235,6 @@ fn download_capi_providers(versions: &Versions) -> Result<(), Box<dyn std::error
     let docker_dir = providers_dir
         .join("infrastructure-docker")
         .join(format!("v{}", versions.capi));
-
-    // RKE2 providers (from rancher/cluster-api-provider-rke2)
     let bootstrap_rke2_dir = providers_dir
         .join("bootstrap-rke2")
         .join(format!("v{}", versions.rke2));
@@ -281,38 +243,12 @@ fn download_capi_providers(versions: &Versions) -> Result<(), Box<dyn std::error
         .join(format!("v{}", versions.rke2));
 
     let core = core_dir.join("core-components.yaml");
-    let core_metadata = core_dir.join("metadata.yaml");
-    let bootstrap_kubeadm = bootstrap_kubeadm_dir.join("bootstrap-components.yaml");
-    let bootstrap_kubeadm_metadata = bootstrap_kubeadm_dir.join("metadata.yaml");
-    let controlplane_kubeadm = controlplane_kubeadm_dir.join("control-plane-components.yaml");
-    let controlplane_kubeadm_metadata = controlplane_kubeadm_dir.join("metadata.yaml");
-    let docker = docker_dir.join("infrastructure-components-development.yaml");
-    let docker_metadata = docker_dir.join("metadata.yaml");
     let bootstrap_rke2 = bootstrap_rke2_dir.join("bootstrap-components.yaml");
-    let bootstrap_rke2_metadata = bootstrap_rke2_dir.join("metadata.yaml");
-    let controlplane_rke2 = controlplane_rke2_dir.join("control-plane-components.yaml");
-    let controlplane_rke2_metadata = controlplane_rke2_dir.join("metadata.yaml");
 
-    // Check if all files exist
-    let all_exist = core.exists()
-        && core_metadata.exists()
-        && bootstrap_kubeadm.exists()
-        && bootstrap_kubeadm_metadata.exists()
-        && controlplane_kubeadm.exists()
-        && controlplane_kubeadm_metadata.exists()
-        && docker.exists()
-        && docker_metadata.exists()
-        && bootstrap_rke2.exists()
-        && bootstrap_rke2_metadata.exists()
-        && controlplane_rke2.exists()
-        && controlplane_rke2_metadata.exists()
-        && config_path.exists();
-
-    if all_exist {
+    if core.exists() && bootstrap_rke2.exists() && config_path.exists() {
         return Ok(());
     }
 
-    // Check if curl is available
     if Command::new("curl").arg("--version").output().is_err() {
         eprintln!("curl not found, skipping CAPI provider download");
         return Ok(());
@@ -320,7 +256,6 @@ fn download_capi_providers(versions: &Versions) -> Result<(), Box<dyn std::error
 
     eprintln!("Downloading CAPI providers v{}...", versions.capi);
 
-    // Create provider directories
     std::fs::create_dir_all(&core_dir)?;
     std::fs::create_dir_all(&bootstrap_kubeadm_dir)?;
     std::fs::create_dir_all(&controlplane_kubeadm_dir)?;
@@ -328,55 +263,71 @@ fn download_capi_providers(versions: &Versions) -> Result<(), Box<dyn std::error
     std::fs::create_dir_all(&bootstrap_rke2_dir)?;
     std::fs::create_dir_all(&controlplane_rke2_dir)?;
 
-    // Download core CAPI components from GitHub releases
     let capi_base_url = format!(
         "https://github.com/kubernetes-sigs/cluster-api/releases/download/v{}",
         versions.capi
     );
-
-    download_file(&format!("{}/core-components.yaml", capi_base_url), &core);
-    download_file(&format!("{}/metadata.yaml", capi_base_url), &core_metadata);
+    download_file(
+        &format!("{}/core-components.yaml", capi_base_url),
+        &core_dir.join("core-components.yaml"),
+    );
+    download_file(
+        &format!("{}/metadata.yaml", capi_base_url),
+        &core_dir.join("metadata.yaml"),
+    );
     download_file(
         &format!("{}/bootstrap-components.yaml", capi_base_url),
-        &bootstrap_kubeadm,
+        &bootstrap_kubeadm_dir.join("bootstrap-components.yaml"),
     );
-    std::fs::copy(&core_metadata, &bootstrap_kubeadm_metadata).ok();
+    std::fs::copy(
+        core_dir.join("metadata.yaml"),
+        bootstrap_kubeadm_dir.join("metadata.yaml"),
+    )
+    .ok();
     download_file(
         &format!("{}/control-plane-components.yaml", capi_base_url),
-        &controlplane_kubeadm,
+        &controlplane_kubeadm_dir.join("control-plane-components.yaml"),
     );
-    std::fs::copy(&core_metadata, &controlplane_kubeadm_metadata).ok();
+    std::fs::copy(
+        core_dir.join("metadata.yaml"),
+        controlplane_kubeadm_dir.join("metadata.yaml"),
+    )
+    .ok();
     download_file(
         &format!(
             "{}/infrastructure-components-development.yaml",
             capi_base_url
         ),
-        &docker,
+        &docker_dir.join("infrastructure-components-development.yaml"),
     );
-    std::fs::copy(&core_metadata, &docker_metadata).ok();
+    std::fs::copy(
+        core_dir.join("metadata.yaml"),
+        docker_dir.join("metadata.yaml"),
+    )
+    .ok();
 
-    // Download RKE2 provider components from rancher/cluster-api-provider-rke2
-    eprintln!("Downloading RKE2 CAPI providers v{}...", versions.rke2);
     let rke2_base_url = format!(
         "https://github.com/rancher/cluster-api-provider-rke2/releases/download/v{}",
         versions.rke2
     );
-
     download_file(
         &format!("{}/bootstrap-components.yaml", rke2_base_url),
-        &bootstrap_rke2,
+        &bootstrap_rke2_dir.join("bootstrap-components.yaml"),
     );
     download_file(
         &format!("{}/metadata.yaml", rke2_base_url),
-        &bootstrap_rke2_metadata,
+        &bootstrap_rke2_dir.join("metadata.yaml"),
     );
     download_file(
         &format!("{}/control-plane-components.yaml", rke2_base_url),
-        &controlplane_rke2,
+        &controlplane_rke2_dir.join("control-plane-components.yaml"),
     );
-    std::fs::copy(&bootstrap_rke2_metadata, &controlplane_rke2_metadata).ok();
+    std::fs::copy(
+        bootstrap_rke2_dir.join("metadata.yaml"),
+        controlplane_rke2_dir.join("metadata.yaml"),
+    )
+    .ok();
 
-    // Create clusterctl.yaml with provider definitions using file:// URLs
     let config_content = format!(
         r#"providers:
   - name: "cluster-api"

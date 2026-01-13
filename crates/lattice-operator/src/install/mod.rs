@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use lattice::install::{InstallConfig, Installer};
+//! use lattice_operator::install::{InstallConfig, Installer};
 //! use std::path::PathBuf;
 //! use std::time::Duration;
 //!

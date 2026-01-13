@@ -642,9 +642,9 @@ BOOTSTRAP_SCRIPT"#
 ///
 /// ```ignore
 /// use async_trait::async_trait;
-/// use lattice::provider::{Provider, CAPIManifest, BootstrapInfo};
-/// use lattice::crd::{LatticeCluster, ProviderSpec};
-/// use lattice::Result;
+/// use lattice_operator::provider::{Provider, CAPIManifest, BootstrapInfo};
+/// use lattice_operator::crd::{LatticeCluster, ProviderSpec};
+/// use lattice_operator::Result;
 ///
 /// struct MyProvider;
 ///

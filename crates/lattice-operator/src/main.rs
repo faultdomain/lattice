@@ -11,15 +11,15 @@ use kube::runtime::Controller;
 use kube::{Api, Client, CustomResourceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use lattice::agent::client::{AgentClient, AgentClientConfig};
-use lattice::controller::{
+use lattice_operator::agent::client::{AgentClient, AgentClientConfig};
+use lattice_operator::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
     service_reconcile, Context, ServiceContext,
 };
-use lattice::crd::{LatticeCluster, LatticeExternalService, LatticeService};
-use lattice::infra::IstioReconciler;
-use lattice::install::{InstallConfig, Installer};
-use lattice::parent::{ParentConfig, ParentServers};
+use lattice_operator::crd::{LatticeCluster, LatticeExternalService, LatticeService};
+use lattice_operator::infra::IstioReconciler;
+use lattice_operator::install::{InstallConfig, Installer};
+use lattice_operator::parent::{ParentConfig, ParentServers};
 
 /// Lattice - CRD-driven Kubernetes operator for multi-cluster lifecycle management
 #[derive(Parser, Debug)]
@@ -88,14 +88,14 @@ struct InstallArgs {
     /// RKE2 is FIPS-compliant out of the box and is the recommended default.
     /// Kubeadm requires FIPS relaxation to communicate with its API server.
     #[arg(long, default_value = "rke2", value_parser = parse_bootstrap_provider)]
-    bootstrap: lattice::crd::BootstrapProvider,
+    bootstrap: lattice_operator::crd::BootstrapProvider,
 }
 
 /// Parse bootstrap provider from CLI argument
-fn parse_bootstrap_provider(s: &str) -> Result<lattice::crd::BootstrapProvider, String> {
+fn parse_bootstrap_provider(s: &str) -> Result<lattice_operator::crd::BootstrapProvider, String> {
     match s.to_lowercase().as_str() {
-        "rke2" => Ok(lattice::crd::BootstrapProvider::Rke2),
-        "kubeadm" => Ok(lattice::crd::BootstrapProvider::Kubeadm),
+        "rke2" => Ok(lattice_operator::crd::BootstrapProvider::Rke2),
+        "kubeadm" => Ok(lattice_operator::crd::BootstrapProvider::Kubeadm),
         _ => Err(format!(
             "invalid bootstrap provider '{}', must be 'rke2' or 'kubeadm'",
             s
@@ -269,7 +269,7 @@ async fn ensure_crds_installed(client: &Client) -> anyhow::Result<()> {
 /// `lattice.dev/service` label are intercepted.
 async fn ensure_webhook_config(
     client: &Client,
-    ca: &std::sync::Arc<lattice::pki::CertificateAuthority>,
+    ca: &std::sync::Arc<lattice_operator::pki::CertificateAuthority>,
 ) -> anyhow::Result<()> {
     use k8s_openapi::api::admissionregistration::v1::{
         MutatingWebhook, MutatingWebhookConfiguration, RuleWithOperations, ServiceReference,
@@ -299,7 +299,7 @@ async fn ensure_webhook_config(
                 port: 443,
                 target_port: Some(
                     k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(
-                        lattice::DEFAULT_BOOTSTRAP_PORT as i32,
+                        lattice_operator::DEFAULT_BOOTSTRAP_PORT as i32,
                     ),
                 ),
                 ..Default::default()
@@ -459,12 +459,12 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
         // Apply Cilium policy for Istio ambient mode compatibility
         // This allows ztunnel's SNAT-ed health probes (from 169.254.7.127) to reach pods
         // Required when using default-deny network policies with Istio ambient
-        let ztunnel_allow = lattice::infra::generate_ztunnel_allowlist();
+        let ztunnel_allow = lattice_operator::infra::generate_ztunnel_allowlist();
         apply_manifest(client, &ztunnel_allow).await?;
 
         // Apply Cilium default-deny policy for L4 defense-in-depth
         // This complements Istio's L7 AuthorizationPolicy - traffic must pass both layers
-        let cilium_default_deny = lattice::infra::generate_default_deny();
+        let cilium_default_deny = lattice_operator::infra::generate_default_deny();
         apply_manifest(client, &cilium_default_deny).await?;
     } else {
         tracing::debug!("Skipping Cilium policies on bootstrap cluster (no Cilium CRDs)");
@@ -596,7 +596,8 @@ async fn run_controller() -> anyhow::Result<()> {
     let client_clone = client.clone();
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
     tokio::spawn(async move {
-        let manifest_generator = match lattice::bootstrap::DefaultManifestGenerator::new() {
+        let manifest_generator = match lattice_operator::bootstrap::DefaultManifestGenerator::new()
+        {
             Ok(gen) => gen,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to create manifest generator");
@@ -606,7 +607,7 @@ async fn run_controller() -> anyhow::Result<()> {
 
         // Wait for LatticeCluster to get extra SANs (cell host IP)
         let extra_sans: Vec<String> = if let Some(ref cluster_name) = self_cluster_name {
-            let clusters: kube::Api<lattice::crd::LatticeCluster> =
+            let clusters: kube::Api<lattice_operator::crd::LatticeCluster> =
                 kube::Api::all(client_clone.clone());
 
             tracing::info!(cluster = %cluster_name, "Waiting for LatticeCluster before starting cell servers...");

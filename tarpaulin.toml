@@ -2,19 +2,23 @@
 # Exclude code that requires real infrastructure (tested by E2E tests)
 exclude-files = [
     # Entry points - tested by E2E
-    "src/main.rs",
-    "src/install/*",
+    "crates/lattice-operator/src/main.rs",
+    "crates/lattice-operator/src/install/*",
     # Agent gRPC - requires real network connections
-    "src/agent/client.rs",
-    "src/agent/server.rs",
+    "crates/lattice-operator/src/agent/client.rs",
+    "crates/lattice-operator/src/agent/server.rs",
     # Agent proxy - requires HTTPS server, TLS, network binding
-    "src/agent/proxy.rs",
+    "crates/lattice-operator/src/agent/proxy.rs",
     # Parent/Cell server - requires gRPC server, TLS, network binding
-    "src/parent/*",
+    "crates/lattice-operator/src/parent/*",
     # Pivot - requires real k8s clusters, clusterctl binary
-    "src/pivot/*",
+    "crates/lattice-operator/src/pivot/*",
     # CAPI - requires clusterctl binary
-    "src/capi/*",
+    "crates/lattice-operator/src/capi/*",
     # Controllers - require real k8s API, tested by E2E
-    "src/controller/*",
+    "crates/lattice-operator/src/controller/*",
+    # Generated proto code - no logic to test
+    "crates/lattice-proto/src/*",
+    # E2E test helpers and tests - require real k8s clusters
+    "crates/lattice-operator/tests/*",
 ]

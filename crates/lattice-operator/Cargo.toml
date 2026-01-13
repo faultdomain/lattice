@@ -1,0 +1,77 @@
+[package]
+name = "lattice-operator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lattice Kubernetes operator for multi-cluster lifecycle management"
+
+[features]
+default = []
+fips = ["lattice-common/fips"]
+e2e = []
+
+[dependencies]
+lattice-common.workspace = true
+lattice-proto.workspace = true
+
+kube.workspace = true
+k8s-openapi.workspace = true
+json-patch.workspace = true
+jsonptr.workspace = true
+tokio.workspace = true
+crossbeam.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+minijinja.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+time.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+axum.workspace = true
+axum-server.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+aws-lc-rs.workspace = true
+rcgen.workspace = true
+x509-parser.workspace = true
+rustls-pemfile.workspace = true
+base64.workspace = true
+pem.workspace = true
+tokio-stream.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+clap.workspace = true
+chrono.workspace = true
+schemars.workspace = true
+uuid.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+mockall.workspace = true
+proptest.workspace = true
+rstest.workspace = true
+tokio-test.workspace = true
+insta.workspace = true
+fake.workspace = true
+tempfile.workspace = true
+tower.workspace = true
+criterion.workspace = true
+
+[[bin]]
+name = "lattice"
+path = "src/main.rs"
+
+[lib]
+name = "lattice_operator"
+path = "src/lib.rs"
+
+[[bench]]
+name = "service_graph"
+harness = false

@@ -8,7 +8,7 @@ use thiserror::Error;
 
 /// Main error type for Lattice operations
 #[derive(Debug, Error)]
-#[non_exhaustive]
+
 pub enum Error {
     /// Kubernetes API error
     #[error("kubernetes error: {source}")]

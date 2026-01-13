@@ -1,19 +1,21 @@
-[package]
-name = "lattice"
+[workspace]
+resolver = "2"
+members = [
+    "crates/lattice-common",
+    "crates/lattice-proto",
+    "crates/lattice-operator",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "CRD-driven Kubernetes operator for multi-cluster lifecycle management"
 license = "Apache-2.0"
 
-[features]
-default = []
-# Use FIPS-validated crypto (required for production)
-# When enabled, aws-lc-rs uses FIPS 140-3 validated module
-fips = ["aws-lc-rs/fips"]
-# Enable full E2E tests (20-30 min, requires Docker with 8GB+ RAM)
-e2e = []
+[workspace.dependencies]
+# Internal crates
+lattice-common = { path = "crates/lattice-common" }
+lattice-proto = { path = "crates/lattice-proto" }
 
-[dependencies]
 # Kubernetes
 kube = { version = "0.98", features = ["runtime", "derive", "client", "rustls-tls", "admission"] }
 k8s-openapi = { version = "0.24", features = ["v1_32"] }
@@ -47,28 +49,28 @@ time = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# gRPC (for agent-cell communication)
+# gRPC
 tonic = { version = "0.12", features = ["tls", "transport"] }
 prost = "0.13"
 prost-types = "0.13"
 
-# HTTP (for registration webhook)
+# HTTP
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 
-# Crypto (aws-lc-rs with optional FIPS)
+# Crypto
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 aws-lc-rs = "1.12"
 
-# PKI / X509 certificates
+# PKI
 rcgen = { version = "0.14", features = ["aws_lc_rs", "pem", "x509-parser"] }
 x509-parser = { version = "0.16", features = ["verify"] }
 rustls-pemfile = "2.2"
 base64 = "0.22"
 pem = "3.0"
 
-# Streaming utilities
+# Streaming
 tokio-stream = { version = "0.1", features = ["net"] }
 
 # Async utilities
@@ -81,55 +83,22 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
-# JSON Schema generation for CRDs
+# JSON Schema
 schemars = { version = "0.8", features = ["chrono"] }
 
-# UUID generation
+# UUID
 uuid = { version = "1.11", features = ["v4"] }
 
-# Random number generation (for retry jitter)
+# Random
 rand = "0.8"
 
-[build-dependencies]
-tonic-build = "0.12"
-
-[dev-dependencies]
-# Primary mocking library
+# Dev dependencies
 mockall = "0.13"
-
-# Property-based testing
 proptest = "1.5"
-
-# Test fixtures and parameterized tests
 rstest = "0.23"
-
-# Async test utilities
 tokio-test = "0.4"
-
-# Snapshot testing
 insta = "1.41"
-
-# Fake data generation
 fake = { version = "3.0", features = ["derive"] }
-
-# Temporary files for testing
 tempfile = "3.14"
-
-# HTTP testing
 tower = { version = "0.5", features = ["util"] }
-
-# Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bin]]
-name = "lattice"
-path = "src/main.rs"
-
-[lib]
-name = "lattice"
-path = "src/lib.rs"
-
-[[bench]]
-name = "service_graph"
-harness = false
-

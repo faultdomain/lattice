@@ -138,14 +138,11 @@ impl DockerProvider {
             _ => json!({}),
         };
 
-        Ok(CAPIManifest::new(
-            api_version,
-            "DockerCluster",
-            name,
-            &namespace,
+        Ok(
+            CAPIManifest::new(api_version, "DockerCluster", name, &namespace)
+                .with_labels(labels)
+                .with_spec(spec),
         )
-        .with_labels(labels)
-        .with_spec(spec))
     }
 
     /// Generate HAProxy ConfigMap for RKE2 clusters
@@ -717,7 +714,10 @@ mod tests {
                 .iter()
                 .find(|m| m.metadata.name == "my-cluster-control-plane")
                 .expect("should have control plane template");
-            assert_eq!(cp_template.api_version, DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2);
+            assert_eq!(
+                cp_template.api_version,
+                DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2
+            );
 
             let worker_template = machine_templates
                 .iter()

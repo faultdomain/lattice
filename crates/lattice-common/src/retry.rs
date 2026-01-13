@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use lattice::retry::{retry_with_backoff, RetryConfig};
+//! use lattice_operator::retry::{retry_with_backoff, RetryConfig};
 //!
 //! let result = retry_with_backoff(
 //!     &RetryConfig::default(),

@@ -1891,7 +1891,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "lattice"
+name = "lattice-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "base64",
+ "chrono",
+ "dashmap",
+ "k8s-openapi",
+ "kube",
+ "minijinja",
+ "proptest",
+ "rand 0.8.5",
+ "rstest",
+ "rustls",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-operator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1912,6 +1937,8 @@ dependencies = [
  "jsonptr",
  "k8s-openapi",
  "kube",
+ "lattice-common",
+ "lattice-proto",
  "minijinja",
  "mockall",
  "parking_lot",
@@ -1936,12 +1963,21 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "tonic",
- "tonic-build",
  "tower 0.5.2",
  "tracing",
  "tracing-subscriber",
  "uuid",
  "x509-parser 0.16.0",
+]
+
+[[package]]
+name = "lattice-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]
