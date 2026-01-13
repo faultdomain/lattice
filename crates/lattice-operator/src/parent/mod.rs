@@ -208,6 +208,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             self.ca.clone(),
             self.config.image.clone(),
             self.config.registry_credentials.clone(),
+            Some(kube_client.clone()),
         ));
 
         // Store bootstrap state

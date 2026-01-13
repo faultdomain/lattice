@@ -468,9 +468,10 @@ pub async fn reconcile(
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         ServicePhase::Failed => {
-            // Failed state requires manual intervention or spec changes
-            warn!("service is in Failed state, awaiting spec change");
-            Ok(Action::await_change())
+            // Retry failed services periodically - failure may have been transient
+            // (e.g., webhook not ready yet, temporary network issue)
+            warn!("service is in Failed state, will retry");
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
     }
 }

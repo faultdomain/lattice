@@ -1131,10 +1131,8 @@ const FRONTEND_ADMIN_EXPECTED: &[(&str, bool)] = &[
 ];
 
 /// Verify traffic patterns by checking all 3 frontend service logs
+/// Note: Caller must wait for traffic tests to run before calling this
 async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
-    println!("  Waiting for traffic tests to run (45 seconds)...");
-    sleep(Duration::from_secs(45)).await;
-
     let mut total_pass = 0;
     let mut total_fail = 0;
     let mut failures: Vec<String> = Vec::new();
@@ -1323,32 +1321,12 @@ async fn verify_control_plane_taints(
 ) -> Result<(), String> {
     println!("  Verifying control-plane taints are restored...");
 
-    // Get control-plane nodes and their taints
-    let cp_taints = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "nodes",
-            "-l",
-            "node-role.kubernetes.io/control-plane",
-            "-o",
-            "jsonpath={range .items[*]}{.metadata.name}: {.spec.taints[*].key}={.spec.taints[*].effect}{\"\\n\"}{end}",
-        ],
-    );
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(45);
 
-    println!("    Control-plane node taints:\n{}", cp_taints);
-
-    // Verify control-plane NoSchedule taint exists
-    if !cp_taints.contains("node-role.kubernetes.io/control-plane=NoSchedule") {
-        return Err("Control-plane nodes missing NoSchedule taint".to_string());
-    }
-    println!("    [x] Control-plane NoSchedule taint present");
-
-    // For RKE2, also verify etcd taint
-    if matches!(bootstrap, BootstrapProvider::Rke2) {
-        let etcd_taints = run_cmd_allow_fail(
+    loop {
+        // Get control-plane nodes and their taints (iterate per-taint for correct pairing)
+        let cp_taints = run_cmd_allow_fail(
             "kubectl",
             &[
                 "--kubeconfig",
@@ -1356,21 +1334,54 @@ async fn verify_control_plane_taints(
                 "get",
                 "nodes",
                 "-l",
-                "node-role.kubernetes.io/etcd",
+                "node-role.kubernetes.io/control-plane",
                 "-o",
-                "jsonpath={range .items[*]}{.metadata.name}: {.spec.taints[*].key}={.spec.taints[*].effect}{\"\\n\"}{end}",
+                "jsonpath={range .items[*]}{.metadata.name}: {range .spec.taints[*]}{.key}={.effect} {end}{\"\\n\"}{end}",
             ],
         );
 
-        println!("    Etcd node taints:\n{}", etcd_taints);
+        // Check control-plane NoSchedule taint
+        let has_cp_taint = cp_taints.contains("node-role.kubernetes.io/control-plane=NoSchedule");
 
-        if !etcd_taints.contains("node-role.kubernetes.io/etcd=NoExecute") {
-            return Err("Etcd nodes missing NoExecute taint".to_string());
+        // For RKE2, also check etcd taint
+        let has_etcd_taint = if matches!(bootstrap, BootstrapProvider::Rke2) {
+            let etcd_taints = run_cmd_allow_fail(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "get",
+                    "nodes",
+                    "-l",
+                    "node-role.kubernetes.io/etcd",
+                    "-o",
+                    "jsonpath={range .items[*]}{.metadata.name}: {range .spec.taints[*]}{.key}={.effect} {end}{\"\\n\"}{end}",
+                ],
+            );
+            etcd_taints.contains("node-role.kubernetes.io/etcd=NoExecute")
+        } else {
+            true
+        };
+
+        if has_cp_taint && has_etcd_taint {
+            println!("    Control-plane node taints:\n{}", cp_taints);
+            println!("    [x] Control-plane NoSchedule taint present");
+            if matches!(bootstrap, BootstrapProvider::Rke2) {
+                println!("    [x] Etcd NoExecute taint present (RKE2)");
+            }
+            return Ok(());
         }
-        println!("    [x] Etcd NoExecute taint present (RKE2)");
-    }
 
-    Ok(())
+        if start.elapsed() > timeout {
+            println!("    Control-plane node taints:\n{}", cp_taints);
+            return Err(format!(
+                "Control-plane nodes missing required taints after {}s",
+                timeout.as_secs()
+            ));
+        }
+
+        sleep(Duration::from_secs(5)).await;
+    }
 }
 
 /// Watch LatticeCluster phase transitions
@@ -1421,9 +1432,9 @@ async fn watch_cluster_phases(client: &Client, cluster_name: &str) -> Result<(),
     }
 }
 
-/// Cleanup all test resources
-fn cleanup_all() {
-    println!("\n[Cleanup] Removing all test resources...\n");
+/// Cleanup clusters and containers only (preserves images for reuse between test runs)
+fn cleanup_clusters() {
+    println!("\n[Cleanup] Removing clusters and containers...\n");
 
     // Delete bootstrap cluster if it exists
     let _ = run_cmd_allow_fail(
@@ -1470,7 +1481,29 @@ fn cleanup_all() {
     let _ = std::fs::remove_file(format!("/tmp/{}-kubeconfig-local", MGMT_CLUSTER_NAME));
     let _ = std::fs::remove_file(format!("/tmp/{}-cluster-config.yaml", MGMT_CLUSTER_NAME));
 
-    println!("  Cleanup complete!");
+    println!("  Cluster cleanup complete!");
+}
+
+/// Cleanup Docker images and build cache (call once at the end of all tests)
+fn cleanup_images() {
+    println!("\n[Cleanup] Removing Docker images and build cache...\n");
+
+    // Remove the lattice image we built
+    let _ = run_cmd_allow_fail("docker", &["rmi", "-f", LATTICE_IMAGE]);
+
+    // Prune dangling images (intermediate build stages)
+    let _ = run_cmd_allow_fail("docker", &["image", "prune", "-f"]);
+
+    // Prune build cache (can be quite large from multi-stage builds)
+    let _ = run_cmd_allow_fail("docker", &["builder", "prune", "-f"]);
+
+    println!("  Image cleanup complete!");
+}
+
+/// Cleanup all test resources (clusters + images)
+fn cleanup_all() {
+    cleanup_clusters();
+    cleanup_images();
 }
 
 // =============================================================================
@@ -1490,7 +1523,30 @@ async fn story_full_install_and_workload_provisioning() {
     // Install crypto provider for rustls/kube client (do this once at the start)
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    // =========================================================================
+    // Setup: Build image once for all test runs
+    // =========================================================================
+    println!("\n################################################################");
+    println!("#  SETUP: Building Lattice image (once for all tests)");
+    println!("################################################################\n");
+
+    // Clean up any previous test artifacts (clusters only, preserve cached images)
+    cleanup_clusters();
+
+    // Ensure Docker network has correct subnet
+    if let Err(e) = ensure_docker_network() {
+        panic!("Failed to setup Docker network: {}", e);
+    }
+
+    // Build and push the image once
+    if let Err(e) = build_and_push_lattice_image().await {
+        cleanup_all(); // Clean up on failure
+        panic!("Failed to build Lattice image: {}", e);
+    }
+
+    // =========================================================================
     // Test combination 1: kubeadm management → RKE2 workload
+    // =========================================================================
     println!("\n################################################################");
     println!("#  TEST RUN 1: kubeadm management → RKE2 workload");
     println!("################################################################\n");
@@ -1508,7 +1564,7 @@ async fn story_full_install_and_workload_provisioning() {
         Ok(Err(e)) => {
             println!("\n=== Run 1 (kubeadm→RKE2) Failed: {} ===\n", e);
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
-            println!("    kind delete clusters --all");
+            println!("    kind delete clusters --all && docker system prune -af");
             panic!("E2E test run 1 failed: {}", e);
         }
         Err(_) => {
@@ -1517,12 +1573,17 @@ async fn story_full_install_and_workload_provisioning() {
                 E2E_TIMEOUT
             );
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
-            println!("    kind delete clusters --all");
+            println!("    kind delete clusters --all && docker system prune -af");
             panic!("E2E test run 1 timed out after {:?}", E2E_TIMEOUT);
         }
     }
 
+    // Clean up clusters between runs (preserve image for reuse)
+    cleanup_clusters();
+
+    // =========================================================================
     // Test combination 2: RKE2 management → kubeadm workload
+    // =========================================================================
     println!("\n################################################################");
     println!("#  TEST RUN 2: RKE2 management → kubeadm workload");
     println!("################################################################\n");
@@ -1543,7 +1604,7 @@ async fn story_full_install_and_workload_provisioning() {
         Ok(Err(e)) => {
             println!("\n=== Run 2 (RKE2→kubeadm) Failed: {} ===\n", e);
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
-            println!("    kind delete clusters --all");
+            println!("    kind delete clusters --all && docker system prune -af");
             panic!("E2E test run 2 failed: {}", e);
         }
         Err(_) => {
@@ -1552,10 +1613,18 @@ async fn story_full_install_and_workload_provisioning() {
                 E2E_TIMEOUT
             );
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
-            println!("    kind delete clusters --all");
+            println!("    kind delete clusters --all && docker system prune -af");
             panic!("E2E test run 2 timed out after {:?}", E2E_TIMEOUT);
         }
     }
+
+    // =========================================================================
+    // Final cleanup: Remove all resources including images
+    // =========================================================================
+    println!("\n################################################################");
+    println!("#  CLEANUP: Removing all test resources");
+    println!("################################################################\n");
+    cleanup_all();
 }
 
 async fn run_full_e2e(
@@ -1576,41 +1645,24 @@ async fn run_full_e2e(
         workload_bootstrap, workload_bootstrap
     );
     println!("\n  Test phases:");
-    println!("    1. Build and push the Lattice Docker image");
     println!(
-        "    2. Run the full installer (bootstrap → {} management cluster)",
+        "    1. Run the full installer (bootstrap → {} management cluster)",
         mgmt_bootstrap
     );
-    println!("    3. Verify management cluster is self-managing");
+    println!("    2. Verify management cluster is self-managing");
     println!(
-        "    4. Create {} workload cluster from {} management cluster",
+        "    3. Create {} workload cluster from {} management cluster",
         workload_bootstrap, mgmt_bootstrap
     );
-    println!("    5. Verify workload cluster reaches Ready state");
-    println!("\n  Expected duration: 20-30 minutes\n");
+    println!("    4. Verify workload cluster reaches Ready state");
+    println!("\n  Expected duration: 15-25 minutes\n");
+
+    // Note: Image build and network setup are done once in the main test function
 
     // =========================================================================
-    // Phase 1: Cleanup any previous runs
+    // Phase 1: Run Full Installer
     // =========================================================================
-    println!("\n[Phase 1] Cleaning up previous test runs...\n");
-    cleanup_all();
-
-    // =========================================================================
-    // Phase 1.5: Ensure Docker network has correct subnet
-    // =========================================================================
-    println!("\n[Phase 1.5] Setting up Docker network...\n");
-    ensure_docker_network()?;
-
-    // =========================================================================
-    // Phase 2: Build and Push Lattice Image
-    // =========================================================================
-    println!("\n[Phase 2] Building and pushing Lattice image...\n");
-    build_and_push_lattice_image().await?;
-
-    // =========================================================================
-    // Phase 3: Run Full Installer
-    // =========================================================================
-    println!("\n[Phase 3] Running Lattice installer...\n");
+    println!("\n[Phase 1] Running Lattice installer...\n");
     println!("  This will:");
     println!("    - Create a bootstrap kind cluster");
     println!("    - Install CAPI with docker provider");
@@ -1689,9 +1741,9 @@ spec:
     println!("\n  Management cluster installation complete!");
 
     // =========================================================================
-    // Phase 4: Verify Management Cluster is Self-Managing
+    // Phase 2: Verify Management Cluster is Self-Managing
     // =========================================================================
-    println!("\n[Phase 4] Verifying management cluster is self-managing...\n");
+    println!("\n[Phase 2] Verifying management cluster is self-managing...\n");
 
     // Get kubeconfig for management cluster
     let kubeconfig_path = get_management_kubeconfig()?;
@@ -1746,9 +1798,9 @@ spec:
     println!("\n  SUCCESS: Management cluster is self-managing!");
 
     // =========================================================================
-    // Phase 5: Create Workload Cluster
+    // Phase 3: Create Workload Cluster
     // =========================================================================
-    println!("\n[Phase 5] Creating workload cluster from management cluster...\n");
+    println!("\n[Phase 3] Creating workload cluster from management cluster...\n");
 
     let workload_cluster = workload_cluster_spec(WORKLOAD_CLUSTER_NAME, workload_bootstrap.clone());
     println!(
@@ -1761,9 +1813,9 @@ spec:
         .map_err(|e| format!("Failed to create workload LatticeCluster: {}", e))?;
 
     // =========================================================================
-    // Phase 6: Watch Workload Cluster Provisioning
+    // Phase 4: Watch Workload Cluster Provisioning
     // =========================================================================
-    println!("\n[Phase 6] Watching workload cluster provisioning...\n");
+    println!("\n[Phase 4] Watching workload cluster provisioning...\n");
     println!("  The management cluster will:");
     println!("    1. Generate CAPI manifests for workload cluster");
     println!("    2. CAPD provisions Docker containers");
@@ -1776,9 +1828,9 @@ spec:
     watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME).await?;
 
     // =========================================================================
-    // Phase 7: Verify Workload Cluster Post-Pivot
+    // Phase 5: Verify Workload Cluster Post-Pivot
     // =========================================================================
-    println!("\n[Phase 7] Verifying workload cluster post-pivot state...\n");
+    println!("\n[Phase 5] Verifying workload cluster post-pivot state...\n");
 
     // After clusterctl move, the kubeconfig secret is on the WORKLOAD cluster, not management.
     // Get kubeconfig directly from the workload cluster's control plane container.
@@ -1873,9 +1925,9 @@ spec:
     println!("  Workload cluster nodes:\n{}", nodes);
 
     // =========================================================================
-    // Phase 8: Watch Worker Scaling
+    // Phase 6: Watch Worker Scaling
     // =========================================================================
-    println!("\n[Phase 8] Watching worker scaling on both clusters...\n");
+    println!("\n[Phase 6] Watching worker scaling on both clusters...\n");
     println!("  After pivot, each cluster's local controller should scale workers:");
     println!("    - Management cluster: 0 -> 1 workers");
     println!("    - Workload cluster: 0 -> 2 workers");
@@ -1890,9 +1942,9 @@ spec:
     watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 2).await?;
 
     // =========================================================================
-    // Phase 9: Comprehensive 3-Layer Service Mesh Testing
+    // Phase 7: Comprehensive 3-Layer Service Mesh Testing
     // =========================================================================
-    println!("\n[Phase 9] Testing comprehensive 3-layer service mesh...\n");
+    println!("\n[Phase 7] Testing comprehensive 3-layer service mesh...\n");
     println!("  This test deploys a realistic microservice architecture:");
     println!();
     println!("  LAYER 1: FRONTEND (traffic generators)");
@@ -1920,14 +1972,43 @@ spec:
     let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
     watch_cluster_phases(&workload_client, WORKLOAD_CLUSTER_NAME).await?;
 
-    // Deploy test services
+    // =========================================================================
+    // Deploy BOTH mesh tests in parallel for efficiency
+    // Both use different namespaces so they don't conflict
+    // =========================================================================
+
+    // Generate randomized mesh first (so we can print the manifest early)
+    println!("\n  Generating randomized mesh (50-100 services)...");
+    let random_mesh = RandomMesh::generate(&RandomMeshConfig::default());
+    let random_stats = random_mesh.stats();
+    println!("{}", random_stats);
+    println!("\n  Expected connection manifest (EXACT MATCH REQUIRED):");
+    random_mesh.print_manifest();
+
+    // Deploy deterministic test services (9 services in mesh-test namespace)
+    println!("\n  Deploying deterministic mesh (9 services)...");
     deploy_test_services(&workload_kubeconfig_path).await?;
 
-    // Wait for pods to be ready
-    wait_for_deployments(&workload_kubeconfig_path).await?;
+    // Deploy randomized mesh services (50-100 services in random-mesh namespace)
+    println!("\n  Deploying randomized mesh...");
+    deploy_random_mesh(&random_mesh, &workload_kubeconfig_path).await?;
 
-    // Verify traffic patterns
+    // Wait for ALL pods from BOTH meshes
+    println!("\n  Waiting for deterministic mesh pods...");
+    wait_for_deployments(&workload_kubeconfig_path).await?;
+    println!("\n  Waiting for randomized mesh pods...");
+    wait_for_random_mesh_pods(&random_mesh, &workload_kubeconfig_path).await?;
+
+    // Single wait for policy propagation (90 seconds covers both)
+    println!("\n  Waiting for traffic tests to run (90 seconds for both meshes)...");
+    sleep(Duration::from_secs(90)).await;
+
+    // Verify BOTH meshes
+    println!("\n  Verifying deterministic mesh traffic patterns...");
     verify_traffic_patterns(&workload_kubeconfig_path).await?;
+
+    println!("\n  Verifying randomized mesh traffic patterns...");
+    verify_random_mesh_traffic(&random_mesh, &workload_kubeconfig_path).await?;
 
     println!("\n============================================================");
     println!("  FULL E2E TEST PASSED!");
@@ -1957,11 +2038,19 @@ spec:
     println!("    [x] Layer 1->3: All frontend -> backend BLOCKED (no direct access)");
     println!("    [x] Same-layer: All peer access BLOCKED (no lateral movement)");
     println!();
+    println!(
+        "  Randomized Mesh ({} services, {} tests):",
+        random_mesh.services.len(),
+        random_mesh.expected_connections.len()
+    );
+    println!("    [x] All bilateral agreements verified");
+    println!("    [x] All blocked paths verified");
+    println!();
 
     // =========================================================================
-    // Phase 10: Prove Workload Cluster Independence
+    // Phase 8: Prove Workload Cluster Independence
     // =========================================================================
-    println!("\n[Phase 10] Proving workload cluster is truly self-managing...\n");
+    println!("\n[Phase 8] Proving workload cluster is truly self-managing...\n");
     println!("  This phase will:");
     println!("    1. Delete the management cluster entirely");
     println!("    2. Update workload cluster's LatticeCluster spec (scale workers 2 -> 3)");
@@ -2037,22 +2126,9 @@ spec:
     println!("  [Step 4] Verifying control-plane taints were restored...");
     verify_control_plane_taints(&workload_kubeconfig_path, &workload_bootstrap).await?;
     println!("    [x] Control-plane taints restored by controller");
-    println!();
 
-    // =========================================================================
-    // Phase 11: Randomized Large-Scale Service Mesh Test
-    // =========================================================================
-    println!("\n[Phase 11] Running randomized large-scale service mesh test...\n");
-    println!("  This test generates 50-100 services with random dependency graphs");
-    println!("  to stress test bilateral agreements at scale.\n");
-
-    run_randomized_mesh_test(&workload_kubeconfig_path, None).await?;
-
-    // =========================================================================
-    // Phase 12: Cleanup
-    // =========================================================================
-    println!("\n[Phase 12] Cleaning up...\n");
-    cleanup_all();
+    // Note: Cleanup is handled by the main test function (preserves images between runs)
+    println!("\n[Phase 10] Test run complete!\n");
 
     Ok(())
 }
@@ -2879,14 +2955,11 @@ async fn wait_for_random_mesh_pods(mesh: &RandomMesh, kubeconfig_path: &str) -> 
 }
 
 /// Verify traffic patterns for the randomized mesh - EXACT MATCH REQUIRED
+/// Note: Caller must wait for traffic tests to run before calling this
 async fn verify_random_mesh_traffic(
     mesh: &RandomMesh,
     kubeconfig_path: &str,
 ) -> Result<(), String> {
-    // Wait for traffic tests to complete at least one iteration
-    println!("  Waiting for traffic tests to run (90 seconds)...");
-    sleep(Duration::from_secs(90)).await;
-
     // Build a map of expected results for exact matching
     // Key: (source, target), Value: (expected_allowed, is_external, actual_result)
     let mut results: BTreeMap<(String, String), (bool, bool, Option<bool>)> = BTreeMap::new();
@@ -3010,48 +3083,5 @@ async fn verify_random_mesh_traffic(
     }
 
     println!("\n  SUCCESS: All {} tests matched exactly!", total);
-    Ok(())
-}
-
-/// Run the randomized service mesh test
-///
-/// This deploys 50-100 services with random dependency graphs and verifies
-/// that the bilateral agreement pattern is correctly enforced at scale.
-async fn run_randomized_mesh_test(
-    kubeconfig_path: &str,
-    config: Option<RandomMeshConfig>,
-) -> Result<(), String> {
-    let config = config.unwrap_or_default();
-
-    println!("\n============================================================");
-    println!("  RANDOMIZED SERVICE MESH TEST");
-    println!("============================================================\n");
-
-    // Generate mesh
-    println!("[Step 1] Generating randomized service mesh...\n");
-    let mesh = RandomMesh::generate(&config);
-    let stats = mesh.stats();
-    println!("{}", stats);
-
-    // Print exact manifest of what we expect
-    println!("[Step 1b] Expected connection manifest (EXACT MATCH REQUIRED):");
-    mesh.print_manifest();
-
-    // Deploy services
-    println!("\n[Step 2] Deploying services...\n");
-    deploy_random_mesh(&mesh, kubeconfig_path).await?;
-
-    // Wait for pods
-    println!("\n[Step 3] Waiting for pods to be ready...\n");
-    wait_for_random_mesh_pods(&mesh, kubeconfig_path).await?;
-
-    // Verify traffic
-    println!("\n[Step 4] Verifying traffic patterns...\n");
-    verify_random_mesh_traffic(&mesh, kubeconfig_path).await?;
-
-    println!("\n============================================================");
-    println!("  RANDOMIZED MESH TEST PASSED!");
-    println!("============================================================\n");
-
     Ok(())
 }

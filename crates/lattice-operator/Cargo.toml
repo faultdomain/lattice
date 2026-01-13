@@ -71,7 +71,3 @@ path = "src/main.rs"
 [lib]
 name = "lattice_operator"
 path = "src/lib.rs"
-
-[[bench]]
-name = "service_graph"
-harness = false

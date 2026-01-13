@@ -109,6 +109,14 @@ pub struct LatticeClusterStatus {
     /// the cluster status to survive controller restarts.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pivot_complete: bool,
+
+    /// Whether bootstrap has completed (manifests fetched from parent)
+    ///
+    /// This is set to true when the bootstrap webhook is called and manifests are
+    /// returned. It persists across operator restarts, allowing CSR signing to work
+    /// for clusters that completed bootstrap before the restart.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bootstrap_complete: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -147,6 +155,12 @@ impl LatticeClusterStatus {
     /// Set pivot_complete and return self for chaining
     pub fn pivot_complete(mut self, complete: bool) -> Self {
         self.pivot_complete = complete;
+        self
+    }
+
+    /// Set whether bootstrap has completed
+    pub fn bootstrap_complete(mut self, complete: bool) -> Self {
+        self.bootstrap_complete = complete;
         self
     }
 }

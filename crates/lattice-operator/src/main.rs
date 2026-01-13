@@ -554,6 +554,106 @@ async fn apply_manifest(client: &Client, manifest: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Re-register clusters that completed bootstrap before operator restart
+///
+/// BootstrapState is in-memory and lost on restart. This reads status.bootstrap_complete
+/// from the CRD and re-registers clusters so CSR signing works immediately.
+async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestGenerator>(
+    client: &Client,
+    bootstrap_state: &std::sync::Arc<lattice_operator::bootstrap::BootstrapState<G>>,
+    self_cluster_name: &Option<String>,
+    parent_servers: &std::sync::Arc<lattice_operator::parent::ParentServers<G>>,
+) {
+    use kube::api::ListParams;
+
+    let clusters: Api<LatticeCluster> = Api::all(client.clone());
+    let list = match clusters.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to list clusters for re-registration");
+            return;
+        }
+    };
+
+    for cluster in list.items {
+        let name = match cluster.metadata.name.as_ref() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Skip self-cluster
+        if self_cluster_name.as_ref() == Some(name) {
+            continue;
+        }
+
+        // Only re-register clusters that completed bootstrap
+        let bootstrap_complete = cluster
+            .status
+            .as_ref()
+            .map(|s| s.bootstrap_complete)
+            .unwrap_or(false);
+
+        if !bootstrap_complete {
+            continue;
+        }
+
+        // Skip if already registered
+        if bootstrap_state.is_cluster_registered(name) {
+            continue;
+        }
+
+        // Get self cluster for endpoints
+        let self_name = match self_cluster_name {
+            Some(n) => n,
+            None => {
+                tracing::warn!(cluster = %name, "Cannot re-register cluster: no self_cluster_name");
+                continue;
+            }
+        };
+
+        let self_cluster = match clusters.get(self_name).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to get self cluster for re-registration");
+                continue;
+            }
+        };
+
+        let endpoints = match self_cluster.spec.endpoints.as_ref() {
+            Some(e) => e,
+            None => {
+                tracing::warn!("Self cluster has no endpoints, cannot re-register");
+                continue;
+            }
+        };
+
+        let ca_cert = parent_servers.ca().ca_cert_pem().to_string();
+        let cell_endpoint = endpoints.endpoint();
+
+        // Serialize cluster manifest
+        let cluster_manifest = match serde_json::to_string(&cluster) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, cluster = %name, "Failed to serialize cluster for re-registration");
+                continue;
+            }
+        };
+
+        let registration = lattice_operator::bootstrap::ClusterRegistration {
+            cluster_id: name.clone(),
+            cell_endpoint,
+            ca_certificate: ca_cert,
+            cluster_manifest,
+            networking: cluster.spec.networking.clone(),
+            provider: cluster.spec.provider.type_.to_string(),
+            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+        };
+
+        bootstrap_state.register_cluster(registration, true);
+        tracing::info!(cluster = %name, "re-registered cluster after operator restart");
+    }
+}
+
 /// Run in controller mode - manages clusters
 ///
 /// Cell servers (gRPC + bootstrap HTTP) start automatically when needed.
@@ -589,68 +689,106 @@ async fn run_controller() -> anyhow::Result<()> {
     // CA is available immediately from parent_servers (created in ParentServers::new)
     ensure_webhook_config(&client, parent_servers.ca()).await?;
 
-    // Spawn background task to start cell servers once LatticeCluster is available
-    // This ensures TLS certificate has correct SANs (spec.endpoints.host) before serving manifests
-    // Controllers start immediately - they check parent_servers.is_running() before provisioning
-    let parent_servers_clone = parent_servers.clone();
-    let client_clone = client.clone();
+    // Start cell servers BEFORE controllers - webhook must be ready for deployment creation
+    // This ensures TLS certificate has correct SANs (spec.endpoints.host) before serving
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
-    tokio::spawn(async move {
-        let manifest_generator = match lattice_operator::bootstrap::DefaultManifestGenerator::new()
-        {
-            Ok(gen) => gen,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create manifest generator");
-                return;
-            }
+    {
+        let manifest_generator = lattice_operator::bootstrap::DefaultManifestGenerator::new()
+            .map_err(|e| anyhow::anyhow!("Failed to create manifest generator: {}", e))?;
+
+        // Get extra SANs from LatticeCluster - MUST wait for it to exist with endpoints
+        // The server certificate needs the correct SANs for workload clusters to connect
+        //
+        // Skip waiting for:
+        // - Bootstrap clusters (LATTICE_BOOTSTRAP_CLUSTER=true): temporary kind cluster
+        // - Child clusters (have lattice-parent-config secret): LatticeCluster comes via pivot
+        //
+        // Only wait for root/management clusters that provision children.
+        let is_bootstrap_cluster = std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        // Check if this is a child cluster (has parent config secret)
+        // Child clusters get their LatticeCluster via pivot, so we can't wait for it
+        let is_child_cluster = {
+            use k8s_openapi::api::core::v1::Secret;
+            let secrets: kube::Api<Secret> =
+                kube::Api::namespaced(client.clone(), "lattice-system");
+            matches!(secrets.get("lattice-parent-config").await, Ok(_))
         };
 
-        // Wait for LatticeCluster to get extra SANs (cell host IP)
-        let extra_sans: Vec<String> = if let Some(ref cluster_name) = self_cluster_name {
+        let extra_sans: Vec<String> = if is_bootstrap_cluster {
+            tracing::info!("Running as bootstrap cluster, using default SANs");
+            vec![]
+        } else if is_child_cluster {
+            tracing::info!(
+                "Running as child cluster (has parent config), skipping LatticeCluster wait"
+            );
+            vec![]
+        } else if let Some(ref cluster_name) = self_cluster_name {
             let clusters: kube::Api<lattice_operator::crd::LatticeCluster> =
-                kube::Api::all(client_clone.clone());
+                kube::Api::all(client.clone());
 
-            tracing::info!(cluster = %cluster_name, "Waiting for LatticeCluster before starting cell servers...");
+            tracing::info!(cluster = %cluster_name, "Waiting for LatticeCluster with endpoints...");
+            let mut retry_delay = std::time::Duration::from_secs(1);
+            let max_retry_delay = std::time::Duration::from_secs(10);
+
             loop {
                 match clusters.get(cluster_name).await {
                     Ok(cluster) => {
-                        if let Some(ref cell) = cluster.spec.endpoints {
-                            tracing::info!(host = %cell.host, "Adding cell host to server certificate SANs");
-                            break vec![cell.host.clone()];
+                        if let Some(ref endpoints) = cluster.spec.endpoints {
+                            tracing::info!(host = %endpoints.host, "Adding cell host to server certificate SANs");
+                            break vec![endpoints.host.clone()];
                         } else {
-                            tracing::debug!(
-                                "LatticeCluster has no cell spec, no extra SANs needed"
+                            tracing::info!(
+                                cluster = %cluster_name,
+                                retry_in = ?retry_delay,
+                                "LatticeCluster exists but has no endpoints, waiting..."
                             );
-                            break vec![];
                         }
                     }
                     Err(kube::Error::Api(e)) if e.code == 404 => {
-                        tracing::debug!(
+                        tracing::info!(
                             cluster = %cluster_name,
+                            retry_in = ?retry_delay,
                             "LatticeCluster not found yet, waiting..."
                         );
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "Failed to read LatticeCluster, retrying...");
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        tracing::warn!(
+                            error = %e,
+                            retry_in = ?retry_delay,
+                            "Failed to read LatticeCluster, retrying..."
+                        );
                     }
                 }
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
             }
         } else {
             vec![]
         };
 
-        // Now start cell servers with correct SANs
-        if let Err(e) = parent_servers_clone
-            .ensure_running_with(manifest_generator, &extra_sans, client_clone)
+        // Start cell servers - MUST complete before controllers start
+        parent_servers
+            .ensure_running_with(manifest_generator, &extra_sans, client.clone())
             .await
-        {
-            tracing::error!(error = %e, "Failed to start cell servers");
-        } else {
-            tracing::info!("Cell servers started (webhook + bootstrap + gRPC)");
+            .map_err(|e| anyhow::anyhow!("Failed to start cell servers: {}", e))?;
+
+        tracing::info!("Cell servers started (webhook + bootstrap + gRPC)");
+
+        // Re-register any clusters that are past Pending phase
+        // This handles operator restarts where BootstrapState was lost but clusters are mid-provisioning
+        if let Some(bootstrap_state) = parent_servers.bootstrap_state().await {
+            re_register_existing_clusters(
+                &client,
+                &bootstrap_state,
+                &self_cluster_name,
+                &parent_servers,
+            )
+            .await;
         }
-    });
+    }
 
     // Create controller context with cell servers
     // LATTICE_CLUSTER_NAME tells the controller which cluster it's running on (to avoid self-provisioning)
@@ -664,24 +802,14 @@ async fn run_controller() -> anyhow::Result<()> {
 
     // Check if we need to connect as an agent to a parent cell
     // This happens when the cluster has a cellRef (was provisioned by a parent)
-    let agent_handle = if let Some(ref cluster_name) = self_cluster_name {
-        match start_agent_if_needed(&client, cluster_name).await {
-            Ok(Some(handle)) => {
-                tracing::info!("Agent connection to parent cell started");
-                Some(handle)
-            }
-            Ok(None) => {
-                tracing::debug!("No parent cell configured, running as standalone");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to start agent connection, continuing without");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Connection happens in background with retries - don't block controller startup
+    if let Some(ref cluster_name) = self_cluster_name {
+        let client_clone = client.clone();
+        let cluster_name_clone = cluster_name.clone();
+        tokio::spawn(async move {
+            start_agent_with_retry(&client_clone, &cluster_name_clone).await;
+        });
+    }
 
     // Create APIs for all CRDs (cluster-scoped)
     let clusters: Api<LatticeCluster> = Api::all(client.clone());
@@ -791,21 +919,61 @@ async fn run_controller() -> anyhow::Result<()> {
         }
     }
 
-    // Shutdown agent if running
-    if let Some(mut agent) = agent_handle {
-        agent.shutdown().await;
-    }
-
-    // Shutdown cell servers
+    // Shutdown cell servers (agent background task cancelled automatically)
     parent_servers.shutdown().await;
 
     tracing::info!("Lattice controller shutting down");
     Ok(())
 }
 
-/// Check if this cluster has a parent cell and start agent connection if so
-///
-/// Returns Ok(Some(client)) if agent started, Ok(None) if no parent, Err on failure
+/// Supervise agent connection with automatic reconnection.
+/// If a parent cell is configured, maintains connection indefinitely with retries.
+/// Runs in background - does not block.
+async fn start_agent_with_retry(client: &Client, cluster_name: &str) {
+    let mut retry_delay = Duration::from_secs(1);
+    let max_retry_delay = Duration::from_secs(30);
+
+    loop {
+        match start_agent_if_needed(client, cluster_name).await {
+            Ok(Some(agent)) => {
+                tracing::info!("Agent connection to parent cell established");
+                // Reset retry delay on successful connection
+                retry_delay = Duration::from_secs(1);
+
+                // Monitor connection - wait until disconnected, then reconnect
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let state = agent.state().await;
+                    if state == lattice_operator::agent::client::ClientState::Disconnected
+                        || state == lattice_operator::agent::client::ClientState::Failed
+                    {
+                        tracing::warn!(
+                            state = ?state,
+                            "Agent disconnected from parent cell, will reconnect..."
+                        );
+                        break;
+                    }
+                }
+                // Fall through to retry connection
+            }
+            Ok(None) => {
+                tracing::debug!("No parent cell configured, running as standalone");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    retry_in = ?retry_delay,
+                    "Failed to connect to parent cell, retrying..."
+                );
+            }
+        }
+
+        tokio::time::sleep(retry_delay).await;
+        retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
+    }
+}
+
 async fn start_agent_if_needed(
     client: &Client,
     cluster_name: &str,

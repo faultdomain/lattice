@@ -411,8 +411,10 @@ nodes:
                     // For bootstrap cluster:
                     // 1. Relax FIPS to fips140=on (not =only) for non-FIPS kind API server
                     // 2. Set LATTICE_ROOT_INSTALL=true to skip bootstrap script generation
+                    // 3. Set LATTICE_BOOTSTRAP_CLUSTER=true to skip waiting for LatticeCluster
                     let with_fips = crate::fips::add_fips_relax_env(s);
-                    crate::fips::add_root_install_env(&with_fips)
+                    let with_root = crate::fips::add_root_install_env(&with_fips);
+                    add_bootstrap_cluster_env(&with_root)
                 } else {
                     s.clone()
                 }
@@ -1098,6 +1100,34 @@ spec:
                 }
             }
         }
+    }
+}
+
+/// Add LATTICE_BOOTSTRAP_CLUSTER=true to a Deployment manifest JSON
+/// This tells the operator it's running on the bootstrap cluster and should skip waiting for LatticeCluster
+fn add_bootstrap_cluster_env(deployment_json: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) {
+        if let Some(containers) = value
+            .pointer_mut("/spec/template/spec/containers")
+            .and_then(|c| c.as_array_mut())
+        {
+            for container in containers {
+                if let Some(env) = container.as_object_mut().and_then(|c| {
+                    c.entry("env")
+                        .or_insert_with(|| serde_json::json!([]))
+                        .as_array_mut()
+                }) {
+                    if !env.iter().any(|e| {
+                        e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_BOOTSTRAP_CLUSTER")
+                    }) {
+                        env.push(serde_json::json!({"name": "LATTICE_BOOTSTRAP_CLUSTER", "value": "true"}));
+                    }
+                }
+            }
+        }
+        serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
+    } else {
+        deployment_json.to_string()
     }
 }
 

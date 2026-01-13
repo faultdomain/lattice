@@ -1729,7 +1729,7 @@ async fn generate_capi_manifests(
                 provider: cluster.spec.provider.type_.to_string(),
                 bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             };
-            let token = bootstrap_state.register_cluster(registration);
+            let token = bootstrap_state.register_cluster(registration, false);
 
             BootstrapInfo::new(bootstrap_endpoint, token.as_str().to_string(), ca_cert)
         } else {

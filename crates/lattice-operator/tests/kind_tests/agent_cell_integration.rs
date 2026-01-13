@@ -41,19 +41,23 @@ async fn integration_bootstrap_http_full_flow() {
         ca.clone(),
         "test:latest".to_string(),
         None,
+        None,
     ));
 
     // Register a cluster
     let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"integration-cluster"}}"#.to_string();
-    let token = state.register_cluster(lattice_operator::bootstrap::ClusterRegistration {
-        cluster_id: "integration-cluster".to_string(),
-        cell_endpoint: "cell.test:8443:50051".to_string(),
-        ca_certificate: ca.ca_cert_pem().to_string(),
-        cluster_manifest,
-        networking: None,
-        provider: "docker".to_string(),
-        bootstrap: lattice_operator::crd::BootstrapProvider::default(),
-    });
+    let token = state.register_cluster(
+        lattice_operator::bootstrap::ClusterRegistration {
+            cluster_id: "integration-cluster".to_string(),
+            cell_endpoint: "cell.test:8443:50051".to_string(),
+            ca_certificate: ca.ca_cert_pem().to_string(),
+            cluster_manifest,
+            networking: None,
+            provider: "docker".to_string(),
+            bootstrap: lattice_operator::crd::BootstrapProvider::default(),
+        },
+        false,
+    );
 
     let router = bootstrap_router(state.clone());
 
@@ -115,18 +119,22 @@ async fn integration_bootstrap_token_replay_blocked() {
         ca.clone(),
         "test:latest".to_string(),
         None,
+        None,
     ));
 
     let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"replay-test"}}"#.to_string();
-    let token = state.register_cluster(lattice_operator::bootstrap::ClusterRegistration {
-        cluster_id: "replay-test".to_string(),
-        cell_endpoint: "cell:8443:50051".to_string(),
-        ca_certificate: ca.ca_cert_pem().to_string(),
-        cluster_manifest,
-        networking: None,
-        provider: "docker".to_string(),
-        bootstrap: lattice_operator::crd::BootstrapProvider::default(),
-    });
+    let token = state.register_cluster(
+        lattice_operator::bootstrap::ClusterRegistration {
+            cluster_id: "replay-test".to_string(),
+            cell_endpoint: "cell:8443:50051".to_string(),
+            ca_certificate: ca.ca_cert_pem().to_string(),
+            cluster_manifest,
+            networking: None,
+            provider: "docker".to_string(),
+            bootstrap: lattice_operator::crd::BootstrapProvider::default(),
+        },
+        false,
+    );
 
     let router = bootstrap_router(state);
 
@@ -168,11 +176,12 @@ async fn integration_full_stack_bootstrap_to_ready() {
         ca.clone(),
         "test:latest".to_string(),
         None,
+        None,
     ));
 
     let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"full-stack-test"}}"#.to_string();
-    let token =
-        bootstrap_state.register_cluster(lattice_operator::bootstrap::ClusterRegistration {
+    let token = bootstrap_state.register_cluster(
+        lattice_operator::bootstrap::ClusterRegistration {
             cluster_id: "full-stack-test".to_string(),
             cell_endpoint: "cell:8443:50051".to_string(),
             ca_certificate: ca.ca_cert_pem().to_string(),
@@ -180,11 +189,14 @@ async fn integration_full_stack_bootstrap_to_ready() {
             networking: None,
             provider: "docker".to_string(),
             bootstrap: lattice_operator::crd::BootstrapProvider::default(),
-        });
+        },
+        false,
+    );
 
     // Step 2: Bootstrap (get manifests and CA cert)
     let info = bootstrap_state
         .validate_and_consume("full-stack-test", token.as_str())
+        .await
         .unwrap();
     let bootstrap_response = bootstrap_state.generate_response(&info);
 

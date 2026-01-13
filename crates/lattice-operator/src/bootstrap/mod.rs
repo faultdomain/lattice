@@ -47,11 +47,12 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::ByteString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::crd::LatticeCluster;
 use crate::pki::{CertificateAuthority, PkiError};
-use kube::CustomResourceExt;
+use kube::api::Patch;
+use kube::{Api, Client, CustomResourceExt};
 
 pub use token::{BootstrapToken, TokenGenerationError, TokenStore};
 
@@ -594,6 +595,8 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
     token_ttl: Duration,
     /// Certificate authority for signing CSRs
     ca: Arc<CertificateAuthority>,
+    /// Kubernetes client for updating CRD status (None in tests)
+    kube_client: Option<Client>,
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
@@ -604,6 +607,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         ca: Arc<CertificateAuthority>,
         image: String,
         registry_credentials: Option<String>,
+        kube_client: Option<Client>,
     ) -> Self {
         Self {
             clusters: DashMap::new(),
@@ -612,6 +616,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             registry_credentials,
             token_ttl,
             ca,
+            kube_client,
         }
     }
 
@@ -624,60 +629,113 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     ///
     /// # Arguments
     /// * `registration` - Cluster registration configuration
-    pub fn register_cluster(&self, registration: ClusterRegistration) -> BootstrapToken {
+    /// * `mark_used` - If true, mark token as already used (for restart recovery)
+    pub fn register_cluster(
+        &self,
+        registration: ClusterRegistration,
+        mark_used: bool,
+    ) -> BootstrapToken {
         let token = BootstrapToken::generate();
         let token_hash = token.hash();
+        let cluster_id = registration.cluster_id.clone();
 
         let info = ClusterBootstrapInfo {
-            cluster_id: registration.cluster_id.clone(),
+            cluster_id: cluster_id.clone(),
             cell_endpoint: registration.cell_endpoint,
             ca_certificate: registration.ca_certificate,
             cluster_manifest: registration.cluster_manifest,
             token_hash,
             token_created: Instant::now(),
-            token_used: false,
+            token_used: mark_used,
             networking: registration.networking,
             provider: registration.provider,
             bootstrap: registration.bootstrap,
         };
 
-        self.clusters.insert(registration.cluster_id, info);
+        self.clusters.insert(cluster_id, info);
         token
     }
 
     /// Validate and consume a bootstrap token
-    pub fn validate_and_consume(
+    ///
+    /// This updates the CRD status to set bootstrap_complete=true before marking
+    /// the token as used, ensuring the status is persisted even if the operator restarts.
+    pub async fn validate_and_consume(
         &self,
         cluster_id: &str,
         token: &str,
     ) -> Result<ClusterBootstrapInfo, BootstrapError> {
-        let mut entry = self
-            .clusters
-            .get_mut(cluster_id)
-            .ok_or_else(|| BootstrapError::ClusterNotFound(cluster_id.to_string()))?;
+        // First, validate without consuming
+        let info = {
+            let entry = self
+                .clusters
+                .get(cluster_id)
+                .ok_or_else(|| BootstrapError::ClusterNotFound(cluster_id.to_string()))?;
 
-        let info = entry.value_mut();
+            let info = entry.value();
 
-        // Check if already used
-        if info.token_used {
-            return Err(BootstrapError::TokenAlreadyUsed);
+            // Check if already used
+            if info.token_used {
+                return Err(BootstrapError::TokenAlreadyUsed);
+            }
+
+            // Check TTL
+            if info.token_created.elapsed() > self.token_ttl {
+                return Err(BootstrapError::InvalidToken);
+            }
+
+            // Verify token hash
+            let token_obj = BootstrapToken::from_string(token);
+            if token_obj.hash() != info.token_hash {
+                return Err(BootstrapError::InvalidToken);
+            }
+
+            info.clone()
+        };
+
+        // Update CRD status to set bootstrap_complete BEFORE marking token as used
+        // This ensures the status is persisted even if operator restarts
+        if let Err(e) = self.set_bootstrap_complete(cluster_id).await {
+            warn!(cluster_id = %cluster_id, error = %e, "Failed to set bootstrap_complete in CRD status");
+            // Don't fail the request - the cluster can still bootstrap, and we'll
+            // re-register it on operator restart based on phase
         }
 
-        // Check TTL
-        if info.token_created.elapsed() > self.token_ttl {
-            return Err(BootstrapError::InvalidToken);
+        // Now mark as used
+        if let Some(mut entry) = self.clusters.get_mut(cluster_id) {
+            entry.value_mut().token_used = true;
         }
 
-        // Verify token hash
-        let token_obj = BootstrapToken::from_string(token);
-        if token_obj.hash() != info.token_hash {
-            return Err(BootstrapError::InvalidToken);
-        }
+        Ok(info)
+    }
 
-        // Mark as used
-        info.token_used = true;
+    /// Set bootstrap_complete in the cluster's CRD status
+    async fn set_bootstrap_complete(&self, cluster_id: &str) -> Result<(), kube::Error> {
+        let Some(ref client) = self.kube_client else {
+            // No client (tests) - skip CRD update
+            return Ok(());
+        };
 
-        Ok(info.clone())
+        let api: Api<LatticeCluster> = Api::all(client.clone());
+
+        // Get current cluster to preserve existing status
+        let cluster = api.get(cluster_id).await?;
+        let mut status = cluster.status.unwrap_or_default();
+        status.bootstrap_complete = true;
+
+        let patch = serde_json::json!({
+            "status": status
+        });
+
+        api.patch_status(
+            cluster_id,
+            &kube::api::PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        info!(cluster_id = %cluster_id, "Set bootstrap_complete in CRD status");
+        Ok(())
     }
 
     /// Generate bootstrap response for a cluster
@@ -852,8 +910,8 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     // Extract token
     let token = extract_bearer_token(&headers)?;
 
-    // Validate and consume the token
-    let info = state.validate_and_consume(&cluster_id, &token)?;
+    // Validate and consume the token (also sets bootstrap_complete in CRD)
+    let info = state.validate_and_consume(&cluster_id, &token).await?;
 
     info!(cluster_id = %cluster_id, "Bootstrap token validated, returning manifests");
 
@@ -919,6 +977,7 @@ mod tests {
             test_ca(),
             "test:latest".to_string(),
             None,
+            None, // No kube client for tests
         )
     }
 
@@ -929,6 +988,7 @@ mod tests {
             test_ca(),
             "test:latest".to_string(),
             None,
+            None, // No kube client for tests
         )
     }
 
@@ -941,15 +1001,18 @@ mod tests {
     ) -> BootstrapToken {
         // Use a minimal test cluster manifest
         let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"test"}}"#.to_string();
-        state.register_cluster(ClusterRegistration {
-            cluster_id: cluster_id.into(),
-            cell_endpoint: cell_endpoint.into(),
-            ca_certificate: ca_certificate.into(),
-            cluster_manifest,
-            networking: None,
-            provider: "docker".to_string(),
-            bootstrap: crate::crd::BootstrapProvider::default(),
-        })
+        state.register_cluster(
+            ClusterRegistration {
+                cluster_id: cluster_id.into(),
+                cell_endpoint: cell_endpoint.into(),
+                ca_certificate: ca_certificate.into(),
+                cluster_manifest,
+                networking: None,
+                provider: "docker".to_string(),
+                bootstrap: crate::crd::BootstrapProvider::default(),
+            },
+            false,
+        )
     }
 
     #[test]
@@ -966,8 +1029,8 @@ mod tests {
         assert!(!token.as_str().is_empty());
     }
 
-    #[test]
-    fn valid_token_is_accepted() {
+    #[tokio::test]
+    async fn valid_token_is_accepted() {
         let state = test_state();
 
         let token = register_test_cluster(
@@ -979,13 +1042,14 @@ mod tests {
 
         let info = state
             .validate_and_consume("test-cluster", token.as_str())
+            .await
             .unwrap();
 
         assert_eq!(info.cluster_id, "test-cluster");
     }
 
-    #[test]
-    fn invalid_token_is_rejected() {
+    #[tokio::test]
+    async fn invalid_token_is_rejected() {
         let state = test_state();
 
         register_test_cluster(
@@ -995,13 +1059,15 @@ mod tests {
             "cert".to_string(),
         );
 
-        let result = state.validate_and_consume("test-cluster", "wrong-token");
+        let result = state
+            .validate_and_consume("test-cluster", "wrong-token")
+            .await;
 
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
     }
 
-    #[test]
-    fn token_can_only_be_used_once() {
+    #[tokio::test]
+    async fn token_can_only_be_used_once() {
         let state = test_state();
 
         let token = register_test_cluster(
@@ -1014,15 +1080,18 @@ mod tests {
         // First use succeeds
         let _ = state
             .validate_and_consume("test-cluster", token.as_str())
+            .await
             .unwrap();
 
         // Second use fails
-        let result = state.validate_and_consume("test-cluster", token.as_str());
+        let result = state
+            .validate_and_consume("test-cluster", token.as_str())
+            .await;
         assert!(matches!(result, Err(BootstrapError::TokenAlreadyUsed)));
     }
 
-    #[test]
-    fn expired_token_is_rejected() {
+    #[tokio::test]
+    async fn expired_token_is_rejected() {
         let state = test_state_with_ttl(Duration::from_millis(1));
 
         let token = register_test_cluster(
@@ -1033,22 +1102,26 @@ mod tests {
         );
 
         // Wait for token to expire
-        std::thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let result = state.validate_and_consume("test-cluster", token.as_str());
+        let result = state
+            .validate_and_consume("test-cluster", token.as_str())
+            .await;
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
     }
 
-    #[test]
-    fn unknown_cluster_is_rejected() {
+    #[tokio::test]
+    async fn unknown_cluster_is_rejected() {
         let state = test_state();
 
-        let result = state.validate_and_consume("unknown-cluster", "any-token");
+        let result = state
+            .validate_and_consume("unknown-cluster", "any-token")
+            .await;
         assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
     }
 
-    #[test]
-    fn response_contains_manifests() {
+    #[tokio::test]
+    async fn response_contains_manifests() {
         let state = test_state();
 
         let token = register_test_cluster(
@@ -1060,6 +1133,7 @@ mod tests {
 
         let info = state
             .validate_and_consume("test-cluster", token.as_str())
+            .await
             .unwrap();
         let response = state.generate_response(&info);
 
@@ -1104,8 +1178,8 @@ mod tests {
         assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
     }
 
-    #[test]
-    fn csr_signed_after_bootstrap() {
+    #[tokio::test]
+    async fn csr_signed_after_bootstrap() {
         let state = test_state();
 
         // Register and bootstrap
@@ -1117,6 +1191,7 @@ mod tests {
         );
         state
             .validate_and_consume("csr-test", token.as_str())
+            .await
             .unwrap();
 
         // Now CSR signing should work
@@ -1129,8 +1204,8 @@ mod tests {
         assert!(response.ca_certificate_pem.contains("BEGIN CERTIFICATE"));
     }
 
-    #[test]
-    fn signed_cert_contains_cluster_id() {
+    #[tokio::test]
+    async fn signed_cert_contains_cluster_id() {
         let state = test_state();
 
         // Register and bootstrap
@@ -1142,6 +1217,7 @@ mod tests {
         );
         state
             .validate_and_consume("cluster-xyz", token.as_str())
+            .await
             .unwrap();
 
         // Sign CSR
@@ -1261,8 +1337,8 @@ mod tests {
     ///
     /// This test demonstrates the entire bootstrap sequence as experienced
     /// by a newly provisioned workload cluster connecting to its parent cell.
-    #[test]
-    fn story_complete_bootstrap_flow() {
+    #[tokio::test]
+    async fn story_complete_bootstrap_flow() {
         let state = test_state();
 
         // Chapter 1: Cell registers a new cluster for provisioning
@@ -1283,6 +1359,7 @@ mod tests {
         // with Authorization: Bearer <token>
         let info = state
             .validate_and_consume("prod-us-west-001", token.as_str())
+            .await
             .unwrap();
         assert_eq!(info.cluster_id, "prod-us-west-001");
         assert_eq!(info.cell_endpoint, "cell.lattice.example.com:8443:50051");
@@ -1323,8 +1400,8 @@ mod tests {
     ///
     /// Bootstrap tokens are one-time use. An attacker who captures
     /// a token cannot use it to bootstrap a malicious agent.
-    #[test]
-    fn story_token_replay_attack_prevention() {
+    #[tokio::test]
+    async fn story_token_replay_attack_prevention() {
         let state = test_state();
 
         // Legitimate cluster gets registered
@@ -1338,10 +1415,13 @@ mod tests {
         // Legitimate bootstrap succeeds
         let _ = state
             .validate_and_consume("secure-cluster", token.as_str())
+            .await
             .unwrap();
 
         // Attacker captures the token and tries to replay it
-        let replay_result = state.validate_and_consume("secure-cluster", token.as_str());
+        let replay_result = state
+            .validate_and_consume("secure-cluster", token.as_str())
+            .await;
 
         // Attack is blocked!
         assert!(matches!(
@@ -1354,8 +1434,8 @@ mod tests {
     ///
     /// Tokens are cryptographically random and cluster-specific.
     /// Guessing or using the wrong token fails.
-    #[test]
-    fn story_invalid_token_rejection() {
+    #[tokio::test]
+    async fn story_invalid_token_rejection() {
         let state = test_state();
 
         register_test_cluster(
@@ -1366,7 +1446,9 @@ mod tests {
         );
 
         // Wrong token
-        let result = state.validate_and_consume("guarded-cluster", "totally-wrong-token");
+        let result = state
+            .validate_and_consume("guarded-cluster", "totally-wrong-token")
+            .await;
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
 
         // Token for wrong cluster
@@ -1376,8 +1458,9 @@ mod tests {
             "cell:8443:50051".to_string(),
             "cert".to_string(),
         );
-        let cross_cluster_result =
-            state.validate_and_consume("guarded-cluster", other_token.as_str());
+        let cross_cluster_result = state
+            .validate_and_consume("guarded-cluster", other_token.as_str())
+            .await;
         assert!(matches!(
             cross_cluster_result,
             Err(BootstrapError::InvalidToken)
@@ -1415,12 +1498,14 @@ mod tests {
     ///
     /// Only pre-registered clusters can use the bootstrap endpoint.
     /// Random cluster IDs are rejected.
-    #[test]
-    fn story_unknown_cluster_rejection() {
+    #[tokio::test]
+    async fn story_unknown_cluster_rejection() {
         let state = test_state();
 
         // No clusters registered - attacker tries to bootstrap
-        let result = state.validate_and_consume("hacker-cluster", "fake-token");
+        let result = state
+            .validate_and_consume("hacker-cluster", "fake-token")
+            .await;
         assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
 
         // Unknown cluster can't get CSR signed either
@@ -1436,8 +1521,8 @@ mod tests {
     ///
     /// Tokens have a TTL. If a cluster takes too long to bootstrap,
     /// the token expires and a new one must be generated.
-    #[test]
-    fn story_expired_token_rejection() {
+    #[tokio::test]
+    async fn story_expired_token_rejection() {
         // Very short TTL for testing
         let state = test_state_with_ttl(Duration::from_millis(1));
 
@@ -1449,10 +1534,12 @@ mod tests {
         );
 
         // Simulate slow bootstrap by waiting
-        std::thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Token has expired
-        let result = state.validate_and_consume("slow-cluster", token.as_str());
+        let result = state
+            .validate_and_consume("slow-cluster", token.as_str())
+            .await;
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
     }
 
@@ -1568,8 +1655,8 @@ mod tests {
     ///
     /// When an agent submits an invalid CSR (not proper PEM format),
     /// the signing should fail with a descriptive error.
-    #[test]
-    fn story_malformed_csr_returns_error() {
+    #[tokio::test]
+    async fn story_malformed_csr_returns_error() {
         let state = test_state();
 
         // Register and bootstrap
@@ -1581,6 +1668,7 @@ mod tests {
         );
         state
             .validate_and_consume("malformed-csr-test", token.as_str())
+            .await
             .unwrap();
 
         // Try to sign a malformed CSR
@@ -1591,8 +1679,8 @@ mod tests {
     }
 
     /// Story: CA certificate availability for distribution
-    #[test]
-    fn story_ca_certificate_distribution() {
+    #[tokio::test]
+    async fn story_ca_certificate_distribution() {
         let state = test_state();
 
         // Cell provides CA cert for agents to verify mTLS
@@ -1608,6 +1696,7 @@ mod tests {
         );
         let info = state
             .validate_and_consume("ca-test", token.as_str())
+            .await
             .unwrap();
         let response = state.generate_response(&info);
 
@@ -1743,6 +1832,7 @@ mod tests {
         );
         state
             .validate_and_consume("csr-http-test", token.as_str())
+            .await
             .unwrap();
 
         // Generate CSR
@@ -1911,6 +2001,7 @@ mod tests {
             test_ca(),
             "test:latest".to_string(),
             None,
+            None,
         );
 
         // Register cluster with kubeadm bootstrap
@@ -1955,6 +2046,7 @@ mod tests {
             Duration::from_secs(3600),
             test_ca(),
             "test:latest".to_string(),
+            None,
             None,
         );
 
