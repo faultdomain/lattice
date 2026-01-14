@@ -208,7 +208,7 @@ impl AgentClient {
             .json(&CsrRequest { csr_pem })
             .send()
             .await
-            .map_err(|e| CertificateError::HttpError(e.to_string()))?;
+            .map_err(|e| CertificateError::HttpError(format!("HTTP request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();

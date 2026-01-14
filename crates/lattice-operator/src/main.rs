@@ -680,8 +680,10 @@ async fn run_controller() -> anyhow::Result<()> {
     // Create cell servers (but don't start them yet - wait for LatticeCluster to get SANs)
     // The webhook is always needed for LatticeService → Deployment mutation
     // External exposure (LoadBalancer) is configured per-cluster based on spec.endpoints
+    // CA is loaded from Secret (or created and persisted) to survive operator restarts
     let parent_servers = Arc::new(
-        ParentServers::new(ParentConfig::default())
+        ParentServers::new(ParentConfig::default(), &client)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to create cell servers: {}", e))?,
     );
 

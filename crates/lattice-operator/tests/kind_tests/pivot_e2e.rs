@@ -468,6 +468,7 @@ fn nginx_container() -> ContainerSpec {
         resources: None,
         liveness_probe: None,
         readiness_probe: None,
+        startup_probe: None,
     }
 }
 
@@ -698,6 +699,7 @@ fn create_frontend_web() -> LatticeService {
         resources: None,
         liveness_probe: None,
         readiness_probe: None,
+        startup_probe: None,
     };
 
     // Outbound: gateway + users (but NOT orders - testing blocked path)
@@ -781,6 +783,7 @@ fn create_frontend_mobile() -> LatticeService {
         resources: None,
         liveness_probe: None,
         readiness_probe: None,
+        startup_probe: None,
     };
 
     create_service(
@@ -862,6 +865,7 @@ fn create_frontend_admin() -> LatticeService {
         resources: None,
         liveness_probe: None,
         readiness_probe: None,
+        startup_probe: None,
     };
 
     create_service(
@@ -1514,8 +1518,8 @@ fn cleanup_all() {
 ///
 /// This test runs the complete Lattice installer flow TWICE to test cross-bootstrap
 /// provisioning in both directions:
-///   1. First run: kubeadm management cluster → RKE2 workload cluster
-///   2. Second run: RKE2 management cluster → kubeadm workload cluster
+///   1. First run: RKE2 management cluster → kubeadm workload cluster
+///   2. Second run: kubeadm management cluster → RKE2 workload cluster
 ///
 /// Run with: cargo test --features e2e --test kind pivot_e2e -- --nocapture
 #[tokio::test]
@@ -1545,31 +1549,31 @@ async fn story_full_install_and_workload_provisioning() {
     }
 
     // =========================================================================
-    // Test combination 1: kubeadm management → RKE2 workload
+    // Test combination 1: RKE2 management → kubeadm workload
     // =========================================================================
     println!("\n################################################################");
-    println!("#  TEST RUN 1: kubeadm management → RKE2 workload");
+    println!("#  TEST RUN 1: RKE2 management → kubeadm workload");
     println!("################################################################\n");
 
     let result1 = tokio::time::timeout(
         E2E_TIMEOUT,
-        run_full_e2e(BootstrapProvider::Kubeadm, BootstrapProvider::Rke2),
+        run_full_e2e(BootstrapProvider::Rke2, BootstrapProvider::Kubeadm),
     )
     .await;
 
     match result1 {
         Ok(Ok(())) => {
-            println!("\n=== Run 1 (kubeadm→RKE2) Completed Successfully! ===\n");
+            println!("\n=== Run 1 (RKE2→kubeadm) Completed Successfully! ===\n");
         }
         Ok(Err(e)) => {
-            println!("\n=== Run 1 (kubeadm→RKE2) Failed: {} ===\n", e);
+            println!("\n=== Run 1 (RKE2→kubeadm) Failed: {} ===\n", e);
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
             println!("    kind delete clusters --all && docker system prune -af");
             panic!("E2E test run 1 failed: {}", e);
         }
         Err(_) => {
             println!(
-                "\n=== Run 1 (kubeadm→RKE2) Timed Out ({:?}) ===\n",
+                "\n=== Run 1 (RKE2→kubeadm) Timed Out ({:?}) ===\n",
                 E2E_TIMEOUT
             );
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
@@ -1582,34 +1586,34 @@ async fn story_full_install_and_workload_provisioning() {
     cleanup_clusters();
 
     // =========================================================================
-    // Test combination 2: RKE2 management → kubeadm workload
+    // Test combination 2: kubeadm management → RKE2 workload
     // =========================================================================
     println!("\n################################################################");
-    println!("#  TEST RUN 2: RKE2 management → kubeadm workload");
+    println!("#  TEST RUN 2: kubeadm management → RKE2 workload");
     println!("################################################################\n");
 
     let result2 = tokio::time::timeout(
         E2E_TIMEOUT,
-        run_full_e2e(BootstrapProvider::Rke2, BootstrapProvider::Kubeadm),
+        run_full_e2e(BootstrapProvider::Kubeadm, BootstrapProvider::Rke2),
     )
     .await;
 
     match result2 {
         Ok(Ok(())) => {
-            println!("\n=== Run 2 (RKE2→kubeadm) Completed Successfully! ===\n");
+            println!("\n=== Run 2 (kubeadm→RKE2) Completed Successfully! ===\n");
             println!("\n################################################################");
             println!("#  ALL CROSS-BOOTSTRAP TESTS PASSED!");
             println!("################################################################\n");
         }
         Ok(Err(e)) => {
-            println!("\n=== Run 2 (RKE2→kubeadm) Failed: {} ===\n", e);
+            println!("\n=== Run 2 (kubeadm→RKE2) Failed: {} ===\n", e);
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
             println!("    kind delete clusters --all && docker system prune -af");
             panic!("E2E test run 2 failed: {}", e);
         }
         Err(_) => {
             println!(
-                "\n=== Run 2 (RKE2→kubeadm) Timed Out ({:?}) ===\n",
+                "\n=== Run 2 (kubeadm→RKE2) Timed Out ({:?}) ===\n",
                 E2E_TIMEOUT
             );
             println!("  NOTE: Not cleaning up so you can investigate. Run cleanup manually:");
@@ -2636,6 +2640,7 @@ impl RandomMesh {
                     resources: None,
                     liveness_probe: None,
                     readiness_probe: None,
+                    startup_probe: None,
                 },
             );
         } else {
@@ -2652,6 +2657,7 @@ impl RandomMesh {
                     resources: None,
                     liveness_probe: None,
                     readiness_probe: None,
+                    startup_probe: None,
                 },
             );
         }

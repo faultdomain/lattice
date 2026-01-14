@@ -364,12 +364,15 @@ pub struct Container {
     /// Resource requirements
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequirements>,
-    /// Liveness probe
+    /// Liveness probe - restarts container when it fails
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_probe: Option<ProbeSpec>,
-    /// Readiness probe
+    /// Readiness probe - removes from service endpoints when it fails
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness_probe: Option<ProbeSpec>,
+    /// Startup probe - delays liveness/readiness until container is ready
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_probe: Option<ProbeSpec>,
     /// Volume mounts
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volume_mounts: Vec<VolumeMount>,
@@ -423,7 +426,7 @@ pub struct ResourceQuantity {
     pub memory: Option<String>,
 }
 
-/// Probe specification
+/// Probe specification - maps 1:1 with Kubernetes probe spec
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeSpec {
@@ -433,12 +436,30 @@ pub struct ProbeSpec {
     /// Exec probe
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecAction>,
-    /// Initial delay seconds
+    /// TCP socket probe
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_socket: Option<TcpSocketAction>,
+    /// gRPC probe (requires Kubernetes 1.24+)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grpc: Option<GrpcAction>,
+    /// Initial delay seconds (default: 0)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_delay_seconds: Option<u32>,
-    /// Period seconds
+    /// Period seconds (default: 10)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period_seconds: Option<u32>,
+    /// Timeout seconds (default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u32>,
+    /// Success threshold (default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_threshold: Option<u32>,
+    /// Failure threshold (default: 3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_threshold: Option<u32>,
+    /// Override pod's terminationGracePeriodSeconds when probe fails
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_grace_period_seconds: Option<i64>,
 }
 
 /// HTTP GET action for probe
@@ -449,9 +470,25 @@ pub struct HttpGetAction {
     pub path: String,
     /// Port
     pub port: u16,
-    /// Scheme
+    /// Scheme (HTTP or HTTPS)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
+    /// Host header
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// HTTP headers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_headers: Option<Vec<HttpHeader>>,
+}
+
+/// HTTP header for probes
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpHeader {
+    /// Header name
+    pub name: String,
+    /// Header value
+    pub value: String,
 }
 
 /// Exec action for probe
@@ -460,6 +497,28 @@ pub struct HttpGetAction {
 pub struct ExecAction {
     /// Command
     pub command: Vec<String>,
+}
+
+/// TCP socket action for probe
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpSocketAction {
+    /// Port
+    pub port: u16,
+    /// Host (defaults to pod IP)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// gRPC action for probe
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GrpcAction {
+    /// Port (must be a gRPC server with health checking)
+    pub port: u16,
+    /// Service name (defaults to "" for server health)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
 }
 
 /// Volume
@@ -887,6 +946,17 @@ impl WorkloadCompiler {
                         }),
                     });
 
+                // Compile probes from container spec
+                let liveness_probe = container_spec
+                    .and_then(|cs| cs.liveness_probe.as_ref())
+                    .map(Self::compile_probe);
+                let readiness_probe = container_spec
+                    .and_then(|cs| cs.readiness_probe.as_ref())
+                    .map(Self::compile_probe);
+                let startup_probe = container_spec
+                    .and_then(|cs| cs.startup_probe.as_ref())
+                    .map(Self::compile_probe);
+
                 Container {
                     name: container_name.clone(),
                     image: rc.image.clone(),
@@ -896,8 +966,9 @@ impl WorkloadCompiler {
                     env_from: compiled_env.env_from.clone(),
                     ports,
                     resources,
-                    liveness_probe: None,  // TODO: from container_spec
-                    readiness_probe: None, // TODO: from container_spec
+                    liveness_probe,
+                    readiness_probe,
+                    startup_probe,
                     volume_mounts: compiled_files.volume_mounts.clone(),
                 }
             })
@@ -1019,32 +1090,19 @@ impl WorkloadCompiler {
                         }),
                     });
 
-                // Convert probes
-                let liveness_probe = container_spec.liveness_probe.as_ref().map(|p| ProbeSpec {
-                    http_get: p.http_get.as_ref().map(|h| HttpGetAction {
-                        path: h.path.clone(),
-                        port: h.port,
-                        scheme: h.scheme.clone(),
-                    }),
-                    exec: p.exec.as_ref().map(|e| ExecAction {
-                        command: e.command.clone(),
-                    }),
-                    initial_delay_seconds: None,
-                    period_seconds: None,
-                });
-
-                let readiness_probe = container_spec.readiness_probe.as_ref().map(|p| ProbeSpec {
-                    http_get: p.http_get.as_ref().map(|h| HttpGetAction {
-                        path: h.path.clone(),
-                        port: h.port,
-                        scheme: h.scheme.clone(),
-                    }),
-                    exec: p.exec.as_ref().map(|e| ExecAction {
-                        command: e.command.clone(),
-                    }),
-                    initial_delay_seconds: None,
-                    period_seconds: None,
-                });
+                // Convert probes using helper
+                let liveness_probe = container_spec
+                    .liveness_probe
+                    .as_ref()
+                    .map(Self::compile_probe);
+                let readiness_probe = container_spec
+                    .readiness_probe
+                    .as_ref()
+                    .map(Self::compile_probe);
+                let startup_probe = container_spec
+                    .startup_probe
+                    .as_ref()
+                    .map(Self::compile_probe);
 
                 Container {
                     name: container_name.clone(),
@@ -1057,10 +1115,49 @@ impl WorkloadCompiler {
                     resources,
                     liveness_probe,
                     readiness_probe,
+                    startup_probe,
                     volume_mounts: vec![],
                 }
             })
             .collect()
+    }
+
+    /// Compile a CRD Probe to a K8s ProbeSpec (1:1 mapping)
+    fn compile_probe(p: &crate::crd::Probe) -> ProbeSpec {
+        ProbeSpec {
+            http_get: p.http_get.as_ref().map(|h| HttpGetAction {
+                path: h.path.clone(),
+                port: h.port,
+                scheme: h.scheme.clone(),
+                host: h.host.clone(),
+                http_headers: h.http_headers.as_ref().map(|headers: &Vec<crate::crd::HttpHeader>| {
+                    headers
+                        .iter()
+                        .map(|hdr| HttpHeader {
+                            name: hdr.name.clone(),
+                            value: hdr.value.clone(),
+                        })
+                        .collect()
+                }),
+            }),
+            exec: p.exec.as_ref().map(|e| ExecAction {
+                command: e.command.clone(),
+            }),
+            tcp_socket: p.tcp_socket.as_ref().map(|t| TcpSocketAction {
+                port: t.port,
+                host: t.host.clone(),
+            }),
+            grpc: p.grpc.as_ref().map(|g| GrpcAction {
+                port: g.port,
+                service: g.service.clone(),
+            }),
+            initial_delay_seconds: p.initial_delay_seconds,
+            period_seconds: p.period_seconds,
+            timeout_seconds: p.timeout_seconds,
+            success_threshold: p.success_threshold,
+            failure_threshold: p.failure_threshold,
+            termination_grace_period_seconds: p.termination_grace_period_seconds,
+        }
     }
 
     /// Compile deployment strategy
@@ -1230,6 +1327,7 @@ mod tests {
                 resources: None,
                 liveness_probe: None,
                 readiness_probe: None,
+                startup_probe: None,
             },
         );
 

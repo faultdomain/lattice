@@ -154,6 +154,7 @@ mod tests {
                 resources: None,
                 liveness_probe: None,
                 readiness_probe: None,
+                startup_probe: None,
             },
         );
 
@@ -230,6 +231,7 @@ mod tests {
                 resources: None,
                 liveness_probe: None,
                 readiness_probe: None,
+                startup_probe: None,
             },
         );
 

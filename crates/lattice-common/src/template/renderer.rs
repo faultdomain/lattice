@@ -250,6 +250,9 @@ impl TemplateRenderer {
         container: &ContainerSpec,
         ctx: &TemplateContext,
     ) -> Result<RenderedContainer, TemplateError> {
+        // Resolve image - handle Score's "." placeholder for runtime-supplied images
+        let image = self.resolve_image(&container.image, name, ctx)?;
+
         // Render environment variables with sensitivity tracking
         let mut variables = BTreeMap::new();
         for (k, v) in &container.variables {
@@ -281,13 +284,47 @@ impl TemplateRenderer {
 
         Ok(RenderedContainer {
             name: name.to_string(),
-            image: container.image.clone(), // Image not templated per Score spec
+            image,
             command: container.command.clone(),
             args: container.args.clone(),
             variables,
             files,
             volumes,
         })
+    }
+
+    /// Resolve container image, handling Score's "." placeholder
+    ///
+    /// Per Score spec, `image: "."` means the image is supplied at runtime.
+    /// We resolve this from the config context in the following order:
+    /// 1. `config.image.<container_name>` - container-specific image
+    /// 2. `config.image` - default image for all containers
+    ///
+    /// If no image is found and "." was specified, returns an error.
+    fn resolve_image(
+        &self,
+        image: &str,
+        container_name: &str,
+        ctx: &TemplateContext,
+    ) -> Result<String, TemplateError> {
+        if image != "." {
+            // Not a placeholder, use as-is (no ${} templating per Score spec)
+            return Ok(image.to_string());
+        }
+
+        // Look for container-specific image first
+        let container_key = format!("image.{}", container_name);
+        if let Some(img) = ctx.config.get(&container_key) {
+            return Ok(img.clone());
+        }
+
+        // Fall back to default image
+        if let Some(img) = ctx.config.get("image") {
+            return Ok(img.clone());
+        }
+
+        // No image found
+        Err(TemplateError::missing_image(container_name))
     }
 
     /// Render a file mount
@@ -396,6 +433,7 @@ mod tests {
                 resources: None,
                 liveness_probe: None,
                 readiness_probe: None,
+                startup_probe: None,
             },
         );
 
@@ -467,6 +505,7 @@ mod tests {
                 resources: None,
                 liveness_probe: None,
                 readiness_probe: None,
+                startup_probe: None,
             },
         );
 
@@ -583,6 +622,7 @@ mod tests {
                 resources: None,
                 liveness_probe: None,
                 readiness_probe: None,
+                startup_probe: None,
             },
         );
 
@@ -661,6 +701,7 @@ mod tests {
                 resources: None,
                 liveness_probe: None,
                 readiness_probe: None,
+                startup_probe: None,
             },
         );
 
@@ -718,6 +759,7 @@ mod tests {
                 resources: None,
                 liveness_probe: None,
                 readiness_probe: None,
+                startup_probe: None,
             },
         );
 
@@ -801,6 +843,7 @@ mod tests {
             resources: None,
             liveness_probe: None,
             readiness_probe: None,
+            startup_probe: None,
         };
 
         let renderer = TemplateRenderer::new();
@@ -817,5 +860,225 @@ mod tests {
 
         // MIXED references both - should be marked sensitive
         assert!(rendered.variables.get("MIXED").unwrap().sensitive);
+    }
+
+    // =========================================================================
+    // Story: Image "." placeholder resolution
+    // =========================================================================
+
+    #[test]
+    fn test_image_dot_resolved_from_config() {
+        let graph = ServiceGraph::new();
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: ".".to_string(), // Score placeholder
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                resources: None,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+            },
+        );
+
+        let service = LatticeService {
+            metadata: ObjectMeta {
+                name: Some("my-app".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeServiceSpec {
+                environment: "prod".to_string(),
+                containers,
+                resources: BTreeMap::new(),
+                service: None,
+                replicas: ReplicaSpec::default(),
+                deploy: crate::crd::DeploySpec::default(),
+            },
+            status: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let config = RenderConfig::new(&graph, "prod", "prod-ns")
+            .with_config("image", "gcr.io/myproject/my-app:v1.2.3");
+
+        let ctx = renderer.build_context(&service, &config).unwrap();
+        let rendered = renderer
+            .render_container("main", &service.spec.containers["main"], &ctx)
+            .unwrap();
+
+        assert_eq!(rendered.image, "gcr.io/myproject/my-app:v1.2.3");
+    }
+
+    #[test]
+    fn test_image_dot_resolved_from_container_specific_config() {
+        let graph = ServiceGraph::new();
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: ".".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                resources: None,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+            },
+        );
+        containers.insert(
+            "sidecar".to_string(),
+            ContainerSpec {
+                image: ".".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                resources: None,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+            },
+        );
+
+        let service = LatticeService {
+            metadata: ObjectMeta {
+                name: Some("my-app".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeServiceSpec {
+                environment: "prod".to_string(),
+                containers,
+                resources: BTreeMap::new(),
+                service: None,
+                replicas: ReplicaSpec::default(),
+                deploy: crate::crd::DeploySpec::default(),
+            },
+            status: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let config = RenderConfig::new(&graph, "prod", "prod-ns")
+            .with_config("image.main", "gcr.io/myproject/main:v1")
+            .with_config("image.sidecar", "gcr.io/myproject/sidecar:v2");
+
+        let ctx = renderer.build_context(&service, &config).unwrap();
+
+        let main_rendered = renderer
+            .render_container("main", &service.spec.containers["main"], &ctx)
+            .unwrap();
+        let sidecar_rendered = renderer
+            .render_container("sidecar", &service.spec.containers["sidecar"], &ctx)
+            .unwrap();
+
+        assert_eq!(main_rendered.image, "gcr.io/myproject/main:v1");
+        assert_eq!(sidecar_rendered.image, "gcr.io/myproject/sidecar:v2");
+    }
+
+    #[test]
+    fn test_image_dot_without_config_errors() {
+        let graph = ServiceGraph::new();
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: ".".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                resources: None,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+            },
+        );
+
+        let service = LatticeService {
+            metadata: ObjectMeta {
+                name: Some("my-app".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeServiceSpec {
+                environment: "prod".to_string(),
+                containers,
+                resources: BTreeMap::new(),
+                service: None,
+                replicas: ReplicaSpec::default(),
+                deploy: crate::crd::DeploySpec::default(),
+            },
+            status: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let config = RenderConfig::new(&graph, "prod", "prod-ns"); // No image config!
+
+        let ctx = renderer.build_context(&service, &config).unwrap();
+        let result = renderer.render_container("main", &service.spec.containers["main"], &ctx);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("main"));
+        assert!(err.to_string().contains("image"));
+    }
+
+    #[test]
+    fn test_regular_image_not_affected() {
+        let graph = ServiceGraph::new();
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "nginx:latest".to_string(), // Normal image
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                resources: None,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+            },
+        );
+
+        let service = LatticeService {
+            metadata: ObjectMeta {
+                name: Some("my-app".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeServiceSpec {
+                environment: "prod".to_string(),
+                containers,
+                resources: BTreeMap::new(),
+                service: None,
+                replicas: ReplicaSpec::default(),
+                deploy: crate::crd::DeploySpec::default(),
+            },
+            status: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let config = RenderConfig::new(&graph, "prod", "prod-ns");
+
+        let ctx = renderer.build_context(&service, &config).unwrap();
+        let rendered = renderer
+            .render_container("main", &service.spec.containers["main"], &ctx)
+            .unwrap();
+
+        assert_eq!(rendered.image, "nginx:latest");
     }
 }

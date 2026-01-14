@@ -731,6 +731,7 @@ mod tests {
             volumes: BTreeMap::new(),
             liveness_probe: None,
             readiness_probe: None,
+            startup_probe: None,
         }
     }
 

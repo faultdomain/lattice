@@ -99,6 +99,14 @@ fn download_helm_charts(
     let cert_manager_chart =
         charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
 
+    // Tell cargo to re-run if any chart is missing or changes
+    println!("cargo:rerun-if-changed={}", cilium_chart.display());
+    println!("cargo:rerun-if-changed={}", base_chart.display());
+    println!("cargo:rerun-if-changed={}", istiod_chart.display());
+    println!("cargo:rerun-if-changed={}", cni_chart.display());
+    println!("cargo:rerun-if-changed={}", ztunnel_chart.display());
+    println!("cargo:rerun-if-changed={}", cert_manager_chart.display());
+
     if cilium_chart.exists()
         && base_chart.exists()
         && istiod_chart.exists()
@@ -244,6 +252,11 @@ fn download_capi_providers(
 
     let core = core_dir.join("core-components.yaml");
     let bootstrap_rke2 = bootstrap_rke2_dir.join("bootstrap-components.yaml");
+
+    // Tell cargo to re-run if providers are missing or change
+    println!("cargo:rerun-if-changed={}", core.display());
+    println!("cargo:rerun-if-changed={}", bootstrap_rke2.display());
+    println!("cargo:rerun-if-changed={}", config_path.display());
 
     if core.exists() && bootstrap_rke2.exists() && config_path.exists() {
         return Ok(());

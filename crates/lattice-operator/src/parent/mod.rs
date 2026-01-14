@@ -6,16 +6,19 @@
 //!
 //! This module provides `ParentServers` which starts these servers on-demand.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::ByteString;
+use kube::api::{Api, PostParams};
+use kube::Client;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
-
-use kube::Client;
 
 use crate::agent::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::agent::mtls::ServerMtlsConfig;
@@ -101,12 +104,20 @@ struct ServerHandles {
     grpc_handle: JoinHandle<()>,
 }
 
+/// Secret name for persisting the CA
+const CA_SECRET_NAME: &str = "lattice-ca";
+/// Namespace for the CA secret
+const CA_SECRET_NAMESPACE: &str = "lattice-system";
+
 /// Error type for cell server operations
 #[derive(Debug, thiserror::Error)]
 pub enum CellServerError {
     /// Failed to create the Certificate Authority
     #[error("Failed to create CA: {0}")]
     CaCreation(String),
+    /// Failed to persist CA to Secret
+    #[error("Failed to persist CA: {0}")]
+    CaPersistence(String),
     /// Failed to create the manifest generator
     #[error("Failed to create manifest generator: {0}")]
     ManifestGenerator(String),
@@ -121,13 +132,110 @@ pub enum CellServerError {
     AlreadyRunning,
 }
 
-impl ParentServers<DefaultManifestGenerator> {
-    /// Create a new ParentServers instance with default manifest generator
-    pub fn new(config: ParentConfig) -> Result<Self, CellServerError> {
-        let ca = Arc::new(
-            CertificateAuthority::new("Lattice CA")
-                .map_err(|e| CellServerError::CaCreation(e.to_string()))?,
-        );
+/// Load CA from Secret or create a new one and persist it
+///
+/// This ensures the CA survives operator restarts. The CA is stored in a Secret
+/// named `lattice-ca` in the `lattice-system` namespace.
+///
+/// # Arguments
+/// * `client` - Kubernetes client for accessing the Secret
+///
+/// # Returns
+/// The CA, either loaded from the Secret or newly created
+pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, CellServerError> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), CA_SECRET_NAMESPACE);
+
+    // Try to load existing CA from Secret
+    match secrets.get(CA_SECRET_NAME).await {
+        Ok(secret) => {
+            // CA Secret exists, load it
+            let data = secret.data.ok_or_else(|| {
+                CellServerError::CaPersistence("CA secret exists but has no data".to_string())
+            })?;
+
+            let cert_pem = data
+                .get("ca.crt")
+                .ok_or_else(|| {
+                    CellServerError::CaPersistence("CA secret missing ca.crt".to_string())
+                })
+                .and_then(|b| {
+                    String::from_utf8(b.0.clone()).map_err(|e| {
+                        CellServerError::CaPersistence(format!("Invalid ca.crt encoding: {}", e))
+                    })
+                })?;
+
+            let key_pem = data
+                .get("ca.key")
+                .ok_or_else(|| {
+                    CellServerError::CaPersistence("CA secret missing ca.key".to_string())
+                })
+                .and_then(|b| {
+                    String::from_utf8(b.0.clone()).map_err(|e| {
+                        CellServerError::CaPersistence(format!("Invalid ca.key encoding: {}", e))
+                    })
+                })?;
+
+            let ca = CertificateAuthority::from_pem(&cert_pem, &key_pem)
+                .map_err(|e| CellServerError::CaPersistence(format!("Failed to load CA: {}", e)))?;
+
+            info!("Loaded existing CA from Secret {}/{}", CA_SECRET_NAMESPACE, CA_SECRET_NAME);
+            Ok(ca)
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            // CA Secret doesn't exist, create a new CA and persist it
+            info!("CA Secret not found, creating new CA");
+
+            let ca = CertificateAuthority::new("Lattice CA")
+                .map_err(|e| CellServerError::CaCreation(e.to_string()))?;
+
+            // Create Secret with CA cert and key
+            let secret = Secret {
+                metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                    name: Some(CA_SECRET_NAME.to_string()),
+                    namespace: Some(CA_SECRET_NAMESPACE.to_string()),
+                    ..Default::default()
+                },
+                type_: Some("Opaque".to_string()),
+                data: Some(BTreeMap::from([
+                    (
+                        "ca.crt".to_string(),
+                        ByteString(ca.ca_cert_pem().as_bytes().to_vec()),
+                    ),
+                    (
+                        "ca.key".to_string(),
+                        ByteString(ca.ca_key_pem().as_bytes().to_vec()),
+                    ),
+                ])),
+                ..Default::default()
+            };
+
+            secrets
+                .create(&PostParams::default(), &secret)
+                .await
+                .map_err(|e| {
+                    CellServerError::CaPersistence(format!("Failed to create CA secret: {}", e))
+                })?;
+
+            info!(
+                "Created and persisted new CA to Secret {}/{}",
+                CA_SECRET_NAMESPACE, CA_SECRET_NAME
+            );
+            Ok(ca)
+        }
+        Err(e) => Err(CellServerError::CaPersistence(format!(
+            "Failed to get CA secret: {}",
+            e
+        ))),
+    }
+}
+
+impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
+    /// Create a new ParentServers instance with persisted CA
+    ///
+    /// Loads CA from Secret if it exists, otherwise creates and persists a new one.
+    /// This ensures the CA survives operator restarts.
+    pub async fn new(config: ParentConfig, client: &Client) -> Result<Self, CellServerError> {
+        let ca = Arc::new(load_or_create_ca(client).await?);
 
         Ok(Self {
             running: AtomicBool::new(false),
@@ -138,11 +246,10 @@ impl ParentServers<DefaultManifestGenerator> {
             handles: RwLock::new(None),
         })
     }
-}
 
-impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
-    /// Create with a custom manifest generator
-    pub fn with_generator(config: ParentConfig, ca: Arc<CertificateAuthority>) -> Self {
+    /// Create with an existing CA (for testing)
+    #[cfg(test)]
+    pub fn with_ca(config: ParentConfig, ca: Arc<CertificateAuthority>) -> Self {
         Self {
             running: AtomicBool::new(false),
             config,
@@ -363,7 +470,7 @@ mod tests {
             ..Default::default()
         };
         let ca = Arc::new(CertificateAuthority::new("Test CA").unwrap());
-        ParentServers::with_generator(config, ca)
+        ParentServers::with_ca(config, ca)
     }
 
     /// Try to get a Kubernetes client for testing
@@ -393,10 +500,10 @@ mod tests {
 
     #[test]
     fn test_parent_servers_creation() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let config = ParentConfig::default();
-        let servers = ParentServers::new(config);
-        assert!(servers.is_ok());
-        let servers = servers.unwrap();
+        let ca = Arc::new(CertificateAuthority::new("Test CA").unwrap());
+        let servers: ParentServers<MockManifestGenerator> = ParentServers::with_ca(config, ca);
         assert!(!servers.is_running());
     }
 

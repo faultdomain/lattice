@@ -224,6 +224,7 @@ mod tests {
             resources: None,
             liveness_probe: None,
             readiness_probe: None,
+            startup_probe: None,
             volume_mounts: vec![],
         }
     }
@@ -441,6 +442,7 @@ mod tests {
             }),
             liveness_probe: None,
             readiness_probe: None,
+            startup_probe: None,
             volume_mounts: vec![],
         };
 

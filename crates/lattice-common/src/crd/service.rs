@@ -187,17 +187,76 @@ pub struct ExecProbe {
     pub command: Vec<String>,
 }
 
-/// Probe configuration (liveness or readiness)
+/// TCP socket probe configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpSocketProbe {
+    /// Port to probe
+    pub port: u16,
+
+    /// Optional host (defaults to pod IP)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// gRPC probe configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GrpcProbe {
+    /// Port to probe (must be a gRPC server with health checking enabled)
+    pub port: u16,
+
+    /// Service name to check (optional, defaults to "" which checks server health)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+}
+
+/// Probe configuration (liveness, readiness, or startup)
+///
+/// Maps 1:1 with Kubernetes probe specification. Supports HTTP GET, exec,
+/// TCP socket, and gRPC probe types with full timing configuration.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Probe {
-    /// HTTP GET probe
+    /// HTTP GET probe - performs an HTTP GET request
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_get: Option<HttpGetProbe>,
 
-    /// Exec probe
+    /// Exec probe - executes a command inside the container
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecProbe>,
+
+    /// TCP socket probe - performs a TCP check against the container's IP
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_socket: Option<TcpSocketProbe>,
+
+    /// gRPC probe - performs a gRPC health check (requires Kubernetes 1.24+)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grpc: Option<GrpcProbe>,
+
+    /// Number of seconds after container starts before probes are initiated (default: 0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_delay_seconds: Option<u32>,
+
+    /// How often (in seconds) to perform the probe (default: 10)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_seconds: Option<u32>,
+
+    /// Number of seconds after which the probe times out (default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u32>,
+
+    /// Minimum consecutive successes for probe to be considered successful (default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_threshold: Option<u32>,
+
+    /// Minimum consecutive failures for probe to be considered failed (default: 3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_threshold: Option<u32>,
+
+    /// Override pod's terminationGracePeriodSeconds when probe fails (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_grace_period_seconds: Option<i64>,
 }
 
 /// File mount specification
@@ -245,7 +304,7 @@ pub struct VolumeMount {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerSpec {
-    /// Container image
+    /// Container image (use "." for runtime-supplied image via config)
     pub image: String,
 
     /// Override container entrypoint
@@ -272,13 +331,20 @@ pub struct ContainerSpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub volumes: BTreeMap<String, VolumeMount>,
 
-    /// Liveness probe
+    /// Liveness probe - restarts container when it fails
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_probe: Option<Probe>,
 
-    /// Readiness probe
+    /// Readiness probe - removes container from service endpoints when it fails
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness_probe: Option<Probe>,
+
+    /// Startup probe - delays liveness/readiness checks until container is ready
+    ///
+    /// Useful for slow-starting containers. Liveness and readiness probes
+    /// will not run until the startup probe succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_probe: Option<Probe>,
 }
 
 /// Service port specification
@@ -642,12 +708,24 @@ impl ServicePortsSpec {
 }
 
 /// Validate container image format
+///
+/// Accepts:
+/// - Standard image references: "nginx:latest", "gcr.io/project/image:v1"
+/// - Runtime placeholder: "." (Score spec - image supplied via config at render time)
+///
+/// Note: Per Score spec, `${...}` placeholders are NOT supported in image field.
+/// Use "." for runtime-supplied images instead.
 fn validate_image(image: &str, container_name: &str) -> Result<(), crate::Error> {
     if image.is_empty() {
         return Err(crate::Error::validation(format!(
             "container '{}': image cannot be empty",
             container_name
         )));
+    }
+
+    // "." is the Score placeholder for runtime-supplied image
+    if image == "." {
+        return Ok(());
     }
 
     // Basic validation: image must not contain whitespace or control characters
@@ -818,6 +896,7 @@ mod tests {
             volumes: BTreeMap::new(),
             liveness_probe: None,
             readiness_probe: None,
+            startup_probe: None,
         }
     }
 
@@ -1296,6 +1375,12 @@ deploy:
         assert!(validate_image("gcr.io/project/image@sha256:abc123", "main").is_ok());
     }
 
+    /// Story: Score "." image placeholder is valid
+    #[test]
+    fn test_dot_image_placeholder_valid() {
+        assert!(validate_image(".", "main").is_ok());
+    }
+
     /// Story: Duplicate service ports fail validation
     #[test]
     fn test_duplicate_service_ports_fail() {
@@ -1423,5 +1508,145 @@ containers:
         let volume = &spec.containers["main"].volumes["/data"];
 
         assert!(volume.source.has_placeholders());
+    }
+
+    // =========================================================================
+    // Probe Tests (Score/K8s compatible)
+    // =========================================================================
+
+    /// Story: Full probe configuration with all timing parameters
+    #[test]
+    fn test_probe_with_timing_parameters() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      successThreshold: 1
+      failureThreshold: 3
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let probe = spec.containers["main"].liveness_probe.as_ref().unwrap();
+
+        assert_eq!(probe.initial_delay_seconds, Some(30));
+        assert_eq!(probe.period_seconds, Some(10));
+        assert_eq!(probe.timeout_seconds, Some(5));
+        assert_eq!(probe.success_threshold, Some(1));
+        assert_eq!(probe.failure_threshold, Some(3));
+
+        let http = probe.http_get.as_ref().unwrap();
+        assert_eq!(http.path, "/healthz");
+        assert_eq!(http.port, 8080);
+    }
+
+    /// Story: TCP socket probe
+    #[test]
+    fn test_tcp_socket_probe() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: redis:latest
+    readinessProbe:
+      tcpSocket:
+        port: 6379
+      periodSeconds: 5
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let probe = spec.containers["main"].readiness_probe.as_ref().unwrap();
+
+        let tcp = probe.tcp_socket.as_ref().unwrap();
+        assert_eq!(tcp.port, 6379);
+        assert_eq!(probe.period_seconds, Some(5));
+    }
+
+    /// Story: gRPC probe
+    #[test]
+    fn test_grpc_probe() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: grpc-server:latest
+    livenessProbe:
+      grpc:
+        port: 50051
+        service: my.health.Service
+      initialDelaySeconds: 10
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let probe = spec.containers["main"].liveness_probe.as_ref().unwrap();
+
+        let grpc = probe.grpc.as_ref().unwrap();
+        assert_eq!(grpc.port, 50051);
+        assert_eq!(grpc.service, Some("my.health.Service".to_string()));
+        assert_eq!(probe.initial_delay_seconds, Some(10));
+    }
+
+    /// Story: Startup probe for slow-starting containers
+    #[test]
+    fn test_startup_probe() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: slow-app:latest
+    startupProbe:
+      httpGet:
+        path: /ready
+        port: 8080
+      failureThreshold: 30
+      periodSeconds: 10
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let probe = spec.containers["main"].startup_probe.as_ref().unwrap();
+
+        let http = probe.http_get.as_ref().unwrap();
+        assert_eq!(http.path, "/ready");
+        assert_eq!(probe.failure_threshold, Some(30));
+        assert_eq!(probe.period_seconds, Some(10));
+    }
+
+    /// Story: Exec probe with command
+    #[test]
+    fn test_exec_probe() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+    livenessProbe:
+      exec:
+        command:
+          - cat
+          - /tmp/healthy
+      periodSeconds: 5
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let probe = spec.containers["main"].liveness_probe.as_ref().unwrap();
+
+        let exec = probe.exec.as_ref().unwrap();
+        assert_eq!(exec.command, vec!["cat", "/tmp/healthy"]);
+    }
+
+    /// Story: Image "." placeholder parses correctly
+    #[test]
+    fn test_image_dot_placeholder_yaml() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: "."
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.containers["main"].image, ".");
+        assert!(spec.validate().is_ok());
     }
 }
