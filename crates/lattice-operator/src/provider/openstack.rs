@@ -484,7 +484,7 @@ mod tests {
             spec: LatticeClusterSpec {
                 provider: ProviderSpec {
                     kubernetes: KubernetesSpec {
-                        version: "1.31.0".to_string(),
+                        version: "1.32.0".to_string(),
                         cert_sans: None,
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
@@ -581,7 +581,7 @@ mod tests {
         let provider = OpenstackProvider::with_namespace("capi-system");
         let spec = ProviderSpec {
             kubernetes: KubernetesSpec {
-                version: "1.31.0".to_string(),
+                version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
             },
@@ -624,5 +624,149 @@ mod tests {
 
         let replicas = md.spec.as_ref().unwrap()["replicas"].as_i64().unwrap();
         assert_eq!(replicas, 0, "MachineDeployment must start with replicas=0");
+    }
+
+    fn make_full_config_cluster(name: &str) -> LatticeCluster {
+        let mut server_metadata = std::collections::BTreeMap::new();
+        server_metadata.insert("managed-by".to_string(), "lattice".to_string());
+
+        LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::openstack(OpenstackConfig {
+                        cloud_name: Some("mycloud".to_string()),
+                        external_network: Some("public-net".to_string()),
+                        router_id: Some("router-123".to_string()),
+                        api_server_lb_enabled: Some(true),
+                        api_server_lb_allowed_cidrs: Some(vec!["10.0.0.0/8".to_string()]),
+                        api_server_floating_ip: Some("203.0.113.10".to_string()),
+                        managed_security_groups: Some(true),
+                        allow_all_in_cluster_traffic: Some(true),
+                        security_groups: Some(vec!["sg-custom".to_string()]),
+                        bastion_enabled: Some(true),
+                        bastion_flavor: Some("m1.small".to_string()),
+                        bastion_image: Some("Ubuntu 22.04".to_string()),
+                        ssh_key_name: Some("my-key".to_string()),
+                        image_id: Some("image-uuid-123".to_string()),
+                        availability_zone: Some("az1".to_string()),
+                        server_group_id: Some("sg-anti-affinity".to_string()),
+                        server_metadata: Some(server_metadata),
+                        tags: Some(vec!["env:test".to_string(), "team:platform".to_string()]),
+                        use_floating_ip: Some(true),
+                        cp_flavor: Some("m1.xlarge".to_string()),
+                        cp_root_volume_size: Some(100),
+                        cp_root_volume_type: Some("ssd".to_string()),
+                        cp_root_volume_az: Some("az1".to_string()),
+                        worker_flavor: Some("m1.2xlarge".to_string()),
+                        worker_root_volume_size: Some(200),
+                        worker_root_volume_type: Some("ssd".to_string()),
+                        worker_root_volume_az: Some("az1".to_string()),
+                        ..Default::default()
+                    }),
+                },
+                nodes: NodeSpec {
+                    control_plane: 3,
+                    workers: 5,
+                },
+                endpoints: None,
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_openstack_cluster_with_full_config() {
+        let provider = OpenstackProvider::with_namespace("capi-system");
+        let cluster = make_full_config_cluster("full-config");
+        let bootstrap = BootstrapInfo::default();
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &bootstrap)
+            .await
+            .unwrap();
+
+        let os_cluster = manifests
+            .iter()
+            .find(|m| m.kind == "OpenStackCluster")
+            .unwrap();
+        let spec = os_cluster.spec.as_ref().unwrap();
+
+        assert_eq!(spec["identityRef"]["cloudName"], "mycloud");
+        assert_eq!(spec["router"]["id"], "router-123");
+        assert_eq!(spec["apiServerLoadBalancer"]["enabled"], true);
+        assert_eq!(spec["apiServerLoadBalancer"]["allowedCidrs"][0], "10.0.0.0/8");
+        assert_eq!(spec["apiServerFloatingIP"], "203.0.113.10");
+        assert_eq!(spec["managedSecurityGroups"]["enabled"], true);
+        assert_eq!(spec["managedSecurityGroups"]["allowAllInClusterTraffic"], true);
+        assert_eq!(spec["bastion"]["enabled"], true);
+        assert_eq!(spec["bastion"]["flavor"], "m1.small");
+        assert_eq!(spec["tags"][0], "env:test");
+    }
+
+    #[tokio::test]
+    async fn test_openstack_cp_machine_template_with_full_config() {
+        let provider = OpenstackProvider::with_namespace("capi-system");
+        let cluster = make_full_config_cluster("full-config");
+        let bootstrap = BootstrapInfo::default();
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &bootstrap)
+            .await
+            .unwrap();
+
+        let cp_template = manifests
+            .iter()
+            .find(|m| m.kind == "OpenStackMachineTemplate" && m.metadata.name.contains("control-plane"))
+            .unwrap();
+        let spec = &cp_template.spec.as_ref().unwrap()["template"]["spec"];
+
+        assert_eq!(spec["flavor"], "m1.xlarge");
+        assert_eq!(spec["image"]["id"], "image-uuid-123");
+        assert_eq!(spec["sshKeyName"], "my-key");
+        assert_eq!(spec["floatingIPEnabled"], true);
+        assert_eq!(spec["availabilityZone"], "az1");
+        assert_eq!(spec["serverGroup"]["id"], "sg-anti-affinity");
+        assert_eq!(spec["serverMetadata"]["managed-by"], "lattice");
+        assert_eq!(spec["securityGroups"][0]["name"], "sg-custom");
+        assert_eq!(spec["rootVolume"]["sizeGiB"], 100);
+        assert_eq!(spec["rootVolume"]["volumeType"], "ssd");
+        assert_eq!(spec["rootVolume"]["availabilityZone"], "az1");
+    }
+
+    #[tokio::test]
+    async fn test_openstack_worker_machine_template_with_full_config() {
+        let provider = OpenstackProvider::with_namespace("capi-system");
+        let cluster = make_full_config_cluster("full-config");
+        let bootstrap = BootstrapInfo::default();
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &bootstrap)
+            .await
+            .unwrap();
+
+        let worker_template = manifests
+            .iter()
+            .find(|m| m.kind == "OpenStackMachineTemplate" && m.metadata.name.contains("md-0"))
+            .unwrap();
+        let spec = &worker_template.spec.as_ref().unwrap()["template"]["spec"];
+
+        assert_eq!(spec["flavor"], "m1.2xlarge");
+        assert_eq!(spec["rootVolume"]["sizeGiB"], 200);
+        assert_eq!(spec["rootVolume"]["volumeType"], "ssd");
+        assert_eq!(spec["rootVolume"]["availabilityZone"], "az1");
     }
 }

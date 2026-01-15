@@ -853,7 +853,7 @@ mod tests {
             ClusterConfig {
                 name: "test-cluster",
                 namespace: "default",
-                k8s_version: "1.31.0",
+                k8s_version: "1.32.0",
                 labels: std::collections::BTreeMap::new(),
                 bootstrap,
             }
@@ -1007,8 +1007,8 @@ mod tests {
                 "RKE2 version should end with +rke2r1"
             );
             assert!(
-                version.starts_with("v1.31.0"),
-                "version should start with v1.31.0"
+                version.starts_with("v1.32.0"),
+                "version should start with v1.32.0"
             );
         }
 

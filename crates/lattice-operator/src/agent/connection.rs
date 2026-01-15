@@ -354,7 +354,7 @@ mod tests {
         let conn = AgentConnection::new(
             name.to_string(),
             "1.0.0".to_string(),
-            "1.31.0".to_string(),
+            "1.32.0".to_string(),
             tx,
         );
         (conn, rx)

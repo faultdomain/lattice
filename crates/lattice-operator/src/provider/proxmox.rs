@@ -557,7 +557,7 @@ mod tests {
             spec: LatticeClusterSpec {
                 provider: ProviderSpec {
                     kubernetes: KubernetesSpec {
-                        version: "1.31.0".to_string(),
+                        version: "1.32.0".to_string(),
                         cert_sans: None,
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
@@ -647,7 +647,7 @@ mod tests {
         let provider = ProxmoxProvider::with_namespace("capi-system");
         let spec = ProviderSpec {
             kubernetes: KubernetesSpec {
-                version: "1.31.0".to_string(),
+                version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
             },

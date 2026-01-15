@@ -422,7 +422,7 @@ mod tests {
             spec: LatticeClusterSpec {
                 provider: ProviderSpec {
                     kubernetes: KubernetesSpec {
-                        version: "1.31.0".to_string(),
+                        version: "1.32.0".to_string(),
                         cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                         bootstrap: BootstrapProvider::default(),
                     },
@@ -649,7 +649,7 @@ mod tests {
 
             let spec = control_plane.spec.as_ref().unwrap();
             assert_eq!(spec.get("replicas").unwrap(), 3);
-            assert_eq!(spec.get("version").unwrap(), "v1.31.0");
+            assert_eq!(spec.get("version").unwrap(), "v1.32.0");
         }
 
         /// Story: MachineDeployment is always created with replicas=0 during initial
@@ -831,13 +831,13 @@ mod tests {
     mod validate_spec {
         use super::*;
 
-        /// Story: A standard version like "1.31.0" should be accepted.
+        /// Story: A standard version like "1.32.0" should be accepted.
         #[tokio::test]
         async fn accepts_standard_semver_version() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
                 kubernetes: KubernetesSpec {
-                    version: "1.31.0".to_string(),
+                    version: "1.32.0".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
@@ -848,14 +848,14 @@ mod tests {
             assert!(result.is_ok());
         }
 
-        /// Story: Some users prefer the "v" prefix (v1.31.0) which is common
+        /// Story: Some users prefer the "v" prefix (v1.32.0) which is common
         /// in Kubernetes version strings.
         #[tokio::test]
         async fn accepts_version_with_v_prefix() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
                 kubernetes: KubernetesSpec {
-                    version: "v1.31.0".to_string(),
+                    version: "v1.32.0".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
@@ -866,14 +866,14 @@ mod tests {
             assert!(result.is_ok());
         }
 
-        /// Story: Two-part versions like "1.31" are valid for specifying
+        /// Story: Two-part versions like "1.32" are valid for specifying
         /// a minor version without pinning to a patch release.
         #[tokio::test]
         async fn accepts_two_part_version() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
                 kubernetes: KubernetesSpec {
-                    version: "1.31".to_string(),
+                    version: "1.32".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
@@ -925,14 +925,14 @@ mod tests {
             assert!(result.unwrap_err().to_string().contains("invalid"));
         }
 
-        /// Story: Pre-release versions like "1.31.beta" aren't supported -
+        /// Story: Pre-release versions like "1.32.beta" aren't supported -
         /// production clusters should use stable releases.
         #[tokio::test]
         async fn rejects_version_with_non_numeric_parts() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
                 kubernetes: KubernetesSpec {
-                    version: "1.31.beta".to_string(),
+                    version: "1.32.beta".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },

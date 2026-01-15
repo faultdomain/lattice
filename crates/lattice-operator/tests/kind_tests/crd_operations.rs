@@ -29,7 +29,7 @@ fn sample_parent_spec(name: &str) -> LatticeCluster {
         spec: LatticeClusterSpec {
             provider: ProviderSpec {
                 kubernetes: KubernetesSpec {
-                    version: "1.31.0".to_string(),
+                    version: "1.32.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                     bootstrap: BootstrapProvider::default(),
                 },
@@ -67,7 +67,7 @@ fn sample_workload_spec(name: &str) -> LatticeCluster {
         spec: LatticeClusterSpec {
             provider: ProviderSpec {
                 kubernetes: KubernetesSpec {
-                    version: "1.31.0".to_string(),
+                    version: "1.32.0".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },

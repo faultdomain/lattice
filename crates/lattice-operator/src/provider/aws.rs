@@ -564,7 +564,7 @@ mod tests {
             spec: LatticeClusterSpec {
                 provider: ProviderSpec {
                     kubernetes: KubernetesSpec {
-                        version: "1.31.0".to_string(),
+                        version: "1.32.0".to_string(),
                         cert_sans: None,
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
@@ -631,7 +631,7 @@ mod tests {
         let provider = AwsProvider::with_namespace("capi-system");
         let spec = ProviderSpec {
             kubernetes: KubernetesSpec {
-                version: "1.31.0".to_string(),
+                version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
             },
@@ -661,7 +661,7 @@ mod tests {
         let provider = AwsProvider::with_namespace("capi-system");
         let spec = ProviderSpec {
             kubernetes: KubernetesSpec {
-                version: "1.31.0".to_string(),
+                version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
             },
@@ -672,5 +672,157 @@ mod tests {
         };
 
         assert!(provider.validate_spec(&spec).await.is_err());
+    }
+
+    fn make_full_config_cluster(name: &str) -> LatticeCluster {
+        let mut tags = BTreeMap::new();
+        tags.insert("Environment".to_string(), "test".to_string());
+        tags.insert("Team".to_string(), "platform".to_string());
+
+        LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::aws(AwsConfig {
+                        region: Some("us-west-2".to_string()),
+                        partition: Some("aws".to_string()),
+                        vpc_id: Some("vpc-12345".to_string()),
+                        subnet_ids: Some(vec!["subnet-a".to_string(), "subnet-b".to_string()]),
+                        lb_scheme: Some("internal".to_string()),
+                        lb_type: Some("nlb".to_string()),
+                        bastion_enabled: Some(true),
+                        bastion_instance_type: Some("t3.micro".to_string()),
+                        bastion_ami_id: Some("ami-bastion".to_string()),
+                        ssh_key_name: Some("my-key".to_string()),
+                        ami_id: Some("ami-12345".to_string()),
+                        additional_tags: Some(tags),
+                        imds_http_endpoint: Some("enabled".to_string()),
+                        imds_http_tokens: Some("required".to_string()),
+                        imds_http_put_response_hop_limit: Some(2),
+                        placement_group_name: Some("my-pg".to_string()),
+                        tenancy: Some("dedicated".to_string()),
+                        market_type: Some("spot".to_string()),
+                        spot_max_price: Some("0.05".to_string()),
+                        cp_instance_type: Some("m5.xlarge".to_string()),
+                        cp_root_volume_size: Some(100),
+                        cp_root_volume_type: Some("gp3".to_string()),
+                        cp_root_volume_iops: Some(3000),
+                        cp_root_volume_throughput: Some(125),
+                        cp_root_volume_encrypted: Some(true),
+                        cp_subnet_id: Some("subnet-cp".to_string()),
+                        worker_instance_type: Some("m5.2xlarge".to_string()),
+                        worker_root_volume_size: Some(200),
+                        worker_root_volume_type: Some("gp3".to_string()),
+                        worker_root_volume_encrypted: Some(true),
+                        worker_subnet_id: Some("subnet-worker".to_string()),
+                        ..Default::default()
+                    }),
+                },
+                nodes: NodeSpec {
+                    control_plane: 3,
+                    workers: 5,
+                },
+                endpoints: None,
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_aws_cluster_with_full_config() {
+        let provider = AwsProvider::with_namespace("capi-system");
+        let cluster = make_full_config_cluster("full-config");
+        let bootstrap = BootstrapInfo::default();
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &bootstrap)
+            .await
+            .unwrap();
+
+        let aws_cluster = manifests.iter().find(|m| m.kind == "AWSCluster").unwrap();
+        let spec = aws_cluster.spec.as_ref().unwrap();
+
+        assert_eq!(spec["region"], "us-west-2");
+        assert_eq!(spec["partition"], "aws");
+        assert_eq!(spec["sshKeyName"], "my-key");
+        assert_eq!(spec["controlPlaneLoadBalancer"]["scheme"], "internal");
+        assert_eq!(spec["controlPlaneLoadBalancer"]["loadBalancerType"], "nlb");
+        assert_eq!(spec["network"]["vpc"]["id"], "vpc-12345");
+        assert_eq!(spec["bastion"]["enabled"], true);
+        assert_eq!(spec["bastion"]["instanceType"], "t3.micro");
+        assert_eq!(spec["additionalTags"]["Environment"], "test");
+        assert_eq!(spec["additionalTags"]["Team"], "platform");
+    }
+
+    #[tokio::test]
+    async fn test_aws_cp_machine_template_with_full_config() {
+        let provider = AwsProvider::with_namespace("capi-system");
+        let cluster = make_full_config_cluster("full-config");
+        let bootstrap = BootstrapInfo::default();
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &bootstrap)
+            .await
+            .unwrap();
+
+        let cp_template = manifests
+            .iter()
+            .find(|m| m.kind == "AWSMachineTemplate" && m.metadata.name.contains("control-plane"))
+            .unwrap();
+        let spec = &cp_template.spec.as_ref().unwrap()["template"]["spec"];
+
+        assert_eq!(spec["instanceType"], "m5.xlarge");
+        assert_eq!(spec["ami"]["id"], "ami-12345");
+        assert_eq!(spec["sshKeyName"], "my-key");
+        assert_eq!(spec["subnet"]["id"], "subnet-cp");
+        assert_eq!(spec["rootVolume"]["size"], 100);
+        assert_eq!(spec["rootVolume"]["type"], "gp3");
+        assert_eq!(spec["rootVolume"]["iops"], 3000);
+        assert_eq!(spec["rootVolume"]["throughput"], 125);
+        assert_eq!(spec["rootVolume"]["encrypted"], true);
+        assert_eq!(spec["instanceMetadataOptions"]["httpEndpoint"], "enabled");
+        assert_eq!(spec["instanceMetadataOptions"]["httpTokens"], "required");
+        assert_eq!(spec["instanceMetadataOptions"]["httpPutResponseHopLimit"], 2);
+        assert_eq!(spec["placementGroupName"], "my-pg");
+        assert_eq!(spec["tenancy"], "dedicated");
+        assert_eq!(spec["spotMarketOptions"]["marketType"], "spot");
+        assert_eq!(spec["spotMarketOptions"]["maxPrice"], "0.05");
+    }
+
+    #[tokio::test]
+    async fn test_aws_worker_machine_template_with_full_config() {
+        let provider = AwsProvider::with_namespace("capi-system");
+        let cluster = make_full_config_cluster("full-config");
+        let bootstrap = BootstrapInfo::default();
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &bootstrap)
+            .await
+            .unwrap();
+
+        let worker_template = manifests
+            .iter()
+            .find(|m| m.kind == "AWSMachineTemplate" && m.metadata.name.contains("md-0"))
+            .unwrap();
+        let spec = &worker_template.spec.as_ref().unwrap()["template"]["spec"];
+
+        assert_eq!(spec["instanceType"], "m5.2xlarge");
+        assert_eq!(spec["subnet"]["id"], "subnet-worker");
+        assert_eq!(spec["rootVolume"]["size"], 200);
+        assert_eq!(spec["rootVolume"]["type"], "gp3");
+        assert_eq!(spec["rootVolume"]["encrypted"], true);
     }
 }

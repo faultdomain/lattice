@@ -57,7 +57,7 @@ metadata:
 spec:
   provider:
     kubernetes:
-      version: "1.31.0"
+      version: "1.32.0"
       bootstrap: {bootstrap}
       certSANs:
         - "127.0.0.1"
@@ -88,7 +88,7 @@ metadata:
 spec:
   provider:
     kubernetes:
-      version: "1.31.0"
+      version: "1.32.0"
       bootstrap: {bootstrap}
       certSANs:
         - "127.0.0.1"
@@ -141,7 +141,7 @@ metadata:
 spec:
   provider:
     kubernetes:
-      version: "1.31.0"
+      version: "1.32.0"
       bootstrap: {bootstrap}
       certSANs:
         - "127.0.0.1"
@@ -191,7 +191,7 @@ metadata:
 spec:
   provider:
     kubernetes:
-      version: "1.31.0"
+      version: "1.32.0"
       bootstrap: {bootstrap}
       certSANs:
         - "127.0.0.1"
@@ -270,7 +270,7 @@ metadata:
 spec:
   provider:
     kubernetes:
-      version: "1.31.0"
+      version: "1.32.0"
       bootstrap: {bootstrap}
       certSANs:
         - "127.0.0.1"

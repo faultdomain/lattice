@@ -195,7 +195,7 @@ mod tests {
     fn sample_provider_spec() -> ProviderSpec {
         ProviderSpec {
             kubernetes: KubernetesSpec {
-                version: "1.31.0".to_string(),
+                version: "1.32.0".to_string(),
                 cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                 bootstrap: BootstrapProvider::default(),
             },
@@ -465,7 +465,7 @@ environment: prod
 region: us-west
 provider:
   kubernetes:
-    version: "1.31.0"
+    version: "1.32.0"
     certSANs:
       - "127.0.0.1"
   config:

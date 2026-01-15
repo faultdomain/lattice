@@ -99,7 +99,7 @@ metadata:
 spec:
   provider:
     kubernetes:
-      version: "1.31.0"
+      version: "1.32.0"
       bootstrap: kubeadm
     config:
 {aws_config}
@@ -237,7 +237,7 @@ async fn test_aws_manifest_generation() {
         spec: LatticeClusterSpec {
             provider: ProviderSpec {
                 kubernetes: KubernetesSpec {
-                    version: "1.31.0".to_string(),
+                    version: "1.32.0".to_string(),
                     cert_sans: Some(vec!["api.example.com".to_string()]),
                     bootstrap: BootstrapProvider::Kubeadm,
                 },

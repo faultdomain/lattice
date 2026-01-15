@@ -112,7 +112,7 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
         spec: LatticeClusterSpec {
             provider: ProviderSpec {
                 kubernetes: KubernetesSpec {
-                    version: "1.31.0".to_string(),
+                    version: "1.32.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                     bootstrap: BootstrapProvider::default(),
                 },
@@ -499,7 +499,7 @@ async fn simulate_agent_connection(
         cluster_name: cluster_name.to_string(),
         payload: Some(Payload::Ready(AgentReady {
             agent_version: "1.0.0-test".to_string(),
-            kubernetes_version: "1.31.0".to_string(),
+            kubernetes_version: "1.32.0".to_string(),
             state: AgentState::Provisioning.into(),
             api_server_endpoint: format!("https://{}:6443", cluster_name),
         })),
