@@ -1331,7 +1331,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Ensure CAPI is installed before provisioning
             info!("ensuring CAPI is installed for provider");
-            let capi_config = CapiProviderConfig::new(cluster.spec.provider.type_.clone());
+            let capi_config = CapiProviderConfig::new(cluster.spec.provider.provider_type());
             ensure_capi_installed(ctx.capi_installer.as_ref(), &capi_config).await?;
 
             // Generate and apply CAPI manifests, then transition to Provisioning
@@ -1726,7 +1726,7 @@ async fn generate_capi_manifests(
                 ca_certificate: ca_cert.clone(),
                 cluster_manifest,
                 networking: cluster.spec.networking.clone(),
-                provider: cluster.spec.provider.type_.to_string(),
+                provider: cluster.spec.provider.provider_type().to_string(),
                 bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             };
             let token = bootstrap_state.register_cluster(registration, false);
@@ -1737,7 +1737,7 @@ async fn generate_capi_manifests(
             BootstrapInfo::default()
         };
 
-    let provider = create_provider(cluster.spec.provider.type_.clone(), &capi_namespace)?;
+    let provider = create_provider(cluster.spec.provider.provider_type(), &capi_namespace)?;
     provider.generate_capi_manifests(cluster, &bootstrap).await
 }
 
@@ -2020,8 +2020,8 @@ impl PivotOperations for PivotOperationsImpl {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
-        ProviderSpec, ProviderType, ServiceSpec,
+        BootstrapProvider, DockerConfig, EndpointsSpec, KubernetesSpec, LatticeClusterSpec,
+        NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
@@ -2034,12 +2034,12 @@ mod tests {
             },
             spec: LatticeClusterSpec {
                 provider: ProviderSpec {
-                    type_: ProviderType::Docker,
                     kubernetes: KubernetesSpec {
                         version: "1.31.0".to_string(),
                         cert_sans: None,
                         bootstrap: BootstrapProvider::default(),
                     },
+                    config: ProviderConfig::docker(),
                 },
                 nodes: NodeSpec {
                     control_plane: 1,
@@ -2589,7 +2589,7 @@ mod tests {
         use super::*;
         use crate::capi::MockCapiInstaller;
 
-        fn cluster_with_provider(name: &str, provider_type: ProviderType) -> LatticeCluster {
+        fn cluster_with_docker_config(name: &str) -> LatticeCluster {
             LatticeCluster {
                 metadata: ObjectMeta {
                     name: Some(name.to_string()),
@@ -2597,12 +2597,12 @@ mod tests {
                 },
                 spec: LatticeClusterSpec {
                     provider: ProviderSpec {
-                        type_: provider_type,
                         kubernetes: KubernetesSpec {
                             version: "1.31.0".to_string(),
                             cert_sans: None,
                             bootstrap: BootstrapProvider::default(),
                         },
+                        config: ProviderConfig::docker(),
                     },
                     nodes: NodeSpec {
                         control_plane: 1,
@@ -2632,7 +2632,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_generate_capi_manifests_docker_provider() {
-            let cluster = cluster_with_provider("docker-cluster", ProviderType::Docker);
+            let cluster = cluster_with_docker_config("docker-cluster");
             let ctx = mock_context();
             let result = generate_capi_manifests(&cluster, &ctx).await;
 
@@ -2640,41 +2640,6 @@ mod tests {
             let manifests = result.unwrap();
             // Docker provider should generate manifests
             assert!(!manifests.is_empty());
-        }
-
-        #[tokio::test]
-        async fn test_generate_capi_manifests_aws_provider_not_implemented() {
-            let cluster = cluster_with_provider("aws-cluster", ProviderType::Aws);
-            let ctx = mock_context();
-            let result = generate_capi_manifests(&cluster, &ctx).await;
-
-            assert!(result.is_err());
-            let err = result.unwrap_err();
-            assert!(err.to_string().contains("AWS provider not yet implemented"));
-        }
-
-        #[tokio::test]
-        async fn test_generate_capi_manifests_gcp_provider_not_implemented() {
-            let cluster = cluster_with_provider("gcp-cluster", ProviderType::Gcp);
-            let ctx = mock_context();
-            let result = generate_capi_manifests(&cluster, &ctx).await;
-
-            assert!(result.is_err());
-            let err = result.unwrap_err();
-            assert!(err.to_string().contains("GCP provider not yet implemented"));
-        }
-
-        #[tokio::test]
-        async fn test_generate_capi_manifests_azure_provider_not_implemented() {
-            let cluster = cluster_with_provider("azure-cluster", ProviderType::Azure);
-            let ctx = mock_context();
-            let result = generate_capi_manifests(&cluster, &ctx).await;
-
-            assert!(result.is_err());
-            let err = result.unwrap_err();
-            assert!(err
-                .to_string()
-                .contains("Azure provider not yet implemented"));
         }
     }
 

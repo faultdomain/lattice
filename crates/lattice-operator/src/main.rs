@@ -179,7 +179,7 @@ async fn run_install(args: InstallArgs) -> anyhow::Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("LatticeCluster must have metadata.name"))?;
 
-    let provider = &cluster.spec.provider.type_;
+    let provider = cluster.spec.provider.provider_type();
 
     println!("=== Lattice Installer ===");
     println!("Config file: {:?}", args.config_file);
@@ -645,7 +645,7 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
             ca_certificate: ca_cert,
             cluster_manifest,
             networking: cluster.spec.networking.clone(),
-            provider: cluster.spec.provider.type_.to_string(),
+            provider: cluster.spec.provider.provider_type().to_string(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         };
 

@@ -123,6 +123,8 @@ impl CapiProviderConfig {
     pub fn desired_providers(&self) -> Vec<DesiredProvider> {
         let infra_name = match self.infrastructure {
             ProviderType::Docker => "docker",
+            ProviderType::Proxmox => "proxmox",
+            ProviderType::OpenStack => "openstack",
             ProviderType::Aws => "aws",
             ProviderType::Gcp => "gcp",
             ProviderType::Azure => "azure",
@@ -511,6 +513,8 @@ impl ClusterctlInstaller {
     ) -> Option<Vec<String>> {
         let infra_name = match config.infrastructure {
             ProviderType::Docker => "docker",
+            ProviderType::Proxmox => "proxmox",
+            ProviderType::OpenStack => "openstack",
             ProviderType::Aws => "aws",
             ProviderType::Gcp => "gcp",
             ProviderType::Azure => "azure",
@@ -584,6 +588,8 @@ impl ClusterctlInstaller {
     ) -> Option<Vec<String>> {
         let infra_name = match config.infrastructure {
             ProviderType::Docker => "docker",
+            ProviderType::Proxmox => "proxmox",
+            ProviderType::OpenStack => "openstack",
             ProviderType::Aws => "aws",
             ProviderType::Gcp => "gcp",
             ProviderType::Azure => "azure",

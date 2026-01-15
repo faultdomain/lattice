@@ -7,11 +7,14 @@ use serde::{Deserialize, Serialize};
 /// Supported infrastructure provider types
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-
 pub enum ProviderType {
     /// Docker/Kind provider for local development
     #[default]
     Docker,
+    /// Proxmox VE - on-premises virtualization
+    Proxmox,
+    /// OpenStack - private cloud
+    OpenStack,
     /// Amazon Web Services
     Aws,
     /// Google Cloud Platform
@@ -25,8 +28,18 @@ impl ProviderType {
     pub fn is_valid(s: &str) -> bool {
         matches!(
             s.to_lowercase().as_str(),
-            "docker" | "aws" | "gcp" | "azure"
+            "docker" | "proxmox" | "openstack" | "aws" | "gcp" | "azure"
         )
+    }
+
+    /// Returns true if this provider is for on-premises infrastructure
+    pub fn is_on_prem(&self) -> bool {
+        matches!(self, Self::Docker | Self::Proxmox | Self::OpenStack)
+    }
+
+    /// Returns true if this provider is for public cloud
+    pub fn is_cloud(&self) -> bool {
+        matches!(self, Self::Aws | Self::Gcp | Self::Azure)
     }
 }
 
@@ -36,11 +49,13 @@ impl std::str::FromStr for ProviderType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "docker" => Ok(Self::Docker),
+            "proxmox" => Ok(Self::Proxmox),
+            "openstack" => Ok(Self::OpenStack),
             "aws" => Ok(Self::Aws),
             "gcp" => Ok(Self::Gcp),
             "azure" => Ok(Self::Azure),
             _ => Err(crate::Error::validation(format!(
-                "invalid provider type: {s}, expected one of: docker, aws, gcp, azure"
+                "invalid provider type: {s}, expected one of: docker, proxmox, openstack, aws, gcp, azure"
             ))),
         }
     }
@@ -50,6 +65,8 @@ impl std::fmt::Display for ProviderType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Docker => write!(f, "docker"),
+            Self::Proxmox => write!(f, "proxmox"),
+            Self::OpenStack => write!(f, "openstack"),
             Self::Aws => write!(f, "aws"),
             Self::Gcp => write!(f, "gcp"),
             Self::Azure => write!(f, "azure"),
@@ -98,13 +115,93 @@ impl std::fmt::Display for BootstrapProvider {
 
 /// Infrastructure provider specification
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderSpec {
-    /// The type of infrastructure provider
-    #[serde(rename = "type")]
-    pub type_: ProviderType,
-
     /// Kubernetes configuration
     pub kubernetes: KubernetesSpec,
+
+    /// Provider-specific configuration (determines provider type)
+    pub config: ProviderConfig,
+}
+
+impl ProviderSpec {
+    /// Get the provider type from the config
+    pub fn provider_type(&self) -> ProviderType {
+        self.config.provider_type()
+    }
+}
+
+/// Provider-specific configuration
+///
+/// Exactly one provider must be specified. Uses `config.docker: {}` format.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfig {
+    /// Docker/Kind for local development
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker: Option<DockerConfig>,
+    /// Proxmox VE on-premises virtualization
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxmox: Option<ProxmoxConfig>,
+}
+
+impl ProviderConfig {
+    /// Create a Docker provider config
+    pub fn docker() -> Self {
+        Self {
+            docker: Some(DockerConfig::default()),
+            proxmox: None,
+        }
+    }
+
+    /// Create a Proxmox provider config
+    pub fn proxmox(config: ProxmoxConfig) -> Self {
+        Self {
+            docker: None,
+            proxmox: Some(config),
+        }
+    }
+
+    /// Get the provider type
+    pub fn provider_type(&self) -> ProviderType {
+        if self.docker.is_some() {
+            ProviderType::Docker
+        } else if self.proxmox.is_some() {
+            ProviderType::Proxmox
+        } else {
+            // Default to Docker if nothing specified
+            ProviderType::Docker
+        }
+    }
+
+    /// Validate that exactly one provider is configured
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        let count = [self.docker.is_some(), self.proxmox.is_some()]
+            .iter()
+            .filter(|&&x| x)
+            .count();
+
+        if count == 0 {
+            return Err(crate::Error::validation(
+                "provider config must specify exactly one provider (docker or proxmox)",
+            ));
+        }
+        if count > 1 {
+            return Err(crate::Error::validation(
+                "provider config must specify exactly one provider, not multiple",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Docker/Kind provider configuration
+///
+/// Docker provider uses sensible defaults and requires no configuration.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerConfig {
+    // No fields - Docker uses sensible defaults
 }
 
 /// Kubernetes version and configuration
@@ -245,6 +342,88 @@ pub struct WorkloadSpec {
 pub struct ServiceRef {
     /// Name of the service
     pub name: String,
+}
+
+// =============================================================================
+// Provider-Specific Configuration
+// =============================================================================
+
+/// Proxmox VE provider configuration (CAPMOX)
+///
+/// Configuration for provisioning clusters on Proxmox Virtual Environment.
+/// All fields are optional with sensible defaults.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxmoxConfig {
+    /// Proxmox node to clone VMs from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_node: Option<String>,
+
+    /// VM template ID to clone from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<u32>,
+
+    /// Storage backend (e.g., "local-lvm", "ceph")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+
+    /// Network bridge (e.g., "vmbr0")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<String>,
+
+    /// Allowed Proxmox nodes for VM placement
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_nodes: Option<Vec<String>>,
+
+    /// DNS servers for cluster nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_servers: Option<Vec<String>>,
+
+    /// IPv4 address pool for nodes (CIDR ranges)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4_addresses: Option<Vec<String>>,
+
+    /// IPv4 network prefix length (default: 24)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4_prefix: Option<u8>,
+
+    /// IPv4 gateway address
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4_gateway: Option<String>,
+
+    // Control plane VM sizing
+    /// CPU sockets for control plane nodes (default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_sockets: Option<u32>,
+
+    /// CPU cores for control plane nodes (default: 4)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_cores: Option<u32>,
+
+    /// Memory in MiB for control plane nodes (default: 8192)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_memory_mib: Option<u32>,
+
+    /// Disk size in GB for control plane nodes (default: 50)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_disk_size_gb: Option<u32>,
+
+    // Worker VM sizing
+    /// CPU sockets for worker nodes (default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_sockets: Option<u32>,
+
+    /// CPU cores for worker nodes (default: 4)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_cores: Option<u32>,
+
+    /// Memory in MiB for worker nodes (default: 8192)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_memory_mib: Option<u32>,
+
+    /// Disk size in GB for worker nodes (default: 100)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_disk_size_gb: Option<u32>,
 }
 
 /// Cluster lifecycle phase
@@ -671,12 +850,12 @@ mod tests {
         #[test]
         fn test_provider_spec_roundtrip() {
             let spec = ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "1.29.0".to_string(),
                     cert_sans: Some(vec!["10.0.0.1".to_string()]),
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             };
             let json = serde_json::to_string(&spec).unwrap();
             let parsed: ProviderSpec = serde_json::from_str(&json).unwrap();

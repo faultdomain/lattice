@@ -168,7 +168,9 @@ impl LatticeClusterStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::types::{BootstrapProvider, KubernetesSpec, ProviderType, ServiceSpec};
+    use crate::crd::types::{
+        BootstrapProvider, DockerConfig, KubernetesSpec, ProviderConfig, ServiceSpec,
+    };
 
     // =========================================================================
     // Test Fixtures
@@ -176,12 +178,12 @@ mod tests {
 
     fn sample_provider_spec() -> ProviderSpec {
         ProviderSpec {
-            type_: ProviderType::Docker,
             kubernetes: KubernetesSpec {
                 version: "1.31.0".to_string(),
                 cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                 bootstrap: BootstrapProvider::default(),
             },
+            config: ProviderConfig::docker(),
         }
     }
 
@@ -225,7 +227,7 @@ mod tests {
             environment: None,
             region: None,
             workload: None,
-        };
+                    };
 
         assert!(spec.has_endpoints(), "Should be recognized as a parent");
     }
@@ -244,7 +246,7 @@ mod tests {
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
             workload: None,
-        };
+                    };
 
         assert!(!spec.has_endpoints(), "Leaf cluster cannot have children");
     }
@@ -268,7 +270,7 @@ mod tests {
             environment: None,
             region: None,
             workload: None,
-        };
+                    };
 
         assert!(
             spec.validate().is_ok(),
@@ -289,7 +291,7 @@ mod tests {
             environment: None,
             region: None,
             workload: None,
-        };
+                    };
 
         assert!(
             spec.validate().is_ok(),
@@ -313,7 +315,7 @@ mod tests {
             environment: None,
             region: None,
             workload: None,
-        };
+                    };
 
         assert!(
             spec.validate().is_err(),
@@ -408,12 +410,13 @@ mod tests {
     fn story_yaml_manifest_defines_management_cluster() {
         let yaml = r#"
 provider:
-  type: docker
   kubernetes:
     version: "1.35.0"
     certSANs:
       - "127.0.0.1"
       - "localhost"
+  config:
+    docker: {}
 nodes:
   controlPlane: 1
   workers: 2
@@ -444,11 +447,12 @@ endpoints:
 environment: prod
 region: us-west
 provider:
-  type: docker
   kubernetes:
     version: "1.31.0"
     certSANs:
       - "127.0.0.1"
+  config:
+    docker: {}
 nodes:
   controlPlane: 1
   workers: 3
@@ -483,7 +487,7 @@ workload:
             environment: Some("staging".to_string()),
             region: None,
             workload: None,
-        };
+                    };
 
         let yaml = serde_yaml::to_string(&spec).unwrap();
         let parsed: LatticeClusterSpec = serde_yaml::from_str(&yaml).unwrap();

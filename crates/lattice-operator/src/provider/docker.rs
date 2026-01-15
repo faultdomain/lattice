@@ -32,7 +32,7 @@ use super::{
     generate_control_plane, generate_machine_deployment, CAPIManifest, ClusterConfig,
     ControlPlaneConfig, InfrastructureRef, Provider,
 };
-use crate::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
+use crate::crd::{BootstrapProvider, LatticeCluster, ProviderSpec};
 use crate::Result;
 
 /// Default namespace for CAPI resources
@@ -364,17 +364,8 @@ impl Provider for DockerProvider {
     /// Validate that the provider spec is valid for Docker
     ///
     /// Checks:
-    /// - Provider type must be Docker
-    /// - Kubernetes version must be specified
+    /// - Kubernetes version must be specified and valid format
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {
-        // Verify provider type is Docker
-        if spec.type_ != ProviderType::Docker {
-            return Err(crate::Error::provider(format!(
-                "DockerProvider received non-docker provider type: {}",
-                spec.type_
-            )));
-        }
-
         // Validate Kubernetes version format (basic check)
         let version = &spec.kubernetes.version;
         if version.is_empty() {
@@ -411,8 +402,8 @@ impl Provider for DockerProvider {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
-        ProviderSpec, ProviderType, ServiceSpec,
+        BootstrapProvider, DockerConfig, EndpointsSpec, KubernetesSpec, LatticeClusterSpec,
+        NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
     };
     use crate::provider::{
         build_post_kubeadm_commands, CAPI_BOOTSTRAP_API_VERSION, CAPI_CLUSTER_API_VERSION,
@@ -430,12 +421,12 @@ mod tests {
             },
             spec: LatticeClusterSpec {
                 provider: ProviderSpec {
-                    type_: ProviderType::Docker,
                     kubernetes: KubernetesSpec {
                         version: "1.31.0".to_string(),
                         cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                         bootstrap: BootstrapProvider::default(),
                     },
+                    config: ProviderConfig::docker(),
                 },
                 nodes: NodeSpec {
                     control_plane: 1,
@@ -844,12 +835,12 @@ mod tests {
         async fn accepts_standard_semver_version() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -862,12 +853,12 @@ mod tests {
         async fn accepts_version_with_v_prefix() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "v1.31.0".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -880,35 +871,16 @@ mod tests {
         async fn accepts_two_part_version() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "1.31".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             };
 
             let result = provider.validate_spec(&spec).await;
             assert!(result.is_ok());
-        }
-
-        /// Story: If someone accidentally sends an AWS spec to the Docker provider,
-        /// it should fail fast with a clear error.
-        #[tokio::test]
-        async fn rejects_non_docker_provider_type() {
-            let provider = DockerProvider::new();
-            let spec = ProviderSpec {
-                type_: ProviderType::Aws,
-                kubernetes: KubernetesSpec {
-                    version: "1.31.0".to_string(),
-                    cert_sans: None,
-                    bootstrap: BootstrapProvider::default(),
-                },
-            };
-
-            let result = provider.validate_spec(&spec).await;
-            assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("non-docker"));
         }
 
         /// Story: Kubernetes version is required - we can't provision without knowing
@@ -917,12 +889,12 @@ mod tests {
         async fn rejects_empty_version() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -939,12 +911,12 @@ mod tests {
         async fn rejects_invalid_version_format() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "latest".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -958,12 +930,12 @@ mod tests {
         async fn rejects_version_with_non_numeric_parts() {
             let provider = DockerProvider::new();
             let spec = ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "1.31.beta".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             };
 
             let result = provider.validate_spec(&spec).await;

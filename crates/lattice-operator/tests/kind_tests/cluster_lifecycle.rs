@@ -14,8 +14,8 @@ use kube::Client;
 
 use lattice_operator::controller::{reconcile, Context, KubeClientImpl};
 use lattice_operator::crd::{
-    BootstrapProvider, ClusterPhase, EndpointsSpec, KubernetesSpec, LatticeCluster,
-    LatticeClusterSpec, LatticeClusterStatus, NodeSpec, ProviderSpec, ProviderType, ServiceSpec,
+    BootstrapProvider, ClusterPhase, DockerConfig, EndpointsSpec, KubernetesSpec, LatticeCluster,
+    LatticeClusterSpec, LatticeClusterStatus, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
 };
 
 use super::helpers::ensure_test_cluster;
@@ -33,12 +33,12 @@ fn sample_cluster(name: &str) -> LatticeCluster {
         },
         spec: LatticeClusterSpec {
             provider: ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string()]),
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             },
             nodes: NodeSpec {
                 control_plane: 1,

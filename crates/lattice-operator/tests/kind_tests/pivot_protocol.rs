@@ -41,8 +41,8 @@ use lattice_operator::agent::connection::{AgentRegistry, PostPivotManifests};
 use lattice_operator::agent::server::AgentServer;
 use lattice_operator::bootstrap::{BootstrapState, DefaultManifestGenerator};
 use lattice_operator::crd::{
-    BootstrapProvider, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec, ProviderSpec,
-    ProviderType,
+    BootstrapProvider, DockerConfig, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
+    ProviderConfig, ProviderSpec,
 };
 use lattice_operator::pki::CertificateAuthority;
 use lattice_operator::proto::agent_message::Payload;
@@ -111,12 +111,12 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
         },
         spec: LatticeClusterSpec {
             provider: ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             },
             nodes: NodeSpec {
                 control_plane: 1,

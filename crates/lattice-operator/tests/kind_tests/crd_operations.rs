@@ -9,8 +9,8 @@ use kube::api::{Api, DeleteParams, PostParams};
 use kube::Client;
 
 use lattice_operator::crd::{
-    BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
-    ProviderSpec, ProviderType, ServiceSpec,
+    BootstrapProvider, DockerConfig, EndpointsSpec, KubernetesSpec, LatticeCluster,
+    LatticeClusterSpec, NodeSpec, ProviderConfig, ProviderSpec, ProviderType, ServiceSpec,
 };
 
 use super::helpers::ensure_test_cluster;
@@ -28,12 +28,12 @@ fn sample_parent_spec(name: &str) -> LatticeCluster {
         },
         spec: LatticeClusterSpec {
             provider: ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             },
             nodes: NodeSpec {
                 control_plane: 1,
@@ -65,12 +65,12 @@ fn sample_workload_spec(name: &str) -> LatticeCluster {
         },
         spec: LatticeClusterSpec {
             provider: ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
                 },
+                config: ProviderConfig::docker(),
             },
             nodes: NodeSpec {
                 control_plane: 1,
@@ -137,7 +137,7 @@ async fn story_operator_creates_management_cluster() {
 
     // Assert: Configuration is persisted correctly
     let fetched = api.get(name).await.expect("failed to get cluster");
-    assert_eq!(fetched.spec.provider.type_, ProviderType::Docker);
+    assert_eq!(fetched.spec.provider.provider_type(), ProviderType::Docker);
     assert_eq!(fetched.spec.nodes.control_plane, 1);
     assert_eq!(fetched.spec.nodes.workers, 2);
     assert_eq!(

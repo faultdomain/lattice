@@ -17,8 +17,10 @@
 //! ```
 
 mod docker;
+mod proxmox;
 
 pub use docker::DockerProvider;
+pub use proxmox::ProxmoxProvider;
 
 use async_trait::async_trait;
 
@@ -725,6 +727,10 @@ pub trait Provider: Send + Sync {
 pub fn create_provider(provider_type: ProviderType, namespace: &str) -> Result<Box<dyn Provider>> {
     match provider_type {
         ProviderType::Docker => Ok(Box::new(DockerProvider::with_namespace(namespace))),
+        ProviderType::Proxmox => Ok(Box::new(ProxmoxProvider::with_namespace(namespace))),
+        ProviderType::OpenStack => Err(crate::Error::provider(
+            "OpenStack provider not yet implemented".to_string(),
+        )),
         ProviderType::Aws => Err(crate::Error::provider(
             "AWS provider not yet implemented".to_string(),
         )),

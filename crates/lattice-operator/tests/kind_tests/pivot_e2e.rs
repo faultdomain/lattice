@@ -44,9 +44,9 @@ use tokio::time::sleep;
 
 use lattice_operator::crd::{
     BootstrapProvider, ClusterPhase, ContainerSpec, DependencyDirection, DeploySpec,
-    KubernetesSpec, LatticeCluster, LatticeClusterSpec, LatticeExternalService,
+    DockerConfig, KubernetesSpec, LatticeCluster, LatticeClusterSpec, LatticeExternalService,
     LatticeExternalServiceSpec, LatticeService, LatticeServiceSpec, NodeSpec, PortSpec,
-    ProviderSpec, ProviderType, ReplicaSpec, Resolution, ResourceSpec, ResourceType,
+    ProviderConfig, ProviderSpec, ReplicaSpec, Resolution, ResourceSpec, ResourceType,
     ServicePortsSpec,
 };
 use lattice_operator::install::{InstallConfig, Installer};
@@ -352,12 +352,12 @@ fn workload_cluster_spec(name: &str, bootstrap: BootstrapProvider) -> LatticeClu
         },
         spec: LatticeClusterSpec {
             provider: ProviderSpec {
-                type_: ProviderType::Docker,
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                     bootstrap,
                 },
+                config: ProviderConfig::docker(),
             },
             nodes: NodeSpec {
                 control_plane: 1,
@@ -1686,7 +1686,6 @@ metadata:
   name: {name}
 spec:
   provider:
-    type: docker
     kubernetes:
       version: "1.31.0"
       bootstrap: {bootstrap}
@@ -1694,6 +1693,8 @@ spec:
         - "127.0.0.1"
         - "localhost"
         - "172.18.255.10"
+    config:
+      docker: {{}}
   nodes:
     controlPlane: 1
     workers: 1

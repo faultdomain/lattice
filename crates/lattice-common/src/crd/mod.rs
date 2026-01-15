@@ -19,7 +19,7 @@ pub use service::{
     TcpSocketProbe, VolumeMount,
 };
 pub use types::{
-    BootstrapProvider, ClusterPhase, Condition, ConditionStatus, EndpointsSpec, KubernetesSpec,
-    NetworkPool, NetworkingSpec, NodeSpec, ProviderSpec, ProviderType, ServiceRef, ServiceSpec,
-    WorkloadSpec,
+    BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig, EndpointsSpec,
+    KubernetesSpec, NetworkPool, NetworkingSpec, NodeSpec, ProviderConfig, ProviderSpec,
+    ProviderType, ProxmoxConfig, ServiceRef, ServiceSpec, WorkloadSpec,
 };

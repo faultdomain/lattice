@@ -151,8 +151,8 @@ impl Installer {
     }
 
     /// Get the provider type from the parsed config
-    fn provider(&self) -> &crate::crd::ProviderType {
-        &self.cluster.spec.provider.type_
+    fn provider(&self) -> crate::crd::ProviderType {
+        self.cluster.spec.provider.provider_type()
     }
 
     /// Get clusterctl init arguments based on configured providers
@@ -165,6 +165,8 @@ impl Installer {
 
         let infra_arg = match self.provider() {
             ProviderType::Docker => "--infrastructure=docker",
+            ProviderType::Proxmox => "--infrastructure=proxmox",
+            ProviderType::OpenStack => "--infrastructure=openstack",
             ProviderType::Aws => "--infrastructure=aws",
             ProviderType::Gcp => "--infrastructure=gcp",
             ProviderType::Azure => "--infrastructure=azure",
@@ -452,7 +454,7 @@ nodes:
         // relax_fips is based on bootstrap provider: kubeadm clusters need FIPS relaxation
         // because kubeadm's API server uses non-FIPS cipher suites (X25519)
         let cluster_name = self.cluster.metadata.name.as_deref();
-        let provider_str = self.cluster.spec.provider.type_.to_string();
+        let provider_str = self.cluster.spec.provider.provider_type().to_string();
         let bootstrap_str = self.cluster.spec.provider.kubernetes.bootstrap.to_string();
         let config = ManifestConfig {
             image: &self.config.image,
@@ -729,7 +731,7 @@ spec:
 
         // For Docker provider, rewrite the server URL to use localhost with the LB's exposed port
         // The kubeconfig has an internal Docker IP that's not accessible from the host
-        if self.cluster.spec.provider.type_ == crate::crd::ProviderType::Docker {
+        if self.cluster.spec.provider.provider_type() == crate::crd::ProviderType::Docker {
             let lb_container = format!("{}-lb", self.cluster_name());
             let port_output = self
                 .run_command("docker", &["port", &lb_container, "6443"])
@@ -1142,9 +1144,10 @@ metadata:
   name: test-cluster
 spec:
   provider:
-    type: docker
     kubernetes:
       version: "1.32.0"
+    config:
+      docker: {}
   nodes:
     controlPlane: 1
     workers: 2
@@ -1192,7 +1195,7 @@ spec:
         let installer = Installer::new(config).expect("should parse valid config");
 
         assert_eq!(installer.cluster_name(), "test-cluster");
-        assert_eq!(*installer.provider(), ProviderType::Docker);
+        assert_eq!(installer.provider(), ProviderType::Docker);
     }
 
     #[test]
@@ -1202,9 +1205,10 @@ kind: LatticeCluster
 metadata: {}
 spec:
   provider:
-    type: docker
     kubernetes:
       version: "1.32.0"
+    config:
+      docker: {}
   nodes:
     controlPlane: 1
     workers: 2
