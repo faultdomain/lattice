@@ -178,7 +178,10 @@ pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, 
             let ca = CertificateAuthority::from_pem(&cert_pem, &key_pem)
                 .map_err(|e| CellServerError::CaPersistence(format!("Failed to load CA: {}", e)))?;
 
-            info!("Loaded existing CA from Secret {}/{}", CA_SECRET_NAMESPACE, CA_SECRET_NAME);
+            info!(
+                "Loaded existing CA from Secret {}/{}",
+                CA_SECRET_NAMESPACE, CA_SECRET_NAME
+            );
             Ok(ca)
         }
         Err(kube::Error::Api(e)) if e.code == 404 => {

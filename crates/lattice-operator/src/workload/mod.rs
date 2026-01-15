@@ -1130,15 +1130,17 @@ impl WorkloadCompiler {
                 port: h.port,
                 scheme: h.scheme.clone(),
                 host: h.host.clone(),
-                http_headers: h.http_headers.as_ref().map(|headers: &Vec<crate::crd::HttpHeader>| {
-                    headers
-                        .iter()
-                        .map(|hdr| HttpHeader {
-                            name: hdr.name.clone(),
-                            value: hdr.value.clone(),
-                        })
-                        .collect()
-                }),
+                http_headers: h.http_headers.as_ref().map(
+                    |headers: &Vec<crate::crd::HttpHeader>| {
+                        headers
+                            .iter()
+                            .map(|hdr| HttpHeader {
+                                name: hdr.name.clone(),
+                                value: hdr.value.clone(),
+                            })
+                            .collect()
+                    },
+                ),
             }),
             exec: p.exec.as_ref().map(|e| ExecAction {
                 command: e.command.clone(),

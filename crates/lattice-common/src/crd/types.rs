@@ -143,6 +143,12 @@ pub struct ProviderConfig {
     /// Proxmox VE on-premises virtualization
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxmox: Option<ProxmoxConfig>,
+    /// Amazon Web Services
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<AwsConfig>,
+    /// OpenStack (including OVH Public Cloud)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openstack: Option<OpenstackConfig>,
 }
 
 impl ProviderConfig {
@@ -151,6 +157,8 @@ impl ProviderConfig {
         Self {
             docker: Some(DockerConfig::default()),
             proxmox: None,
+            aws: None,
+            openstack: None,
         }
     }
 
@@ -159,6 +167,28 @@ impl ProviderConfig {
         Self {
             docker: None,
             proxmox: Some(config),
+            aws: None,
+            openstack: None,
+        }
+    }
+
+    /// Create an AWS provider config
+    pub fn aws(config: AwsConfig) -> Self {
+        Self {
+            docker: None,
+            proxmox: None,
+            aws: Some(config),
+            openstack: None,
+        }
+    }
+
+    /// Create an OpenStack provider config
+    pub fn openstack(config: OpenstackConfig) -> Self {
+        Self {
+            docker: None,
+            proxmox: None,
+            aws: None,
+            openstack: Some(config),
         }
     }
 
@@ -168,6 +198,10 @@ impl ProviderConfig {
             ProviderType::Docker
         } else if self.proxmox.is_some() {
             ProviderType::Proxmox
+        } else if self.aws.is_some() {
+            ProviderType::Aws
+        } else if self.openstack.is_some() {
+            ProviderType::OpenStack
         } else {
             // Default to Docker if nothing specified
             ProviderType::Docker
@@ -176,14 +210,19 @@ impl ProviderConfig {
 
     /// Validate that exactly one provider is configured
     pub fn validate(&self) -> Result<(), crate::Error> {
-        let count = [self.docker.is_some(), self.proxmox.is_some()]
-            .iter()
-            .filter(|&&x| x)
-            .count();
+        let count = [
+            self.docker.is_some(),
+            self.proxmox.is_some(),
+            self.aws.is_some(),
+            self.openstack.is_some(),
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
 
         if count == 0 {
             return Err(crate::Error::validation(
-                "provider config must specify exactly one provider (docker or proxmox)",
+                "provider config must specify exactly one provider (docker, proxmox, aws, or openstack)",
             ));
         }
         if count > 1 {
@@ -424,6 +463,124 @@ pub struct ProxmoxConfig {
     /// Disk size in GB for worker nodes (default: 100)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_disk_size_gb: Option<u32>,
+}
+
+/// AWS provider configuration (CAPA)
+///
+/// Configuration for provisioning clusters on Amazon Web Services.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AwsConfig {
+    /// AWS region (e.g., "us-west-2")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+
+    /// SSH key name for EC2 instances
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_key_name: Option<String>,
+
+    /// EC2 instance type for control plane nodes (default: "t3.large")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_instance_type: Option<String>,
+
+    /// EC2 instance type for worker nodes (default: "t3.large")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_instance_type: Option<String>,
+
+    /// IAM instance profile for control plane nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_iam_instance_profile: Option<String>,
+
+    /// IAM instance profile for worker nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_iam_instance_profile: Option<String>,
+
+    /// AMI ID for cluster nodes (uses CAPA default if not specified)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ami_id: Option<String>,
+
+    /// VPC ID to use (creates new VPC if not specified)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vpc_id: Option<String>,
+
+    /// Subnet IDs for cluster nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet_ids: Option<Vec<String>>,
+
+    /// Root volume size in GB for control plane nodes (default: 80)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_root_volume_size: Option<u32>,
+
+    /// Root volume size in GB for worker nodes (default: 80)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_root_volume_size: Option<u32>,
+
+    /// Enable public IP for nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_ip: Option<bool>,
+}
+
+/// OpenStack provider configuration (CAPO)
+///
+/// Configuration for provisioning clusters on OpenStack (including OVH Public Cloud).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenstackConfig {
+    /// Name of the cloud in clouds.yaml (default: "openstack")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_name: Option<String>,
+
+    /// External network name or ID for floating IPs (e.g., "Ext-Net" on OVH)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_network: Option<String>,
+
+    /// DNS nameservers for cluster nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_nameservers: Option<Vec<String>>,
+
+    /// SSH key name registered in OpenStack
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_key_name: Option<String>,
+
+    /// Flavor (instance type) for control plane nodes (e.g., "b2-30" on OVH)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_flavor: Option<String>,
+
+    /// Flavor (instance type) for worker nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_flavor: Option<String>,
+
+    /// Image name for cluster nodes (e.g., "Ubuntu 22.04")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_name: Option<String>,
+
+    /// Use floating IPs for nodes (default: true for external access)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_floating_ip: Option<bool>,
+
+    /// Existing network ID to use (creates new network if not specified)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<String>,
+
+    /// Existing subnet ID to use
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet_id: Option<String>,
+
+    /// CIDR for managed subnet if creating new network (default: "10.6.0.0/24")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_subnet_cidr: Option<String>,
+
+    /// Root volume size in GB for control plane nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_root_volume_size: Option<u32>,
+
+    /// Root volume size in GB for worker nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_root_volume_size: Option<u32>,
+
+    /// Availability zone for instances
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_zone: Option<String>,
 }
 
 /// Cluster lifecycle phase

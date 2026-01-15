@@ -2020,8 +2020,8 @@ impl PivotOperations for PivotOperationsImpl {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, DockerConfig, EndpointsSpec, KubernetesSpec, LatticeClusterSpec,
-        NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
+        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
+        ProviderConfig, ProviderSpec, ServiceSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 

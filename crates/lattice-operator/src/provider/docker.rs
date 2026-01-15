@@ -402,8 +402,8 @@ impl Provider for DockerProvider {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, DockerConfig, EndpointsSpec, KubernetesSpec, LatticeClusterSpec,
-        NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
+        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
+        ProviderConfig, ProviderSpec, ServiceSpec,
     };
     use crate::provider::{
         build_post_kubeadm_commands, CAPI_BOOTSTRAP_API_VERSION, CAPI_CLUSTER_API_VERSION,

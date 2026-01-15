@@ -227,7 +227,7 @@ mod tests {
             environment: None,
             region: None,
             workload: None,
-                    };
+        };
 
         assert!(spec.has_endpoints(), "Should be recognized as a parent");
     }
@@ -246,7 +246,7 @@ mod tests {
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
             workload: None,
-                    };
+        };
 
         assert!(!spec.has_endpoints(), "Leaf cluster cannot have children");
     }
@@ -270,7 +270,7 @@ mod tests {
             environment: None,
             region: None,
             workload: None,
-                    };
+        };
 
         assert!(
             spec.validate().is_ok(),
@@ -291,7 +291,7 @@ mod tests {
             environment: None,
             region: None,
             workload: None,
-                    };
+        };
 
         assert!(
             spec.validate().is_ok(),
@@ -315,7 +315,7 @@ mod tests {
             environment: None,
             region: None,
             workload: None,
-                    };
+        };
 
         assert!(
             spec.validate().is_err(),
@@ -487,7 +487,7 @@ workload:
             environment: Some("staging".to_string()),
             region: None,
             workload: None,
-                    };
+        };
 
         let yaml = serde_yaml::to_string(&spec).unwrap();
         let parsed: LatticeClusterSpec = serde_yaml::from_str(&yaml).unwrap();

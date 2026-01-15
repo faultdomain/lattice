@@ -14,7 +14,7 @@ use kube::Client;
 
 use lattice_operator::controller::{reconcile, Context, KubeClientImpl};
 use lattice_operator::crd::{
-    BootstrapProvider, ClusterPhase, DockerConfig, EndpointsSpec, KubernetesSpec, LatticeCluster,
+    BootstrapProvider, ClusterPhase, EndpointsSpec, KubernetesSpec, LatticeCluster,
     LatticeClusterSpec, LatticeClusterStatus, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
 };
 

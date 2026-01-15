@@ -41,7 +41,7 @@ use lattice_operator::agent::connection::{AgentRegistry, PostPivotManifests};
 use lattice_operator::agent::server::AgentServer;
 use lattice_operator::bootstrap::{BootstrapState, DefaultManifestGenerator};
 use lattice_operator::crd::{
-    BootstrapProvider, DockerConfig, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
+    BootstrapProvider, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
     ProviderConfig, ProviderSpec,
 };
 use lattice_operator::pki::CertificateAuthority;

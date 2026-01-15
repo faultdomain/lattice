@@ -107,13 +107,10 @@ impl ProxmoxProvider {
             "allowedNodes": allowed_nodes
         });
 
-        Ok(CAPIManifest::new(
-            PROXMOX_API_VERSION,
-            "ProxmoxCluster",
-            name,
-            &self.namespace,
+        Ok(
+            CAPIManifest::new(PROXMOX_API_VERSION, "ProxmoxCluster", name, &self.namespace)
+                .with_spec(spec_json),
         )
-        .with_spec(spec_json))
     }
 
     /// Generate ProxmoxMachineTemplate for control plane nodes
@@ -131,9 +128,7 @@ impl ProxmoxProvider {
             .and_then(|c| c.source_node.clone())
             .unwrap_or_else(|| "pve".to_string());
 
-        let template_id = proxmox_config
-            .and_then(|c| c.template_id)
-            .unwrap_or(9000);
+        let template_id = proxmox_config.and_then(|c| c.template_id).unwrap_or(9000);
 
         let cp_cores = proxmox_config.and_then(|c| c.cp_cores).unwrap_or(4);
         let cp_sockets = proxmox_config.and_then(|c| c.cp_sockets).unwrap_or(1);
@@ -198,9 +193,7 @@ impl ProxmoxProvider {
             .and_then(|c| c.source_node.clone())
             .unwrap_or_else(|| "pve".to_string());
 
-        let template_id = proxmox_config
-            .and_then(|c| c.template_id)
-            .unwrap_or(9000);
+        let template_id = proxmox_config.and_then(|c| c.template_id).unwrap_or(9000);
 
         let worker_cores = proxmox_config.and_then(|c| c.worker_cores).unwrap_or(4);
         let worker_sockets = proxmox_config.and_then(|c| c.worker_sockets).unwrap_or(1);

@@ -6,6 +6,8 @@ struct Versions {
     capi: String,
     rke2: String,
     capmox: String,
+    capa: String,
+    capo: String,
     cilium: String,
     istio: String,
     cert_manager: String,
@@ -23,6 +25,8 @@ fn load_versions() -> Versions {
         capi: String::new(),
         rke2: String::new(),
         capmox: String::new(),
+        capa: String::new(),
+        capo: String::new(),
         cilium: String::new(),
         istio: String::new(),
         cert_manager: String::new(),
@@ -40,6 +44,8 @@ fn load_versions() -> Versions {
                 ("capi", "version") => versions.capi = value.to_string(),
                 ("rke2", "version") => versions.rke2 = value.to_string(),
                 ("capmox", "version") => versions.capmox = value.to_string(),
+                ("capa", "version") => versions.capa = value.to_string(),
+                ("capo", "version") => versions.capo = value.to_string(),
                 ("charts", "cilium") => versions.cilium = value.to_string(),
                 ("charts", "istio") => versions.istio = value.to_string(),
                 ("charts", "cert-manager") => versions.cert_manager = value.to_string(),
@@ -255,18 +261,34 @@ fn download_capi_providers(
     let proxmox_dir = providers_dir
         .join("infrastructure-proxmox")
         .join(format!("v{}", versions.capmox));
+    let aws_dir = providers_dir
+        .join("infrastructure-aws")
+        .join(format!("v{}", versions.capa));
+    let openstack_dir = providers_dir
+        .join("infrastructure-openstack")
+        .join(format!("v{}", versions.capo));
 
     let core = core_dir.join("core-components.yaml");
     let bootstrap_rke2 = bootstrap_rke2_dir.join("bootstrap-components.yaml");
     let proxmox = proxmox_dir.join("infrastructure-components.yaml");
+    let aws = aws_dir.join("infrastructure-components.yaml");
+    let openstack = openstack_dir.join("infrastructure-components.yaml");
 
     // Tell cargo to re-run if providers are missing or change
     println!("cargo:rerun-if-changed={}", core.display());
     println!("cargo:rerun-if-changed={}", bootstrap_rke2.display());
     println!("cargo:rerun-if-changed={}", proxmox.display());
+    println!("cargo:rerun-if-changed={}", aws.display());
+    println!("cargo:rerun-if-changed={}", openstack.display());
     println!("cargo:rerun-if-changed={}", config_path.display());
 
-    if core.exists() && bootstrap_rke2.exists() && proxmox.exists() && config_path.exists() {
+    if core.exists()
+        && bootstrap_rke2.exists()
+        && proxmox.exists()
+        && aws.exists()
+        && openstack.exists()
+        && config_path.exists()
+    {
         return Ok(());
     }
 
@@ -284,6 +306,8 @@ fn download_capi_providers(
     std::fs::create_dir_all(&bootstrap_rke2_dir)?;
     std::fs::create_dir_all(&controlplane_rke2_dir)?;
     std::fs::create_dir_all(&proxmox_dir)?;
+    std::fs::create_dir_all(&aws_dir)?;
+    std::fs::create_dir_all(&openstack_dir)?;
 
     let capi_base_url = format!(
         "https://github.com/kubernetes-sigs/cluster-api/releases/download/v{}",
@@ -364,6 +388,34 @@ fn download_capi_providers(
         &proxmox_dir.join("metadata.yaml"),
     );
 
+    // Download CAPA (AWS) infrastructure provider
+    let capa_base_url = format!(
+        "https://github.com/kubernetes-sigs/cluster-api-provider-aws/releases/download/v{}",
+        versions.capa
+    );
+    download_file(
+        &format!("{}/infrastructure-components.yaml", capa_base_url),
+        &aws_dir.join("infrastructure-components.yaml"),
+    );
+    download_file(
+        &format!("{}/metadata.yaml", capa_base_url),
+        &aws_dir.join("metadata.yaml"),
+    );
+
+    // Download CAPO (OpenStack) infrastructure provider
+    let capo_base_url = format!(
+        "https://github.com/kubernetes-sigs/cluster-api-provider-openstack/releases/download/v{}",
+        versions.capo
+    );
+    download_file(
+        &format!("{}/infrastructure-components.yaml", capo_base_url),
+        &openstack_dir.join("infrastructure-components.yaml"),
+    );
+    download_file(
+        &format!("{}/metadata.yaml", capo_base_url),
+        &openstack_dir.join("metadata.yaml"),
+    );
+
     let config_content = format!(
         r#"providers:
   - name: "cluster-api"
@@ -387,11 +439,19 @@ fn download_capi_providers(
   - name: "proxmox"
     url: "file://{providers_dir}/infrastructure-proxmox/v{capmox_version}/infrastructure-components.yaml"
     type: "InfrastructureProvider"
+  - name: "aws"
+    url: "file://{providers_dir}/infrastructure-aws/v{capa_version}/infrastructure-components.yaml"
+    type: "InfrastructureProvider"
+  - name: "openstack"
+    url: "file://{providers_dir}/infrastructure-openstack/v{capo_version}/infrastructure-components.yaml"
+    type: "InfrastructureProvider"
 "#,
         providers_dir = providers_dir.display(),
         capi_version = versions.capi,
         rke2_version = versions.rke2,
         capmox_version = versions.capmox,
+        capa_version = versions.capa,
+        capo_version = versions.capo,
     );
     std::fs::write(&config_path, config_content)?;
 

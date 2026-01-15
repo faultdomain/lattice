@@ -9,8 +9,8 @@ use kube::api::{Api, DeleteParams, PostParams};
 use kube::Client;
 
 use lattice_operator::crd::{
-    BootstrapProvider, DockerConfig, EndpointsSpec, KubernetesSpec, LatticeCluster,
-    LatticeClusterSpec, NodeSpec, ProviderConfig, ProviderSpec, ProviderType, ServiceSpec,
+    BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
+    ProviderConfig, ProviderSpec, ProviderType, ServiceSpec,
 };
 
 use super::helpers::ensure_test_cluster;
