@@ -47,6 +47,7 @@ fn sample_parent_spec(name: &str) -> LatticeCluster {
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
+                gitops: None,
             }),
             environment: None,
             region: None,

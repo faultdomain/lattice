@@ -13,6 +13,12 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use async_trait::async_trait;
+use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::core::v1::Namespace;
+use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
+use kube::core::DynamicObject;
+use kube::discovery::ApiResource;
+use kube::Client as KubeClient;
 #[cfg(test)]
 use mockall::automock;
 use tracing::{debug, info, warn};
@@ -84,25 +90,104 @@ pub enum ProviderAction {
     },
 }
 
+/// Provider-specific configuration for CAPI infrastructure providers
+///
+/// Consolidates all provider-specific logic in one place:
+/// - clusterctl name and version
+/// - credentials secret location and env var mapping
+/// - extra clusterctl init arguments (e.g., IPAM for Proxmox)
+#[derive(Debug, Clone)]
+pub struct InfraProviderInfo {
+    /// clusterctl infrastructure provider name
+    pub name: &'static str,
+    /// Provider version (from versions.toml)
+    pub version: String,
+    /// Credentials secret location: (namespace, name)
+    pub credentials_secret: Option<(&'static str, &'static str)>,
+    /// Mapping from secret keys to env var names for clusterctl template substitution
+    pub credentials_env_map: &'static [(&'static str, &'static str)],
+    /// Extra clusterctl init arguments (e.g., ["--ipam", "in-cluster"])
+    pub extra_init_args: &'static [&'static str],
+}
+
+impl InfraProviderInfo {
+    /// Get provider info for a given infrastructure type
+    pub fn for_provider(provider: ProviderType, capi_version: &str) -> Self {
+        match provider {
+            ProviderType::Docker => Self {
+                name: "docker",
+                version: capi_version.to_string(), // CAPD is part of CAPI
+                credentials_secret: None,
+                credentials_env_map: &[],
+                extra_init_args: &[],
+            },
+            ProviderType::Proxmox => Self {
+                name: "proxmox",
+                version: env!("CAPMOX_VERSION").to_string(),
+                credentials_secret: Some(("capmox-system", "capmox-manager-credentials")),
+                credentials_env_map: &[
+                    ("url", "PROXMOX_URL"),
+                    ("token", "PROXMOX_TOKEN"),
+                    ("secret", "PROXMOX_SECRET"),
+                ],
+                extra_init_args: &["--ipam", "in-cluster"], // CAPMOX requires IPAM provider
+            },
+            ProviderType::OpenStack => Self {
+                name: "openstack",
+                version: env!("CAPO_VERSION").to_string(),
+                credentials_secret: None, // Uses OS_* env vars from environment
+                credentials_env_map: &[],
+                extra_init_args: &[],
+            },
+            ProviderType::Aws => Self {
+                name: "aws",
+                version: env!("CAPA_VERSION").to_string(),
+                credentials_secret: None, // Uses AWS_* env vars from environment
+                credentials_env_map: &[],
+                extra_init_args: &[],
+            },
+            ProviderType::Gcp => Self {
+                name: "gcp",
+                version: capi_version.to_string(),
+                credentials_secret: None,
+                credentials_env_map: &[],
+                extra_init_args: &[],
+            },
+            ProviderType::Azure => Self {
+                name: "azure",
+                version: capi_version.to_string(),
+                credentials_secret: None,
+                credentials_env_map: &[],
+                extra_init_args: &[],
+            },
+        }
+    }
+}
+
 /// Configuration for CAPI provider installation
 #[derive(Debug, Clone)]
 pub struct CapiProviderConfig {
-    /// Infrastructure provider (docker, aws, gcp, azure)
+    /// Infrastructure provider (docker, aws, gcp, azure, proxmox, openstack)
     pub infrastructure: ProviderType,
     /// Desired CAPI core version (from versions.toml)
     pub capi_version: String,
     /// Desired RKE2 provider version (from versions.toml)
     pub rke2_version: String,
+    /// Infrastructure provider info (name, version, credentials, etc.)
+    pub infra_info: InfraProviderInfo,
 }
 
 impl CapiProviderConfig {
     /// Create a new CAPI provider configuration
     pub fn new(infrastructure: ProviderType) -> Self {
-        // Load versions from build-time constants (set by build.rs from versions.toml)
+        let capi_version = env!("CAPI_VERSION").to_string();
+        let infra_info = InfraProviderInfo::for_provider(infrastructure, &capi_version);
+
         Self {
             infrastructure,
-            capi_version: env!("CAPI_VERSION").to_string(),
+            capi_version,
             rke2_version: env!("RKE2_VERSION").to_string(),
+            infra_info,
         }
     }
 
@@ -112,24 +197,31 @@ impl CapiProviderConfig {
         capi_version: String,
         rke2_version: String,
     ) -> Self {
+        let infra_info = InfraProviderInfo {
+            name: match infrastructure {
+                ProviderType::Docker => "docker",
+                ProviderType::Proxmox => "proxmox",
+                ProviderType::OpenStack => "openstack",
+                ProviderType::Aws => "aws",
+                ProviderType::Gcp => "gcp",
+                ProviderType::Azure => "azure",
+            },
+            version: capi_version.clone(),
+            credentials_secret: None,
+            credentials_env_map: &[],
+            extra_init_args: &[],
+        };
+
         Self {
             infrastructure,
             capi_version,
             rke2_version,
+            infra_info,
         }
     }
 
     /// Get the list of desired providers based on this config
     pub fn desired_providers(&self) -> Vec<DesiredProvider> {
-        let infra_name = match self.infrastructure {
-            ProviderType::Docker => "docker",
-            ProviderType::Proxmox => "proxmox",
-            ProviderType::OpenStack => "openstack",
-            ProviderType::Aws => "aws",
-            ProviderType::Gcp => "gcp",
-            ProviderType::Azure => "azure",
-        };
-
         vec![
             // Core CAPI
             DesiredProvider {
@@ -163,9 +255,9 @@ impl CapiProviderConfig {
             },
             // Infrastructure provider
             DesiredProvider {
-                name: infra_name.to_string(),
+                name: self.infra_info.name.to_string(),
                 provider_type: CapiProviderType::Infrastructure,
-                version: format!("v{}", self.capi_version),
+                version: format!("v{}", self.infra_info.version),
             },
         ]
     }
@@ -217,7 +309,7 @@ impl ClusterctlInstaller {
     }
 
     /// Get installed CAPI providers by checking provider namespaces
-    fn get_installed_providers() -> Vec<InstalledProvider> {
+    async fn get_installed_providers(client: &KubeClient) -> Vec<InstalledProvider> {
         let mut providers = Vec::new();
 
         // Provider namespace patterns and their types
@@ -240,13 +332,15 @@ impl ClusterctlInstaller {
                 CapiProviderType::ControlPlane,
             ),
             ("capd-system", "docker", CapiProviderType::Infrastructure),
+            ("capmox-system", "proxmox", CapiProviderType::Infrastructure),
+            ("capo-system", "openstack", CapiProviderType::Infrastructure),
             ("capa-system", "aws", CapiProviderType::Infrastructure),
             ("capg-system", "gcp", CapiProviderType::Infrastructure),
             ("capz-system", "azure", CapiProviderType::Infrastructure),
         ];
 
         for (namespace, name, provider_type) in provider_checks {
-            if let Some(version) = Self::get_provider_version(namespace, name) {
+            if let Some(version) = Self::get_provider_version(client, namespace).await {
                 providers.push(InstalledProvider {
                     name: name.to_string(),
                     provider_type,
@@ -259,59 +353,37 @@ impl ClusterctlInstaller {
         providers
     }
 
-    /// Get provider version from deployment labels
-    fn get_provider_version(namespace: &str, _name: &str) -> Option<String> {
-        // Check if namespace exists first
-        let ns_check = Command::new("kubectl")
-            .args(["get", "namespace", namespace])
-            .output()
-            .ok()?;
-
-        if !ns_check.status.success() {
+    /// Get provider version from deployment labels using kube-rs
+    async fn get_provider_version(client: &KubeClient, namespace: &str) -> Option<String> {
+        // Check if namespace exists
+        let namespaces: Api<Namespace> = Api::all(client.clone());
+        if namespaces.get(namespace).await.is_err() {
             return None;
         }
 
-        // Get version from deployment label (CAPI convention: app.kubernetes.io/version)
-        let output = Command::new("kubectl")
-            .args([
-                "get",
-                "deployment",
-                "-n",
-                namespace,
-                "-o",
-                "jsonpath={.items[0].metadata.labels.app\\.kubernetes\\.io/version}",
-            ])
-            .output()
-            .ok()?;
+        // Get deployments in the namespace
+        let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+        let list = deployments.list(&ListParams::default()).await.ok()?;
 
-        if output.status.success() {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // Get first deployment and check labels
+        let deployment = list.items.first()?;
+        let labels = deployment.metadata.labels.as_ref()?;
+
+        // Check app.kubernetes.io/version label (CAPI convention)
+        if let Some(version) = labels.get("app.kubernetes.io/version") {
             if !version.is_empty() {
-                return Some(version);
+                return Some(version.clone());
             }
         }
 
-        // Fallback: check cluster-api.cattle.io/version label (RKE2 providers use this)
-        let output = Command::new("kubectl")
-            .args([
-                "get",
-                "deployment",
-                "-n",
-                namespace,
-                "-o",
-                "jsonpath={.items[0].metadata.labels.cluster-api\\.cattle\\.io/version}",
-            ])
-            .output()
-            .ok()?;
-
-        if output.status.success() {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // Fallback: check cluster-api.cattle.io/version label (RKE2 providers)
+        if let Some(version) = labels.get("cluster-api.cattle.io/version") {
             if !version.is_empty() {
-                return Some(version);
+                return Some(version.clone());
             }
         }
 
-        // If namespace exists but we can't get version, assume it's installed with unknown version
+        // Namespace exists but can't get version
         Some("unknown".to_string())
     }
 
@@ -364,33 +436,22 @@ impl ClusterctlInstaller {
     }
 
     /// Install cert-manager from local helm chart (required before CAPI providers)
-    fn install_cert_manager() -> Result<(), Error> {
-        // Check if cert-manager is already installed
-        let check = Command::new("kubectl")
-            .args(["get", "namespace", "cert-manager"])
-            .output();
+    async fn install_cert_manager(client: &KubeClient) -> Result<(), Error> {
+        use std::time::Duration;
 
-        if let Ok(output) = check {
-            if output.status.success() {
-                // Check if deployments are ready
-                let ready = Command::new("kubectl")
-                    .args([
-                        "get",
-                        "deployment",
-                        "cert-manager",
-                        "-n",
-                        "cert-manager",
-                        "-o",
-                        "jsonpath={.status.availableReplicas}",
-                    ])
-                    .output();
-
-                if let Ok(output) = ready {
-                    let replicas = String::from_utf8_lossy(&output.stdout);
-                    if replicas.trim().parse::<i32>().unwrap_or(0) > 0 {
-                        info!("cert-manager already installed and ready");
-                        return Ok(());
-                    }
+        // Check if cert-manager is already installed and ready
+        let namespaces: Api<Namespace> = Api::all(client.clone());
+        if namespaces.get("cert-manager").await.is_ok() {
+            let deployments: Api<Deployment> = Api::namespaced(client.clone(), "cert-manager");
+            if let Ok(deploy) = deployments.get("cert-manager").await {
+                let available = deploy
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.available_replicas)
+                    .unwrap_or(0);
+                if available > 0 {
+                    info!("cert-manager already installed and ready");
+                    return Ok(());
                 }
             }
         }
@@ -426,83 +487,179 @@ impl ClusterctlInstaller {
             )));
         }
 
-        // Create namespace
-        let _ = Command::new("kubectl")
-            .args([
-                "create",
-                "namespace",
-                "cert-manager",
-                "--dry-run=client",
-                "-o",
-                "yaml",
-            ])
-            .output()
-            .and_then(|ns_output| {
-                Command::new("kubectl")
-                    .args(["apply", "-f", "-"])
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .and_then(|mut child| {
-                        use std::io::Write;
-                        if let Some(stdin) = child.stdin.as_mut() {
-                            let _ = stdin.write_all(&ns_output.stdout);
-                        }
-                        child.wait()
-                    })
-            });
+        // Create namespace using kube-rs
+        let ns = Namespace {
+            metadata: kube::core::ObjectMeta {
+                name: Some("cert-manager".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let _ = namespaces.create(&PostParams::default(), &ns).await;
 
-        // Apply cert-manager manifests
-        let apply_output = Command::new("kubectl")
-            .args(["apply", "-f", "-", "--server-side", "--force-conflicts"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut() {
-                    let _ = stdin.write_all(&template_output.stdout);
-                }
-                child.wait_with_output()
-            })
-            .map_err(|e| {
-                Error::capi_installation(format!("failed to apply cert-manager: {}", e))
-            })?;
+        // Parse and apply each manifest using kube-rs server-side apply
+        let yaml_str = String::from_utf8_lossy(&template_output.stdout);
+        for doc in yaml_str.split("\n---") {
+            let doc = doc.trim();
+            if doc.is_empty() || !doc.contains("kind:") {
+                continue;
+            }
 
-        if !apply_output.status.success() {
-            return Err(Error::capi_installation(format!(
-                "kubectl apply cert-manager failed: {}",
-                String::from_utf8_lossy(&apply_output.stderr)
-            )));
+            if let Err(e) = Self::apply_yaml_manifest(client, doc).await {
+                warn!(error = %e, "Failed to apply cert-manager manifest, continuing...");
+            }
         }
 
-        // Wait for cert-manager to be ready
+        // Wait for cert-manager deployments to be ready using kube-rs
         info!("Waiting for cert-manager to be ready");
-        let wait_output = Command::new("kubectl")
-            .args([
-                "wait",
-                "--for=condition=Available",
-                "deployment/cert-manager",
-                "deployment/cert-manager-webhook",
-                "deployment/cert-manager-cainjector",
-                "-n",
-                "cert-manager",
-                "--timeout=120s",
-            ])
-            .output()
-            .map_err(|e| {
-                Error::capi_installation(format!("failed to wait for cert-manager: {}", e))
-            })?;
+        let deployments: Api<Deployment> = Api::namespaced(client.clone(), "cert-manager");
+        let required_deployments = ["cert-manager", "cert-manager-webhook", "cert-manager-cainjector"];
 
-        if !wait_output.status.success() {
-            return Err(Error::capi_installation(format!(
-                "cert-manager not ready: {}",
-                String::from_utf8_lossy(&wait_output.stderr)
-            )));
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(120);
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(Error::capi_installation(
+                    "cert-manager not ready: timeout".to_string(),
+                ));
+            }
+
+            let all_ready = futures::future::try_join_all(
+                required_deployments.iter().map(|name| deployments.get(name)),
+            )
+            .await
+            .map(|deps| {
+                deps.iter().all(|d| {
+                    d.status
+                        .as_ref()
+                        .and_then(|s| s.available_replicas)
+                        .unwrap_or(0)
+                        > 0
+                })
+            })
+            .unwrap_or(false);
+
+            if all_ready {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
         info!("cert-manager installed successfully");
         Ok(())
+    }
+
+    /// Apply a single YAML manifest using kube-rs server-side apply
+    async fn apply_yaml_manifest(client: &KubeClient, yaml: &str) -> Result<(), String> {
+        let value: serde_yaml::Value = serde_yaml::from_str(yaml)
+            .map_err(|e| format!("Invalid YAML: {}", e))?;
+
+        let api_version = value["apiVersion"]
+            .as_str()
+            .ok_or("Missing apiVersion")?;
+        let kind = value["kind"].as_str().ok_or("Missing kind")?;
+        let name = value["metadata"]["name"]
+            .as_str()
+            .ok_or("Missing metadata.name")?;
+        let namespace = value["metadata"]["namespace"].as_str();
+
+        let (group, version) = if api_version.contains('/') {
+            let parts: Vec<&str> = api_version.splitn(2, '/').collect();
+            (parts[0].to_string(), parts[1].to_string())
+        } else {
+            (String::new(), api_version.to_string())
+        };
+
+        let plural = format!("{}s", kind.to_lowercase());
+        let ar = ApiResource {
+            group,
+            version: version.clone(),
+            kind: kind.to_string(),
+            api_version: api_version.to_string(),
+            plural,
+        };
+
+        let obj: DynamicObject = serde_yaml::from_str(yaml)
+            .map_err(|e| format!("Failed to parse: {}", e))?;
+
+        let api: Api<DynamicObject> = if let Some(ns) = namespace {
+            Api::namespaced_with(client.clone(), ns, &ar)
+        } else {
+            Api::all_with(client.clone(), &ar)
+        };
+
+        api.patch(
+            name,
+            &PatchParams::apply("lattice-operator").force(),
+            &Patch::Apply(&obj),
+        )
+        .await
+        .map_err(|e| format!("Apply failed: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Get provider-specific environment variables for clusterctl template substitution
+    ///
+    /// Reads credentials from pre-created secrets so clusterctl can substitute
+    /// template variables like ${PROXMOX_URL} correctly.
+    async fn get_provider_env_vars(
+        client: &KubeClient,
+        config: &CapiProviderConfig,
+    ) -> Vec<(String, String)> {
+        let mut env_vars = Vec::new();
+        let info = &config.infra_info;
+
+        // Read credentials from secret if configured
+        if let Some((namespace, secret_name)) = info.credentials_secret {
+            if let Ok(secret) = Self::read_secret(client, namespace, secret_name).await {
+                for (secret_key, env_key) in info.credentials_env_map {
+                    if let Some(value) = secret.get(*secret_key) {
+                        env_vars.push((env_key.to_string(), value.clone()));
+                    }
+                }
+                if !env_vars.is_empty() {
+                    info!(
+                        provider = info.name,
+                        credentials_count = env_vars.len(),
+                        "Loaded provider credentials for clusterctl"
+                    );
+                }
+            }
+        }
+
+        env_vars
+    }
+
+    /// Read a secret and return its string data
+    async fn read_secret(
+        client: &KubeClient,
+        namespace: &str,
+        name: &str,
+    ) -> Result<HashMap<String, String>, String> {
+        use k8s_openapi::api::core::v1::Secret;
+
+        let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+        let secret = secrets
+            .get(name)
+            .await
+            .map_err(|e| format!("Failed to get secret {}/{}: {}", namespace, name, e))?;
+
+        let mut data = HashMap::new();
+        if let Some(string_data) = secret.string_data {
+            data.extend(string_data);
+        }
+        if let Some(secret_data) = secret.data {
+            for (key, value) in secret_data {
+                if let Ok(decoded) = String::from_utf8(value.0) {
+                    data.insert(key, decoded);
+                }
+            }
+        }
+
+        Ok(data)
     }
 
     /// Build clusterctl init arguments for missing providers only
@@ -511,14 +668,7 @@ impl ClusterctlInstaller {
         actions: &HashMap<String, ProviderAction>,
         config_path: &str,
     ) -> Option<Vec<String>> {
-        let infra_name = match config.infrastructure {
-            ProviderType::Docker => "docker",
-            ProviderType::Proxmox => "proxmox",
-            ProviderType::OpenStack => "openstack",
-            ProviderType::Aws => "aws",
-            ProviderType::Gcp => "gcp",
-            ProviderType::Azure => "azure",
-        };
+        let info = &config.infra_info;
 
         // Collect providers that need installation
         let mut bootstrap_providers = Vec::new();
@@ -561,7 +711,12 @@ impl ClusterctlInstaller {
 
         if need_infra {
             args.push("--infrastructure".to_string());
-            args.push(infra_name.to_string());
+            args.push(info.name.to_string());
+
+            // Add provider-specific extra init args (e.g., IPAM for Proxmox)
+            for arg in info.extra_init_args {
+                args.push(arg.to_string());
+            }
         }
 
         if !bootstrap_providers.is_empty() {
@@ -586,14 +741,7 @@ impl ClusterctlInstaller {
         actions: &HashMap<String, ProviderAction>,
         config_path: &str,
     ) -> Option<Vec<String>> {
-        let infra_name = match config.infrastructure {
-            ProviderType::Docker => "docker",
-            ProviderType::Proxmox => "proxmox",
-            ProviderType::OpenStack => "openstack",
-            ProviderType::Aws => "aws",
-            ProviderType::Gcp => "gcp",
-            ProviderType::Azure => "azure",
-        };
+        let info = &config.infra_info;
 
         // Check if any providers need upgrading
         let needs_upgrade = actions
@@ -631,7 +779,7 @@ impl ClusterctlInstaller {
 
         // Add infrastructure provider
         args.push("--infrastructure".to_string());
-        args.push(format!("{}:v{}", infra_name, config.capi_version));
+        args.push(format!("{}:v{}", info.name, info.version));
 
         args.push("--config".to_string());
         args.push(config_path.to_string());
@@ -649,8 +797,13 @@ impl Default for ClusterctlInstaller {
 #[async_trait]
 impl CapiInstaller for ClusterctlInstaller {
     async fn ensure(&self, config: &CapiProviderConfig) -> Result<(), Error> {
+        // Create kube client for all k8s operations
+        let client = KubeClient::try_default()
+            .await
+            .map_err(|e| Error::capi_installation(format!("Failed to create k8s client: {}", e)))?;
+
         // Get currently installed providers
-        let installed = Self::get_installed_providers();
+        let installed = Self::get_installed_providers(&client).await;
         let desired = config.desired_providers();
 
         debug!(
@@ -690,7 +843,7 @@ impl CapiInstaller for ClusterctlInstaller {
         });
 
         // Install cert-manager first (required by CAPI)
-        Self::install_cert_manager()?;
+        Self::install_cert_manager(&client).await?;
 
         // Handle installations first
         if needs_install {
@@ -698,14 +851,22 @@ impl CapiInstaller for ClusterctlInstaller {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 info!(args = ?args_ref, "Running clusterctl init for missing providers");
 
-                let output = Command::new("timeout")
-                    .args(&args_ref)
+                // Read provider credentials from pre-created secret for template substitution
+                let provider_env = Self::get_provider_env_vars(&client, config).await;
+
+                let mut cmd = Command::new("timeout");
+                cmd.args(&args_ref)
                     .env("GOPROXY", "off")
-                    .env("CLUSTERCTL_DISABLE_VERSIONCHECK", "true")
-                    .output()
-                    .map_err(|e| {
-                        Error::capi_installation(format!("failed to run clusterctl: {}", e))
-                    })?;
+                    .env("CLUSTERCTL_DISABLE_VERSIONCHECK", "true");
+
+                // Pass provider credentials as env vars for clusterctl template substitution
+                for (key, value) in &provider_env {
+                    cmd.env(key, value);
+                }
+
+                let output = cmd.output().map_err(|e| {
+                    Error::capi_installation(format!("failed to run clusterctl: {}", e))
+                })?;
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);

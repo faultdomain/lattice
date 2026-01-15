@@ -1,0 +1,61 @@
+[package]
+name = "lattice-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for managing Lattice cluster hierarchies"
+
+[features]
+default = []
+provider-e2e = []
+aws-e2e = []
+
+[dependencies]
+lattice-common.workspace = true
+lattice-operator = { path = "../lattice-operator" }
+
+# CLI
+clap.workspace = true
+
+# Async
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+base64.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Git
+git2.workspace = true
+
+# File system
+tempfile.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+kube.workspace = true
+k8s-openapi.workspace = true
+rand.workspace = true
+rustls.workspace = true
+aws-lc-rs.workspace = true
+
+[[bin]]
+name = "lattice"
+path = "src/main.rs"
+
+[lib]
+name = "lattice_cli"
+path = "src/lib.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/mod.rs"

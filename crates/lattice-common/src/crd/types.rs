@@ -4,8 +4,15 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+// Re-export provider configs from the providers module
+pub use super::providers::{AwsConfig, DockerConfig, OpenstackConfig, ProxmoxConfig};
+
+// =============================================================================
+// Provider Types
+// =============================================================================
+
 /// Supported infrastructure provider types
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderType {
     /// Docker/Kind provider for local development
@@ -75,16 +82,10 @@ impl std::fmt::Display for ProviderType {
 }
 
 /// Bootstrap provider for cluster node initialization
-///
-/// Determines how nodes are bootstrapped during cluster provisioning.
-/// - Kubeadm: Standard Kubernetes bootstrap (requires FIPS relaxation for non-FIPS clusters)
-/// - Rke2: RKE2 bootstrap (FIPS-compliant out of the box)
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-
 pub enum BootstrapProvider {
     /// Standard kubeadm bootstrap (default)
-    /// Note: May require FIPS relaxation when communicating with non-FIPS clusters
     #[default]
     Kubeadm,
     /// RKE2 bootstrap (FIPS-compliant)
@@ -98,7 +99,6 @@ impl BootstrapProvider {
     }
 
     /// Returns true if this bootstrap provider may need FIPS relaxation
-    /// when bootstrapping clusters to non-FIPS API servers
     pub fn needs_fips_relax(&self) -> bool {
         matches!(self, Self::Kubeadm)
     }
@@ -112,6 +112,10 @@ impl std::fmt::Display for BootstrapProvider {
         }
     }
 }
+
+// =============================================================================
+// Provider Specification
+// =============================================================================
 
 /// Infrastructure provider specification
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -203,7 +207,6 @@ impl ProviderConfig {
         } else if self.openstack.is_some() {
             ProviderType::OpenStack
         } else {
-            // Default to Docker if nothing specified
             ProviderType::Docker
         }
     }
@@ -234,14 +237,9 @@ impl ProviderConfig {
     }
 }
 
-/// Docker/Kind provider configuration
-///
-/// Docker provider uses sensible defaults and requires no configuration.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerConfig {
-    // No fields - Docker uses sensible defaults
-}
+// =============================================================================
+// Kubernetes Configuration
+// =============================================================================
 
 /// Kubernetes version and configuration
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -254,7 +252,6 @@ pub struct KubernetesSpec {
     pub cert_sans: Option<Vec<String>>,
 
     /// Bootstrap provider (kubeadm or rke2)
-    /// Defaults to kubeadm for backwards compatibility
     #[serde(default, skip_serializing_if = "is_default_bootstrap")]
     pub bootstrap: BootstrapProvider,
 }
@@ -262,6 +259,10 @@ pub struct KubernetesSpec {
 fn is_default_bootstrap(b: &BootstrapProvider) -> bool {
     *b == BootstrapProvider::Kubeadm
 }
+
+// =============================================================================
+// Node Configuration
+// =============================================================================
 
 /// Node topology specification
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -287,7 +288,6 @@ impl NodeSpec {
                 "control plane count must be at least 1",
             ));
         }
-        // For HA, control plane should be odd (1, 3, 5)
         if self.control_plane > 1 && self.control_plane.is_multiple_of(2) {
             return Err(crate::Error::validation(
                 "control plane count must be odd for HA (1, 3, 5, ...)",
@@ -296,6 +296,10 @@ impl NodeSpec {
         Ok(())
     }
 }
+
+// =============================================================================
+// Network Configuration
+// =============================================================================
 
 /// Network configuration specification
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -312,25 +316,98 @@ pub struct NetworkPool {
     pub cidr: String,
 }
 
-/// Parent cluster configuration
-///
-/// When present, this cluster can have children (provision and manage other clusters).
-/// Contains the endpoint configuration for child clusters to connect back.
+// =============================================================================
+// GitOps Configuration
+// =============================================================================
+
+/// GitOps configuration for child clusters
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOpsSpec {
+    /// Git repository URL (SSH or HTTPS)
+    pub url: String,
+
+    /// Git branch to watch (default: "main")
+    #[serde(default = "default_git_branch")]
+    pub branch: String,
+
+    /// Base path in the repo for cluster configs (default: "clusters")
+    #[serde(default = "default_git_base_path")]
+    pub base_path: String,
+
+    /// Sync interval (e.g., "5m", "1h") - default: "5m"
+    #[serde(default = "default_git_interval")]
+    pub interval: String,
+
+    /// Reference to a Secret containing git credentials
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<GitSecretRef>,
+}
+
+/// Reference to a Secret containing git credentials
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSecretRef {
+    /// Name of the Secret
+    pub name: String,
+    /// Namespace of the Secret (default: "lattice-system")
+    #[serde(default = "default_lattice_namespace")]
+    pub namespace: String,
+}
+
+fn default_git_branch() -> String {
+    "main".to_string()
+}
+
+fn default_git_base_path() -> String {
+    "clusters".to_string()
+}
+
+fn default_git_interval() -> String {
+    "5m".to_string()
+}
+
+fn default_lattice_namespace() -> String {
+    "lattice-system".to_string()
+}
+
+impl GitOpsSpec {
+    /// Get the path for a specific cluster
+    pub fn cluster_path(&self, cluster_name: &str) -> String {
+        format!("{}/{}", self.base_path, cluster_name)
+    }
+
+    /// Check if credentials are configured
+    pub fn has_credentials(&self) -> bool {
+        self.secret_ref.is_some()
+    }
+}
+
+// =============================================================================
+// Endpoints Configuration
+// =============================================================================
+
+/// Parent cluster endpoint configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct EndpointsSpec {
     /// Host address for child agent connections
     pub host: String,
 
     /// gRPC port for agent connections (default: 50051)
-    #[serde(default = "default_grpc_port", rename = "grpcPort")]
+    #[serde(default = "default_grpc_port")]
     pub grpc_port: u16,
 
     /// Bootstrap HTTPS port for kubeadm webhook (default: 443)
-    #[serde(default = "default_bootstrap_port", rename = "bootstrapPort")]
+    #[serde(default = "default_bootstrap_port")]
     pub bootstrap_port: u16,
 
     /// Service exposure configuration
     pub service: ServiceSpec,
+
+    /// GitOps configuration for child clusters
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gitops: Option<GitOpsSpec>,
 }
 
 fn default_grpc_port() -> u16 {
@@ -343,8 +420,6 @@ fn default_bootstrap_port() -> u16 {
 
 impl EndpointsSpec {
     /// Get the combined parent endpoint in format "host:http_port:grpc_port"
-    ///
-    /// This format is used by bootstrap to pass all connection info in a single string.
     pub fn endpoint(&self) -> String {
         format!("{}:{}:{}", self.host, self.bootstrap_port, self.grpc_port)
     }
@@ -368,6 +443,10 @@ pub struct ServiceSpec {
     pub type_: String,
 }
 
+// =============================================================================
+// Workload Configuration
+// =============================================================================
+
 /// Workload specification for clusters
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct WorkloadSpec {
@@ -384,208 +463,11 @@ pub struct ServiceRef {
 }
 
 // =============================================================================
-// Provider-Specific Configuration
+// Cluster Status Types
 // =============================================================================
-
-/// Proxmox VE provider configuration (CAPMOX)
-///
-/// Configuration for provisioning clusters on Proxmox Virtual Environment.
-/// All fields are optional with sensible defaults.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProxmoxConfig {
-    /// Proxmox node to clone VMs from
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_node: Option<String>,
-
-    /// VM template ID to clone from
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_id: Option<u32>,
-
-    /// Storage backend (e.g., "local-lvm", "ceph")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage: Option<String>,
-
-    /// Network bridge (e.g., "vmbr0")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bridge: Option<String>,
-
-    /// Allowed Proxmox nodes for VM placement
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_nodes: Option<Vec<String>>,
-
-    /// DNS servers for cluster nodes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dns_servers: Option<Vec<String>>,
-
-    /// IPv4 address pool for nodes (CIDR ranges)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv4_addresses: Option<Vec<String>>,
-
-    /// IPv4 network prefix length (default: 24)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv4_prefix: Option<u8>,
-
-    /// IPv4 gateway address
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv4_gateway: Option<String>,
-
-    // Control plane VM sizing
-    /// CPU sockets for control plane nodes (default: 1)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_sockets: Option<u32>,
-
-    /// CPU cores for control plane nodes (default: 4)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_cores: Option<u32>,
-
-    /// Memory in MiB for control plane nodes (default: 8192)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_memory_mib: Option<u32>,
-
-    /// Disk size in GB for control plane nodes (default: 50)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_disk_size_gb: Option<u32>,
-
-    // Worker VM sizing
-    /// CPU sockets for worker nodes (default: 1)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_sockets: Option<u32>,
-
-    /// CPU cores for worker nodes (default: 4)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_cores: Option<u32>,
-
-    /// Memory in MiB for worker nodes (default: 8192)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_memory_mib: Option<u32>,
-
-    /// Disk size in GB for worker nodes (default: 100)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_disk_size_gb: Option<u32>,
-}
-
-/// AWS provider configuration (CAPA)
-///
-/// Configuration for provisioning clusters on Amazon Web Services.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AwsConfig {
-    /// AWS region (e.g., "us-west-2")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-
-    /// SSH key name for EC2 instances
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_key_name: Option<String>,
-
-    /// EC2 instance type for control plane nodes (default: "t3.large")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_instance_type: Option<String>,
-
-    /// EC2 instance type for worker nodes (default: "t3.large")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_instance_type: Option<String>,
-
-    /// IAM instance profile for control plane nodes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_iam_instance_profile: Option<String>,
-
-    /// IAM instance profile for worker nodes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_iam_instance_profile: Option<String>,
-
-    /// AMI ID for cluster nodes (uses CAPA default if not specified)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ami_id: Option<String>,
-
-    /// VPC ID to use (creates new VPC if not specified)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vpc_id: Option<String>,
-
-    /// Subnet IDs for cluster nodes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subnet_ids: Option<Vec<String>>,
-
-    /// Root volume size in GB for control plane nodes (default: 80)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_root_volume_size: Option<u32>,
-
-    /// Root volume size in GB for worker nodes (default: 80)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_root_volume_size: Option<u32>,
-
-    /// Enable public IP for nodes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public_ip: Option<bool>,
-}
-
-/// OpenStack provider configuration (CAPO)
-///
-/// Configuration for provisioning clusters on OpenStack (including OVH Public Cloud).
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenstackConfig {
-    /// Name of the cloud in clouds.yaml (default: "openstack")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloud_name: Option<String>,
-
-    /// External network name or ID for floating IPs (e.g., "Ext-Net" on OVH)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_network: Option<String>,
-
-    /// DNS nameservers for cluster nodes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dns_nameservers: Option<Vec<String>>,
-
-    /// SSH key name registered in OpenStack
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_key_name: Option<String>,
-
-    /// Flavor (instance type) for control plane nodes (e.g., "b2-30" on OVH)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_flavor: Option<String>,
-
-    /// Flavor (instance type) for worker nodes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_flavor: Option<String>,
-
-    /// Image name for cluster nodes (e.g., "Ubuntu 22.04")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_name: Option<String>,
-
-    /// Use floating IPs for nodes (default: true for external access)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub use_floating_ip: Option<bool>,
-
-    /// Existing network ID to use (creates new network if not specified)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_id: Option<String>,
-
-    /// Existing subnet ID to use
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subnet_id: Option<String>,
-
-    /// CIDR for managed subnet if creating new network (default: "10.6.0.0/24")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed_subnet_cidr: Option<String>,
-
-    /// Root volume size in GB for control plane nodes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_root_volume_size: Option<u32>,
-
-    /// Root volume size in GB for worker nodes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_root_volume_size: Option<u32>,
-
-    /// Availability zone for instances
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub availability_zone: Option<String>,
-}
 
 /// Cluster lifecycle phase
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-
 pub enum ClusterPhase {
     /// Cluster is waiting to be provisioned
     #[default]
@@ -635,9 +517,6 @@ impl std::fmt::Display for ConditionStatus {
 }
 
 /// Kubernetes-style condition for status reporting
-///
-/// This type follows Kubernetes API conventions and can be used
-/// for any resource status (clusters, services, etc.)
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct Condition {
     /// Type of condition (e.g., Ready, Provisioning)
@@ -676,6 +555,10 @@ impl Condition {
     }
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,28 +568,16 @@ mod tests {
 
         #[test]
         fn test_from_str_valid() {
-            assert_eq!(
-                "docker".parse::<ProviderType>().unwrap(),
-                ProviderType::Docker
-            );
+            assert_eq!("docker".parse::<ProviderType>().unwrap(), ProviderType::Docker);
             assert_eq!("aws".parse::<ProviderType>().unwrap(), ProviderType::Aws);
             assert_eq!("gcp".parse::<ProviderType>().unwrap(), ProviderType::Gcp);
-            assert_eq!(
-                "azure".parse::<ProviderType>().unwrap(),
-                ProviderType::Azure
-            );
+            assert_eq!("azure".parse::<ProviderType>().unwrap(), ProviderType::Azure);
         }
 
         #[test]
         fn test_from_str_case_insensitive() {
-            assert_eq!(
-                "DOCKER".parse::<ProviderType>().unwrap(),
-                ProviderType::Docker
-            );
-            assert_eq!(
-                "Docker".parse::<ProviderType>().unwrap(),
-                ProviderType::Docker
-            );
+            assert_eq!("DOCKER".parse::<ProviderType>().unwrap(), ProviderType::Docker);
+            assert_eq!("Docker".parse::<ProviderType>().unwrap(), ProviderType::Docker);
             assert_eq!("AWS".parse::<ProviderType>().unwrap(), ProviderType::Aws);
         }
 
@@ -714,10 +585,7 @@ mod tests {
         fn test_from_str_invalid() {
             let result = "invalid".parse::<ProviderType>();
             assert!(result.is_err());
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("invalid provider type"));
+            assert!(result.unwrap_err().to_string().contains("invalid provider type"));
         }
 
         #[test]
@@ -745,43 +613,28 @@ mod tests {
 
         #[test]
         fn test_total_nodes() {
-            let spec = NodeSpec {
-                control_plane: 1,
-                workers: 2,
-            };
+            let spec = NodeSpec { control_plane: 1, workers: 2 };
             assert_eq!(spec.total_nodes(), 3);
         }
 
         #[test]
         fn test_validate_single_control_plane() {
-            let spec = NodeSpec {
-                control_plane: 1,
-                workers: 0,
-            };
+            let spec = NodeSpec { control_plane: 1, workers: 0 };
             assert!(spec.validate().is_ok());
         }
 
         #[test]
         fn test_validate_ha_control_plane() {
-            let spec = NodeSpec {
-                control_plane: 3,
-                workers: 2,
-            };
+            let spec = NodeSpec { control_plane: 3, workers: 2 };
             assert!(spec.validate().is_ok());
 
-            let spec = NodeSpec {
-                control_plane: 5,
-                workers: 2,
-            };
+            let spec = NodeSpec { control_plane: 5, workers: 2 };
             assert!(spec.validate().is_ok());
         }
 
         #[test]
         fn test_validate_zero_control_plane_fails() {
-            let spec = NodeSpec {
-                control_plane: 0,
-                workers: 2,
-            };
+            let spec = NodeSpec { control_plane: 0, workers: 2 };
             let result = spec.validate();
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("at least 1"));
@@ -789,28 +642,54 @@ mod tests {
 
         #[test]
         fn test_validate_even_control_plane_fails() {
-            let spec = NodeSpec {
-                control_plane: 2,
-                workers: 2,
-            };
+            let spec = NodeSpec { control_plane: 2, workers: 2 };
             let result = spec.validate();
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("odd"));
         }
     }
 
-    mod cluster_condition {
+    mod cluster_phase {
+        use super::*;
+
+        #[test]
+        fn test_default_is_pending() {
+            assert_eq!(ClusterPhase::default(), ClusterPhase::Pending);
+        }
+
+        #[test]
+        fn test_display() {
+            assert_eq!(ClusterPhase::Pending.to_string(), "Pending");
+            assert_eq!(ClusterPhase::Provisioning.to_string(), "Provisioning");
+            assert_eq!(ClusterPhase::Pivoting.to_string(), "Pivoting");
+            assert_eq!(ClusterPhase::Ready.to_string(), "Ready");
+            assert_eq!(ClusterPhase::Failed.to_string(), "Failed");
+        }
+
+        #[test]
+        fn test_serde_roundtrip() {
+            let phases = [
+                ClusterPhase::Pending,
+                ClusterPhase::Provisioning,
+                ClusterPhase::Pivoting,
+                ClusterPhase::Ready,
+                ClusterPhase::Failed,
+            ];
+            for phase in phases {
+                let json = serde_json::to_string(&phase).unwrap();
+                let parsed: ClusterPhase = serde_json::from_str(&json).unwrap();
+                assert_eq!(phase, parsed);
+            }
+        }
+    }
+
+    mod condition {
         use super::*;
 
         #[test]
         fn test_new_sets_timestamp() {
             let before = Utc::now();
-            let condition = Condition::new(
-                "Ready",
-                ConditionStatus::True,
-                "ClusterReady",
-                "Cluster is ready",
-            );
+            let condition = Condition::new("Ready", ConditionStatus::True, "ClusterReady", "Cluster is ready");
             let after = Utc::now();
 
             assert_eq!(condition.type_, "Ready");
@@ -820,184 +699,90 @@ mod tests {
             assert!(condition.last_transition_time >= before);
             assert!(condition.last_transition_time <= after);
         }
+
+        #[test]
+        fn test_condition_status_display() {
+            assert_eq!(ConditionStatus::True.to_string(), "True");
+            assert_eq!(ConditionStatus::False.to_string(), "False");
+            assert_eq!(ConditionStatus::Unknown.to_string(), "Unknown");
+        }
+
+        #[test]
+        fn test_default_status_is_unknown() {
+            assert_eq!(ConditionStatus::default(), ConditionStatus::Unknown);
+        }
     }
 
-    // ==========================================================================
-    // Story Tests: Cluster State Machine
-    // ==========================================================================
-    //
-    // Clusters transition through phases during their lifecycle:
-    // Pending -> Provisioning -> Pivoting -> Ready
-    // Any phase can transition to Failed on error.
-
-    mod cluster_lifecycle {
+    mod bootstrap_provider {
         use super::*;
 
-        /// Story: New cluster starts in Pending phase
-        ///
-        /// When a user creates a LatticeCluster CRD, it starts in Pending
-        /// phase waiting for the operator to begin provisioning.
         #[test]
-        fn story_new_cluster_starts_pending() {
-            let phase = ClusterPhase::default();
-            assert_eq!(phase, ClusterPhase::Pending);
-            assert_eq!(phase.to_string(), "Pending");
+        fn test_default_is_kubeadm() {
+            assert_eq!(BootstrapProvider::default(), BootstrapProvider::Kubeadm);
         }
 
-        /// Story: Complete successful cluster lifecycle
-        ///
-        /// A cluster transitions through all phases during normal provisioning:
-        /// Pending -> Provisioning -> Pivoting -> Ready
         #[test]
-        fn story_successful_cluster_lifecycle() {
-            // User creates LatticeCluster - starts Pending
-            let mut phase = ClusterPhase::Pending;
-            assert_eq!(phase.to_string(), "Pending");
-
-            // Operator picks up CRD and starts CAPI provisioning
-            phase = ClusterPhase::Provisioning;
-            assert_eq!(phase.to_string(), "Provisioning");
-
-            // CAPI completes, agent connects, pivot begins
-            phase = ClusterPhase::Pivoting;
-            assert_eq!(phase.to_string(), "Pivoting");
-
-            // CAPI resources imported, cluster is self-managing
-            phase = ClusterPhase::Ready;
-            assert_eq!(phase.to_string(), "Ready");
+        fn test_display() {
+            assert_eq!(BootstrapProvider::Kubeadm.to_string(), "kubeadm");
+            assert_eq!(BootstrapProvider::Rke2.to_string(), "rke2");
         }
 
-        /// Story: Cluster failure during provisioning
-        ///
-        /// If CAPI provisioning fails (e.g., quota exceeded),
-        /// the cluster transitions to Failed state.
         #[test]
-        fn story_provisioning_failure() {
-            // CAPI reports infrastructure failure - cluster goes to Failed
-            let phase = ClusterPhase::Failed;
-            assert_eq!(phase.to_string(), "Failed");
+        fn test_fips_native() {
+            assert!(!BootstrapProvider::Kubeadm.is_fips_native());
+            assert!(BootstrapProvider::Rke2.is_fips_native());
         }
 
-        /// Story: Cluster failure during pivot
-        ///
-        /// If pivot fails (e.g., agent disconnects), the cluster
-        /// may need manual intervention.
         #[test]
-        fn story_pivot_failure() {
-            // Agent connection lost during pivot - cluster goes to Failed
-            let phase = ClusterPhase::Failed;
-            assert_eq!(phase.to_string(), "Failed");
+        fn test_needs_fips_relax() {
+            assert!(BootstrapProvider::Kubeadm.needs_fips_relax());
+            assert!(!BootstrapProvider::Rke2.needs_fips_relax());
         }
 
-        /// Story: Phase values are serializable for status updates
-        ///
-        /// Phases must serialize correctly for Kubernetes status subresource.
         #[test]
-        fn story_phase_serialization_for_kubernetes() {
-            let phases = [
-                ClusterPhase::Pending,
-                ClusterPhase::Provisioning,
-                ClusterPhase::Pivoting,
-                ClusterPhase::Ready,
-                ClusterPhase::Failed,
-            ];
-
-            for phase in phases {
-                let json = serde_json::to_string(&phase).unwrap();
-                let parsed: ClusterPhase = serde_json::from_str(&json).unwrap();
-                assert_eq!(phase, parsed);
+        fn test_serde_roundtrip() {
+            let providers = [BootstrapProvider::Kubeadm, BootstrapProvider::Rke2];
+            for provider in providers {
+                let json = serde_json::to_string(&provider).unwrap();
+                let parsed: BootstrapProvider = serde_json::from_str(&json).unwrap();
+                assert_eq!(provider, parsed);
             }
         }
     }
 
-    mod cluster_conditions {
+    mod provider_config {
         use super::*;
 
-        /// Story: Conditions track cluster health with Kubernetes conventions
-        ///
-        /// Conditions follow Kubernetes API conventions with type, status,
-        /// reason, and message fields plus a timestamp.
         #[test]
-        fn story_conditions_follow_kubernetes_conventions() {
-            let before = Utc::now();
-
-            // Create a "Ready" condition
-            let condition = Condition::new(
-                "Ready",
-                ConditionStatus::True,
-                "ClusterReady",
-                "All components are healthy",
-            );
-
-            let after = Utc::now();
-
-            // Follows Kubernetes condition structure
-            assert_eq!(condition.type_, "Ready");
-            assert_eq!(condition.status, ConditionStatus::True);
-            assert_eq!(condition.reason, "ClusterReady"); // Machine-readable
-            assert_eq!(condition.message, "All components are healthy"); // Human-readable
-
-            // Timestamp is set automatically
-            assert!(condition.last_transition_time >= before);
-            assert!(condition.last_transition_time <= after);
+        fn test_docker_config() {
+            let config = ProviderConfig::docker();
+            assert!(config.docker.is_some());
+            assert_eq!(config.provider_type(), ProviderType::Docker);
+            assert!(config.validate().is_ok());
         }
 
-        /// Story: Condition status reflects actual state
-        ///
-        /// ConditionStatus::True means the condition is met,
-        /// False means it's not met, Unknown means we can't determine.
         #[test]
-        fn story_condition_status_meanings() {
-            // True = condition is definitely met
-            let ready = Condition::new(
-                "Ready",
-                ConditionStatus::True,
-                "AllHealthy",
-                "Cluster is fully operational",
-            );
-            assert_eq!(ready.status.to_string(), "True");
-
-            // False = condition is definitely NOT met
-            let not_ready = Condition::new(
-                "Ready",
-                ConditionStatus::False,
-                "ComponentsFailed",
-                "Control plane nodes not reachable",
-            );
-            assert_eq!(not_ready.status.to_string(), "False");
-
-            // Unknown = can't determine (e.g., during startup)
-            let unknown = Condition::new(
-                "Ready",
-                ConditionStatus::Unknown,
-                "Checking",
-                "Health check in progress",
-            );
-            assert_eq!(unknown.status.to_string(), "Unknown");
+        fn test_proxmox_config() {
+            let config = ProviderConfig::proxmox(ProxmoxConfig::default());
+            assert!(config.proxmox.is_some());
+            assert_eq!(config.provider_type(), ProviderType::Proxmox);
+            assert!(config.validate().is_ok());
         }
 
-        /// Story: Default condition status is Unknown (safe default)
         #[test]
-        fn story_default_condition_status_is_safe() {
-            // When we don't know the state, Unknown is the safe default
-            let status = ConditionStatus::default();
-            assert_eq!(status, ConditionStatus::Unknown);
+        fn test_aws_config() {
+            let config = ProviderConfig::aws(AwsConfig::default());
+            assert!(config.aws.is_some());
+            assert_eq!(config.provider_type(), ProviderType::Aws);
+            assert!(config.validate().is_ok());
         }
 
-        /// Story: Conditions are serializable for status updates
         #[test]
-        fn story_condition_serialization() {
-            let statuses = [
-                ConditionStatus::True,
-                ConditionStatus::False,
-                ConditionStatus::Unknown,
-            ];
-
-            for status in statuses {
-                let json = serde_json::to_string(&status).unwrap();
-                let parsed: ConditionStatus = serde_json::from_str(&json).unwrap();
-                assert_eq!(status, parsed);
-            }
+        fn test_openstack_config() {
+            let config = ProviderConfig::openstack(OpenstackConfig::default());
+            assert!(config.openstack.is_some());
+            assert_eq!(config.provider_type(), ProviderType::OpenStack);
+            assert!(config.validate().is_ok());
         }
     }
 
@@ -1033,53 +818,7 @@ mod tests {
         }
 
         #[test]
-        fn test_networking_spec_default() {
-            let spec = NetworkingSpec::default();
-            assert!(spec.default.is_none());
-        }
-
-        #[test]
-        fn test_network_pool_roundtrip() {
-            let pool = NetworkPool {
-                cidr: "10.0.0.0/24".to_string(),
-            };
-            let json = serde_json::to_string(&pool).unwrap();
-            let parsed: NetworkPool = serde_json::from_str(&json).unwrap();
-            assert_eq!(pool, parsed);
-        }
-
-        #[test]
-        fn test_cell_spec_roundtrip() {
-            let spec = EndpointsSpec {
-                host: "cell.example.com".to_string(),
-                grpc_port: 50051,
-                bootstrap_port: 8443,
-                service: ServiceSpec {
-                    type_: "LoadBalancer".to_string(),
-                },
-            };
-            let json = serde_json::to_string(&spec).unwrap();
-            let parsed: EndpointsSpec = serde_json::from_str(&json).unwrap();
-            assert_eq!(spec, parsed);
-        }
-
-        #[test]
-        fn test_cell_spec_endpoints() {
-            let spec = EndpointsSpec {
-                host: "172.18.255.1".to_string(),
-                grpc_port: 50051,
-                bootstrap_port: 8443,
-                service: ServiceSpec {
-                    type_: "LoadBalancer".to_string(),
-                },
-            };
-            assert_eq!(spec.grpc_endpoint(), "https://172.18.255.1:50051");
-            assert_eq!(spec.bootstrap_endpoint(), "https://172.18.255.1:8443");
-        }
-
-        #[test]
-        fn test_cell_spec_default_ports() {
-            // Ports should default when not specified in JSON
+        fn test_endpoints_spec_default_ports() {
             let json = r#"{"host":"example.com","service":{"type":"LoadBalancer"}}"#;
             let spec: EndpointsSpec = serde_json::from_str(json).unwrap();
             assert_eq!(spec.grpc_port, 50051);
@@ -1087,130 +826,16 @@ mod tests {
         }
 
         #[test]
-        fn test_workload_spec_default() {
-            let spec = WorkloadSpec::default();
-            assert!(spec.services.is_empty());
-        }
-
-        #[test]
-        fn test_workload_spec_with_services() {
-            let spec = WorkloadSpec {
-                services: vec![
-                    ServiceRef {
-                        name: "nginx".to_string(),
-                    },
-                    ServiceRef {
-                        name: "redis".to_string(),
-                    },
-                ],
+        fn test_endpoints_spec_urls() {
+            let spec = EndpointsSpec {
+                host: "172.18.255.1".to_string(),
+                grpc_port: 50051,
+                bootstrap_port: 8443,
+                service: ServiceSpec { type_: "LoadBalancer".to_string() },
+                gitops: None,
             };
-            let json = serde_json::to_string(&spec).unwrap();
-            let parsed: WorkloadSpec = serde_json::from_str(&json).unwrap();
-            assert_eq!(spec, parsed);
-            assert_eq!(spec.services.len(), 2);
-        }
-
-        #[test]
-        fn test_service_ref_roundtrip() {
-            let service = ServiceRef {
-                name: "my-service".to_string(),
-            };
-            let json = serde_json::to_string(&service).unwrap();
-            let parsed: ServiceRef = serde_json::from_str(&json).unwrap();
-            assert_eq!(service, parsed);
-        }
-
-        #[test]
-        fn test_cluster_phase_serde() {
-            let phases = vec![
-                ClusterPhase::Pending,
-                ClusterPhase::Provisioning,
-                ClusterPhase::Pivoting,
-                ClusterPhase::Ready,
-                ClusterPhase::Failed,
-            ];
-            for phase in phases {
-                let json = serde_json::to_string(&phase).unwrap();
-                let parsed: ClusterPhase = serde_json::from_str(&json).unwrap();
-                assert_eq!(phase, parsed);
-            }
-        }
-
-        #[test]
-        fn test_condition_status_serde() {
-            let statuses = vec![
-                ConditionStatus::True,
-                ConditionStatus::False,
-                ConditionStatus::Unknown,
-            ];
-            for status in statuses {
-                let json = serde_json::to_string(&status).unwrap();
-                let parsed: ConditionStatus = serde_json::from_str(&json).unwrap();
-                assert_eq!(status, parsed);
-            }
-        }
-
-        #[test]
-        fn test_provider_type_default() {
-            assert_eq!(ProviderType::default(), ProviderType::Docker);
-        }
-
-        #[test]
-        fn test_bootstrap_provider_default() {
-            assert_eq!(BootstrapProvider::default(), BootstrapProvider::Kubeadm);
-        }
-
-        #[test]
-        fn test_bootstrap_provider_serde() {
-            let providers = vec![BootstrapProvider::Kubeadm, BootstrapProvider::Rke2];
-            for provider in providers {
-                let json = serde_json::to_string(&provider).unwrap();
-                let parsed: BootstrapProvider = serde_json::from_str(&json).unwrap();
-                assert_eq!(provider, parsed);
-            }
-        }
-
-        #[test]
-        fn test_bootstrap_provider_display() {
-            assert_eq!(BootstrapProvider::Kubeadm.to_string(), "kubeadm");
-            assert_eq!(BootstrapProvider::Rke2.to_string(), "rke2");
-        }
-
-        #[test]
-        fn test_bootstrap_provider_fips_native() {
-            assert!(!BootstrapProvider::Kubeadm.is_fips_native());
-            assert!(BootstrapProvider::Rke2.is_fips_native());
-        }
-
-        #[test]
-        fn test_bootstrap_provider_needs_fips_relax() {
-            assert!(BootstrapProvider::Kubeadm.needs_fips_relax());
-            assert!(!BootstrapProvider::Rke2.needs_fips_relax());
-        }
-
-        #[test]
-        fn test_kubernetes_spec_with_bootstrap_provider() {
-            let spec = KubernetesSpec {
-                version: "1.35.0".to_string(),
-                cert_sans: None,
-                bootstrap: BootstrapProvider::Rke2,
-            };
-            let json = serde_json::to_string(&spec).unwrap();
-            assert!(json.contains("rke2")); // RKE2 should be serialized
-            let parsed: KubernetesSpec = serde_json::from_str(&json).unwrap();
-            assert_eq!(spec.bootstrap, parsed.bootstrap);
-        }
-
-        #[test]
-        fn test_kubernetes_spec_default_bootstrap_not_serialized() {
-            let spec = KubernetesSpec {
-                version: "1.35.0".to_string(),
-                cert_sans: None,
-                bootstrap: BootstrapProvider::Kubeadm, // Default
-            };
-            let json = serde_json::to_string(&spec).unwrap();
-            // Default should not be serialized (skip_serializing_if)
-            assert!(!json.contains("bootstrap"));
+            assert_eq!(spec.grpc_endpoint(), "https://172.18.255.1:50051");
+            assert_eq!(spec.bootstrap_endpoint(), "https://172.18.255.1:8443");
         }
     }
 }

@@ -109,6 +109,8 @@ pub struct PostPivotManifests {
     pub crd_yaml: Option<String>,
     /// LatticeCluster resource YAML (the cluster's spec)
     pub cluster_yaml: Option<String>,
+    /// Flux manifests (base controllers + GitRepository + Kustomization + credential Secret)
+    pub flux_manifests: Vec<String>,
 }
 
 /// Sender for streaming proxy responses

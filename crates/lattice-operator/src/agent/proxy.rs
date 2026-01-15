@@ -302,11 +302,11 @@ async fn central_proxy_handler(
         let request_id_clone = request_id.clone();
         tokio::spawn(async move {
             // Send first body chunk BEFORE processing any other chunks
-            if !first_body.is_empty() {
-                if body_tx.send(Ok(Bytes::from(first_body))).await.is_err() {
-                    debug!(request_id = %request_id_clone, "Body channel closed on first chunk");
-                    return;
-                }
+            if !first_body.is_empty()
+                && body_tx.send(Ok(Bytes::from(first_body))).await.is_err()
+            {
+                debug!(request_id = %request_id_clone, "Body channel closed on first chunk");
+                return;
             }
 
             // Now forward remaining chunks from the agent

@@ -452,6 +452,7 @@ mod tests {
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
+            gitops: None,
         });
         cluster
     }

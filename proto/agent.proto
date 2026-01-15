@@ -104,6 +104,7 @@ message AgentMessage {
     Heartbeat heartbeat = 6;
     ClusterHealth cluster_health = 7;
     StatusResponse status_response = 8;
+    FluxInstalled flux_installed = 9;
   }
 }
 
@@ -142,6 +143,20 @@ message PivotComplete {
   string error_message = 2;
   // Number of CAPI resources imported
   int32 resources_imported = 3;
+}
+
+// Sent when Flux has been installed and configured
+message FluxInstalled {
+  // Whether installation succeeded
+  bool success = 1;
+  // Error message if success=false
+  string error_message = 2;
+  // Installed Flux version
+  string flux_version = 3;
+  // Git repository URL being watched
+  string git_url = 4;
+  // Path being watched
+  string git_path = 5;
 }
 
 // Periodic heartbeat with agent state
@@ -224,6 +239,7 @@ message CellCommand {
     ApplyManifestsCommand apply_manifests = 2;
     StartPivotCommand start_pivot = 3;
     StatusRequest status_request = 4;
+    FluxConfigCommand flux_config = 5;
   }
 }
 
@@ -261,4 +277,27 @@ message StatusRequest {
   bool include_nodes = 1;
   // Whether to include CAPI resource status
   bool include_capi = 2;
+}
+
+// Command to configure and install Flux for GitOps
+//
+// Sent by parent after pivot is complete. Agent installs Flux and
+// configures it to watch the cluster's subtree in the git repository.
+message FluxConfigCommand {
+  // Git repository URL
+  string git_url = 1;
+  // Git branch to watch
+  string git_branch = 2;
+  // Path within the repo for this cluster (e.g., "children/prod-cluster")
+  string git_path = 3;
+  // Flux version to install (e.g., "2.2.0")
+  string flux_version = 4;
+  // Git credentials - SSH private key (base64 encoded)
+  string ssh_private_key = 5;
+  // Git credentials - HTTPS username (for token auth)
+  string https_username = 6;
+  // Git credentials - HTTPS password/token
+  string https_password = 7;
+  // Interval for git polling (e.g., "1m", "5m")
+  string sync_interval = 8;
 }

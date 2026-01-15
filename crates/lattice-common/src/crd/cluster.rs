@@ -165,11 +165,27 @@ impl LatticeClusterStatus {
     }
 }
 
+impl LatticeCluster {
+    /// Create a copy suitable for export to another cluster.
+    ///
+    /// Strips server-managed metadata fields (managedFields, resourceVersion, uid, etc.)
+    /// that would cause server-side apply to fail on the target cluster.
+    pub fn for_export(&self) -> Self {
+        let mut exported = self.clone();
+        exported.metadata.managed_fields = None;
+        exported.metadata.resource_version = None;
+        exported.metadata.uid = None;
+        exported.metadata.creation_timestamp = None;
+        exported.metadata.generation = None;
+        exported
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crd::types::{
-        BootstrapProvider, DockerConfig, KubernetesSpec, ProviderConfig, ServiceSpec,
+        BootstrapProvider, KubernetesSpec, ProviderConfig, ServiceSpec,
     };
 
     // =========================================================================
@@ -202,6 +218,7 @@ mod tests {
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
+            gitops: None,
         }
     }
 

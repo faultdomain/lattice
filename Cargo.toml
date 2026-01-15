@@ -4,6 +4,7 @@ members = [
     "crates/lattice-common",
     "crates/lattice-proto",
     "crates/lattice-operator",
+    "crates/lattice-cli",
 ]
 
 [workspace.package]
@@ -91,6 +92,12 @@ uuid = { version = "1.11", features = ["v4"] }
 
 # Random
 rand = "0.8"
+
+# Git
+git2 = "0.19"
+
+# File system
+walkdir = "2.5"
 
 # Dev dependencies
 mockall = "0.13"

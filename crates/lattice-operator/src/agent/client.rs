@@ -31,7 +31,7 @@ use crate::proto::lattice_agent_client::LatticeAgentClient;
 use crate::proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
     BootstrapComplete, CellCommand, Heartbeat, KubeProxyRequest, KubeProxyResponse, PivotComplete,
-    PivotStarted,
+    PivotStarted, StatusResponse,
 };
 
 use super::mtls::ClientMtlsConfig;
@@ -517,40 +517,71 @@ impl AgentClient {
         self.send_message(msg).await
     }
 
-    /// Apply a Kubernetes manifest using kubectl
+    /// Apply a Kubernetes manifest using kube-rs server-side apply
     ///
     /// This is used to apply manifests received via ApplyManifestsCommand
     /// (e.g., LatticeCluster CRD and resource after pivot).
     async fn apply_manifest(yaml: &str) -> Result<(), std::io::Error> {
-        use std::process::Stdio;
-        use tokio::io::AsyncWriteExt;
-        use tokio::process::Command;
+        use kube::api::{Api, Patch, PatchParams};
+        use kube::core::DynamicObject;
+        use kube::discovery::ApiResource;
 
-        debug!("Applying manifest via kubectl");
+        debug!("Applying manifest via kube-rs");
 
-        let mut child = Command::new("kubectl")
-            .args(["apply", "-f", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        // Parse YAML to extract metadata
+        let value: serde_yaml::Value = serde_yaml::from_str(yaml)
+            .map_err(|e| std::io::Error::other(format!("Invalid YAML: {}", e)))?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(yaml.as_bytes()).await?;
-        }
+        let api_version = value["apiVersion"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("Missing apiVersion"))?;
+        let kind = value["kind"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("Missing kind"))?;
+        let name = value["metadata"]["name"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("Missing metadata.name"))?;
+        let namespace = value["metadata"]["namespace"].as_str();
 
-        let output = child.wait_with_output().await?;
-
-        if output.status.success() {
-            debug!("kubectl apply succeeded");
-            Ok(())
+        // Parse group and version from apiVersion
+        let (group, version) = if api_version.contains('/') {
+            let parts: Vec<&str> = api_version.splitn(2, '/').collect();
+            (parts[0].to_string(), parts[1].to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(std::io::Error::other(format!(
-                "kubectl apply failed: {}",
-                stderr
-            )))
-        }
+            (String::new(), api_version.to_string())
+        };
+
+        // Create ApiResource for dynamic access
+        let plural = format!("{}s", kind.to_lowercase());
+        let ar = ApiResource {
+            group,
+            version: version.clone(),
+            kind: kind.to_string(),
+            api_version: api_version.to_string(),
+            plural,
+        };
+
+        // Parse into DynamicObject
+        let obj: DynamicObject = serde_yaml::from_str(yaml)
+            .map_err(|e| std::io::Error::other(format!("Failed to parse manifest: {}", e)))?;
+
+        let client = KubeClient::try_default()
+            .await
+            .map_err(|e| std::io::Error::other(format!("Failed to create client: {}", e)))?;
+
+        // Use server-side apply
+        let api: Api<DynamicObject> = if let Some(ns) = namespace {
+            Api::namespaced_with(client, ns, &ar)
+        } else {
+            Api::all_with(client, &ar)
+        };
+
+        api.patch(name, &PatchParams::apply("lattice-agent").force(), &Patch::Apply(&obj))
+            .await
+            .map_err(|e| std::io::Error::other(format!("Server-side apply failed: {}", e)))?;
+
+        debug!(name = name, kind = kind, "Manifest applied successfully");
+        Ok(())
     }
 
     /// Install CAPI and infrastructure provider
@@ -591,30 +622,35 @@ impl AgentClient {
 
     /// Wait for CAPI CRDs to be available
     ///
-    /// Polls kubectl to check if the clusters.cluster.x-k8s.io CRD exists.
+    /// Uses kube-rs to check if the clusters.cluster.x-k8s.io CRD exists.
     /// Returns true if CRD becomes available within timeout_secs.
     async fn wait_for_capi_crds(timeout_secs: u64) -> bool {
-        use tokio::process::Command;
+        use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+        use kube::api::Api;
         use tokio::time::{sleep, Duration};
+
+        let client = match KubeClient::try_default().await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "Failed to create client for CRD check");
+                return false;
+            }
+        };
+
+        let crds: Api<CustomResourceDefinition> = Api::all(client);
 
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
         let poll_interval = Duration::from_secs(5);
 
         while start.elapsed() < timeout {
-            let result = Command::new("kubectl")
-                .args(["get", "crd", "clusters.cluster.x-k8s.io", "--no-headers"])
-                .output()
-                .await;
-
-            if let Ok(output) = result {
-                if output.status.success() {
-                    return true;
+            match crds.get("clusters.cluster.x-k8s.io").await {
+                Ok(_) => return true,
+                Err(_) => {
+                    debug!("CAPI CRDs not yet available, waiting...");
+                    sleep(poll_interval).await;
                 }
             }
-
-            debug!("CAPI CRDs not yet available, waiting...");
-            sleep(poll_interval).await;
         }
 
         false
@@ -771,9 +807,19 @@ impl AgentClient {
                     }
                 });
             }
-            Some(Command::StatusRequest(_req)) => {
+            Some(Command::StatusRequest(_)) => {
                 debug!("Received status request");
-                // TODO: Send status response
+                let current_state = *agent_state.read().await;
+                let msg = AgentMessage {
+                    cluster_name: cluster_name.to_string(),
+                    payload: Some(Payload::StatusResponse(StatusResponse {
+                        request_id: command.command_id.clone(),
+                        state: current_state.into(),
+                        health: None,
+                        capi_status: None,
+                    })),
+                };
+                let _ = message_tx.send(msg).await;
             }
             None => {
                 warn!(command_id = %command.command_id, "Received command with no payload");

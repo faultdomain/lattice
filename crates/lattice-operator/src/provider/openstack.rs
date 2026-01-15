@@ -96,6 +96,13 @@ impl OpenstackProvider {
             .and_then(|c| c.managed_subnet_cidr.clone())
             .unwrap_or_else(|| "10.6.0.0/24".to_string());
 
+        // API server load balancer configuration
+        let api_server_lb_enabled = os_config.and_then(|c| c.api_server_lb_enabled).unwrap_or(true);
+        let mut lb_config = serde_json::json!({ "enabled": api_server_lb_enabled });
+        if let Some(allowed_cidrs) = os_config.and_then(|c| c.api_server_lb_allowed_cidrs.clone()) {
+            lb_config["allowedCidrs"] = serde_json::json!(allowed_cidrs);
+        }
+
         let mut spec_json = serde_json::json!({
             "identityRef": {
                 "cloudName": cloud_name,
@@ -105,10 +112,13 @@ impl OpenstackProvider {
             "externalNetwork": {
                 "id": external_network
             },
-            "apiServerLoadBalancer": {
-                "enabled": true
-            }
+            "apiServerLoadBalancer": lb_config
         });
+
+        // Add router configuration
+        if let Some(router_id) = os_config.and_then(|c| c.router_id.clone()) {
+            spec_json["router"] = serde_json::json!({ "id": router_id });
+        }
 
         // Add network config
         if let Some(network) = network_spec {
@@ -119,6 +129,50 @@ impl OpenstackProvider {
                 "cidr": managed_subnet_cidr,
                 "dnsNameservers": dns_nameservers
             }]);
+        }
+
+        // Floating IP configuration for API server
+        if let Some(floating_ip) = os_config.and_then(|c| c.api_server_floating_ip.clone()) {
+            spec_json["apiServerFloatingIP"] = serde_json::json!(floating_ip);
+        }
+        if let Some(disable) = os_config.and_then(|c| c.disable_api_server_floating_ip) {
+            spec_json["disableAPIServerFloatingIP"] = serde_json::json!(disable);
+        }
+
+        // Managed security groups configuration
+        if let Some(managed) = os_config.and_then(|c| c.managed_security_groups) {
+            spec_json["managedSecurityGroups"] = serde_json::json!({
+                "enabled": managed
+            });
+            if let Some(allow_all) = os_config.and_then(|c| c.allow_all_in_cluster_traffic) {
+                spec_json["managedSecurityGroups"]["allowAllInClusterTraffic"] =
+                    serde_json::json!(allow_all);
+            }
+        }
+
+        // Tags
+        if let Some(tags) = os_config.and_then(|c| c.tags.clone()) {
+            spec_json["tags"] = serde_json::json!(tags);
+        }
+
+        // Bastion host configuration
+        if let Some(bastion_enabled) = os_config.and_then(|c| c.bastion_enabled) {
+            if bastion_enabled {
+                let mut bastion_spec = serde_json::json!({ "enabled": true });
+                if let Some(flavor) = os_config.and_then(|c| c.bastion_flavor.clone()) {
+                    bastion_spec["flavor"] = serde_json::json!(flavor);
+                }
+                if let Some(image) = os_config.and_then(|c| c.bastion_image.clone()) {
+                    bastion_spec["image"] = serde_json::json!({ "filter": { "name": image } });
+                }
+                if let Some(ssh_key) = os_config.and_then(|c| c.bastion_ssh_key_name.clone()) {
+                    bastion_spec["sshKeyName"] = serde_json::json!(ssh_key);
+                }
+                if let Some(fip) = os_config.and_then(|c| c.bastion_floating_ip.clone()) {
+                    bastion_spec["floatingIP"] = serde_json::json!(fip);
+                }
+                spec_json["bastion"] = bastion_spec;
+            }
         }
 
         // Add control plane endpoint if specified
@@ -153,36 +207,73 @@ impl OpenstackProvider {
             .and_then(|c| c.cp_flavor.clone())
             .unwrap_or_else(|| "m1.large".to_string());
 
-        // Image name
-        let image_name = os_config
-            .and_then(|c| c.image_name.clone())
-            .unwrap_or_else(|| "Ubuntu 22.04".to_string());
-
-        // SSH key (optional)
-        let ssh_key_name = os_config.and_then(|c| c.ssh_key_name.clone());
-
-        // Root volume size
-        let root_volume_size = os_config.and_then(|c| c.cp_root_volume_size);
-
         let mut machine_spec = serde_json::json!({
-            "flavor": flavor,
-            "image": {
-                "filter": {
-                    "name": image_name
-                }
-            }
+            "flavor": flavor
         });
 
-        // Add SSH key if specified
-        if let Some(key_name) = ssh_key_name {
+        // Image: prefer ID over name
+        if let Some(image_id) = os_config.and_then(|c| c.image_id.clone()) {
+            machine_spec["image"] = serde_json::json!({ "id": image_id });
+        } else {
+            let image_name = os_config
+                .and_then(|c| c.image_name.clone())
+                .unwrap_or_else(|| "Ubuntu 22.04".to_string());
+            machine_spec["image"] = serde_json::json!({ "filter": { "name": image_name } });
+        }
+
+        // SSH key
+        if let Some(key_name) = os_config.and_then(|c| c.ssh_key_name.clone()) {
             machine_spec["sshKeyName"] = serde_json::json!(key_name);
         }
 
-        // Add root volume if specified
-        if let Some(size) = root_volume_size {
-            machine_spec["rootVolume"] = serde_json::json!({
-                "sizeGiB": size
-            });
+        // Floating IP for nodes
+        if let Some(use_fip) = os_config.and_then(|c| c.use_floating_ip) {
+            machine_spec["floatingIPEnabled"] = serde_json::json!(use_fip);
+        }
+
+        // Availability zone
+        if let Some(az) = os_config.and_then(|c| c.availability_zone.clone()) {
+            machine_spec["availabilityZone"] = serde_json::json!(az);
+        }
+
+        // Server group for anti-affinity
+        if let Some(sg_id) = os_config.and_then(|c| c.server_group_id.clone()) {
+            machine_spec["serverGroup"] = serde_json::json!({ "id": sg_id });
+        }
+
+        // Custom server metadata
+        if let Some(metadata) = os_config.and_then(|c| c.server_metadata.clone()) {
+            machine_spec["serverMetadata"] = serde_json::json!(metadata);
+        }
+
+        // Security groups
+        if let Some(sgs) = os_config.and_then(|c| c.security_groups.clone()) {
+            let sg_refs: Vec<_> = sgs.iter().map(|sg| serde_json::json!({ "name": sg })).collect();
+            machine_spec["securityGroups"] = serde_json::json!(sg_refs);
+        }
+
+        // Tags
+        if let Some(tags) = os_config.and_then(|c| c.tags.clone()) {
+            machine_spec["tags"] = serde_json::json!(tags);
+        }
+
+        // Root volume configuration
+        let has_volume_config = os_config.and_then(|c| c.cp_root_volume_size).is_some()
+            || os_config.and_then(|c| c.cp_root_volume_type.clone()).is_some()
+            || os_config.and_then(|c| c.cp_root_volume_az.clone()).is_some();
+
+        if has_volume_config {
+            let mut root_volume = serde_json::json!({});
+            if let Some(size) = os_config.and_then(|c| c.cp_root_volume_size) {
+                root_volume["sizeGiB"] = serde_json::json!(size);
+            }
+            if let Some(vol_type) = os_config.and_then(|c| c.cp_root_volume_type.clone()) {
+                root_volume["volumeType"] = serde_json::json!(vol_type);
+            }
+            if let Some(vol_az) = os_config.and_then(|c| c.cp_root_volume_az.clone()) {
+                root_volume["availabilityZone"] = serde_json::json!(vol_az);
+            }
+            machine_spec["rootVolume"] = root_volume;
         }
 
         let spec_json = serde_json::json!({
@@ -194,7 +285,7 @@ impl OpenstackProvider {
         Ok(CAPIManifest::new(
             OPENSTACK_API_VERSION,
             "OpenStackMachineTemplate",
-            format!("{}-cp", name),
+            format!("{}-control-plane", name),
             &self.namespace,
         )
         .with_spec(spec_json))
@@ -215,36 +306,73 @@ impl OpenstackProvider {
             .and_then(|c| c.worker_flavor.clone())
             .unwrap_or_else(|| "m1.large".to_string());
 
-        // Image name
-        let image_name = os_config
-            .and_then(|c| c.image_name.clone())
-            .unwrap_or_else(|| "Ubuntu 22.04".to_string());
-
-        // SSH key (optional)
-        let ssh_key_name = os_config.and_then(|c| c.ssh_key_name.clone());
-
-        // Root volume size
-        let root_volume_size = os_config.and_then(|c| c.worker_root_volume_size);
-
         let mut machine_spec = serde_json::json!({
-            "flavor": flavor,
-            "image": {
-                "filter": {
-                    "name": image_name
-                }
-            }
+            "flavor": flavor
         });
 
-        // Add SSH key if specified
-        if let Some(key_name) = ssh_key_name {
+        // Image: prefer ID over name
+        if let Some(image_id) = os_config.and_then(|c| c.image_id.clone()) {
+            machine_spec["image"] = serde_json::json!({ "id": image_id });
+        } else {
+            let image_name = os_config
+                .and_then(|c| c.image_name.clone())
+                .unwrap_or_else(|| "Ubuntu 22.04".to_string());
+            machine_spec["image"] = serde_json::json!({ "filter": { "name": image_name } });
+        }
+
+        // SSH key
+        if let Some(key_name) = os_config.and_then(|c| c.ssh_key_name.clone()) {
             machine_spec["sshKeyName"] = serde_json::json!(key_name);
         }
 
-        // Add root volume if specified
-        if let Some(size) = root_volume_size {
-            machine_spec["rootVolume"] = serde_json::json!({
-                "sizeGiB": size
-            });
+        // Floating IP for nodes
+        if let Some(use_fip) = os_config.and_then(|c| c.use_floating_ip) {
+            machine_spec["floatingIPEnabled"] = serde_json::json!(use_fip);
+        }
+
+        // Availability zone
+        if let Some(az) = os_config.and_then(|c| c.availability_zone.clone()) {
+            machine_spec["availabilityZone"] = serde_json::json!(az);
+        }
+
+        // Server group for anti-affinity
+        if let Some(sg_id) = os_config.and_then(|c| c.server_group_id.clone()) {
+            machine_spec["serverGroup"] = serde_json::json!({ "id": sg_id });
+        }
+
+        // Custom server metadata
+        if let Some(metadata) = os_config.and_then(|c| c.server_metadata.clone()) {
+            machine_spec["serverMetadata"] = serde_json::json!(metadata);
+        }
+
+        // Security groups
+        if let Some(sgs) = os_config.and_then(|c| c.security_groups.clone()) {
+            let sg_refs: Vec<_> = sgs.iter().map(|sg| serde_json::json!({ "name": sg })).collect();
+            machine_spec["securityGroups"] = serde_json::json!(sg_refs);
+        }
+
+        // Tags
+        if let Some(tags) = os_config.and_then(|c| c.tags.clone()) {
+            machine_spec["tags"] = serde_json::json!(tags);
+        }
+
+        // Root volume configuration
+        let has_volume_config = os_config.and_then(|c| c.worker_root_volume_size).is_some()
+            || os_config.and_then(|c| c.worker_root_volume_type.clone()).is_some()
+            || os_config.and_then(|c| c.worker_root_volume_az.clone()).is_some();
+
+        if has_volume_config {
+            let mut root_volume = serde_json::json!({});
+            if let Some(size) = os_config.and_then(|c| c.worker_root_volume_size) {
+                root_volume["sizeGiB"] = serde_json::json!(size);
+            }
+            if let Some(vol_type) = os_config.and_then(|c| c.worker_root_volume_type.clone()) {
+                root_volume["volumeType"] = serde_json::json!(vol_type);
+            }
+            if let Some(vol_az) = os_config.and_then(|c| c.worker_root_volume_az.clone()) {
+                root_volume["availabilityZone"] = serde_json::json!(vol_az);
+            }
+            machine_spec["rootVolume"] = root_volume;
         }
 
         let spec_json = serde_json::json!({
@@ -310,31 +438,20 @@ impl Provider for OpenstackProvider {
             post_kubeadm_commands: post_commands,
         };
 
-        // Generate manifests
-        let mut manifests = Vec::new();
+        // Generate manifests - extract fallible operations first
+        let openstack_cluster = self.generate_openstack_cluster(cluster)?;
+        let cp_machine_template = self.generate_cp_machine_template(cluster)?;
+        let worker_machine_template = self.generate_worker_machine_template(cluster)?;
 
-        // 1. CAPI Cluster (provider-agnostic)
-        manifests.push(generate_cluster(&config, &infra));
-
-        // 2. OpenStackCluster (infrastructure)
-        manifests.push(self.generate_openstack_cluster(cluster)?);
-
-        // 3. Control Plane (KubeadmControlPlane or RKE2ControlPlane)
-        manifests.push(generate_control_plane(&config, &infra, &cp_config));
-
-        // 4. Control Plane Machine Template
-        manifests.push(self.generate_cp_machine_template(cluster)?);
-
-        // 5. MachineDeployment for workers (replicas=0)
-        manifests.push(generate_machine_deployment(&config, &infra));
-
-        // 6. Worker Machine Template
-        manifests.push(self.generate_worker_machine_template(cluster)?);
-
-        // 7. Bootstrap Config Template for workers
-        manifests.push(generate_bootstrap_config_template(&config));
-
-        Ok(manifests)
+        Ok(vec![
+            generate_cluster(&config, &infra),              // 1. CAPI Cluster
+            openstack_cluster,                              // 2. OpenStackCluster
+            generate_control_plane(&config, &infra, &cp_config), // 3. Control Plane
+            cp_machine_template,                            // 4. CP Machine Template
+            generate_machine_deployment(&config, &infra),   // 5. MachineDeployment
+            worker_machine_template,                        // 6. Worker Machine Template
+            generate_bootstrap_config_template(&config),    // 7. Bootstrap Config Template
+        ])
     }
 
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {

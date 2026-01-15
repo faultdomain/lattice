@@ -67,7 +67,7 @@ tower.workspace = true
 criterion.workspace = true
 
 [[bin]]
-name = "lattice"
+name = "lattice-operator"
 path = "src/main.rs"
 
 [lib]

@@ -9,7 +9,6 @@ pub mod cilium;
 pub mod compiler;
 pub mod controller;
 pub mod infra;
-pub mod install;
 pub mod parent;
 pub mod pivot;
 pub mod pki;

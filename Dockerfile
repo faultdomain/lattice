@@ -89,6 +89,9 @@ FROM debian:trixie-slim
 # Re-declare ARGs for this stage
 ARG CAPI_VERSION
 ARG RKE2_VERSION
+ARG CAPMOX_VERSION
+ARG CAPA_VERSION
+ARG CAPO_VERSION
 
 # Install only CA certificates for TLS
 RUN apt-get update && apt-get install -y \
@@ -100,8 +103,8 @@ COPY --from=go-builder /usr/local/bin/kubectl /usr/local/bin/kubectl
 COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=go-builder /usr/local/bin/clusterctl /usr/local/bin/clusterctl
 
-# Copy Lattice binary
-COPY --from=rust-builder /app/target/release/lattice /usr/local/bin/lattice
+# Copy Lattice operator binary
+COPY --from=rust-builder /app/target/release/lattice-operator /usr/local/bin/lattice-operator
 
 # Copy helm charts from source (pre-downloaded)
 COPY test-charts /charts
@@ -112,7 +115,7 @@ COPY test-providers /providers
 # Copy scripts for templating
 COPY scripts /scripts
 
-# Create clusterctl config with local provider repositories (kubeadm + RKE2)
+# Create clusterctl config with local provider repositories (all providers)
 RUN echo "providers:" > /providers/clusterctl.yaml && \
     echo "  - name: \"cluster-api\"" >> /providers/clusterctl.yaml && \
     echo "    url: \"file:///providers/cluster-api/v${CAPI_VERSION}/core-components.yaml\"" >> /providers/clusterctl.yaml && \
@@ -131,6 +134,15 @@ RUN echo "providers:" > /providers/clusterctl.yaml && \
     echo "    type: \"ControlPlaneProvider\"" >> /providers/clusterctl.yaml && \
     echo "  - name: \"docker\"" >> /providers/clusterctl.yaml && \
     echo "    url: \"file:///providers/infrastructure-docker/v${CAPI_VERSION}/infrastructure-components-development.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
+    echo "  - name: \"proxmox\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/infrastructure-proxmox/v${CAPMOX_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
+    echo "  - name: \"aws\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/infrastructure-aws/v${CAPA_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
+    echo "  - name: \"openstack\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/infrastructure-openstack/v${CAPO_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
     echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml
 
 # Set environment variables for air-gapped clusterctl operation
@@ -155,4 +167,4 @@ ENV LATTICE_SCRIPTS_DIR=/scripts
 # Set clusterctl config for offline CAPI installation
 ENV CLUSTERCTL_CONFIG=/providers/clusterctl.yaml
 
-ENTRYPOINT ["/usr/local/bin/lattice"]
+ENTRYPOINT ["/usr/local/bin/lattice-operator"]

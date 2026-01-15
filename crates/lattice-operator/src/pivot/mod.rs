@@ -90,9 +90,10 @@ impl From<Output> for CommandOutput {
 }
 
 /// Trait for executing external commands (allows mocking in tests)
+#[async_trait::async_trait]
 pub trait CommandRunner: Send + Sync {
     /// Execute clusterctl move command
-    fn run_clusterctl_move(
+    async fn run_clusterctl_move(
         &self,
         target_kubeconfig: &Path,
         namespace: &str,
@@ -100,8 +101,8 @@ pub trait CommandRunner: Send + Sync {
         source_kubeconfig: Option<PathBuf>,
     ) -> Result<CommandOutput, PivotError>;
 
-    /// Execute kubectl to check for CAPI resources
-    fn run_kubectl_get(
+    /// List CAPI resources of a given type
+    async fn run_kubectl_get(
         &self,
         resource_type: &str,
         namespace: &str,
@@ -112,48 +113,129 @@ pub trait CommandRunner: Send + Sync {
 #[derive(Default, Clone)]
 pub struct RealCommandRunner;
 
+#[async_trait::async_trait]
 impl CommandRunner for RealCommandRunner {
-    fn run_clusterctl_move(
+    async fn run_clusterctl_move(
         &self,
         target_kubeconfig: &Path,
         namespace: &str,
         cluster_name: &str,
         source_kubeconfig: Option<PathBuf>,
     ) -> Result<CommandOutput, PivotError> {
-        let mut cmd = Command::new("clusterctl");
-        cmd.arg("move")
-            .arg("--to-kubeconfig")
-            .arg(target_kubeconfig)
-            .arg("--namespace")
-            .arg(namespace)
-            .arg("--filter-cluster")
-            .arg(cluster_name);
+        let target = target_kubeconfig.to_path_buf();
+        let ns = namespace.to_string();
+        let cluster = cluster_name.to_string();
+        let source = source_kubeconfig;
 
-        if let Some(ref source) = source_kubeconfig {
-            cmd.arg("--kubeconfig").arg(source);
-        }
+        tokio::task::spawn_blocking(move || {
+            let mut cmd = Command::new("clusterctl");
+            cmd.arg("move")
+                .arg("--to-kubeconfig")
+                .arg(&target)
+                .arg("--namespace")
+                .arg(&ns)
+                .arg("--filter-cluster")
+                .arg(&cluster);
 
-        debug!(command = ?cmd, "Executing clusterctl move");
+            if let Some(ref source_path) = source {
+                cmd.arg("--kubeconfig").arg(source_path);
+            }
 
-        let output = cmd
-            .output()
-            .map_err(|e| PivotError::ClusterctlFailed(format!("failed to execute: {}", e)))?;
+            debug!(command = ?cmd, "Executing clusterctl move");
 
-        Ok(CommandOutput::from(output))
+            let output = cmd
+                .output()
+                .map_err(|e| PivotError::ClusterctlFailed(format!("failed to execute: {}", e)))?;
+
+            Ok(CommandOutput::from(output))
+        })
+        .await
+        .map_err(|e| PivotError::Internal(format!("spawn_blocking failed: {}", e)))?
     }
 
-    fn run_kubectl_get(
+    async fn run_kubectl_get(
         &self,
         resource_type: &str,
         namespace: &str,
     ) -> Result<CommandOutput, PivotError> {
-        let output = Command::new("kubectl")
-            .args(["get", resource_type, "-n", namespace, "--no-headers"])
-            .output()
-            .map_err(|e| PivotError::Internal(format!("kubectl failed: {}", e)))?;
+        use kube::api::{Api, DynamicObject, ListParams};
+        use kube::discovery::ApiResource;
 
-        Ok(CommandOutput::from(output))
+        let client = Client::try_default()
+            .await
+            .map_err(|e| PivotError::Internal(format!("k8s client failed: {}", e)))?;
+
+        // Parse resource type to get group/version/kind
+        let (group, version, kind, plural) = parse_capi_resource_type(resource_type)?;
+
+        let ar = ApiResource {
+            group: group.clone(),
+            version,
+            kind,
+            api_version: if group.is_empty() {
+                "v1".to_string()
+            } else {
+                format!("{}/v1beta1", group)
+            },
+            plural,
+        };
+
+        let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
+        let list = api.list(&ListParams::default()).await.map_err(|e| {
+            // Return empty result for "not found" errors (CRD not installed)
+            if e.to_string().contains("not found") || e.to_string().contains("404") {
+                return PivotError::Internal("not found".to_string());
+            }
+            PivotError::Internal(format!("list failed: {}", e))
+        })?;
+
+        // Format output similar to kubectl
+        let stdout = list
+            .items
+            .iter()
+            .filter_map(|obj| obj.metadata.name.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(CommandOutput {
+            stdout,
+            stderr: String::new(),
+            success: true,
+        })
     }
+}
+
+/// Parse CAPI resource type string into group/version/kind/plural
+fn parse_capi_resource_type(resource_type: &str) -> Result<(String, String, String, String), PivotError> {
+    // Resource types like "clusters.cluster.x-k8s.io"
+    let parts: Vec<&str> = resource_type.splitn(2, '.').collect();
+    if parts.len() != 2 {
+        return Err(PivotError::Internal(format!(
+            "invalid resource type: {}",
+            resource_type
+        )));
+    }
+
+    let plural = parts[0].to_string();
+    let group = parts[1].to_string();
+
+    // Derive kind from plural (simple heuristic)
+    let kind = if plural.ends_with("ies") {
+        format!("{}y", &plural[..plural.len() - 3])
+    } else if plural.ends_with('s') {
+        plural[..plural.len() - 1].to_string()
+    } else {
+        plural.clone()
+    };
+
+    // Capitalize first letter
+    let kind = kind
+        .chars()
+        .enumerate()
+        .map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c })
+        .collect();
+
+    Ok((group, "v1beta1".to_string(), kind, plural))
 }
 
 /// Pivot orchestrator for the cell side
@@ -214,43 +296,38 @@ impl<R: CommandRunner> PivotOrchestrator<R> {
         cluster_name: &str,
         proxy_kubeconfig_path: &Path,
         source_kubeconfig: Option<&Path>,
-    ) -> Result<PivotResult, PivotError>
-    where
-        R: 'static + Clone,
-    {
+    ) -> Result<PivotResult, PivotError> {
         info!(
             cluster = %cluster_name,
             target_kubeconfig = ?proxy_kubeconfig_path,
             "Starting pivot with clusterctl move"
         );
 
-        let namespace = self.capi_namespace.clone();
-        let cluster = cluster_name.to_string();
-        let target = proxy_kubeconfig_path.to_path_buf();
         let source = source_kubeconfig.map(|p| p.to_path_buf());
-        let runner = self.runner.clone();
 
         // Execute with timeout
-        let result = timeout(self.pivot_timeout, async move {
-            tokio::task::spawn_blocking(move || {
-                let output = runner.run_clusterctl_move(&target, &namespace, &cluster, source)?;
-
-                if output.success {
-                    let resources = extract_resource_count(&output.stdout);
-                    Ok(PivotResult {
-                        success: true,
-                        resources_moved: resources,
-                        error: None,
-                    })
-                } else {
-                    Err(PivotError::ClusterctlFailed(output.stderr))
-                }
-            })
-            .await
-            .map_err(|e| PivotError::Internal(e.to_string()))?
-        })
+        let output = timeout(
+            self.pivot_timeout,
+            self.runner.run_clusterctl_move(
+                proxy_kubeconfig_path,
+                &self.capi_namespace,
+                cluster_name,
+                source,
+            ),
+        )
         .await
         .map_err(|_| PivotError::Timeout)??;
+
+        let result = if output.success {
+            let resources = extract_resource_count(&output.stdout);
+            PivotResult {
+                success: true,
+                resources_moved: resources,
+                error: None,
+            }
+        } else {
+            return Err(PivotError::ClusterctlFailed(output.stderr));
+        };
 
         info!(
             cluster = %cluster_name,
@@ -317,10 +394,11 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
     }
 
     /// Check if CAPI resources exist in the cluster
-    pub fn check_capi_resources_present(&self) -> Result<bool, PivotError> {
+    pub async fn check_capi_resources_present(&self) -> Result<bool, PivotError> {
         let output = self
             .runner
-            .run_kubectl_get("clusters.cluster.x-k8s.io", &self.capi_namespace)?;
+            .run_kubectl_get("clusters.cluster.x-k8s.io", &self.capi_namespace)
+            .await?;
 
         let has_resources =
             !output.stdout.trim().is_empty() && !output.stdout.contains("No resources found");
@@ -343,8 +421,8 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
         let start = std::time::Instant::now();
 
         while start.elapsed() < timeout_duration {
-            if self.check_capi_resources_present()? {
-                let count = self.count_capi_resources()?;
+            if self.check_capi_resources_present().await? {
+                let count = self.count_capi_resources().await?;
                 info!(count = count, "CAPI resources detected");
                 return Ok(count);
             }
@@ -356,7 +434,7 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
     }
 
     /// Count CAPI resources in the namespace
-    fn count_capi_resources(&self) -> Result<u32, PivotError> {
+    async fn count_capi_resources(&self) -> Result<u32, PivotError> {
         let resource_types = [
             "clusters.cluster.x-k8s.io",
             "machines.cluster.x-k8s.io",
@@ -369,7 +447,8 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
         for resource_type in &resource_types {
             let output = self
                 .runner
-                .run_kubectl_get(resource_type, &self.capi_namespace)?;
+                .run_kubectl_get(resource_type, &self.capi_namespace)
+                .await?;
             let count = output
                 .stdout
                 .lines()
@@ -711,8 +790,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl CommandRunner for MockCommandRunner {
-        fn run_clusterctl_move(
+        async fn run_clusterctl_move(
             &self,
             target_kubeconfig: &Path,
             namespace: &str,
@@ -735,7 +815,7 @@ mod tests {
             }
         }
 
-        fn run_kubectl_get(
+        async fn run_kubectl_get(
             &self,
             resource_type: &str,
             namespace: &str,
@@ -860,8 +940,8 @@ Done."#
     /// Story: Agent detects CAPI resources after pivot
     ///
     /// After pivot, the agent checks for CAPI resources to confirm success.
-    #[test]
-    fn story_agent_detects_capi_resources_after_pivot() {
+    #[tokio::test]
+    async fn story_agent_detects_capi_resources_after_pivot() {
         let mock = MockCommandRunner::new().with_kubectl(|_, _| {
             Ok(CommandOutput {
                 success: true,
@@ -871,7 +951,7 @@ Done."#
         });
 
         let handler = AgentPivotHandler::with_runner(mock);
-        let has_resources = handler.check_capi_resources_present().unwrap();
+        let has_resources = handler.check_capi_resources_present().await.unwrap();
 
         assert!(has_resources);
     }
@@ -879,8 +959,8 @@ Done."#
     /// Story: Agent detects no CAPI resources before pivot
     ///
     /// Before pivot completes, no CAPI resources exist on the workload cluster.
-    #[test]
-    fn story_agent_detects_no_capi_resources_before_pivot() {
+    #[tokio::test]
+    async fn story_agent_detects_no_capi_resources_before_pivot() {
         let mock = MockCommandRunner::new().with_kubectl(|_, _| {
             Ok(CommandOutput {
                 success: true,
@@ -890,7 +970,7 @@ Done."#
         });
 
         let handler = AgentPivotHandler::with_runner(mock);
-        let has_resources = handler.check_capi_resources_present().unwrap();
+        let has_resources = handler.check_capi_resources_present().await.unwrap();
 
         assert!(!has_resources);
     }
@@ -898,8 +978,8 @@ Done."#
     /// Story: Agent counts all CAPI resource types
     ///
     /// The agent counts clusters, machines, machinedeployments, and control planes.
-    #[test]
-    fn story_agent_counts_all_capi_resource_types() {
+    #[tokio::test]
+    async fn story_agent_counts_all_capi_resource_types() {
         let mock = MockCommandRunner::new().with_kubectl(|resource_type, _| {
             let stdout = match resource_type {
                 "clusters.cluster.x-k8s.io" => "my-cluster   True",
@@ -916,7 +996,7 @@ Done."#
         });
 
         let handler = AgentPivotHandler::with_runner(mock);
-        let count = handler.count_capi_resources().unwrap();
+        let count = handler.count_capi_resources().await.unwrap();
 
         // 1 cluster + 3 machines + 1 machinedeployment + 1 controlplane = 6
         assert_eq!(count, 6);
@@ -1324,8 +1404,8 @@ Other log line
 
     /// When kubectl fails during resource check, the system should propagate
     /// the error.
-    #[test]
-    fn when_kubectl_fails_should_propagate_error() {
+    #[tokio::test]
+    async fn when_kubectl_fails_should_propagate_error() {
         let mock = MockCommandRunner::new().with_kubectl(|_, _| {
             Err(PivotError::Internal(
                 "kubectl: command not found".to_string(),
@@ -1333,7 +1413,7 @@ Other log line
         });
 
         let handler = AgentPivotHandler::with_runner(mock);
-        let result = handler.check_capi_resources_present();
+        let result = handler.check_capi_resources_present().await;
 
         assert!(matches!(result, Err(PivotError::Internal(_))));
     }
@@ -1363,8 +1443,8 @@ Other log line
     // ==========================================================================
 
     /// When resources exist but output is empty lines, should not count them.
-    #[test]
-    fn when_output_has_empty_lines_should_not_count_them() {
+    #[tokio::test]
+    async fn when_output_has_empty_lines_should_not_count_them() {
         let mock = MockCommandRunner::new().with_kubectl(|resource_type, _| {
             let stdout = match resource_type {
                 "clusters.cluster.x-k8s.io" => "\n\n",
@@ -1379,7 +1459,7 @@ Other log line
         });
 
         let handler = AgentPivotHandler::with_runner(mock);
-        let count = handler.count_capi_resources().unwrap();
+        let count = handler.count_capi_resources().await.unwrap();
 
         // Only 1 machine line, empty lines should not count
         assert_eq!(count, 1);

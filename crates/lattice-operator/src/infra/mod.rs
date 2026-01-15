@@ -5,6 +5,7 @@
 //!
 //! - **Cilium**: CNI (deployed at bootstrap, reconciled by controller)
 //! - **Istio**: Service mesh for mTLS and authorization policies
+//! - **Flux**: GitOps for self-management
 //!
 //! # Architecture
 //!
@@ -18,10 +19,12 @@
 //! upgrades, the controller applies updated manifests automatically.
 
 pub mod cilium;
+pub mod flux;
 pub mod istio;
 
 pub use cilium::{
     generate_default_deny, generate_operator_network_policy, generate_ztunnel_allowlist,
     CiliumConfig, CiliumReconciler,
 };
+pub use flux::{generate_gitops_resources, FluxConfig, FluxReconciler, ResolvedGitCredentials};
 pub use istio::{IstioConfig, IstioReconciler};

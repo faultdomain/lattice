@@ -267,6 +267,7 @@ async fn run_pivot_e2e_test() -> Result<(), String> {
         PostPivotManifests {
             crd_yaml: Some(crd_yaml),
             cluster_yaml: Some(cluster_yaml),
+            flux_manifests: Vec::new(),
         },
     );
     println!("  Post-pivot manifests stored");
@@ -544,6 +545,7 @@ async fn story_pivot_failure_handled_gracefully() {
         PostPivotManifests {
             crd_yaml: Some("test".to_string()),
             cluster_yaml: Some("test".to_string()),
+            flux_manifests: Vec::new(),
         },
     );
 
@@ -635,6 +637,7 @@ async fn story_multiple_clusters_pivot_concurrently() {
             PostPivotManifests {
                 crd_yaml: Some(format!("crd-{}", name)),
                 cluster_yaml: Some(format!("cluster-{}", name)),
+                flux_manifests: Vec::new(),
             },
         );
     }

@@ -202,6 +202,7 @@ spec:
           - cilium-system
           - istio-system
           - lattice-system
+          - flux-system
           - cert-manager
           - capi-system
           - capi-kubeadm-bootstrap-system

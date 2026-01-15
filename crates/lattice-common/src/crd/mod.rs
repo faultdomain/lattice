@@ -4,6 +4,7 @@
 
 mod cluster;
 mod external_service;
+mod providers;
 mod service;
 mod types;
 
@@ -20,7 +21,7 @@ pub use service::{
 };
 pub use types::{
     AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,
-    EndpointsSpec, KubernetesSpec, NetworkPool, NetworkingSpec, NodeSpec, OpenstackConfig,
-    ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig, ServiceRef, ServiceSpec,
-    WorkloadSpec,
+    EndpointsSpec, GitOpsSpec, GitSecretRef, KubernetesSpec, NetworkPool, NetworkingSpec, NodeSpec,
+    OpenstackConfig, ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig, ServiceRef,
+    ServiceSpec, WorkloadSpec,
 };

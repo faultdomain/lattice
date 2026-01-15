@@ -52,6 +52,7 @@ fn sample_cluster(name: &str) -> LatticeCluster {
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
+                gitops: None,
             }),
             environment: None,
             region: None,

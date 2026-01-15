@@ -62,13 +62,35 @@ impl ProxmoxProvider {
 
         let proxmox_config = Self::get_proxmox_config(cluster);
 
-        // Build IPv4 config - addresses come from pool or config
+        // Get endpoint IP (if any) - must be excluded from addresses pool per CAPMOX validation
+        let endpoint_ip = cluster
+            .spec
+            .endpoints
+            .as_ref()
+            .map(|e| e.host.as_str());
+
+        // Build IPv4 config - addresses come from pool or config, excluding endpoint IP
         let ipv4_config = if let Some(cfg) = proxmox_config {
-            serde_json::json!({
-                "addresses": cfg.ipv4_addresses.clone().unwrap_or_default(),
+            let addresses: Vec<String> = cfg
+                .ipv4_addresses
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|addr| endpoint_ip != Some(addr.as_str()))
+                .collect();
+
+            let mut config = serde_json::json!({
+                "addresses": addresses,
                 "prefix": cfg.ipv4_prefix.unwrap_or(24),
                 "gateway": cfg.ipv4_gateway.clone().unwrap_or_default()
-            })
+            });
+
+            // Add metric if specified
+            if let Some(metric) = cfg.ipv4_metric {
+                config["metric"] = serde_json::json!(metric);
+            }
+
+            config
         } else {
             serde_json::json!({
                 "addresses": [],
@@ -76,6 +98,21 @@ impl ProxmoxProvider {
                 "gateway": ""
             })
         };
+
+        // Build IPv6 config if addresses are specified
+        let ipv6_config = proxmox_config.and_then(|cfg| {
+            cfg.ipv6_addresses.as_ref().map(|addrs| {
+                let mut config = serde_json::json!({
+                    "addresses": addrs,
+                    "prefix": cfg.ipv6_prefix.unwrap_or(64),
+                    "gateway": cfg.ipv6_gateway.clone().unwrap_or_default()
+                });
+                if let Some(metric) = cfg.ipv6_metric {
+                    config["metric"] = serde_json::json!(metric);
+                }
+                config
+            })
+        });
 
         // DNS servers
         let dns_servers = proxmox_config
@@ -100,12 +137,49 @@ impl ProxmoxProvider {
             })
         };
 
-        let spec_json = serde_json::json!({
+        // Build spec
+        let mut spec_json = serde_json::json!({
             "controlPlaneEndpoint": control_plane_endpoint,
             "ipv4Config": ipv4_config,
             "dnsServers": dns_servers,
-            "allowedNodes": allowed_nodes
+            "allowedNodes": allowed_nodes,
+            "credentialsRef": {
+                "name": "capmox-manager-credentials",
+                "namespace": "capmox-system"
+            }
         });
+
+        // Add IPv6 config if present
+        if let Some(ipv6) = ipv6_config {
+            spec_json["ipv6Config"] = ipv6;
+        }
+
+        // Add scheduler hints if memory adjustment is specified
+        if let Some(cfg) = proxmox_config {
+            if let Some(memory_adj) = cfg.memory_adjustment {
+                spec_json["schedulerHints"] = serde_json::json!({
+                    "memoryAdjustment": memory_adj
+                });
+            }
+
+            // Add cloneSpec for SSH keys and virtual IP interface
+            let mut clone_spec = serde_json::Map::new();
+            if let Some(ref keys) = cfg.ssh_authorized_keys {
+                clone_spec.insert(
+                    "sshAuthorizedKeys".to_string(),
+                    serde_json::json!(keys),
+                );
+            }
+            if let Some(ref iface) = cfg.virtual_ip_network_interface {
+                clone_spec.insert(
+                    "virtualIPNetworkInterface".to_string(),
+                    serde_json::json!(iface),
+                );
+            }
+            if !clone_spec.is_empty() {
+                spec_json["cloneSpec"] = serde_json::Value::Object(clone_spec);
+            }
+        }
 
         Ok(
             CAPIManifest::new(PROXMOX_API_VERSION, "ProxmoxCluster", name, &self.namespace)
@@ -128,14 +202,12 @@ impl ProxmoxProvider {
             .and_then(|c| c.source_node.clone())
             .unwrap_or_else(|| "pve".to_string());
 
-        let template_id = proxmox_config.and_then(|c| c.template_id).unwrap_or(9000);
-
         let cp_cores = proxmox_config.and_then(|c| c.cp_cores).unwrap_or(4);
         let cp_sockets = proxmox_config.and_then(|c| c.cp_sockets).unwrap_or(1);
         let cp_memory_mib = proxmox_config.and_then(|c| c.cp_memory_mib).unwrap_or(8192);
         let cp_disk_size_gb = proxmox_config.and_then(|c| c.cp_disk_size_gb).unwrap_or(50);
 
-        let _storage = proxmox_config
+        let storage = proxmox_config
             .and_then(|c| c.storage.clone())
             .unwrap_or_else(|| "local-lvm".to_string());
 
@@ -143,36 +215,109 @@ impl ProxmoxProvider {
             .and_then(|c| c.bridge.clone())
             .unwrap_or_else(|| "vmbr0".to_string());
 
+        let format = proxmox_config
+            .and_then(|c| c.format.clone())
+            .unwrap_or_else(|| "qcow2".to_string());
+
+        let full_clone = proxmox_config
+            .and_then(|c| c.full_clone)
+            .unwrap_or(true);
+
+        let network_model = proxmox_config
+            .and_then(|c| c.network_model.clone())
+            .unwrap_or_else(|| "virtio".to_string());
+
+        // Build template spec
+        let mut template_spec = serde_json::json!({
+            "sourceNode": source_node,
+            "format": format,
+            "full": full_clone,
+            "storage": storage,
+            "numSockets": cp_sockets,
+            "numCores": cp_cores,
+            "memoryMiB": cp_memory_mib,
+            "disks": {
+                "bootVolume": {
+                    "disk": "scsi0",
+                    "sizeGb": cp_disk_size_gb
+                }
+            },
+            "network": {
+                "default": {
+                    "bridge": bridge,
+                    "model": network_model
+                }
+            }
+        });
+
+        // Add templateID or templateSelector
+        if let Some(cfg) = proxmox_config {
+            if let Some(ref tags) = cfg.template_tags {
+                template_spec["templateSelector"] = serde_json::json!({
+                    "matchTags": tags
+                });
+            } else {
+                let template_id = cfg.template_id.unwrap_or(9000);
+                template_spec["templateID"] = serde_json::json!(template_id);
+            }
+
+            // Optional fields
+            if let Some(ref snap) = cfg.snap_name {
+                template_spec["snapName"] = serde_json::json!(snap);
+            }
+            if let Some(ref target) = cfg.target_node {
+                template_spec["target"] = serde_json::json!(target);
+            }
+            if let Some(ref pool) = cfg.pool {
+                template_spec["pool"] = serde_json::json!(pool);
+            }
+            if let Some(ref desc) = cfg.description {
+                template_spec["description"] = serde_json::json!(desc);
+            }
+            if let Some(ref tags) = cfg.tags {
+                template_spec["tags"] = serde_json::json!(tags);
+            }
+            if let Some(vlan) = cfg.vlan {
+                template_spec["network"]["default"]["vlan"] = serde_json::json!(vlan);
+            }
+
+            // VMID range
+            if cfg.vmid_min.is_some() || cfg.vmid_max.is_some() {
+                let mut vmid_range = serde_json::Map::new();
+                if let Some(min) = cfg.vmid_min {
+                    vmid_range.insert("start".to_string(), serde_json::json!(min));
+                }
+                if let Some(max) = cfg.vmid_max {
+                    vmid_range.insert("end".to_string(), serde_json::json!(max));
+                }
+                template_spec["vmIDRange"] = serde_json::Value::Object(vmid_range);
+            }
+
+            // Health checks
+            if cfg.skip_cloud_init_status.is_some() || cfg.skip_qemu_guest_agent.is_some() {
+                let mut checks = serde_json::Map::new();
+                if let Some(skip) = cfg.skip_cloud_init_status {
+                    checks.insert("skipCloudInitStatus".to_string(), serde_json::json!(skip));
+                }
+                if let Some(skip) = cfg.skip_qemu_guest_agent {
+                    checks.insert("skipQemuGuestAgent".to_string(), serde_json::json!(skip));
+                }
+                template_spec["checks"] = serde_json::Value::Object(checks);
+            }
+        } else {
+            template_spec["templateID"] = serde_json::json!(9000);
+        }
+
         let spec_json = serde_json::json!({
             "template": {
-                "spec": {
-                    "sourceNode": source_node,
-                    "templateID": template_id,
-                    "format": "qcow2",
-                    "full": true,
-                    "numSockets": cp_sockets,
-                    "numCores": cp_cores,
-                    "memoryMiB": cp_memory_mib,
-                    "disks": {
-                        "bootVolume": {
-                            "disk": "scsi0",
-                            "sizeGb": cp_disk_size_gb
-                        }
-                    },
-                    "network": {
-                        "default": {
-                            "bridge": bridge,
-                            "model": "virtio"
-                        }
-                    }
-                }
+                "spec": template_spec
             }
         });
 
         Ok(CAPIManifest::new(
             PROXMOX_API_VERSION,
             "ProxmoxMachineTemplate",
-            format!("{}-cp", name),
+            format!("{}-control-plane", name),
             &self.namespace,
         )
         .with_spec(spec_json))
@@ -193,8 +338,6 @@ impl ProxmoxProvider {
             .and_then(|c| c.source_node.clone())
             .unwrap_or_else(|| "pve".to_string());
 
-        let template_id = proxmox_config.and_then(|c| c.template_id).unwrap_or(9000);
-
         let worker_cores = proxmox_config.and_then(|c| c.worker_cores).unwrap_or(4);
         let worker_sockets = proxmox_config.and_then(|c| c.worker_sockets).unwrap_or(1);
         let worker_memory_mib = proxmox_config
@@ -204,7 +347,7 @@ impl ProxmoxProvider {
             .and_then(|c| c.worker_disk_size_gb)
             .unwrap_or(100);
 
-        let _storage = proxmox_config
+        let storage = proxmox_config
             .and_then(|c| c.storage.clone())
             .unwrap_or_else(|| "local-lvm".to_string());
 
@@ -212,29 +355,102 @@ impl ProxmoxProvider {
             .and_then(|c| c.bridge.clone())
             .unwrap_or_else(|| "vmbr0".to_string());
 
+        let format = proxmox_config
+            .and_then(|c| c.format.clone())
+            .unwrap_or_else(|| "qcow2".to_string());
+
+        let full_clone = proxmox_config
+            .and_then(|c| c.full_clone)
+            .unwrap_or(true);
+
+        let network_model = proxmox_config
+            .and_then(|c| c.network_model.clone())
+            .unwrap_or_else(|| "virtio".to_string());
+
+        // Build template spec
+        let mut template_spec = serde_json::json!({
+            "sourceNode": source_node,
+            "format": format,
+            "full": full_clone,
+            "storage": storage,
+            "numSockets": worker_sockets,
+            "numCores": worker_cores,
+            "memoryMiB": worker_memory_mib,
+            "disks": {
+                "bootVolume": {
+                    "disk": "scsi0",
+                    "sizeGb": worker_disk_size_gb
+                }
+            },
+            "network": {
+                "default": {
+                    "bridge": bridge,
+                    "model": network_model
+                }
+            }
+        });
+
+        // Add templateID or templateSelector
+        if let Some(cfg) = proxmox_config {
+            if let Some(ref tags) = cfg.template_tags {
+                template_spec["templateSelector"] = serde_json::json!({
+                    "matchTags": tags
+                });
+            } else {
+                let template_id = cfg.template_id.unwrap_or(9000);
+                template_spec["templateID"] = serde_json::json!(template_id);
+            }
+
+            // Optional fields (shared with control plane)
+            if let Some(ref snap) = cfg.snap_name {
+                template_spec["snapName"] = serde_json::json!(snap);
+            }
+            if let Some(ref target) = cfg.target_node {
+                template_spec["target"] = serde_json::json!(target);
+            }
+            if let Some(ref pool) = cfg.pool {
+                template_spec["pool"] = serde_json::json!(pool);
+            }
+            if let Some(ref desc) = cfg.description {
+                template_spec["description"] = serde_json::json!(format!("{} (worker)", desc));
+            }
+            if let Some(ref tags) = cfg.tags {
+                template_spec["tags"] = serde_json::json!(tags);
+            }
+            if let Some(vlan) = cfg.vlan {
+                template_spec["network"]["default"]["vlan"] = serde_json::json!(vlan);
+            }
+
+            // VMID range
+            if cfg.vmid_min.is_some() || cfg.vmid_max.is_some() {
+                let mut vmid_range = serde_json::Map::new();
+                if let Some(min) = cfg.vmid_min {
+                    vmid_range.insert("start".to_string(), serde_json::json!(min));
+                }
+                if let Some(max) = cfg.vmid_max {
+                    vmid_range.insert("end".to_string(), serde_json::json!(max));
+                }
+                template_spec["vmIDRange"] = serde_json::Value::Object(vmid_range);
+            }
+
+            // Health checks
+            if cfg.skip_cloud_init_status.is_some() || cfg.skip_qemu_guest_agent.is_some() {
+                let mut checks = serde_json::Map::new();
+                if let Some(skip) = cfg.skip_cloud_init_status {
+                    checks.insert("skipCloudInitStatus".to_string(), serde_json::json!(skip));
+                }
+                if let Some(skip) = cfg.skip_qemu_guest_agent {
+                    checks.insert("skipQemuGuestAgent".to_string(), serde_json::json!(skip));
+                }
+                template_spec["checks"] = serde_json::Value::Object(checks);
+            }
+        } else {
+            template_spec["templateID"] = serde_json::json!(9000);
+        }
+
         let spec_json = serde_json::json!({
             "template": {
-                "spec": {
-                    "sourceNode": source_node,
-                    "templateID": template_id,
-                    "format": "qcow2",
-                    "full": true,
-                    "numSockets": worker_sockets,
-                    "numCores": worker_cores,
-                    "memoryMiB": worker_memory_mib,
-                    "disks": {
-                        "bootVolume": {
-                            "disk": "scsi0",
-                            "sizeGb": worker_disk_size_gb
-                        }
-                    },
-                    "network": {
-                        "default": {
-                            "bridge": bridge,
-                            "model": "virtio"
-                        }
-                    }
-                }
+                "spec": template_spec
             }
         });
 
@@ -295,31 +511,20 @@ impl Provider for ProxmoxProvider {
             post_kubeadm_commands: post_commands,
         };
 
-        // Generate manifests
-        let mut manifests = Vec::new();
+        // Generate manifests - extract fallible operations first
+        let proxmox_cluster = self.generate_proxmox_cluster(cluster)?;
+        let cp_machine_template = self.generate_cp_machine_template(cluster)?;
+        let worker_machine_template = self.generate_worker_machine_template(cluster)?;
 
-        // 1. CAPI Cluster (provider-agnostic)
-        manifests.push(generate_cluster(&config, &infra));
-
-        // 2. ProxmoxCluster (infrastructure)
-        manifests.push(self.generate_proxmox_cluster(cluster)?);
-
-        // 3. Control Plane (KubeadmControlPlane or RKE2ControlPlane)
-        manifests.push(generate_control_plane(&config, &infra, &cp_config));
-
-        // 4. Control Plane Machine Template
-        manifests.push(self.generate_cp_machine_template(cluster)?);
-
-        // 5. MachineDeployment for workers (replicas=0)
-        manifests.push(generate_machine_deployment(&config, &infra));
-
-        // 6. Worker Machine Template
-        manifests.push(self.generate_worker_machine_template(cluster)?);
-
-        // 7. Bootstrap Config Template for workers
-        manifests.push(generate_bootstrap_config_template(&config));
-
-        Ok(manifests)
+        Ok(vec![
+            generate_cluster(&config, &infra),              // 1. CAPI Cluster
+            proxmox_cluster,                                // 2. ProxmoxCluster
+            generate_control_plane(&config, &infra, &cp_config), // 3. Control Plane
+            cp_machine_template,                            // 4. CP Machine Template
+            generate_machine_deployment(&config, &infra),   // 5. MachineDeployment
+            worker_machine_template,                        // 6. Worker Machine Template
+            generate_bootstrap_config_template(&config),    // 7. Bootstrap Config Template
+        ])
     }
 
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {

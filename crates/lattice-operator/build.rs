@@ -11,6 +11,7 @@ struct Versions {
     cilium: String,
     istio: String,
     cert_manager: String,
+    flux: String,
 }
 
 /// Load versions from versions.toml in workspace root
@@ -30,6 +31,7 @@ fn load_versions() -> Versions {
         cilium: String::new(),
         istio: String::new(),
         cert_manager: String::new(),
+        flux: String::new(),
     };
     let mut section = "";
 
@@ -49,6 +51,7 @@ fn load_versions() -> Versions {
                 ("charts", "cilium") => versions.cilium = value.to_string(),
                 ("charts", "istio") => versions.istio = value.to_string(),
                 ("charts", "cert-manager") => versions.cert_manager = value.to_string(),
+                ("charts", "flux") => versions.flux = value.to_string(),
                 _ => {}
             }
         }
@@ -82,6 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-env=ISTIO_VERSION={}", versions.istio);
     println!("cargo:rustc-env=CAPI_VERSION={}", versions.capi);
     println!("cargo:rustc-env=RKE2_VERSION={}", versions.rke2);
+    println!("cargo:rustc-env=FLUX_VERSION={}", versions.flux);
+    println!("cargo:rustc-env=CAPMOX_VERSION={}", versions.capmox);
+    println!("cargo:rustc-env=CAPA_VERSION={}", versions.capa);
+    println!("cargo:rustc-env=CAPO_VERSION={}", versions.capo);
 
     let config_path = providers_dir.join("clusterctl.yaml");
     println!(
@@ -107,6 +114,7 @@ fn download_helm_charts(
     let ztunnel_chart = charts_dir.join(format!("ztunnel-{}.tgz", versions.istio));
     let cert_manager_chart =
         charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
+    let flux_chart = charts_dir.join(format!("flux2-{}.tgz", versions.flux));
 
     // Tell cargo to re-run if any chart is missing or changes
     println!("cargo:rerun-if-changed={}", cilium_chart.display());
@@ -115,14 +123,19 @@ fn download_helm_charts(
     println!("cargo:rerun-if-changed={}", cni_chart.display());
     println!("cargo:rerun-if-changed={}", ztunnel_chart.display());
     println!("cargo:rerun-if-changed={}", cert_manager_chart.display());
+    println!("cargo:rerun-if-changed={}", flux_chart.display());
 
-    if cilium_chart.exists()
-        && base_chart.exists()
-        && istiod_chart.exists()
-        && cni_chart.exists()
-        && ztunnel_chart.exists()
-        && cert_manager_chart.exists()
-    {
+    let all_charts = [
+        &cilium_chart,
+        &base_chart,
+        &istiod_chart,
+        &cni_chart,
+        &ztunnel_chart,
+        &cert_manager_chart,
+        &flux_chart,
+    ];
+
+    if all_charts.iter().all(|c| c.exists()) {
         return Ok(());
     }
 
@@ -146,6 +159,14 @@ fn download_helm_charts(
         .output();
     let _ = Command::new("helm")
         .args(["repo", "add", "jetstack", "https://charts.jetstack.io"])
+        .output();
+    let _ = Command::new("helm")
+        .args([
+            "repo",
+            "add",
+            "fluxcd-community",
+            "https://fluxcd-community.github.io/helm-charts",
+        ])
         .output();
     let _ = Command::new("helm").args(["repo", "update"]).output();
 
@@ -225,6 +246,19 @@ fn download_helm_charts(
                 "jetstack/cert-manager",
                 "--version",
                 &versions.cert_manager,
+                "--destination",
+            ])
+            .arg(charts_dir)
+            .status();
+    }
+    if !flux_chart.exists() {
+        eprintln!("Downloading Flux chart v{}...", versions.flux);
+        let _ = Command::new("helm")
+            .args([
+                "pull",
+                "fluxcd-community/flux2",
+                "--version",
+                &versions.flux,
                 "--destination",
             ])
             .arg(charts_dir)

@@ -141,6 +141,28 @@ spec:
         .to_string()
     }
 
+    /// Generate AuthorizationPolicy allowing all traffic to flux-system namespace
+    ///
+    /// Flux controllers need to communicate with each other and external git repos.
+    /// Since flux-system is infrastructure, we allow all traffic similar to other
+    /// system namespaces.
+    pub fn generate_flux_allow_policy() -> String {
+        r#"---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: flux-allow-all
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  action: ALLOW
+  rules:
+  - {}
+"#
+        .to_string()
+    }
+
     fn render_manifests(config: &IstioConfig) -> Result<Vec<String>, String> {
         let mut all_manifests = Vec::new();
 
@@ -329,5 +351,79 @@ mod tests {
             let has_cni = manifests.iter().any(|m| m.contains("name: istio-cni"));
             assert!(has_cni, "Should contain istio-cni for ambient mode");
         }
+    }
+
+    #[test]
+    fn test_default_deny_policy() {
+        let policy = IstioReconciler::generate_default_deny();
+        assert!(policy.contains("apiVersion: security.istio.io/v1"));
+        assert!(policy.contains("kind: AuthorizationPolicy"));
+        assert!(policy.contains("name: mesh-default-deny"));
+        assert!(policy.contains("namespace: istio-system"));
+        assert!(policy.contains("app.kubernetes.io/managed-by: lattice"));
+        // Empty spec {} means deny all traffic
+        assert!(policy.contains("spec:"));
+        assert!(policy.contains("{}"));
+        // No selector = mesh-wide
+        assert!(!policy.contains("selector:"));
+    }
+
+    #[test]
+    fn test_operator_allow_policy() {
+        let policy = IstioReconciler::generate_operator_allow_policy();
+        assert!(policy.contains("apiVersion: security.istio.io/v1"));
+        assert!(policy.contains("kind: AuthorizationPolicy"));
+        assert!(policy.contains("name: lattice-operator-allow"));
+        assert!(policy.contains("namespace: lattice-system"));
+        assert!(policy.contains("app.kubernetes.io/managed-by: lattice"));
+        assert!(policy.contains("selector:"));
+        assert!(policy.contains("app: lattice-operator"));
+        assert!(policy.contains("action: ALLOW"));
+        assert!(policy.contains("8443"));
+        assert!(policy.contains("50051"));
+    }
+
+    #[test]
+    fn test_flux_allow_policy() {
+        let policy = IstioReconciler::generate_flux_allow_policy();
+        assert!(policy.contains("apiVersion: security.istio.io/v1"));
+        assert!(policy.contains("kind: AuthorizationPolicy"));
+        assert!(policy.contains("name: flux-allow-all"));
+        assert!(policy.contains("namespace: flux-system"));
+        assert!(policy.contains("app.kubernetes.io/managed-by: lattice"));
+        assert!(policy.contains("action: ALLOW"));
+        assert!(policy.contains("rules:"));
+        assert!(policy.contains("- {}"));
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_single() {
+        let yaml = "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test";
+        let docs = parse_yaml_documents(yaml);
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].starts_with("---"));
+        assert!(docs[0].contains("kind: ConfigMap"));
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_multiple() {
+        let yaml = "---\napiVersion: v1\nkind: ConfigMap\n---\napiVersion: v1\nkind: Secret\n---\napiVersion: v1\nkind: Service";
+        let docs = parse_yaml_documents(yaml);
+        assert_eq!(docs.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_filters_empty() {
+        let yaml = "---\napiVersion: v1\nkind: ConfigMap\n---\n\n---\n# comment\n---\napiVersion: v1\nkind: Secret";
+        let docs = parse_yaml_documents(yaml);
+        assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_yaml_documents_adds_separator() {
+        let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test";
+        let docs = parse_yaml_documents(yaml);
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].starts_with("---"));
     }
 }

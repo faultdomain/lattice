@@ -62,6 +62,13 @@ pub trait KubeClient: Send + Sync {
     /// Get a LatticeCluster by name
     async fn get_cluster(&self, name: &str) -> Result<Option<LatticeCluster>, Error>;
 
+    /// Get a Secret by name and namespace
+    async fn get_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<k8s_openapi::api::core::v1::Secret>, Error>;
+
     /// Ensure the cell LoadBalancer Service exists
     ///
     /// Creates a LoadBalancer Service in lattice-system namespace to expose
@@ -316,6 +323,20 @@ impl KubeClient for KubeClientImpl {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
         match api.get(name).await {
             Ok(cluster) => Ok(Some(cluster)),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn get_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<k8s_openapi::api::core::v1::Secret>, Error> {
+        use k8s_openapi::api::core::v1::Secret;
+        let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
+        match api.get(name).await {
+            Ok(secret) => Ok(Some(secret)),
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -1026,13 +1047,14 @@ pub trait PivotOperations: Send + Sync {
 
     /// Store post-pivot manifests to send after PivotComplete
     ///
-    /// These manifests (LatticeCluster CRD + resource) will be sent
+    /// These manifests (LatticeCluster CRD + resource + GitOps resources) will be sent
     /// to the agent via ApplyManifestsCommand after pivot succeeds.
     fn store_post_pivot_manifests(
         &self,
         cluster_name: &str,
         crd_yaml: Option<String>,
         cluster_yaml: Option<String>,
+        flux_manifests: Vec<String>,
     );
 }
 
@@ -1491,13 +1513,19 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                         use kube::CustomResourceExt;
                         let crd_yaml = serde_yaml::to_string(&LatticeCluster::crd())
                             .map_err(|e| Error::serialization(e.to_string()))?;
-                        let cluster_yaml = serde_yaml::to_string(cluster.as_ref())
+                        // Use for_export() to strip managedFields and other server-set metadata
+                        let cluster_yaml = serde_yaml::to_string(&cluster.for_export())
                             .map_err(|e| Error::serialization(e.to_string()))?;
+
+                        // Generate GitOps manifests if parent has GitOps config
+                        let flux_manifests =
+                            generate_flux_manifests_for_child(&ctx, &name).await?;
 
                         pivot_ops.store_post_pivot_manifests(
                             &name,
                             Some(crd_yaml),
                             Some(cluster_yaml),
+                            flux_manifests,
                         );
 
                         // Trigger pivot (sends StartPivotCommand)
@@ -1688,9 +1716,14 @@ async fn generate_capi_manifests(
     // Build bootstrap info - if parent_servers is running, we're a cell provisioning a cluster
     // that needs to connect back to us. During root install, LATTICE_ROOT_INSTALL=true skips this.
     let is_root_install = std::env::var("LATTICE_ROOT_INSTALL").is_ok();
-    let bootstrap =
-        if !is_root_install && ctx.parent_servers.as_ref().is_some_and(|s| s.is_running()) {
-            let parent_servers = ctx.parent_servers.as_ref().unwrap();
+    let running_parent_servers = if is_root_install {
+        None
+    } else {
+        ctx.parent_servers
+            .as_ref()
+            .filter(|s| s.is_running())
+    };
+    let bootstrap = if let Some(parent_servers) = running_parent_servers {
             let self_cluster_name = ctx.self_cluster_name.as_ref().ok_or_else(|| {
                 Error::validation("self_cluster_name required when parent_servers is configured")
             })?;
@@ -1714,7 +1747,7 @@ async fn generate_capi_manifests(
 
             // Serialize the LatticeCluster CRD to pass to workload cluster
             let cluster_manifest =
-                serde_json::to_string(&cluster).map_err(|e| Error::Serialization {
+                serde_json::to_string(&cluster.for_export()).map_err(|e| Error::Serialization {
                     message: format!("failed to serialize cluster: {}", e),
                     kind: Some("LatticeCluster".to_string()),
                 })?;
@@ -1739,6 +1772,61 @@ async fn generate_capi_manifests(
 
     let provider = create_provider(cluster.spec.provider.provider_type(), &capi_namespace)?;
     provider.generate_capi_manifests(cluster, &bootstrap).await
+}
+
+/// Generate Flux GitOps manifests for a child cluster
+///
+/// Reads the parent cluster's GitOps config and credentials from the referenced Secret,
+/// then generates the manifests that will be applied to the child cluster after pivot.
+async fn generate_flux_manifests_for_child(ctx: &Context, child_name: &str) -> Result<Vec<String>, Error> {
+    use crate::infra::ResolvedGitCredentials;
+
+    // Get parent cluster's GitOps config
+    let Some(ref self_name) = ctx.self_cluster_name else {
+        return Ok(Vec::new());
+    };
+
+    let Some(parent_cluster) = ctx.kube.get_cluster(self_name).await? else {
+        return Ok(Vec::new());
+    };
+
+    let Some(ref endpoints) = parent_cluster.spec.endpoints else {
+        return Ok(Vec::new());
+    };
+
+    let Some(ref gitops) = endpoints.gitops else {
+        return Ok(Vec::new());
+    };
+
+    // Read credentials from Secret if referenced
+    let credentials = if let Some(ref secret_ref) = gitops.secret_ref {
+        if let Some(secret) = ctx.kube.get_secret(&secret_ref.name, &secret_ref.namespace).await? {
+            let data = secret.data.unwrap_or_default();
+            Some(ResolvedGitCredentials {
+                ssh_identity: data.get("identity").map(|v| base64_encode(&v.0)),
+                ssh_known_hosts: data.get("known_hosts").map(|v| base64_encode(&v.0)),
+                https_username: data.get("username").map(|v| base64_encode(&v.0)),
+                https_password: data.get("password").map(|v| base64_encode(&v.0)),
+            })
+        } else {
+            warn!(
+                secret = %secret_ref.name,
+                namespace = %secret_ref.namespace,
+                "GitOps secret not found, generating manifests without credentials"
+            );
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(crate::infra::generate_gitops_resources(gitops, child_name, credentials.as_ref()))
+}
+
+/// Base64 encode bytes for Secret data
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// Error policy for the controller
@@ -1946,6 +2034,7 @@ impl PivotOperations for PivotOperationsImpl {
         cluster_name: &str,
         crd_yaml: Option<String>,
         cluster_yaml: Option<String>,
+        flux_manifests: Vec<String>,
     ) {
         use crate::agent::connection::PostPivotManifests;
         self.agent_registry.set_post_pivot_manifests(
@@ -1953,6 +2042,7 @@ impl PivotOperations for PivotOperationsImpl {
             PostPivotManifests {
                 crd_yaml,
                 cluster_yaml,
+                flux_manifests,
             },
         );
     }
@@ -2065,6 +2155,7 @@ mod tests {
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
+            gitops: None,
         });
         cluster
     }

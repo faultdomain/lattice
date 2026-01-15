@@ -88,13 +88,14 @@ async fn handle_agent_message_impl(
                 );
                 registry.update_state(cluster_name, AgentState::Ready);
 
-                // Send post-pivot manifests (LatticeCluster CRD + resource)
+                // Send post-pivot manifests (LatticeCluster CRD + resource + Flux)
                 if let Some(manifests) = registry.take_post_pivot_manifests(cluster_name) {
                     let mut manifest_bytes = Vec::new();
 
                     // Clone the YAML strings so we can restore on failure
                     let crd_yaml = manifests.crd_yaml.clone();
                     let cluster_yaml = manifests.cluster_yaml.clone();
+                    let flux_manifests = manifests.flux_manifests.clone();
 
                     if let Some(ref crd) = crd_yaml {
                         manifest_bytes.push(crd.clone().into_bytes());
@@ -102,12 +103,17 @@ async fn handle_agent_message_impl(
                     if let Some(ref cluster) = cluster_yaml {
                         manifest_bytes.push(cluster.clone().into_bytes());
                     }
+                    // Add Flux manifests (base controllers + GitRepository + Kustomization + Secret)
+                    for flux_yaml in &flux_manifests {
+                        manifest_bytes.push(flux_yaml.clone().into_bytes());
+                    }
 
                     if !manifest_bytes.is_empty() {
                         info!(
                             cluster = %cluster_name,
                             manifest_count = manifest_bytes.len(),
-                            "Sending post-pivot ApplyManifestsCommand with LatticeCluster"
+                            flux_count = flux_manifests.len(),
+                            "Sending post-pivot ApplyManifestsCommand"
                         );
 
                         let apply_cmd = CellCommand {
@@ -131,6 +137,7 @@ async fn handle_agent_message_impl(
                                 super::connection::PostPivotManifests {
                                     crd_yaml,
                                     cluster_yaml,
+                                    flux_manifests,
                                 },
                             );
                         }
@@ -1193,6 +1200,7 @@ mod tests {
             PostPivotManifests {
                 crd_yaml: Some(crd_yaml.to_string()),
                 cluster_yaml: Some(cluster_yaml.to_string()),
+                flux_manifests: Vec::new(),
             },
         );
 
@@ -1307,6 +1315,7 @@ mod tests {
             PostPivotManifests {
                 crd_yaml: Some("crd".to_string()),
                 cluster_yaml: Some("cluster".to_string()),
+                flux_manifests: Vec::new(),
             },
         );
 
@@ -1368,6 +1377,7 @@ mod tests {
             PostPivotManifests {
                 crd_yaml: Some("crd-yaml-content".to_string()),
                 cluster_yaml: Some("cluster-yaml-content".to_string()),
+                flux_manifests: Vec::new(),
             },
         );
 
@@ -1427,6 +1437,7 @@ mod tests {
             PostPivotManifests {
                 crd_yaml: Some("apiVersion: apiextensions.k8s.io/v1\nkind: CRD".to_string()),
                 cluster_yaml: None,
+                flux_manifests: Vec::new(),
             },
         );
 

@@ -209,34 +209,58 @@ spec:
 }
 
 /// Generate cluster config YAML for Proxmox provider
+///
+/// Required environment variables:
+/// - PROXMOX_NODE: Proxmox node name (e.g., "pve")
+/// - PROXMOX_TEMPLATE_ID: VM template ID (e.g., "9000")
+/// - PROXMOX_IP_POOL: Comma-separated IPs for nodes (e.g., "10.0.0.100,10.0.0.101,10.0.0.102")
+/// - PROXMOX_GATEWAY: Gateway IP (e.g., "10.0.0.1")
+///
+/// Optional:
+/// - PROXMOX_STORAGE: Storage backend (default: "local-lvm")
+/// - PROXMOX_BRIDGE: Network bridge (default: "vmbr0")
+/// - PROXMOX_DNS: DNS servers (default: gateway IP)
 fn generate_proxmox_config(name: &str, bootstrap: &str, is_mgmt: bool) -> String {
-    let url = std::env::var("PROXMOX_URL").expect("PROXMOX_URL required for proxmox provider");
-    let token_id = std::env::var("PROXMOX_TOKEN_ID").expect("PROXMOX_TOKEN_ID required");
-    let token_secret =
-        std::env::var("PROXMOX_TOKEN_SECRET").expect("PROXMOX_TOKEN_SECRET required");
-    let node = std::env::var("PROXMOX_NODE").expect("PROXMOX_NODE required");
-    let template_id = std::env::var("PROXMOX_TEMPLATE_ID").expect("PROXMOX_TEMPLATE_ID required");
+    let node = std::env::var("PROXMOX_NODE").expect("PROXMOX_NODE required for proxmox provider");
+    let template_id: u32 = std::env::var("PROXMOX_TEMPLATE_ID")
+        .expect("PROXMOX_TEMPLATE_ID required")
+        .parse()
+        .expect("PROXMOX_TEMPLATE_ID must be a number");
+    let ip_pool =
+        std::env::var("PROXMOX_IP_POOL").expect("PROXMOX_IP_POOL required (comma-separated IPs)");
+    let gateway = std::env::var("PROXMOX_GATEWAY").expect("PROXMOX_GATEWAY required");
+
     let storage = std::env::var("PROXMOX_STORAGE").unwrap_or_else(|_| "local-lvm".to_string());
-    let ssh_key = std::env::var("PROXMOX_SSH_KEY").ok();
+    let bridge = std::env::var("PROXMOX_BRIDGE").unwrap_or_else(|_| "vmbr0".to_string());
+    let dns = std::env::var("PROXMOX_DNS").unwrap_or_else(|_| gateway.clone());
 
-    let mut proxmox_section = format!(
-        r#"      url: "{url}"
-      tokenId: "{token_id}"
-      tokenSecret: "{token_secret}"
-      node: "{node}"
-      templateId: {template_id}
-      storage: "{storage}"
-      cpCores: 4
-      cpMemory: 8192
-      workerCores: 4
-      workerMemory: 8192"#
-    );
-
-    if let Some(key) = ssh_key {
-        proxmox_section.push_str(&format!("\n      sshPublicKey: \"{key}\""));
-    }
+    // Parse IP pool
+    let ips: Vec<&str> = ip_pool.split(',').map(|s| s.trim()).collect();
+    let ip_yaml: String = ips
+        .iter()
+        .map(|ip| format!("          - \"{}\"", ip))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let workers = if is_mgmt { 1 } else { 2 };
+
+    // First IP is for control plane / management endpoint
+    let mgmt_ip = ips
+        .first()
+        .expect("PROXMOX_IP_POOL must have at least one IP");
+
+    let endpoints_section = if is_mgmt {
+        format!(
+            r#"  endpoints:
+    host: {mgmt_ip}
+    grpcPort: 50051
+    bootstrapPort: 8443
+    service:
+      type: LoadBalancer"#
+        )
+    } else {
+        String::new()
+    };
 
     format!(
         r#"apiVersion: lattice.dev/v1alpha1
@@ -251,14 +275,31 @@ spec:
       certSANs:
         - "127.0.0.1"
         - "localhost"
+        - "{mgmt_ip}"
     config:
       proxmox:
-{proxmox_section}
+        sourceNode: "{node}"
+        templateId: {template_id}
+        storage: "{storage}"
+        bridge: "{bridge}"
+        ipv4Addresses:
+{ip_yaml}
+        ipv4Prefix: 24
+        ipv4Gateway: "{gateway}"
+        dnsServers:
+          - "{dns}"
+        cpCores: 4
+        cpMemoryMib: 8192
+        cpDiskSizeGb: 50
+        workerCores: 4
+        workerMemoryMib: 8192
+        workerDiskSizeGb: 100
   nodes:
     controlPlane: 1
     workers: {workers}
   environment: e2e-test
   region: proxmox
+{endpoints_section}
 "#
     )
 }

@@ -30,7 +30,7 @@
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
-use lattice_operator::install::{InstallConfig, Installer};
+use lattice_cli::commands::install::{InstallConfig, Installer};
 
 // =============================================================================
 // Test Configuration

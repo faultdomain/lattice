@@ -17,8 +17,7 @@ use lattice_operator::controller::{
     service_reconcile, Context, ServiceContext,
 };
 use lattice_operator::crd::{LatticeCluster, LatticeExternalService, LatticeService};
-use lattice_operator::infra::IstioReconciler;
-use lattice_operator::install::{InstallConfig, Installer};
+use lattice_operator::infra::{FluxReconciler, IstioReconciler};
 use lattice_operator::parent::{ParentConfig, ParentServers};
 
 /// Lattice - CRD-driven Kubernetes operator for multi-cluster lifecycle management
@@ -44,63 +43,6 @@ enum Commands {
     ///
     /// This unified mode means every cluster is self-managing.
     Controller,
-
-    /// Install Lattice - bootstrap a new management cluster
-    ///
-    /// Creates a temporary kind cluster, provisions the management cluster,
-    /// pivots CAPI resources, and deletes the bootstrap cluster.
-    Install(InstallArgs),
-}
-
-/// Install mode arguments
-#[derive(Parser, Debug)]
-struct InstallArgs {
-    /// Path to the LatticeCluster YAML configuration file
-    ///
-    /// This file defines the management cluster spec and is applied as-is.
-    /// The same file is used for both provisioning and the self-referential
-    /// CRD on the management cluster, making it GitOps-friendly.
-    #[arg(short = 'f', long = "config")]
-    config_file: std::path::PathBuf,
-
-    /// Lattice container image
-    #[arg(
-        long,
-        env = "LATTICE_IMAGE",
-        default_value = "ghcr.io/evan-hines-js/lattice:latest"
-    )]
-    image: String,
-
-    /// Path to registry credentials file (dockerconfigjson format)
-    #[arg(long, env = "REGISTRY_CREDENTIALS_FILE")]
-    registry_credentials_file: Option<std::path::PathBuf>,
-
-    /// Skip kind cluster deletion on failure (for debugging)
-    #[arg(long)]
-    keep_bootstrap_on_failure: bool,
-
-    /// Timeout for the entire installation in seconds
-    #[arg(long, default_value = "1200")]
-    timeout_secs: u64,
-
-    /// Kubernetes bootstrap provider (overrides config file if set)
-    ///
-    /// RKE2 is FIPS-compliant out of the box and is the recommended default.
-    /// Kubeadm requires FIPS relaxation to communicate with its API server.
-    #[arg(long, default_value = "rke2", value_parser = parse_bootstrap_provider)]
-    bootstrap: lattice_operator::crd::BootstrapProvider,
-}
-
-/// Parse bootstrap provider from CLI argument
-fn parse_bootstrap_provider(s: &str) -> Result<lattice_operator::crd::BootstrapProvider, String> {
-    match s.to_lowercase().as_str() {
-        "rke2" => Ok(lattice_operator::crd::BootstrapProvider::Rke2),
-        "kubeadm" => Ok(lattice_operator::crd::BootstrapProvider::Kubeadm),
-        _ => Err(format!(
-            "invalid bootstrap provider '{}', must be 'rke2' or 'kubeadm'",
-            s
-        )),
-    }
 }
 
 #[tokio::main]
@@ -157,64 +99,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Install(args)) => run_install(args).await,
         Some(Commands::Controller) | None => run_controller().await,
     }
-}
-
-/// Run the installer - bootstrap a new management cluster
-async fn run_install(args: InstallArgs) -> anyhow::Result<()> {
-    // Read and validate the cluster config file
-    let config_content = tokio::fs::read_to_string(&args.config_file)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read config file {:?}: {}", args.config_file, e))?;
-
-    // Parse the YAML to validate it's a valid LatticeCluster
-    let cluster: LatticeCluster = serde_yaml::from_str(&config_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse LatticeCluster config: {}", e))?;
-
-    let cluster_name = cluster
-        .metadata
-        .name
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("LatticeCluster must have metadata.name"))?;
-
-    let provider = cluster.spec.provider.provider_type();
-
-    println!("=== Lattice Installer ===");
-    println!("Config file: {:?}", args.config_file);
-    println!("Management cluster: {}", cluster_name);
-    println!("Provider: {}", provider);
-    println!(
-        "Kubernetes version: {}",
-        cluster.spec.provider.kubernetes.version
-    );
-    println!("Bootstrap: {}", args.bootstrap);
-    println!();
-
-    // Read registry credentials if provided
-    let registry_credentials = if let Some(creds_path) = &args.registry_credentials_file {
-        Some(
-            tokio::fs::read_to_string(creds_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to read registry credentials: {}", e))?,
-        )
-    } else {
-        None
-    };
-
-    let config = InstallConfig {
-        cluster_config_path: args.config_file,
-        cluster_config_content: config_content,
-        image: args.image,
-        keep_bootstrap_on_failure: args.keep_bootstrap_on_failure,
-        timeout: Duration::from_secs(args.timeout_secs),
-        registry_credentials,
-        bootstrap_override: Some(args.bootstrap),
-    };
-
-    let installer = Installer::new(config).map_err(|e| anyhow::anyhow!("{}", e))?;
-    installer.run().await.map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Ensure all Lattice CRDs are installed
@@ -434,43 +320,85 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create istio-system namespace: {}", e))?;
 
-    // Apply manifests (server-side apply handles create or update)
-    for manifest in manifests {
-        apply_manifest(client, manifest).await?;
-    }
+    // Build all Istio manifests to apply
+    let mut all_manifests: Vec<String> = manifests.to_vec();
+    all_manifests.push(IstioReconciler::generate_peer_authentication());
+    all_manifests.push(IstioReconciler::generate_default_deny());
+    all_manifests.push(IstioReconciler::generate_operator_allow_policy());
 
-    // Apply PeerAuthentication for STRICT mTLS
-    let peer_auth = IstioReconciler::generate_peer_authentication();
-    apply_manifest(client, &peer_auth).await?;
-
-    // Apply mesh-wide default-deny AuthorizationPolicy
-    // This is the security baseline - all traffic denied unless explicitly allowed
-    let default_deny = IstioReconciler::generate_default_deny();
-    apply_manifest(client, &default_deny).await?;
-
-    // Apply allow policy for lattice-operator (webhook + gRPC from workload clusters)
-    let operator_allow = IstioReconciler::generate_operator_allow_policy();
-    apply_manifest(client, &operator_allow).await?;
-
-    // Apply Cilium policies only if Cilium is installed (skip on bootstrap cluster)
-    // Bootstrap kind cluster uses default CNI, not Cilium, so these CRDs don't exist
+    // Add Cilium policies only if not on bootstrap cluster (kind uses default CNI, not Cilium)
     let is_bootstrap_cluster = std::env::var("LATTICE_ROOT_INSTALL").is_ok();
     if !is_bootstrap_cluster {
-        // Apply Cilium policy for Istio ambient mode compatibility
-        // This allows ztunnel's SNAT-ed health probes (from 169.254.7.127) to reach pods
-        // Required when using default-deny network policies with Istio ambient
-        let ztunnel_allow = lattice_operator::infra::generate_ztunnel_allowlist();
-        apply_manifest(client, &ztunnel_allow).await?;
-
-        // Apply Cilium default-deny policy for L4 defense-in-depth
-        // This complements Istio's L7 AuthorizationPolicy - traffic must pass both layers
-        let cilium_default_deny = lattice_operator::infra::generate_default_deny();
-        apply_manifest(client, &cilium_default_deny).await?;
+        all_manifests.push(lattice_operator::infra::generate_ztunnel_allowlist());
+        all_manifests.push(lattice_operator::infra::generate_default_deny());
     } else {
         tracing::debug!("Skipping Cilium policies on bootstrap cluster (no Cilium CRDs)");
     }
 
+    // Apply all manifests in one batch (single discovery call)
+    // Istio helm template includes namespace in manifests, so no default needed
+    apply_manifests(client, &all_manifests, None).await?;
+
     tracing::info!(version = %expected_version, "Istio reconciliation complete");
+
+    // Install Flux for GitOps support
+    tracing::info!("Installing Flux...");
+    ensure_flux(client).await?;
+    tracing::info!("Flux installation complete");
+
+    Ok(())
+}
+
+/// Ensures Flux is installed at the correct version for GitOps support.
+/// Flux enables clusters to watch git repositories and apply changes automatically.
+async fn ensure_flux(client: &Client) -> anyhow::Result<()> {
+    use k8s_openapi::api::apps::v1::Deployment;
+    use kube::api::{Api, Patch, PatchParams};
+
+    tracing::debug!("Creating FluxReconciler...");
+    let reconciler = FluxReconciler::new()
+        .map_err(|e| anyhow::anyhow!("Failed to create Flux reconciler: {}", e))?;
+    tracing::debug!("FluxReconciler created successfully");
+    let expected_version = reconciler.version();
+
+    // Check source-controller deployment version
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), "flux-system");
+    let source_version = get_deployment_version(&deployments, "source-controller").await;
+
+    if source_version.as_deref() == Some(expected_version) {
+        tracing::debug!(version = %expected_version, "Flux at expected version, skipping");
+        return Ok(());
+    }
+
+    tracing::info!(
+        expected = %expected_version,
+        current = ?source_version,
+        "Installing/upgrading Flux"
+    );
+
+    // Ensure flux-system namespace exists
+    let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
+    let ns = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": { "name": "flux-system" }
+    });
+    let params = PatchParams::apply("lattice").force();
+    namespaces
+        .patch("flux-system", &params, &Patch::Apply(&ns))
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flux-system namespace: {}", e))?;
+
+    // Build all Flux manifests including the Istio allow policy
+    let mut all_manifests: Vec<String> = reconciler.manifests().to_vec();
+    all_manifests.push(IstioReconciler::generate_flux_allow_policy());
+
+    tracing::info!(count = all_manifests.len(), "Applying Flux manifests");
+
+    // Flux helm template doesn't embed namespace in manifests, so we provide flux-system as default
+    apply_manifests(client, &all_manifests, Some("flux-system")).await?;
+
+    tracing::info!(version = %expected_version, "Flux installation complete");
     Ok(())
 }
 
@@ -503,54 +431,106 @@ async fn get_daemonset_version(
     })
 }
 
-/// Apply a single YAML manifest to the cluster
-async fn apply_manifest(client: &Client, manifest: &str) -> anyhow::Result<()> {
+/// Apply multiple YAML manifests to the cluster
+///
+/// If a manifest doesn't specify a namespace and default_ns is provided,
+/// the default namespace will be injected for namespaced resources.
+/// Uses the discovery API (cached) to determine resource scope.
+async fn apply_manifests(
+    client: &Client,
+    manifests: &[impl AsRef<str>],
+    default_ns: Option<&str>,
+) -> anyhow::Result<()> {
     use kube::api::{Api, DynamicObject, Patch, PatchParams};
-    use kube::discovery::ApiResource;
+    use kube::discovery::{Discovery, Scope};
 
-    let obj: serde_json::Value =
-        serde_yaml::from_str(manifest).map_err(|e| anyhow::anyhow!("Invalid YAML: {}", e))?;
+    if manifests.is_empty() {
+        return Ok(());
+    }
 
-    let kind = obj
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing kind"))?;
-    let api_version = obj
-        .get("apiVersion")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing apiVersion"))?;
-    let name = obj
-        .pointer("/metadata/name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing metadata.name"))?;
-    let namespace = obj.pointer("/metadata/namespace").and_then(|v| v.as_str());
-
-    // Parse apiVersion into group/version
-    let (group, version) = if api_version.contains('/') {
-        let parts: Vec<&str> = api_version.splitn(2, '/').collect();
-        (parts[0].to_string(), parts[1].to_string())
-    } else {
-        (String::new(), api_version.to_string())
-    };
-
-    let gvk = kube::api::GroupVersionKind {
-        group,
-        version,
-        kind: kind.to_string(),
-    };
-    let api_resource = ApiResource::from_gvk(&gvk);
-
-    let api: Api<DynamicObject> = match namespace {
-        Some(ns) => Api::namespaced_with(client.clone(), ns, &api_resource),
-        None => Api::all_with(client.clone(), &api_resource),
-    };
+    // Run discovery once to cache all API resources
+    let discovery = Discovery::new(client.clone())
+        .run()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to run API discovery: {}", e))?;
 
     let params = PatchParams::apply("lattice").force();
-    api.patch(name, &params, &Patch::Apply(&obj))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to apply {}/{}: {}", kind, name, e))?;
 
-    tracing::debug!(kind = kind, name = name, "Applied manifest");
+    for manifest in manifests {
+        let manifest = manifest.as_ref();
+
+        let mut obj: serde_json::Value =
+            serde_yaml::from_str(manifest).map_err(|e| anyhow::anyhow!("Invalid YAML: {}", e))?;
+
+        let kind = obj
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing kind"))?
+            .to_string();
+        let api_version = obj
+            .get("apiVersion")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing apiVersion"))?
+            .to_string();
+        let name = obj
+            .pointer("/metadata/name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing metadata.name"))?
+            .to_string();
+
+        // Parse apiVersion into group/version
+        let (group, version) = if api_version.contains('/') {
+            let parts: Vec<&str> = api_version.splitn(2, '/').collect();
+            (parts[0].to_string(), parts[1].to_string())
+        } else {
+            (String::new(), api_version.clone())
+        };
+
+        // Look up resource in cached discovery
+        let gvk = kube::api::GroupVersionKind {
+            group: group.clone(),
+            version: version.clone(),
+            kind: kind.clone(),
+        };
+
+        let (api_resource, capabilities) = discovery
+            .resolve_gvk(&gvk)
+            .ok_or_else(|| anyhow::anyhow!("Unknown resource type: {}/{}", api_version, kind))?;
+
+        // Determine namespace: use manifest's namespace, or inject default for namespaced resources
+        let manifest_ns = obj
+            .pointer("/metadata/namespace")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let namespace: Option<String> = if manifest_ns.is_some() {
+            manifest_ns
+        } else if capabilities.scope == Scope::Namespaced {
+            // Inject default namespace into manifest for namespaced resources
+            if let Some(ns) = default_ns {
+                if let Some(metadata) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+                    metadata.insert("namespace".to_string(), serde_json::Value::String(ns.to_string()));
+                }
+                Some(ns.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let api: Api<DynamicObject> = match &namespace {
+            Some(ns) => Api::namespaced_with(client.clone(), ns, &api_resource),
+            None => Api::all_with(client.clone(), &api_resource),
+        };
+
+        api.patch(&name, &params, &Patch::Apply(&obj))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to apply {}/{}: {}", kind, name, e))?;
+
+        tracing::debug!(kind = %kind, name = %name, namespace = ?namespace, "Applied manifest");
+    }
+
     Ok(())
 }
 
@@ -630,8 +610,8 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
         let ca_cert = parent_servers.ca().ca_cert_pem().to_string();
         let cell_endpoint = endpoints.endpoint();
 
-        // Serialize cluster manifest
-        let cluster_manifest = match serde_json::to_string(&cluster) {
+        // Serialize cluster manifest for export
+        let cluster_manifest = match serde_json::to_string(&cluster.for_export()) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(error = %e, cluster = %name, "Failed to serialize cluster for re-registration");
@@ -716,7 +696,7 @@ async fn run_controller() -> anyhow::Result<()> {
             use k8s_openapi::api::core::v1::Secret;
             let secrets: kube::Api<Secret> =
                 kube::Api::namespaced(client.clone(), "lattice-system");
-            matches!(secrets.get("lattice-parent-config").await, Ok(_))
+            secrets.get("lattice-parent-config").await.is_ok()
         };
 
         let extra_sans: Vec<String> = if is_bootstrap_cluster {

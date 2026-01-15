@@ -71,7 +71,6 @@ impl DependencyDirection {
 /// Type of resource dependency
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
-
 pub enum ResourceType {
     /// Internal service (another LatticeService)
     #[default]

@@ -60,12 +60,13 @@ use kube::api::{Api, PostParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::Client;
 
+use lattice_cli::commands::install::{InstallConfig, Installer};
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster};
-use lattice_operator::install::{InstallConfig, Installer};
 
 use super::helpers::{
-    ensure_docker_network, extract_docker_cluster_kubeconfig, run_cmd, run_cmd_allow_fail,
-    verify_control_plane_taints, watch_cluster_phases, watch_worker_scaling,
+    create_capmox_credentials_secret, ensure_docker_network, extract_docker_cluster_kubeconfig,
+    run_cmd, run_cmd_allow_fail, verify_control_plane_taints, watch_cluster_phases,
+    watch_worker_scaling,
 };
 use super::mesh_tests::{mesh_test_enabled, run_mesh_test, run_random_mesh_test};
 use super::providers::{generate_cluster_config, InfraProvider};
@@ -418,6 +419,12 @@ async fn run_provider_e2e(
     watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
 
     println!("\n  SUCCESS: Management cluster is self-managing!");
+
+    // Create provider-specific credentials if needed
+    if workload_provider == InfraProvider::Proxmox {
+        println!("\n  Setting up Proxmox credentials for workload cluster provisioning...");
+        create_capmox_credentials_secret(&mgmt_client).await?;
+    }
 
     // =========================================================================
     // Phase 3: Create Workload Cluster
