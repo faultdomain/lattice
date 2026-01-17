@@ -21,6 +21,6 @@ pub use service::{
 };
 pub use types::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig, EndpointsSpec,
-    GitOpsSpec, GitSecretRef, KubernetesSpec, NetworkPool, NetworkingSpec, NodeSpec, ProviderConfig,
-    ProviderSpec, ProviderType, ProxmoxConfig, ServiceRef, ServiceSpec, WorkloadSpec,
+    GitOpsSpec, KubernetesSpec, NetworkPool, NetworkingSpec, NodeSpec, ProviderConfig,
+    ProviderSpec, ProviderType, ProxmoxConfig, SecretRef, ServiceRef, ServiceSpec, WorkloadSpec,
 };

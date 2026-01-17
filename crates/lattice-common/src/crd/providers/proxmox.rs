@@ -8,6 +8,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::super::types::SecretRef;
+
 /// Proxmox VE provider configuration (CAPMOX)
 ///
 /// Configuration for provisioning clusters on Proxmox Virtual Environment.
@@ -100,16 +102,13 @@ pub struct ProxmoxConfig {
     pub kube_vip_image: Option<String>,
 
     // ==========================================================================
-    // CAPMOX Credentials
+    // Credentials
     // ==========================================================================
 
-    /// CAPMOX credentials secret name (default: capmox-manager-credentials)
+    /// Reference to Secret containing Proxmox API credentials
+    /// The secret should contain: url, token, secret
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials_secret_name: Option<String>,
-
-    /// CAPMOX credentials secret namespace (default: capmox-system)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials_secret_namespace: Option<String>,
+    pub secret_ref: Option<SecretRef>,
 
     // ==========================================================================
     // IPv4 Configuration

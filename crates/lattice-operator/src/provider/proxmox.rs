@@ -152,8 +152,8 @@ impl ProxmoxProvider {
             // This avoids race conditions when multiple clusters share credentials
             "credentialsRef": {
                 "name": proxmox_config
-                    .and_then(|c| c.credentials_secret_name.clone())
-                    .unwrap_or_else(|| "capmox-manager-credentials".to_string()),
+                    .and_then(|c| c.secret_ref.as_ref().map(|s| s.name.clone()))
+                    .unwrap_or_else(|| "proxmox-credentials".to_string()),
                 "namespace": &self.namespace
             }
         });
@@ -570,11 +570,12 @@ impl Provider for ProxmoxProvider {
 
     fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
         let proxmox_config = cluster.spec.provider.config.proxmox.as_ref();
-        let secret_name = proxmox_config
-            .and_then(|c| c.credentials_secret_name.clone())
-            .unwrap_or_else(|| "capmox-manager-credentials".to_string());
-        let source_namespace = proxmox_config
-            .and_then(|c| c.credentials_secret_namespace.clone())
+        let secret_ref = proxmox_config.and_then(|c| c.secret_ref.as_ref());
+        let secret_name = secret_ref
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "proxmox-credentials".to_string());
+        let source_namespace = secret_ref
+            .map(|s| s.namespace.clone())
             .unwrap_or_else(|| "capmox-system".to_string());
 
         vec![(secret_name, source_namespace)]

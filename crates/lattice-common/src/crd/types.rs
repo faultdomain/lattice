@@ -305,16 +305,19 @@ pub struct GitOpsSpec {
     pub secret_ref: Option<GitSecretRef>,
 }
 
-/// Reference to a Secret containing git credentials
+/// Reference to a Kubernetes Secret
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct GitSecretRef {
+pub struct SecretRef {
     /// Name of the Secret
     pub name: String,
     /// Namespace of the Secret (default: "lattice-system")
     #[serde(default = "default_lattice_namespace")]
     pub namespace: String,
 }
+
+/// Reference to a Secret containing git credentials (alias for SecretRef)
+pub type GitSecretRef = SecretRef;
 
 fn default_git_branch() -> String {
     "main".to_string()

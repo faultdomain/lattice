@@ -1,0 +1,44 @@
+# Proxmox workload cluster for E2E testing
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: e2e-workload
+spec:
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: rke2
+      certSANs:
+        - "127.0.0.1"
+        - "localhost"
+        - "10.0.0.104"
+    config:
+      proxmox:
+        secretRef:
+          name: proxmox-credentials
+          namespace: capmox-system
+        sourceNode: "poweredge-lg"
+        templateId: 9000
+        controlPlaneEndpoint: "10.0.0.104"
+        storage: "local-lvm"
+        bridge: "vmbr0"
+        ipv4Addresses:
+          - "10.0.0.105"
+          - "10.0.0.106"
+          - "10.0.0.107"
+        ipv4Prefix: 24
+        ipv4Gateway: "10.0.0.1"
+        dnsServers:
+          - "10.0.0.1"
+        virtualIpNetworkInterface: "ens18"
+        cpCores: 16
+        cpMemoryMib: 32768
+        cpDiskSizeGb: 50
+        workerCores: 16
+        workerMemoryMib: 32768
+        workerDiskSizeGb: 100
+  nodes:
+    controlPlane: 1
+    workers: 2
+  environment: e2e-test
+  region: proxmox
