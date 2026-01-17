@@ -224,10 +224,14 @@ fn get_management_kubeconfig(provider: InfraProvider) -> Result<String, String> 
 // =============================================================================
 
 fn cleanup_clusters() {
-    println!("  Cleaning up any existing clusters...");
-    let _ = run_cmd("kind", &["delete", "clusters", "--all"]);
+    // Only clean up clusters created by THIS test instance, not all kind clusters.
+    // This allows concurrent E2E test runs with unique cluster names.
+    println!("  Cleaning up test clusters...");
 
+    // Delete known test cluster names (not --all to avoid killing concurrent tests)
     for name in &[MGMT_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME] {
+        let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", name]);
+
         let _ = run_cmd_allow_fail(
             "docker",
             &["ps", "-a", "--filter", &format!("name={}", name), "-q"],

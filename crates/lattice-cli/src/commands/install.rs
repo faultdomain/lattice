@@ -157,6 +157,12 @@ impl Installer {
         &self.cluster_name
     }
 
+    /// Get the path to the bootstrap cluster's kubeconfig file.
+    /// Using a dedicated file instead of the shared ~/.kube/config allows concurrent installs.
+    fn bootstrap_kubeconfig_path(&self) -> String {
+        format!("/tmp/{}-kubeconfig", self.bootstrap_cluster_name)
+    }
+
     fn provider(&self) -> ProviderType {
         self.cluster.spec.provider.provider_type()
     }
@@ -305,7 +311,29 @@ nodes:
             )));
         }
 
-        self.run_command(
+        // Export kubeconfig to a dedicated file for this bootstrap cluster.
+        // This avoids race conditions when multiple installs run concurrently.
+        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
+        let export_output = Command::new("kind")
+            .args([
+                "export",
+                "kubeconfig",
+                "--name",
+                &self.bootstrap_cluster_name,
+                "--kubeconfig",
+                &bootstrap_kubeconfig,
+            ])
+            .output()
+            .await?;
+
+        if !export_output.status.success() {
+            return Err(Error::command_failed(format!(
+                "kind export kubeconfig failed: {}",
+                String::from_utf8_lossy(&export_output.stderr)
+            )));
+        }
+
+        self.run_command_with_kubeconfig(
             "kubectl",
             &[
                 "wait",
@@ -314,6 +342,7 @@ nodes:
                 "--all",
                 "--timeout=120s",
             ],
+            &bootstrap_kubeconfig,
         )
         .await?;
 
@@ -354,13 +383,15 @@ nodes:
             })
             .collect();
 
+        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
         for manifest in &operator_manifests {
-            self.kubectl_apply(manifest, None).await?;
+            self.kubectl_apply(manifest, Some(&bootstrap_kubeconfig))
+                .await?;
         }
 
         // Wait for operator deployment to be ready
         info!("  Waiting for Lattice operator to be ready...");
-        self.run_command(
+        self.run_command_with_kubeconfig(
             "kubectl",
             &[
                 "wait",
@@ -370,6 +401,7 @@ nodes:
                 "lattice-system",
                 "--timeout=300s",
             ],
+            &bootstrap_kubeconfig,
         )
         .await?;
 
@@ -383,6 +415,7 @@ nodes:
     async fn wait_for_capi_crds(&self) -> Result<()> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(300);
+        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
 
         let required_crds = [
             "clusters.cluster.x-k8s.io",
@@ -400,7 +433,7 @@ nodes:
                 }
 
                 let result = self
-                    .run_command("kubectl", &["get", "crd", crd])
+                    .run_command_with_kubeconfig("kubectl", &["get", "crd", crd], &bootstrap_kubeconfig)
                     .await;
 
                 if result.is_ok() {
@@ -519,13 +552,20 @@ spec:
             cluster_name = self.cluster_name()
         );
 
+        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
         let _ = self
-            .run_command("kubectl", &["create", "namespace", &namespace])
+            .run_command_with_kubeconfig(
+                "kubectl",
+                &["create", "namespace", &namespace],
+                &bootstrap_kubeconfig,
+            )
             .await;
 
-        self.kubectl_apply(&cilium_configmap, None).await?;
-        self.kubectl_apply(&operator_configmap, None).await?;
-        self.kubectl_apply_with_retry(&crs, None, Duration::from_secs(120))
+        self.kubectl_apply(&cilium_configmap, Some(&bootstrap_kubeconfig))
+            .await?;
+        self.kubectl_apply(&operator_configmap, Some(&bootstrap_kubeconfig))
+            .await?;
+        self.kubectl_apply_with_retry(&crs, Some(&bootstrap_kubeconfig), Duration::from_secs(120))
             .await?;
 
         Ok(())
@@ -533,13 +573,15 @@ spec:
 
     async fn create_management_cluster_crd(&self) -> Result<()> {
         // Create provider-specific credentials on bootstrap cluster BEFORE CAPI can provision
+        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
         if self.provider() == ProviderType::Proxmox {
-            self.create_capmox_credentials(None).await?;
+            self.create_capmox_credentials(Some(&bootstrap_kubeconfig))
+                .await?;
         }
 
         self.kubectl_apply_with_retry(
             &self.config.cluster_config_content,
-            None,
+            Some(&bootstrap_kubeconfig),
             Duration::from_secs(120),
         )
         .await?;
@@ -550,6 +592,7 @@ spec:
     async fn wait_for_management_cluster(&self) -> Result<()> {
         let start = Instant::now();
         let timeout = Duration::from_secs(600);
+        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
 
         loop {
             if start.elapsed() > timeout {
@@ -557,7 +600,7 @@ spec:
             }
 
             let output = self
-                .run_command(
+                .run_command_with_kubeconfig(
                     "kubectl",
                     &[
                         "get",
@@ -566,6 +609,7 @@ spec:
                         "-o",
                         "jsonpath={.status.phase}",
                     ],
+                    &bootstrap_kubeconfig,
                 )
                 .await
                 .unwrap_or_default();
@@ -594,9 +638,10 @@ spec:
             }
 
             if self
-                .run_command(
+                .run_command_with_kubeconfig(
                     "kubectl",
                     &["get", "secret", &secret_name, "-n", &namespace],
+                    &bootstrap_kubeconfig,
                 )
                 .await
                 .is_ok()
@@ -613,9 +658,10 @@ spec:
     async fn apply_bootstrap_to_management(&self) -> Result<()> {
         let namespace = format!("capi-{}", self.cluster_name());
         let secret_name = format!("{}-kubeconfig", self.cluster_name());
+        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
 
         let kubeconfig_b64 = self
-            .run_command(
+            .run_command_with_kubeconfig(
                 "kubectl",
                 &[
                     "get",
@@ -626,6 +672,7 @@ spec:
                     "-o",
                     "jsonpath={.data.value}",
                 ],
+                &bootstrap_kubeconfig,
             )
             .await?;
 
@@ -985,7 +1032,8 @@ stringData:
         if let Some(kc) = kubeconfig {
             args.extend(["--kubeconfig", kc]);
         }
-        args.extend(["apply", "-f", "-"]);
+        // Use --server-side to handle "already exists" errors gracefully
+        args.extend(["apply", "--server-side", "-f", "-"]);
 
         let mut child = Command::new("kubectl")
             .args(&args)
