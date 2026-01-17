@@ -112,6 +112,10 @@ pub struct InfraProviderInfo {
 
 impl InfraProviderInfo {
     /// Get provider info for a given infrastructure type
+    ///
+    /// # Panics
+    /// Panics if called with an unsupported provider type (OpenStack, AWS, GCP, Azure).
+    /// These should be caught earlier in validation.
     pub fn for_provider(provider: ProviderType, capi_version: &str) -> Self {
         match provider {
             ProviderType::Docker => Self {
@@ -132,37 +136,9 @@ impl InfraProviderInfo {
                 ],
                 extra_init_args: &["--ipam", "in-cluster"], // CAPMOX requires IPAM provider
             },
-            ProviderType::OpenStack => Self {
-                name: "openstack",
-                version: env!("CAPO_VERSION").to_string(),
-                credentials_secret: Some(("capo-system", "capo-manager-credentials")),
-                credentials_env_map: &[
-                    ("clouds_yaml", "OPENSTACK_CLOUD_YAML_B64"),
-                    ("cloud_name", "OPENSTACK_CLOUD"),
-                ],
-                extra_init_args: &[],
-            },
-            ProviderType::Aws => Self {
-                name: "aws",
-                version: env!("CAPA_VERSION").to_string(),
-                credentials_secret: None, // Uses AWS_* env vars from environment
-                credentials_env_map: &[],
-                extra_init_args: &[],
-            },
-            ProviderType::Gcp => Self {
-                name: "gcp",
-                version: capi_version.to_string(),
-                credentials_secret: None,
-                credentials_env_map: &[],
-                extra_init_args: &[],
-            },
-            ProviderType::Azure => Self {
-                name: "azure",
-                version: capi_version.to_string(),
-                credentials_secret: None,
-                credentials_env_map: &[],
-                extra_init_args: &[],
-            },
+            ProviderType::OpenStack | ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
+                panic!("Provider {:?} is not yet implemented", provider)
+            }
         }
     }
 }
@@ -195,6 +171,9 @@ impl CapiProviderConfig {
     }
 
     /// Create config with explicit versions (for testing)
+    ///
+    /// # Panics
+    /// Panics if called with an unsupported provider type.
     pub fn with_versions(
         infrastructure: ProviderType,
         capi_version: String,
@@ -204,10 +183,9 @@ impl CapiProviderConfig {
             name: match infrastructure {
                 ProviderType::Docker => "docker",
                 ProviderType::Proxmox => "proxmox",
-                ProviderType::OpenStack => "openstack",
-                ProviderType::Aws => "aws",
-                ProviderType::Gcp => "gcp",
-                ProviderType::Azure => "azure",
+                ProviderType::OpenStack | ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
+                    panic!("Provider {:?} is not yet implemented", infrastructure)
+                }
             },
             version: capi_version.clone(),
             credentials_secret: None,
@@ -1044,12 +1022,10 @@ mod tests {
     }
 
     #[test]
-    fn all_infrastructure_providers_map_correctly() {
+    fn supported_infrastructure_providers_map_correctly() {
         for (provider, expected) in [
             (ProviderType::Docker, "docker"),
-            (ProviderType::Aws, "aws"),
-            (ProviderType::Gcp, "gcp"),
-            (ProviderType::Azure, "azure"),
+            (ProviderType::Proxmox, "proxmox"),
         ] {
             let config = CapiProviderConfig::with_versions(
                 provider,

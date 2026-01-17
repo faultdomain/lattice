@@ -242,18 +242,10 @@ impl Installer {
 
         // Create provider credentials BEFORE deploying operator
         // The operator reads these during CAPI installation
-        match self.provider() {
-            ProviderType::Proxmox => {
-                info!("[Phase 1.5] Creating Proxmox credentials...");
-                self.create_capmox_credentials(Some(&self.bootstrap_kubeconfig_path()))
-                    .await?;
-            }
-            ProviderType::OpenStack => {
-                info!("[Phase 1.5] Creating OpenStack credentials...");
-                self.create_capo_credentials(Some(&self.bootstrap_kubeconfig_path()))
-                    .await?;
-            }
-            _ => {}
+        if self.provider() == ProviderType::Proxmox {
+            info!("[Phase 1.5] Creating Proxmox credentials...");
+            self.create_capmox_credentials(Some(&self.bootstrap_kubeconfig_path()))
+                .await?;
         }
 
         info!("[Phase 2] Deploying Lattice operator...");
@@ -774,16 +766,9 @@ spec:
         .await?;
 
         // Create provider-specific credentials if needed
-        match self.provider() {
-            ProviderType::Proxmox => {
-                self.create_capmox_credentials(Some(&kubeconfig_path))
-                    .await?;
-            }
-            ProviderType::OpenStack => {
-                self.create_capo_credentials(Some(&kubeconfig_path))
-                    .await?;
-            }
-            _ => {}
+        if self.provider() == ProviderType::Proxmox {
+            self.create_capmox_credentials(Some(&kubeconfig_path))
+                .await?;
         }
 
         // Wait for Lattice operator
@@ -863,81 +848,6 @@ stringData:
         Ok(())
     }
 
-    /// Create CAPO credentials secret for OpenStack provider
-    ///
-    /// Creates a clouds.yaml-based credential secret that CAPO uses.
-    /// Reads OS_* environment variables and generates the clouds.yaml content.
-    async fn create_capo_credentials(&self, kubeconfig: Option<&str>) -> Result<()> {
-        let target = kubeconfig.map_or("bootstrap", |_| "management");
-        info!("Creating CAPO credentials on {} cluster...", target);
-
-        let auth_url = std::env::var("OS_AUTH_URL").map_err(|_| {
-            Error::validation("OS_AUTH_URL environment variable required for OpenStack provider")
-        })?;
-        let username = std::env::var("OS_USERNAME").map_err(|_| {
-            Error::validation("OS_USERNAME environment variable required for OpenStack provider")
-        })?;
-        let password = std::env::var("OS_PASSWORD").map_err(|_| {
-            Error::validation("OS_PASSWORD environment variable required for OpenStack provider")
-        })?;
-        let project_name = std::env::var("OS_PROJECT_NAME").map_err(|_| {
-            Error::validation("OS_PROJECT_NAME environment variable required for OpenStack provider")
-        })?;
-        let user_domain = std::env::var("OS_USER_DOMAIN_NAME").unwrap_or_else(|_| "Default".to_string());
-        let project_domain = std::env::var("OS_PROJECT_DOMAIN_NAME").unwrap_or_else(|_| "Default".to_string());
-        let cloud_name = std::env::var("OS_CLOUD_NAME").unwrap_or_else(|_| "openstack".to_string());
-
-        info!("  OS_AUTH_URL: {}", auth_url);
-        info!("  OS_USERNAME: {}", username);
-        info!("  OS_PROJECT_NAME: {}", project_name);
-
-        // Generate clouds.yaml content
-        let clouds_yaml = format!(
-            r#"clouds:
-  {cloud_name}:
-    auth:
-      auth_url: "{auth_url}"
-      username: "{username}"
-      password: "{password}"
-      project_name: "{project_name}"
-      user_domain_name: "{user_domain}"
-      project_domain_name: "{project_domain}"
-    region_name: "RegionOne"
-    interface: "public"
-    identity_api_version: 3"#
-        );
-
-        // Base64 encode for OPENSTACK_CLOUD_YAML_B64
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        let clouds_yaml_b64 = STANDARD.encode(clouds_yaml.as_bytes());
-
-        let ns_manifest = r#"apiVersion: v1
-kind: Namespace
-metadata:
-  name: capo-system"#;
-
-        self.kubectl_apply_with_retry(ns_manifest, kubeconfig, Duration::from_secs(30))
-            .await?;
-
-        let secret_manifest = format!(
-            r#"apiVersion: v1
-kind: Secret
-metadata:
-  name: capo-manager-credentials
-  namespace: capo-system
-type: Opaque
-stringData:
-  clouds_yaml: "{clouds_yaml_b64}"
-  cloud_name: "{cloud_name}""#
-        );
-
-        self.kubectl_apply_with_retry(&secret_manifest, kubeconfig, Duration::from_secs(30))
-            .await?;
-
-        info!("CAPO credentials created on {} cluster", target);
-        Ok(())
-    }
-
     async fn pivot_capi_resources(&self) -> Result<()> {
         let namespace = format!("capi-{}", self.cluster_name());
         let kubeconfig_path = format!("/tmp/{}-kubeconfig", self.cluster_name());
@@ -1009,12 +919,15 @@ stringData:
         }
 
         // Run clusterctl move with retries
-        info!("Running clusterctl move...");
+        // Must specify both source (--kubeconfig) and destination (--to-kubeconfig)
+        info!("Running clusterctl move from bootstrap to management cluster...");
         let mut last_error = None;
         for attempt in 1..=5 {
             let result = Command::new("clusterctl")
                 .args([
                     "move",
+                    "--kubeconfig",
+                    &bootstrap_kubeconfig,
                     "--to-kubeconfig",
                     &kubeconfig_path,
                     "--namespace",

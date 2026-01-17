@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 // Re-export provider configs from the providers module
-pub use super::providers::{AwsConfig, DockerConfig, OpenstackConfig, ProxmoxConfig};
+pub use super::providers::{DockerConfig, ProxmoxConfig};
 
 // =============================================================================
 // Provider Types
@@ -147,12 +147,6 @@ pub struct ProviderConfig {
     /// Proxmox VE on-premises virtualization
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxmox: Option<ProxmoxConfig>,
-    /// Amazon Web Services
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aws: Option<AwsConfig>,
-    /// OpenStack (including OVH Public Cloud)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openstack: Option<OpenstackConfig>,
 }
 
 impl ProviderConfig {
@@ -161,8 +155,6 @@ impl ProviderConfig {
         Self {
             docker: Some(DockerConfig::default()),
             proxmox: None,
-            aws: None,
-            openstack: None,
         }
     }
 
@@ -171,28 +163,6 @@ impl ProviderConfig {
         Self {
             docker: None,
             proxmox: Some(config),
-            aws: None,
-            openstack: None,
-        }
-    }
-
-    /// Create an AWS provider config
-    pub fn aws(config: AwsConfig) -> Self {
-        Self {
-            docker: None,
-            proxmox: None,
-            aws: Some(config),
-            openstack: None,
-        }
-    }
-
-    /// Create an OpenStack provider config
-    pub fn openstack(config: OpenstackConfig) -> Self {
-        Self {
-            docker: None,
-            proxmox: None,
-            aws: None,
-            openstack: Some(config),
         }
     }
 
@@ -202,10 +172,6 @@ impl ProviderConfig {
             ProviderType::Docker
         } else if self.proxmox.is_some() {
             ProviderType::Proxmox
-        } else if self.aws.is_some() {
-            ProviderType::Aws
-        } else if self.openstack.is_some() {
-            ProviderType::OpenStack
         } else {
             ProviderType::Docker
         }
@@ -213,19 +179,14 @@ impl ProviderConfig {
 
     /// Validate that exactly one provider is configured
     pub fn validate(&self) -> Result<(), crate::Error> {
-        let count = [
-            self.docker.is_some(),
-            self.proxmox.is_some(),
-            self.aws.is_some(),
-            self.openstack.is_some(),
-        ]
-        .iter()
-        .filter(|&&x| x)
-        .count();
+        let count = [self.docker.is_some(), self.proxmox.is_some()]
+            .iter()
+            .filter(|&&x| x)
+            .count();
 
         if count == 0 {
             return Err(crate::Error::validation(
-                "provider config must specify exactly one provider (docker, proxmox, aws, or openstack)",
+                "provider config must specify exactly one provider (docker or proxmox)",
             ));
         }
         if count > 1 {
@@ -766,22 +727,6 @@ mod tests {
             let config = ProviderConfig::proxmox(ProxmoxConfig::default());
             assert!(config.proxmox.is_some());
             assert_eq!(config.provider_type(), ProviderType::Proxmox);
-            assert!(config.validate().is_ok());
-        }
-
-        #[test]
-        fn test_aws_config() {
-            let config = ProviderConfig::aws(AwsConfig::default());
-            assert!(config.aws.is_some());
-            assert_eq!(config.provider_type(), ProviderType::Aws);
-            assert!(config.validate().is_ok());
-        }
-
-        #[test]
-        fn test_openstack_config() {
-            let config = ProviderConfig::openstack(OpenstackConfig::default());
-            assert!(config.openstack.is_some());
-            assert_eq!(config.provider_type(), ProviderType::OpenStack);
             assert!(config.validate().is_ok());
         }
     }

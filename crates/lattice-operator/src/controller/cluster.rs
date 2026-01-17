@@ -1313,9 +1313,23 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             if is_self {
                 let capi_namespace = format!("capi-{}", name);
 
-                // Ensure kubeconfig uses internal endpoint for self-management
+                // First check if CAPI resources exist (from pivot)
+                // Don't try to patch kubeconfig until pivot has completed
+                let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
+                let capi_ready = ctx
+                    .capi
+                    .is_infrastructure_ready(&name, &capi_namespace, bootstrap)
+                    .await
+                    .unwrap_or(false);
+
+                if !capi_ready {
+                    debug!("self-cluster waiting for CAPI resources (pivot not complete yet)");
+                    return Ok(Action::requeue(Duration::from_secs(10)));
+                }
+
+                // CAPI resources exist - now patch kubeconfig for self-management
                 // CAPI needs to reach itself via kubernetes.default.svc, not external IP
-                // Use retry with backoff since this is critical for self-management
+                info!("CAPI resources found, patching kubeconfig for self-management");
                 let cluster_name = name.clone();
                 let namespace = capi_namespace.clone();
                 let patch_result =
@@ -1334,22 +1348,11 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
                 if let Err(e) = patch_result {
                     warn!(error = %e, "Failed to patch kubeconfig for self-management after retries");
-                }
-
-                let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
-                let capi_ready = ctx
-                    .capi
-                    .is_infrastructure_ready(&name, &capi_namespace, bootstrap)
-                    .await
-                    .unwrap_or(false);
-
-                if capi_ready {
-                    info!("self-cluster has CAPI resources ready");
-                    return try_transition_to_ready(&cluster, &ctx, true).await;
-                } else {
-                    debug!("self-cluster waiting for CAPI resources (pivot not complete yet)");
                     return Ok(Action::requeue(Duration::from_secs(10)));
                 }
+
+                info!("self-cluster has CAPI resources ready");
+                return try_transition_to_ready(&cluster, &ctx, true).await;
             }
 
             // Ensure CAPI is installed before provisioning
