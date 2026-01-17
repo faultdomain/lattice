@@ -848,9 +848,9 @@ async fn run_controller() -> anyhow::Result<()> {
     let service_ctx = Arc::new(ServiceContext::from_client(client, "cluster.local"));
 
     tracing::info!("Starting Lattice controllers...");
-    tracing::info!("  - LatticeCluster controller");
-    tracing::info!("  - LatticeService controller");
-    tracing::info!("  - LatticeExternalService controller");
+    tracing::info!("LatticeCluster controller");
+    tracing::info!("LatticeService controller");
+    tracing::info!("LatticeExternalService controller");
 
     // Create all controllers
     let cluster_controller = Controller::new(clusters, WatcherConfig::default())

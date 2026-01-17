@@ -394,7 +394,7 @@ nodes:
         }
 
         // Wait for operator deployment to be ready
-        info!("  Waiting for Lattice operator to be ready...");
+        info!("Waiting for Lattice operator to be ready...");
         self.run_command_with_kubeconfig(
             "kubectl",
             &[
@@ -410,7 +410,7 @@ nodes:
         .await?;
 
         // Wait for CAPI CRDs to be available (operator installs CAPI on startup)
-        info!("  Waiting for CAPI to be installed...");
+        info!("Waiting for CAPI to be installed...");
         self.wait_for_capi_crds().await?;
 
         Ok(())
@@ -441,7 +441,7 @@ nodes:
                     .await;
 
                 if result.is_ok() {
-                    info!("  CRD ready: {}", crd);
+                    info!("CRD ready: {}", crd);
                     break;
                 }
 
@@ -756,7 +756,7 @@ nodes:
     /// Create CAPMOX credentials on bootstrap cluster
     async fn create_capmox_credentials_on_bootstrap(&self) -> Result<()> {
         let (url, token, secret) = Self::get_proxmox_credentials()?;
-        info!("  PROXMOX_URL: {}", url);
+        info!("PROXMOX_URL: {}", url);
 
         let manifests = capmox_credentials_manifests(&url, &token, &secret);
         let kubeconfig = self.bootstrap_kubeconfig_path();
@@ -890,7 +890,7 @@ nodes:
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
             while let Some(line) = lines.next_line().await? {
-                info!("  {}", line);
+                info!("{}", line);
             }
         }
 
@@ -1083,13 +1083,13 @@ pub async fn run(args: InstallArgs) -> Result<()> {
 
     if args.dry_run {
         info!("Dry run - would perform the following:");
-        info!("  1. Create bootstrap kind cluster");
-        info!("  2. Install CAPI controllers");
-        info!("  3. Install Lattice operator");
-        info!("  4. Apply root cluster: {}", config_path.display());
-        info!("  5. Wait for cluster provisioning");
-        info!("  6. Pivot CAPI resources");
-        info!("  7. Delete bootstrap cluster");
+        info!("1. Create bootstrap kind cluster");
+        info!("2. Install CAPI controllers");
+        info!("3. Install Lattice operator");
+        info!("4. Apply root cluster: {}", config_path.display());
+        info!("5. Wait for cluster provisioning");
+        info!("6. Pivot CAPI resources");
+        info!("7. Delete bootstrap cluster");
         return Ok(());
     }
 
