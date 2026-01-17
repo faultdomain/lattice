@@ -13,8 +13,6 @@ use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, PostParams};
-use kube::config::{KubeConfigOptions, Kubeconfig};
-use kube::Client;
 use rand::prelude::*;
 use tokio::time::sleep;
 
@@ -24,22 +22,7 @@ use lattice_operator::crd::{
     Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
 };
 
-use super::helpers::{run_cmd, run_cmd_allow_fail};
-
-// =============================================================================
-// Shared Utilities
-// =============================================================================
-
-async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
-    let kubeconfig =
-        Kubeconfig::read_from(path).map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
-
-    let config = kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
-        .await
-        .map_err(|e| format!("Failed to create kube config: {}", e))?;
-
-    Client::try_from(config).map_err(|e| format!("Failed to create client: {}", e))
-}
+use super::helpers::{client_from_kubeconfig, run_cmd, run_cmd_allow_fail};
 
 /// Check if mesh tests are enabled via environment variable
 pub fn mesh_test_enabled() -> bool {

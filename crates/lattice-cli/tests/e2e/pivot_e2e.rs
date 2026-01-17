@@ -54,15 +54,13 @@ use std::time::Duration;
 
 use base64::Engine;
 use kube::api::{Api, PostParams};
-use kube::config::{KubeConfigOptions, Kubeconfig};
-use kube::Client;
 
 use lattice_cli::commands::install::{InstallConfig, Installer};
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster};
 
 use super::helpers::{
-    ensure_docker_network, extract_docker_cluster_kubeconfig, run_cmd, run_cmd_allow_fail,
-    verify_control_plane_taints, watch_cluster_phases, watch_worker_scaling,
+    client_from_kubeconfig, ensure_docker_network, extract_docker_cluster_kubeconfig, run_cmd,
+    run_cmd_allow_fail, verify_control_plane_taints, watch_cluster_phases, watch_worker_scaling,
 };
 use super::mesh_tests::{mesh_test_enabled, run_mesh_test, run_random_mesh_test};
 use super::providers::InfraProvider;
@@ -162,17 +160,6 @@ fn load_registry_credentials() -> Option<String> {
     }
 
     None
-}
-
-async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
-    let kubeconfig =
-        Kubeconfig::read_from(path).map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
-
-    let config = kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
-        .await
-        .map_err(|e| format!("Failed to create kube config: {}", e))?;
-
-    Client::try_from(config).map_err(|e| format!("Failed to create client: {}", e))
 }
 
 /// Load cluster configuration from a CRD file.

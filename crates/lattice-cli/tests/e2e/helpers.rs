@@ -10,7 +10,32 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 #[cfg(feature = "provider-e2e")]
+use kube::config::{KubeConfigOptions, Kubeconfig};
+#[cfg(feature = "provider-e2e")]
+use kube::Client;
+
+#[cfg(feature = "provider-e2e")]
 use lattice_operator::crd::{BootstrapProvider, ClusterPhase};
+
+// =============================================================================
+// Kubernetes Client
+// =============================================================================
+
+/// Create a kube client from a kubeconfig file with proper timeouts
+#[cfg(feature = "provider-e2e")]
+pub async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
+    let kubeconfig =
+        Kubeconfig::read_from(path).map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
+
+    let mut config = kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+        .await
+        .map_err(|e| format!("Failed to create kube config: {}", e))?;
+
+    config.connect_timeout = Some(Duration::from_secs(10));
+    config.read_timeout = Some(Duration::from_secs(30));
+
+    Client::try_from(config).map_err(|e| format!("Failed to create client: {}", e))
+}
 
 // =============================================================================
 // Docker Network Constants
@@ -279,15 +304,14 @@ pub async fn watch_cluster_phases(
             ));
         }
 
-        match tokio::time::timeout(Duration::from_secs(15), api.get(cluster_name)).await {
-            Ok(Ok(cluster)) => {
+        match api.get(cluster_name).await {
+            Ok(cluster) => {
                 let current_phase = cluster
                     .status
                     .as_ref()
                     .map(|s| s.phase.clone())
                     .unwrap_or(ClusterPhase::Pending);
 
-                // Only print when phase changes
                 if last_phase.as_ref() != Some(&current_phase) {
                     println!("  Cluster {} phase: {:?}", cluster_name, current_phase);
                     last_phase = Some(current_phase.clone());
@@ -307,17 +331,8 @@ pub async fn watch_cluster_phases(
                     return Err(format!("Cluster {} failed: {}", cluster_name, msg));
                 }
             }
-            Ok(Err(e)) => {
-                println!(
-                    "  Warning: failed to get cluster {} status: {}",
-                    cluster_name, e
-                );
-            }
-            Err(_) => {
-                println!(
-                    "  Warning: timeout getting cluster {} status, retrying...",
-                    cluster_name
-                );
+            Err(e) => {
+                println!("  Warning: failed to get cluster {} status: {}", cluster_name, e);
             }
         }
 
