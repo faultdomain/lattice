@@ -598,6 +598,8 @@ impl AgentClient {
 
         let infrastructure = match provider_str.as_str() {
             "docker" => ProviderType::Docker,
+            "proxmox" => ProviderType::Proxmox,
+            "openstack" => ProviderType::OpenStack,
             "aws" => ProviderType::Aws,
             "gcp" => ProviderType::Gcp,
             "azure" => ProviderType::Azure,

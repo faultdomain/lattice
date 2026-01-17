@@ -8,6 +8,7 @@ struct Versions {
     capmox: String,
     capa: String,
     capo: String,
+    ipam_in_cluster: String,
     cilium: String,
     istio: String,
     cert_manager: String,
@@ -28,6 +29,7 @@ fn load_versions() -> Versions {
         capmox: String::new(),
         capa: String::new(),
         capo: String::new(),
+        ipam_in_cluster: String::new(),
         cilium: String::new(),
         istio: String::new(),
         cert_manager: String::new(),
@@ -48,6 +50,7 @@ fn load_versions() -> Versions {
                 ("capmox", "version") => versions.capmox = value.to_string(),
                 ("capa", "version") => versions.capa = value.to_string(),
                 ("capo", "version") => versions.capo = value.to_string(),
+                ("ipam-in-cluster", "version") => versions.ipam_in_cluster = value.to_string(),
                 ("charts", "cilium") => versions.cilium = value.to_string(),
                 ("charts", "istio") => versions.istio = value.to_string(),
                 ("charts", "cert-manager") => versions.cert_manager = value.to_string(),
@@ -89,6 +92,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-env=CAPMOX_VERSION={}", versions.capmox);
     println!("cargo:rustc-env=CAPA_VERSION={}", versions.capa);
     println!("cargo:rustc-env=CAPO_VERSION={}", versions.capo);
+    println!(
+        "cargo:rustc-env=IPAM_IN_CLUSTER_VERSION={}",
+        versions.ipam_in_cluster
+    );
 
     let config_path = providers_dir.join("clusterctl.yaml");
     println!(
@@ -301,12 +308,16 @@ fn download_capi_providers(
     let openstack_dir = providers_dir
         .join("infrastructure-openstack")
         .join(format!("v{}", versions.capo));
+    let ipam_dir = providers_dir
+        .join("ipam-in-cluster")
+        .join(format!("v{}", versions.ipam_in_cluster));
 
     let core = core_dir.join("core-components.yaml");
     let bootstrap_rke2 = bootstrap_rke2_dir.join("bootstrap-components.yaml");
     let proxmox = proxmox_dir.join("infrastructure-components.yaml");
     let aws = aws_dir.join("infrastructure-components.yaml");
     let openstack = openstack_dir.join("infrastructure-components.yaml");
+    let ipam = ipam_dir.join("ipam-components.yaml");
 
     // Tell cargo to re-run if providers are missing or change
     println!("cargo:rerun-if-changed={}", core.display());
@@ -314,6 +325,7 @@ fn download_capi_providers(
     println!("cargo:rerun-if-changed={}", proxmox.display());
     println!("cargo:rerun-if-changed={}", aws.display());
     println!("cargo:rerun-if-changed={}", openstack.display());
+    println!("cargo:rerun-if-changed={}", ipam.display());
     println!("cargo:rerun-if-changed={}", config_path.display());
 
     if core.exists()
@@ -321,6 +333,7 @@ fn download_capi_providers(
         && proxmox.exists()
         && aws.exists()
         && openstack.exists()
+        && ipam.exists()
         && config_path.exists()
     {
         return Ok(());
@@ -342,6 +355,7 @@ fn download_capi_providers(
     std::fs::create_dir_all(&proxmox_dir)?;
     std::fs::create_dir_all(&aws_dir)?;
     std::fs::create_dir_all(&openstack_dir)?;
+    std::fs::create_dir_all(&ipam_dir)?;
 
     let capi_base_url = format!(
         "https://github.com/kubernetes-sigs/cluster-api/releases/download/v{}",
@@ -450,6 +464,20 @@ fn download_capi_providers(
         &openstack_dir.join("metadata.yaml"),
     );
 
+    // Download IPAM in-cluster provider (required by CAPMOX)
+    let ipam_base_url = format!(
+        "https://github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster/releases/download/v{}",
+        versions.ipam_in_cluster
+    );
+    download_file(
+        &format!("{}/ipam-components.yaml", ipam_base_url),
+        &ipam_dir.join("ipam-components.yaml"),
+    );
+    download_file(
+        &format!("{}/metadata.yaml", ipam_base_url),
+        &ipam_dir.join("metadata.yaml"),
+    );
+
     let config_content = format!(
         r#"providers:
   - name: "cluster-api"
@@ -479,6 +507,9 @@ fn download_capi_providers(
   - name: "openstack"
     url: "file://{providers_dir}/infrastructure-openstack/v{capo_version}/infrastructure-components.yaml"
     type: "InfrastructureProvider"
+  - name: "in-cluster"
+    url: "file://{providers_dir}/ipam-in-cluster/v{ipam_version}/ipam-components.yaml"
+    type: "IPAMProvider"
 "#,
         providers_dir = providers_dir.display(),
         capi_version = versions.capi,
@@ -486,6 +517,7 @@ fn download_capi_providers(
         capmox_version = versions.capmox,
         capa_version = versions.capa,
         capo_version = versions.capo,
+        ipam_version = versions.ipam_in_cluster,
     );
     std::fs::write(&config_path, config_content)?;
 

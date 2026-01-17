@@ -297,11 +297,11 @@ spec:
         dnsServers:
           - "{dns}"
         virtualIpNetworkInterface: "{vip_interface}"{ssh_keys_yaml}
-        cpCores: 4
-        cpMemoryMib: 8192
+        cpCores: 16
+        cpMemoryMib: 32768
         cpDiskSizeGb: 50
-        workerCores: 4
-        workerMemoryMib: 8192
+        workerCores: 16
+        workerMemoryMib: 32768
         workerDiskSizeGb: 100
   nodes:
     controlPlane: 1

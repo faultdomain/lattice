@@ -111,6 +111,8 @@ pub struct PostPivotManifests {
     pub cluster_yaml: Option<String>,
     /// Flux manifests (base controllers + GitRepository + Kustomization + credential Secret)
     pub flux_manifests: Vec<String>,
+    /// CiliumNetworkPolicy for the operator (applied after Cilium CRDs exist)
+    pub network_policy_yaml: Option<String>,
 }
 
 /// Sender for streaming proxy responses

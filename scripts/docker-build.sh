@@ -25,6 +25,7 @@ RKE2_VERSION=$(get_version "rke2" "version")
 CAPMOX_VERSION=$(get_version "capmox" "version")
 CAPA_VERSION=$(get_version "capa" "version")
 CAPO_VERSION=$(get_version "capo" "version")
+IPAM_VERSION=$(get_version "ipam-in-cluster" "version")
 
 echo "Building with versions from versions.toml:"
 echo "  kubectl: $KUBECTL_VERSION"
@@ -35,6 +36,7 @@ echo "  rke2: $RKE2_VERSION"
 echo "  capmox: $CAPMOX_VERSION"
 echo "  capa: $CAPA_VERSION"
 echo "  capo: $CAPO_VERSION"
+echo "  ipam-in-cluster: $IPAM_VERSION"
 
 docker build \
     --build-arg KUBECTL_VERSION="$KUBECTL_VERSION" \
@@ -45,5 +47,8 @@ docker build \
     --build-arg CAPMOX_VERSION="$CAPMOX_VERSION" \
     --build-arg CAPA_VERSION="$CAPA_VERSION" \
     --build-arg CAPO_VERSION="$CAPO_VERSION" \
+    --build-arg IPAM_VERSION="$IPAM_VERSION" \
+    --platform linux/amd64 \
+    --build-arg FIPS=false \
     "$@" \
     "$PROJECT_ROOT"

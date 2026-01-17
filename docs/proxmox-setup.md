@@ -38,7 +38,9 @@ cd /var/lib/vz/template/iso
 wget https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
 
 # Create a new VM (ID 9000 as template)
-qm create 9000 --name ubuntu-cloud-template --memory 2048 --cores 2 --net0 virtio,bridge=vmbr0
+# IMPORTANT: --cpu host ensures x86-64-v2+ support (required by Istio CNI, modern glibc)
+# 16 cores / 32GB RAM recommended for Kubernetes control plane + workloads
+qm create 9000 --name ubuntu-cloud-template --memory 32768 --sockets 1 --cores 16 --cpu host --net0 virtio,bridge=vmbr0
 
 # Import the cloud image as the VM's disk
 qm importdisk 9000 jammy-server-cloudimg-amd64.img local-lvm
@@ -180,6 +182,10 @@ curl -k "https://10.0.0.97:8006/api2/json/version" \
 2. **Network unreachable**: Verify bridge name and IP range don't conflict
 3. **Cloud-init not running**: Ensure template has cloud-init installed
 4. **Permission denied**: API token needs PVEAdmin or root privileges
+5. **"CPU does not support x86-64-v2"**: Template needs `--cpu host`. Fix existing template:
+   ```bash
+   qm set 9000 --cpu host
+   ```
 
 ## Running E2E Tests with Proxmox
 

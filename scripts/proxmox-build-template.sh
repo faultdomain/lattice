@@ -17,8 +17,10 @@
 #   PROXMOX_STORAGE      - Storage pool (default: local-lvm)
 #   PROXMOX_BRIDGE       - Network bridge (default: vmbr0)
 #   PROXMOX_ISO_POOL     - ISO storage pool (default: local)
-#   KUBERNETES_VERSION   - Kubernetes version (default: 1.31.0)
-#   BUILD_MEMORY         - VM memory in MB (default: 16384)
+#   KUBERNETES_VERSION   - Kubernetes version (default: 1.32.0)
+#   BUILD_MEMORY         - VM memory in MB (default: 32768)
+#   BUILD_CORES          - CPU cores per socket (default: 16)
+#   BUILD_SOCKETS        - CPU sockets (default: 1)
 
 set -euo pipefail
 
@@ -32,7 +34,9 @@ STORAGE="${PROXMOX_STORAGE:-local-lvm}"
 BRIDGE="${PROXMOX_BRIDGE:-vmbr0}"
 ISO_POOL="${PROXMOX_ISO_POOL:-local}"
 K8S_VERSION="${KUBERNETES_VERSION:-1.32.0}"
-MEMORY="${BUILD_MEMORY:-16384}"
+MEMORY="${BUILD_MEMORY:-32768}"
+CORES="${BUILD_CORES:-16}"
+SOCKETS="${BUILD_SOCKETS:-1}"
 IMAGE_BUILDER_DIR="${IMAGE_BUILDER_DIR:-/tmp/image-builder}"
 
 echo "=== Proxmox CAPI Template Builder ==="
@@ -41,6 +45,7 @@ echo "Node: $PROXMOX_NODE"
 echo "Template ID: $TEMPLATE_ID"
 echo "Storage: $STORAGE"
 echo "K8s Version: $K8S_VERSION"
+echo "CPUs: ${SOCKETS} socket(s) x ${CORES} cores"
 echo "Memory: ${MEMORY}MB"
 echo ""
 
@@ -88,6 +93,10 @@ PACKER_FLAGS+=" --var 'kubernetes_series=${K8S_SERIES}'"
 PACKER_FLAGS+=" --var 'kubernetes_deb_version=${K8S_DEB_VERSION}'"
 PACKER_FLAGS+=" --var 'vmid=${TEMPLATE_ID}'"
 PACKER_FLAGS+=" --var 'memory=${MEMORY}'"
+PACKER_FLAGS+=" --var 'cores=${CORES}'"
+PACKER_FLAGS+=" --var 'sockets=${SOCKETS}'"
+# Use host CPU to ensure x86-64-v2+ instruction support (required by Istio CNI, modern glibc)
+PACKER_FLAGS+=" --var 'cpu_type=host'"
 
 [[ "$STORAGE" == *"lvm"* ]] && PACKER_FLAGS+=" --var 'disk_format=raw'"
 

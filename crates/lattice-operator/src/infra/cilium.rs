@@ -50,23 +50,29 @@ pub fn generate_cilium_manifests(provider: Option<&str>) -> Result<Vec<String>, 
         "operator.prometheus.enabled=false",
         "--set",
         "cni.exclusive=false",
+        // Don't replace kube-proxy - less invasive
         "--set",
         "kubeProxyReplacement=false",
-        "--set",
-        "l2announcements.enabled=true",
-        "--set",
-        "externalIPs.enabled=true",
-        // Disable host firewall to prevent blocking host/bridge traffic
+        // Disable host firewall - prevents blocking bridge traffic
         "--set",
         "hostFirewall.enabled=false",
-        // Use native routing instead of VXLAN overlay (avoids MTU issues, simpler for VMs)
+        // VXLAN tunnel mode with reduced MTU (tunnelProtocol replaces deprecated tunnel option)
         "--set",
-        "routingMode=native",
+        "routingMode=tunnel",
         "--set",
-        "autoDirectNodeRoutes=true",
-        // Must match pod CIDR (192.168.0.0/16) - NOT the LAN CIDR
+        "tunnelProtocol=vxlan",
         "--set",
-        "ipv4NativeRoutingCIDR=192.168.0.0/16",
+        "mtu=1450",
+        // Use Kubernetes IPAM - gets pod CIDR from kubeadm (192.168.0.0/16)
+        // Default cluster-pool mode uses 10.0.0.0/8 which conflicts with common LANs
+        "--set",
+        "ipam.mode=kubernetes",
+        // Disable BPF-based masquerading - use iptables instead (less invasive)
+        "--set",
+        "bpf.masquerade=false",
+        // Disable host routing via BPF - use kernel routing
+        "--set",
+        "bpf.hostLegacyRouting=true",
     ];
 
     info!(provider = ?provider, "Rendering Cilium manifests");
@@ -302,7 +308,9 @@ mod tests {
         if let Ok(manifests) = generate_cilium_manifests(Some("docker")) {
             assert!(!manifests.is_empty());
             let combined = manifests.join("\n");
-            assert!(combined.contains("l2announcements"));
+            // Check for core Cilium components
+            assert!(combined.contains("kind: DaemonSet"));
+            assert!(combined.contains("cilium-agent"));
         }
     }
 

@@ -250,16 +250,9 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
         manifests.extend(crate::cilium::generate_lb_resources(networking));
     }
 
-    // Add CiliumNetworkPolicy for the operator/agent
-    // This is the ONLY policy applied at bootstrap - just enough for the agent to connect
-    // - Root clusters (no parent): egress to DNS + API server only
-    // - Child clusters (have parent): also include parent for gRPC connection
-    // All other policies (default-deny, ztunnel allowlist, Istio policies) are applied
-    // by the operator once it starts - single source of truth, no drift.
-    manifests.push(crate::infra::generate_operator_network_policy(
-        config.parent_host,
-        config.parent_grpc_port,
-    ));
+    // NOTE: CiliumNetworkPolicy is NOT included in bootstrap manifests because
+    // Cilium CRDs may not be ready yet. The operator applies network policies
+    // after Cilium is running.
 
     manifests
 }
@@ -474,7 +467,11 @@ impl DefaultManifestGenerator {
         };
 
         // Serialize all resources to JSON
-        let mut manifests = vec![serde_json::to_string(&namespace)?];
+        // Start with the LatticeCluster CRD definition so it's applied first
+        let crd = LatticeCluster::crd();
+        let mut manifests = vec![serde_json::to_string(&crd)?];
+
+        manifests.push(serde_json::to_string(&namespace)?);
         if let Some(ref reg_secret) = registry_secret {
             manifests.push(serde_json::to_string(reg_secret)?);
         }
@@ -1523,6 +1520,12 @@ mod tests {
     fn story_manifest_generation() {
         let generator = DefaultManifestGenerator::new();
         let manifests = generator.generate("test:latest", None, None, None, None);
+
+        // CRD must be first so it's applied before any CR instances
+        let has_crd = manifests
+            .iter()
+            .any(|m| m.contains("\"kind\":\"CustomResourceDefinition\"") && m.contains("latticeclusters.lattice.dev"));
+        assert!(has_crd, "Should include LatticeCluster CRD definition");
 
         // Manifests create the lattice-system namespace (JSON format)
         let has_namespace = manifests

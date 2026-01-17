@@ -190,10 +190,16 @@ impl ProxmoxProvider {
             .and_then(|c| c.source_node.clone())
             .unwrap_or_else(|| "pve".to_string());
 
-        let cp_cores = proxmox_config.and_then(|c| c.cp_cores).unwrap_or(4);
+        let cp_cores = proxmox_config
+            .and_then(|c| c.cp_cores)
+            .ok_or_else(|| crate::Error::validation("proxmox.cpCores is required".to_string()))?;
         let cp_sockets = proxmox_config.and_then(|c| c.cp_sockets).unwrap_or(1);
-        let cp_memory_mib = proxmox_config.and_then(|c| c.cp_memory_mib).unwrap_or(8192);
-        let cp_disk_size_gb = proxmox_config.and_then(|c| c.cp_disk_size_gb).unwrap_or(50);
+        let cp_memory_mib = proxmox_config
+            .and_then(|c| c.cp_memory_mib)
+            .ok_or_else(|| crate::Error::validation("proxmox.cpMemoryMib is required".to_string()))?;
+        let cp_disk_size_gb = proxmox_config
+            .and_then(|c| c.cp_disk_size_gb)
+            .ok_or_else(|| crate::Error::validation("proxmox.cpDiskSizeGb is required".to_string()))?;
 
         let storage = proxmox_config
             .and_then(|c| c.storage.clone())
@@ -326,14 +332,16 @@ impl ProxmoxProvider {
             .and_then(|c| c.source_node.clone())
             .unwrap_or_else(|| "pve".to_string());
 
-        let worker_cores = proxmox_config.and_then(|c| c.worker_cores).unwrap_or(4);
+        let worker_cores = proxmox_config
+            .and_then(|c| c.worker_cores)
+            .ok_or_else(|| crate::Error::validation("proxmox.workerCores is required".to_string()))?;
         let worker_sockets = proxmox_config.and_then(|c| c.worker_sockets).unwrap_or(1);
         let worker_memory_mib = proxmox_config
             .and_then(|c| c.worker_memory_mib)
-            .unwrap_or(8192);
+            .ok_or_else(|| crate::Error::validation("proxmox.workerMemoryMib is required".to_string()))?;
         let worker_disk_size_gb = proxmox_config
             .and_then(|c| c.worker_disk_size_gb)
-            .unwrap_or(100);
+            .ok_or_else(|| crate::Error::validation("proxmox.workerDiskSizeGb is required".to_string()))?;
 
         let storage = proxmox_config
             .and_then(|c| c.storage.clone())
@@ -553,6 +561,18 @@ mod tests {
     use kube::api::ObjectMeta;
     use lattice_common::crd::LatticeClusterSpec;
 
+    fn make_test_proxmox_config() -> ProxmoxConfig {
+        ProxmoxConfig {
+            cp_cores: Some(16),
+            cp_memory_mib: Some(32768),
+            cp_disk_size_gb: Some(50),
+            worker_cores: Some(16),
+            worker_memory_mib: Some(32768),
+            worker_disk_size_gb: Some(100),
+            ..Default::default()
+        }
+    }
+
     fn make_test_cluster(name: &str) -> LatticeCluster {
         LatticeCluster {
             metadata: ObjectMeta {
@@ -567,7 +587,7 @@ mod tests {
                         cert_sans: None,
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
-                    config: ProviderConfig::proxmox(ProxmoxConfig::default()),
+                    config: ProviderConfig::proxmox(make_test_proxmox_config()),
                 },
                 nodes: NodeSpec {
                     control_plane: 3,
@@ -676,5 +696,45 @@ mod tests {
         };
 
         assert!(provider.validate_spec(&spec).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rejects_missing_required_resource_fields() {
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let bootstrap = BootstrapInfo::default();
+
+        // Create cluster with default (empty) proxmox config
+        let cluster = LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some("test".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::proxmox(ProxmoxConfig::default()),
+                },
+                nodes: NodeSpec {
+                    control_plane: 1,
+                    workers: 0,
+                },
+                endpoints: None,
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        };
+
+        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cpCores") || err.contains("cpMemoryMib") || err.contains("cpDiskSizeGb"));
     }
 }

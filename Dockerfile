@@ -73,13 +73,13 @@ COPY crates ./crates
 COPY scripts ./scripts
 
 # Build with FIPS if enabled, otherwise standard build
-RUN if [ -n "$FIPS" ]; then \
-        echo "Building with FIPS support..." && \
-        cargo build --release --features fips -p lattice-operator; \
-    else \
-        echo "Building without FIPS..." && \
-        cargo build --release -p lattice-operator; \
-    fi
+# RUN if [ -n "$FIPS" ]; then \
+#         echo "Building with FIPS support..." && \
+#         cargo build --release --features fips -p lattice-operator; \
+#     else \
+RUN        echo "Building without FIPS..." && \
+        cargo build --release -p lattice-operator; 
+    # fi
 
 # -----------------------------------------------------------------------------
 # Stage 3: Runtime image (minimal)
@@ -92,6 +92,7 @@ ARG RKE2_VERSION
 ARG CAPMOX_VERSION
 ARG CAPA_VERSION
 ARG CAPO_VERSION
+ARG IPAM_VERSION
 
 # Install only CA certificates for TLS
 RUN apt-get update && apt-get install -y \
@@ -143,7 +144,10 @@ RUN echo "providers:" > /providers/clusterctl.yaml && \
     echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
     echo "  - name: \"openstack\"" >> /providers/clusterctl.yaml && \
     echo "    url: \"file:///providers/infrastructure-openstack/v${CAPO_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml
+    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
+    echo "  - name: \"in-cluster\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/ipam-in-cluster/v${IPAM_VERSION}/ipam-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"IPAMProvider\"" >> /providers/clusterctl.yaml
 
 # Set environment variables for air-gapped clusterctl operation
 ENV GOPROXY=off

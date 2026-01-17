@@ -30,6 +30,11 @@ version = "2.10.0"
 # OpenStack CAPI provider from https://github.com/kubernetes-sigs/cluster-api-provider-openstack
 version = "0.11.0"
 
+[ipam-in-cluster]
+# IPAM in-cluster provider from https://github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster
+# Required by CAPMOX (Proxmox provider)
+version = "1.0.3"
+
 [charts]
 cilium = "1.18.5"
 istio = "1.28.2"

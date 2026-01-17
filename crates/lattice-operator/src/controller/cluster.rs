@@ -1047,14 +1047,15 @@ pub trait PivotOperations: Send + Sync {
 
     /// Store post-pivot manifests to send after PivotComplete
     ///
-    /// These manifests (LatticeCluster CRD + resource + GitOps resources) will be sent
-    /// to the agent via ApplyManifestsCommand after pivot succeeds.
+    /// These manifests (LatticeCluster CRD + resource + GitOps resources + network policy)
+    /// will be sent to the agent via ApplyManifestsCommand after pivot succeeds.
     fn store_post_pivot_manifests(
         &self,
         cluster_name: &str,
         crd_yaml: Option<String>,
         cluster_yaml: Option<String>,
         flux_manifests: Vec<String>,
+        network_policy_yaml: Option<String>,
     );
 }
 
@@ -1521,11 +1522,16 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                         let flux_manifests =
                             generate_flux_manifests_for_child(&ctx, &name).await?;
 
+                        // Generate CiliumNetworkPolicy for operator (requires Cilium CRDs)
+                        let network_policy_yaml =
+                            generate_network_policy_for_child(&ctx).await?;
+
                         pivot_ops.store_post_pivot_manifests(
                             &name,
                             Some(crd_yaml),
                             Some(cluster_yaml),
                             flux_manifests,
+                            network_policy_yaml,
                         );
 
                         // Trigger pivot (sends StartPivotCommand)
@@ -1829,6 +1835,47 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+/// Generate CiliumNetworkPolicy for child cluster's operator
+///
+/// Reads the parent cluster's endpoint config and generates a network policy
+/// that allows the child's operator to communicate with its parent cell.
+/// This is applied post-pivot when Cilium CRDs are available.
+async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<String>, Error> {
+    // Get parent cluster's endpoint
+    let Some(ref self_name) = ctx.self_cluster_name else {
+        return Ok(None);
+    };
+
+    let Some(parent_cluster) = ctx.kube.get_cluster(self_name).await? else {
+        return Ok(None);
+    };
+
+    let Some(ref endpoints) = parent_cluster.spec.endpoints else {
+        return Ok(None);
+    };
+
+    // Parse cell_endpoint: host:http_port:grpc_port
+    let cell_endpoint = endpoints.endpoint();
+    let parts: Vec<&str> = cell_endpoint.split(':').collect();
+    if parts.len() != 3 {
+        warn!(
+            cell_endpoint = %cell_endpoint,
+            "Invalid cell_endpoint format, expected host:http_port:grpc_port"
+        );
+        return Ok(None);
+    }
+
+    let parent_host = parts[0];
+    let grpc_port: u16 = parts[2].parse().map_err(|_| {
+        Error::validation(format!("Invalid gRPC port in cell_endpoint: {}", parts[2]))
+    })?;
+
+    Ok(Some(crate::infra::generate_operator_network_policy(
+        Some(parent_host),
+        grpc_port,
+    )))
+}
+
 /// Error policy for the controller
 ///
 /// This function is called when reconciliation fails. It determines
@@ -2035,6 +2082,7 @@ impl PivotOperations for PivotOperationsImpl {
         crd_yaml: Option<String>,
         cluster_yaml: Option<String>,
         flux_manifests: Vec<String>,
+        network_policy_yaml: Option<String>,
     ) {
         use crate::agent::connection::PostPivotManifests;
         self.agent_registry.set_post_pivot_manifests(
@@ -2043,6 +2091,7 @@ impl PivotOperations for PivotOperationsImpl {
                 crd_yaml,
                 cluster_yaml,
                 flux_manifests,
+                network_policy_yaml,
             },
         );
     }

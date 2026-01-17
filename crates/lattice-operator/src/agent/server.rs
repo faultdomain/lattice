@@ -96,6 +96,7 @@ async fn handle_agent_message_impl(
                     let crd_yaml = manifests.crd_yaml.clone();
                     let cluster_yaml = manifests.cluster_yaml.clone();
                     let flux_manifests = manifests.flux_manifests.clone();
+                    let network_policy_yaml = manifests.network_policy_yaml.clone();
 
                     if let Some(ref crd) = crd_yaml {
                         manifest_bytes.push(crd.clone().into_bytes());
@@ -106,6 +107,10 @@ async fn handle_agent_message_impl(
                     // Add Flux manifests (base controllers + GitRepository + Kustomization + Secret)
                     for flux_yaml in &flux_manifests {
                         manifest_bytes.push(flux_yaml.clone().into_bytes());
+                    }
+                    // Add CiliumNetworkPolicy for lattice-operator (requires Cilium CRDs)
+                    if let Some(ref policy) = network_policy_yaml {
+                        manifest_bytes.push(policy.clone().into_bytes());
                     }
 
                     if !manifest_bytes.is_empty() {
@@ -138,6 +143,7 @@ async fn handle_agent_message_impl(
                                     crd_yaml,
                                     cluster_yaml,
                                     flux_manifests,
+                                    network_policy_yaml,
                                 },
                             );
                         }
@@ -1201,6 +1207,7 @@ mod tests {
                 crd_yaml: Some(crd_yaml.to_string()),
                 cluster_yaml: Some(cluster_yaml.to_string()),
                 flux_manifests: Vec::new(),
+                network_policy_yaml: None,
             },
         );
 
@@ -1316,6 +1323,7 @@ mod tests {
                 crd_yaml: Some("crd".to_string()),
                 cluster_yaml: Some("cluster".to_string()),
                 flux_manifests: Vec::new(),
+                network_policy_yaml: None,
             },
         );
 
@@ -1378,6 +1386,7 @@ mod tests {
                 crd_yaml: Some("crd-yaml-content".to_string()),
                 cluster_yaml: Some("cluster-yaml-content".to_string()),
                 flux_manifests: Vec::new(),
+                network_policy_yaml: None,
             },
         );
 
@@ -1438,6 +1447,7 @@ mod tests {
                 crd_yaml: Some("apiVersion: apiextensions.k8s.io/v1\nkind: CRD".to_string()),
                 cluster_yaml: None,
                 flux_manifests: Vec::new(),
+                network_policy_yaml: None,
             },
         );
 
