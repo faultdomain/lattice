@@ -12,11 +12,12 @@ use kube::{Api, Client, CustomResourceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lattice_operator::agent::client::{AgentClient, AgentClientConfig};
+use lattice_operator::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
 use lattice_operator::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
     service_reconcile, Context, ServiceContext,
 };
-use lattice_operator::crd::{LatticeCluster, LatticeExternalService, LatticeService};
+use lattice_operator::crd::{LatticeCluster, LatticeExternalService, LatticeService, ProviderType};
 use lattice_operator::infra::{FluxReconciler, IstioReconciler};
 use lattice_operator::parent::{ParentConfig, ParentServers};
 
@@ -346,6 +347,20 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
     ensure_flux(client).await?;
     tracing::info!("Flux installation complete");
 
+    // Install CAPI on bootstrap cluster to allow installer to provision clusters
+    // The bootstrap cluster is a temporary kind cluster that provisions the management cluster.
+    // CAPI must be installed before the LatticeCluster CRD is created, otherwise the installer
+    // will hang waiting for CAPI CRDs that never appear.
+    let is_bootstrap_cluster = std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if is_bootstrap_cluster {
+        tracing::info!("Installing CAPI on bootstrap cluster...");
+        ensure_capi_on_bootstrap().await?;
+        tracing::info!("CAPI installation complete on bootstrap cluster");
+    }
+
     Ok(())
 }
 
@@ -399,6 +414,38 @@ async fn ensure_flux(client: &Client) -> anyhow::Result<()> {
     apply_manifests(client, &all_manifests, Some("flux-system")).await?;
 
     tracing::info!(version = %expected_version, "Flux installation complete");
+    Ok(())
+}
+
+/// Install CAPI on the bootstrap cluster.
+///
+/// The bootstrap cluster needs CAPI installed BEFORE a LatticeCluster is created,
+/// because the installer waits for CAPI CRDs to be available. Without this, the
+/// installer hangs in Phase 2 waiting for CRDs that would only be installed when
+/// a LatticeCluster is reconciled (Phase 3).
+///
+/// Uses LATTICE_PROVIDER env var to determine which infrastructure provider to install.
+async fn ensure_capi_on_bootstrap() -> anyhow::Result<()> {
+    let provider_str = std::env::var("LATTICE_PROVIDER").unwrap_or_else(|_| "docker".to_string());
+
+    let infrastructure = match provider_str.to_lowercase().as_str() {
+        "docker" => ProviderType::Docker,
+        "proxmox" => ProviderType::Proxmox,
+        "openstack" => ProviderType::OpenStack,
+        "aws" => ProviderType::Aws,
+        "gcp" => ProviderType::Gcp,
+        "azure" => ProviderType::Azure,
+        other => return Err(anyhow::anyhow!("unknown LATTICE_PROVIDER: {}", other)),
+    };
+
+    tracing::info!(infrastructure = %provider_str, "Installing CAPI providers for bootstrap cluster");
+
+    let config = CapiProviderConfig::new(infrastructure);
+    ensure_capi_installed(&ClusterctlInstaller::new(), &config)
+        .await
+        .map_err(|e| anyhow::anyhow!("CAPI installation failed: {}", e))?;
+
+    tracing::info!(infrastructure = %provider_str, "CAPI providers installed successfully");
     Ok(())
 }
 

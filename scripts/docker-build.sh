@@ -48,7 +48,7 @@ docker build \
     --build-arg CAPA_VERSION="$CAPA_VERSION" \
     --build-arg CAPO_VERSION="$CAPO_VERSION" \
     --build-arg IPAM_VERSION="$IPAM_VERSION" \
-    --platform linux/amd64 \
+    --platform linux/amd64,linux/arm64 \
     --build-arg FIPS=false \
     "$@" \
     "$PROJECT_ROOT"

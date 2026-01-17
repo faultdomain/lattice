@@ -334,6 +334,7 @@ nodes:
             None,
         );
 
+        let provider_str = self.provider().to_string();
         let operator_manifests: Vec<String> = all_manifests
             .iter()
             .filter(|m: &&String| m.starts_with("{"))
@@ -341,7 +342,7 @@ nodes:
                 if fips::is_deployment(s) {
                     let with_fips = fips::add_fips_relax_env(s);
                     let with_root = fips::add_root_install_env(&with_fips);
-                    add_bootstrap_cluster_env(&with_root)
+                    add_bootstrap_env(&with_root, &provider_str)
                 } else {
                     s.to_string()
                 }
@@ -350,6 +351,60 @@ nodes:
 
         for manifest in &operator_manifests {
             self.kubectl_apply(manifest, None).await?;
+        }
+
+        // Wait for operator deployment to be ready
+        info!("  Waiting for Lattice operator to be ready...");
+        self.run_command(
+            "kubectl",
+            &[
+                "wait",
+                "--for=condition=Available",
+                "deployment/lattice-operator",
+                "-n",
+                "lattice-system",
+                "--timeout=300s",
+            ],
+        )
+        .await?;
+
+        // Wait for CAPI CRDs to be available (operator installs CAPI on startup)
+        info!("  Waiting for CAPI to be installed...");
+        self.wait_for_capi_crds().await?;
+
+        Ok(())
+    }
+
+    async fn wait_for_capi_crds(&self) -> Result<()> {
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(300);
+
+        let required_crds = [
+            "clusters.cluster.x-k8s.io",
+            "machines.cluster.x-k8s.io",
+            "clusterresourcesets.addons.cluster.x-k8s.io",
+        ];
+
+        for crd in required_crds {
+            loop {
+                if start.elapsed() > timeout {
+                    return Err(Error::command_failed(format!(
+                        "Timeout waiting for CRD: {}",
+                        crd
+                    )));
+                }
+
+                let result = self
+                    .run_command("kubectl", &["get", "crd", crd])
+                    .await;
+
+                if result.is_ok() {
+                    info!("  CRD ready: {}", crd);
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
         }
 
         Ok(())
@@ -978,30 +1033,49 @@ stringData:
     }
 }
 
-fn add_bootstrap_cluster_env(deployment_json: &str) -> String {
-    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) {
-        if let Some(containers) = value
-            .pointer_mut("/spec/template/spec/containers")
-            .and_then(|c| c.as_array_mut())
+/// Add bootstrap cluster environment variables to a deployment.
+///
+/// Sets LATTICE_BOOTSTRAP_CLUSTER=true and LATTICE_PROVIDER to the specified provider.
+/// The bootstrap cluster needs these so the operator knows to install CAPI on startup.
+fn add_bootstrap_env(deployment_json: &str, provider: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) else {
+        return deployment_json.to_string();
+    };
+
+    let Some(containers) = value
+        .pointer_mut("/spec/template/spec/containers")
+        .and_then(|c| c.as_array_mut())
+    else {
+        return deployment_json.to_string();
+    };
+
+    for container in containers {
+        let Some(env) = container.as_object_mut().and_then(|c| {
+            c.entry("env")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+        }) else {
+            continue;
+        };
+
+        // Add LATTICE_BOOTSTRAP_CLUSTER=true if not present
+        if !env
+            .iter()
+            .any(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_BOOTSTRAP_CLUSTER"))
         {
-            for container in containers {
-                if let Some(env) = container.as_object_mut().and_then(|c| {
-                    c.entry("env")
-                        .or_insert_with(|| serde_json::json!([]))
-                        .as_array_mut()
-                }) {
-                    if !env.iter().any(|e| {
-                        e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_BOOTSTRAP_CLUSTER")
-                    }) {
-                        env.push(serde_json::json!({"name": "LATTICE_BOOTSTRAP_CLUSTER", "value": "true"}));
-                    }
-                }
-            }
+            env.push(serde_json::json!({"name": "LATTICE_BOOTSTRAP_CLUSTER", "value": "true"}));
         }
-        serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
-    } else {
-        deployment_json.to_string()
+
+        // Add LATTICE_PROVIDER if not present
+        if !env
+            .iter()
+            .any(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER"))
+        {
+            env.push(serde_json::json!({"name": "LATTICE_PROVIDER", "value": provider}));
+        }
     }
+
+    serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
 }
 
 pub async fn run(args: InstallArgs) -> Result<()> {
@@ -1106,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_bootstrap_cluster_env_adds_env() {
+    fn test_add_bootstrap_env_adds_both_env_vars() {
         let deployment = r#"{
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -1122,7 +1196,7 @@ mod tests {
             }
         }"#;
 
-        let result = add_bootstrap_cluster_env(deployment);
+        let result = add_bootstrap_env(deployment, "proxmox");
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
         let env = parsed
@@ -1131,13 +1205,21 @@ mod tests {
             .as_array()
             .unwrap();
 
+        // Check LATTICE_BOOTSTRAP_CLUSTER
         assert!(env.iter().any(|e| {
             e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_BOOTSTRAP_CLUSTER")
+                && e.get("value").and_then(|v| v.as_str()) == Some("true")
+        }));
+
+        // Check LATTICE_PROVIDER
+        assert!(env.iter().any(|e| {
+            e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER")
+                && e.get("value").and_then(|v| v.as_str()) == Some("proxmox")
         }));
     }
 
     #[test]
-    fn test_add_bootstrap_cluster_env_idempotent() {
+    fn test_add_bootstrap_env_idempotent() {
         let deployment = r#"{
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -1146,14 +1228,17 @@ mod tests {
                     "spec": {
                         "containers": [{
                             "name": "lattice",
-                            "env": [{"name": "LATTICE_BOOTSTRAP_CLUSTER", "value": "true"}]
+                            "env": [
+                                {"name": "LATTICE_BOOTSTRAP_CLUSTER", "value": "true"},
+                                {"name": "LATTICE_PROVIDER", "value": "docker"}
+                            ]
                         }]
                     }
                 }
             }
         }"#;
 
-        let result = add_bootstrap_cluster_env(deployment);
+        let result = add_bootstrap_env(deployment, "docker");
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
         let env = parsed
@@ -1162,18 +1247,24 @@ mod tests {
             .as_array()
             .unwrap();
 
-        // Should still only have one entry
-        let count = env
+        // Should still only have one entry for each
+        let bootstrap_count = env
             .iter()
             .filter(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_BOOTSTRAP_CLUSTER"))
             .count();
-        assert_eq!(count, 1);
+        assert_eq!(bootstrap_count, 1);
+
+        let provider_count = env
+            .iter()
+            .filter(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER"))
+            .count();
+        assert_eq!(provider_count, 1);
     }
 
     #[test]
-    fn test_add_bootstrap_cluster_env_invalid_json() {
+    fn test_add_bootstrap_env_invalid_json() {
         let invalid = "not json";
-        let result = add_bootstrap_cluster_env(invalid);
+        let result = add_bootstrap_env(invalid, "docker");
         assert_eq!(result, invalid);
     }
 }
