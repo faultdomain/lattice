@@ -17,6 +17,8 @@ spec:
         secretRef:
           name: proxmox-credentials
           namespace: capmox-system
+        sshAuthorizedKeys:
+          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1f8eVKp5YCAtis77YO/oHhWvzAiimDzlDqhtD+85YR evan.hines.dev@gmail.com"
         sourceNode: "poweredge-lg"
         templateId: 9000
         controlPlaneEndpoint: "10.0.0.100"
