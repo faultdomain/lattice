@@ -112,9 +112,10 @@ pub struct Installer {
     config: InstallConfig,
     cluster: LatticeCluster,
     cluster_name: String,
-    /// Bootstrap cluster name with random suffix for concurrent runs
-    bootstrap_cluster_name: String,
 }
+
+/// Fixed bootstrap cluster name - concurrent installs are not supported
+const BOOTSTRAP_CLUSTER_NAME: &str = "lattice-bootstrap";
 
 impl Installer {
     /// Create a new installer with the given configuration
@@ -133,23 +134,10 @@ impl Installer {
             .clone()
             .ok_or_else(|| Error::validation("LatticeCluster must have metadata.name"))?;
 
-        // Generate unique suffix for bootstrap cluster to allow concurrent runs
-        // Use process ID and timestamp for uniqueness
-        let suffix = format!(
-            "{:x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                % 0xFFFFFF
-        );
-        let bootstrap_cluster_name = format!("lattice-bootstrap-{}", suffix);
-
         Ok(Self {
             config,
             cluster,
             cluster_name,
-            bootstrap_cluster_name,
         })
     }
 
@@ -158,9 +146,9 @@ impl Installer {
     }
 
     /// Get the path to the bootstrap cluster's kubeconfig file.
-    /// Using a dedicated file instead of the shared ~/.kube/config allows concurrent installs.
+    /// Using a dedicated file avoids polluting the user's default kubeconfig.
     fn bootstrap_kubeconfig_path(&self) -> String {
-        format!("/tmp/{}-kubeconfig", self.bootstrap_cluster_name)
+        format!("/tmp/{}-kubeconfig", BOOTSTRAP_CLUSTER_NAME)
     }
 
     fn provider(&self) -> ProviderType {
@@ -180,14 +168,21 @@ impl Installer {
 
         let config_path = env!("CLUSTERCTL_CONFIG");
 
-        vec![
+        let mut args = vec![
             "init".to_string(),
             infra_arg.to_string(),
             "--bootstrap=kubeadm,rke2".to_string(),
             "--control-plane=kubeadm,rke2".to_string(),
             format!("--config={}", config_path),
             "--wait-providers".to_string(),
-        ]
+        ];
+
+        // Proxmox requires the in-cluster IPAM provider for IP address management
+        if self.provider() == ProviderType::Proxmox {
+            args.push("--ipam=in-cluster".to_string());
+        }
+
+        args
     }
 
     /// Run the installation
@@ -245,6 +240,22 @@ impl Installer {
         info!("[Phase 1] Creating kind bootstrap cluster...");
         self.create_kind_cluster().await?;
 
+        // Create provider credentials BEFORE deploying operator
+        // The operator reads these during CAPI installation
+        match self.provider() {
+            ProviderType::Proxmox => {
+                info!("[Phase 1.5] Creating Proxmox credentials...");
+                self.create_capmox_credentials(Some(&self.bootstrap_kubeconfig_path()))
+                    .await?;
+            }
+            ProviderType::OpenStack => {
+                info!("[Phase 1.5] Creating OpenStack credentials...");
+                self.create_capo_credentials(Some(&self.bootstrap_kubeconfig_path()))
+                    .await?;
+            }
+            _ => {}
+        }
+
         info!("[Phase 2] Deploying Lattice operator...");
         self.deploy_lattice_operator().await?;
 
@@ -282,14 +293,14 @@ nodes:
         tls-cipher-suites: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
 "#;
 
-        info!("Creating bootstrap cluster: {}", self.bootstrap_cluster_name);
+        info!("Creating bootstrap cluster: {}", BOOTSTRAP_CLUSTER_NAME);
 
         let mut child = Command::new("kind")
             .args([
                 "create",
                 "cluster",
                 "--name",
-                &self.bootstrap_cluster_name,
+                &BOOTSTRAP_CLUSTER_NAME,
                 "--config",
                 "-",
             ])
@@ -319,7 +330,7 @@ nodes:
                 "export",
                 "kubeconfig",
                 "--name",
-                &self.bootstrap_cluster_name,
+                &BOOTSTRAP_CLUSTER_NAME,
                 "--kubeconfig",
                 &bootstrap_kubeconfig,
             ])
@@ -352,7 +363,7 @@ nodes:
     async fn delete_kind_cluster(&self) -> Result<()> {
         self.run_command(
             "kind",
-            &["delete", "cluster", "--name", &self.bootstrap_cluster_name],
+            &["delete", "cluster", "--name", &BOOTSTRAP_CLUSTER_NAME],
         )
         .await?;
         Ok(())
@@ -572,12 +583,7 @@ spec:
     }
 
     async fn create_management_cluster_crd(&self) -> Result<()> {
-        // Create provider-specific credentials on bootstrap cluster BEFORE CAPI can provision
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
-        if self.provider() == ProviderType::Proxmox {
-            self.create_capmox_credentials(Some(&bootstrap_kubeconfig))
-                .await?;
-        }
 
         self.kubectl_apply_with_retry(
             &self.config.cluster_config_content,
@@ -768,9 +774,16 @@ spec:
         .await?;
 
         // Create provider-specific credentials if needed
-        if self.provider() == ProviderType::Proxmox {
-            self.create_capmox_credentials(Some(&kubeconfig_path))
-                .await?;
+        match self.provider() {
+            ProviderType::Proxmox => {
+                self.create_capmox_credentials(Some(&kubeconfig_path))
+                    .await?;
+            }
+            ProviderType::OpenStack => {
+                self.create_capo_credentials(Some(&kubeconfig_path))
+                    .await?;
+            }
+            _ => {}
         }
 
         // Wait for Lattice operator
@@ -847,6 +860,81 @@ stringData:
             .await?;
 
         info!("CAPMOX credentials created on {} cluster", target);
+        Ok(())
+    }
+
+    /// Create CAPO credentials secret for OpenStack provider
+    ///
+    /// Creates a clouds.yaml-based credential secret that CAPO uses.
+    /// Reads OS_* environment variables and generates the clouds.yaml content.
+    async fn create_capo_credentials(&self, kubeconfig: Option<&str>) -> Result<()> {
+        let target = kubeconfig.map_or("bootstrap", |_| "management");
+        info!("Creating CAPO credentials on {} cluster...", target);
+
+        let auth_url = std::env::var("OS_AUTH_URL").map_err(|_| {
+            Error::validation("OS_AUTH_URL environment variable required for OpenStack provider")
+        })?;
+        let username = std::env::var("OS_USERNAME").map_err(|_| {
+            Error::validation("OS_USERNAME environment variable required for OpenStack provider")
+        })?;
+        let password = std::env::var("OS_PASSWORD").map_err(|_| {
+            Error::validation("OS_PASSWORD environment variable required for OpenStack provider")
+        })?;
+        let project_name = std::env::var("OS_PROJECT_NAME").map_err(|_| {
+            Error::validation("OS_PROJECT_NAME environment variable required for OpenStack provider")
+        })?;
+        let user_domain = std::env::var("OS_USER_DOMAIN_NAME").unwrap_or_else(|_| "Default".to_string());
+        let project_domain = std::env::var("OS_PROJECT_DOMAIN_NAME").unwrap_or_else(|_| "Default".to_string());
+        let cloud_name = std::env::var("OS_CLOUD_NAME").unwrap_or_else(|_| "openstack".to_string());
+
+        info!("  OS_AUTH_URL: {}", auth_url);
+        info!("  OS_USERNAME: {}", username);
+        info!("  OS_PROJECT_NAME: {}", project_name);
+
+        // Generate clouds.yaml content
+        let clouds_yaml = format!(
+            r#"clouds:
+  {cloud_name}:
+    auth:
+      auth_url: "{auth_url}"
+      username: "{username}"
+      password: "{password}"
+      project_name: "{project_name}"
+      user_domain_name: "{user_domain}"
+      project_domain_name: "{project_domain}"
+    region_name: "RegionOne"
+    interface: "public"
+    identity_api_version: 3"#
+        );
+
+        // Base64 encode for OPENSTACK_CLOUD_YAML_B64
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let clouds_yaml_b64 = STANDARD.encode(clouds_yaml.as_bytes());
+
+        let ns_manifest = r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: capo-system"#;
+
+        self.kubectl_apply_with_retry(ns_manifest, kubeconfig, Duration::from_secs(30))
+            .await?;
+
+        let secret_manifest = format!(
+            r#"apiVersion: v1
+kind: Secret
+metadata:
+  name: capo-manager-credentials
+  namespace: capo-system
+type: Opaque
+stringData:
+  clouds_yaml: "{clouds_yaml_b64}"
+  cloud_name: "{cloud_name}""#
+        );
+
+        self.kubectl_apply_with_retry(&secret_manifest, kubeconfig, Duration::from_secs(30))
+            .await?;
+
+        info!("CAPO credentials created on {} cluster", target);
         Ok(())
     }
 

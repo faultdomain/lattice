@@ -19,6 +19,9 @@ use crate::Result;
 /// CAPMOX API version
 const PROXMOX_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1alpha1";
 
+/// Default network interface for Proxmox VMs with virtio
+const DEFAULT_VIP_INTERFACE: &str = "ens18";
+
 /// Proxmox VE infrastructure provider
 ///
 /// Generates CAPI manifests for Proxmox using the CAPMOX provider.
@@ -505,9 +508,12 @@ impl Provider for ProxmoxProvider {
 
         // Configure kube-vip for management clusters (those with endpoints)
         let vip = cluster.spec.endpoints.as_ref().map(|e| {
+            let interface = proxmox_cfg
+                .and_then(|c| c.virtual_ip_network_interface.clone())
+                .unwrap_or_else(|| DEFAULT_VIP_INTERFACE.to_string());
             VipConfig::new(
                 e.host.clone(),
-                proxmox_cfg.and_then(|c| c.virtual_ip_network_interface.clone()),
+                Some(interface),
                 proxmox_cfg.and_then(|c| c.kube_vip_image.clone()),
             )
         });

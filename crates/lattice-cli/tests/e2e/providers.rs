@@ -241,7 +241,7 @@ fn generate_proxmox_config(name: &str, bootstrap: &str, is_mgmt: bool) -> String
     let bridge = std::env::var("PROXMOX_BRIDGE").unwrap_or_else(|_| "vmbr0".to_string());
     let dns = std::env::var("PROXMOX_DNS").unwrap_or_else(|_| gateway.clone());
     let ssh_key = std::env::var("PROXMOX_SSH_KEY").ok();
-    let vip_interface = std::env::var("PROXMOX_VIP_INTERFACE").unwrap_or_else(|_| "eth0".to_string());
+    let vip_interface = std::env::var("PROXMOX_VIP_INTERFACE").unwrap_or_else(|_| "ens18".to_string());
 
     // Parse IP pool (these are for VMs, NOT including VIP)
     let ips: Vec<&str> = ip_pool.split(',').map(|s| s.trim()).collect();

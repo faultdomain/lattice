@@ -185,6 +185,8 @@ spec:
           - rke2-control-plane-system
           - capd-system
           - capo-system
+          - capmox-system
+          - capi-ipam-in-cluster-system
   egress:
     # Allow DNS to kube-dns
     - toEndpoints:

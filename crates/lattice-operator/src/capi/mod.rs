@@ -135,8 +135,11 @@ impl InfraProviderInfo {
             ProviderType::OpenStack => Self {
                 name: "openstack",
                 version: env!("CAPO_VERSION").to_string(),
-                credentials_secret: None, // Uses OS_* env vars from environment
-                credentials_env_map: &[],
+                credentials_secret: Some(("capo-system", "capo-manager-credentials")),
+                credentials_env_map: &[
+                    ("clouds_yaml", "OPENSTACK_CLOUD_YAML_B64"),
+                    ("cloud_name", "OPENSTACK_CLOUD"),
+                ],
                 extra_init_args: &[],
             },
             ProviderType::Aws => Self {

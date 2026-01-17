@@ -64,9 +64,8 @@ use lattice_cli::commands::install::{InstallConfig, Installer};
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster};
 
 use super::helpers::{
-    create_capmox_credentials_secret, ensure_docker_network, extract_docker_cluster_kubeconfig,
-    run_cmd, run_cmd_allow_fail, verify_control_plane_taints, watch_cluster_phases,
-    watch_worker_scaling,
+    ensure_docker_network, extract_docker_cluster_kubeconfig, run_cmd, run_cmd_allow_fail,
+    verify_control_plane_taints, watch_cluster_phases, watch_worker_scaling,
 };
 use super::mesh_tests::{mesh_test_enabled, run_mesh_test, run_random_mesh_test};
 use super::providers::{generate_cluster_config, InfraProvider};
@@ -224,19 +223,8 @@ fn get_management_kubeconfig(provider: InfraProvider) -> Result<String, String> 
 // =============================================================================
 
 fn cleanup_clusters() {
-    // Only clean up clusters created by THIS test instance, not all kind clusters.
-    // This allows concurrent E2E test runs with unique cluster names.
-    println!("  Cleaning up test clusters...");
-
-    // Delete known test cluster names (not --all to avoid killing concurrent tests)
-    for name in &[MGMT_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME] {
-        let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", name]);
-
-        let _ = run_cmd_allow_fail(
-            "docker",
-            &["ps", "-a", "--filter", &format!("name={}", name), "-q"],
-        );
-    }
+    println!("  Cleaning up all kind clusters...");
+    let _ = run_cmd_allow_fail("kind", &["delete", "clusters", "--all"]);
 }
 
 fn cleanup_all() {
@@ -423,12 +411,6 @@ async fn run_provider_e2e(
     watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
 
     println!("\n  SUCCESS: Management cluster is self-managing!");
-
-    // Create provider-specific credentials if needed
-    if workload_provider == InfraProvider::Proxmox {
-        println!("\n  Setting up Proxmox credentials for workload cluster provisioning...");
-        create_capmox_credentials_secret(&mgmt_client).await?;
-    }
 
     // =========================================================================
     // Phase 3: Create Workload Cluster
