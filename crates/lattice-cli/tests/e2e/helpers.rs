@@ -279,8 +279,8 @@ pub async fn watch_cluster_phases(
             ));
         }
 
-        match api.get(cluster_name).await {
-            Ok(cluster) => {
+        match tokio::time::timeout(Duration::from_secs(15), api.get(cluster_name)).await {
+            Ok(Ok(cluster)) => {
                 let current_phase = cluster
                     .status
                     .as_ref()
@@ -307,10 +307,16 @@ pub async fn watch_cluster_phases(
                     return Err(format!("Cluster {} failed: {}", cluster_name, msg));
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 println!(
                     "  Warning: failed to get cluster {} status: {}",
                     cluster_name, e
+                );
+            }
+            Err(_) => {
+                println!(
+                    "  Warning: timeout getting cluster {} status, retrying...",
+                    cluster_name
                 );
             }
         }
