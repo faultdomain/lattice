@@ -74,7 +74,7 @@ async fn integration_bootstrap_http_full_flow() {
     let response = router.clone().oneshot(manifests_req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+    let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
         .await
         .unwrap();
     let manifests_json = String::from_utf8(body.to_vec()).unwrap();

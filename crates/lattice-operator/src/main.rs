@@ -18,7 +18,6 @@ use lattice_operator::controller::{
     service_reconcile, Context, ServiceContext,
 };
 use lattice_operator::crd::{LatticeCluster, LatticeExternalService, LatticeService, ProviderType};
-use lattice_operator::infra::{FluxReconciler, IstioReconciler, KgatewayReconciler};
 use lattice_operator::parent::{ParentConfig, ParentServers};
 
 /// Lattice - CRD-driven Kubernetes operator for multi-cluster lifecycle management
@@ -263,247 +262,46 @@ async fn ensure_webhook_config(
 
 /// Reconcile infrastructure components
 ///
-/// Ensures Istio is installed at the correct version. Cilium is deployed at bootstrap.
-/// This runs on every controller startup, enabling version upgrades when
-/// Lattice is upgraded (new binary has new component versions).
+/// Ensures all infrastructure is installed. Server-side apply handles idempotency.
+/// This runs on every controller startup, applying the latest manifests.
+/// No version checks needed - just apply and let K8s handle it.
 async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
-    use k8s_openapi::api::apps::v1::{DaemonSet, Deployment};
-    use kube::api::{Api, Patch, PatchParams};
+    use lattice_operator::infra::bootstrap;
 
-    let reconciler = IstioReconciler::new();
-    let expected_version = reconciler.version();
+    let is_bootstrap_cluster = std::env::var("LATTICE_ROOT_INSTALL").is_ok()
+        || std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
 
-    // Check ALL required Istio components, not just istiod
-    // All three must exist at expected version to skip installation
-    let deployments: Api<Deployment> = Api::namespaced(client.clone(), "istio-system");
-    let daemonsets: Api<DaemonSet> = Api::namespaced(client.clone(), "istio-system");
+    tracing::info!("Applying infrastructure manifests (server-side apply)...");
 
-    let istiod_version = get_deployment_version(&deployments, "istiod").await;
-    let cni_version = get_daemonset_version(&daemonsets, "istio-cni-node").await;
-    let ztunnel_version = get_daemonset_version(&daemonsets, "ztunnel").await;
+    // Generate all infrastructure manifests
+    let mut manifests = Vec::new();
 
-    // All components must be at expected version to skip
-    let all_at_expected = istiod_version.as_deref() == Some(expected_version)
-        && cni_version.as_deref() == Some(expected_version)
-        && ztunnel_version.as_deref() == Some(expected_version);
+    // Istio
+    manifests.extend(bootstrap::generate_istio(is_bootstrap_cluster));
+    tracing::debug!(count = manifests.len(), "generated Istio manifests");
 
-    if all_at_expected {
-        tracing::debug!(version = %expected_version, "Istio components at expected version, skipping");
-        return Ok(());
-    }
+    // Flux (includes allow policy)
+    manifests.extend(bootstrap::generate_flux());
+    tracing::debug!("added Flux manifests");
 
-    // Log what we're doing
-    tracing::info!(
-        expected = %expected_version,
-        istiod = ?istiod_version,
-        cni = ?cni_version,
-        ztunnel = ?ztunnel_version,
-        "Installing/upgrading Istio components"
-    );
+    // kgateway (includes allow policy)
+    manifests.extend(bootstrap::generate_kgateway());
+    tracing::debug!("added kgateway manifests");
 
-    // Get manifests and apply them
-    let manifests = reconciler
-        .manifests()
-        .map_err(|e| anyhow::anyhow!("Failed to generate Istio manifests: {}", e))?;
+    // Apply all at once
+    tracing::info!(count = manifests.len(), "applying infrastructure manifests");
+    apply_manifests(client, &manifests, None).await?;
 
-    tracing::info!(count = manifests.len(), "Applying Istio manifests");
-
-    // Ensure istio-system namespace exists
-    let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
-    let ns = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": { "name": "istio-system" }
-    });
-    let params = PatchParams::apply("lattice").force();
-    namespaces
-        .patch("istio-system", &params, &Patch::Apply(&ns))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create istio-system namespace: {}", e))?;
-
-    // Build all Istio manifests to apply
-    let mut all_manifests: Vec<String> = manifests.to_vec();
-    all_manifests.push(IstioReconciler::generate_peer_authentication());
-    all_manifests.push(IstioReconciler::generate_default_deny());
-    all_manifests.push(IstioReconciler::generate_operator_allow_policy());
-
-    // Add Cilium policies only if not on bootstrap cluster (kind uses default CNI, not Cilium)
-    let is_bootstrap_cluster = std::env::var("LATTICE_ROOT_INSTALL").is_ok();
-    if !is_bootstrap_cluster {
-        all_manifests.push(lattice_operator::infra::generate_ztunnel_allowlist());
-        all_manifests.push(lattice_operator::infra::generate_default_deny());
-    } else {
-        tracing::debug!("Skipping Cilium policies on bootstrap cluster (no Cilium CRDs)");
-    }
-
-    // Apply all manifests in one batch (single discovery call)
-    // Istio helm template includes namespace in manifests, so no default needed
-    apply_manifests(client, &all_manifests, None).await?;
-
-    tracing::info!(version = %expected_version, "Istio reconciliation complete");
-
-    // Install Flux for GitOps support
-    tracing::info!("Installing Flux...");
-    ensure_flux(client).await?;
-    tracing::info!("Flux installation complete");
-
-    // Install kgateway for L7 traffic management (ingress and waypoint)
-    tracing::info!("Installing kgateway...");
-    ensure_kgateway(client).await?;
-    tracing::info!("kgateway installation complete");
-
-    // Install CAPI on bootstrap cluster to allow installer to provision clusters
-    // The bootstrap cluster is a temporary kind cluster that provisions the management cluster.
-    // CAPI must be installed before the LatticeCluster CRD is created, otherwise the installer
-    // will hang waiting for CAPI CRDs that never appear.
-    let is_bootstrap_cluster = std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
-
+    // CAPI on bootstrap cluster only (KIND cluster running installer)
     if is_bootstrap_cluster {
         tracing::info!("Installing CAPI on bootstrap cluster...");
         ensure_capi_on_bootstrap().await?;
-        tracing::info!("CAPI installation complete on bootstrap cluster");
     }
 
+    tracing::info!("Infrastructure installation complete");
     Ok(())
-}
-
-/// Ensures Flux is installed at the correct version for GitOps support.
-/// Flux enables clusters to watch git repositories and apply changes automatically.
-async fn ensure_flux(client: &Client) -> anyhow::Result<()> {
-    use k8s_openapi::api::apps::v1::Deployment;
-    use kube::api::{Api, Patch, PatchParams};
-
-    tracing::debug!("Creating FluxReconciler...");
-    let reconciler = FluxReconciler::new()
-        .map_err(|e| anyhow::anyhow!("Failed to create Flux reconciler: {}", e))?;
-    tracing::debug!("FluxReconciler created successfully");
-    let expected_version = reconciler.version();
-
-    // Check source-controller deployment version
-    let deployments: Api<Deployment> = Api::namespaced(client.clone(), "flux-system");
-    let source_version = get_deployment_version(&deployments, "source-controller").await;
-
-    if source_version.as_deref() == Some(expected_version) {
-        tracing::debug!(version = %expected_version, "Flux at expected version, skipping");
-        return Ok(());
-    }
-
-    tracing::info!(
-        expected = %expected_version,
-        current = ?source_version,
-        "Installing/upgrading Flux"
-    );
-
-    // Ensure flux-system namespace exists
-    let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
-    let ns = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": { "name": "flux-system" }
-    });
-    let params = PatchParams::apply("lattice").force();
-    namespaces
-        .patch("flux-system", &params, &Patch::Apply(&ns))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flux-system namespace: {}", e))?;
-
-    // Build all Flux manifests including the Istio allow policy
-    let mut all_manifests: Vec<String> = reconciler.manifests().to_vec();
-    all_manifests.push(IstioReconciler::generate_flux_allow_policy());
-
-    tracing::info!(count = all_manifests.len(), "Applying Flux manifests");
-
-    // Flux helm template doesn't embed namespace in manifests, so we provide flux-system as default
-    apply_manifests(client, &all_manifests, Some("flux-system")).await?;
-
-    tracing::info!(version = %expected_version, "Flux installation complete");
-    Ok(())
-}
-
-/// Ensures kgateway is installed at the correct version for L7 traffic management.
-/// kgateway serves as both:
-/// - North-south ingress gateway (GatewayClass: kgateway)
-/// - East-west waypoint proxy for Istio Ambient (GatewayClass: kgateway-waypoint)
-async fn ensure_kgateway(client: &Client) -> anyhow::Result<()> {
-    use k8s_openapi::api::apps::v1::Deployment;
-    use kube::api::{Api, Patch, PatchParams};
-
-    let reconciler = KgatewayReconciler::new();
-    let expected_version = reconciler.version();
-
-    // Check kgateway deployment version
-    let deployments: Api<Deployment> = Api::namespaced(client.clone(), "kgateway-system");
-    let kgateway_version = get_deployment_version(&deployments, "kgateway").await;
-
-    if kgateway_version.as_deref() == Some(expected_version) {
-        tracing::debug!(version = %expected_version, "kgateway at expected version, skipping");
-        return Ok(());
-    }
-
-    tracing::info!(
-        expected = %expected_version,
-        current = ?kgateway_version,
-        "Installing/upgrading kgateway"
-    );
-
-    // Ensure kgateway-system namespace exists
-    let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
-    let ns = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": {
-            "name": "kgateway-system",
-            "labels": {
-                "istio.io/dataplane-mode": "ambient"
-            }
-        }
-    });
-    let params = PatchParams::apply("lattice").force();
-    namespaces
-        .patch("kgateway-system", &params, &Patch::Apply(&ns))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create kgateway-system namespace: {}", e))?;
-
-    // Get manifests
-    let manifests = reconciler
-        .manifests()
-        .map_err(|e| anyhow::anyhow!("Failed to generate kgateway manifests: {}", e))?;
-
-    // Build all kgateway manifests including the Istio allow policy
-    let mut all_manifests: Vec<String> = manifests.to_vec();
-    all_manifests.push(generate_kgateway_allow_policy());
-
-    tracing::info!(count = all_manifests.len(), "Applying kgateway manifests");
-
-    // Apply manifests (kgateway helm template embeds namespace)
-    apply_manifests(client, &all_manifests, Some("kgateway-system")).await?;
-
-    tracing::info!(version = %expected_version, "kgateway installation complete");
-    Ok(())
-}
-
-/// Generate AuthorizationPolicy allowing all traffic to kgateway-system namespace
-///
-/// kgateway needs to accept connections from all sources for both:
-/// - North-south ingress traffic from external clients
-/// - East-west waypoint traffic from internal services
-fn generate_kgateway_allow_policy() -> String {
-    r#"---
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: kgateway-allow-all
-  namespace: kgateway-system
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  action: ALLOW
-  rules:
-  - {}
-"#
-    .to_string()
 }
 
 /// Install CAPI on the bootstrap cluster.
@@ -537,35 +335,6 @@ async fn ensure_capi_on_bootstrap() -> anyhow::Result<()> {
 
     tracing::info!(infrastructure = %provider_str, "CAPI providers installed successfully");
     Ok(())
-}
-
-/// Get version from a Deployment's container image tag
-async fn get_deployment_version(
-    api: &kube::Api<k8s_openapi::api::apps::v1::Deployment>,
-    name: &str,
-) -> Option<String> {
-    api.get(name).await.ok().and_then(|deploy| {
-        deploy
-            .spec
-            .and_then(|s| s.template.spec)
-            .and_then(|s| s.containers.into_iter().next())
-            .and_then(|c| c.image)
-            .and_then(|img| img.split(':').next_back().map(String::from))
-    })
-}
-
-/// Get version from a DaemonSet's container image tag
-async fn get_daemonset_version(
-    api: &kube::Api<k8s_openapi::api::apps::v1::DaemonSet>,
-    name: &str,
-) -> Option<String> {
-    api.get(name).await.ok().and_then(|ds| {
-        ds.spec
-            .and_then(|s| s.template.spec)
-            .and_then(|s| s.containers.into_iter().next())
-            .and_then(|c| c.image)
-            .and_then(|img| img.split(':').next_back().map(String::from))
-    })
 }
 
 /// Apply multiple YAML manifests to the cluster

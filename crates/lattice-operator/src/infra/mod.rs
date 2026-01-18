@@ -7,12 +7,20 @@
 //! - **Istio Ambient**: Service mesh L4 (ztunnel for mTLS)
 //! - **kgateway**: L7 proxy for ingress and waypoint (rate limiting, transforms)
 //! - **Flux**: GitOps for self-management
+//! - **cert-manager**: Certificate management (CAPI dependency)
+//! - **CAPI**: Cluster API providers for self-management
 //!
 //! # Architecture
 //!
-//! Bootstrap uses these generators to deploy initial infrastructure.
-//! The controller uses the SAME generators for day-2 reconciliation,
-//! ensuring no drift between initial deployment and upgrades.
+//! Bootstrap webhook generates ALL infrastructure manifests upfront.
+//! This allows cert-manager, CAPI, Istio, Flux, and kgateway to install
+//! in parallel with the operator starting up.
+//!
+//! The operator "adopts" pre-installed components by checking if each
+//! is already installed and skipping installation if so. This ensures:
+//! - Faster cluster creation (parallel installation)
+//! - No drift between bootstrap and day-2 reconciliation
+//! - Single source of truth for manifest generation
 //!
 //! # L7 Proxy Architecture
 //!
@@ -25,11 +33,13 @@
 //! Component versions are pinned to the Lattice release. When Lattice
 //! upgrades, the controller applies updated manifests automatically.
 
+pub mod bootstrap;
 pub mod cilium;
 pub mod flux;
 pub mod istio;
 pub mod kgateway;
 
+pub use bootstrap::{generate_all as generate_infrastructure_manifests, InfrastructureConfig};
 pub use cilium::{
     cilium_version, generate_cilium_manifests, generate_default_deny,
     generate_operator_network_policy, generate_ztunnel_allowlist,

@@ -771,21 +771,20 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
     /// Generate bootstrap response for a cluster
     ///
-    /// This generates manifests for clusters with a parent:
+    /// Generates ALL manifests needed for a self-managing cluster:
     /// - CNI (Cilium)
     /// - Lattice operator
-    /// - CiliumNetworkPolicy (with parent for egress)
-    /// - LatticeCluster CRD definition (CustomResourceDefinition)
-    /// - LatticeCluster CRD instance (with parent reference)
+    /// - cert-manager, CAPI, Istio, Flux, kgateway (infrastructure)
+    /// - LatticeCluster CRD definition
     /// - Parent connection config Secret
+    ///
+    /// Everything installs in parallel with the operator starting up.
+    /// Operator will "adopt" pre-installed components (server-side apply is idempotent).
     pub fn generate_response(&self, info: &ClusterBootstrapInfo) -> BootstrapResponse {
         // Parse parent endpoint for network policy
-        // Format: "host:http_port:grpc_port"
         let (parent_host, grpc_port) = parse_parent_endpoint(&info.cell_endpoint);
 
-        // Use the standard manifest generation - pass cluster_id, provider, and parent info
-        // relax_fips is based on bootstrap provider: kubeadm clusters need relaxation,
-        // RKE2 clusters are FIPS-compliant out of the box
+        // Generate operator + CNI manifests
         let bootstrap_str = info.bootstrap.to_string();
         let config = ManifestConfig {
             image: &self.image,
@@ -800,6 +799,20 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             relax_fips: info.bootstrap.needs_fips_relax(),
         };
         let mut manifests = generate_all_manifests(&self.manifest_generator, &config);
+
+        // Add ALL infrastructure manifests (cert-manager, CAPI, Istio, Flux, kgateway)
+        // These install in parallel with the operator, massively speeding up cluster creation
+        let infra_config = crate::infra::InfrastructureConfig {
+            provider: info.provider.clone(),
+            bootstrap: info.bootstrap.clone(),
+            skip_cilium_policies: false, // Real clusters have Cilium
+        };
+        let infra_manifests = crate::infra::bootstrap::generate_all(&infra_config);
+        info!(
+            count = infra_manifests.len(),
+            "adding infrastructure manifests to bootstrap"
+        );
+        manifests.extend(infra_manifests);
 
         // Add the LatticeCluster CRD definition (CustomResourceDefinition)
         // The CRD is needed so post-pivot manifests can create the LatticeCluster instance
@@ -1798,7 +1811,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Response is raw YAML for kubectl apply
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
             .unwrap();
         let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
@@ -1908,7 +1921,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Parse response
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
             .unwrap();
         let csr_response: CsrResponse = serde_json::from_slice(&body).unwrap();
@@ -2000,7 +2013,7 @@ mod tests {
         let response = router.clone().oneshot(manifests_request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
             .unwrap();
         let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
@@ -2024,7 +2037,7 @@ mod tests {
         let response = router.oneshot(csr_request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
             .unwrap();
         let csr_response: CsrResponse = serde_json::from_slice(&body).unwrap();
