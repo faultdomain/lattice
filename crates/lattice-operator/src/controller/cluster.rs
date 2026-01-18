@@ -234,6 +234,9 @@ impl KubeClient for KubeClientImpl {
         let api: Api<Node> = Api::all(self.client.clone());
         let nodes = api.list(&Default::default()).await?;
 
+        // Build list of (node_name, patch) for nodes that need tainting
+        let mut patches_to_apply: Vec<(String, serde_json::Value)> = Vec::new();
+
         for node in nodes.items.iter() {
             let is_cp = is_control_plane_node(node);
             let is_etcd = is_etcd_node(node);
@@ -247,7 +250,8 @@ impl KubeClient for KubeClientImpl {
                 .metadata
                 .name
                 .as_ref()
-                .ok_or_else(|| Error::provider("node has no name".to_string()))?;
+                .ok_or_else(|| Error::provider("node has no name".to_string()))?
+                .clone();
 
             // Build list of taints to apply based on node roles
             let mut taints_to_apply = Vec::new();
@@ -271,23 +275,36 @@ impl KubeClient for KubeClientImpl {
                 continue;
             }
 
-            // Apply taints (strategic merge patch adds to existing taints)
-            info!(node = %node_name, taints = ?taints_to_apply, "applying taints to node");
-
             let patch = serde_json::json!({
                 "spec": {
                     "taints": taints_to_apply
                 }
             });
 
-            api.patch(
-                node_name,
-                &PatchParams::apply("lattice-controller"),
-                &Patch::Strategic(&patch),
-            )
-            .await?;
+            patches_to_apply.push((node_name, patch));
+        }
 
-            info!(node = %node_name, "node tainted successfully");
+        // Apply all taints in parallel
+        if !patches_to_apply.is_empty() {
+            let futures: Vec<_> = patches_to_apply
+                .into_iter()
+                .map(|(node_name, patch)| {
+                    let api = api.clone();
+                    async move {
+                        info!(node = %node_name, "applying taints to node");
+                        api.patch(
+                            &node_name,
+                            &PatchParams::apply("lattice-controller"),
+                            &Patch::Strategic(&patch),
+                        )
+                        .await?;
+                        info!(node = %node_name, "node tainted successfully");
+                        Ok::<(), Error>(())
+                    }
+                })
+                .collect();
+
+            futures::future::try_join_all(futures).await?;
         }
 
         Ok(())
@@ -1447,13 +1464,23 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Ensure the namespace exists
             ctx.kube.ensure_namespace(&capi_namespace).await?;
 
-            // Copy provider credentials to cluster namespace
+            // Copy provider credentials to cluster namespace in parallel
             // This avoids race conditions when multiple clusters share credentials
             let provider = create_provider(cluster.spec.provider.provider_type(), &capi_namespace)?;
-            for (secret_name, source_namespace) in provider.required_secrets(&cluster) {
-                ctx.kube
-                    .copy_secret_to_namespace(&secret_name, &source_namespace, &capi_namespace)
-                    .await?;
+            let secrets: Vec<_> = provider.required_secrets(&cluster);
+            if !secrets.is_empty() {
+                let futures: Vec<_> = secrets
+                    .into_iter()
+                    .map(|(secret_name, source_namespace)| {
+                        let kube = Arc::clone(&ctx.kube);
+                        let target_namespace = capi_namespace.clone();
+                        async move {
+                            kube.copy_secret_to_namespace(&secret_name, &source_namespace, &target_namespace)
+                                .await
+                        }
+                    })
+                    .collect();
+                futures::future::try_join_all(futures).await?;
             }
 
             // Get the appropriate provider based on cluster spec

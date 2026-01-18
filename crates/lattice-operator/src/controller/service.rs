@@ -166,6 +166,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         namespace: &str,
         compiled: &CompiledService,
     ) -> Result<(), Error> {
+        use futures::future::try_join_all;
         use k8s_openapi::api::apps::v1::Deployment as K8sDeployment;
         use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler as K8sHpa;
         use k8s_openapi::api::core::v1::{Service as K8sService, ServiceAccount as K8sSA};
@@ -174,193 +175,262 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         let params = PatchParams::apply("lattice-service-controller").force();
 
-        // Apply ServiceAccount
+        // Collect all patch operations as futures and run them in parallel
+        // This significantly improves performance vs sequential application
+        let mut futures: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>> = Vec::new();
+
+        // ServiceAccount
         if let Some(ref sa) = compiled.workloads.service_account {
-            debug!(name = %sa.metadata.name, "applying ServiceAccount");
+            let name = sa.metadata.name.clone();
             let json = serde_json::to_value(sa)
                 .map_err(|e| Error::serialization(format!("ServiceAccount: {}", e)))?;
             let api: Api<K8sSA> = Api::namespaced(self.client.clone(), namespace);
-            api.patch(&sa.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying ServiceAccount");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply Deployment
+        // Deployment
         if let Some(ref deployment) = compiled.workloads.deployment {
-            debug!(name = %deployment.metadata.name, "applying Deployment");
+            let name = deployment.metadata.name.clone();
             let json = serde_json::to_value(deployment)
                 .map_err(|e| Error::serialization(format!("Deployment: {}", e)))?;
             let api: Api<K8sDeployment> = Api::namespaced(self.client.clone(), namespace);
-            api.patch(&deployment.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying Deployment");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply Service
+        // Service
         if let Some(ref service) = compiled.workloads.service {
-            debug!(name = %service.metadata.name, "applying Service");
+            let name = service.metadata.name.clone();
             let json = serde_json::to_value(service)
                 .map_err(|e| Error::serialization(format!("Service: {}", e)))?;
             let api: Api<K8sService> = Api::namespaced(self.client.clone(), namespace);
-            api.patch(&service.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying Service");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply HPA
+        // HPA
         if let Some(ref hpa) = compiled.workloads.hpa {
-            debug!(name = %hpa.metadata.name, "applying HPA");
+            let name = hpa.metadata.name.clone();
             let json = serde_json::to_value(hpa)
                 .map_err(|e| Error::serialization(format!("HPA: {}", e)))?;
             let api: Api<K8sHpa> = Api::namespaced(self.client.clone(), namespace);
-            api.patch(&hpa.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying HPA");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply CiliumNetworkPolicies using DynamicObject
+        // CiliumNetworkPolicies
+        let cnp_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "cilium.io".to_string(),
+            version: "v2".to_string(),
+            kind: "CiliumNetworkPolicy".to_string(),
+        });
         for cnp in &compiled.policies.cilium_policies {
-            debug!(name = %cnp.metadata.name, "applying CiliumNetworkPolicy");
+            let name = cnp.metadata.name.clone();
             let json = serde_json::to_value(cnp)
                 .map_err(|e| Error::serialization(format!("CiliumNetworkPolicy: {}", e)))?;
-
-            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-                group: "cilium.io".to_string(),
-                version: "v2".to_string(),
-                kind: "CiliumNetworkPolicy".to_string(),
-            });
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(&cnp.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &cnp_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying CiliumNetworkPolicy");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply AuthorizationPolicies using DynamicObject
+        // AuthorizationPolicies
+        let authz_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "security.istio.io".to_string(),
+            version: "v1beta1".to_string(),
+            kind: "AuthorizationPolicy".to_string(),
+        });
         for authz in &compiled.policies.authorization_policies {
-            debug!(name = %authz.metadata.name, "applying AuthorizationPolicy");
+            let name = authz.metadata.name.clone();
             let json = serde_json::to_value(authz)
                 .map_err(|e| Error::serialization(format!("AuthorizationPolicy: {}", e)))?;
-
-            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-                group: "security.istio.io".to_string(),
-                version: "v1beta1".to_string(),
-                kind: "AuthorizationPolicy".to_string(),
-            });
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(&authz.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &authz_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying AuthorizationPolicy");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply ServiceEntries using DynamicObject
+        // ServiceEntries
+        let se_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "networking.istio.io".to_string(),
+            version: "v1beta1".to_string(),
+            kind: "ServiceEntry".to_string(),
+        });
         for entry in &compiled.policies.service_entries {
-            debug!(name = %entry.metadata.name, "applying ServiceEntry");
+            let name = entry.metadata.name.clone();
             let json = serde_json::to_value(entry)
                 .map_err(|e| Error::serialization(format!("ServiceEntry: {}", e)))?;
-
-            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-                group: "networking.istio.io".to_string(),
-                version: "v1beta1".to_string(),
-                kind: "ServiceEntry".to_string(),
-            });
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(&entry.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &se_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying ServiceEntry");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply Gateway using DynamicObject
+        // Gateway
+        let gw_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "gateway.networking.k8s.io".to_string(),
+            version: "v1".to_string(),
+            kind: "Gateway".to_string(),
+        });
         if let Some(ref gateway) = compiled.ingress.gateway {
-            debug!(name = %gateway.metadata.name, "applying Gateway");
+            let name = gateway.metadata.name.clone();
             let json = serde_json::to_value(gateway)
                 .map_err(|e| Error::serialization(format!("Gateway: {}", e)))?;
-
-            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-                group: "gateway.networking.k8s.io".to_string(),
-                version: "v1".to_string(),
-                kind: "Gateway".to_string(),
-            });
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(&gateway.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &gw_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying Gateway");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply HTTPRoute using DynamicObject
+        // HTTPRoute
+        let route_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "gateway.networking.k8s.io".to_string(),
+            version: "v1".to_string(),
+            kind: "HTTPRoute".to_string(),
+        });
         if let Some(ref route) = compiled.ingress.http_route {
-            debug!(name = %route.metadata.name, "applying HTTPRoute");
+            let name = route.metadata.name.clone();
             let json = serde_json::to_value(route)
                 .map_err(|e| Error::serialization(format!("HTTPRoute: {}", e)))?;
-
-            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-                group: "gateway.networking.k8s.io".to_string(),
-                version: "v1".to_string(),
-                kind: "HTTPRoute".to_string(),
-            });
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(&route.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &route_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying HTTPRoute");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply Certificate using DynamicObject
+        // Certificate
+        let cert_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "cert-manager.io".to_string(),
+            version: "v1".to_string(),
+            kind: "Certificate".to_string(),
+        });
         if let Some(ref cert) = compiled.ingress.certificate {
-            debug!(name = %cert.metadata.name, "applying Certificate");
+            let name = cert.metadata.name.clone();
             let json = serde_json::to_value(cert)
                 .map_err(|e| Error::serialization(format!("Certificate: {}", e)))?;
-
-            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-                group: "cert-manager.io".to_string(),
-                version: "v1".to_string(),
-                kind: "Certificate".to_string(),
-            });
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(&cert.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &cert_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying Certificate");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply TrafficPolicy using DynamicObject
+        // TrafficPolicy (ingress rate limiting)
+        let tp_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "gateway.kgateway.dev".to_string(),
+            version: "v1alpha1".to_string(),
+            kind: "TrafficPolicy".to_string(),
+        });
         if let Some(ref policy) = compiled.ingress.traffic_policy {
-            debug!(name = %policy.metadata.name, "applying TrafficPolicy");
+            let name = policy.metadata.name.clone();
             let json = serde_json::to_value(policy)
                 .map_err(|e| Error::serialization(format!("TrafficPolicy: {}", e)))?;
-
-            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-                group: "gateway.kgateway.dev".to_string(),
-                version: "v1alpha1".to_string(),
-                kind: "TrafficPolicy".to_string(),
-            });
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(&policy.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &tp_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying TrafficPolicy");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply waypoint outbound TrafficPolicies
+        // Waypoint outbound TrafficPolicies
         for policy in &compiled.waypoint_policies.outbound_policies {
-            debug!(name = %policy.metadata.name, "applying outbound TrafficPolicy");
+            let name = policy.metadata.name.clone();
             let json = serde_json::to_value(policy)
                 .map_err(|e| Error::serialization(format!("TrafficPolicy: {}", e)))?;
-
-            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-                group: "gateway.kgateway.dev".to_string(),
-                version: "v1alpha1".to_string(),
-                kind: "TrafficPolicy".to_string(),
-            });
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(&policy.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &tp_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying outbound TrafficPolicy");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
         }
 
-        // Apply waypoint inbound TrafficPolicies
+        // Waypoint inbound TrafficPolicies
         for policy in &compiled.waypoint_policies.inbound_policies {
-            debug!(name = %policy.metadata.name, "applying inbound TrafficPolicy");
+            let name = policy.metadata.name.clone();
             let json = serde_json::to_value(policy)
                 .map_err(|e| Error::serialization(format!("TrafficPolicy: {}", e)))?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &tp_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying inbound TrafficPolicy");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
 
-            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-                group: "gateway.kgateway.dev".to_string(),
-                version: "v1alpha1".to_string(),
-                kind: "TrafficPolicy".to_string(),
-            });
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(&policy.metadata.name, &params, &Patch::Apply(&json))
-                .await?;
+        // Waypoint Gateway
+        if let Some(ref gateway) = compiled.waypoint_policies.waypoint_gateway {
+            let name = gateway.metadata.name.clone();
+            let json = serde_json::to_value(gateway)
+                .map_err(|e| Error::serialization(format!("waypoint Gateway: {}", e)))?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &gw_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying waypoint Gateway");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
+        // Execute all patches in parallel
+        let count = futures.len();
+        if count > 0 {
+            debug!(count = count, "applying resources in parallel");
+            try_join_all(futures).await?;
         }
 
         info!(
             service = %service_name,
             namespace = %namespace,
+            resources = count,
             "applied compiled resources"
         );
         Ok(())

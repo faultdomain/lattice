@@ -484,6 +484,8 @@ pub struct GeneratedWaypointPolicies {
     pub outbound_policies: Vec<TrafficPolicy>,
     /// Inbound policies (callee-side: rate limits, headers)
     pub inbound_policies: Vec<TrafficPolicy>,
+    /// Namespace waypoint Gateway (required for kgateway to process TrafficPolicies)
+    pub waypoint_gateway: Option<Gateway>,
 }
 
 impl GeneratedWaypointPolicies {
@@ -494,12 +496,16 @@ impl GeneratedWaypointPolicies {
 
     /// Check if any policies were generated
     pub fn is_empty(&self) -> bool {
-        self.outbound_policies.is_empty() && self.inbound_policies.is_empty()
+        self.outbound_policies.is_empty()
+            && self.inbound_policies.is_empty()
+            && self.waypoint_gateway.is_none()
     }
 
-    /// Total count of all generated policies
+    /// Total count of all generated resources (policies + gateway)
     pub fn total_count(&self) -> usize {
-        self.outbound_policies.len() + self.inbound_policies.len()
+        self.outbound_policies.len()
+            + self.inbound_policies.len()
+            + if self.waypoint_gateway.is_some() { 1 } else { 0 }
     }
 }
 
@@ -833,7 +839,46 @@ impl WaypointPolicyCompiler {
             }
         }
 
+        // If any policies were generated, include the namespace waypoint Gateway
+        // kgateway needs a waypoint Gateway per namespace to process TrafficPolicies
+        if !output.outbound_policies.is_empty() || !output.inbound_policies.is_empty() {
+            output.waypoint_gateway = Some(Self::compile_namespace_waypoint(namespace));
+        }
+
         output
+    }
+
+    /// Compile a namespace waypoint Gateway for east-west traffic
+    ///
+    /// kgateway requires a waypoint Gateway in each namespace to intercept and
+    /// process service-to-service traffic with TrafficPolicy resources.
+    fn compile_namespace_waypoint(namespace: &str) -> Gateway {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "app.kubernetes.io/managed-by".to_string(),
+            "lattice".to_string(),
+        );
+        // Label required by kgateway to identify this as a service waypoint
+        labels.insert(
+            "istio.io/waypoint-for".to_string(),
+            "service".to_string(),
+        );
+
+        Gateway {
+            api_version: "gateway.networking.k8s.io/v1".to_string(),
+            kind: "Gateway".to_string(),
+            metadata: GatewayMetadata {
+                name: format!("{}-waypoint", namespace),
+                namespace: namespace.to_string(),
+                labels,
+            },
+            spec: GatewaySpec {
+                gateway_class_name: "kgateway-waypoint".to_string(),
+                // Waypoint gateways don't need explicit listeners - they intercept
+                // traffic via iptables/eBPF redirection based on the waypoint-for label
+                listeners: vec![],
+            },
+        }
     }
 
     /// Compile outbound TrafficPolicy (retries, timeouts, circuit breakers)
@@ -1501,5 +1546,106 @@ mod tests {
         assert!(json.contains("gateway.kgateway.dev/v1alpha1"));
         assert!(json.contains("TrafficPolicy"));
         assert!(json.contains("frontend-to-backend-outbound"));
+    }
+
+    // =========================================================================
+    // Waypoint Gateway Generation Tests
+    // =========================================================================
+
+    #[test]
+    fn story_waypoint_gateway_generated_with_outbound_policies() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("backend".to_string(), make_resource_with_outbound());
+
+        let output = WaypointPolicyCompiler::compile("frontend", "prod", &resources);
+
+        // Should have waypoint gateway when policies exist
+        assert!(output.waypoint_gateway.is_some());
+
+        let gateway = output.waypoint_gateway.unwrap();
+        assert_eq!(gateway.metadata.name, "prod-waypoint");
+        assert_eq!(gateway.metadata.namespace, "prod");
+        assert_eq!(gateway.spec.gateway_class_name, "kgateway-waypoint");
+        assert!(gateway.spec.listeners.is_empty());
+
+        // Check labels
+        assert_eq!(
+            gateway.metadata.labels.get("istio.io/waypoint-for"),
+            Some(&"service".to_string())
+        );
+        assert_eq!(
+            gateway.metadata.labels.get("app.kubernetes.io/managed-by"),
+            Some(&"lattice".to_string())
+        );
+    }
+
+    #[test]
+    fn story_waypoint_gateway_generated_with_inbound_policies() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("api".to_string(), make_resource_with_inbound());
+
+        let output = WaypointPolicyCompiler::compile("frontend", "staging", &resources);
+
+        // Should have waypoint gateway when policies exist
+        assert!(output.waypoint_gateway.is_some());
+
+        let gateway = output.waypoint_gateway.unwrap();
+        assert_eq!(gateway.metadata.name, "staging-waypoint");
+        assert_eq!(gateway.metadata.namespace, "staging");
+        assert_eq!(gateway.spec.gateway_class_name, "kgateway-waypoint");
+    }
+
+    #[test]
+    fn story_waypoint_gateway_not_generated_without_policies() {
+        let resource = ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            outbound: None, // No outbound policy
+            inbound: None,  // No inbound policy
+        };
+
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("backend".to_string(), resource);
+
+        let output = WaypointPolicyCompiler::compile("frontend", "prod", &resources);
+
+        // Should NOT have waypoint gateway when no policies exist
+        assert!(output.waypoint_gateway.is_none());
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn story_waypoint_total_count_includes_gateway() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("backend".to_string(), make_resource_with_outbound());
+
+        let output = WaypointPolicyCompiler::compile("frontend", "prod", &resources);
+
+        // Should count: 1 outbound policy + 1 gateway = 2
+        assert_eq!(output.outbound_policies.len(), 1);
+        assert_eq!(output.inbound_policies.len(), 0);
+        assert!(output.waypoint_gateway.is_some());
+        assert_eq!(output.total_count(), 2);
+    }
+
+    #[test]
+    fn story_waypoint_gateway_serialization() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("backend".to_string(), make_resource_with_outbound());
+
+        let output = WaypointPolicyCompiler::compile("frontend", "prod", &resources);
+        let gateway = output.waypoint_gateway.unwrap();
+
+        // Verify it can be serialized to JSON (for Kubernetes API)
+        let json = serde_json::to_string_pretty(&gateway).unwrap();
+        assert!(json.contains("gateway.networking.k8s.io/v1"));
+        assert!(json.contains("Gateway"));
+        assert!(json.contains("prod-waypoint"));
+        assert!(json.contains("kgateway-waypoint"));
+        assert!(json.contains("istio.io/waypoint-for"));
     }
 }

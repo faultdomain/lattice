@@ -303,12 +303,10 @@ impl ClusterctlInstaller {
         Self
     }
 
-    /// Get installed CAPI providers by checking provider namespaces
+    /// Get installed CAPI providers by checking provider namespaces in parallel
     async fn get_installed_providers(client: &KubeClient) -> Vec<InstalledProvider> {
-        let mut providers = Vec::new();
-
         // Provider namespace patterns and their types
-        let provider_checks = [
+        let provider_checks: Vec<(&str, &str, CapiProviderType)> = vec![
             ("capi-system", "cluster-api", CapiProviderType::Core),
             (
                 "capi-kubeadm-bootstrap-system",
@@ -334,18 +332,26 @@ impl ClusterctlInstaller {
             ("capz-system", "azure", CapiProviderType::Infrastructure),
         ];
 
-        for (namespace, name, provider_type) in provider_checks {
-            if let Some(version) = Self::get_provider_version(client, namespace).await {
-                providers.push(InstalledProvider {
-                    name: name.to_string(),
-                    provider_type,
-                    version,
-                    namespace: namespace.to_string(),
-                });
-            }
-        }
+        // Check all providers in parallel
+        let futures: Vec<_> = provider_checks
+            .into_iter()
+            .map(|(namespace, name, provider_type)| {
+                let client = client.clone();
+                async move {
+                    Self::get_provider_version(&client, namespace)
+                        .await
+                        .map(|version| InstalledProvider {
+                            name: name.to_string(),
+                            provider_type,
+                            version,
+                            namespace: namespace.to_string(),
+                        })
+                }
+            })
+            .collect();
 
-        providers
+        let results = futures::future::join_all(futures).await;
+        results.into_iter().flatten().collect()
     }
 
     /// Get provider version from deployment labels using kube-rs
@@ -492,18 +498,31 @@ impl ClusterctlInstaller {
         };
         let _ = namespaces.create(&PostParams::default(), &ns).await;
 
-        // Parse and apply each manifest using kube-rs server-side apply
+        // Parse and apply manifests in parallel for faster installation
         let yaml_str = String::from_utf8_lossy(&template_output.stdout);
-        for doc in yaml_str.split("\n---") {
-            let doc = doc.trim();
-            if doc.is_empty() || !doc.contains("kind:") {
-                continue;
-            }
+        let docs: Vec<&str> = yaml_str
+            .split("\n---")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && s.contains("kind:"))
+            .collect();
 
-            if let Err(e) = Self::apply_yaml_manifest(client, doc).await {
-                warn!(error = %e, "Failed to apply cert-manager manifest, continuing...");
-            }
-        }
+        let manifest_count = docs.len();
+        debug!(count = manifest_count, "applying cert-manager manifests in parallel");
+
+        let futures: Vec<_> = docs
+            .into_iter()
+            .map(|doc| {
+                let client = client.clone();
+                let doc = doc.to_string();
+                async move {
+                    if let Err(e) = Self::apply_yaml_manifest(&client, &doc).await {
+                        warn!(error = %e, "Failed to apply cert-manager manifest, continuing...");
+                    }
+                }
+            })
+            .collect();
+
+        futures::future::join_all(futures).await;
 
         // Wait for cert-manager deployments to be ready using kube-rs
         info!("Waiting for cert-manager to be ready");
