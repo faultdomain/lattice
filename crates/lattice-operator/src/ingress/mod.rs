@@ -312,6 +312,18 @@ pub struct TrafficPolicySpec {
     /// Rate limit configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<PolicyRateLimit>,
+    /// Retry configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<PolicyRetry>,
+    /// Timeout configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<PolicyTimeout>,
+    /// Circuit breaker configuration (via connection_limits)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_limits: Option<PolicyConnectionLimits>,
+    /// Request header modification
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_header_modifier: Option<PolicyHeaderModifier>,
 }
 
 /// Target reference for policy
@@ -352,6 +364,68 @@ pub struct TokenBucket {
     pub tokens_per_fill: u32,
     /// Fill interval (e.g., "60s")
     pub fill_interval: String,
+}
+
+/// Retry policy for TrafficPolicy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyRetry {
+    /// Number of retries
+    pub num_retries: u32,
+    /// Per-try timeout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_try_timeout: Option<String>,
+    /// Retry on specific conditions (e.g., "5xx", "reset", "connect-failure")
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_on: Vec<String>,
+}
+
+/// Timeout configuration for TrafficPolicy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyTimeout {
+    /// Request timeout
+    pub request: String,
+    /// Idle timeout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<String>,
+}
+
+/// Connection limits for circuit breaking
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyConnectionLimits {
+    /// Maximum pending requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending_requests: Option<u32>,
+    /// Maximum concurrent requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_requests: Option<u32>,
+    /// Maximum concurrent retries
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+}
+
+/// Header modification for TrafficPolicy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyHeaderModifier {
+    /// Headers to add
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<PolicyHeader>,
+    /// Headers to remove
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
+}
+
+/// Header key-value pair
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyHeader {
+    /// Header name
+    pub name: String,
+    /// Header value
+    pub value: String,
 }
 
 // =============================================================================
@@ -396,6 +470,36 @@ impl GeneratedIngress {
         .iter()
         .filter(|&&x| x)
         .count()
+    }
+}
+
+// =============================================================================
+// Generated Waypoint Policies Container
+// =============================================================================
+
+/// Collection of waypoint TrafficPolicy resources for east-west L7 traffic
+#[derive(Clone, Debug, Default)]
+pub struct GeneratedWaypointPolicies {
+    /// Outbound policies (caller-side: retries, timeouts, circuit breakers)
+    pub outbound_policies: Vec<TrafficPolicy>,
+    /// Inbound policies (callee-side: rate limits, headers)
+    pub inbound_policies: Vec<TrafficPolicy>,
+}
+
+impl GeneratedWaypointPolicies {
+    /// Create empty waypoint policies collection
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if any policies were generated
+    pub fn is_empty(&self) -> bool {
+        self.outbound_policies.is_empty() && self.inbound_policies.is_empty()
+    }
+
+    /// Total count of all generated policies
+    pub fn total_count(&self) -> usize {
+        self.outbound_policies.len() + self.inbound_policies.len()
     }
 }
 
@@ -487,6 +591,10 @@ impl IngressCompiler {
                         },
                     },
                 }),
+                retry: None,
+                timeout: None,
+                connection_limits: None,
+                request_header_modifier: None,
             },
         }
     }
@@ -665,6 +773,190 @@ impl IngressCompiler {
         tls.secret_name
             .clone()
             .unwrap_or_else(|| format!("{}-tls", service_name))
+    }
+}
+
+// =============================================================================
+// Waypoint Policy Compiler
+// =============================================================================
+
+use lattice_common::crd::{
+    CircuitBreakerPolicy, HeaderPolicy, InboundTrafficPolicy, OutboundTrafficPolicy, ResourceSpec,
+    RetryPolicy, TimeoutPolicy,
+};
+
+/// Compiler for generating kgateway waypoint TrafficPolicy from ResourceSpec L7 policies
+pub struct WaypointPolicyCompiler;
+
+impl WaypointPolicyCompiler {
+    /// Compile waypoint policies for a service's resource dependencies
+    ///
+    /// # Arguments
+    /// * `service_name` - Name of the source LatticeService
+    /// * `namespace` - Target namespace
+    /// * `resources` - Map of resource name to ResourceSpec
+    ///
+    /// # Returns
+    /// Generated waypoint TrafficPolicy resources for east-west traffic
+    pub fn compile(
+        service_name: &str,
+        namespace: &str,
+        resources: &std::collections::BTreeMap<String, ResourceSpec>,
+    ) -> GeneratedWaypointPolicies {
+        let mut output = GeneratedWaypointPolicies::new();
+
+        for (resource_name, resource) in resources {
+            // Only process service resources
+            if !matches!(
+                resource.type_,
+                lattice_common::crd::ResourceType::Service
+            ) {
+                continue;
+            }
+
+            // Compile outbound policy (caller-side)
+            if let Some(ref outbound) = resource.outbound {
+                if let Some(policy) = Self::compile_outbound_policy(
+                    service_name,
+                    resource_name,
+                    namespace,
+                    outbound,
+                ) {
+                    output.outbound_policies.push(policy);
+                }
+            }
+
+            // Compile inbound policy (callee-side)
+            if let Some(ref inbound) = resource.inbound {
+                if let Some(policy) = Self::compile_inbound_policy(
+                    service_name,
+                    resource_name,
+                    namespace,
+                    inbound,
+                ) {
+                    output.inbound_policies.push(policy);
+                }
+            }
+        }
+
+        output
+    }
+
+    /// Compile outbound TrafficPolicy (retries, timeouts, circuit breakers)
+    fn compile_outbound_policy(
+        caller: &str,
+        callee: &str,
+        namespace: &str,
+        outbound: &OutboundTrafficPolicy,
+    ) -> Option<TrafficPolicy> {
+        // Skip if no policies configured
+        if outbound.retries.is_none()
+            && outbound.timeout.is_none()
+            && outbound.circuit_breaker.is_none()
+        {
+            return None;
+        }
+
+        let policy_name = format!("{}-to-{}-outbound", caller, callee);
+
+        Some(TrafficPolicy {
+            api_version: "gateway.kgateway.dev/v1alpha1".to_string(),
+            kind: "TrafficPolicy".to_string(),
+            metadata: GatewayMetadata::new(policy_name, namespace),
+            spec: TrafficPolicySpec {
+                target_refs: vec![PolicyTargetRef {
+                    group: String::new(),
+                    kind: "Service".to_string(),
+                    name: callee.to_string(),
+                }],
+                rate_limit: None,
+                retry: outbound.retries.as_ref().map(Self::convert_retry_policy),
+                timeout: outbound.timeout.as_ref().map(Self::convert_timeout_policy),
+                connection_limits: outbound
+                    .circuit_breaker
+                    .as_ref()
+                    .map(Self::convert_circuit_breaker),
+                request_header_modifier: None,
+            },
+        })
+    }
+
+    /// Compile inbound TrafficPolicy (rate limits, headers)
+    fn compile_inbound_policy(
+        caller: &str,
+        callee: &str,
+        namespace: &str,
+        inbound: &InboundTrafficPolicy,
+    ) -> Option<TrafficPolicy> {
+        // Skip if no policies configured
+        if inbound.rate_limit.is_none() && inbound.headers.is_none() {
+            return None;
+        }
+
+        let policy_name = format!("{}-from-{}-inbound", callee, caller);
+
+        Some(TrafficPolicy {
+            api_version: "gateway.kgateway.dev/v1alpha1".to_string(),
+            kind: "TrafficPolicy".to_string(),
+            metadata: GatewayMetadata::new(policy_name, namespace),
+            spec: TrafficPolicySpec {
+                target_refs: vec![PolicyTargetRef {
+                    group: String::new(),
+                    kind: "Service".to_string(),
+                    name: callee.to_string(),
+                }],
+                rate_limit: inbound.rate_limit.as_ref().map(|rl| PolicyRateLimit {
+                    local: LocalRateLimit {
+                        token_bucket: TokenBucket {
+                            max_tokens: rl.burst.unwrap_or(rl.requests_per_interval),
+                            tokens_per_fill: rl.requests_per_interval,
+                            fill_interval: format!("{}s", rl.interval_seconds),
+                        },
+                    },
+                }),
+                retry: None,
+                timeout: None,
+                connection_limits: None,
+                request_header_modifier: inbound.headers.as_ref().map(Self::convert_header_policy),
+            },
+        })
+    }
+
+    fn convert_retry_policy(retry: &RetryPolicy) -> PolicyRetry {
+        PolicyRetry {
+            num_retries: retry.attempts,
+            per_try_timeout: retry.per_try_timeout.clone(),
+            retry_on: retry.retry_on.clone(),
+        }
+    }
+
+    fn convert_timeout_policy(timeout: &TimeoutPolicy) -> PolicyTimeout {
+        PolicyTimeout {
+            request: timeout.request.clone(),
+            idle: timeout.idle.clone(),
+        }
+    }
+
+    fn convert_circuit_breaker(cb: &CircuitBreakerPolicy) -> PolicyConnectionLimits {
+        PolicyConnectionLimits {
+            max_pending_requests: cb.max_pending_requests,
+            max_requests: cb.max_requests,
+            max_retries: cb.max_retries,
+        }
+    }
+
+    fn convert_header_policy(headers: &HeaderPolicy) -> PolicyHeaderModifier {
+        PolicyHeaderModifier {
+            add: headers
+                .add
+                .iter()
+                .map(|(k, v)| PolicyHeader {
+                    name: k.clone(),
+                    value: v.clone(),
+                })
+                .collect(),
+            remove: headers.remove.clone(),
+        }
     }
 }
 
@@ -1019,5 +1311,200 @@ mod tests {
             metadata.labels.get("app.kubernetes.io/managed-by"),
             Some(&"lattice".to_string())
         );
+    }
+
+    // =========================================================================
+    // Waypoint Policy Compiler Tests
+    // =========================================================================
+
+    use lattice_common::crd::{
+        CircuitBreakerPolicy, DependencyDirection, HeaderPolicy, InboundTrafficPolicy,
+        OutboundTrafficPolicy, ResourceType, RetryPolicy, TimeoutPolicy,
+    };
+
+    fn make_resource_with_outbound() -> ResourceSpec {
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            outbound: Some(OutboundTrafficPolicy {
+                retries: Some(RetryPolicy {
+                    attempts: 3,
+                    per_try_timeout: Some("5s".to_string()),
+                    retry_on: vec!["5xx".to_string(), "reset".to_string()],
+                }),
+                timeout: Some(TimeoutPolicy {
+                    request: "30s".to_string(),
+                    idle: Some("5m".to_string()),
+                }),
+                circuit_breaker: Some(CircuitBreakerPolicy {
+                    max_pending_requests: Some(100),
+                    max_requests: Some(1000),
+                    max_retries: Some(10),
+                    consecutive_5xx_errors: None,
+                    base_ejection_time: None,
+                    max_ejection_percent: None,
+                }),
+            }),
+            inbound: None,
+        }
+    }
+
+    fn make_resource_with_inbound() -> ResourceSpec {
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Inbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            outbound: None,
+            inbound: Some(InboundTrafficPolicy {
+                rate_limit: Some(RateLimitSpec {
+                    requests_per_interval: 100,
+                    interval_seconds: 60,
+                    burst: Some(150),
+                }),
+                headers: Some(HeaderPolicy {
+                    add: std::collections::BTreeMap::from([
+                        ("X-Caller".to_string(), "frontend".to_string()),
+                    ]),
+                    remove: vec!["X-Internal".to_string()],
+                }),
+            }),
+        }
+    }
+
+    #[test]
+    fn story_waypoint_outbound_policy() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("backend".to_string(), make_resource_with_outbound());
+
+        let output = WaypointPolicyCompiler::compile("frontend", "prod", &resources);
+
+        assert_eq!(output.outbound_policies.len(), 1);
+        assert!(output.inbound_policies.is_empty());
+
+        let policy = &output.outbound_policies[0];
+        assert_eq!(policy.metadata.name, "frontend-to-backend-outbound");
+        assert_eq!(policy.metadata.namespace, "prod");
+
+        // Check target ref
+        assert_eq!(policy.spec.target_refs[0].kind, "Service");
+        assert_eq!(policy.spec.target_refs[0].name, "backend");
+
+        // Check retry
+        let retry = policy.spec.retry.as_ref().unwrap();
+        assert_eq!(retry.num_retries, 3);
+        assert_eq!(retry.per_try_timeout, Some("5s".to_string()));
+        assert_eq!(retry.retry_on, vec!["5xx", "reset"]);
+
+        // Check timeout
+        let timeout = policy.spec.timeout.as_ref().unwrap();
+        assert_eq!(timeout.request, "30s");
+        assert_eq!(timeout.idle, Some("5m".to_string()));
+
+        // Check circuit breaker
+        let limits = policy.spec.connection_limits.as_ref().unwrap();
+        assert_eq!(limits.max_pending_requests, Some(100));
+        assert_eq!(limits.max_requests, Some(1000));
+        assert_eq!(limits.max_retries, Some(10));
+    }
+
+    #[test]
+    fn story_waypoint_inbound_policy() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("api".to_string(), make_resource_with_inbound());
+
+        let output = WaypointPolicyCompiler::compile("frontend", "prod", &resources);
+
+        assert!(output.outbound_policies.is_empty());
+        assert_eq!(output.inbound_policies.len(), 1);
+
+        let policy = &output.inbound_policies[0];
+        assert_eq!(policy.metadata.name, "api-from-frontend-inbound");
+        assert_eq!(policy.metadata.namespace, "prod");
+
+        // Check rate limit
+        let rate_limit = policy.spec.rate_limit.as_ref().unwrap();
+        assert_eq!(rate_limit.local.token_bucket.max_tokens, 150);
+        assert_eq!(rate_limit.local.token_bucket.tokens_per_fill, 100);
+        assert_eq!(rate_limit.local.token_bucket.fill_interval, "60s");
+
+        // Check headers
+        let headers = policy.spec.request_header_modifier.as_ref().unwrap();
+        assert_eq!(headers.add.len(), 1);
+        assert_eq!(headers.add[0].name, "X-Caller");
+        assert_eq!(headers.add[0].value, "frontend");
+        assert_eq!(headers.remove, vec!["X-Internal"]);
+    }
+
+    #[test]
+    fn story_waypoint_no_policy_for_empty_config() {
+        let resource = ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            outbound: None,
+            inbound: None,
+        };
+
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("backend".to_string(), resource);
+
+        let output = WaypointPolicyCompiler::compile("frontend", "prod", &resources);
+
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn story_waypoint_skips_non_service_resources() {
+        let resource = ResourceSpec {
+            type_: ResourceType::ExternalService,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            outbound: Some(OutboundTrafficPolicy {
+                retries: Some(RetryPolicy {
+                    attempts: 3,
+                    per_try_timeout: None,
+                    retry_on: vec![],
+                }),
+                timeout: None,
+                circuit_breaker: None,
+            }),
+            inbound: None,
+        };
+
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("external".to_string(), resource);
+
+        let output = WaypointPolicyCompiler::compile("frontend", "prod", &resources);
+
+        // External services should be skipped
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn story_waypoint_policies_serialization() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert("backend".to_string(), make_resource_with_outbound());
+
+        let output = WaypointPolicyCompiler::compile("frontend", "prod", &resources);
+        let policy = &output.outbound_policies[0];
+
+        // Verify it can be serialized to JSON (for Kubernetes API)
+        let json = serde_json::to_string_pretty(policy).unwrap();
+        assert!(json.contains("gateway.kgateway.dev/v1alpha1"));
+        assert!(json.contains("TrafficPolicy"));
+        assert!(json.contains("frontend-to-backend-outbound"));
     }
 }

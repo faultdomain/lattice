@@ -81,6 +81,8 @@ fn outbound_dep(name: &str) -> (String, ResourceSpec) {
             class: None,
             metadata: None,
             params: None,
+            outbound: None,
+            inbound: None,
         },
     )
 }
@@ -95,6 +97,8 @@ fn inbound_allow(name: &str) -> (String, ResourceSpec) {
             class: None,
             metadata: None,
             params: None,
+            outbound: None,
+            inbound: None,
         },
     )
 }
