@@ -21,6 +21,14 @@ use crate::{Error, Result};
 const PROXMOX_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1alpha1";
 const DEFAULT_VIP_INTERFACE: &str = "ens18";
 
+/// VM sizing parameters for ProxmoxMachineTemplate
+struct MachineSizing {
+    cores: u32,
+    memory_mib: u32,
+    disk_size_gb: u32,
+    sockets: u32,
+}
+
 /// Proxmox VE infrastructure provider
 #[derive(Clone, Debug)]
 pub struct ProxmoxProvider {
@@ -92,10 +100,7 @@ impl ProxmoxProvider {
         &self,
         name: &str,
         cfg: &ProxmoxConfig,
-        cores: u32,
-        memory_mib: u32,
-        disk_size_gb: u32,
-        sockets: u32,
+        sizing: MachineSizing,
         suffix: &str,
     ) -> CAPIManifest {
         let bridge = cfg.bridge.clone().unwrap_or_else(|| "vmbr0".to_string());
@@ -112,13 +117,13 @@ impl ProxmoxProvider {
         // Always use linked clones (template must be on Ceph)
         let mut spec = serde_json::json!({
             "full": false,
-            "numSockets": sockets,
-            "numCores": cores,
-            "memoryMiB": memory_mib,
+            "numSockets": sizing.sockets,
+            "numCores": sizing.cores,
+            "memoryMiB": sizing.memory_mib,
             "disks": {
                 "bootVolume": {
                     "disk": "scsi0",
-                    "sizeGb": disk_size_gb
+                    "sizeGb": sizing.disk_size_gb
                 }
             },
             "network": { "default": network }
@@ -251,19 +256,19 @@ impl Provider for ProxmoxProvider {
             generate_cluster(&config, &infra),
             self.generate_proxmox_cluster(cluster)?,
             generate_control_plane(&config, &infra, &cp_config),
-            self.generate_machine_template(
-                name, cfg,
-                cfg.cp_cores, cfg.cp_memory_mib, cfg.cp_disk_size_gb,
-                cfg.cp_sockets.unwrap_or(1),
-                "control-plane",
-            ),
+            self.generate_machine_template(name, cfg, MachineSizing {
+                cores: cfg.cp_cores,
+                memory_mib: cfg.cp_memory_mib,
+                disk_size_gb: cfg.cp_disk_size_gb,
+                sockets: cfg.cp_sockets.unwrap_or(1),
+            }, "control-plane"),
             generate_machine_deployment(&config, &infra),
-            self.generate_machine_template(
-                name, cfg,
-                cfg.worker_cores, cfg.worker_memory_mib, cfg.worker_disk_size_gb,
-                cfg.worker_sockets.unwrap_or(1),
-                "md-0",
-            ),
+            self.generate_machine_template(name, cfg, MachineSizing {
+                cores: cfg.worker_cores,
+                memory_mib: cfg.worker_memory_mib,
+                disk_size_gb: cfg.worker_disk_size_gb,
+                sockets: cfg.worker_sockets.unwrap_or(1),
+            }, "md-0"),
             generate_bootstrap_config_template(&config),
         ])
     }
