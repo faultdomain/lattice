@@ -28,15 +28,15 @@
 //!
 //! ```bash
 //! # Docker clusters
-//! LATTICE_MGMT_CLUSTER_CONFIG=tests/e2e/fixtures/docker-mgmt.yaml \
-//!   LATTICE_WORKLOAD_CLUSTER_CONFIG=tests/e2e/fixtures/docker-workload.yaml \
+//! LATTICE_MGMT_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/docker-mgmt.yaml \
+//!   LATTICE_WORKLOAD_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/docker-workload.yaml \
 //!   LATTICE_MGMT_PROVIDER=docker \
 //!   LATTICE_WORKLOAD_PROVIDER=docker \
 //!   cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
 //!
 //! # Proxmox clusters
-//! LATTICE_MGMT_CLUSTER_CONFIG=./clusters/proxmox-mgmt.yaml \
-//!   LATTICE_WORKLOAD_CLUSTER_CONFIG=./clusters/proxmox-workload.yaml \
+//! LATTICE_MGMT_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-mgmt.yaml \
+//!   LATTICE_WORKLOAD_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-workload.yaml \
 //!   LATTICE_MGMT_PROVIDER=proxmox \
 //!   LATTICE_WORKLOAD_PROVIDER=proxmox \
 //!   cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
@@ -44,7 +44,7 @@
 //!
 //! # Example CRD Files
 //!
-//! See `tests/e2e/fixtures/` for example LatticeCluster CRD files for each provider.
+//! See `crates/lattice-cli/tests/e2e/fixtures/clusters/` for LatticeCluster CRD files.
 
 #![cfg(feature = "provider-e2e")]
 
@@ -59,8 +59,9 @@ use lattice_cli::commands::install::{InstallConfig, Installer};
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster};
 
 use super::helpers::{
-    client_from_kubeconfig, ensure_docker_network, extract_docker_cluster_kubeconfig, run_cmd,
-    run_cmd_allow_fail, verify_control_plane_taints, watch_cluster_phases, watch_worker_scaling,
+    client_from_kubeconfig, ensure_docker_network, extract_capi_kubeconfig,
+    extract_docker_cluster_kubeconfig, run_cmd, run_cmd_allow_fail, verify_control_plane_taints,
+    watch_cluster_phases, watch_worker_scaling,
 };
 use super::mesh_tests::{mesh_test_enabled, run_mesh_test, run_random_mesh_test};
 use super::providers::InfraProvider;
@@ -179,7 +180,7 @@ fn load_cluster_config(env_var: &str) -> Result<(PathBuf, String), String> {
     let config_path = std::env::var(env_var).map_err(|_| {
         format!(
             "No cluster config provided. Set {} to a LatticeCluster YAML file.\n\
-             Example CRD files are in tests/e2e/fixtures/",
+             Example CRD files are in crates/lattice-cli/tests/e2e/fixtures/clusters/",
             env_var
         )
     })?;
@@ -468,127 +469,122 @@ async fn run_provider_e2e(
     println!("\n  SUCCESS: Workload cluster is Ready!");
 
     // =========================================================================
-    // Phase 5: Verify Workload Cluster Independence
+    // Phase 5: Extract Workload Cluster Kubeconfig and Verify
     // =========================================================================
     println!("\n[Phase 5] Verifying workload cluster...\n");
 
     let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
 
+    println!("  Extracting workload cluster kubeconfig...");
     if workload_provider == InfraProvider::Docker {
-        println!("  Extracting workload cluster kubeconfig from control plane container...");
-
-        match extract_docker_cluster_kubeconfig(
+        extract_docker_cluster_kubeconfig(
             WORKLOAD_CLUSTER_NAME,
             &workload_bootstrap,
             &workload_kubeconfig_path,
-        ) {
-            Ok(()) => {
-                println!("  Kubeconfig extracted successfully");
+        )?;
+    } else {
+        extract_capi_kubeconfig(
+            &kubeconfig_path,
+            WORKLOAD_CLUSTER_NAME,
+            &workload_kubeconfig_path,
+        )
+        .await?;
+    }
+    println!("  Kubeconfig extracted successfully");
 
-                let nodes_check = run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        &workload_kubeconfig_path,
-                        "get",
-                        "nodes",
-                        "-o",
-                        "wide",
-                    ],
+    let nodes_output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            &workload_kubeconfig_path,
+            "get",
+            "nodes",
+            "-o",
+            "wide",
+        ],
+    )?;
+    println!("  Workload cluster nodes:\n{}", nodes_output);
+
+    println!("  Checking for CAPI resources on workload cluster...");
+    match run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            &workload_kubeconfig_path,
+            "get",
+            "clusters",
+            "-A",
+        ],
+    ) {
+        Ok(output) => {
+            println!("  Workload cluster CAPI resources:\n{}", output);
+            if !output.contains(WORKLOAD_CLUSTER_NAME) {
+                return Err(
+                    "Workload cluster should have its own CAPI Cluster resource after pivot"
+                        .to_string(),
                 );
-
-                match nodes_check {
-                    Ok(output) => println!("  Workload cluster nodes:\n{}", output),
-                    Err(e) => {
-                        return Err(format!(
-                            "Docker workload cluster should be accessible but failed: {}",
-                            e
-                        ))
-                    }
-                }
-
-                println!("  Checking for CAPI resources on workload cluster...");
-                let capi_check = run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        &workload_kubeconfig_path,
-                        "get",
-                        "clusters",
-                        "-A",
-                    ],
-                );
-
-                match capi_check {
-                    Ok(output) => {
-                        println!("  Workload cluster CAPI resources:\n{}", output);
-                        if !output.contains(WORKLOAD_CLUSTER_NAME) {
-                            return Err("Workload cluster should have its own CAPI Cluster resource after pivot".to_string());
-                        }
-                    }
-                    Err(e) => println!("  Warning: Could not check CAPI resources: {}", e),
-                }
-            }
-            Err(e) => {
-                return Err(format!(
-                    "Failed to extract kubeconfig for Docker workload cluster: {}",
-                    e
-                ))
             }
         }
-    } else {
-        println!(
-            "  Skipping direct verification for cloud provider ({:?})",
-            workload_provider
-        );
+        Err(e) => println!("  Warning: Could not check CAPI resources: {}", e),
     }
 
     // =========================================================================
-    // Phase 6: Worker Scaling Verification (Docker only)
+    // Phase 6: Worker Scaling Verification
     // =========================================================================
-    if workload_provider == InfraProvider::Docker {
-        println!("\n[Phase 6] Watching worker scaling...\n");
-        watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 2).await?;
-    } else {
-        println!("\n[Phase 6] Skipping worker scaling verification for cloud provider\n");
-    }
+    println!("\n[Phase 6] Watching worker scaling...\n");
+    watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 2).await?;
 
     // =========================================================================
-    // Phase 7: Independence Verification (Docker only)
+    // Phase 7: Independence Verification
     // =========================================================================
-    if workload_provider == InfraProvider::Docker && independence_test_enabled() {
+    if independence_test_enabled() {
         println!("\n[Phase 7] Proving workload cluster is truly self-managing...\n");
 
         println!("  [Step 1] Deleting management cluster...");
-        let mgmt_containers = run_cmd_allow_fail(
-            "docker",
-            &[
-                "ps",
-                "-a",
-                "--filter",
-                &format!("name={}", MGMT_CLUSTER_NAME),
-                "-q",
-            ],
-        );
-        for id in mgmt_containers.lines() {
-            if !id.trim().is_empty() {
-                let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
+        if workload_provider == InfraProvider::Docker {
+            let mgmt_containers = run_cmd_allow_fail(
+                "docker",
+                &[
+                    "ps",
+                    "-a",
+                    "--filter",
+                    &format!("name={}", MGMT_CLUSTER_NAME),
+                    "-q",
+                ],
+            );
+            for id in mgmt_containers.lines() {
+                if !id.trim().is_empty() {
+                    let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
+                }
             }
+
+            let mgmt_check = run_cmd_allow_fail(
+                "docker",
+                &[
+                    "ps",
+                    "--filter",
+                    &format!("name={}", MGMT_CLUSTER_NAME),
+                    "-q",
+                ],
+            );
+            if !mgmt_check.trim().is_empty() {
+                return Err("Failed to delete management cluster".to_string());
+            }
+        } else {
+            // Cloud provider: delete via kubectl
+            let _ = run_cmd_allow_fail(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    &kubeconfig_path,
+                    "delete",
+                    "latticecluster",
+                    MGMT_CLUSTER_NAME,
+                    "--timeout=300s",
+                ],
+            );
         }
         println!("    Management cluster deleted!");
-
-        let mgmt_check = run_cmd_allow_fail(
-            "docker",
-            &[
-                "ps",
-                "--filter",
-                &format!("name={}", MGMT_CLUSTER_NAME),
-                "-q",
-            ],
-        );
-        if !mgmt_check.trim().is_empty() {
-            return Err("Failed to delete management cluster".to_string());
-        }
 
         println!("\n  [Step 2] Scaling workload cluster workers 2 -> 3...");
         let patch_result = run_cmd(
@@ -616,18 +612,16 @@ async fn run_provider_e2e(
         );
 
         println!("\n  [Step 4] Verifying control-plane taints were restored...");
-        verify_control_plane_taints(&workload_kubeconfig_path, &workload_bootstrap).await?;
+        verify_control_plane_taints(&workload_kubeconfig_path).await?;
         println!("    [x] Control-plane taints restored by controller");
-    } else if workload_provider == InfraProvider::Docker {
-        println!("\n[Phase 7] Skipping independence test (set LATTICE_ENABLE_INDEPENDENCE_TEST=true to enable)\n");
     } else {
-        println!("\n[Phase 7] Skipping independence test for cloud provider\n");
+        println!("\n[Phase 7] Skipping independence test (set LATTICE_ENABLE_INDEPENDENCE_TEST=true to enable)\n");
     }
 
     // =========================================================================
     // Phase 8-9: Service Mesh Tests (Optional, run in parallel)
     // =========================================================================
-    if workload_provider == InfraProvider::Docker && mesh_test_enabled() {
+    if mesh_test_enabled() {
         println!("\n[Phase 8-9] Running mesh tests in parallel...\n");
         let kubeconfig = workload_kubeconfig_path.clone();
         let kubeconfig2 = workload_kubeconfig_path.clone();
@@ -639,12 +633,10 @@ async fn run_provider_e2e(
 
         result1?;
         result2?;
-    } else if workload_provider == InfraProvider::Docker {
+    } else {
         println!(
             "\n[Phase 8-9] Skipping mesh tests (set LATTICE_ENABLE_MESH_TEST=true to enable)\n"
         );
-    } else {
-        println!("\n[Phase 8-9] Skipping mesh tests for cloud provider\n");
     }
 
     println!("\n################################################################");

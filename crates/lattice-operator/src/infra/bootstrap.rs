@@ -38,7 +38,7 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     }
 
     // CAPI providers
-    if let Ok(capi) = generate_capi(&config.provider, &config.bootstrap) {
+    if let Ok(capi) = generate_capi(&config.provider) {
         debug!(count = capi.len(), "generated CAPI manifests");
         manifests.extend(capi);
     } else {
@@ -82,12 +82,14 @@ pub fn generate_certmanager() -> Result<Vec<String>, String> {
 
     let yaml = String::from_utf8_lossy(&output.stdout);
     let mut manifests = vec![namespace_yaml("cert-manager")];
-    manifests.extend(split_yaml(&yaml));
+    for m in split_yaml(&yaml) {
+        manifests.push(inject_namespace(&m, "cert-manager"));
+    }
     Ok(manifests)
 }
 
 /// Generate CAPI provider manifests
-pub fn generate_capi(provider: &str, _bootstrap: &BootstrapProvider) -> Result<Vec<String>, String> {
+pub fn generate_capi(provider: &str) -> Result<Vec<String>, String> {
     let infra = match provider.to_lowercase().as_str() {
         "docker" => "docker",
         "proxmox" => "proxmox",
@@ -144,61 +146,51 @@ pub fn generate_istio(skip_cilium_policies: bool) -> Vec<String> {
 
 /// Generate Flux manifests including allow policy
 pub fn generate_flux() -> Vec<String> {
-    let mut manifests = match FluxReconciler::new() {
-        Ok(r) => r.manifests().to_vec(),
-        Err(e) => {
-            warn!(error = %e, "failed to create Flux reconciler");
-            vec![]
+    let mut manifests = vec![namespace_yaml("flux-system")];
+
+    match FluxReconciler::new() {
+        Ok(r) => {
+            for m in r.manifests() {
+                manifests.push(inject_namespace(m, "flux-system"));
+            }
         }
+        Err(e) => warn!(error = %e, "failed to create Flux reconciler"),
     };
-    // Add Istio allow policy for Flux
-    manifests.push(generate_flux_allow_policy());
+    manifests.push(allow_all_policy("flux", "flux-system"));
     manifests
 }
 
 /// Generate kgateway manifests including allow policy
 pub fn generate_kgateway() -> Vec<String> {
+    let mut manifests = vec![namespace_yaml("kgateway-system")];
+
     let reconciler = KgatewayReconciler::new();
-    let mut manifests = match reconciler.manifests() {
-        Ok(m) => m.to_vec(),
-        Err(e) => {
-            warn!(error = %e, "failed to generate kgateway manifests");
-            vec![]
+    match reconciler.manifests() {
+        Ok(m) => {
+            for manifest in m {
+                manifests.push(inject_namespace(manifest, "kgateway-system"));
+            }
         }
+        Err(e) => warn!(error = %e, "failed to generate kgateway manifests"),
     };
-    // Add Istio allow policy for kgateway
-    manifests.push(generate_kgateway_allow_policy());
+    manifests.push(allow_all_policy("kgateway", "kgateway-system"));
     manifests
 }
 
-fn generate_flux_allow_policy() -> String {
-    r#"apiVersion: security.istio.io/v1
+fn allow_all_policy(name: &str, namespace: &str) -> String {
+    format!(
+        r#"apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
-  name: flux-allow-all
-  namespace: flux-system
+  name: {name}-allow-all
+  namespace: {namespace}
   labels:
     app.kubernetes.io/managed-by: lattice
 spec:
   action: ALLOW
   rules:
-  - {}"#
-        .to_string()
-}
-
-fn generate_kgateway_allow_policy() -> String {
-    r#"apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: kgateway-allow-all
-  namespace: kgateway-system
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  action: ALLOW
-  rules:
-  - {}"#
-        .to_string()
+  - {{}}"#
+    )
 }
 
 // Helpers
@@ -241,6 +233,66 @@ fn split_yaml(yaml: &str) -> Vec<String> {
         .collect()
 }
 
+/// Inject namespace into a manifest if it doesn't have one and is a namespaced resource
+fn inject_namespace(manifest: &str, namespace: &str) -> String {
+    if is_cluster_scoped(manifest) {
+        return manifest.to_string();
+    }
+
+    // Check if namespace already exists (skip helm templates with {{ }})
+    if manifest.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("namespace:") && !trimmed.contains("{{")
+    }) {
+        return manifest.to_string();
+    }
+
+    // Inject namespace after "metadata:"
+    let mut result = String::new();
+    let mut injected = false;
+
+    for line in manifest.lines() {
+        result.push_str(line);
+        result.push('\n');
+
+        if !injected && line.trim() == "metadata:" {
+            injected = true;
+            result.push_str(&format!("  namespace: {}\n", namespace));
+        }
+    }
+
+    result
+}
+
+const CLUSTER_SCOPED_KINDS: &[&str] = &[
+    "Namespace",
+    "CustomResourceDefinition",
+    "ClusterRole",
+    "ClusterRoleBinding",
+    "PriorityClass",
+    "StorageClass",
+    "PersistentVolume",
+    "Node",
+    "APIService",
+    "ValidatingWebhookConfiguration",
+    "MutatingWebhookConfiguration",
+    "GatewayClass",
+];
+
+fn is_cluster_scoped(manifest: &str) -> bool {
+    let kind = extract_kind(manifest);
+    CLUSTER_SCOPED_KINDS.contains(&kind)
+}
+
+fn extract_kind(manifest: &str) -> &str {
+    manifest
+        .lines()
+        .find(|line| line.starts_with("kind:"))
+        .and_then(|line| line.strip_prefix("kind:"))
+        .map(|k| k.trim())
+        .unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +309,37 @@ mod tests {
         let ns = namespace_yaml("test");
         assert!(ns.contains("kind: Namespace"));
         assert!(ns.contains("name: test"));
+    }
+
+    #[test]
+    fn test_inject_namespace_adds_to_namespaced_resource() {
+        let manifest = "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: test-sa";
+        let result = inject_namespace(manifest, "my-namespace");
+        assert!(result.contains("namespace: my-namespace"));
+    }
+
+    #[test]
+    fn test_inject_namespace_preserves_existing() {
+        let manifest =
+            "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: test-sa\n  namespace: existing";
+        let result = inject_namespace(manifest, "my-namespace");
+        assert!(result.contains("namespace: existing"));
+        assert!(!result.contains("namespace: my-namespace"));
+    }
+
+    #[test]
+    fn test_inject_namespace_skips_cluster_scoped() {
+        let manifest = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: test-ns";
+        let result = inject_namespace(manifest, "my-namespace");
+        assert!(!result.contains("namespace: my-namespace"));
+    }
+
+    #[test]
+    fn test_is_cluster_scoped() {
+        assert!(is_cluster_scoped("kind: Namespace\nmetadata:\n  name: test"));
+        assert!(is_cluster_scoped("kind: ClusterRole\nmetadata:\n  name: test"));
+        assert!(is_cluster_scoped("kind: CustomResourceDefinition\nmetadata:\n  name: test"));
+        assert!(!is_cluster_scoped("kind: ServiceAccount\nmetadata:\n  name: test"));
+        assert!(!is_cluster_scoped("kind: Deployment\nmetadata:\n  name: test"));
     }
 }

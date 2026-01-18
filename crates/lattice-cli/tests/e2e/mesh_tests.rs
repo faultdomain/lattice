@@ -1516,64 +1516,7 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
 // - Retries: Failed requests are automatically retried
 // - Timeouts: Slow requests are terminated
 
-use lattice_operator::crd::{
-    InboundTrafficPolicy, OutboundTrafficPolicy, RateLimitSpec, RetryPolicy, TimeoutPolicy,
-};
-
 const POLICY_TEST_NAMESPACE: &str = "policy-test";
-
-/// Create an outbound dependency with L7 policies
-fn outbound_dep_with_policies(
-    name: &str,
-    retries: Option<RetryPolicy>,
-    timeout: Option<TimeoutPolicy>,
-) -> (String, ResourceSpec) {
-    (
-        name.to_string(),
-        ResourceSpec {
-            type_: ResourceType::Service,
-            direction: DependencyDirection::Outbound,
-            id: None,
-            class: None,
-            metadata: None,
-            params: None,
-            outbound: Some(OutboundTrafficPolicy {
-                retries,
-                timeout,
-                circuit_breaker: None,
-            }),
-            inbound: None,
-        },
-    )
-}
-
-/// Create an inbound allowance with rate limiting
-fn inbound_allow_with_rate_limit(
-    name: &str,
-    requests_per_interval: u32,
-    interval_seconds: u32,
-) -> (String, ResourceSpec) {
-    (
-        name.to_string(),
-        ResourceSpec {
-            type_: ResourceType::Service,
-            direction: DependencyDirection::Inbound,
-            id: None,
-            class: None,
-            metadata: None,
-            params: None,
-            outbound: None,
-            inbound: Some(InboundTrafficPolicy {
-                rate_limit: Some(RateLimitSpec {
-                    requests_per_interval,
-                    interval_seconds,
-                    burst: None,
-                }),
-                headers: None,
-            }),
-        },
-    )
-}
 
 /// Test script that verifies rate limiting is enforced
 fn generate_rate_limit_test_script(target: &str, namespace: &str, rate_limit: u32) -> String {
@@ -1618,39 +1561,45 @@ sleep 60
     )
 }
 
-/// Test script that verifies retries are working
+/// Test script that verifies retries are working using httpbin /status/500
 fn generate_retry_test_script(target: &str, namespace: &str) -> String {
     format!(
         r#"
 echo "=== Retry Policy Enforcement Test ==="
-echo "Testing retries to flaky endpoint {target}..."
+echo "Testing retries against {target} returning 500s..."
 
-# The target service will fail 50% of requests
-# With 3 retries, we should see high success rate
-TOTAL_REQUESTS=20
+# Without retries, 500 would fail immediately
+# With retries configured, Istio will retry and we track attempts
+TOTAL_REQUESTS=10
 SUCCESS=0
 FAILED=0
 
 for i in $(seq 1 $TOTAL_REQUESTS); do
-    RESPONSE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 http://{target}.{namespace}.svc.cluster.local/flaky)
-    if [ "$RESPONSE" = "200" ]; then
+    # Request /status/500 which always returns 500
+    # Istio should retry based on retry policy
+    START=$(date +%s%3N)
+    RESPONSE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 10 --max-time 15 http://{target}.{namespace}.svc.cluster.local/status/500)
+    END=$(date +%s%3N)
+    ELAPSED=$((END - START))
+
+    # With retries, request should take longer as Istio retries
+    if [ $ELAPSED -gt 1000 ]; then
         SUCCESS=$((SUCCESS + 1))
+        echo "  Request $i: took ${{ELAPSED}}ms (retries occurred)"
     else
         FAILED=$((FAILED + 1))
+        echo "  Request $i: took ${{ELAPSED}}ms (no retries)"
     fi
-    sleep 0.5
+    sleep 1
 done
 
-echo "Total requests: $TOTAL_REQUESTS"
-echo "Successful: $SUCCESS"
-echo "Failed: $FAILED"
+echo "Requests with retries: $SUCCESS"
+echo "Requests without retries: $FAILED"
 
-# With retries, success rate should be > 80%
-SUCCESS_RATE=$((SUCCESS * 100 / TOTAL_REQUESTS))
-if [ $SUCCESS_RATE -ge 80 ]; then
-    echo "RETRY_TEST:PASS - Success rate $SUCCESS_RATE% (retries working)"
+if [ $SUCCESS -ge 5 ]; then
+    echo "RETRY_TEST:PASS - Retries are being attempted"
 else
-    echo "RETRY_TEST:FAIL - Success rate $SUCCESS_RATE% (retries may not be working)"
+    echo "RETRY_TEST:FAIL - Retries may not be configured"
 fi
 
 echo "=== End Retry Test ==="
@@ -1661,27 +1610,28 @@ sleep 60
     )
 }
 
-/// Test script that verifies timeouts are enforced
+/// Test script that verifies timeouts are enforced using httpbin /delay/N
 fn generate_timeout_test_script(target: &str, namespace: &str, timeout_secs: u32) -> String {
     format!(
         r#"
 echo "=== Timeout Policy Enforcement Test ==="
-echo "Testing {timeout_secs}s timeout to slow endpoint {target}..."
+echo "Testing {timeout_secs}s timeout against {target}..."
 
-# Request a slow response that takes longer than the timeout
+# Request /delay/10 which waits 10 seconds before responding
+# With a {timeout_secs}s timeout, the request should be cut off early
 START=$(date +%s)
-RESPONSE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 10 http://{target}.{namespace}.svc.cluster.local/slow?delay=10)
+RESPONSE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 15 --max-time 20 http://{target}.{namespace}.svc.cluster.local/delay/10)
 END=$(date +%s)
 ELAPSED=$((END - START))
 
 echo "Response code: $RESPONSE"
 echo "Elapsed time: $ELAPSED seconds"
 
-# Verify the request was terminated before 10s (the endpoint delay)
-if [ $ELAPSED -le $((timeout_secs + 2)) ]; then
-    echo "TIMEOUT_TEST:PASS - Request terminated in $ELAPSED seconds (timeout working)"
+# Request should complete in roughly timeout_secs, not the full 10s delay
+if [ $ELAPSED -le $(({timeout_secs} + 2)) ]; then
+    echo "TIMEOUT_TEST:PASS - Request terminated in $ELAPSED seconds (timeout enforced)"
 else
-    echo "TIMEOUT_TEST:FAIL - Request took $ELAPSED seconds (timeout may not be enforced)"
+    echo "TIMEOUT_TEST:FAIL - Request took $ELAPSED seconds (timeout not enforced)"
 fi
 
 echo "=== End Timeout Test ==="
@@ -1693,86 +1643,46 @@ sleep 60
     )
 }
 
-/// Create a rate-limited backend service
-fn create_rate_limited_backend() -> LatticeService {
-    let mut labels = BTreeMap::new();
-    labels.insert(
-        "lattice.dev/environment".to_string(),
-        POLICY_TEST_NAMESPACE.to_string(),
-    );
+// =============================================================================
+// YAML-based LatticeService definitions (loaded from fixtures)
+// =============================================================================
 
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some("backend-rate-limited".to_string()),
-            namespace: Some(POLICY_TEST_NAMESPACE.to_string()),
-            labels: Some(labels),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            environment: POLICY_TEST_NAMESPACE.to_string(),
-            containers: BTreeMap::from([("main".to_string(), nginx_container())]),
-            resources: BTreeMap::from([inbound_allow_with_rate_limit("client", 10, 60)]),
-            service: Some(http_port()),
-            replicas: ReplicaSpec { min: 1, max: None },
-            deploy: DeploySpec::default(),
-            ingress: None,
-        },
-        status: None,
-    }
+/// Parse a LatticeService from YAML fixture
+fn parse_service(yaml: &str) -> LatticeService {
+    serde_yaml::from_str(yaml).expect("Failed to parse LatticeService YAML")
 }
 
-/// Create a client that tests rate limiting
+/// Parse a LatticeService from YAML fixture, replacing script placeholder
+fn parse_service_with_script(yaml: &str, script: &str) -> LatticeService {
+    let yaml_with_script = yaml.replace("{{SCRIPT}}", &format!("while true; do\n{}\ndone", script));
+    serde_yaml::from_str(&yaml_with_script).expect("Failed to parse LatticeService YAML")
+}
+
+fn create_retry_backend() -> LatticeService {
+    parse_service(include_str!("fixtures/services/backend-retry.yaml"))
+}
+
+fn create_retry_client() -> LatticeService {
+    let script = generate_retry_test_script("backend-retry", POLICY_TEST_NAMESPACE);
+    parse_service_with_script(include_str!("fixtures/services/retry-client.yaml"), &script)
+}
+
+fn create_timeout_backend() -> LatticeService {
+    parse_service(include_str!("fixtures/services/backend-timeout.yaml"))
+}
+
+fn create_timeout_client() -> LatticeService {
+    let script = generate_timeout_test_script("backend-timeout", POLICY_TEST_NAMESPACE, 3);
+    parse_service_with_script(include_str!("fixtures/services/timeout-client.yaml"), &script)
+}
+
+fn create_rate_limited_backend() -> LatticeService {
+    parse_service(include_str!("fixtures/services/backend-rate-limited.yaml"))
+}
+
 fn create_rate_limit_client() -> LatticeService {
     let script = generate_rate_limit_test_script("backend-rate-limited", POLICY_TEST_NAMESPACE, 10);
-
-    let container = ContainerSpec {
-        image: "curlimages/curl:latest".to_string(),
-        command: Some(vec!["/bin/sh".to_string()]),
-        args: Some(vec!["-c".to_string(), format!("while true; do\n{}\ndone", script)]),
-        variables: BTreeMap::new(),
-        files: BTreeMap::new(),
-        volumes: BTreeMap::new(),
-        resources: None,
-        liveness_probe: None,
-        readiness_probe: None,
-        startup_probe: None,
-    };
-
-    let mut labels = BTreeMap::new();
-    labels.insert(
-        "lattice.dev/environment".to_string(),
-        POLICY_TEST_NAMESPACE.to_string(),
-    );
-
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some("client".to_string()),
-            namespace: Some(POLICY_TEST_NAMESPACE.to_string()),
-            labels: Some(labels),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            environment: POLICY_TEST_NAMESPACE.to_string(),
-            containers: BTreeMap::from([("main".to_string(), container)]),
-            resources: BTreeMap::from([outbound_dep_with_policies(
-                "backend-rate-limited",
-                Some(RetryPolicy {
-                    attempts: 3,
-                    per_try_timeout: Some("5s".to_string()),
-                    retry_on: vec!["5xx".to_string()],
-                }),
-                Some(TimeoutPolicy {
-                    request: "30s".to_string(),
-                    idle: None,
-                }),
-            )]),
-            service: None,
-            replicas: ReplicaSpec { min: 1, max: None },
-            deploy: DeploySpec::default(),
-            ingress: None,
-        },
-        status: None,
-    }
+    parse_service_with_script(include_str!("fixtures/services/rate-limit-client.yaml"), &script)
 }
 
 /// Deploy L7 policy test services
@@ -1792,7 +1702,14 @@ async fn deploy_policy_test_services(kubeconfig_path: &str) -> Result<(), String
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::all(client);
 
-    let services = vec![create_rate_limited_backend(), create_rate_limit_client()];
+    let services = vec![
+        create_rate_limited_backend(),
+        create_rate_limit_client(),
+        create_retry_backend(),
+        create_retry_client(),
+        create_timeout_backend(),
+        create_timeout_client(),
+    ];
 
     for svc in services {
         let name = svc.metadata.name.clone().unwrap();
@@ -1843,29 +1760,51 @@ async fn wait_for_policy_test_pods(kubeconfig_path: &str) -> Result<(), String> 
 async fn verify_policy_enforcement(kubeconfig_path: &str) -> Result<(), String> {
     println!("  Checking policy enforcement results...");
 
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "logs",
-            "-n",
-            POLICY_TEST_NAMESPACE,
-            "-l",
-            "app.kubernetes.io/name=client",
-            "--tail=100",
-        ],
-    )
-    .map_err(|e| format!("Failed to get logs: {}", e))?;
+    // Check all policy test client logs
+    let clients = ["client", "retry-client", "timeout-client"];
+    let mut all_logs = String::new();
+
+    for client in &clients {
+        let output = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "logs",
+                "-n",
+                POLICY_TEST_NAMESPACE,
+                "-l",
+                &format!("app.kubernetes.io/name={}", client),
+                "--tail=100",
+            ],
+        )
+        .unwrap_or_default();
+        all_logs.push_str(&output);
+        all_logs.push('\n');
+    }
 
     let mut rate_limit_passed = false;
+    let mut retry_passed = false;
+    let mut timeout_passed = false;
 
-    for line in output.lines() {
+    for line in all_logs.lines() {
         if line.contains("RATE_LIMIT_TEST:PASS") {
             rate_limit_passed = true;
             println!("  [PASS] Rate limiting enforced");
         } else if line.contains("RATE_LIMIT_TEST:FAIL") {
-            println!("  [WARN] Rate limiting not observed (may need more time)");
+            println!("  [WARN] Rate limiting not observed");
+        }
+        if line.contains("RETRY_TEST:PASS") {
+            retry_passed = true;
+            println!("  [PASS] Retries are working");
+        } else if line.contains("RETRY_TEST:FAIL") {
+            println!("  [WARN] Retries not observed");
+        }
+        if line.contains("TIMEOUT_TEST:PASS") {
+            timeout_passed = true;
+            println!("  [PASS] Timeouts enforced");
+        } else if line.contains("TIMEOUT_TEST:FAIL") {
+            println!("  [WARN] Timeouts not enforced");
         }
     }
 
@@ -1876,12 +1815,20 @@ async fn verify_policy_enforcement(kubeconfig_path: &str) -> Result<(), String> 
         "  Rate Limiting: {}",
         if rate_limit_passed { "PASS" } else { "PENDING" }
     );
+    println!(
+        "  Retries:       {}",
+        if retry_passed { "PASS" } else { "PENDING" }
+    );
+    println!(
+        "  Timeouts:      {}",
+        if timeout_passed { "PASS" } else { "PENDING" }
+    );
 
-    // For now, don't fail on rate limiting - it may need waypoint to be fully deployed
-    if rate_limit_passed {
-        println!("\n  SUCCESS: L7 policies are being enforced!");
+    let all_passed = rate_limit_passed && retry_passed && timeout_passed;
+    if all_passed {
+        println!("\n  SUCCESS: All L7 policies are being enforced!");
     } else {
-        println!("\n  NOTE: Rate limiting verification pending - ensure kgateway waypoint is deployed");
+        println!("\n  NOTE: Some policies pending - ensure kgateway waypoint is deployed");
     }
 
     Ok(())

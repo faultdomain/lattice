@@ -294,6 +294,79 @@ pub fn extract_docker_cluster_kubeconfig(
     Ok(())
 }
 
+/// Extract kubeconfig from CAPI Secret for cloud providers
+///
+/// CAPI stores the kubeconfig in a Secret named `{cluster-name}-kubeconfig`
+/// in the cluster's namespace (capi-{cluster-name}).
+///
+/// Includes retries since the secret may not be immediately available after
+/// cluster status reaches Ready.
+#[cfg(feature = "provider-e2e")]
+pub async fn extract_capi_kubeconfig(
+    mgmt_kubeconfig: &str,
+    cluster_name: &str,
+    output_path: &str,
+) -> Result<(), String> {
+    use base64::Engine;
+
+    let namespace = format!("capi-{}", cluster_name);
+    let secret_name = format!("{}-kubeconfig", cluster_name);
+
+    // Retry getting the secret - it may not exist immediately after Ready status
+    let max_retries = 30;
+    let mut last_error = String::new();
+
+    for attempt in 1..=max_retries {
+        let result = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                mgmt_kubeconfig,
+                "get",
+                "secret",
+                &secret_name,
+                "-n",
+                &namespace,
+                "-o",
+                "jsonpath={.data.value}",
+            ],
+        );
+
+        match result {
+            Ok(output) if !output.trim().is_empty() => {
+                // Decode base64
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(output.trim())
+                    .map_err(|e| format!("Failed to decode kubeconfig: {}", e))?;
+
+                let kubeconfig = String::from_utf8(decoded)
+                    .map_err(|e| format!("Kubeconfig is not valid UTF-8: {}", e))?;
+
+                std::fs::write(output_path, &kubeconfig)
+                    .map_err(|e| format!("Failed to write kubeconfig to {}: {}", output_path, e))?;
+
+                return Ok(());
+            }
+            Ok(_) => {
+                last_error = format!("Kubeconfig secret {}/{} is empty", namespace, secret_name);
+            }
+            Err(e) => {
+                last_error = e;
+            }
+        }
+
+        if attempt < max_retries {
+            println!(
+                "  Waiting for kubeconfig secret (attempt {}/{})...",
+                attempt, max_retries
+            );
+            sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    Err(last_error)
+}
+
 // =============================================================================
 // Cluster Status Watching
 // =============================================================================
@@ -435,10 +508,7 @@ pub async fn watch_worker_scaling(
 ///
 /// Checks that control-plane nodes have the NoSchedule taint.
 #[cfg(feature = "provider-e2e")]
-pub async fn verify_control_plane_taints(
-    kubeconfig_path: &str,
-    _bootstrap: &BootstrapProvider,
-) -> Result<(), String> {
+pub async fn verify_control_plane_taints(kubeconfig_path: &str) -> Result<(), String> {
     println!("  Verifying control-plane taints are restored...");
 
     let start = std::time::Instant::now();
