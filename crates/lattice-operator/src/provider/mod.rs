@@ -574,7 +574,7 @@ fn generate_kubeadm_control_plane(
         // See: https://github.com/kube-vip/kube-vip/issues/741
         let interface = &vip.interface;
         kubeadm_config_spec["preKubeadmCommands"] = serde_json::json!([format!(
-            r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{{{print $4}}}}' | cut -d/ -f1 | head -1) && echo "KUBELET_EXTRA_ARGS=\"$KUBELET_EXTRA_ARGS --node-ip=$NODE_IP\"" >> /etc/default/kubelet"#,
+            r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{print $4}}' | cut -d/ -f1 | head -1) && echo "KUBELET_EXTRA_ARGS=\"--node-ip=$NODE_IP\"" > /etc/default/kubelet"#,
             iface = interface
         )]);
     }

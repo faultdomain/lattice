@@ -236,6 +236,7 @@ mod tests {
                     kind: None,
                 }),
             }),
+            rate_limit: None,
             gateway_class: None,
         });
         service
@@ -257,6 +258,8 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    outbound: None,
+                    inbound: None,
                 },
             );
         }
@@ -270,6 +273,8 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    outbound: None,
+                    inbound: None,
                 },
             );
         }

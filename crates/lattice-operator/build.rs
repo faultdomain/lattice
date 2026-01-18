@@ -11,6 +11,7 @@ struct Versions {
     ipam_in_cluster: String,
     cilium: String,
     istio: String,
+    kgateway: String,
     cert_manager: String,
     flux: String,
 }
@@ -32,6 +33,7 @@ fn load_versions() -> Versions {
         ipam_in_cluster: String::new(),
         cilium: String::new(),
         istio: String::new(),
+        kgateway: String::new(),
         cert_manager: String::new(),
         flux: String::new(),
     };
@@ -53,6 +55,7 @@ fn load_versions() -> Versions {
                 ("ipam-in-cluster", "version") => versions.ipam_in_cluster = value.to_string(),
                 ("charts", "cilium") => versions.cilium = value.to_string(),
                 ("charts", "istio") => versions.istio = value.to_string(),
+                ("charts", "kgateway") => versions.kgateway = value.to_string(),
                 ("charts", "cert-manager") => versions.cert_manager = value.to_string(),
                 ("charts", "flux") => versions.flux = value.to_string(),
                 _ => {}
@@ -86,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("cargo:rustc-env=CILIUM_VERSION={}", versions.cilium);
     println!("cargo:rustc-env=ISTIO_VERSION={}", versions.istio);
+    println!("cargo:rustc-env=KGATEWAY_VERSION={}", versions.kgateway);
     println!("cargo:rustc-env=CAPI_VERSION={}", versions.capi);
     println!("cargo:rustc-env=RKE2_VERSION={}", versions.rke2);
     println!("cargo:rustc-env=FLUX_VERSION={}", versions.flux);
@@ -119,18 +123,26 @@ fn download_helm_charts(
     let istiod_chart = charts_dir.join(format!("istiod-{}.tgz", versions.istio));
     let cni_chart = charts_dir.join(format!("cni-{}.tgz", versions.istio));
     let ztunnel_chart = charts_dir.join(format!("ztunnel-{}.tgz", versions.istio));
+    let kgateway_crds_chart = charts_dir.join(format!("kgateway-crds-v{}.tgz", versions.kgateway));
+    let kgateway_chart = charts_dir.join(format!("kgateway-v{}.tgz", versions.kgateway));
     let cert_manager_chart =
         charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
     let flux_chart = charts_dir.join(format!("flux2-{}.tgz", versions.flux));
 
     // Tell cargo to re-run if any chart is missing or changes
-    println!("cargo:rerun-if-changed={}", cilium_chart.display());
-    println!("cargo:rerun-if-changed={}", base_chart.display());
-    println!("cargo:rerun-if-changed={}", istiod_chart.display());
-    println!("cargo:rerun-if-changed={}", cni_chart.display());
-    println!("cargo:rerun-if-changed={}", ztunnel_chart.display());
-    println!("cargo:rerun-if-changed={}", cert_manager_chart.display());
-    println!("cargo:rerun-if-changed={}", flux_chart.display());
+    for chart in [
+        &cilium_chart,
+        &base_chart,
+        &istiod_chart,
+        &cni_chart,
+        &ztunnel_chart,
+        &kgateway_crds_chart,
+        &kgateway_chart,
+        &cert_manager_chart,
+        &flux_chart,
+    ] {
+        println!("cargo:rerun-if-changed={}", chart.display());
+    }
 
     let all_charts = [
         &cilium_chart,
@@ -138,6 +150,8 @@ fn download_helm_charts(
         &istiod_chart,
         &cni_chart,
         &ztunnel_chart,
+        &kgateway_crds_chart,
+        &kgateway_chart,
         &cert_manager_chart,
         &flux_chart,
     ];
@@ -153,119 +167,61 @@ fn download_helm_charts(
 
     std::fs::create_dir_all(charts_dir)?;
 
-    let _ = Command::new("helm")
-        .args(["repo", "add", "cilium", "https://helm.cilium.io/"])
-        .output();
-    let _ = Command::new("helm")
-        .args([
-            "repo",
-            "add",
-            "istio",
-            "https://istio-release.storage.googleapis.com/charts",
-        ])
-        .output();
-    let _ = Command::new("helm")
-        .args(["repo", "add", "jetstack", "https://charts.jetstack.io"])
-        .output();
-    let _ = Command::new("helm")
-        .args([
-            "repo",
-            "add",
-            "fluxcd-community",
-            "https://fluxcd-community.github.io/helm-charts",
-        ])
-        .output();
+    // Add helm repos
+    let repos = [
+        ("cilium", "https://helm.cilium.io/"),
+        ("istio", "https://istio-release.storage.googleapis.com/charts"),
+        ("jetstack", "https://charts.jetstack.io"),
+        ("fluxcd-community", "https://fluxcd-community.github.io/helm-charts"),
+    ];
+    for (name, url) in repos {
+        let _ = Command::new("helm").args(["repo", "add", name, url]).output();
+    }
     let _ = Command::new("helm").args(["repo", "update"]).output();
 
-    if !cilium_chart.exists() {
-        eprintln!("Downloading Cilium chart v{}...", versions.cilium);
+    // Download charts
+    let charts = [
+        (&cilium_chart, "cilium/cilium", &versions.cilium, "Cilium"),
+        (&base_chart, "istio/base", &versions.istio, "Istio base"),
+        (&istiod_chart, "istio/istiod", &versions.istio, "Istio istiod"),
+        (&cni_chart, "istio/cni", &versions.istio, "Istio CNI"),
+        (&ztunnel_chart, "istio/ztunnel", &versions.istio, "Istio ztunnel"),
+        (&cert_manager_chart, "jetstack/cert-manager", &versions.cert_manager, "cert-manager"),
+        (&flux_chart, "fluxcd-community/flux2", &versions.flux, "Flux"),
+    ];
+
+    for (path, chart, version, name) in charts {
+        if !path.exists() {
+            eprintln!("Downloading {} chart v{}...", name, version);
+            let _ = Command::new("helm")
+                .args(["pull", chart, "--version", version, "--destination"])
+                .arg(charts_dir)
+                .status();
+        }
+    }
+
+    // kgateway uses OCI registry, not helm repo
+    if !kgateway_crds_chart.exists() {
+        eprintln!("Downloading kgateway-crds chart v{}...", versions.kgateway);
         let _ = Command::new("helm")
             .args([
                 "pull",
-                "cilium/cilium",
+                &format!("oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds"),
                 "--version",
-                &versions.cilium,
+                &format!("v{}", versions.kgateway),
                 "--destination",
             ])
             .arg(charts_dir)
             .status();
     }
-    if !base_chart.exists() {
-        eprintln!("Downloading Istio base chart v{}...", versions.istio);
+    if !kgateway_chart.exists() {
+        eprintln!("Downloading kgateway chart v{}...", versions.kgateway);
         let _ = Command::new("helm")
             .args([
                 "pull",
-                "istio/base",
+                &format!("oci://cr.kgateway.dev/kgateway-dev/charts/kgateway"),
                 "--version",
-                &versions.istio,
-                "--destination",
-            ])
-            .arg(charts_dir)
-            .status();
-    }
-    if !istiod_chart.exists() {
-        eprintln!("Downloading Istio istiod chart v{}...", versions.istio);
-        let _ = Command::new("helm")
-            .args([
-                "pull",
-                "istio/istiod",
-                "--version",
-                &versions.istio,
-                "--destination",
-            ])
-            .arg(charts_dir)
-            .status();
-    }
-    if !cni_chart.exists() {
-        eprintln!("Downloading Istio CNI chart v{}...", versions.istio);
-        let _ = Command::new("helm")
-            .args([
-                "pull",
-                "istio/cni",
-                "--version",
-                &versions.istio,
-                "--destination",
-            ])
-            .arg(charts_dir)
-            .status();
-    }
-    if !ztunnel_chart.exists() {
-        eprintln!("Downloading Istio ztunnel chart v{}...", versions.istio);
-        let _ = Command::new("helm")
-            .args([
-                "pull",
-                "istio/ztunnel",
-                "--version",
-                &versions.istio,
-                "--destination",
-            ])
-            .arg(charts_dir)
-            .status();
-    }
-    if !cert_manager_chart.exists() {
-        eprintln!(
-            "Downloading cert-manager chart v{}...",
-            versions.cert_manager
-        );
-        let _ = Command::new("helm")
-            .args([
-                "pull",
-                "jetstack/cert-manager",
-                "--version",
-                &versions.cert_manager,
-                "--destination",
-            ])
-            .arg(charts_dir)
-            .status();
-    }
-    if !flux_chart.exists() {
-        eprintln!("Downloading Flux chart v{}...", versions.flux);
-        let _ = Command::new("helm")
-            .args([
-                "pull",
-                "fluxcd-community/flux2",
-                "--version",
-                &versions.flux,
+                &format!("v{}", versions.kgateway),
                 "--destination",
             ])
             .arg(charts_dir)

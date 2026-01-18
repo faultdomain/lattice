@@ -794,10 +794,10 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Compile an AuthorizationPolicy to allow the Istio ingress gateway to reach a service
+    /// Compile an AuthorizationPolicy to allow kgateway to reach a service
     ///
     /// This policy is generated for services with ingress configuration. It allows
-    /// the gateway service account to bypass the normal bilateral agreement requirements
+    /// the kgateway service account to bypass the normal bilateral agreement requirements
     /// for north-south (external) traffic.
     ///
     /// # Arguments
@@ -806,23 +806,22 @@ impl<'a> PolicyCompiler<'a> {
     /// * `ports` - List of ports the service exposes
     ///
     /// # Returns
-    /// An AuthorizationPolicy allowing the ingress gateway to access the service
+    /// An AuthorizationPolicy allowing kgateway to access the service
     pub fn compile_gateway_allow_policy(
         &self,
         service_name: &str,
         namespace: &str,
         ports: &[u16],
     ) -> AuthorizationPolicy {
-        // The Istio ingress gateway typically runs in istio-system with the
-        // service account name "istio-ingressgateway"
+        // kgateway runs in kgateway-system namespace
         let gateway_principal = format!(
-            "spiffe://{}/ns/istio-system/sa/istio-ingressgateway",
+            "spiffe://{}/ns/kgateway-system/sa/kgateway",
             self.trust_domain
         );
 
-        // Also allow from the gateway's namespace waypoint if using Ambient mode
-        let gateway_waypoint_principal = format!(
-            "spiffe://{}/ns/istio-system/sa/istio-system-waypoint",
+        // kgateway-waypoint for east-west L7 traffic
+        let waypoint_principal = format!(
+            "spiffe://{}/ns/kgateway-system/sa/kgateway-waypoint",
             self.trust_domain
         );
 
@@ -843,7 +842,7 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![gateway_principal, gateway_waypoint_principal],
+                            principals: vec![gateway_principal, waypoint_principal],
                         },
                     }],
                     to: if port_strings.is_empty() {
@@ -951,6 +950,8 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    outbound: None,
+                    inbound: None,
                 },
             );
         }
@@ -964,6 +965,8 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    outbound: None,
+                    inbound: None,
                 },
             );
         }
@@ -1594,12 +1597,20 @@ mod tests {
         assert_eq!(policy.metadata.namespace, "prod-ns");
         assert_eq!(policy.spec.action, "ALLOW");
 
-        // Should have the ingress gateway principal
+        // Should have the kgateway principals (both ingress and waypoint)
         let principals = &policy.spec.rules[0].from[0].source.principals;
-        assert!(principals
-            .iter()
-            .any(|p| p.contains("istio-ingressgateway")));
-        assert!(principals.iter().any(|p| p.contains("istio-system")));
+        assert!(
+            principals.iter().any(|p| p.contains("/sa/kgateway")),
+            "Should have kgateway principal"
+        );
+        assert!(
+            principals.iter().any(|p| p.contains("/sa/kgateway-waypoint")),
+            "Should have kgateway-waypoint principal"
+        );
+        assert!(
+            principals.iter().any(|p| p.contains("kgateway-system")),
+            "Should reference kgateway-system namespace"
+        );
 
         // Should have correct ports
         let ports = &policy.spec.rules[0].to[0].operation.ports;

@@ -32,7 +32,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use lattice_common::crd::{IngressPath, IngressSpec, IngressTls, PathMatchType, TlsMode};
+use lattice_common::crd::{
+    IngressPath, IngressSpec, IngressTls, PathMatchType, RateLimitSpec, TlsMode,
+};
 
 // =============================================================================
 // Gateway API Types
@@ -284,6 +286,75 @@ pub struct IssuerRef {
 }
 
 // =============================================================================
+// kgateway TrafficPolicy (for rate limiting)
+// =============================================================================
+
+/// kgateway TrafficPolicy resource for rate limiting and traffic control
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficPolicy {
+    /// API version
+    pub api_version: String,
+    /// Kind
+    pub kind: String,
+    /// Metadata
+    pub metadata: GatewayMetadata,
+    /// Spec
+    pub spec: TrafficPolicySpec,
+}
+
+/// TrafficPolicy spec
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficPolicySpec {
+    /// Target references (HTTPRoute or Service)
+    pub target_refs: Vec<PolicyTargetRef>,
+    /// Rate limit configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<PolicyRateLimit>,
+}
+
+/// Target reference for policy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyTargetRef {
+    /// Group
+    pub group: String,
+    /// Kind
+    pub kind: String,
+    /// Name
+    pub name: String,
+}
+
+/// Rate limit configuration in TrafficPolicy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyRateLimit {
+    /// Local rate limiting (in-proxy, no external service)
+    pub local: LocalRateLimit,
+}
+
+/// Local rate limit using token bucket
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRateLimit {
+    /// Token bucket configuration
+    pub token_bucket: TokenBucket,
+}
+
+/// Token bucket rate limiting configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenBucket {
+    /// Maximum tokens in bucket (burst capacity)
+    pub max_tokens: u32,
+    /// Tokens added per fill
+    pub tokens_per_fill: u32,
+    /// Fill interval (e.g., "60s")
+    pub fill_interval: String,
+}
+
+// =============================================================================
 // Generated Ingress Container
 // =============================================================================
 
@@ -296,6 +367,8 @@ pub struct GeneratedIngress {
     pub http_route: Option<HttpRoute>,
     /// cert-manager Certificate resource
     pub certificate: Option<Certificate>,
+    /// kgateway TrafficPolicy for rate limiting
+    pub traffic_policy: Option<TrafficPolicy>,
 }
 
 impl GeneratedIngress {
@@ -306,7 +379,10 @@ impl GeneratedIngress {
 
     /// Check if any resources were generated
     pub fn is_empty(&self) -> bool {
-        self.gateway.is_none() && self.http_route.is_none() && self.certificate.is_none()
+        self.gateway.is_none()
+            && self.http_route.is_none()
+            && self.certificate.is_none()
+            && self.traffic_policy.is_none()
     }
 
     /// Total count of all generated resources
@@ -315,6 +391,7 @@ impl GeneratedIngress {
             self.gateway.is_some(),
             self.http_route.is_some(),
             self.certificate.is_some(),
+            self.traffic_policy.is_some(),
         ]
         .iter()
         .filter(|&&x| x)
@@ -330,8 +407,8 @@ impl GeneratedIngress {
 pub struct IngressCompiler;
 
 impl IngressCompiler {
-    /// Default GatewayClass for Istio
-    const DEFAULT_GATEWAY_CLASS: &'static str = "istio";
+    /// Default GatewayClass for kgateway
+    const DEFAULT_GATEWAY_CLASS: &'static str = "kgateway";
 
     /// Compile ingress resources for a service
     ///
@@ -370,7 +447,48 @@ impl IngressCompiler {
             }
         }
 
+        // Compile TrafficPolicy if rate limiting is configured
+        if let Some(ref rate_limit) = ingress.rate_limit {
+            output.traffic_policy =
+                Some(Self::compile_traffic_policy(service_name, namespace, rate_limit));
+        }
+
         output
+    }
+
+    /// Compile a kgateway TrafficPolicy for rate limiting
+    fn compile_traffic_policy(
+        service_name: &str,
+        namespace: &str,
+        rate_limit: &RateLimitSpec,
+    ) -> TrafficPolicy {
+        let policy_name = format!("{}-rate-limit", service_name);
+        let route_name = format!("{}-route", service_name);
+
+        // Use burst if specified, otherwise default to requests_per_interval
+        let burst = rate_limit.burst.unwrap_or(rate_limit.requests_per_interval);
+
+        TrafficPolicy {
+            api_version: "gateway.kgateway.dev/v1alpha1".to_string(),
+            kind: "TrafficPolicy".to_string(),
+            metadata: GatewayMetadata::new(policy_name, namespace),
+            spec: TrafficPolicySpec {
+                target_refs: vec![PolicyTargetRef {
+                    group: "gateway.networking.k8s.io".to_string(),
+                    kind: "HTTPRoute".to_string(),
+                    name: route_name,
+                }],
+                rate_limit: Some(PolicyRateLimit {
+                    local: LocalRateLimit {
+                        token_bucket: TokenBucket {
+                            max_tokens: burst,
+                            tokens_per_fill: rate_limit.requests_per_interval,
+                            fill_interval: format!("{}s", rate_limit.interval_seconds),
+                        },
+                    },
+                }),
+            },
+        }
     }
 
     /// Compile a Gateway resource
@@ -564,6 +682,7 @@ mod tests {
             hosts: vec!["api.example.com".to_string()],
             paths: None,
             tls: None,
+            rate_limit: None,
             gateway_class: None,
         }
     }
@@ -580,6 +699,21 @@ mod tests {
                     kind: None,
                 }),
             }),
+            rate_limit: None,
+            gateway_class: None,
+        }
+    }
+
+    fn sample_ingress_with_rate_limit() -> IngressSpec {
+        IngressSpec {
+            hosts: vec!["api.example.com".to_string()],
+            paths: None,
+            tls: None,
+            rate_limit: Some(RateLimitSpec {
+                requests_per_interval: 100,
+                interval_seconds: 60,
+                burst: Some(150),
+            }),
             gateway_class: None,
         }
     }
@@ -595,7 +729,7 @@ mod tests {
 
         assert_eq!(gateway.metadata.name, "my-api-gateway");
         assert_eq!(gateway.metadata.namespace, "prod");
-        assert_eq!(gateway.spec.gateway_class_name, "istio");
+        assert_eq!(gateway.spec.gateway_class_name, "kgateway");
         assert_eq!(gateway.spec.listeners.len(), 1);
 
         let listener = &gateway.spec.listeners[0];
@@ -633,6 +767,7 @@ mod tests {
             hosts: vec!["api.example.com".to_string(), "api.example.org".to_string()],
             paths: None,
             tls: None,
+            rate_limit: None,
             gateway_class: None,
         };
         let gateway = IngressCompiler::compile_gateway("my-api", "prod", &ingress);
@@ -648,11 +783,67 @@ mod tests {
             hosts: vec!["api.example.com".to_string()],
             paths: None,
             tls: None,
-            gateway_class: Some("nginx".to_string()),
+            rate_limit: None,
+            gateway_class: Some("custom-gateway".to_string()),
         };
         let gateway = IngressCompiler::compile_gateway("my-api", "prod", &ingress);
 
-        assert_eq!(gateway.spec.gateway_class_name, "nginx");
+        assert_eq!(gateway.spec.gateway_class_name, "custom-gateway");
+    }
+
+    // =========================================================================
+    // TrafficPolicy (Rate Limiting) Tests
+    // =========================================================================
+
+    #[test]
+    fn story_traffic_policy_rate_limiting() {
+        let rate_limit = RateLimitSpec {
+            requests_per_interval: 100,
+            interval_seconds: 60,
+            burst: Some(150),
+        };
+        let policy = IngressCompiler::compile_traffic_policy("my-api", "prod", &rate_limit);
+
+        assert_eq!(policy.metadata.name, "my-api-rate-limit");
+        assert_eq!(policy.metadata.namespace, "prod");
+        assert_eq!(policy.api_version, "gateway.kgateway.dev/v1alpha1");
+        assert_eq!(policy.kind, "TrafficPolicy");
+
+        let target = &policy.spec.target_refs[0];
+        assert_eq!(target.kind, "HTTPRoute");
+        assert_eq!(target.name, "my-api-route");
+
+        let bucket = &policy.spec.rate_limit.as_ref().unwrap().local.token_bucket;
+        assert_eq!(bucket.max_tokens, 150);
+        assert_eq!(bucket.tokens_per_fill, 100);
+        assert_eq!(bucket.fill_interval, "60s");
+    }
+
+    #[test]
+    fn story_traffic_policy_defaults_burst_to_requests() {
+        let rate_limit = RateLimitSpec {
+            requests_per_interval: 50,
+            interval_seconds: 30,
+            burst: None,
+        };
+        let policy = IngressCompiler::compile_traffic_policy("my-api", "prod", &rate_limit);
+
+        let bucket = &policy.spec.rate_limit.as_ref().unwrap().local.token_bucket;
+        assert_eq!(bucket.max_tokens, 50); // defaults to requests_per_interval
+        assert_eq!(bucket.tokens_per_fill, 50);
+        assert_eq!(bucket.fill_interval, "30s");
+    }
+
+    #[test]
+    fn story_full_compilation_with_rate_limit() {
+        let ingress = sample_ingress_with_rate_limit();
+        let output = IngressCompiler::compile("my-api", "prod", &ingress, 8080);
+
+        assert!(output.gateway.is_some());
+        assert!(output.http_route.is_some());
+        assert!(output.traffic_policy.is_some());
+        assert!(output.certificate.is_none());
+        assert_eq!(output.total_count(), 3);
     }
 
     // =========================================================================
@@ -696,6 +887,7 @@ mod tests {
                 },
             ]),
             tls: None,
+            rate_limit: None,
             gateway_class: None,
         };
         let route = IngressCompiler::compile_http_route("my-api", "prod", &ingress, 8080);
@@ -746,6 +938,7 @@ mod tests {
                     kind: Some("Issuer".to_string()),
                 }),
             }),
+            rate_limit: None,
             gateway_class: None,
         };
         let tls = ingress.tls.as_ref().unwrap();
@@ -766,15 +959,17 @@ mod tests {
                 secret_name: Some("my-tls-secret".to_string()),
                 issuer_ref: None,
             }),
+            rate_limit: None,
             gateway_class: None,
         };
 
         let output = IngressCompiler::compile("my-api", "prod", &ingress, 8080);
 
-        // Should have gateway and route, but no certificate
+        // Should have gateway and route, but no certificate or traffic policy
         assert!(output.gateway.is_some());
         assert!(output.http_route.is_some());
         assert!(output.certificate.is_none());
+        assert!(output.traffic_policy.is_none());
     }
 
     // =========================================================================

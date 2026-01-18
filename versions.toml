@@ -38,5 +38,6 @@ version = "1.0.3"
 [charts]
 cilium = "1.18.5"
 istio = "1.28.2"
+kgateway = "2.1.2"
 cert-manager = "1.19.2"
 flux = "2.14.1"

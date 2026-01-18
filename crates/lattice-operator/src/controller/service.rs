@@ -310,6 +310,22 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
                 .await?;
         }
 
+        // Apply TrafficPolicy using DynamicObject
+        if let Some(ref policy) = compiled.ingress.traffic_policy {
+            debug!(name = %policy.metadata.name, "applying TrafficPolicy");
+            let json = serde_json::to_value(policy)
+                .map_err(|e| Error::serialization(format!("TrafficPolicy: {}", e)))?;
+
+            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+                group: "gateway.kgateway.dev".to_string(),
+                version: "v1alpha1".to_string(),
+                kind: "TrafficPolicy".to_string(),
+            });
+            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+            api.patch(&policy.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
         info!(
             service = %service_name,
             namespace = %namespace,
@@ -821,6 +837,8 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    outbound: None,
+                    inbound: None,
                 },
             );
         }
@@ -847,6 +865,8 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    outbound: None,
+                    inbound: None,
                 },
             );
         }

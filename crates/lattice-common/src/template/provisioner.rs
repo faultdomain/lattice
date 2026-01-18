@@ -324,6 +324,8 @@ mod tests {
             class: None,
             metadata: None,
             params: None,
+            outbound: None,
+            inbound: None,
         };
 
         let outputs = provisioner.resolve("api", &resource, &ctx).unwrap();
@@ -351,6 +353,8 @@ mod tests {
             class: None,
             metadata: None,
             params: None,
+            outbound: None,
+            inbound: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -375,6 +379,8 @@ mod tests {
             class: None,
             metadata: None,
             params: None,
+            outbound: None,
+            inbound: None,
         };
 
         let outputs = provisioner.resolve("stripe", &resource, &ctx).unwrap();
@@ -401,6 +407,8 @@ mod tests {
             class: None,
             metadata: None,
             params: None,
+            outbound: None,
+            inbound: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -434,6 +442,8 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                outbound: None,
+                inbound: None,
             },
         );
 

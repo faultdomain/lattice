@@ -520,6 +520,8 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                outbound: None,
+                inbound: None,
             },
         );
 

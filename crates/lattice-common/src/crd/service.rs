@@ -117,6 +117,130 @@ pub struct ResourceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "arbitrary_json_object")]
     pub params: Option<serde_json::Value>,
+
+    /// Outbound traffic policy (caller-side L7 configuration)
+    ///
+    /// Applied when this service calls the target. Configures retries, timeouts,
+    /// and circuit breakers via kgateway waypoint proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound: Option<OutboundTrafficPolicy>,
+
+    /// Inbound traffic policy (callee-side L7 configuration)
+    ///
+    /// Applied when the target calls this service. Configures rate limits and
+    /// header manipulation via kgateway waypoint proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound: Option<InboundTrafficPolicy>,
+}
+
+// =============================================================================
+// L7 Traffic Policies (kgateway waypoint)
+// =============================================================================
+
+/// Outbound traffic policy for caller-side L7 configuration
+///
+/// These policies are applied by the kgateway waypoint proxy when this service
+/// makes outbound calls to the target service.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundTrafficPolicy {
+    /// Retry policy for failed requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<RetryPolicy>,
+
+    /// Request timeout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<TimeoutPolicy>,
+
+    /// Circuit breaker configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<CircuitBreakerPolicy>,
+}
+
+/// Inbound traffic policy for callee-side L7 configuration
+///
+/// These policies are applied by the kgateway waypoint proxy when receiving
+/// traffic from the specified caller.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InboundTrafficPolicy {
+    /// Rate limiting for this specific caller
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitSpec>,
+
+    /// Header manipulation rules
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HeaderPolicy>,
+}
+
+/// Retry policy for failed requests
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryPolicy {
+    /// Maximum number of retry attempts
+    pub attempts: u32,
+
+    /// Per-try timeout (e.g., "5s", "500ms")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_try_timeout: Option<String>,
+
+    /// Retry on specific conditions (e.g., "5xx", "reset", "connect-failure")
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_on: Vec<String>,
+}
+
+/// Timeout policy for requests
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeoutPolicy {
+    /// Request timeout (e.g., "30s", "1m")
+    pub request: String,
+
+    /// Idle timeout for long-lived connections (e.g., "5m")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<String>,
+}
+
+/// Circuit breaker configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CircuitBreakerPolicy {
+    /// Maximum number of pending requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending_requests: Option<u32>,
+
+    /// Maximum number of concurrent requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_requests: Option<u32>,
+
+    /// Maximum number of concurrent retries
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+
+    /// Consecutive 5xx errors before ejection
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consecutive_5xx_errors: Option<u32>,
+
+    /// Base ejection time (e.g., "30s")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ejection_time: Option<String>,
+
+    /// Maximum ejection percentage (0-100)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ejection_percent: Option<u32>,
+}
+
+/// Header manipulation policy
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderPolicy {
+    /// Headers to add to requests
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub add: BTreeMap<String, String>,
+
+    /// Headers to remove from requests
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
 }
 
 /// Container resource limits and requests
@@ -447,9 +571,33 @@ pub struct IngressSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<IngressTls>,
 
-    /// GatewayClass name (default: "istio")
+    /// Rate limiting configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitSpec>,
+
+    /// GatewayClass name (default: "kgateway")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_class: Option<String>,
+}
+
+/// Rate limiting configuration using token bucket algorithm
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitSpec {
+    /// Maximum requests per interval
+    pub requests_per_interval: u32,
+
+    /// Interval in seconds (default: 60)
+    #[serde(default = "default_rate_limit_interval")]
+    pub interval_seconds: u32,
+
+    /// Burst capacity (default: same as requests_per_interval)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
+}
+
+fn default_rate_limit_interval() -> u32 {
+    60
 }
 
 /// Path configuration for ingress routing
@@ -1042,6 +1190,8 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                outbound: None,
+                inbound: None,
             },
         );
         resources.insert(
@@ -1053,6 +1203,8 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                outbound: None,
+                inbound: None,
             },
         );
 
@@ -1078,6 +1230,8 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                outbound: None,
+                inbound: None,
             },
         );
         resources.insert(
@@ -1089,6 +1243,8 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                outbound: None,
+                inbound: None,
             },
         );
 
@@ -1114,6 +1270,8 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                outbound: None,
+                inbound: None,
             },
         );
 
@@ -1138,6 +1296,8 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                outbound: None,
+                inbound: None,
             },
         );
         resources.insert(
@@ -1149,6 +1309,8 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                outbound: None,
+                inbound: None,
             },
         );
 
@@ -1736,5 +1898,210 @@ containers:
         let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(spec.containers["main"].image, ".");
         assert!(spec.validate().is_ok());
+    }
+
+    // =========================================================================
+    // L7 Traffic Policy Tests (kgateway waypoint)
+    // =========================================================================
+
+    /// Story: Service configures outbound traffic policies
+    #[test]
+    fn test_outbound_traffic_policy() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+resources:
+  backend:
+    type: service
+    direction: outbound
+    outbound:
+      retries:
+        attempts: 3
+        perTryTimeout: "5s"
+        retryOn:
+          - "5xx"
+          - "reset"
+      timeout:
+        request: "30s"
+        idle: "5m"
+      circuitBreaker:
+        maxPendingRequests: 100
+        maxRequests: 1000
+        consecutive5xxErrors: 5
+        baseEjectionTime: "30s"
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let resource = &spec.resources["backend"];
+
+        let outbound = resource.outbound.as_ref().unwrap();
+
+        // Check retries
+        let retries = outbound.retries.as_ref().unwrap();
+        assert_eq!(retries.attempts, 3);
+        assert_eq!(retries.per_try_timeout, Some("5s".to_string()));
+        assert_eq!(retries.retry_on, vec!["5xx", "reset"]);
+
+        // Check timeout
+        let timeout = outbound.timeout.as_ref().unwrap();
+        assert_eq!(timeout.request, "30s");
+        assert_eq!(timeout.idle, Some("5m".to_string()));
+
+        // Check circuit breaker
+        let cb = outbound.circuit_breaker.as_ref().unwrap();
+        assert_eq!(cb.max_pending_requests, Some(100));
+        assert_eq!(cb.max_requests, Some(1000));
+        assert_eq!(cb.consecutive_5xx_errors, Some(5));
+        assert_eq!(cb.base_ejection_time, Some("30s".to_string()));
+    }
+
+    /// Story: Service configures inbound traffic policies for callers
+    #[test]
+    fn test_inbound_traffic_policy() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+resources:
+  frontend:
+    type: service
+    direction: inbound
+    inbound:
+      rateLimit:
+        requestsPerInterval: 100
+        intervalSeconds: 60
+        burst: 150
+      headers:
+        add:
+          X-Request-ID: "${request.id}"
+          X-Caller: "frontend"
+        remove:
+          - "X-Internal-Header"
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let resource = &spec.resources["frontend"];
+
+        let inbound = resource.inbound.as_ref().unwrap();
+
+        // Check rate limit
+        let rate_limit = inbound.rate_limit.as_ref().unwrap();
+        assert_eq!(rate_limit.requests_per_interval, 100);
+        assert_eq!(rate_limit.interval_seconds, 60);
+        assert_eq!(rate_limit.burst, Some(150));
+
+        // Check headers
+        let headers = inbound.headers.as_ref().unwrap();
+        assert_eq!(headers.add.get("X-Caller"), Some(&"frontend".to_string()));
+        assert_eq!(headers.remove, vec!["X-Internal-Header"]);
+    }
+
+    /// Story: Bidirectional service with both inbound and outbound policies
+    #[test]
+    fn test_bidirectional_traffic_policies() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+resources:
+  cache:
+    type: service
+    direction: both
+    outbound:
+      timeout:
+        request: "100ms"
+    inbound:
+      rateLimit:
+        requestsPerInterval: 1000
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let resource = &spec.resources["cache"];
+
+        // Check outbound policy
+        let outbound = resource.outbound.as_ref().unwrap();
+        assert_eq!(outbound.timeout.as_ref().unwrap().request, "100ms");
+
+        // Check inbound policy
+        let inbound = resource.inbound.as_ref().unwrap();
+        assert_eq!(inbound.rate_limit.as_ref().unwrap().requests_per_interval, 1000);
+    }
+
+    /// Story: Minimal retry policy with just attempts
+    #[test]
+    fn test_minimal_retry_policy() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+resources:
+  backend:
+    type: service
+    direction: outbound
+    outbound:
+      retries:
+        attempts: 2
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let resource = &spec.resources["backend"];
+
+        let retries = resource.outbound.as_ref().unwrap().retries.as_ref().unwrap();
+        assert_eq!(retries.attempts, 2);
+        assert!(retries.per_try_timeout.is_none());
+        assert!(retries.retry_on.is_empty());
+    }
+
+    /// Story: Circuit breaker with outlier detection
+    #[test]
+    fn test_circuit_breaker_outlier_detection() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+resources:
+  database:
+    type: service
+    direction: outbound
+    outbound:
+      circuitBreaker:
+        consecutive5xxErrors: 10
+        baseEjectionTime: "1m"
+        maxEjectionPercent: 50
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let resource = &spec.resources["database"];
+
+        let cb = resource.outbound.as_ref().unwrap().circuit_breaker.as_ref().unwrap();
+        assert_eq!(cb.consecutive_5xx_errors, Some(10));
+        assert_eq!(cb.base_ejection_time, Some("1m".to_string()));
+        assert_eq!(cb.max_ejection_percent, Some(50));
+    }
+
+    /// Story: Header manipulation without rate limiting
+    #[test]
+    fn test_header_only_policy() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+resources:
+  api:
+    type: service
+    direction: inbound
+    inbound:
+      headers:
+        add:
+          X-Environment: "production"
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let resource = &spec.resources["api"];
+
+        let headers = resource.inbound.as_ref().unwrap().headers.as_ref().unwrap();
+        assert_eq!(headers.add.get("X-Environment"), Some(&"production".to_string()));
+        assert!(resource.inbound.as_ref().unwrap().rate_limit.is_none());
     }
 }
