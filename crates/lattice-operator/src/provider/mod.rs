@@ -367,7 +367,7 @@ pub fn generate_bootstrap_config_template(config: &ClusterConfig) -> CAPIManifes
     }
 }
 
-/// Build kubelet extra args based on provider type
+/// Build kubelet extra args for kubeadm based on provider type
 ///
 /// All providers include the eviction-hard arg to disable aggressive eviction in test.
 /// Cloud providers (non-Docker) also include provider-id which uses cloud-init templating
@@ -385,6 +385,25 @@ fn build_kubelet_extra_args(provider_type: ProviderType) -> Vec<serde_json::Valu
             "name": "provider-id",
             "value": format!("{}://'{{{{ ds.meta_data.instance_id }}}}'", provider_type)
         }));
+    }
+
+    args
+}
+
+/// Build kubelet extra args for RKE2 based on provider type
+///
+/// RKE2 uses a different format: list of "key=value" strings instead of {name, value} objects.
+/// Cloud providers (non-Docker) include provider-id for CAPI machine-node linking.
+fn build_rke2_kubelet_extra_args(provider_type: ProviderType) -> Vec<String> {
+    let mut args = vec!["eviction-hard=nodefs.available<0%,imagefs.available<0%".to_string()];
+
+    // Cloud providers need provider-id for CAPI to link Machine to Node
+    // The value uses cloud-init templating to get the instance ID at boot time
+    if provider_type != ProviderType::Docker {
+        args.push(format!(
+            "provider-id={}://'{{{{ ds.meta_data.instance_id }}}}'",
+            provider_type
+        ));
     }
 
     args
@@ -425,14 +444,15 @@ fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
 fn generate_rke2_config_template(config: &ClusterConfig) -> CAPIManifest {
     let template_name = format!("{}-md-0", config.name);
 
+    // Build kubelet extra args using the shared function
+    let kubelet_extra_args = build_rke2_kubelet_extra_args(config.provider_type);
+
     let spec = serde_json::json!({
         "template": {
             "spec": {
                 "agentConfig": {
                     "kubelet": {
-                        "extraArgs": [
-                            "eviction-hard=nodefs.available<0%,imagefs.available<0%"
-                        ]
+                        "extraArgs": kubelet_extra_args
                     }
                 }
             }
@@ -663,6 +683,9 @@ fn generate_rke2_control_plane(
         ));
     }
 
+    // Build kubelet extra args using the shared function
+    let kubelet_extra_args = build_rke2_kubelet_extra_args(config.provider_type);
+
     let mut spec = serde_json::json!({
         "replicas": cp_config.replicas,
         "version": format!("v{}+rke2r1", config.k8s_version.trim_start_matches('v')),
@@ -676,7 +699,7 @@ fn generate_rke2_control_plane(
         },
         "agentConfig": {
             "kubelet": {
-                "extraArgs": ["eviction-hard=nodefs.available<0%,imagefs.available<0%"]
+                "extraArgs": kubelet_extra_args
             }
         },
         "serverConfig": {
