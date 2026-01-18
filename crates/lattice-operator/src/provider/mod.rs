@@ -383,7 +383,7 @@ fn build_kubelet_extra_args(provider_type: ProviderType) -> Vec<serde_json::Valu
     if provider_type != ProviderType::Docker {
         args.push(serde_json::json!({
             "name": "provider-id",
-            "value": format!("{}://'{{{{ ds.meta_data.instance_id }}}}'", provider_type)
+            "value": format!("{}://{{{{ ds.meta_data.instance_id }}}}", provider_type)
         }));
     }
 
@@ -401,7 +401,7 @@ fn build_rke2_kubelet_extra_args(provider_type: ProviderType) -> Vec<String> {
     // The value uses cloud-init templating to get the instance ID at boot time
     if provider_type != ProviderType::Docker {
         args.push(format!(
-            "provider-id={}://'{{{{ ds.meta_data.instance_id }}}}'",
+            "provider-id={}://{{{{ ds.meta_data.instance_id }}}}",
             provider_type
         ));
     }

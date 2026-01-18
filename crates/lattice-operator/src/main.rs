@@ -18,7 +18,7 @@ use lattice_operator::controller::{
     service_reconcile, Context, ServiceContext,
 };
 use lattice_operator::crd::{LatticeCluster, LatticeExternalService, LatticeService, ProviderType};
-use lattice_operator::infra::{FluxReconciler, IstioReconciler};
+use lattice_operator::infra::{FluxReconciler, IstioReconciler, KgatewayReconciler};
 use lattice_operator::parent::{ParentConfig, ParentServers};
 
 /// Lattice - CRD-driven Kubernetes operator for multi-cluster lifecycle management
@@ -347,6 +347,11 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
     ensure_flux(client).await?;
     tracing::info!("Flux installation complete");
 
+    // Install kgateway for L7 traffic management (ingress and waypoint)
+    tracing::info!("Installing kgateway...");
+    ensure_kgateway(client).await?;
+    tracing::info!("kgateway installation complete");
+
     // Install CAPI on bootstrap cluster to allow installer to provision clusters
     // The bootstrap cluster is a temporary kind cluster that provisions the management cluster.
     // CAPI must be installed before the LatticeCluster CRD is created, otherwise the installer
@@ -415,6 +420,90 @@ async fn ensure_flux(client: &Client) -> anyhow::Result<()> {
 
     tracing::info!(version = %expected_version, "Flux installation complete");
     Ok(())
+}
+
+/// Ensures kgateway is installed at the correct version for L7 traffic management.
+/// kgateway serves as both:
+/// - North-south ingress gateway (GatewayClass: kgateway)
+/// - East-west waypoint proxy for Istio Ambient (GatewayClass: kgateway-waypoint)
+async fn ensure_kgateway(client: &Client) -> anyhow::Result<()> {
+    use k8s_openapi::api::apps::v1::Deployment;
+    use kube::api::{Api, Patch, PatchParams};
+
+    let reconciler = KgatewayReconciler::new();
+    let expected_version = reconciler.version();
+
+    // Check kgateway deployment version
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), "kgateway-system");
+    let kgateway_version = get_deployment_version(&deployments, "kgateway").await;
+
+    if kgateway_version.as_deref() == Some(expected_version) {
+        tracing::debug!(version = %expected_version, "kgateway at expected version, skipping");
+        return Ok(());
+    }
+
+    tracing::info!(
+        expected = %expected_version,
+        current = ?kgateway_version,
+        "Installing/upgrading kgateway"
+    );
+
+    // Ensure kgateway-system namespace exists
+    let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
+    let ns = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": "kgateway-system",
+            "labels": {
+                "istio.io/dataplane-mode": "ambient"
+            }
+        }
+    });
+    let params = PatchParams::apply("lattice").force();
+    namespaces
+        .patch("kgateway-system", &params, &Patch::Apply(&ns))
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create kgateway-system namespace: {}", e))?;
+
+    // Get manifests
+    let manifests = reconciler
+        .manifests()
+        .map_err(|e| anyhow::anyhow!("Failed to generate kgateway manifests: {}", e))?;
+
+    // Build all kgateway manifests including the Istio allow policy
+    let mut all_manifests: Vec<String> = manifests.to_vec();
+    all_manifests.push(generate_kgateway_allow_policy());
+
+    tracing::info!(count = all_manifests.len(), "Applying kgateway manifests");
+
+    // Apply manifests (kgateway helm template embeds namespace)
+    apply_manifests(client, &all_manifests, Some("kgateway-system")).await?;
+
+    tracing::info!(version = %expected_version, "kgateway installation complete");
+    Ok(())
+}
+
+/// Generate AuthorizationPolicy allowing all traffic to kgateway-system namespace
+///
+/// kgateway needs to accept connections from all sources for both:
+/// - North-south ingress traffic from external clients
+/// - East-west waypoint traffic from internal services
+fn generate_kgateway_allow_policy() -> String {
+    r#"---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: kgateway-allow-all
+  namespace: kgateway-system
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  action: ALLOW
+  rules:
+  - {}
+"#
+    .to_string()
 }
 
 /// Install CAPI on the bootstrap cluster.
