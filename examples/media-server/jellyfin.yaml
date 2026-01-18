@@ -1,0 +1,61 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: jellyfin
+  namespace: media
+spec:
+  environment: media
+  containers:
+    main:
+      image: jellyfin/jellyfin:latest
+      variables:
+        JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
+      volumes:
+        config:
+          mountPath: /config
+          size: 10Gi
+          storageClass: local-path
+        cache:
+          mountPath: /cache
+          size: 20Gi
+          storageClass: local-path
+        media:
+          mountPath: /media
+          size: 1Ti
+          storageClass: local-path
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: 4000m
+          memory: 8Gi
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8096
+        initialDelaySeconds: 30
+        periodSeconds: 10
+  service:
+    ports:
+      http:
+        port: 8096
+        protocol: TCP
+  resources:
+    # Allow Sonarr to notify Jellyfin to scan library (bilateral agreement)
+    sonarr:
+      type: service
+      direction: inbound
+      inbound:
+        rateLimit:
+          requestsPerInterval: 100
+          intervalSeconds: 60
+  ingress:
+    hosts:
+      - jellyfin.home.local
+    tls:
+      mode: auto
+      issuerRef:
+        name: letsencrypt-prod
+  replicas:
+    min: 1

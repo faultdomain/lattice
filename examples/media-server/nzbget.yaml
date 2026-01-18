@@ -1,0 +1,52 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: nzbget
+  namespace: media
+spec:
+  environment: media
+  containers:
+    main:
+      image: linuxserver/nzbget:latest
+      variables:
+        PUID: "1000"
+        PGID: "1000"
+        TZ: "America/New_York"
+      volumes:
+        config:
+          mountPath: /config
+          size: 1Gi
+          storageClass: local-path
+        downloads:
+          mountPath: /downloads
+          size: 500Gi
+          storageClass: local-path
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 2000m
+          memory: 2Gi
+      readinessProbe:
+        httpGet:
+          path: /
+          port: 6789
+        initialDelaySeconds: 10
+        periodSeconds: 10
+  service:
+    ports:
+      http:
+        port: 6789
+        protocol: TCP
+  resources:
+    # Allow Sonarr to manage downloads (bilateral agreement)
+    sonarr:
+      type: service
+      direction: inbound
+      inbound:
+        rateLimit:
+          requestsPerInterval: 1000
+          intervalSeconds: 60
+  replicas:
+    min: 1

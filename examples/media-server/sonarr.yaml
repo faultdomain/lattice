@@ -1,0 +1,77 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: sonarr
+  namespace: media
+spec:
+  environment: media
+  containers:
+    main:
+      image: linuxserver/sonarr:latest
+      variables:
+        PUID: "1000"
+        PGID: "1000"
+        TZ: "America/New_York"
+      volumes:
+        config:
+          mountPath: /config
+          size: 5Gi
+          storageClass: local-path
+        # Share downloads volume with nzbget for hardlinking
+        downloads:
+          mountPath: /downloads
+          size: 500Gi
+          storageClass: local-path
+        # Share media volume with jellyfin
+        media:
+          mountPath: /media
+          size: 1Ti
+          storageClass: local-path
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+      readinessProbe:
+        httpGet:
+          path: /ping
+          port: 8989
+        initialDelaySeconds: 30
+        periodSeconds: 10
+  service:
+    ports:
+      http:
+        port: 8989
+        protocol: TCP
+  resources:
+    # Sonarr calls NZBGet API to manage downloads
+    nzbget:
+      type: service
+      direction: outbound
+      outbound:
+        retries:
+          attempts: 3
+          perTryTimeout: 10s
+          retryOn:
+            - 5xx
+            - connect-failure
+        timeout:
+          request: 30s
+    # Sonarr calls Jellyfin API to trigger library scans
+    jellyfin:
+      type: service
+      direction: outbound
+      outbound:
+        timeout:
+          request: 60s
+  ingress:
+    hosts:
+      - sonarr.home.local
+    tls:
+      mode: auto
+      issuerRef:
+        name: letsencrypt-prod
+  replicas:
+    min: 1
