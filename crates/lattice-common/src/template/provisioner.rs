@@ -285,6 +285,7 @@ mod tests {
             service: Some(crate::crd::ServicePortsSpec { ports }),
             replicas: crate::crd::ReplicaSpec::default(),
             deploy: crate::crd::DeploySpec::default(),
+            ingress: None,
         };
 
         graph.put_service(env, name, &spec);
@@ -458,6 +459,7 @@ mod tests {
             service: None,
             replicas: crate::crd::ReplicaSpec::default(),
             deploy: crate::crd::DeploySpec::default(),
+            ingress: None,
         };
 
         let registry = ProvisionerRegistry::new();

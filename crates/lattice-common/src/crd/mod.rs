@@ -14,10 +14,11 @@ pub use external_service::{
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
 };
 pub use service::{
-    ContainerSpec, DependencyDirection, DeploySpec, DeployStrategy, ExecProbe, FileMount,
-    GrpcProbe, HttpGetProbe, HttpHeader, LatticeService, LatticeServiceSpec, LatticeServiceStatus,
-    PortSpec, Probe, ReplicaSpec, ResourceSpec, ResourceType, ServicePhase, ServicePortsSpec,
-    TcpSocketProbe, VolumeMount,
+    CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec, DeployStrategy, ExecProbe,
+    FileMount, GrpcProbe, HttpGetProbe, HttpHeader, IngressPath, IngressSpec, IngressTls,
+    LatticeService, LatticeServiceSpec, LatticeServiceStatus, PathMatchType, PortSpec, Probe,
+    ReplicaSpec, ResourceSpec, ResourceType, ServicePhase, ServicePortsSpec, TcpSocketProbe,
+    TlsMode, VolumeMount,
 };
 pub use types::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig, EndpointsSpec,

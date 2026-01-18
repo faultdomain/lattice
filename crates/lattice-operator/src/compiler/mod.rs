@@ -27,10 +27,12 @@
 
 use crate::crd::LatticeService;
 use crate::graph::ServiceGraph;
+use crate::ingress::{GeneratedIngress, IngressCompiler};
 use crate::policy::{AuthorizationPolicy, GeneratedPolicies, PolicyCompiler};
 use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
 
 // Re-export types for convenience
+pub use crate::ingress::{Certificate, Gateway, HttpRoute};
 pub use crate::policy::{CiliumNetworkPolicy, ServiceEntry};
 pub use crate::workload::{Deployment, HorizontalPodAutoscaler, Service, ServiceAccount};
 
@@ -41,6 +43,8 @@ pub struct CompiledService {
     pub workloads: GeneratedWorkloads,
     /// Generated network policies (AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry)
     pub policies: GeneratedPolicies,
+    /// Generated ingress resources (Gateway, HTTPRoute, Certificate)
+    pub ingress: GeneratedIngress,
 }
 
 impl CompiledService {
@@ -51,7 +55,7 @@ impl CompiledService {
 
     /// Check if any resources were generated
     pub fn is_empty(&self) -> bool {
-        self.workloads.is_empty() && self.policies.is_empty()
+        self.workloads.is_empty() && self.policies.is_empty() && self.ingress.is_empty()
     }
 
     /// Total count of all generated resources
@@ -66,7 +70,7 @@ impl CompiledService {
         .filter(|&&x| x)
         .count();
 
-        workload_count + self.policies.total_count()
+        workload_count + self.policies.total_count() + self.ingress.total_count()
     }
 }
 
@@ -99,6 +103,7 @@ impl<'a> ServiceCompiler<'a> {
     /// Generates:
     /// - Workloads: Deployment, Service, ServiceAccount, HPA
     /// - Policies: AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
+    /// - Ingress: Gateway, HTTPRoute, Certificate (if ingress configured)
     ///
     /// The environment (and namespace) comes from `spec.environment`, since
     /// LatticeService is cluster-scoped.
@@ -110,12 +115,44 @@ impl<'a> ServiceCompiler<'a> {
 
         // Delegate to specialized compilers
         let workloads = WorkloadCompiler::compile(service, namespace);
-        let policies =
-            PolicyCompiler::new(self.graph, &self.trust_domain).compile(name, namespace, env);
+        let policy_compiler = PolicyCompiler::new(self.graph, &self.trust_domain);
+        let mut policies = policy_compiler.compile(name, namespace, env);
+
+        // Compile ingress resources if configured
+        let ingress = if let Some(ref ingress_spec) = service.spec.ingress {
+            // Get primary service port for routing
+            let backend_port = service
+                .spec
+                .service
+                .as_ref()
+                .and_then(|s| s.ports.values().next())
+                .map(|p| p.port)
+                .unwrap_or(80);
+
+            // Generate ingress resources
+            let ingress = IngressCompiler::compile(name, namespace, ingress_spec, backend_port);
+
+            // Add gateway allow policy for north-south traffic
+            let ports: Vec<u16> = service
+                .spec
+                .service
+                .as_ref()
+                .map(|s| s.ports.values().map(|p| p.port).collect())
+                .unwrap_or_default();
+
+            let gateway_policy =
+                policy_compiler.compile_gateway_allow_policy(name, namespace, &ports);
+            policies.authorization_policies.push(gateway_policy);
+
+            ingress
+        } else {
+            GeneratedIngress::new()
+        };
 
         CompiledService {
             workloads,
             policies,
+            ingress,
         }
     }
 
@@ -135,8 +172,8 @@ impl<'a> ServiceCompiler<'a> {
 mod tests {
     use super::*;
     use crate::crd::{
-        ContainerSpec, DependencyDirection, DeploySpec, PortSpec, ReplicaSpec, ResourceSpec,
-        ResourceType, ServicePortsSpec,
+        CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec, IngressSpec, IngressTls,
+        PortSpec, ReplicaSpec, ResourceSpec, ResourceType, ServicePortsSpec, TlsMode,
     };
     use std::collections::BTreeMap;
 
@@ -180,9 +217,28 @@ mod tests {
                 service: Some(ServicePortsSpec { ports }),
                 replicas: ReplicaSpec { min: 1, max: None },
                 deploy: DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         }
+    }
+
+    fn make_service_with_ingress(name: &str, env: &str) -> LatticeService {
+        let mut service = make_service(name, env);
+        service.spec.ingress = Some(IngressSpec {
+            hosts: vec!["api.example.com".to_string()],
+            paths: None,
+            tls: Some(IngressTls {
+                mode: TlsMode::Auto,
+                secret_name: None,
+                issuer_ref: Some(CertIssuerRef {
+                    name: "letsencrypt-prod".to_string(),
+                    kind: None,
+                }),
+            }),
+            gateway_class: None,
+        });
+        service
     }
 
     fn make_service_spec_for_graph(
@@ -252,6 +308,7 @@ mod tests {
             service: Some(ServicePortsSpec { ports }),
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
+            ingress: None,
         }
     }
 
@@ -399,5 +456,77 @@ mod tests {
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
         let output = compiler.compile(&service);
         assert!(!output.is_empty());
+    }
+
+    // =========================================================================
+    // Story: Ingress Integration
+    // =========================================================================
+
+    #[test]
+    fn story_service_with_ingress_generates_gateway_resources() {
+        let graph = ServiceGraph::new();
+        let spec = make_service_spec_for_graph("prod", vec![], vec![]);
+        graph.put_service("prod", "api", &spec);
+
+        let service = make_service_with_ingress("api", "prod");
+
+        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile(&service);
+
+        // Should have ingress resources
+        assert!(output.ingress.gateway.is_some());
+        assert!(output.ingress.http_route.is_some());
+        assert!(output.ingress.certificate.is_some());
+
+        let gateway = output.ingress.gateway.unwrap();
+        assert_eq!(gateway.metadata.name, "api-gateway");
+        assert_eq!(gateway.metadata.namespace, "prod");
+
+        let route = output.ingress.http_route.unwrap();
+        assert_eq!(route.metadata.name, "api-route");
+
+        // Should have gateway allow policy
+        let gateway_policies: Vec<_> = output
+            .policies
+            .authorization_policies
+            .iter()
+            .filter(|p| p.metadata.name.starts_with("allow-gateway-to-"))
+            .collect();
+        assert_eq!(gateway_policies.len(), 1);
+    }
+
+    #[test]
+    fn story_service_without_ingress_has_no_gateway_resources() {
+        let graph = ServiceGraph::new();
+        let spec = make_service_spec_for_graph("prod", vec![], vec![]);
+        graph.put_service("prod", "api", &spec);
+
+        let service = make_service("api", "prod");
+
+        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile(&service);
+
+        // Should NOT have ingress resources
+        assert!(output.ingress.is_empty());
+        assert!(output.ingress.gateway.is_none());
+        assert!(output.ingress.http_route.is_none());
+        assert!(output.ingress.certificate.is_none());
+    }
+
+    #[test]
+    fn story_resource_count_includes_ingress() {
+        let graph = ServiceGraph::new();
+        let spec = make_service_spec_for_graph("prod", vec![], vec![]);
+        graph.put_service("prod", "api", &spec);
+
+        let service = make_service_with_ingress("api", "prod");
+
+        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile(&service);
+
+        // Should include: Deployment + Service + ServiceAccount + CiliumPolicy +
+        //                 Gateway + HTTPRoute + Certificate + GatewayAllowPolicy
+        // = 3 workloads + 2 policies + 3 ingress = at least 8
+        assert!(output.resource_count() >= 6);
     }
 }

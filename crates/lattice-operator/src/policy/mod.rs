@@ -794,6 +794,73 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
+    /// Compile an AuthorizationPolicy to allow the Istio ingress gateway to reach a service
+    ///
+    /// This policy is generated for services with ingress configuration. It allows
+    /// the gateway service account to bypass the normal bilateral agreement requirements
+    /// for north-south (external) traffic.
+    ///
+    /// # Arguments
+    /// * `service_name` - Name of the service
+    /// * `namespace` - Namespace where the service lives
+    /// * `ports` - List of ports the service exposes
+    ///
+    /// # Returns
+    /// An AuthorizationPolicy allowing the ingress gateway to access the service
+    pub fn compile_gateway_allow_policy(
+        &self,
+        service_name: &str,
+        namespace: &str,
+        ports: &[u16],
+    ) -> AuthorizationPolicy {
+        // The Istio ingress gateway typically runs in istio-system with the
+        // service account name "istio-ingressgateway"
+        let gateway_principal = format!(
+            "spiffe://{}/ns/istio-system/sa/istio-ingressgateway",
+            self.trust_domain
+        );
+
+        // Also allow from the gateway's namespace waypoint if using Ambient mode
+        let gateway_waypoint_principal = format!(
+            "spiffe://{}/ns/istio-system/sa/istio-system-waypoint",
+            self.trust_domain
+        );
+
+        let port_strings: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+
+        AuthorizationPolicy {
+            api_version: "security.istio.io/v1beta1".to_string(),
+            kind: "AuthorizationPolicy".to_string(),
+            metadata: PolicyMetadata::new(format!("allow-gateway-to-{}", service_name), namespace),
+            spec: AuthorizationPolicySpec {
+                target_refs: vec![TargetRef {
+                    group: String::new(),
+                    kind: "Service".to_string(),
+                    name: service_name.to_string(),
+                }],
+                selector: None,
+                action: "ALLOW".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![AuthorizationSource {
+                        source: SourceSpec {
+                            principals: vec![gateway_principal, gateway_waypoint_principal],
+                        },
+                    }],
+                    to: if port_strings.is_empty() {
+                        vec![]
+                    } else {
+                        vec![AuthorizationOperation {
+                            operation: OperationSpec {
+                                ports: port_strings,
+                                hosts: vec![],
+                            },
+                        }]
+                    },
+                }],
+            },
+        }
+    }
+
     fn compile_service_entry(
         &self,
         service: &ServiceNode,
@@ -935,6 +1002,7 @@ mod tests {
             service: Some(ServicePortsSpec { ports }),
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
+            ingress: None,
         }
     }
 
@@ -1509,5 +1577,58 @@ mod tests {
             !PolicyCompiler::is_ip_address("localhost"),
             "Hostname should not be IP"
         );
+    }
+
+    // =========================================================================
+    // Story: Gateway Allow Policy
+    // =========================================================================
+
+    #[test]
+    fn story_gateway_allow_policy_generated() {
+        let graph = ServiceGraph::new();
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+
+        let policy = compiler.compile_gateway_allow_policy("api", "prod-ns", &[8080, 8443]);
+
+        assert_eq!(policy.metadata.name, "allow-gateway-to-api");
+        assert_eq!(policy.metadata.namespace, "prod-ns");
+        assert_eq!(policy.spec.action, "ALLOW");
+
+        // Should have the ingress gateway principal
+        let principals = &policy.spec.rules[0].from[0].source.principals;
+        assert!(principals
+            .iter()
+            .any(|p| p.contains("istio-ingressgateway")));
+        assert!(principals.iter().any(|p| p.contains("istio-system")));
+
+        // Should have correct ports
+        let ports = &policy.spec.rules[0].to[0].operation.ports;
+        assert!(ports.contains(&"8080".to_string()));
+        assert!(ports.contains(&"8443".to_string()));
+    }
+
+    #[test]
+    fn story_gateway_allow_policy_no_ports() {
+        let graph = ServiceGraph::new();
+        let compiler = PolicyCompiler::new(&graph, "test.local");
+
+        let policy = compiler.compile_gateway_allow_policy("svc", "ns", &[]);
+
+        // Should still generate policy but with empty to operations
+        assert_eq!(policy.metadata.name, "allow-gateway-to-svc");
+        assert!(policy.spec.rules[0].to.is_empty());
+    }
+
+    #[test]
+    fn story_gateway_allow_policy_uses_trust_domain() {
+        let graph = ServiceGraph::new();
+        let compiler = PolicyCompiler::new(&graph, "custom.trust.domain");
+
+        let policy = compiler.compile_gateway_allow_policy("api", "prod", &[80]);
+
+        let principals = &policy.spec.rules[0].from[0].source.principals;
+        assert!(principals
+            .iter()
+            .any(|p| p.starts_with("spiffe://custom.trust.domain/")));
     }
 }

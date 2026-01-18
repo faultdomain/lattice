@@ -454,6 +454,7 @@ mod tests {
             service: Some(ServicePortsSpec { ports }),
             replicas: ReplicaSpec::default(),
             deploy: crate::crd::DeploySpec::default(),
+            ingress: None,
         };
 
         graph.put_service(env, "postgres", &spec);
@@ -534,6 +535,7 @@ mod tests {
                 service: None,
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         }
@@ -638,6 +640,7 @@ mod tests {
                 service: None,
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         };
@@ -717,6 +720,7 @@ mod tests {
                 service: None,
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         };
@@ -775,6 +779,7 @@ mod tests {
                 service: None,
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         };
@@ -899,6 +904,7 @@ mod tests {
                 service: None,
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         };
@@ -963,6 +969,7 @@ mod tests {
                 service: None,
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         };
@@ -1018,6 +1025,7 @@ mod tests {
                 service: None,
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         };
@@ -1067,6 +1075,7 @@ mod tests {
                 service: None,
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         };

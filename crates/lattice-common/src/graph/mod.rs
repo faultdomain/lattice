@@ -577,6 +577,7 @@ mod tests {
             service: Some(ServicePortsSpec { ports }),
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
+            ingress: None,
         }
     }
 

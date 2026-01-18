@@ -262,6 +262,54 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
                 .await?;
         }
 
+        // Apply Gateway using DynamicObject
+        if let Some(ref gateway) = compiled.ingress.gateway {
+            debug!(name = %gateway.metadata.name, "applying Gateway");
+            let json = serde_json::to_value(gateway)
+                .map_err(|e| Error::serialization(format!("Gateway: {}", e)))?;
+
+            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+                group: "gateway.networking.k8s.io".to_string(),
+                version: "v1".to_string(),
+                kind: "Gateway".to_string(),
+            });
+            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+            api.patch(&gateway.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        // Apply HTTPRoute using DynamicObject
+        if let Some(ref route) = compiled.ingress.http_route {
+            debug!(name = %route.metadata.name, "applying HTTPRoute");
+            let json = serde_json::to_value(route)
+                .map_err(|e| Error::serialization(format!("HTTPRoute: {}", e)))?;
+
+            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+                group: "gateway.networking.k8s.io".to_string(),
+                version: "v1".to_string(),
+                kind: "HTTPRoute".to_string(),
+            });
+            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+            api.patch(&route.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        // Apply Certificate using DynamicObject
+        if let Some(ref cert) = compiled.ingress.certificate {
+            debug!(name = %cert.metadata.name, "applying Certificate");
+            let json = serde_json::to_value(cert)
+                .map_err(|e| Error::serialization(format!("Certificate: {}", e)))?;
+
+            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+                group: "cert-manager.io".to_string(),
+                version: "v1".to_string(),
+                kind: "Certificate".to_string(),
+            });
+            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+            api.patch(&cert.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
         info!(
             service = %service_name,
             namespace = %namespace,
@@ -746,6 +794,7 @@ mod tests {
             service: None,
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
+            ingress: None,
         }
     }
 

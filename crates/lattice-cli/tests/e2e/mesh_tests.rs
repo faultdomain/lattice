@@ -133,6 +133,7 @@ fn create_service(
             service: if has_port { Some(http_port()) } else { None },
             replicas: ReplicaSpec { min: 1, max: None },
             deploy: DeploySpec::default(),
+            ingress: None,
         },
         status: None,
     }
@@ -1180,6 +1181,7 @@ impl RandomMesh {
                 },
                 replicas: ReplicaSpec { min: 1, max: None },
                 deploy: DeploySpec::default(),
+                ingress: None,
             },
             status: None,
         }
