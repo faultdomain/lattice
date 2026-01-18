@@ -638,6 +638,22 @@ fn generate_rke2_control_plane(
         }));
     }
 
+    // Build preRKE2Commands to set node-ip before kube-vip adds the VIP
+    // This prevents kubelet from registering with the VIP instead of the actual node IP
+    // See: https://github.com/kube-vip/kube-vip/issues/741
+    let mut pre_rke2_commands: Vec<String> = vec![];
+    if let Some(ref vip) = cp_config.vip {
+        let interface = &vip.interface;
+        // Get the node's actual IP (not the VIP) and write to RKE2 config
+        // This runs BEFORE RKE2 starts, so kube-vip hasn't added the VIP yet
+        pre_rke2_commands.push(format!(
+            r#"NODE_IP=$(ip -4 addr show {} | grep -oP '(?<=inet\s)\d+(\.\d+){{3}}' | head -1) && \
+mkdir -p /etc/rancher/rke2 && \
+echo "node-ip: $NODE_IP" >> /etc/rancher/rke2/config.yaml"#,
+            interface
+        ));
+    }
+
     let mut spec = serde_json::json!({
         "replicas": cp_config.replicas,
         "version": format!("v{}+rke2r1", config.k8s_version.trim_start_matches('v')),
@@ -672,6 +688,10 @@ fn generate_rke2_control_plane(
             "rollingUpdate": { "maxSurge": 1 }
         }
     });
+
+    if !pre_rke2_commands.is_empty() {
+        spec["preRKE2Commands"] = serde_json::json!(pre_rke2_commands);
+    }
 
     if !cp_config.post_kubeadm_commands.is_empty() {
         spec["postRKE2Commands"] = serde_json::json!(cp_config.post_kubeadm_commands);
@@ -1296,6 +1316,17 @@ mod tests {
                 !content.contains("/etc/kubernetes/super-admin.conf"),
                 "RKE2 kube-vip should not use kubeadm kubeconfig path"
             );
+
+            // Verify preRKE2Commands sets node-ip to prevent VIP registration issue
+            // See: https://github.com/kube-vip/kube-vip/issues/741
+            let pre_commands = spec
+                .pointer("/preRKE2Commands")
+                .expect("should have preRKE2Commands when VIP configured");
+            let pre_commands_arr = pre_commands.as_array().expect("preRKE2Commands should be array");
+            assert!(!pre_commands_arr.is_empty(), "preRKE2Commands should have commands");
+            let cmd = pre_commands_arr[0].as_str().unwrap();
+            assert!(cmd.contains("node-ip"), "should set node-ip in RKE2 config");
+            assert!(cmd.contains("eth0"), "should use VIP interface for IP detection");
         }
 
         #[test]
@@ -1316,6 +1347,10 @@ mod tests {
             assert!(
                 spec.pointer("/files").is_none(),
                 "should not have files when neither VIP nor SSH configured"
+            );
+            assert!(
+                spec.pointer("/preRKE2Commands").is_none(),
+                "should not have preRKE2Commands when VIP not configured"
             );
         }
 
