@@ -8,10 +8,7 @@ spec:
     kubernetes:
       version: "1.32.0"
       bootstrap: rke2
-      certSANs:
-        - "127.0.0.1"
-        - "localhost"
-        - "10.0.0.104"
+      # certSANs auto-populated from controlPlaneEndpoint
     config:
       proxmox:
         secretRef:
@@ -21,9 +18,10 @@ spec:
           - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1f8eVKp5YCAtis77YO/oHhWvzAiimDzlDqhtD+85YR evan.hines.dev@gmail.com"
         sourceNode: "poweredge-lg"
         templateId: 9000
+        # kube-vip VIP for K8s API server
         controlPlaneEndpoint: "10.0.0.104"
-        storage: "local-lvm"
         bridge: "vmbr0"
+        # Node IPs assigned by CAPMOX (105-107)
         ipv4Pool:
           start: "10.0.0.105"
           end: "10.0.0.107"

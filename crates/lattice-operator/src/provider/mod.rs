@@ -321,13 +321,6 @@ pub fn generate_machine_deployment(
         "selector": {
             "matchLabels": {}
         },
-        "strategy": {
-            "type": "RollingUpdate",
-            "rollingUpdate": {
-                "maxSurge": 1,
-                "maxUnavailable": 0
-            }
-        },
         "template": {
             "spec": {
                 "clusterName": config.name,

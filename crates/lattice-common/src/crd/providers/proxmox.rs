@@ -113,20 +113,8 @@ pub struct ProxmoxConfig {
     pub snap_name: Option<String>,
 
     // ==========================================================================
-    // Clone Configuration (Optional)
+    // VM Placement (Optional)
     // ==========================================================================
-
-    /// Storage backend for full clone (default: "local-lvm")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage: Option<String>,
-
-    /// Disk format for cloned VMs (default: "qcow2")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-
-    /// Use full clone instead of linked clone (default: true)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub full_clone: Option<bool>,
 
     /// Target node for cloning (overrides automatic placement)
     #[serde(default, skip_serializing_if = "Option::is_none")]
