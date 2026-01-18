@@ -184,9 +184,7 @@ impl LatticeCluster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::types::{
-        BootstrapProvider, KubernetesSpec, ProviderConfig, ServiceSpec,
-    };
+    use crate::crd::types::{BootstrapProvider, KubernetesSpec, ProviderConfig, ServiceSpec};
 
     // =========================================================================
     // Test Fixtures

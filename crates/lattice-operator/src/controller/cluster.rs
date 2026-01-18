@@ -1609,12 +1609,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                             .map_err(|e| Error::serialization(e.to_string()))?;
 
                         // Generate GitOps manifests if parent has GitOps config
-                        let flux_manifests =
-                            generate_flux_manifests_for_child(&ctx, &name).await?;
+                        let flux_manifests = generate_flux_manifests_for_child(&ctx, &name).await?;
 
                         // Generate CiliumNetworkPolicy for operator (requires Cilium CRDs)
-                        let network_policy_yaml =
-                            generate_network_policy_for_child(&ctx).await?;
+                        let network_policy_yaml = generate_network_policy_for_child(&ctx).await?;
 
                         pivot_ops.store_post_pivot_manifests(
                             &name,
@@ -1815,64 +1813,62 @@ async fn generate_capi_manifests(
     let running_parent_servers = if is_root_install {
         None
     } else {
-        ctx.parent_servers
-            .as_ref()
-            .filter(|s| s.is_running())
+        ctx.parent_servers.as_ref().filter(|s| s.is_running())
     };
     let bootstrap = if let Some(parent_servers) = running_parent_servers {
-            let self_cluster_name = ctx.self_cluster_name.as_ref().ok_or_else(|| {
-                Error::validation("self_cluster_name required when parent_servers is configured")
+        let self_cluster_name = ctx.self_cluster_name.as_ref().ok_or_else(|| {
+            Error::validation("self_cluster_name required when parent_servers is configured")
+        })?;
+        let self_cluster = ctx
+            .kube
+            .get_cluster(self_cluster_name)
+            .await?
+            .ok_or_else(|| Error::Bootstrap("self-cluster LatticeCluster not found".into()))?;
+        let endpoints = self_cluster.spec.endpoints.as_ref().ok_or_else(|| {
+            Error::validation("self-cluster must have spec.endpoints to provision clusters")
+        })?;
+
+        // Get bootstrap state from parent_servers
+        let bootstrap_state = parent_servers.bootstrap_state().await.ok_or_else(|| {
+            Error::Bootstrap("parent_servers running but bootstrap_state not available".into())
+        })?;
+
+        let ca_cert = bootstrap_state.ca_cert_pem().to_string();
+        let cell_endpoint = endpoints.endpoint();
+        let bootstrap_endpoint = endpoints.bootstrap_endpoint();
+
+        // Serialize the LatticeCluster CRD to pass to workload cluster
+        let cluster_manifest =
+            serde_json::to_string(&cluster.for_export()).map_err(|e| Error::Serialization {
+                message: format!("failed to serialize cluster: {}", e),
+                kind: Some("LatticeCluster".to_string()),
             })?;
-            let self_cluster = ctx
-                .kube
-                .get_cluster(self_cluster_name)
-                .await?
-                .ok_or_else(|| Error::Bootstrap("self-cluster LatticeCluster not found".into()))?;
-            let endpoints = self_cluster.spec.endpoints.as_ref().ok_or_else(|| {
-                Error::validation("self-cluster must have spec.endpoints to provision clusters")
-            })?;
 
-            // Get bootstrap state from parent_servers
-            let bootstrap_state = parent_servers.bootstrap_state().await.ok_or_else(|| {
-                Error::Bootstrap("parent_servers running but bootstrap_state not available".into())
-            })?;
-
-            let ca_cert = bootstrap_state.ca_cert_pem().to_string();
-            let cell_endpoint = endpoints.endpoint();
-            let bootstrap_endpoint = endpoints.bootstrap_endpoint();
-
-            // Serialize the LatticeCluster CRD to pass to workload cluster
-            let cluster_manifest =
-                serde_json::to_string(&cluster.for_export()).map_err(|e| Error::Serialization {
-                    message: format!("failed to serialize cluster: {}", e),
-                    kind: Some("LatticeCluster".to_string()),
-                })?;
-
-            // Register cluster and get token
-            let proxmox_ipv4_pool = cluster
-                .spec
-                .provider
-                .config
-                .proxmox
-                .as_ref()
-                .map(|p| p.ipv4_pool.clone());
-            let registration = crate::bootstrap::ClusterRegistration {
-                cluster_id: cluster_name.to_string(),
-                cell_endpoint: cell_endpoint.clone(),
-                ca_certificate: ca_cert.clone(),
-                cluster_manifest,
-                networking: cluster.spec.networking.clone(),
-                proxmox_ipv4_pool,
-                provider: cluster.spec.provider.provider_type().to_string(),
-                bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
-            };
-            let token = bootstrap_state.register_cluster(registration, false);
-
-            BootstrapInfo::new(bootstrap_endpoint, token.as_str().to_string(), ca_cert)
-        } else {
-            // No parent_servers - self-provisioning (management cluster bootstrap)
-            BootstrapInfo::default()
+        // Register cluster and get token
+        let proxmox_ipv4_pool = cluster
+            .spec
+            .provider
+            .config
+            .proxmox
+            .as_ref()
+            .map(|p| p.ipv4_pool.clone());
+        let registration = crate::bootstrap::ClusterRegistration {
+            cluster_id: cluster_name.to_string(),
+            cell_endpoint: cell_endpoint.clone(),
+            ca_certificate: ca_cert.clone(),
+            cluster_manifest,
+            networking: cluster.spec.networking.clone(),
+            proxmox_ipv4_pool,
+            provider: cluster.spec.provider.provider_type().to_string(),
+            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         };
+        let token = bootstrap_state.register_cluster(registration, false);
+
+        BootstrapInfo::new(bootstrap_endpoint, token.as_str().to_string(), ca_cert)
+    } else {
+        // No parent_servers - self-provisioning (management cluster bootstrap)
+        BootstrapInfo::default()
+    };
 
     let provider = create_provider(cluster.spec.provider.provider_type(), &capi_namespace)?;
     provider.generate_capi_manifests(cluster, &bootstrap).await
@@ -1882,7 +1878,10 @@ async fn generate_capi_manifests(
 ///
 /// Reads the parent cluster's GitOps config and credentials from the referenced Secret,
 /// then generates the manifests that will be applied to the child cluster after pivot.
-async fn generate_flux_manifests_for_child(ctx: &Context, child_name: &str) -> Result<Vec<String>, Error> {
+async fn generate_flux_manifests_for_child(
+    ctx: &Context,
+    child_name: &str,
+) -> Result<Vec<String>, Error> {
     use crate::infra::ResolvedGitCredentials;
 
     // Get parent cluster's GitOps config
@@ -1904,7 +1903,11 @@ async fn generate_flux_manifests_for_child(ctx: &Context, child_name: &str) -> R
 
     // Read credentials from Secret if referenced
     let credentials = if let Some(ref secret_ref) = gitops.secret_ref {
-        if let Some(secret) = ctx.kube.get_secret(&secret_ref.name, &secret_ref.namespace).await? {
+        if let Some(secret) = ctx
+            .kube
+            .get_secret(&secret_ref.name, &secret_ref.namespace)
+            .await?
+        {
             let data = secret.data.unwrap_or_default();
             Some(ResolvedGitCredentials {
                 ssh_identity: data.get("identity").map(|v| base64_encode(&v.0)),
@@ -1924,7 +1927,11 @@ async fn generate_flux_manifests_for_child(ctx: &Context, child_name: &str) -> R
         None
     };
 
-    Ok(crate::infra::generate_gitops_resources(gitops, child_name, credentials.as_ref()))
+    Ok(crate::infra::generate_gitops_resources(
+        gitops,
+        child_name,
+        credentials.as_ref(),
+    ))
 }
 
 /// Base64 encode bytes for Secret data

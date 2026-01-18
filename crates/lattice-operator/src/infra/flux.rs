@@ -372,7 +372,7 @@ mod tests {
 
         let credentials = ResolvedGitCredentials {
             ssh_identity: Some("c3NoLXByaXZhdGUta2V5".to_string()), // base64 SSH key
-            ssh_known_hosts: Some("a25vd25faG9zdHM=".to_string()), // base64 known_hosts
+            ssh_known_hosts: Some("a25vd25faG9zdHM=".to_string()),  // base64 known_hosts
             https_username: None,
             https_password: None,
         };

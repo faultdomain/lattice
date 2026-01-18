@@ -224,7 +224,10 @@ impl VipConfig {
 }
 
 /// Generate kube-vip static pod manifest
-fn generate_kube_vip_manifest(vip: &VipConfig, bootstrap: &crate::crd::BootstrapProvider) -> String {
+fn generate_kube_vip_manifest(
+    vip: &VipConfig,
+    bootstrap: &crate::crd::BootstrapProvider,
+) -> String {
     use crate::crd::BootstrapProvider;
 
     let kubeconfig_path = match bootstrap {
@@ -570,12 +573,10 @@ fn generate_kubeadm_control_plane(
         // Set node-ip before kubeadm starts to prevent VIP registration issue
         // See: https://github.com/kube-vip/kube-vip/issues/741
         let interface = &vip.interface;
-        kubeadm_config_spec["preKubeadmCommands"] = serde_json::json!([
-            format!(
-                r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{{{print $4}}}}' | cut -d/ -f1 | head -1) && echo "KUBELET_EXTRA_ARGS=\"$KUBELET_EXTRA_ARGS --node-ip=$NODE_IP\"" >> /etc/default/kubelet"#,
-                iface = interface
-            )
-        ]);
+        kubeadm_config_spec["preKubeadmCommands"] = serde_json::json!([format!(
+            r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{{{print $4}}}}' | cut -d/ -f1 | head -1) && echo "KUBELET_EXTRA_ARGS=\"$KUBELET_EXTRA_ARGS --node-ip=$NODE_IP\"" >> /etc/default/kubelet"#,
+            iface = interface
+        )]);
     }
 
     // Add SSH authorized keys if configured
@@ -1251,7 +1252,11 @@ mod tests {
                 .pointer("/kubeadmConfigSpec/files")
                 .expect("should have files when VIP configured");
 
-            let file = files.as_array().expect("files should be array").first().unwrap();
+            let file = files
+                .as_array()
+                .expect("files should be array")
+                .first()
+                .unwrap();
             let path = file.get("path").unwrap().as_str().unwrap();
             let content = file.get("content").unwrap().as_str().unwrap();
 
@@ -1271,11 +1276,19 @@ mod tests {
             let pre_commands = spec
                 .pointer("/kubeadmConfigSpec/preKubeadmCommands")
                 .expect("should have preKubeadmCommands when VIP configured");
-            let pre_commands_arr = pre_commands.as_array().expect("preKubeadmCommands should be array");
-            assert!(!pre_commands_arr.is_empty(), "preKubeadmCommands should have commands");
+            let pre_commands_arr = pre_commands
+                .as_array()
+                .expect("preKubeadmCommands should be array");
+            assert!(
+                !pre_commands_arr.is_empty(),
+                "preKubeadmCommands should have commands"
+            );
             let cmd = pre_commands_arr[0].as_str().unwrap();
             assert!(cmd.contains("node-ip"), "should set node-ip for kubelet");
-            assert!(cmd.contains("eth0"), "should use VIP interface for IP detection");
+            assert!(
+                cmd.contains("eth0"),
+                "should use VIP interface for IP detection"
+            );
         }
 
         #[test]
@@ -1298,7 +1311,8 @@ mod tests {
                 "should not have files when VIP not configured"
             );
             assert!(
-                spec.pointer("/kubeadmConfigSpec/preKubeadmCommands").is_none(),
+                spec.pointer("/kubeadmConfigSpec/preKubeadmCommands")
+                    .is_none(),
                 "should not have preKubeadmCommands when VIP not configured"
             );
         }
@@ -1322,12 +1336,19 @@ mod tests {
                 .pointer("/files")
                 .expect("should have files when VIP configured");
 
-            let file = files.as_array().expect("files should be array").first().unwrap();
+            let file = files
+                .as_array()
+                .expect("files should be array")
+                .first()
+                .unwrap();
             let path = file.get("path").unwrap().as_str().unwrap();
             let content = file.get("content").unwrap().as_str().unwrap();
 
             // RKE2 uses different path than kubeadm
-            assert_eq!(path, "/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml");
+            assert_eq!(
+                path,
+                "/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml"
+            );
             assert!(content.contains("kube-vip"));
             assert!(content.contains("10.0.0.100"));
             // RKE2 uses different kubeconfig path than kubeadm
@@ -1345,11 +1366,19 @@ mod tests {
             let pre_commands = spec
                 .pointer("/preRKE2Commands")
                 .expect("should have preRKE2Commands when VIP configured");
-            let pre_commands_arr = pre_commands.as_array().expect("preRKE2Commands should be array");
-            assert!(!pre_commands_arr.is_empty(), "preRKE2Commands should have commands");
+            let pre_commands_arr = pre_commands
+                .as_array()
+                .expect("preRKE2Commands should be array");
+            assert!(
+                !pre_commands_arr.is_empty(),
+                "preRKE2Commands should have commands"
+            );
             let cmd = pre_commands_arr[0].as_str().unwrap();
             assert!(cmd.contains("node-ip"), "should set node-ip in RKE2 config");
-            assert!(cmd.contains("eth0"), "should use VIP interface for IP detection");
+            assert!(
+                cmd.contains("eth0"),
+                "should use VIP interface for IP detection"
+            );
         }
 
         #[test]
@@ -1425,7 +1454,11 @@ mod tests {
             let files = spec.pointer("/files").expect("should have files");
             let files_arr = files.as_array().unwrap();
 
-            assert_eq!(files_arr.len(), 2, "should have both kube-vip and SSH files");
+            assert_eq!(
+                files_arr.len(),
+                2,
+                "should have both kube-vip and SSH files"
+            );
 
             let paths: Vec<&str> = files_arr
                 .iter()

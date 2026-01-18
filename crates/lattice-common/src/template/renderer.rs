@@ -1164,7 +1164,10 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let rendered = renderer.render_container("main", &container, &ctx).unwrap();
 
-        assert_eq!(rendered.volumes["/cache"].source, "prod-cluster-fast-ssd-cache");
+        assert_eq!(
+            rendered.volumes["/cache"].source,
+            "prod-cluster-fast-ssd-cache"
+        );
     }
 
     #[test]

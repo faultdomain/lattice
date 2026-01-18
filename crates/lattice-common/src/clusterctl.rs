@@ -140,7 +140,8 @@ pub async fn execute_move(
 
             tokio::time::sleep(delay).await;
             delay = Duration::from_secs_f64(
-                (delay.as_secs_f64() * config.backoff_multiplier).min(config.max_delay.as_secs_f64()),
+                (delay.as_secs_f64() * config.backoff_multiplier)
+                    .min(config.max_delay.as_secs_f64()),
             );
         }
     }

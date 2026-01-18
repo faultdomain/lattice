@@ -135,12 +135,13 @@ impl InfraProviderInfo {
                 ],
                 extra_init_args: &["--ipam", "in-cluster"],
             }),
-            ProviderType::OpenStack | ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
-                Err(Error::capi_installation(format!(
-                    "Provider {:?} is not yet implemented",
-                    provider
-                )))
-            }
+            ProviderType::OpenStack
+            | ProviderType::Aws
+            | ProviderType::Gcp
+            | ProviderType::Azure => Err(Error::capi_installation(format!(
+                "Provider {:?} is not yet implemented",
+                provider
+            ))),
         }
     }
 }
@@ -187,7 +188,10 @@ impl CapiProviderConfig {
         let name = match infrastructure {
             ProviderType::Docker => "docker",
             ProviderType::Proxmox => "proxmox",
-            ProviderType::OpenStack | ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
+            ProviderType::OpenStack
+            | ProviderType::Aws
+            | ProviderType::Gcp
+            | ProviderType::Azure => {
                 return Err(Error::capi_installation(format!(
                     "Provider {:?} is not yet implemented",
                     infrastructure
@@ -504,7 +508,11 @@ impl ClusterctlInstaller {
         // Wait for cert-manager deployments to be ready using kube-rs
         info!("Waiting for cert-manager to be ready");
         let deployments: Api<Deployment> = Api::namespaced(client.clone(), "cert-manager");
-        let required_deployments = ["cert-manager", "cert-manager-webhook", "cert-manager-cainjector"];
+        let required_deployments = [
+            "cert-manager",
+            "cert-manager-webhook",
+            "cert-manager-cainjector",
+        ];
 
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(300); // 5 min for slow image pulls (RKE2)
@@ -517,7 +525,9 @@ impl ClusterctlInstaller {
             }
 
             let all_ready = futures::future::try_join_all(
-                required_deployments.iter().map(|name| deployments.get(name)),
+                required_deployments
+                    .iter()
+                    .map(|name| deployments.get(name)),
             )
             .await
             .map(|deps| {
@@ -544,12 +554,10 @@ impl ClusterctlInstaller {
 
     /// Apply a single YAML manifest using kube-rs server-side apply
     async fn apply_yaml_manifest(client: &KubeClient, yaml: &str) -> Result<(), String> {
-        let value: serde_yaml::Value = serde_yaml::from_str(yaml)
-            .map_err(|e| format!("Invalid YAML: {}", e))?;
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(yaml).map_err(|e| format!("Invalid YAML: {}", e))?;
 
-        let api_version = value["apiVersion"]
-            .as_str()
-            .ok_or("Missing apiVersion")?;
+        let api_version = value["apiVersion"].as_str().ok_or("Missing apiVersion")?;
         let kind = value["kind"].as_str().ok_or("Missing kind")?;
         let name = value["metadata"]["name"]
             .as_str()
@@ -572,8 +580,8 @@ impl ClusterctlInstaller {
             plural,
         };
 
-        let obj: DynamicObject = serde_yaml::from_str(yaml)
-            .map_err(|e| format!("Failed to parse: {}", e))?;
+        let obj: DynamicObject =
+            serde_yaml::from_str(yaml).map_err(|e| format!("Failed to parse: {}", e))?;
 
         let api: Api<DynamicObject> = if let Some(ns) = namespace {
             Api::namespaced_with(client.clone(), ns, &ar)

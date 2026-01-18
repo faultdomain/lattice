@@ -135,7 +135,9 @@ impl CommandRunner for RealCommandRunner {
 }
 
 /// Parse CAPI resource type string into group/version/kind/plural
-fn parse_capi_resource_type(resource_type: &str) -> Result<(String, String, String, String), PivotError> {
+fn parse_capi_resource_type(
+    resource_type: &str,
+) -> Result<(String, String, String, String), PivotError> {
     // Resource types like "clusters.cluster.x-k8s.io"
     let parts: Vec<&str> = resource_type.splitn(2, '.').collect();
     if parts.len() != 2 {

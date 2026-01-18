@@ -148,7 +148,8 @@ mod tests {
             r#"{"kind": "Deployment"}"#.to_string(),
         ];
 
-        let result = generate_crs_yaml_manifests("my-cluster", "capi-my-cluster", &all_manifests, None);
+        let result =
+            generate_crs_yaml_manifests("my-cluster", "capi-my-cluster", &all_manifests, None);
 
         assert_eq!(result.len(), 3); // cilium cm, operator cm, crs
 
@@ -226,7 +227,8 @@ mod tests {
     fn test_generate_crs_yaml_manifests_cluster_selector() {
         let all_manifests = vec!["apiVersion: v1\nkind: ConfigMap".to_string()];
 
-        let result = generate_crs_yaml_manifests("target-cluster", "capi-target", &all_manifests, None);
+        let result =
+            generate_crs_yaml_manifests("target-cluster", "capi-target", &all_manifests, None);
 
         // CRS should select the correct cluster
         let crs = &result[2];

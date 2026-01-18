@@ -83,7 +83,13 @@ pub fn generate_cilium_manifests(provider: Option<&str>) -> Result<Vec<String>, 
     info!(provider = ?provider, "Rendering Cilium manifests");
 
     let output = Command::new("helm")
-        .args(["template", "cilium", &chart_path, "--namespace", "kube-system"])
+        .args([
+            "template",
+            "cilium",
+            &chart_path,
+            "--namespace",
+            "kube-system",
+        ])
         .args(&values)
         .output()
         .map_err(|e| format!("failed to run helm: {}", e))?;
@@ -108,7 +114,10 @@ pub fn generate_cilium_manifests(provider: Option<&str>) -> Result<Vec<String>, 
         })
         .collect();
 
-    info!(count = manifests.len(), version, "Rendered Cilium manifests");
+    info!(
+        count = manifests.len(),
+        version, "Rendered Cilium manifests"
+    );
     Ok(manifests)
 }
 

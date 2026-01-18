@@ -126,7 +126,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // Required Fields
     // ==========================================================================
-
     /// Control plane endpoint IP or FQDN
     /// This is the VIP that kube-vip will manage for API server access
     pub control_plane_endpoint: String,
@@ -155,7 +154,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // Template Source Configuration (Optional)
     // ==========================================================================
-
     /// Proxmox node where the template VM is located
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_node: Option<String>,
@@ -176,7 +174,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // VM Placement (Optional)
     // ==========================================================================
-
     /// Target node for cloning (overrides automatic placement)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_node: Option<String>,
@@ -196,7 +193,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // Cluster-Level Configuration (Optional)
     // ==========================================================================
-
     /// Allowed Proxmox nodes for VM placement
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_nodes: Option<Vec<String>>,
@@ -220,7 +216,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // Credentials (Optional)
     // ==========================================================================
-
     /// Reference to Secret containing Proxmox API credentials
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<SecretRef>,
@@ -228,7 +223,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // IPv6 Configuration (Optional)
     // ==========================================================================
-
     /// IPv6 address pool for automatic node IP allocation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv6_pool: Option<Ipv6PoolConfig>,
@@ -236,7 +230,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // Network Configuration (Optional)
     // ==========================================================================
-
     /// Network bridge (default: "vmbr0")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge: Option<String>,
@@ -252,7 +245,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // Scheduler Hints (Optional)
     // ==========================================================================
-
     /// Memory adjustment percentage for scheduling
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_adjustment: Option<u64>,
@@ -260,7 +252,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // VM ID Range (Optional)
     // ==========================================================================
-
     /// Minimum VMID for created VMs
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vmid_min: Option<u32>,
@@ -272,7 +263,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // Health Checks (Optional)
     // ==========================================================================
-
     /// Skip cloud-init status check (required for Flatcar Linux)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_cloud_init_status: Option<bool>,
@@ -284,7 +274,6 @@ pub struct ProxmoxConfig {
     // ==========================================================================
     // VM Sizing - Optional Overrides
     // ==========================================================================
-
     /// CPU sockets for control plane nodes (default: 1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cp_sockets: Option<u32>,
@@ -344,7 +333,10 @@ mod tests {
             gateway: "10.0.0.1".to_string(),
         };
 
-        assert_eq!(pool.address_range(), Some("10.0.0.101-10.0.0.107".to_string()));
+        assert_eq!(
+            pool.address_range(),
+            Some("10.0.0.101-10.0.0.107".to_string())
+        );
     }
 
     #[test]

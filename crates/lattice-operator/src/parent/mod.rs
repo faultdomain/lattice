@@ -464,9 +464,15 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             Ok(secret) => {
                 let data = secret.data.as_ref()?;
 
-                let url = data.get("url").and_then(|b| String::from_utf8(b.0.clone()).ok())?;
-                let token = data.get("token").and_then(|b| String::from_utf8(b.0.clone()).ok())?;
-                let secret_val = data.get("secret").and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+                let url = data
+                    .get("url")
+                    .and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+                let token = data
+                    .get("token")
+                    .and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+                let secret_val = data
+                    .get("secret")
+                    .and_then(|b| String::from_utf8(b.0.clone()).ok())?;
 
                 Some((url, token, secret_val))
             }

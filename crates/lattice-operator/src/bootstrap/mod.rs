@@ -555,10 +555,7 @@ impl ManifestGenerator for DefaultManifestGenerator {
                 bootstrap,
             )
             .unwrap_or_else(|e| {
-                panic!(
-                    "BUG: failed to serialize operator manifests to JSON: {}",
-                    e
-                )
+                panic!("BUG: failed to serialize operator manifests to JSON: {}", e)
             }),
         );
 
@@ -1604,9 +1601,10 @@ mod tests {
         let manifests = generator.generate("test:latest", None, None, None, None);
 
         // CRD must be first so it's applied before any CR instances
-        let has_crd = manifests
-            .iter()
-            .any(|m| m.contains("\"kind\":\"CustomResourceDefinition\"") && m.contains("latticeclusters.lattice.dev"));
+        let has_crd = manifests.iter().any(|m| {
+            m.contains("\"kind\":\"CustomResourceDefinition\"")
+                && m.contains("latticeclusters.lattice.dev")
+        });
         assert!(has_crd, "Should include LatticeCluster CRD definition");
 
         // Manifests create the lattice-system namespace (JSON format)

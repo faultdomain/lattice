@@ -58,22 +58,31 @@ impl ProxmoxProvider {
 
     /// Generate ProxmoxCluster manifest
     fn generate_proxmox_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
-        let name = cluster.metadata.name.as_ref()
+        let name = cluster
+            .metadata
+            .name
+            .as_ref()
             .ok_or_else(|| Error::validation("cluster name required"))?;
         let cfg = Self::get_config(cluster)
             .ok_or_else(|| Error::validation("proxmox config required"))?;
 
-        let dns_servers = cfg.dns_servers.clone()
+        let dns_servers = cfg
+            .dns_servers
+            .clone()
             .unwrap_or_else(|| vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]);
         let allowed_nodes = cfg.allowed_nodes.clone().unwrap_or_default();
 
         // Parse ipv4_pool range to get start-end and prefix
-        let (ip_range, prefix) = cfg.ipv4_pool.parse_range()
+        let (ip_range, prefix) = cfg
+            .ipv4_pool
+            .parse_range()
             .map(|(start, end, prefix)| (format!("{}-{}", start, end), prefix))
-            .ok_or_else(|| Error::validation(format!(
-                "invalid ipv4Pool range format: '{}', expected format like '10.0.0.101-102/24'",
-                cfg.ipv4_pool.range
-            )))?;
+            .ok_or_else(|| {
+                Error::validation(format!(
+                    "invalid ipv4Pool range format: '{}', expected format like '10.0.0.101-102/24'",
+                    cfg.ipv4_pool.range
+                ))
+            })?;
 
         let mut spec = serde_json::json!({
             "controlPlaneEndpoint": {
@@ -98,8 +107,10 @@ impl ProxmoxProvider {
             spec["schedulerHints"] = serde_json::json!({ "memoryAdjustment": memory_adj });
         }
 
-        Ok(CAPIManifest::new(PROXMOX_API_VERSION, "ProxmoxCluster", name, &self.namespace)
-            .with_spec(spec))
+        Ok(
+            CAPIManifest::new(PROXMOX_API_VERSION, "ProxmoxCluster", name, &self.namespace)
+                .with_spec(spec),
+        )
     }
 
     /// Generate ProxmoxMachineTemplate (shared logic for CP and workers)
@@ -111,7 +122,10 @@ impl ProxmoxProvider {
         suffix: &str,
     ) -> CAPIManifest {
         let bridge = cfg.bridge.clone().unwrap_or_else(|| "vmbr0".to_string());
-        let network_model = cfg.network_model.clone().unwrap_or_else(|| "virtio".to_string());
+        let network_model = cfg
+            .network_model
+            .clone()
+            .unwrap_or_else(|| "virtio".to_string());
 
         let mut network = serde_json::json!({
             "bridge": bridge,
@@ -209,7 +223,10 @@ impl Provider for ProxmoxProvider {
         cluster: &LatticeCluster,
         bootstrap: &BootstrapInfo,
     ) -> Result<Vec<CAPIManifest>> {
-        let name = cluster.metadata.name.as_ref()
+        let name = cluster
+            .metadata
+            .name
+            .as_ref()
             .ok_or_else(|| Error::validation("cluster name required"))?;
         let spec = &cluster.spec;
         let cfg = Self::get_config(cluster)
@@ -230,7 +247,12 @@ impl Provider for ProxmoxProvider {
         };
 
         // Build certSANs - auto-add controlPlaneEndpoint and endpoints.host
-        let mut cert_sans = spec.provider.kubernetes.cert_sans.clone().unwrap_or_default();
+        let mut cert_sans = spec
+            .provider
+            .kubernetes
+            .cert_sans
+            .clone()
+            .unwrap_or_default();
         if !cert_sans.contains(&cfg.control_plane_endpoint) {
             cert_sans.push(cfg.control_plane_endpoint.clone());
         }
@@ -244,8 +266,11 @@ impl Provider for ProxmoxProvider {
         // All Proxmox clusters need kube-vip to manage the API server VIP
         let vip = Some(VipConfig::new(
             cfg.control_plane_endpoint.clone(),
-            Some(cfg.virtual_ip_network_interface.clone()
-                .unwrap_or_else(|| DEFAULT_VIP_INTERFACE.to_string())),
+            Some(
+                cfg.virtual_ip_network_interface
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_VIP_INTERFACE.to_string()),
+            ),
             cfg.kube_vip_image.clone(),
         ));
 
@@ -263,19 +288,29 @@ impl Provider for ProxmoxProvider {
             generate_cluster(&config, &infra),
             self.generate_proxmox_cluster(cluster)?,
             generate_control_plane(&config, &infra, &cp_config),
-            self.generate_machine_template(name, cfg, MachineSizing {
-                cores: cfg.cp_cores,
-                memory_mib: cfg.cp_memory_mib,
-                disk_size_gb: cfg.cp_disk_size_gb,
-                sockets: cfg.cp_sockets.unwrap_or(1),
-            }, "control-plane"),
+            self.generate_machine_template(
+                name,
+                cfg,
+                MachineSizing {
+                    cores: cfg.cp_cores,
+                    memory_mib: cfg.cp_memory_mib,
+                    disk_size_gb: cfg.cp_disk_size_gb,
+                    sockets: cfg.cp_sockets.unwrap_or(1),
+                },
+                "control-plane",
+            ),
             generate_machine_deployment(&config, &infra),
-            self.generate_machine_template(name, cfg, MachineSizing {
-                cores: cfg.worker_cores,
-                memory_mib: cfg.worker_memory_mib,
-                disk_size_gb: cfg.worker_disk_size_gb,
-                sockets: cfg.worker_sockets.unwrap_or(1),
-            }, "md-0"),
+            self.generate_machine_template(
+                name,
+                cfg,
+                MachineSizing {
+                    cores: cfg.worker_cores,
+                    memory_mib: cfg.worker_memory_mib,
+                    disk_size_gb: cfg.worker_disk_size_gb,
+                    sockets: cfg.worker_sockets.unwrap_or(1),
+                },
+                "md-0",
+            ),
             generate_bootstrap_config_template(&config),
         ])
     }
@@ -293,8 +328,12 @@ impl Provider for ProxmoxProvider {
     fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
         let secret_ref = Self::get_config(cluster).and_then(|c| c.secret_ref.as_ref());
         vec![(
-            secret_ref.map(|s| s.name.clone()).unwrap_or_else(|| "proxmox-credentials".to_string()),
-            secret_ref.map(|s| s.namespace.clone()).unwrap_or_else(|| "capmox-system".to_string()),
+            secret_ref
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "proxmox-credentials".to_string()),
+            secret_ref
+                .map(|s| s.namespace.clone())
+                .unwrap_or_else(|| "capmox-system".to_string()),
         )]
     }
 }
@@ -363,7 +402,10 @@ mod tests {
                     },
                     config: ProviderConfig::proxmox(test_proxmox_config()),
                 },
-                nodes: NodeSpec { control_plane: 3, workers: 5 },
+                nodes: NodeSpec {
+                    control_plane: 3,
+                    workers: 5,
+                },
                 endpoints: None,
                 networking: None,
                 environment: None,
@@ -400,7 +442,8 @@ mod tests {
             .await
             .unwrap();
 
-        let template = manifests.iter()
+        let template = manifests
+            .iter()
             .find(|m| m.kind == "ProxmoxMachineTemplate")
             .unwrap();
         let full = &template.spec.as_ref().unwrap()["template"]["spec"]["full"];
@@ -415,12 +458,14 @@ mod tests {
             .await
             .unwrap();
 
-        let cp = manifests.iter()
+        let cp = manifests
+            .iter()
             .find(|m| m.kind == "KubeadmControlPlane")
             .unwrap();
         let spec = cp.spec.as_ref().unwrap();
         let sans = spec["kubeadmConfigSpec"]["clusterConfiguration"]["apiServer"]["certSANs"]
-            .as_array().unwrap();
+            .as_array()
+            .unwrap();
         assert!(sans.contains(&serde_json::json!("10.0.0.100")));
     }
 
@@ -460,7 +505,10 @@ mod tests {
             .await
             .unwrap();
 
-        let cp = manifests.iter().find(|m| m.kind.contains("ControlPlane")).unwrap();
+        let cp = manifests
+            .iter()
+            .find(|m| m.kind.contains("ControlPlane"))
+            .unwrap();
         assert!(cp.kind.contains("RKE2"));
     }
 }

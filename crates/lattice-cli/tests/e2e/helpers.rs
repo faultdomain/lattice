@@ -27,9 +27,10 @@ pub async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
     let kubeconfig =
         Kubeconfig::read_from(path).map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
 
-    let mut config = kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
-        .await
-        .map_err(|e| format!("Failed to create kube config: {}", e))?;
+    let mut config =
+        kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+            .await
+            .map_err(|e| format!("Failed to create kube config: {}", e))?;
 
     config.connect_timeout = Some(Duration::from_secs(10));
     config.read_timeout = Some(Duration::from_secs(30));
@@ -332,7 +333,10 @@ pub async fn watch_cluster_phases(
                 }
             }
             Err(e) => {
-                println!("  Warning: failed to get cluster {} status: {}", cluster_name, e);
+                println!(
+                    "  Warning: failed to get cluster {} status: {}",
+                    cluster_name, e
+                );
             }
         }
 

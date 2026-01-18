@@ -532,16 +532,28 @@ mod tests {
 
         #[test]
         fn test_from_str_valid() {
-            assert_eq!("docker".parse::<ProviderType>().unwrap(), ProviderType::Docker);
+            assert_eq!(
+                "docker".parse::<ProviderType>().unwrap(),
+                ProviderType::Docker
+            );
             assert_eq!("aws".parse::<ProviderType>().unwrap(), ProviderType::Aws);
             assert_eq!("gcp".parse::<ProviderType>().unwrap(), ProviderType::Gcp);
-            assert_eq!("azure".parse::<ProviderType>().unwrap(), ProviderType::Azure);
+            assert_eq!(
+                "azure".parse::<ProviderType>().unwrap(),
+                ProviderType::Azure
+            );
         }
 
         #[test]
         fn test_from_str_case_insensitive() {
-            assert_eq!("DOCKER".parse::<ProviderType>().unwrap(), ProviderType::Docker);
-            assert_eq!("Docker".parse::<ProviderType>().unwrap(), ProviderType::Docker);
+            assert_eq!(
+                "DOCKER".parse::<ProviderType>().unwrap(),
+                ProviderType::Docker
+            );
+            assert_eq!(
+                "Docker".parse::<ProviderType>().unwrap(),
+                ProviderType::Docker
+            );
             assert_eq!("AWS".parse::<ProviderType>().unwrap(), ProviderType::Aws);
         }
 
@@ -549,7 +561,10 @@ mod tests {
         fn test_from_str_invalid() {
             let result = "invalid".parse::<ProviderType>();
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("invalid provider type"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid provider type"));
         }
 
         #[test]
@@ -577,28 +592,43 @@ mod tests {
 
         #[test]
         fn test_total_nodes() {
-            let spec = NodeSpec { control_plane: 1, workers: 2 };
+            let spec = NodeSpec {
+                control_plane: 1,
+                workers: 2,
+            };
             assert_eq!(spec.total_nodes(), 3);
         }
 
         #[test]
         fn test_validate_single_control_plane() {
-            let spec = NodeSpec { control_plane: 1, workers: 0 };
+            let spec = NodeSpec {
+                control_plane: 1,
+                workers: 0,
+            };
             assert!(spec.validate().is_ok());
         }
 
         #[test]
         fn test_validate_ha_control_plane() {
-            let spec = NodeSpec { control_plane: 3, workers: 2 };
+            let spec = NodeSpec {
+                control_plane: 3,
+                workers: 2,
+            };
             assert!(spec.validate().is_ok());
 
-            let spec = NodeSpec { control_plane: 5, workers: 2 };
+            let spec = NodeSpec {
+                control_plane: 5,
+                workers: 2,
+            };
             assert!(spec.validate().is_ok());
         }
 
         #[test]
         fn test_validate_zero_control_plane_fails() {
-            let spec = NodeSpec { control_plane: 0, workers: 2 };
+            let spec = NodeSpec {
+                control_plane: 0,
+                workers: 2,
+            };
             let result = spec.validate();
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("at least 1"));
@@ -606,7 +636,10 @@ mod tests {
 
         #[test]
         fn test_validate_even_control_plane_fails() {
-            let spec = NodeSpec { control_plane: 2, workers: 2 };
+            let spec = NodeSpec {
+                control_plane: 2,
+                workers: 2,
+            };
             let result = spec.validate();
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("odd"));
@@ -653,7 +686,12 @@ mod tests {
         #[test]
         fn test_new_sets_timestamp() {
             let before = Utc::now();
-            let condition = Condition::new("Ready", ConditionStatus::True, "ClusterReady", "Cluster is ready");
+            let condition = Condition::new(
+                "Ready",
+                ConditionStatus::True,
+                "ClusterReady",
+                "Cluster is ready",
+            );
             let after = Utc::now();
 
             assert_eq!(condition.type_, "Ready");
@@ -817,7 +855,9 @@ mod tests {
                 host: "172.18.255.1".to_string(),
                 grpc_port: 50051,
                 bootstrap_port: 8443,
-                service: ServiceSpec { type_: "LoadBalancer".to_string() },
+                service: ServiceSpec {
+                    type_: "LoadBalancer".to_string(),
+                },
                 gitops: None,
             };
             assert_eq!(spec.grpc_endpoint(), "https://172.18.255.1:50051");

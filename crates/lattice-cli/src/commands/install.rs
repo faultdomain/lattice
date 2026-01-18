@@ -437,7 +437,11 @@ nodes:
                 }
 
                 let result = self
-                    .run_command_with_kubeconfig("kubectl", &["get", "crd", crd], &bootstrap_kubeconfig)
+                    .run_command_with_kubeconfig(
+                        "kubectl",
+                        &["get", "crd", crd],
+                        &bootstrap_kubeconfig,
+                    )
                     .await;
 
                 if result.is_ok() {
@@ -522,8 +526,12 @@ nodes:
         for (i, manifest) in crs_manifests.iter().enumerate() {
             if i == crs_manifests.len() - 1 {
                 // Last manifest is the CRS, use retry for CRD availability
-                self.kubectl_apply_with_retry(manifest, Some(&bootstrap_kubeconfig), Duration::from_secs(120))
-                    .await?;
+                self.kubectl_apply_with_retry(
+                    manifest,
+                    Some(&bootstrap_kubeconfig),
+                    Duration::from_secs(120),
+                )
+                .await?;
             } else {
                 self.kubectl_apply(manifest, Some(&bootstrap_kubeconfig))
                     .await?;
@@ -834,8 +842,8 @@ nodes:
 
             if result.status.success() {
                 let phases = String::from_utf8_lossy(&result.stdout);
-                let all_running = !phases.is_empty()
-                    && phases.split_whitespace().all(|p| p == "Running");
+                let all_running =
+                    !phases.is_empty() && phases.split_whitespace().all(|p| p == "Running");
                 if all_running {
                     info!("All machines are Running");
                     break;

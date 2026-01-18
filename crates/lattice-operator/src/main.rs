@@ -557,7 +557,10 @@ async fn apply_manifests(
             // Inject default namespace into manifest for namespaced resources
             if let Some(ns) = default_ns {
                 if let Some(metadata) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-                    metadata.insert("namespace".to_string(), serde_json::Value::String(ns.to_string()));
+                    metadata.insert(
+                        "namespace".to_string(),
+                        serde_json::Value::String(ns.to_string()),
+                    );
                 }
                 Some(ns.to_string())
             } else {

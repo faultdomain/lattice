@@ -356,7 +356,10 @@ impl AgentClient {
                         installed_providers = vec![provider];
                         break;
                     } else {
-                        warn!(attempt, "CAPI CRDs not available after timeout, retrying...");
+                        warn!(
+                            attempt,
+                            "CAPI CRDs not available after timeout, retrying..."
+                        );
                     }
                 }
                 Err(e) => {
@@ -591,9 +594,13 @@ impl AgentClient {
             Api::all_with(client, &ar)
         };
 
-        api.patch(name, &PatchParams::apply("lattice-agent").force(), &Patch::Apply(&obj))
-            .await
-            .map_err(|e| std::io::Error::other(format!("Server-side apply failed: {}", e)))?;
+        api.patch(
+            name,
+            &PatchParams::apply("lattice-agent").force(),
+            &Patch::Apply(&obj),
+        )
+        .await
+        .map_err(|e| std::io::Error::other(format!("Server-side apply failed: {}", e)))?;
 
         debug!(name = name, kind = kind, "Manifest applied successfully");
         Ok(())
