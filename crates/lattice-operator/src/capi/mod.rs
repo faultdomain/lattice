@@ -507,7 +507,7 @@ impl ClusterctlInstaller {
         let required_deployments = ["cert-manager", "cert-manager-webhook", "cert-manager-cainjector"];
 
         let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(120);
+        let timeout = Duration::from_secs(300); // 5 min for slow image pulls (RKE2)
 
         loop {
             if start.elapsed() > timeout {

@@ -341,23 +341,38 @@ impl AgentClient {
         Self::start_proxy_stream(channel, cluster_name).await;
 
         // Install CAPI on this cluster - required for clusterctl move during pivot
+        // Retry up to 3 times with backoff for slow clusters (RKE2 image pulls)
         info!("Installing CAPI on local cluster");
-        let (capi_ready, installed_providers) = match Self::install_capi().await {
-            Ok(provider) => {
-                info!("CAPI installed, waiting for CRDs");
-                if Self::wait_for_capi_crds(120).await {
-                    info!("CAPI is ready");
-                    (true, vec![provider])
-                } else {
-                    warn!("CAPI CRDs not available after timeout");
-                    (false, vec![])
+        let mut capi_ready = false;
+        let mut installed_providers = vec![];
+
+        for attempt in 1..=3 {
+            match Self::install_capi().await {
+                Ok(provider) => {
+                    info!("CAPI installed, waiting for CRDs");
+                    if Self::wait_for_capi_crds(120).await {
+                        info!("CAPI is ready");
+                        capi_ready = true;
+                        installed_providers = vec![provider];
+                        break;
+                    } else {
+                        warn!(attempt, "CAPI CRDs not available after timeout, retrying...");
+                    }
+                }
+                Err(e) => {
+                    warn!(attempt, error = %e, "Failed to install CAPI, retrying...");
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "Failed to install CAPI, pivot may fail");
-                (false, vec![])
+            if attempt < 3 {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
-        };
+        }
+
+        if !capi_ready {
+            return Err(ClientError::CapiInstallFailed(
+                "failed after 3 attempts - cluster cannot self-manage".to_string(),
+            ));
+        }
 
         // Send bootstrap complete with CAPI status
         self.send_bootstrap_complete(capi_ready, installed_providers)
@@ -1097,6 +1112,8 @@ pub enum ClientError {
     NotConnected,
     /// Channel closed
     ChannelClosed,
+    /// CAPI installation failed
+    CapiInstallFailed(String),
 }
 
 impl std::fmt::Display for ClientError {
@@ -1108,6 +1125,7 @@ impl std::fmt::Display for ClientError {
             ClientError::TlsError(e) => write!(f, "TLS error: {}", e),
             ClientError::NotConnected => write!(f, "not connected"),
             ClientError::ChannelClosed => write!(f, "channel closed"),
+            ClientError::CapiInstallFailed(e) => write!(f, "CAPI installation failed: {}", e),
         }
     }
 }
