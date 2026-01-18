@@ -38,22 +38,19 @@ spec:
         port: 8989
         protocol: TCP
   resources:
-    # Volume resources - own config, share downloads and media
+    # Owned volume (private to this service)
     config:
       type: volume
       params:
         size: 5Gi
         storageClass: local-path
+    # Shared volume REFERENCES (no size = reference only)
     downloads:
       type: volume
-      params:
-        # Reference NZBGet's downloads volume for hardlinking
-        ref: nzbget.downloads
+      id: media-downloads
     media:
       type: volume
-      params:
-        # Reference Jellyfin's media volume
-        ref: jellyfin.media
+      id: media-library
     # Service dependencies (bilateral agreements)
     nzbget:
       type: service

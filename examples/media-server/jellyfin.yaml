@@ -36,7 +36,7 @@ spec:
         port: 8096
         protocol: TCP
   resources:
-    # Volume resources
+    # Owned volumes (private to this service)
     config:
       type: volume
       params:
@@ -47,8 +47,10 @@ spec:
       params:
         size: 20Gi
         storageClass: local-path
+    # Owned shared volume (OWNER - has size)
     media:
       type: volume
+      id: media-library
       params:
         size: 1Ti
         storageClass: local-path

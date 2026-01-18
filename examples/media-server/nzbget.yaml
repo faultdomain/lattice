@@ -36,14 +36,16 @@ spec:
         port: 6789
         protocol: TCP
   resources:
-    # Volume resources
+    # Owned volume (private to this service)
     config:
       type: volume
       params:
         size: 1Gi
         storageClass: local-path
+    # Owned shared volume (OWNER - has size)
     downloads:
       type: volume
+      id: media-downloads
       params:
         size: 500Gi
         storageClass: local-path

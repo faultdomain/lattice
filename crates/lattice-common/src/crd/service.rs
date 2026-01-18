@@ -141,14 +141,31 @@ pub struct ResourceSpec {
 
 /// Parameters for volume resources (type: volume)
 ///
-/// Volumes can be either:
-/// 1. Owned volumes - created and managed by this service
-/// 2. Shared volumes - reference another service's volume
+/// Volume ownership is determined by the presence of `size`:
+/// - With `size`: This service OWNS the volume (creates the PVC)
+/// - Without `size`: This service REFERENCES a shared volume
+///
+/// For shared volumes, use the `id` field on ResourceSpec (Score-native):
+/// ```yaml
+/// # Owner (has size)
+/// resources:
+///   downloads:
+///     type: volume
+///     id: media-downloads
+///     params:
+///       size: 500Gi
+///
+/// # Reference (no size)
+/// resources:
+///   downloads:
+///     type: volume
+///     id: media-downloads
+/// ```
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeParams {
     /// Storage size (e.g., "10Gi", "500Gi")
-    /// Required for owned volumes, ignored for shared volumes
+    /// Required for owned volumes. Omit for shared volume references.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
 
@@ -159,12 +176,6 @@ pub struct VolumeParams {
     /// Access mode: ReadWriteOnce (default), ReadWriteMany, ReadOnlyMany
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<VolumeAccessMode>,
-
-    /// Reference to another service's volume for sharing
-    /// Format: "{service-name}.{volume-name}"
-    /// When set, this volume mounts another service's PVC
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
-    pub ref_: Option<String>,
 }
 
 /// Volume access mode
@@ -185,9 +196,45 @@ impl ResourceSpec {
         if self.type_ != ResourceType::Volume {
             return None;
         }
-        self.params
-            .as_ref()
-            .and_then(|p| serde_json::from_value(p.clone()).ok())
+        // If no params, return default (empty) VolumeParams
+        match &self.params {
+            Some(p) => serde_json::from_value(p.clone()).ok(),
+            None => Some(VolumeParams::default()),
+        }
+    }
+
+    /// Returns true if this is a volume resource that owns (creates) the PVC
+    /// Owner = has size in params
+    pub fn is_volume_owner(&self) -> bool {
+        self.volume_params()
+            .map(|p| p.size.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Returns true if this is a volume resource that references a shared PVC
+    /// Reference = has id but no size
+    pub fn is_volume_reference(&self) -> bool {
+        if self.type_ != ResourceType::Volume {
+            return false;
+        }
+        self.id.is_some()
+            && self
+                .volume_params()
+                .map(|p| p.size.is_none())
+                .unwrap_or(true)
+    }
+
+    /// Get the PVC name for this volume resource
+    /// - If `id` is set: `vol-{id}`
+    /// - Otherwise: `{service}-{resource-name}` (caller must provide service name)
+    pub fn volume_pvc_name(&self, service_name: &str, resource_name: &str) -> Option<String> {
+        if self.type_ != ResourceType::Volume {
+            return None;
+        }
+        Some(match &self.id {
+            Some(id) => format!("vol-{}", id),
+            None => format!("{}-{}", service_name, resource_name),
+        })
     }
 }
 

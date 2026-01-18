@@ -72,36 +72,52 @@ Traffic is only allowed when BOTH sides agree:
 | * → NZBGet | - | - | 1000/min |
 | * → Jellyfin | - | - | 100/min |
 
-## Shared Volumes
+## Shared Volumes (Score-compatible)
 
-Volumes are shared across services using the `ref` parameter:
+Volumes are shared using the Score-native `id` field:
+
+- **Owner** (has `size`): Creates and owns the PVC
+- **Reference** (no `size`, just `id`): Uses existing PVC
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Volume Sharing Graph                         │
+│                    Volume Ownership                             │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│   NZBGet                           Sonarr                       │
-│   ┌──────────────────┐             ┌──────────────────┐         │
-│   │ downloads: (RWX) │◄───ref──────│ downloads:       │         │
-│   │   size: 500Gi    │             │   ref: nzbget.   │         │
-│   │   accessMode:    │             │        downloads │         │
-│   │   ReadWriteMany  │             └──────────────────┘         │
-│   └──────────────────┘                                          │
+│   NZBGet (OWNER)                   Sonarr (REFERENCE)           │
+│   ┌────────────────────┐           ┌────────────────────┐       │
+│   │ downloads:         │           │ downloads:         │       │
+│   │   type: volume     │           │   type: volume     │       │
+│   │   id: media-       │◄──shares──│   id: media-       │       │
+│   │       downloads    │           │       downloads    │       │
+│   │   params:          │           │   # no params =    │       │
+│   │     size: 500Gi    │           │   # reference      │       │
+│   └────────────────────┘           └────────────────────┘       │
 │                                                                 │
-│   Jellyfin                         Sonarr                       │
-│   ┌──────────────────┐             ┌──────────────────┐         │
-│   │ media: (RWX)     │◄───ref──────│ media:           │         │
-│   │   size: 1Ti      │             │   ref: jellyfin. │         │
-│   │   accessMode:    │             │        media     │         │
-│   │   ReadWriteMany  │             └──────────────────┘         │
-│   └──────────────────┘                                          │
+│   Jellyfin (OWNER)                 Sonarr (REFERENCE)           │
+│   ┌────────────────────┐           ┌────────────────────┐       │
+│   │ media:             │           │ media:             │       │
+│   │   type: volume     │           │   type: volume     │       │
+│   │   id: media-       │◄──shares──│   id: media-       │       │
+│   │       library      │           │       library      │       │
+│   │   params:          │           │   # no params      │       │
+│   │     size: 1Ti      │           └────────────────────┘       │
+│   └────────────────────┘                                        │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### PVC Naming
+
+| Volume | ID | PVC Name |
+|--------|-----|----------|
+| NZBGet config | (none) | `nzbget-config` |
+| NZBGet downloads | `media-downloads` | `vol-media-downloads` |
+| Jellyfin media | `media-library` | `vol-media-library` |
+| Sonarr downloads | `media-downloads` | `vol-media-downloads` (shared) |
+
 This enables:
-- **Hardlinking**: Sonarr can hardlink completed downloads to media library (same filesystem)
+- **Hardlinking**: Sonarr can hardlink completed downloads to media library
 - **Instant moves**: No copying needed when moving files between services
 - **Disk efficiency**: Single copy of files shared between services
 
