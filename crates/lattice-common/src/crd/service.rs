@@ -76,6 +76,8 @@ pub enum ResourceType {
     Service,
     /// External service (LatticeExternalService)
     ExternalService,
+    /// Persistent volume (Score-compatible)
+    Volume,
 }
 
 /// Resource metadata (Score-compatible)
@@ -131,6 +133,62 @@ pub struct ResourceSpec {
     /// header manipulation via kgateway waypoint proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound: Option<InboundTrafficPolicy>,
+}
+
+// =============================================================================
+// Volume Resource Configuration
+// =============================================================================
+
+/// Parameters for volume resources (type: volume)
+///
+/// Volumes can be either:
+/// 1. Owned volumes - created and managed by this service
+/// 2. Shared volumes - reference another service's volume
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeParams {
+    /// Storage size (e.g., "10Gi", "500Gi")
+    /// Required for owned volumes, ignored for shared volumes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+
+    /// Kubernetes storage class name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_class: Option<String>,
+
+    /// Access mode: ReadWriteOnce (default), ReadWriteMany, ReadOnlyMany
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_mode: Option<VolumeAccessMode>,
+
+    /// Reference to another service's volume for sharing
+    /// Format: "{service-name}.{volume-name}"
+    /// When set, this volume mounts another service's PVC
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
+    pub ref_: Option<String>,
+}
+
+/// Volume access mode
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum VolumeAccessMode {
+    /// Single node read-write (default)
+    #[default]
+    ReadWriteOnce,
+    /// Multi-node read-write (requires RWX-capable storage)
+    ReadWriteMany,
+    /// Multi-node read-only
+    ReadOnlyMany,
+}
+
+impl ResourceSpec {
+    /// Parse params as VolumeParams if this is a volume resource
+    pub fn volume_params(&self) -> Option<VolumeParams> {
+        if self.type_ != ResourceType::Volume {
+            return None;
+        }
+        self.params
+            .as_ref()
+            .and_then(|p| serde_json::from_value(p.clone()).ok())
+    }
 }
 
 // =============================================================================

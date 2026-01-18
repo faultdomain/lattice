@@ -11,18 +11,12 @@ spec:
       variables:
         JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
       volumes:
-        config:
-          mountPath: /config
-          size: 10Gi
-          storageClass: local-path
-        cache:
-          mountPath: /cache
-          size: 20Gi
-          storageClass: local-path
-        media:
-          mountPath: /media
-          size: 1Ti
-          storageClass: local-path
+        /config:
+          source: ${resources.config}
+        /cache:
+          source: ${resources.cache}
+        /media:
+          source: ${resources.media}
       resources:
         requests:
           cpu: 500m
@@ -42,7 +36,24 @@ spec:
         port: 8096
         protocol: TCP
   resources:
-    # Allow Sonarr to notify Jellyfin to scan library (bilateral agreement)
+    # Volume resources
+    config:
+      type: volume
+      params:
+        size: 10Gi
+        storageClass: local-path
+    cache:
+      type: volume
+      params:
+        size: 20Gi
+        storageClass: local-path
+    media:
+      type: volume
+      params:
+        size: 1Ti
+        storageClass: local-path
+        accessMode: ReadWriteMany
+    # Service dependencies (bilateral agreement)
     sonarr:
       type: service
       direction: inbound

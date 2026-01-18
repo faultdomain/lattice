@@ -1,6 +1,6 @@
 # Home Media Server Stack
 
-A complete home media server using Lattice's service mesh with bilateral agreements.
+A complete home media server using Lattice's service mesh with bilateral agreements and shared volumes.
 
 ## Services
 
@@ -74,10 +74,36 @@ Traffic is only allowed when BOTH sides agree:
 
 ## Shared Volumes
 
-For hardlinking to work (saving disk space), services share volumes:
+Volumes are shared across services using the `ref` parameter:
 
-- `/downloads` - Shared between NZBGet and Sonarr
-- `/media` - Shared between Sonarr and Jellyfin
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Volume Sharing Graph                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   NZBGet                           Sonarr                       │
+│   ┌──────────────────┐             ┌──────────────────┐         │
+│   │ downloads: (RWX) │◄───ref──────│ downloads:       │         │
+│   │   size: 500Gi    │             │   ref: nzbget.   │         │
+│   │   accessMode:    │             │        downloads │         │
+│   │   ReadWriteMany  │             └──────────────────┘         │
+│   └──────────────────┘                                          │
+│                                                                 │
+│   Jellyfin                         Sonarr                       │
+│   ┌──────────────────┐             ┌──────────────────┐         │
+│   │ media: (RWX)     │◄───ref──────│ media:           │         │
+│   │   size: 1Ti      │             │   ref: jellyfin. │         │
+│   │   accessMode:    │             │        media     │         │
+│   │   ReadWriteMany  │             └──────────────────┘         │
+│   └──────────────────┘                                          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+This enables:
+- **Hardlinking**: Sonarr can hardlink completed downloads to media library (same filesystem)
+- **Instant moves**: No copying needed when moving files between services
+- **Disk efficiency**: Single copy of files shared between services
 
 ## Deploy
 

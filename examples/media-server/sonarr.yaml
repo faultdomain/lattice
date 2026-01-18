@@ -13,20 +13,12 @@ spec:
         PGID: "1000"
         TZ: "America/New_York"
       volumes:
-        config:
-          mountPath: /config
-          size: 5Gi
-          storageClass: local-path
-        # Share downloads volume with nzbget for hardlinking
-        downloads:
-          mountPath: /downloads
-          size: 500Gi
-          storageClass: local-path
-        # Share media volume with jellyfin
-        media:
-          mountPath: /media
-          size: 1Ti
-          storageClass: local-path
+        /config:
+          source: ${resources.config}
+        /downloads:
+          source: ${resources.downloads}
+        /media:
+          source: ${resources.media}
       resources:
         requests:
           cpu: 100m
@@ -46,7 +38,23 @@ spec:
         port: 8989
         protocol: TCP
   resources:
-    # Sonarr calls NZBGet API to manage downloads
+    # Volume resources - own config, share downloads and media
+    config:
+      type: volume
+      params:
+        size: 5Gi
+        storageClass: local-path
+    downloads:
+      type: volume
+      params:
+        # Reference NZBGet's downloads volume for hardlinking
+        ref: nzbget.downloads
+    media:
+      type: volume
+      params:
+        # Reference Jellyfin's media volume
+        ref: jellyfin.media
+    # Service dependencies (bilateral agreements)
     nzbget:
       type: service
       direction: outbound
@@ -59,7 +67,6 @@ spec:
             - connect-failure
         timeout:
           request: 30s
-    # Sonarr calls Jellyfin API to trigger library scans
     jellyfin:
       type: service
       direction: outbound

@@ -13,14 +13,10 @@ spec:
         PGID: "1000"
         TZ: "America/New_York"
       volumes:
-        config:
-          mountPath: /config
-          size: 1Gi
-          storageClass: local-path
-        downloads:
-          mountPath: /downloads
-          size: 500Gi
-          storageClass: local-path
+        /config:
+          source: ${resources.config}
+        /downloads:
+          source: ${resources.downloads}
       resources:
         requests:
           cpu: 100m
@@ -40,7 +36,19 @@ spec:
         port: 6789
         protocol: TCP
   resources:
-    # Allow Sonarr to manage downloads (bilateral agreement)
+    # Volume resources
+    config:
+      type: volume
+      params:
+        size: 1Gi
+        storageClass: local-path
+    downloads:
+      type: volume
+      params:
+        size: 500Gi
+        storageClass: local-path
+        accessMode: ReadWriteMany
+    # Service dependencies (bilateral agreement)
     sonarr:
       type: service
       direction: inbound
