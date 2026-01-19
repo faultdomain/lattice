@@ -357,6 +357,36 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
+        // Waypoint Gateway (for east-west L7 policies via Envoy Gateway)
+        if let Some(ref gateway) = compiled.waypoint.gateway {
+            let name = gateway.metadata.name.clone();
+            let json = serde_json::to_value(gateway)
+                .map_err(|e| Error::serialization(format!("Waypoint Gateway: {}", e)))?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &gw_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying waypoint Gateway");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
+        // Waypoint HTTPRoute (routes mesh traffic through waypoint)
+        if let Some(ref route) = compiled.waypoint.http_route {
+            let name = route.metadata.name.clone();
+            let json = serde_json::to_value(route)
+                .map_err(|e| Error::serialization(format!("Waypoint HTTPRoute: {}", e)))?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &route_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying waypoint HTTPRoute");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
         // BackendTrafficPolicy (Envoy Gateway traffic shaping)
         let btp_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
             group: "gateway.envoyproxy.io".to_string(),

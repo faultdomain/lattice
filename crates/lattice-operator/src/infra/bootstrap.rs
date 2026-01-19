@@ -226,8 +226,12 @@ pub fn generate_envoy_gateway() -> Result<Vec<String>, String> {
         manifests.push(inject_namespace(&m, "envoy-gateway-system"));
     }
 
-    // Add GatewayClass for Envoy Gateway (name: "eg")
+    // Add GatewayClass for Envoy Gateway ingress (name: "eg")
     manifests.push(envoy_gateway_class());
+
+    // Add waypoint GatewayClass and EnvoyProxy for east-west L7 policies
+    manifests.push(waypoint_envoy_proxy());
+    manifests.push(waypoint_gateway_class());
 
     // Add allow policy for Envoy Gateway
     manifests.push(allow_all_policy("envoy-gateway", "envoy-gateway-system"));
@@ -235,7 +239,7 @@ pub fn generate_envoy_gateway() -> Result<Vec<String>, String> {
     Ok(manifests)
 }
 
-/// Generate the Envoy Gateway GatewayClass
+/// Generate the Envoy Gateway GatewayClass for ingress
 fn envoy_gateway_class() -> String {
     r#"apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
@@ -245,6 +249,58 @@ metadata:
     app.kubernetes.io/managed-by: lattice
 spec:
   controllerName: gateway.envoyproxy.io/gatewayclass-controller"#
+        .to_string()
+}
+
+/// Generate the EnvoyProxy config for waypoint mode
+///
+/// Configures Envoy Gateway to act as an Istio Ambient waypoint proxy:
+/// - ClusterIP service (not LoadBalancer)
+/// - Fake HBONE port 15008 for ztunnel compatibility
+fn waypoint_envoy_proxy() -> String {
+    r#"apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: waypoint
+  namespace: envoy-gateway-system
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: ClusterIP
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              ports:
+                - name: hbone
+                  port: 15008
+                  protocol: TCP
+                  targetPort: 15008"#
+        .to_string()
+}
+
+/// Generate the waypoint GatewayClass for east-west L7 policies
+///
+/// Uses the waypoint EnvoyProxy config to create waypoint proxies
+/// that integrate with Istio Ambient mesh.
+fn waypoint_gateway_class() -> String {
+    r#"apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg-waypoint
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: waypoint
+    namespace: envoy-gateway-system"#
         .to_string()
 }
 

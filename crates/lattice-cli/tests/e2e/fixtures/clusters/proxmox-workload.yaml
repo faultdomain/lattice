@@ -19,11 +19,11 @@ spec:
         sourceNode: "poweredge-lg"
         templateId: 9000
         # kube-vip VIP for K8s API server
-        controlPlaneEndpoint: "10.0.0.104"
+        controlPlaneEndpoint: "10.0.0.110"
         bridge: "vmbr0"
-        # Node IPs assigned by CAPMOX
+        # Node IPs assigned by CAPMOX (extra headroom for failed test cleanup)
         ipv4Pool:
-          range: "10.0.0.105-107/24"
+          range: "10.0.0.111-120/24"
           gateway: "10.0.0.1"
         dnsServers:
           - "10.0.0.1"

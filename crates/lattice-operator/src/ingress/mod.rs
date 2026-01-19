@@ -326,6 +326,160 @@ impl GeneratedIngress {
 }
 
 // =============================================================================
+// Waypoint Resources (East-West L7 Policies)
+// =============================================================================
+
+/// Waypoint resources for east-west mesh traffic L7 policy enforcement
+///
+/// Uses Envoy Gateway as waypoint proxy integrated with Istio Ambient mesh.
+/// The waypoint Gateway handles L7 traffic between ztunnel endpoints.
+#[derive(Clone, Debug, Default)]
+pub struct GeneratedWaypoint {
+    /// Waypoint Gateway (one per namespace, includes HBONE listener)
+    pub gateway: Option<Gateway>,
+    /// HTTPRoute for service (routes traffic through waypoint)
+    pub http_route: Option<HttpRoute>,
+}
+
+impl GeneratedWaypoint {
+    /// Create empty waypoint collection
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if any resources were generated
+    pub fn is_empty(&self) -> bool {
+        self.gateway.is_none() && self.http_route.is_none()
+    }
+}
+
+/// Compiler for generating waypoint Gateway and HTTPRoute resources
+///
+/// Creates the infrastructure needed for Envoy Gateway to act as an
+/// Istio Ambient waypoint proxy for L7 policy enforcement.
+pub struct WaypointCompiler;
+
+impl WaypointCompiler {
+    /// Waypoint GatewayClass name
+    const WAYPOINT_GATEWAY_CLASS: &'static str = "eg-waypoint";
+    /// HBONE port for ztunnel compatibility
+    const HBONE_PORT: u16 = 15008;
+
+    /// Compile waypoint resources for a service
+    ///
+    /// # Arguments
+    /// * `service_name` - Name of the LatticeService
+    /// * `namespace` - Target namespace
+    /// * `service_port` - Primary service port
+    pub fn compile(service_name: &str, namespace: &str, service_port: u16) -> GeneratedWaypoint {
+        let mut output = GeneratedWaypoint::new();
+
+        // Generate waypoint Gateway for this namespace
+        output.gateway = Some(Self::compile_waypoint_gateway(
+            namespace,
+            service_name,
+            service_port,
+        ));
+
+        // Generate HTTPRoute for this service through the waypoint
+        output.http_route = Some(Self::compile_waypoint_http_route(
+            service_name,
+            namespace,
+            service_port,
+        ));
+
+        output
+    }
+
+    /// Compile waypoint Gateway for a namespace
+    ///
+    /// The Gateway includes:
+    /// - Service listener on the specified port
+    /// - HBONE listener on 15008 for ztunnel compatibility
+    /// - `istio.io/dataplane-mode: ambient` label
+    fn compile_waypoint_gateway(namespace: &str, service_name: &str, port: u16) -> Gateway {
+        let gateway_name = format!("{}-waypoint", namespace);
+        let mut metadata = GatewayMetadata::new(&gateway_name, namespace);
+        metadata
+            .labels
+            .insert("istio.io/dataplane-mode".to_string(), "ambient".to_string());
+
+        Gateway {
+            api_version: "gateway.networking.k8s.io/v1".to_string(),
+            kind: "Gateway".to_string(),
+            metadata,
+            spec: GatewaySpec {
+                gateway_class_name: Self::WAYPOINT_GATEWAY_CLASS.to_string(),
+                listeners: vec![
+                    // Service listener
+                    GatewayListener {
+                        name: service_name.to_string(),
+                        hostname: None,
+                        port,
+                        protocol: "HTTP".to_string(),
+                        tls: None,
+                        allowed_routes: Some(AllowedRoutes {
+                            namespaces: RouteNamespaces {
+                                from: "Same".to_string(),
+                            },
+                        }),
+                    },
+                    // HBONE listener for ztunnel
+                    GatewayListener {
+                        name: "hbone".to_string(),
+                        hostname: None,
+                        port: Self::HBONE_PORT,
+                        protocol: "TCP".to_string(),
+                        tls: None,
+                        allowed_routes: Some(AllowedRoutes {
+                            namespaces: RouteNamespaces {
+                                from: "Same".to_string(),
+                            },
+                        }),
+                    },
+                ],
+            },
+        }
+    }
+
+    /// Compile HTTPRoute for a service through the waypoint
+    ///
+    /// Routes traffic to the service via the waypoint Gateway.
+    /// Hostnames include all DNS variants for the service.
+    fn compile_waypoint_http_route(service_name: &str, namespace: &str, port: u16) -> HttpRoute {
+        let route_name = format!("{}-waypoint", service_name);
+        let gateway_name = format!("{}-waypoint", namespace);
+
+        HttpRoute {
+            api_version: "gateway.networking.k8s.io/v1".to_string(),
+            kind: "HTTPRoute".to_string(),
+            metadata: GatewayMetadata::new(&route_name, namespace),
+            spec: HttpRouteSpec {
+                parent_refs: vec![ParentRef {
+                    group: Some("gateway.networking.k8s.io".to_string()),
+                    kind: Some("Gateway".to_string()),
+                    name: gateway_name,
+                    namespace: None, // Same namespace
+                }],
+                hostnames: vec![
+                    service_name.to_string(),
+                    format!("{}.{}", service_name, namespace),
+                    format!("{}.{}.svc.cluster.local", service_name, namespace),
+                ],
+                rules: vec![HttpRouteRule {
+                    matches: vec![],
+                    backend_refs: vec![BackendRef {
+                        kind: Some("Service".to_string()),
+                        name: service_name.to_string(),
+                        port,
+                    }],
+                }],
+            },
+        }
+    }
+}
+
+// =============================================================================
 // Ingress Compiler
 // =============================================================================
 
@@ -804,15 +958,18 @@ impl TrafficPolicyCompiler {
 
         let policy_name = format!("{}-to-{}-traffic", caller, callee);
 
+        // Target the waypoint HTTPRoute for the callee service
+        let http_route_name = format!("{}-waypoint", callee);
+
         Some(BackendTrafficPolicy {
             api_version: "gateway.envoyproxy.io/v1alpha1".to_string(),
             kind: "BackendTrafficPolicy".to_string(),
             metadata: GatewayMetadata::new(policy_name, namespace),
             spec: BackendTrafficPolicySpec {
                 target_refs: vec![PolicyTargetRef {
-                    group: String::new(),
-                    kind: "Service".to_string(),
-                    name: callee.to_string(),
+                    group: "gateway.networking.k8s.io".to_string(),
+                    kind: "HTTPRoute".to_string(),
+                    name: http_route_name,
                 }],
                 retry: outbound.retries.as_ref().map(Self::convert_retry),
                 timeout: outbound.timeout.as_ref().map(Self::convert_timeout),
@@ -841,15 +998,18 @@ impl TrafficPolicyCompiler {
 
         let policy_name = format!("{}-from-{}-ratelimit", service_name, caller_name);
 
+        // Target the waypoint HTTPRoute for the service
+        let http_route_name = format!("{}-waypoint", service_name);
+
         Some(BackendTrafficPolicy {
             api_version: "gateway.envoyproxy.io/v1alpha1".to_string(),
             kind: "BackendTrafficPolicy".to_string(),
             metadata: GatewayMetadata::new(policy_name, namespace),
             spec: BackendTrafficPolicySpec {
                 target_refs: vec![PolicyTargetRef {
-                    group: String::new(),
-                    kind: "Service".to_string(),
-                    name: service_name.to_string(),
+                    group: "gateway.networking.k8s.io".to_string(),
+                    kind: "HTTPRoute".to_string(),
+                    name: http_route_name,
                 }],
                 retry: None,
                 timeout: None,

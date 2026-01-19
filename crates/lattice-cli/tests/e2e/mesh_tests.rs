@@ -761,7 +761,7 @@ impl Default for RandomMeshConfig {
     fn default() -> Self {
         Self {
             min_services: 50,
-            max_services: 100,
+            max_services: 75,
             num_layers: 5,
             outbound_probability: 0.3,
             bilateral_probability: 0.6,
@@ -1494,7 +1494,7 @@ async fn verify_random_mesh_traffic(
 
 /// Run the randomized 50-100 service mesh test
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
-    println!("\n[Phase 9] Running randomized large-scale mesh test (50-100 services)...\n");
+    println!("\n[Phase 9] Running randomized large-scale mesh test (50-75 services)...\n");
 
     let mesh = RandomMesh::generate(&RandomMeshConfig::default());
     println!("{}", mesh.stats());

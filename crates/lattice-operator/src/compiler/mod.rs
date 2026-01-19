@@ -28,7 +28,8 @@
 use crate::crd::LatticeService;
 use crate::graph::ServiceGraph;
 use crate::ingress::{
-    GeneratedIngress, GeneratedTrafficPolicies, IngressCompiler, TrafficPolicyCompiler,
+    GeneratedIngress, GeneratedTrafficPolicies, GeneratedWaypoint, IngressCompiler,
+    TrafficPolicyCompiler, WaypointCompiler,
 };
 use crate::policy::{AuthorizationPolicy, GeneratedPolicies, PolicyCompiler};
 use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
@@ -49,6 +50,8 @@ pub struct CompiledService {
     pub ingress: GeneratedIngress,
     /// Generated traffic policies (BackendTrafficPolicy for retries, timeouts, rate limits)
     pub traffic_policies: GeneratedTrafficPolicies,
+    /// Generated waypoint resources (Gateway, HTTPRoute for east-west L7 policies)
+    pub waypoint: GeneratedWaypoint,
 }
 
 impl CompiledService {
@@ -63,6 +66,7 @@ impl CompiledService {
             && self.policies.is_empty()
             && self.ingress.is_empty()
             && self.traffic_policies.is_empty()
+            && self.waypoint.is_empty()
     }
 
     /// Total count of all generated resources
@@ -77,10 +81,19 @@ impl CompiledService {
         .filter(|&&x| x)
         .count();
 
+        let waypoint_count = [
+            self.waypoint.gateway.is_some(),
+            self.waypoint.http_route.is_some(),
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
+
         workload_count
             + self.policies.total_count()
             + self.ingress.total_count()
             + self.traffic_policies.total_count()
+            + waypoint_count
     }
 }
 
@@ -133,6 +146,17 @@ impl<'a> ServiceCompiler<'a> {
         let traffic_policies =
             TrafficPolicyCompiler::compile(name, namespace, &service.spec.resources);
 
+        // Compile waypoint resources for east-west L7 policies
+        // Get primary service port for waypoint routing
+        let waypoint_port = service
+            .spec
+            .service
+            .as_ref()
+            .and_then(|s| s.ports.values().next())
+            .map(|p| p.port)
+            .unwrap_or(80);
+        let waypoint = WaypointCompiler::compile(name, namespace, waypoint_port);
+
         // Compile ingress resources if configured
         let ingress = if let Some(ref ingress_spec) = service.spec.ingress {
             // Get primary service port for routing
@@ -169,6 +193,7 @@ impl<'a> ServiceCompiler<'a> {
             policies,
             ingress,
             traffic_policies,
+            waypoint,
         }
     }
 
@@ -443,8 +468,8 @@ mod tests {
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
         let output = compiler.compile(&service);
 
-        // Deployment + Service + ServiceAccount + CiliumPolicy = 4
-        assert_eq!(output.resource_count(), 4);
+        // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointHTTPRoute = 6
+        assert_eq!(output.resource_count(), 6);
     }
 
     // =========================================================================
