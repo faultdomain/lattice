@@ -88,6 +88,7 @@ pub fn generate_cilium_manifests(provider: Option<&str>) -> Result<Vec<String>, 
             &chart_path,
             "--namespace",
             "kube-system",
+            "--include-crds",
         ])
         .args(&values)
         .output()
@@ -186,6 +187,7 @@ spec:
           - lattice-system
           - flux-system
           - cert-manager
+          - envoy-gateway-system
           - capi-system
           - capi-kubeadm-bootstrap-system
           - capi-kubeadm-control-plane-system

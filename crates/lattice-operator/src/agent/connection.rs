@@ -28,6 +28,11 @@ pub struct AgentConnection {
     /// This must be true before pivot can proceed, since clusterctl move
     /// requires CAPI to be installed on the target cluster.
     pub capi_ready: bool,
+    /// Whether pivot has completed successfully
+    ///
+    /// Set to true only when agent reports PivotComplete with success=true.
+    /// This distinguishes "ready for pivot" from "pivot completed".
+    pub pivot_complete: bool,
 }
 
 impl AgentConnection {
@@ -45,6 +50,7 @@ impl AgentConnection {
             state: AgentState::Provisioning,
             command_tx,
             capi_ready: false,
+            pivot_complete: false,
         }
     }
 
@@ -56,6 +62,11 @@ impl AgentConnection {
     /// Set CAPI ready status
     pub fn set_capi_ready(&mut self, ready: bool) {
         self.capi_ready = ready;
+    }
+
+    /// Set pivot complete status
+    pub fn set_pivot_complete(&mut self, complete: bool) {
+        self.pivot_complete = complete;
     }
 
     /// Check if agent is ready for pivot
@@ -220,6 +231,16 @@ impl AgentRegistry {
             agent.set_capi_ready(ready);
         } else {
             warn!(cluster = %cluster_name, "Attempted to set CAPI ready for unknown agent");
+        }
+    }
+
+    /// Set pivot complete status for an agent
+    ///
+    /// Called when agent reports PivotComplete with success=true.
+    pub fn set_pivot_complete(&self, cluster_name: &str, complete: bool) {
+        if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+            debug!(cluster = %cluster_name, pivot_complete = complete, "Agent pivot status updated");
+            agent.set_pivot_complete(complete);
         }
     }
 

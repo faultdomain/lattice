@@ -22,12 +22,10 @@
 //!
 //! # Pivot Flow
 //!
-//! 1. Cell sends `StartPivotCommand` via control stream
-//! 2. Agent enters PIVOTING state, sends `PivotStarted`
-//! 3. Cell exports CAPI resources via `clusterctl move --to-directory`
-//! 4. Cell sends `PivotManifestsCommand` with manifests
-//! 5. Agent imports via `clusterctl move --from-directory`
-//! 6. Agent sends `PivotComplete`
+//! 1. Cell exports CAPI resources via `clusterctl move --to-directory`
+//! 2. Cell sends `PivotManifestsCommand` with manifests
+//! 3. Agent imports via `clusterctl move --from-directory`
+//! 4. Agent sends `PivotComplete`
 
 pub mod client;
 pub mod connection;

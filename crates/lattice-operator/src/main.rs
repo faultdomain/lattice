@@ -11,7 +11,7 @@ use kube::runtime::Controller;
 use kube::{Api, Client, CustomResourceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use lattice_operator::agent::client::{AgentClient, AgentClientConfig};
+use lattice_operator::agent::client::{AgentClient, AgentClientConfig, AgentCredentials};
 use lattice_operator::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
 use lattice_operator::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
@@ -1111,10 +1111,26 @@ async fn start_agent_if_needed(
         "Connecting to parent cell"
     );
 
-    // Request certificate from cell
-    let credentials = AgentClient::request_certificate(&http_endpoint, cluster_name, &ca_cert_pem)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get certificate: {}", e))?;
+    // Try to load existing credentials from secret, or request new ones
+    let credentials = match load_agent_credentials(&secrets).await {
+        Ok(creds) => {
+            tracing::info!("Using existing agent credentials from secret");
+            creds
+        }
+        Err(_) => {
+            tracing::info!("No existing credentials, requesting new certificate from cell");
+            let creds =
+                AgentClient::request_certificate(&http_endpoint, cluster_name, &ca_cert_pem)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to get certificate: {}", e))?;
+
+            // Store credentials for future restarts
+            if let Err(e) = save_agent_credentials(&secrets, &creds).await {
+                tracing::warn!(error = %e, "Failed to save agent credentials to secret");
+            }
+            creds
+        }
+    };
 
     // Create agent client config
     let config = AgentClientConfig {
@@ -1135,4 +1151,85 @@ async fn start_agent_if_needed(
 
     tracing::info!("Agent connected to parent cell");
     Ok(Some(agent))
+}
+
+const AGENT_CREDENTIALS_SECRET: &str = "lattice-agent-credentials";
+
+/// Load agent credentials from Kubernetes secret
+async fn load_agent_credentials(
+    secrets: &Api<k8s_openapi::api::core::v1::Secret>,
+) -> anyhow::Result<AgentCredentials> {
+    let secret = secrets.get(AGENT_CREDENTIALS_SECRET).await?;
+    let data = secret
+        .data
+        .ok_or_else(|| anyhow::anyhow!("credentials secret has no data"))?;
+
+    let cert_pem = data
+        .get("tls.crt")
+        .ok_or_else(|| anyhow::anyhow!("missing tls.crt"))?;
+    let key_pem = data
+        .get("tls.key")
+        .ok_or_else(|| anyhow::anyhow!("missing tls.key"))?;
+    let ca_pem = data
+        .get("ca.crt")
+        .ok_or_else(|| anyhow::anyhow!("missing ca.crt"))?;
+
+    Ok(AgentCredentials {
+        cert_pem: String::from_utf8(cert_pem.0.clone())?,
+        key_pem: String::from_utf8(key_pem.0.clone())?,
+        ca_cert_pem: String::from_utf8(ca_pem.0.clone())?,
+    })
+}
+
+/// Save agent credentials to Kubernetes secret
+async fn save_agent_credentials(
+    secrets: &Api<k8s_openapi::api::core::v1::Secret>,
+    credentials: &AgentCredentials,
+) -> anyhow::Result<()> {
+    use k8s_openapi::api::core::v1::Secret;
+    use k8s_openapi::ByteString;
+    use kube::api::{ObjectMeta, PostParams};
+    use std::collections::BTreeMap;
+
+    let mut data = BTreeMap::new();
+    data.insert(
+        "tls.crt".to_string(),
+        ByteString(credentials.cert_pem.as_bytes().to_vec()),
+    );
+    data.insert(
+        "tls.key".to_string(),
+        ByteString(credentials.key_pem.as_bytes().to_vec()),
+    );
+    data.insert(
+        "ca.crt".to_string(),
+        ByteString(credentials.ca_cert_pem.as_bytes().to_vec()),
+    );
+
+    let secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(AGENT_CREDENTIALS_SECRET.to_string()),
+            namespace: Some("lattice-system".to_string()),
+            ..Default::default()
+        },
+        data: Some(data),
+        type_: Some("kubernetes.io/tls".to_string()),
+        ..Default::default()
+    };
+
+    // Try to create, if exists then replace
+    match secrets.create(&PostParams::default(), &secret).await {
+        Ok(_) => {
+            tracing::info!("Created agent credentials secret");
+        }
+        Err(kube::Error::Api(e)) if e.code == 409 => {
+            // Already exists, replace it
+            secrets
+                .replace(AGENT_CREDENTIALS_SECRET, &PostParams::default(), &secret)
+                .await?;
+            tracing::info!("Updated agent credentials secret");
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    Ok(())
 }

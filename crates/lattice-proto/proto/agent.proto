@@ -40,12 +40,11 @@ message AgentMessage {
   oneof payload {
     AgentReady ready = 2;
     BootstrapComplete bootstrap_complete = 3;
-    PivotStarted pivot_started = 4;
-    PivotComplete pivot_complete = 5;
-    Heartbeat heartbeat = 6;
-    ClusterHealth cluster_health = 7;
-    StatusResponse status_response = 8;
-    ClusterDeleting cluster_deleting = 9;
+    PivotComplete pivot_complete = 4;
+    Heartbeat heartbeat = 5;
+    ClusterHealth cluster_health = 6;
+    StatusResponse status_response = 7;
+    ClusterDeleting cluster_deleting = 8;
   }
 }
 
@@ -81,12 +80,6 @@ message BootstrapComplete {
   bool capi_ready = 1;
   // List of installed providers (e.g., ["docker", "kubeadm"])
   repeated string installed_providers = 2;
-}
-
-// Sent when agent begins pivot (CAPI import starting)
-message PivotStarted {
-  // Namespace where CAPI resources will be imported
-  string target_namespace = 1;
 }
 
 // Sent when pivot operation completes
@@ -177,43 +170,15 @@ message CellCommand {
 
   oneof command {
     ApplyManifestsCommand apply_manifests = 2;
-    StartPivotCommand start_pivot = 3;
-    StatusRequest status_request = 4;
-    PivotManifestsCommand pivot_manifests = 5;
+    StatusRequest status_request = 3;
+    PivotManifestsCommand pivot_manifests = 4;
   }
 }
 
-// Command to apply Kubernetes manifests
-//
-// Used for:
-// - Post-pivot setup: LatticeCluster CRD + self-referential resource
-// - The controller reconciles LatticeCluster and lazily installs CAPI
 message ApplyManifestsCommand {
-  // YAML manifests to apply (will be kubectl apply -f)
   repeated bytes manifests = 1;
 }
 
-// Command to start pivot - prepares agent for CAPI import
-//
-// Flow:
-// 1. Cell sends StartPivotCommand
-// 2. Agent sends PivotStarted, enters PIVOTING state
-// 3. Cell sends PivotManifestsCommand with CAPI resources
-// 4. Agent imports via clusterctl move --from-directory
-// 5. Agent sends PivotComplete
-message StartPivotCommand {
-  // Source namespace on cell where CAPI resources currently live
-  string source_namespace = 1;
-  // Target namespace on agent where CAPI resources should go
-  string target_namespace = 2;
-  // Name of the cluster being pivoted
-  string cluster_name = 3;
-}
-
-// CAPI manifests to import during pivot
-//
-// Sent after StartPivotCommand. Contains manifests exported via
-// `clusterctl move --to-directory` on the parent.
 message PivotManifestsCommand {
   // YAML manifests exported via clusterctl move --to-directory
   repeated bytes manifests = 1;

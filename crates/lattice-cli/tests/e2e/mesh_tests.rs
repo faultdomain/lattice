@@ -935,7 +935,7 @@ impl RandomMesh {
             ("httpbin", "https://httpbin.org/status/200"),
             ("example", "https://example.com"),
             ("google", "https://www.google.com"),
-            ("cloudflare", "https://1.1.1.1"),
+            ("cloudflare", "https://one.one.one.one"),
             ("github", "https://github.com"),
         ];
 

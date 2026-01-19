@@ -4,8 +4,10 @@
 // parent cell (management cluster). All connections are initiated OUTBOUND
 // from workload clusters - cells never connect to agents.
 //
-// Key design: The agent exposes a K8s API proxy through gRPC, allowing the
-// cell to run `clusterctl move --to-kubeconfig` directly through the tunnel.
+// Pivot flow: Parent pauses CAPI → exports via --to-directory → sends to child
+//             → child imports → child unpauses
+// Unpivot flow: Child pauses CAPI → exports via --to-directory → sends to parent
+//               → parent imports → parent unpauses → parent deletes
 
 syntax = "proto3";
 package lattice.agent.v1;
@@ -19,72 +21,11 @@ import "google/protobuf/timestamp.proto";
 // LatticeAgent service - agent connects to cell
 //
 // The agent initiates an outbound connection to the cell's gRPC server.
-// This establishes streams for control messages and K8s API proxying.
+// This establishes a stream for control messages.
 service LatticeAgent {
   // Bidirectional stream for control messages (heartbeat, commands, status)
   // Agent initiates, maintains persistent connection
   rpc StreamMessages(stream AgentMessage) returns (stream CellCommand);
-
-  // K8s API proxy - allows cell to execute kubectl commands on agent's cluster
-  // Used for: clusterctl move --to-kubeconfig, debugging, monitoring
-  // Agent calls this to register, cell sends requests, agent returns responses
-  rpc ProxyKubernetesAPI(stream KubeProxyResponse) returns (stream KubeProxyRequest);
-}
-
-// =============================================================================
-// K8s API Proxy Messages
-// =============================================================================
-
-// Request from cell to agent - proxied K8s API call
-message KubeProxyRequest {
-  // Unique request ID for correlation
-  string request_id = 1;
-
-  // HTTP method (GET, POST, PUT, PATCH, DELETE, etc.)
-  string method = 2;
-
-  // Request path (e.g., /api/v1/namespaces/default/pods)
-  string path = 3;
-
-  // HTTP headers (repeated key-value pairs)
-  repeated HttpHeader headers = 4;
-
-  // Request body (for POST, PUT, PATCH)
-  bytes body = 5;
-}
-
-// Response from agent to cell - proxied K8s API response
-//
-// For streaming responses (like K8s watch), multiple messages with the same
-// request_id will be sent. The first message contains status_code and headers.
-// Subsequent messages contain body chunks. The final message has is_final=true.
-message KubeProxyResponse {
-  // Correlation ID matching the request
-  string request_id = 1;
-
-  // HTTP status code (200, 404, 500, etc.) - only set in first message
-  int32 status_code = 2;
-
-  // Response headers - only set in first message
-  repeated HttpHeader headers = 3;
-
-  // Response body (or chunk for streaming responses)
-  bytes body = 4;
-
-  // Error message if proxy itself failed (not K8s API error)
-  string error = 5;
-
-  // True if this is a streaming response (more chunks may follow)
-  bool is_streaming = 6;
-
-  // True if this is the final chunk of a streaming response
-  bool is_final = 7;
-}
-
-// HTTP header key-value pair
-message HttpHeader {
-  string key = 1;
-  string value = 2;
 }
 
 // =============================================================================
@@ -99,13 +40,25 @@ message AgentMessage {
   oneof payload {
     AgentReady ready = 2;
     BootstrapComplete bootstrap_complete = 3;
-    PivotStarted pivot_started = 4;
-    PivotComplete pivot_complete = 5;
-    Heartbeat heartbeat = 6;
-    ClusterHealth cluster_health = 7;
-    StatusResponse status_response = 8;
-    FluxInstalled flux_installed = 9;
+    PivotComplete pivot_complete = 4;
+    Heartbeat heartbeat = 5;
+    ClusterHealth cluster_health = 6;
+    StatusResponse status_response = 7;
+    ClusterDeleting cluster_deleting = 8;
   }
+}
+
+// Sent when cluster deletion is initiated (unpivot)
+//
+// Unpivot is pivot in reverse: child pauses CAPI, exports via --to-directory,
+// sends manifests to parent. Parent imports, unpauses, then deletes.
+// This ensures parent has all resources including any nodes added post-pivot.
+message ClusterDeleting {
+  // Namespace where CAPI resources live
+  string namespace = 1;
+  // CAPI manifests exported via clusterctl move --to-directory
+  // Parent will import these before cleanup to get any new nodes/machines
+  repeated bytes capi_manifests = 2;
 }
 
 // Sent when agent first connects to cell
@@ -129,12 +82,6 @@ message BootstrapComplete {
   repeated string installed_providers = 2;
 }
 
-// Sent when agent begins pivot (CAPI import starting)
-message PivotStarted {
-  // Namespace where CAPI resources will be imported
-  string target_namespace = 1;
-}
-
 // Sent when pivot operation completes
 message PivotComplete {
   // Whether pivot succeeded
@@ -143,20 +90,6 @@ message PivotComplete {
   string error_message = 2;
   // Number of CAPI resources imported
   int32 resources_imported = 3;
-}
-
-// Sent when Flux has been installed and configured
-message FluxInstalled {
-  // Whether installation succeeded
-  bool success = 1;
-  // Error message if success=false
-  string error_message = 2;
-  // Installed Flux version
-  string flux_version = 3;
-  // Git repository URL being watched
-  string git_url = 4;
-  // Path being watched
-  string git_path = 5;
 }
 
 // Periodic heartbeat with agent state
@@ -237,37 +170,21 @@ message CellCommand {
 
   oneof command {
     ApplyManifestsCommand apply_manifests = 2;
-    StartPivotCommand start_pivot = 3;
-    StatusRequest status_request = 4;
-    FluxConfigCommand flux_config = 5;
+    StatusRequest status_request = 3;
+    PivotManifestsCommand pivot_manifests = 4;
   }
 }
 
-// Command to apply Kubernetes manifests
-//
-// Used for:
-// - Post-pivot setup: LatticeCluster CRD + self-referential resource
-// - The controller on the workload cluster will reconcile the LatticeCluster
-//   and lazily install CAPI based on spec.provider.type
 message ApplyManifestsCommand {
-  // YAML manifests to apply (will be kubectl apply -f)
   repeated bytes manifests = 1;
 }
 
-// Command to start pivot - cell will use K8s proxy for clusterctl move
-//
-// Flow:
-// 1. Cell sends StartPivotCommand
-// 2. Agent sends PivotStarted, enters PIVOTING state
-// 3. Cell runs: clusterctl move --to-kubeconfig <proxy-kubeconfig>
-//    (This uses ProxyKubernetesAPI to tunnel requests to agent)
-// 4. Agent detects CAPI resources imported, sends PivotComplete
-message StartPivotCommand {
-  // Source namespace on cell where CAPI resources currently live
-  string source_namespace = 1;
-  // Target namespace on agent where CAPI resources should go
+message PivotManifestsCommand {
+  // YAML manifests exported via clusterctl move --to-directory
+  repeated bytes manifests = 1;
+  // Namespace to import into
   string target_namespace = 2;
-  // Name of the cluster being pivoted
+  // Cluster name
   string cluster_name = 3;
 }
 
@@ -277,27 +194,4 @@ message StatusRequest {
   bool include_nodes = 1;
   // Whether to include CAPI resource status
   bool include_capi = 2;
-}
-
-// Command to configure and install Flux for GitOps
-//
-// Sent by parent after pivot is complete. Agent installs Flux and
-// configures it to watch the cluster's subtree in the git repository.
-message FluxConfigCommand {
-  // Git repository URL
-  string git_url = 1;
-  // Git branch to watch
-  string git_branch = 2;
-  // Path within the repo for this cluster (e.g., "children/prod-cluster")
-  string git_path = 3;
-  // Flux version to install (e.g., "2.2.0")
-  string flux_version = 4;
-  // Git credentials - SSH private key (base64 encoded)
-  string ssh_private_key = 5;
-  // Git credentials - HTTPS username (for token auth)
-  string https_username = 6;
-  // Git credentials - HTTPS password/token
-  string https_password = 7;
-  // Interval for git polling (e.g., "1m", "5m")
-  string sync_interval = 8;
 }

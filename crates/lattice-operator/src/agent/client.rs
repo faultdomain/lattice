@@ -29,8 +29,7 @@ use crate::pki::AgentCertRequest;
 use crate::proto::lattice_agent_client::LatticeAgentClient;
 use crate::proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
-    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, PivotComplete, PivotStarted,
-    StatusResponse,
+    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, PivotComplete, StatusResponse,
 };
 
 use super::mtls::ClientMtlsConfig;
@@ -424,6 +423,13 @@ impl AgentClient {
                 }
             }
 
+            // Reset agent state if we were mid-pivot - allows retry on reconnect
+            let current_agent_state = *agent_state.read().await;
+            if current_agent_state == AgentState::Pivoting {
+                warn!("Connection lost during pivot - resetting to Provisioning for retry");
+                *agent_state.write().await = AgentState::Provisioning;
+            }
+
             *state.write().await = ClientState::Disconnected;
             info!("Disconnected from cell");
         });
@@ -461,20 +467,6 @@ impl AgentClient {
             Some(tx) => tx.send(msg).await.map_err(|_| ClientError::ChannelClosed),
             None => Err(ClientError::NotConnected),
         }
-    }
-
-    /// Send pivot started notification
-    pub async fn send_pivot_started(&self, target_namespace: &str) -> Result<(), ClientError> {
-        self.set_agent_state(AgentState::Pivoting).await;
-
-        let msg = AgentMessage {
-            cluster_name: self.config.cluster_name.clone(),
-            payload: Some(Payload::PivotStarted(PivotStarted {
-                target_namespace: target_namespace.to_string(),
-            })),
-        };
-
-        self.send_message(msg).await
     }
 
     /// Send pivot complete notification
@@ -779,32 +771,15 @@ impl AgentClient {
                 // so ApplyManifestsCommand is only used for post-pivot manifests
                 // like LatticeCluster CRD and resource.
             }
-            Some(Command::StartPivot(cmd)) => {
+            Some(Command::PivotManifests(cmd)) => {
                 info!(
-                    source_namespace = %cmd.source_namespace,
-                    target_namespace = %cmd.target_namespace,
-                    "Received start pivot command - waiting for PivotManifestsCommand"
+                    manifests = cmd.manifests.len(),
+                    namespace = %cmd.target_namespace,
+                    "pivot started"
                 );
                 *agent_state.write().await = AgentState::Pivoting;
 
-                // Send pivot started - the actual import happens when we receive PivotManifestsCommand
-                let msg = AgentMessage {
-                    cluster_name: cluster_name.to_string(),
-                    payload: Some(Payload::PivotStarted(PivotStarted {
-                        target_namespace: cmd.target_namespace.clone(),
-                    })),
-                };
-                let _ = message_tx.send(msg).await;
-            }
-            Some(Command::PivotManifests(cmd)) => {
-                info!(
-                    manifest_count = cmd.manifests.len(),
-                    target_namespace = %cmd.target_namespace,
-                    cluster_name = %cmd.cluster_name,
-                    "Received pivot manifests - importing CAPI resources"
-                );
-
-                // Spawn background task to import manifests and complete pivot
+                // Spawn background task to import manifests
                 let target_namespace = cmd.target_namespace.clone();
                 let manifests = cmd.manifests.clone();
                 let pivot_cluster_name = cmd.cluster_name.clone();
@@ -978,7 +953,7 @@ fn extract_domain(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{ApplyManifestsCommand, StartPivotCommand, StatusRequest};
+    use crate::proto::{ApplyManifestsCommand, StatusRequest};
     use std::sync::Mutex;
 
     // Mutex to serialize tests that modify environment variables
@@ -1214,17 +1189,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_pivot_started_not_connected() {
-        let config = AgentClientConfig::default();
-        let client = AgentClient::new(config);
-
-        let result = client.send_pivot_started("default").await;
-        assert_eq!(result, Err(ClientError::NotConnected));
-        // State should still change even if send fails
-        assert_eq!(client.agent_state().await, AgentState::Pivoting);
-    }
-
-    #[tokio::test]
     async fn test_send_pivot_complete_success_not_connected() {
         let config = AgentClientConfig::default();
         let client = AgentClient::new(config);
@@ -1272,36 +1236,6 @@ mod tests {
 
         AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster").await;
         // ApplyManifests command doesn't change state - CAPI install is lazy
-    }
-
-    #[tokio::test]
-    async fn test_handle_start_pivot_command() {
-        let agent_state = Arc::new(RwLock::new(AgentState::Ready));
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-
-        let command = CellCommand {
-            command_id: "cmd-2".to_string(),
-            command: Some(Command::StartPivot(StartPivotCommand {
-                source_namespace: "default".to_string(),
-                target_namespace: "capi-system".to_string(),
-                cluster_name: "test-cluster".to_string(),
-            })),
-        };
-
-        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster").await;
-
-        // State should change to Pivoting
-        assert_eq!(*agent_state.read().await, AgentState::Pivoting);
-
-        // Should send PivotStarted message
-        let msg = rx.recv().await.unwrap();
-        assert_eq!(msg.cluster_name, "test-cluster");
-        match msg.payload {
-            Some(Payload::PivotStarted(ps)) => {
-                assert_eq!(ps.target_namespace, "capi-system");
-            }
-            _ => panic!("Expected PivotStarted payload"),
-        }
     }
 
     #[tokio::test]
@@ -1359,30 +1293,6 @@ mod tests {
         // Verify message was received
         let received = rx.recv().await.unwrap();
         assert_eq!(received.cluster_name, "test-cluster");
-    }
-
-    #[tokio::test]
-    async fn test_send_pivot_started_with_channel() {
-        let config = AgentClientConfig {
-            cluster_name: "test-cluster".to_string(),
-            ..Default::default()
-        };
-        let mut client = AgentClient::new(config);
-
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-        client.message_tx = Some(tx);
-
-        let result = client.send_pivot_started("capi-system").await;
-        assert!(result.is_ok());
-        assert_eq!(client.agent_state().await, AgentState::Pivoting);
-
-        let received = rx.recv().await.unwrap();
-        match received.payload {
-            Some(Payload::PivotStarted(ps)) => {
-                assert_eq!(ps.target_namespace, "capi-system");
-            }
-            _ => panic!("Expected PivotStarted payload"),
-        }
     }
 
     #[tokio::test]
@@ -1542,41 +1452,6 @@ mod tests {
     // Story Tests: Message Sending When Connected
     // ==========================================================================
 
-    /// Story: When an agent sends pivot started notification, it enters pivoting state
-    ///
-    /// Before the cell sends CAPI resources, the agent acknowledges it's ready
-    /// to receive them by sending PivotStarted and entering PIVOTING state.
-    #[tokio::test]
-    async fn story_agent_sends_pivot_started_and_enters_pivoting_state() {
-        let config = AgentClientConfig {
-            cluster_name: "pivot-test-cluster".to_string(),
-            ..Default::default()
-        };
-        let mut client = AgentClient::new(config);
-
-        // Simulate connected state with a channel
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-        client.message_tx = Some(tx);
-
-        // Agent sends pivot started
-        let result = client.send_pivot_started("capi-system").await;
-        assert!(result.is_ok());
-
-        // Agent should now be in Pivoting state
-        assert_eq!(client.agent_state().await, AgentState::Pivoting);
-
-        // Verify the message was sent correctly
-        let msg = rx.recv().await.unwrap();
-        assert_eq!(msg.cluster_name, "pivot-test-cluster");
-
-        match msg.payload {
-            Some(Payload::PivotStarted(ps)) => {
-                assert_eq!(ps.target_namespace, "capi-system");
-            }
-            _ => panic!("Expected PivotStarted payload"),
-        }
-    }
-
     /// Story: When pivot completes successfully, agent becomes ready
     ///
     /// After CAPI resources are successfully imported, the agent sends
@@ -1713,9 +1588,6 @@ mod tests {
     // ==========================================================================
 
     /// Story: When agent is not connected, sending messages fails gracefully
-    ///
-    /// Before mTLS connection is established, any attempt to send messages
-    /// should return NotConnected error rather than panicking.
     #[tokio::test]
     async fn story_sending_when_not_connected_returns_error() {
         let config = AgentClientConfig {
@@ -1723,12 +1595,6 @@ mod tests {
             ..Default::default()
         };
         let client = AgentClient::new(config);
-
-        // Try to send various messages without being connected
-        assert_eq!(
-            client.send_pivot_started("ns").await,
-            Err(ClientError::NotConnected)
-        );
 
         assert_eq!(
             client.send_pivot_complete(true, "", 0).await,
@@ -1742,9 +1608,6 @@ mod tests {
     }
 
     /// Story: When the message channel closes unexpectedly, sends return ChannelClosed
-    ///
-    /// If the gRPC connection drops and the channel is closed, message sends
-    /// should fail with ChannelClosed error.
     #[tokio::test]
     async fn story_channel_closure_detected_on_send() {
         let config = AgentClientConfig {
@@ -1756,12 +1619,10 @@ mod tests {
         let (tx, rx) = mpsc::channel::<AgentMessage>(32);
         client.message_tx = Some(tx);
 
-        // Simulate channel closure (connection dropped)
         drop(rx);
 
-        // All message sends should fail with ChannelClosed
         assert_eq!(
-            client.send_pivot_started("ns").await,
+            client.send_pivot_complete(true, "", 0).await,
             Err(ClientError::ChannelClosed)
         );
     }
@@ -1833,39 +1694,6 @@ mod tests {
 
         // State should not change (manifests applied, CAPI install is lazy)
         assert_eq!(*agent_state.read().await, AgentState::Provisioning);
-    }
-
-    /// Story: When cell sends start pivot command, agent enters pivoting state
-    ///
-    /// The cell initiates pivot by sending StartPivotCommand. The agent
-    /// transitions to PIVOTING state and sends PivotStarted acknowledgment.
-    #[tokio::test]
-    async fn story_agent_transitions_to_pivoting_on_command() {
-        let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-
-        let command = CellCommand {
-            command_id: "pivot-456".to_string(),
-            command: Some(Command::StartPivot(StartPivotCommand {
-                source_namespace: "default".to_string(),
-                target_namespace: "capi-workload".to_string(),
-                cluster_name: "my-workload-cluster".to_string(),
-            })),
-        };
-
-        AgentClient::handle_command(&command, &agent_state, &tx, "my-workload-cluster").await;
-
-        // Agent should be in Pivoting state
-        assert_eq!(*agent_state.read().await, AgentState::Pivoting);
-
-        // Agent should have sent PivotStarted
-        let msg = rx.recv().await.unwrap();
-        match msg.payload {
-            Some(Payload::PivotStarted(ps)) => {
-                assert_eq!(ps.target_namespace, "capi-workload");
-            }
-            _ => panic!("Expected PivotStarted"),
-        }
     }
 
     /// Story: When cell requests status, agent responds with current state
@@ -2110,7 +1938,6 @@ mod tests {
         client.message_tx = Some(tx);
 
         // Send multiple messages in sequence
-        client.send_pivot_started("ns1").await.unwrap();
         client
             .send_bootstrap_complete(true, vec!["docker".to_string()])
             .await
@@ -2119,13 +1946,10 @@ mod tests {
 
         // Verify all messages received in order
         let msg1 = rx.recv().await.unwrap();
-        assert!(matches!(msg1.payload, Some(Payload::PivotStarted(_))));
+        assert!(matches!(msg1.payload, Some(Payload::BootstrapComplete(_))));
 
         let msg2 = rx.recv().await.unwrap();
-        assert!(matches!(msg2.payload, Some(Payload::BootstrapComplete(_))));
-
-        let msg3 = rx.recv().await.unwrap();
-        assert!(matches!(msg3.payload, Some(Payload::PivotComplete(_))));
+        assert!(matches!(msg2.payload, Some(Payload::PivotComplete(_))));
     }
 
     /// Integration test: State transitions during typical lifecycle
@@ -2150,8 +1974,8 @@ mod tests {
             .unwrap();
         assert_eq!(client.agent_state().await, AgentState::Provisioning);
 
-        // 3. Pivot starts - transitions to Pivoting
-        client.send_pivot_started("capi-system").await.unwrap();
+        // 3. Pivot starts (set state directly as handle_command does)
+        client.set_agent_state(AgentState::Pivoting).await;
         assert_eq!(client.agent_state().await, AgentState::Pivoting);
 
         // 4. Pivot completes - transitions to Ready
@@ -2175,7 +1999,7 @@ mod tests {
         assert_eq!(client.agent_state().await, AgentState::Provisioning);
 
         // 2. Pivot starts
-        client.send_pivot_started("capi-system").await.unwrap();
+        client.set_agent_state(AgentState::Pivoting).await;
         assert_eq!(client.agent_state().await, AgentState::Pivoting);
 
         // 3. Pivot fails - transitions to Failed
@@ -2377,47 +2201,6 @@ mod tests {
         assert_eq!(i32::from(AgentState::Ready), 3);
         assert_eq!(i32::from(AgentState::Degraded), 4);
         assert_eq!(i32::from(AgentState::Failed), 5);
-    }
-
-    // ==========================================================================
-    // Story Tests: Command Handling
-    // ==========================================================================
-
-    /// Story: Agent handles pivot command for different namespaces
-    #[tokio::test]
-    async fn story_agent_handles_various_namespace_configs() {
-        let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-
-        let namespaces = [
-            ("default", "capi-system"),
-            ("capi-workload", "capi-workload"),
-            ("flux-system", "lattice-capi"),
-        ];
-
-        for (source, target) in namespaces {
-            *agent_state.write().await = AgentState::Provisioning;
-
-            let command = CellCommand {
-                command_id: format!("pivot-{}-{}", source, target),
-                command: Some(Command::StartPivot(StartPivotCommand {
-                    source_namespace: source.to_string(),
-                    target_namespace: target.to_string(),
-                    cluster_name: "ns-test".to_string(),
-                })),
-            };
-
-            AgentClient::handle_command(&command, &agent_state, &tx, "ns-test").await;
-
-            // Verify pivot started with correct namespace
-            let msg = rx.recv().await.unwrap();
-            match msg.payload {
-                Some(Payload::PivotStarted(ps)) => {
-                    assert_eq!(ps.target_namespace, target);
-                }
-                _ => panic!("Expected PivotStarted"),
-            }
-        }
     }
 
     // ==========================================================================

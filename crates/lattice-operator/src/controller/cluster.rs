@@ -29,7 +29,7 @@ use crate::crd::{
 };
 use crate::parent::ParentServers;
 use crate::proto::{
-    cell_command, AgentState, CellCommand, PivotManifestsCommand, StartPivotCommand,
+    cell_command, AgentState, CellCommand, PivotManifestsCommand,
 };
 use crate::provider::{create_provider, CAPIManifest};
 use crate::Error;
@@ -1140,7 +1140,7 @@ pub enum PivotAction {
     Complete,
     /// Wait for agent to complete pivot (manifests sent)
     WaitForPivotComplete,
-    /// Trigger pivot: send StartPivotCommand, export via --to-directory, send PivotManifestsCommand
+    /// Trigger pivot: export via --to-directory, send PivotManifestsCommand
     TriggerPivot,
     /// Wait for agent to connect
     WaitForAgent,
@@ -1173,13 +1173,7 @@ pub fn determine_pivot_action(
 #[cfg_attr(test, automock)]
 #[async_trait]
 pub trait PivotOperations: Send + Sync {
-    /// Trigger pivot for a cluster via connected agent
-    ///
-    /// This method:
-    /// 1. Sends StartPivotCommand to the agent
-    /// 2. Exports CAPI resources via `clusterctl move --to-directory` (keeps paused on parent)
-    /// 3. Sends PivotManifestsCommand with the exported manifests
-    /// 4. Agent imports via `clusterctl move --from-directory` and sends PivotComplete
+    /// Export CAPI manifests and send to agent for import.
     async fn trigger_pivot(
         &self,
         cluster_name: &str,
@@ -1767,8 +1761,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                             network_policy_yaml,
                         );
 
-                        // Trigger pivot: sends StartPivotCommand, exports via --to-directory,
-                        // and sends PivotManifestsCommand to the agent
+                        // Trigger pivot: export CAPI manifests and send to agent
                         info!("agent ready, triggering pivot");
                         match pivot_ops
                             .trigger_pivot(&name, &capi_namespace, &capi_namespace)
@@ -2255,19 +2248,13 @@ async fn update_cluster_status(
 
 /// Real implementation of PivotOperations using AgentRegistry
 pub struct PivotOperationsImpl {
-    /// Agent registry for sending commands
     agent_registry: SharedAgentRegistry,
-    /// Set of clusters where pivot has been triggered (to avoid double-triggering)
-    pivot_in_progress: dashmap::DashSet<String>,
 }
 
 impl PivotOperationsImpl {
-    /// Create a new PivotOperationsImpl
+    /// Create new pivot operations with the given agent registry
     pub fn new(agent_registry: SharedAgentRegistry) -> Self {
-        Self {
-            agent_registry,
-            pivot_in_progress: dashmap::DashSet::new(),
-        }
+        Self { agent_registry }
     }
 }
 
@@ -2281,15 +2268,8 @@ impl PivotOperations for PivotOperationsImpl {
     ) -> Result<(), Error> {
         use lattice_common::clusterctl::{export_for_pivot, is_capi_cluster_ready};
 
-        // Check if pivot is already in progress
-        if self.pivot_in_progress.contains(cluster_name) {
-            debug!(cluster = %cluster_name, "pivot already in progress");
-            return Ok(());
-        }
-
         // Check if agent is connected
-        let agent_ref = self.agent_registry.get(cluster_name);
-        if agent_ref.is_none() {
+        if self.agent_registry.get(cluster_name).is_none() {
             return Err(Error::pivot(format!(
                 "agent not connected for cluster {}",
                 cluster_name
@@ -2309,51 +2289,15 @@ impl PivotOperations for PivotOperationsImpl {
             }
         }
 
-        // Mark pivot as in progress
-        self.pivot_in_progress.insert(cluster_name.to_string());
-
-        // Step 1: Send StartPivotCommand to agent
-        let command_id = uuid::Uuid::new_v4().to_string();
-        let start_pivot_cmd = CellCommand {
-            command_id,
-            command: Some(cell_command::Command::StartPivot(StartPivotCommand {
-                source_namespace: source_namespace.to_string(),
-                target_namespace: target_namespace.to_string(),
-                cluster_name: cluster_name.to_string(),
-            })),
-        };
-
-        if let Err(e) = self
-            .agent_registry
-            .send_command(cluster_name, start_pivot_cmd)
+        // Export CAPI resources via clusterctl move --to-directory
+        let manifests = export_for_pivot(None, source_namespace, cluster_name)
             .await
-        {
-            self.pivot_in_progress.remove(cluster_name);
-            return Err(Error::pivot(format!(
-                "failed to send StartPivotCommand: {}",
-                e
-            )));
-        }
-        info!(cluster = %cluster_name, "StartPivotCommand sent to agent");
+            .map_err(|e| Error::pivot(format!("clusterctl move --to-directory failed: {}", e)))?;
+        let manifest_count = manifests.len();
 
-        // Step 2: Export CAPI resources via clusterctl move --to-directory
-        info!(cluster = %cluster_name, namespace = %source_namespace, "exporting CAPI manifests");
-        let manifests = match export_for_pivot(None, source_namespace, cluster_name).await {
-            Ok(m) => m,
-            Err(e) => {
-                self.pivot_in_progress.remove(cluster_name);
-                return Err(Error::pivot(format!(
-                    "clusterctl move --to-directory failed: {}",
-                    e
-                )));
-            }
-        };
-        info!(cluster = %cluster_name, manifest_count = manifests.len(), "CAPI resources exported");
-
-        // Step 3: Send PivotManifestsCommand to agent with the exported manifests
-        let command_id = uuid::Uuid::new_v4().to_string();
+        // Send PivotManifestsCommand to agent
         let pivot_manifests_cmd = CellCommand {
-            command_id,
+            command_id: uuid::Uuid::new_v4().to_string(),
             command: Some(cell_command::Command::PivotManifests(
                 PivotManifestsCommand {
                     manifests,
@@ -2363,19 +2307,12 @@ impl PivotOperations for PivotOperationsImpl {
             )),
         };
 
-        if let Err(e) = self
-            .agent_registry
+        self.agent_registry
             .send_command(cluster_name, pivot_manifests_cmd)
             .await
-        {
-            self.pivot_in_progress.remove(cluster_name);
-            return Err(Error::pivot(format!(
-                "failed to send PivotManifestsCommand: {}",
-                e
-            )));
-        }
-        info!(cluster = %cluster_name, "PivotManifestsCommand sent to agent, waiting for import");
+            .map_err(|e| Error::pivot(format!("failed to send PivotManifestsCommand: {}", e)))?;
 
+        info!(cluster = %cluster_name, manifests = manifest_count, "pivot triggered");
         Ok(())
     }
 
@@ -2386,18 +2323,15 @@ impl PivotOperations for PivotOperationsImpl {
     }
 
     fn is_pivot_in_progress(&self, cluster_name: &str) -> bool {
-        // Check in-memory set first, then agent state (handles controller restarts)
-        self.pivot_in_progress.contains(cluster_name)
-            || self
-                .agent_registry
-                .get(cluster_name)
-                .is_some_and(|a| matches!(a.state, AgentState::Pivoting))
+        self.agent_registry
+            .get(cluster_name)
+            .is_some_and(|a| matches!(a.state, AgentState::Pivoting))
     }
 
     fn is_pivot_complete(&self, cluster_name: &str) -> bool {
         self.agent_registry
             .get(cluster_name)
-            .is_some_and(|a| matches!(a.state, AgentState::Ready))
+            .is_some_and(|a| a.pivot_complete)
     }
 
     fn store_post_pivot_manifests(
@@ -3823,28 +3757,6 @@ mod tests {
             }
         }
 
-        /// Story: Double-triggering pivot should be idempotent
-        #[tokio::test]
-        async fn story_double_trigger_is_idempotent() {
-            let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry);
-
-            // First trigger fails (no agent)
-            let _ = ops
-                .trigger_pivot("test-cluster", "default", "default")
-                .await;
-
-            // Manually mark as in progress to test idempotency
-            ops.pivot_in_progress.insert("test-cluster".to_string());
-
-            // Second trigger should succeed (returns Ok, not error)
-            let result = ops
-                .trigger_pivot("test-cluster", "default", "default")
-                .await;
-
-            // Should succeed because it recognizes pivot is already in progress
-            assert!(result.is_ok());
-        }
     }
 
     // =========================================================================

@@ -51,10 +51,10 @@ async fn handle_agent_message_impl(
                 cluster = %cluster_name,
                 agent_version = %ready.agent_version,
                 k8s_version = %ready.kubernetes_version,
-                "Agent ready"
+                state = ?ready.state(),
+                "Agent connected"
             );
 
-            // Register the agent
             let conn = AgentConnection::new(
                 cluster_name.clone(),
                 ready.agent_version.clone(),
@@ -63,6 +63,12 @@ async fn handle_agent_message_impl(
             );
             registry.register(conn);
             registry.update_state(cluster_name, ready.state());
+
+            // If agent reports Ready state, pivot must have completed
+            // (Ready is only reached after successful CAPI import)
+            if ready.state() == AgentState::Ready {
+                registry.set_pivot_complete(cluster_name, true);
+            }
         }
         Some(Payload::BootstrapComplete(bc)) => {
             info!(
@@ -74,14 +80,6 @@ async fn handle_agent_message_impl(
             // Store CAPI ready status - pivot requires this to be true
             registry.set_capi_ready(cluster_name, bc.capi_ready);
         }
-        Some(Payload::PivotStarted(ps)) => {
-            info!(
-                cluster = %cluster_name,
-                target_namespace = %ps.target_namespace,
-                "Pivot started"
-            );
-            registry.update_state(cluster_name, AgentState::Pivoting);
-        }
         Some(Payload::PivotComplete(pc)) => {
             if pc.success {
                 info!(
@@ -90,6 +88,32 @@ async fn handle_agent_message_impl(
                     "Pivot complete"
                 );
                 registry.update_state(cluster_name, AgentState::Ready);
+                registry.set_pivot_complete(cluster_name, true);
+
+                // Persist pivot_complete to CR status immediately
+                // This ensures we don't lose state if agent disconnects before reconcile
+                let api: Api<LatticeCluster> = Api::all(kube_client.clone());
+                let patch = serde_json::json!({
+                    "status": {
+                        "pivotComplete": true
+                    }
+                });
+                if let Err(e) = api
+                    .patch_status(
+                        cluster_name,
+                        &PatchParams::apply("lattice-operator"),
+                        &Patch::Merge(&patch),
+                    )
+                    .await
+                {
+                    error!(
+                        cluster = %cluster_name,
+                        error = %e,
+                        "Failed to persist pivot_complete to status"
+                    );
+                } else {
+                    info!(cluster = %cluster_name, "Pivot complete persisted to cluster status");
+                }
 
                 // Send post-pivot manifests (Flux config + CiliumNetworkPolicy)
                 // Note: LatticeCluster CRD/instance already delivered via bootstrap webhook
@@ -332,7 +356,7 @@ mod tests {
     use super::*;
     use crate::proto::{
         agent_message::Payload, AgentReady, BootstrapComplete, ClusterHealth, Heartbeat,
-        PivotComplete, PivotStarted, StatusResponse,
+        PivotComplete, StatusResponse,
     };
 
     /// Test helper: handle message directly without needing a server
@@ -355,12 +379,12 @@ mod tests {
                 );
                 registry.register(conn);
                 registry.update_state(cluster_name, ready.state());
+                if ready.state() == AgentState::Ready {
+                    registry.set_pivot_complete(cluster_name, true);
+                }
             }
             Some(Payload::BootstrapComplete(bc)) => {
                 registry.set_capi_ready(cluster_name, bc.capi_ready);
-            }
-            Some(Payload::PivotStarted(_)) => {
-                registry.update_state(cluster_name, AgentState::Pivoting);
             }
             Some(Payload::PivotComplete(pc)) => {
                 if pc.success {
@@ -498,38 +522,6 @@ mod tests {
 
         // Should not panic
         test_handle_message(&registry, &msg, &tx).await;
-    }
-
-    // Test handle_agent_message with PivotStarted payload
-    #[tokio::test]
-    async fn test_handle_pivot_started_message() {
-        let registry = create_test_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
-
-        // First register the agent
-        let ready_msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "0.1.0".to_string(),
-                kubernetes_version: "1.28.0".to_string(),
-                state: AgentState::Ready.into(),
-                api_server_endpoint: "https://api.test:6443".to_string(),
-            })),
-        };
-        test_handle_message(&registry, &ready_msg, &tx).await;
-
-        // Then send pivot started
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::PivotStarted(PivotStarted {
-                target_namespace: "capi-system".to_string(),
-            })),
-        };
-        test_handle_message(&registry, &msg, &tx).await;
-
-        // Verify state changed to Pivoting
-        let conn = registry.get("test-cluster").unwrap();
-        assert_eq!(conn.state, AgentState::Pivoting);
     }
 
     // Test handle_agent_message with PivotComplete (success)
@@ -765,19 +757,6 @@ mod tests {
         assert_eq!(
             registry.get("test-cluster").unwrap().state,
             AgentState::Ready
-        );
-
-        // Pivot started
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::PivotStarted(PivotStarted {
-                target_namespace: "capi-system".to_string(),
-            })),
-        };
-        test_handle_message(&registry, &msg, &tx).await;
-        assert_eq!(
-            registry.get("test-cluster").unwrap().state,
-            AgentState::Pivoting
         );
 
         // Pivot complete
