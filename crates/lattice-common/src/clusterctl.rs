@@ -225,6 +225,103 @@ pub async fn export_to_directory(
     Ok(manifests)
 }
 
+/// Import CAPI resources from a directory using `clusterctl move --from-directory`
+///
+/// This imports all CAPI resources from YAML files in the specified directory.
+/// Used during unpivot to restore resources received from a child cluster.
+///
+/// # Arguments
+/// * `kubeconfig` - Optional path to target cluster kubeconfig
+/// * `namespace` - CAPI namespace to import resources into
+/// * `input_dir` - Directory containing YAML files to import
+///
+/// # Returns
+/// Ok(()) on success
+pub async fn import_from_directory(
+    kubeconfig: Option<&Path>,
+    namespace: &str,
+    input_dir: &Path,
+) -> Result<(), ClusterctlError> {
+    let mut cmd = Command::new("clusterctl");
+    cmd.arg("move")
+        .arg("--from-directory")
+        .arg(input_dir)
+        .arg("--namespace")
+        .arg(namespace);
+
+    if let Some(kc) = kubeconfig {
+        cmd.arg("--to-kubeconfig").arg(kc);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ClusterctlError::MoveFailed(stderr.to_string()));
+    }
+
+    info!(
+        namespace = %namespace,
+        input_dir = %input_dir.display(),
+        "clusterctl move --from-directory completed"
+    );
+
+    Ok(())
+}
+
+/// Import CAPI resources from raw manifest bytes
+///
+/// Convenience function that writes manifests to a temp directory and then
+/// calls `import_from_directory`. Used when manifests are received over the wire.
+///
+/// # Arguments
+/// * `kubeconfig` - Optional path to target cluster kubeconfig
+/// * `namespace` - CAPI namespace to import resources into
+/// * `manifests` - Raw YAML content of each manifest file
+///
+/// # Returns
+/// Ok(()) on success
+pub async fn import_from_manifests(
+    kubeconfig: Option<&Path>,
+    namespace: &str,
+    manifests: &[Vec<u8>],
+) -> Result<(), ClusterctlError> {
+    // Create temp directory with timestamp + pid for uniqueness
+    let unique_id = format!(
+        "{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::process::id()
+    );
+    let import_dir = format!("/tmp/lattice-import-{}", unique_id);
+    let import_path = Path::new(&import_dir);
+
+    std::fs::create_dir_all(import_path).map_err(|e| {
+        ClusterctlError::ExecutionFailed(format!("failed to create import dir: {}", e))
+    })?;
+
+    // Write manifests to files
+    for (i, manifest) in manifests.iter().enumerate() {
+        let file_path = import_path.join(format!("manifest-{}.yaml", i));
+        std::fs::write(&file_path, manifest).map_err(|e| {
+            ClusterctlError::ExecutionFailed(format!("failed to write manifest: {}", e))
+        })?;
+    }
+
+    // Run clusterctl move --from-directory
+    let result = import_from_directory(kubeconfig, namespace, import_path).await;
+
+    // Clean up temp directory
+    let _ = std::fs::remove_dir_all(import_path);
+
+    result
+}
+
 /// Unpause a CAPI cluster
 ///
 /// clusterctl move pauses clusters during the move operation. If the move fails

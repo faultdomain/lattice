@@ -2520,16 +2520,20 @@ impl PivotOperations for PivotOperationsImpl {
     }
 }
 
-/// Apply unpivot manifests from a child cluster
+/// Import unpivot manifests from a child cluster using clusterctl move
 ///
 /// Called when a child cluster sends its CAPI resources back during deletion.
-/// Just applies the manifests and requeues - cleanup is handled separately.
+/// Uses `clusterctl move --from-directory` to properly import resources so CAPI
+/// can reconcile and reconnect to the existing infrastructure.
 async fn handle_child_unpivot(
     cluster: &LatticeCluster,
     ctx: &Context,
     registry: SharedAgentRegistry,
 ) -> Result<Action, Error> {
+    use lattice_common::clusterctl::import_from_manifests;
+
     let name = cluster.name_any();
+    let capi_namespace = format!("capi-{}", name);
 
     // Take the manifests from registry (removes them)
     let manifests = match registry.take_unpivot_manifests(&name) {
@@ -2543,34 +2547,19 @@ async fn handle_child_unpivot(
     info!(
         cluster = %name,
         manifest_count = manifests.len(),
-        "Applying unpivot manifests from child cluster"
+        "Importing unpivot manifests using clusterctl move --from-directory"
     );
 
-    // Apply each manifest using server-side apply
-    for (i, manifest_bytes) in manifests.iter().enumerate() {
-        let manifest_str = match String::from_utf8(manifest_bytes.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                error!(manifest = i, error = %e, "Invalid UTF-8 in manifest");
-                continue;
-            }
-        };
+    // Ensure the CAPI namespace exists
+    ctx.kube.ensure_namespace(&capi_namespace).await?;
 
-        for doc in manifest_str.split("---") {
-            let doc = doc.trim();
-            if doc.is_empty() {
-                continue;
-            }
-
-            if let Err(e) = apply_yaml_manifest(ctx, doc).await {
-                warn!(manifest = i, error = %e, "Failed to apply manifest document");
-            } else {
-                debug!(manifest = i, "Applied manifest document");
-            }
-        }
+    // Import using clusterctl move --from-directory
+    if let Err(e) = import_from_manifests(None, &capi_namespace, &manifests).await {
+        error!(cluster = %name, error = %e, "Failed to import CAPI resources");
+        return Err(Error::pivot(format!("clusterctl move --from-directory failed: {}", e)));
     }
 
-    info!(cluster = %name, "Unpivot manifests applied, requeuing to wait for CAPI");
+    info!(cluster = %name, "CAPI resources imported, requeuing to wait for reconciliation");
     Ok(Action::requeue(Duration::from_secs(5)))
 }
 
@@ -2614,52 +2603,6 @@ async fn handle_unpivot_cleanup(
     }
 
     Ok(Action::await_change())
-}
-
-/// Apply a single YAML manifest document using server-side apply
-async fn apply_yaml_manifest(ctx: &Context, yaml: &str) -> Result<(), Error> {
-    // Parse the YAML to get apiVersion, kind, metadata
-    let value: serde_json::Value = serde_yaml::from_str(yaml)
-        .map_err(|e| Error::serialization(format!("Invalid YAML: {}", e)))?;
-
-    let api_version = value["apiVersion"]
-        .as_str()
-        .ok_or_else(|| Error::serialization("Missing apiVersion".to_string()))?;
-    let kind = value["kind"]
-        .as_str()
-        .ok_or_else(|| Error::serialization("Missing kind".to_string()))?;
-    let name = value["metadata"]["name"]
-        .as_str()
-        .ok_or_else(|| Error::serialization("Missing metadata.name".to_string()))?;
-    let namespace = value["metadata"]["namespace"].as_str();
-
-    // Parse into DynamicObject
-    let obj: DynamicObject = serde_json::from_value(
-        serde_json::to_value(&value).map_err(|e| Error::serialization(e.to_string()))?,
-    )
-    .map_err(|e| Error::serialization(e.to_string()))?;
-
-    // Build ApiResource from apiVersion and kind
-    let (group, version) = parse_api_version(api_version);
-    let ar = ApiResource {
-        group: group.to_string(),
-        version: version.to_string(),
-        api_version: api_version.to_string(),
-        kind: kind.to_string(),
-        plural: pluralize_kind(kind),
-    };
-
-    // Apply the object
-    let params = PatchParams::apply("lattice-controller").force();
-    if let Some(ns) = namespace {
-        let api: Api<DynamicObject> = Api::namespaced_with(ctx.capi.kube_client(), ns, &ar);
-        api.patch(name, &params, &Patch::Apply(&obj)).await?;
-    } else {
-        let api: Api<DynamicObject> = Api::all_with(ctx.capi.kube_client(), &ar);
-        api.patch(name, &params, &Patch::Apply(&obj)).await?;
-    }
-
-    Ok(())
 }
 
 /// Check if a cluster has the unpivot finalizer
