@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
@@ -202,6 +202,8 @@ pub struct AgentRegistry {
     proxy_channels: DashMap<String, Arc<ProxyChannels>>,
     /// CAPI manifests received from agents during unpivot
     unpivot_manifests: DashMap<String, Vec<Vec<u8>>>,
+    /// Clusters with unpivot in progress (persists after manifests are consumed)
+    unpivot_pending: DashSet<String>,
 }
 
 impl AgentRegistry {
@@ -212,6 +214,7 @@ impl AgentRegistry {
             post_pivot_manifests: DashMap::new(),
             proxy_channels: DashMap::new(),
             unpivot_manifests: DashMap::new(),
+            unpivot_pending: DashSet::new(),
         }
     }
 
@@ -350,6 +353,7 @@ impl AgentRegistry {
     ///
     /// These manifests need to be applied to this (parent) cluster so CAPI
     /// can properly delete the infrastructure when the child terminates.
+    /// Also marks unpivot as pending for this cluster.
     pub fn set_unpivot_manifests(&self, cluster_name: &str, manifests: Vec<Vec<u8>>) {
         info!(
             cluster = %cluster_name,
@@ -358,11 +362,13 @@ impl AgentRegistry {
         );
         self.unpivot_manifests
             .insert(cluster_name.to_string(), manifests);
+        self.unpivot_pending.insert(cluster_name.to_string());
     }
 
     /// Get and remove unpivot manifests for a cluster
     ///
     /// Returns None if no manifests were stored or if they've already been consumed.
+    /// Note: unpivot_pending remains true until clear_unpivot_pending is called.
     pub fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<Vec<Vec<u8>>> {
         self.unpivot_manifests.remove(cluster_name).map(|(_, m)| m)
     }
@@ -370,6 +376,18 @@ impl AgentRegistry {
     /// Check if unpivot manifests are stored for a cluster
     pub fn has_unpivot_manifests(&self, cluster_name: &str) -> bool {
         self.unpivot_manifests.contains_key(cluster_name)
+    }
+
+    /// Check if unpivot is pending for a cluster (manifests received but cleanup not done)
+    pub fn is_unpivot_pending(&self, cluster_name: &str) -> bool {
+        self.unpivot_pending.contains(cluster_name)
+    }
+
+    /// Clear unpivot pending state after cleanup is complete
+    pub fn clear_unpivot_pending(&self, cluster_name: &str) {
+        if self.unpivot_pending.remove(cluster_name).is_some() {
+            info!(cluster = %cluster_name, "Unpivot cleanup complete");
+        }
     }
 }
 

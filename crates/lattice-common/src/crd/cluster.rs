@@ -117,6 +117,13 @@ pub struct LatticeClusterStatus {
     /// for clusters that completed bootstrap before the restart.
     #[serde(default, skip_serializing_if = "is_false")]
     pub bootstrap_complete: bool,
+
+    /// Whether unpivot is in progress for this cluster (as a child being deleted)
+    ///
+    /// Set to true when a child cluster sends its CAPI manifests back during deletion.
+    /// Cleared after CAPI cleanup is complete. Persists across operator restarts.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unpivot_pending: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -161,6 +168,12 @@ impl LatticeClusterStatus {
     /// Set whether bootstrap has completed
     pub fn bootstrap_complete(mut self, complete: bool) -> Self {
         self.bootstrap_complete = complete;
+        self
+    }
+
+    /// Set whether unpivot is pending
+    pub fn unpivot_pending(mut self, pending: bool) -> Self {
+        self.unpivot_pending = pending;
         self
     }
 }

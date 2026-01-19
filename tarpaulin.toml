@@ -3,7 +3,6 @@
 exclude-files = [
     # Entry points - tested by E2E
     "crates/lattice-operator/src/main.rs",
-    "crates/lattice-operator/src/install/*",
     # Agent gRPC - requires real network connections
     "crates/lattice-operator/src/agent/client.rs",
     "crates/lattice-operator/src/agent/server.rs",
@@ -21,4 +20,8 @@ exclude-files = [
     "crates/lattice-proto/src/*",
     # E2E test helpers and tests - require real k8s clusters
     "crates/lattice-operator/tests/*",
+    # CLI - requires file I/O, git operations, and k8s clusters (tested by E2E)
+    "crates/lattice-cli/src/*",
+    # clusterctl wrapper - requires clusterctl binary
+    "crates/lattice-common/src/clusterctl.rs",
 ]

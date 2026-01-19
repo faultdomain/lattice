@@ -176,9 +176,6 @@ pub trait CAPIClient: Send + Sync {
     /// Delete a CAPI Cluster resource
     async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
 
-    /// Check if a CAPI Cluster resource exists
-    async fn has_cluster(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
-
     /// Get the underlying kube Client for advanced operations
     fn kube_client(&self) -> Client;
 }
@@ -1009,15 +1006,6 @@ impl CAPIClient for CAPIClientImpl {
         }
     }
 
-    async fn has_cluster(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error> {
-        let api = self.capi_cluster_api(namespace);
-        match api.get(cluster_name).await {
-            Ok(_) => Ok(true),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
-            Err(e) => Err(e.into()),
-        }
-    }
-
     fn kube_client(&self) -> Client {
         self.client.clone()
     }
@@ -1576,15 +1564,21 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Check if we have unpivot manifests waiting to be applied
             if registry.has_unpivot_manifests(&name) {
-                info!(cluster = %name, "Child cluster has unpivot manifests - applying and cleaning up");
+                info!(cluster = %name, "Child cluster has unpivot manifests - importing via clusterctl");
                 return handle_child_unpivot(&cluster, &ctx, registry).await;
             }
 
-            // Check if we're waiting for CAPI to be ready after applying unpivot manifests
-            // (manifests already applied, CAPI namespace exists with resources)
-            let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
-            if ctx.capi.has_cluster(&name, &capi_namespace).await.unwrap_or(false) {
-                info!(cluster = %name, "CAPI resources exist from unpivot - waiting for ready then cleanup");
+            // Check if unpivot is in progress (manifests applied, waiting for cleanup)
+            // Use status field to survive operator restarts
+            let unpivot_pending = cluster
+                .status
+                .as_ref()
+                .map(|s| s.unpivot_pending)
+                .unwrap_or(false);
+
+            if unpivot_pending {
+                let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
+                info!(cluster = %name, "Unpivot in progress - waiting for CAPI ready then cleanup");
                 return handle_unpivot_cleanup(&cluster, &ctx, &capi_namespace, bootstrap).await;
             }
         }
@@ -2559,6 +2553,14 @@ async fn handle_child_unpivot(
         return Err(Error::pivot(format!("clusterctl move --from-directory failed: {}", e)));
     }
 
+    // Mark unpivot as pending in status (survives restarts)
+    let status = cluster
+        .status
+        .clone()
+        .unwrap_or_default()
+        .unpivot_pending(true);
+    ctx.kube.patch_status(&name, &status).await?;
+
     info!(cluster = %name, "CAPI resources imported, requeuing to wait for reconciliation");
     Ok(Action::requeue(Duration::from_secs(5)))
 }
@@ -2596,7 +2598,12 @@ async fn handle_unpivot_cleanup(
         info!(cluster = %name, "CAPI Cluster deleted, infrastructure cleanup will proceed");
     }
 
-    // Delete the LatticeCluster
+    // Clear unpivot state from registry (if parent servers exist)
+    if let Some(ref parent_servers) = ctx.parent_servers {
+        parent_servers.agent_registry().clear_unpivot_pending(&name);
+    }
+
+    // Delete the LatticeCluster (this also removes the status)
     info!(cluster = %name, "Deleting LatticeCluster");
     if let Err(e) = ctx.kube.delete_cluster(&name).await {
         warn!(cluster = %name, error = %e, "Failed to delete LatticeCluster");
