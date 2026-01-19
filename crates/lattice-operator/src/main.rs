@@ -546,7 +546,13 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
         };
 
         let ca_cert = parent_servers.ca().ca_cert_pem().to_string();
-        let cell_endpoint = endpoints.endpoint();
+        let cell_endpoint = match endpoints.endpoint() {
+            Some(e) => e,
+            None => {
+                tracing::warn!(cluster = %name, "Cell endpoint host not set, cannot re-register");
+                continue;
+            }
+        };
 
         // Serialize cluster manifest for export
         let cluster_manifest = match serde_json::to_string(&cluster.for_export()) {
@@ -647,10 +653,45 @@ async fn run_controller() -> anyhow::Result<()> {
             tracing::info!("Running as bootstrap cluster, using default SANs");
             vec![]
         } else if is_child_cluster {
-            tracing::info!(
-                "Running as child cluster (has parent config), skipping LatticeCluster wait"
-            );
-            vec![]
+            // Child clusters get LatticeCluster via pivot, so we can't block waiting for it.
+            // But if the cluster is already pivoted and has endpoints, we need those SANs
+            // for the server certificate (child clusters can also become parents).
+            if let Some(ref cluster_name) = self_cluster_name {
+                let clusters: kube::Api<lattice_operator::crd::LatticeCluster> =
+                    kube::Api::all(client.clone());
+                match clusters.get(cluster_name).await {
+                    Ok(cluster) => {
+                        if let Some(ref endpoints) = cluster.spec.endpoints {
+                            if let Some(ref host) = endpoints.host {
+                                tracing::info!(
+                                    host = %host,
+                                    "Child cluster has endpoints, adding to server certificate SANs"
+                                );
+                                vec![host.clone()]
+                            } else {
+                                tracing::info!(
+                                    "Child cluster has endpoints but host not yet discovered, using default SANs"
+                                );
+                                vec![]
+                            }
+                        } else {
+                            tracing::info!(
+                                "Child cluster exists but has no endpoints (pre-pivot), using default SANs"
+                            );
+                            vec![]
+                        }
+                    }
+                    Err(_) => {
+                        tracing::info!(
+                            "Child cluster LatticeCluster not found yet (pre-pivot), using default SANs"
+                        );
+                        vec![]
+                    }
+                }
+            } else {
+                tracing::info!("Running as child cluster without cluster name, using default SANs");
+                vec![]
+            }
         } else if let Some(ref cluster_name) = self_cluster_name {
             let clusters: kube::Api<lattice_operator::crd::LatticeCluster> =
                 kube::Api::all(client.clone());
@@ -663,8 +704,16 @@ async fn run_controller() -> anyhow::Result<()> {
                 match clusters.get(cluster_name).await {
                     Ok(cluster) => {
                         if let Some(ref endpoints) = cluster.spec.endpoints {
-                            tracing::info!(host = %endpoints.host, "Adding cell host to server certificate SANs");
-                            break vec![endpoints.host.clone()];
+                            if let Some(ref host) = endpoints.host {
+                                tracing::info!(host = %host, "Adding cell host to server certificate SANs");
+                                break vec![host.clone()];
+                            } else {
+                                tracing::info!(
+                                    cluster = %cluster_name,
+                                    retry_in = ?retry_delay,
+                                    "LatticeCluster has endpoints but host not yet discovered, waiting..."
+                                );
+                            }
                         } else {
                             tracing::info!(
                                 cluster = %cluster_name,
@@ -910,7 +959,9 @@ async fn start_agent_with_retry(
                 tracing::debug!("No parent cell configured, running as standalone");
                 // Still need to drain unpivot requests even if no parent
                 while let Some(request) = unpivot_rx.recv().await {
-                    let _ = request.completion_tx.send(Err("No parent cell configured".to_string()));
+                    let _ = request
+                        .completion_tx
+                        .send(Err("No parent cell configured".to_string()));
                 }
                 return;
             }

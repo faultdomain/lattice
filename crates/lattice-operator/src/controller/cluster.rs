@@ -74,9 +74,10 @@ pub trait KubeClient: Send + Sync {
     ///
     /// Creates a LoadBalancer Service in lattice-system namespace to expose
     /// cell servers (bootstrap + gRPC) for workload cluster provisioning.
+    /// If load_balancer_ip is None (cloud providers), the cloud will assign one.
     async fn ensure_cell_service(
         &self,
-        load_balancer_ip: &str,
+        load_balancer_ip: Option<String>,
         bootstrap_port: u16,
         grpc_port: u16,
     ) -> Result<(), Error>;
@@ -102,7 +103,8 @@ pub trait KubeClient: Send + Sync {
     ) -> Result<(), Error>;
 
     /// Add a finalizer to a LatticeCluster
-    async fn add_cluster_finalizer(&self, cluster_name: &str, finalizer: &str) -> Result<(), Error>;
+    async fn add_cluster_finalizer(&self, cluster_name: &str, finalizer: &str)
+        -> Result<(), Error>;
 
     /// Remove a finalizer from a LatticeCluster
     async fn remove_cluster_finalizer(
@@ -458,7 +460,7 @@ impl KubeClient for KubeClientImpl {
 
     async fn ensure_cell_service(
         &self,
-        load_balancer_ip: &str,
+        load_balancer_ip: Option<String>,
         bootstrap_port: u16,
         grpc_port: u16,
     ) -> Result<(), Error> {
@@ -478,7 +480,9 @@ impl KubeClient for KubeClientImpl {
             },
             spec: Some(ServiceSpec {
                 type_: Some("LoadBalancer".to_string()),
-                load_balancer_ip: Some(load_balancer_ip.to_string()),
+                // Only set loadBalancerIP if specified (on-prem).
+                // For cloud providers, leave None and let the cloud assign one.
+                load_balancer_ip,
                 selector: Some(labels),
                 ports: Some(vec![
                     ServicePort {
@@ -572,7 +576,11 @@ impl KubeClient for KubeClientImpl {
         }
     }
 
-    async fn add_cluster_finalizer(&self, cluster_name: &str, finalizer: &str) -> Result<(), Error> {
+    async fn add_cluster_finalizer(
+        &self,
+        cluster_name: &str,
+        finalizer: &str,
+    ) -> Result<(), Error> {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
 
         // Get current cluster to read existing finalizers
@@ -1579,10 +1587,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // This exposes cell servers for workload clusters to reach bootstrap + gRPC endpoints
             // Note: Cell servers are started at application startup, not on-demand
             if let Some(ref cell_spec) = cluster.spec.endpoints {
-                info!(host = %cell_spec.host, "ensuring LoadBalancer Service for cell servers");
+                info!(host = ?cell_spec.host, "ensuring LoadBalancer Service for cell servers");
                 ctx.kube
                     .ensure_cell_service(
-                        &cell_spec.host,
+                        cell_spec.host.clone(),
                         cell_spec.bootstrap_port,
                         cell_spec.grpc_port,
                     )
@@ -2061,8 +2069,18 @@ async fn generate_capi_manifests(
         })?;
 
         let ca_cert = bootstrap_state.ca_cert_pem().to_string();
-        let cell_endpoint = endpoints.endpoint();
-        let bootstrap_endpoint = endpoints.bootstrap_endpoint();
+
+        // Cell endpoint and bootstrap endpoint require host to be known.
+        // For cloud providers, the host must be discovered from the LB before provisioning children.
+        let cell_endpoint = endpoints.endpoint().ok_or_else(|| {
+            Error::validation(
+                "endpoints.host must be set to provision child clusters. \
+                 For cloud providers, wait for the LB IP to be discovered.",
+            )
+        })?;
+        let bootstrap_endpoint = endpoints.bootstrap_endpoint().ok_or_else(|| {
+            Error::validation("endpoints.host must be set for bootstrap endpoint")
+        })?;
 
         // Serialize the LatticeCluster CRD to pass to workload cluster
         let cluster_manifest =
@@ -2187,7 +2205,10 @@ async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<Strin
     };
 
     // Parse cell_endpoint: host:http_port:grpc_port
-    let cell_endpoint = endpoints.endpoint();
+    let Some(cell_endpoint) = endpoints.endpoint() else {
+        // Host not yet known (cloud provider waiting for LB IP)
+        return Ok(None);
+    };
     let parts: Vec<&str> = cell_endpoint.split(':').collect();
     if parts.len() != 3 {
         warn!(
@@ -2586,11 +2607,7 @@ async fn apply_yaml_manifest(ctx: &Context, yaml: &str) -> Result<(), Error> {
     // Apply the object
     let params = PatchParams::apply("lattice-controller").force();
     if let Some(ns) = namespace {
-        let api: Api<DynamicObject> = Api::namespaced_with(
-            ctx.capi.kube_client(),
-            ns,
-            &ar,
-        );
+        let api: Api<DynamicObject> = Api::namespaced_with(ctx.capi.kube_client(), ns, &ar);
         api.patch(name, &params, &Patch::Apply(&obj)).await?;
     } else {
         let api: Api<DynamicObject> = Api::all_with(ctx.capi.kube_client(), &ar);
@@ -2764,7 +2781,7 @@ mod tests {
     fn sample_parent(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name);
         cluster.spec.endpoints = Some(EndpointsSpec {
-            host: "172.18.255.1".to_string(),
+            host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
             service: ServiceSpec {

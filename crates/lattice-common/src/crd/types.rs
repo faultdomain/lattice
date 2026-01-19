@@ -5,7 +5,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 // Re-export provider configs from the providers module
-pub use super::providers::{DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, ProxmoxConfig};
+pub use super::providers::{
+    DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
+};
 
 // =============================================================================
 // Provider Types
@@ -147,6 +149,9 @@ pub struct ProviderConfig {
     /// Proxmox VE on-premises virtualization
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxmox: Option<ProxmoxConfig>,
+    /// OpenStack private/public cloud
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openstack: Option<OpenStackConfig>,
 }
 
 impl ProviderConfig {
@@ -155,6 +160,7 @@ impl ProviderConfig {
         Self {
             docker: Some(DockerConfig::default()),
             proxmox: None,
+            openstack: None,
         }
     }
 
@@ -163,6 +169,16 @@ impl ProviderConfig {
         Self {
             docker: None,
             proxmox: Some(config),
+            openstack: None,
+        }
+    }
+
+    /// Create an OpenStack provider config
+    pub fn openstack(config: OpenStackConfig) -> Self {
+        Self {
+            docker: None,
+            proxmox: None,
+            openstack: Some(config),
         }
     }
 
@@ -172,6 +188,8 @@ impl ProviderConfig {
             ProviderType::Docker
         } else if self.proxmox.is_some() {
             ProviderType::Proxmox
+        } else if self.openstack.is_some() {
+            ProviderType::OpenStack
         } else {
             ProviderType::Docker
         }
@@ -179,14 +197,18 @@ impl ProviderConfig {
 
     /// Validate that exactly one provider is configured
     pub fn validate(&self) -> Result<(), crate::Error> {
-        let count = [self.docker.is_some(), self.proxmox.is_some()]
-            .iter()
-            .filter(|&&x| x)
-            .count();
+        let count = [
+            self.docker.is_some(),
+            self.proxmox.is_some(),
+            self.openstack.is_some(),
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
 
         if count == 0 {
             return Err(crate::Error::validation(
-                "provider config must specify exactly one provider (docker or proxmox)",
+                "provider config must specify exactly one provider (docker, proxmox, or openstack)",
             ));
         }
         if count > 1 {
@@ -355,8 +377,11 @@ impl GitOpsSpec {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointsSpec {
-    /// Host address for child agent connections
-    pub host: String,
+    /// Host address for child agent connections.
+    /// Optional for cloud providers with LBs - will be auto-discovered from LB status.
+    /// Required for on-premises providers (Proxmox, Docker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 
     /// gRPC port for agent connections (default: 50051)
     #[serde(default = "default_grpc_port")]
@@ -384,18 +409,27 @@ fn default_bootstrap_port() -> u16 {
 
 impl EndpointsSpec {
     /// Get the combined parent endpoint in format "host:http_port:grpc_port"
-    pub fn endpoint(&self) -> String {
-        format!("{}:{}:{}", self.host, self.bootstrap_port, self.grpc_port)
+    /// Returns None if host is not set (pending auto-discovery from cloud LB)
+    pub fn endpoint(&self) -> Option<String> {
+        self.host
+            .as_ref()
+            .map(|h| format!("{}:{}:{}", h, self.bootstrap_port, self.grpc_port))
     }
 
     /// Get the gRPC endpoint URL for agent connections
-    pub fn grpc_endpoint(&self) -> String {
-        format!("https://{}:{}", self.host, self.grpc_port)
+    /// Returns None if host is not set
+    pub fn grpc_endpoint(&self) -> Option<String> {
+        self.host
+            .as_ref()
+            .map(|h| format!("https://{}:{}", h, self.grpc_port))
     }
 
     /// Get the bootstrap endpoint URL for kubeadm webhook
-    pub fn bootstrap_endpoint(&self) -> String {
-        format!("https://{}:{}", self.host, self.bootstrap_port)
+    /// Returns None if host is not set
+    pub fn bootstrap_endpoint(&self) -> Option<String> {
+        self.host
+            .as_ref()
+            .map(|h| format!("https://{}:{}", h, self.bootstrap_port))
     }
 }
 
@@ -852,7 +886,7 @@ mod tests {
         #[test]
         fn test_endpoints_spec_urls() {
             let spec = EndpointsSpec {
-                host: "172.18.255.1".to_string(),
+                host: Some("172.18.255.1".to_string()),
                 grpc_port: 50051,
                 bootstrap_port: 8443,
                 service: ServiceSpec {
@@ -860,8 +894,34 @@ mod tests {
                 },
                 gitops: None,
             };
-            assert_eq!(spec.grpc_endpoint(), "https://172.18.255.1:50051");
-            assert_eq!(spec.bootstrap_endpoint(), "https://172.18.255.1:8443");
+            assert_eq!(
+                spec.grpc_endpoint(),
+                Some("https://172.18.255.1:50051".to_string())
+            );
+            assert_eq!(
+                spec.bootstrap_endpoint(),
+                Some("https://172.18.255.1:8443".to_string())
+            );
+            assert_eq!(
+                spec.endpoint(),
+                Some("172.18.255.1:8443:50051".to_string())
+            );
+        }
+
+        #[test]
+        fn test_endpoints_spec_no_host() {
+            let spec = EndpointsSpec {
+                host: None,
+                grpc_port: 50051,
+                bootstrap_port: 8443,
+                service: ServiceSpec {
+                    type_: "LoadBalancer".to_string(),
+                },
+                gitops: None,
+            };
+            assert_eq!(spec.grpc_endpoint(), None);
+            assert_eq!(spec.bootstrap_endpoint(), None);
+            assert_eq!(spec.endpoint(), None);
         }
     }
 }

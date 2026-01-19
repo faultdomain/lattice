@@ -318,8 +318,10 @@ impl Provider for DockerProvider {
         }
         // Auto-add endpoints.host to certSANs so users don't have to specify it twice
         if let Some(ref endpoints) = cluster.spec.endpoints {
-            if !cert_sans.contains(&endpoints.host) {
-                cert_sans.push(endpoints.host.clone());
+            if let Some(ref host) = endpoints.host {
+                if !cert_sans.contains(host) {
+                    cert_sans.push(host.clone());
+                }
             }
         }
 
@@ -455,7 +457,7 @@ mod tests {
     fn sample_parent_cluster(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name, 2);
         cluster.spec.endpoints = Some(EndpointsSpec {
-            host: "172.18.255.1".to_string(),
+            host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
             service: ServiceSpec {

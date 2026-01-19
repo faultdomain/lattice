@@ -28,7 +28,7 @@ version = "2.10.0"
 
 [capo]
 # OpenStack CAPI provider from https://github.com/kubernetes-sigs/cluster-api-provider-openstack
-version = "0.11.0"
+version = "0.14.0"
 
 [ipam-in-cluster]
 # IPAM in-cluster provider from https://github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster

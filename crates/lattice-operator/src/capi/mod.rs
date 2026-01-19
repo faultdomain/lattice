@@ -114,7 +114,7 @@ impl InfraProviderInfo {
     /// Get provider info for a given infrastructure type
     ///
     /// # Errors
-    /// Returns an error if called with an unsupported provider type (OpenStack, AWS, GCP, Azure).
+    /// Returns an error if called with an unsupported provider type (AWS, GCP, Azure).
     pub fn for_provider(provider: ProviderType, capi_version: &str) -> Result<Self, Error> {
         match provider {
             ProviderType::Docker => Ok(Self {
@@ -135,13 +135,18 @@ impl InfraProviderInfo {
                 ],
                 extra_init_args: &["--ipam", "in-cluster"],
             }),
-            ProviderType::OpenStack
-            | ProviderType::Aws
-            | ProviderType::Gcp
-            | ProviderType::Azure => Err(Error::capi_installation(format!(
-                "Provider {:?} is not yet implemented",
-                provider
-            ))),
+            ProviderType::OpenStack => Ok(Self {
+                name: "openstack",
+                version: env!("CAPO_VERSION").to_string(),
+                credentials_secret: Some(("capo-system", "openstack-cloud-config")),
+                // OpenStack uses clouds.yaml in the secret, not individual env vars
+                // The secret key "clouds.yaml" contains the full clouds.yaml file
+                credentials_env_map: &[],
+                extra_init_args: &[],
+            }),
+            ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => Err(
+                Error::capi_installation(format!("Provider {:?} is not yet implemented", provider)),
+            ),
         }
     }
 }
@@ -188,10 +193,8 @@ impl CapiProviderConfig {
         let name = match infrastructure {
             ProviderType::Docker => "docker",
             ProviderType::Proxmox => "proxmox",
-            ProviderType::OpenStack
-            | ProviderType::Aws
-            | ProviderType::Gcp
-            | ProviderType::Azure => {
+            ProviderType::OpenStack => "openstack",
+            ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
                 return Err(Error::capi_installation(format!(
                     "Provider {:?} is not yet implemented",
                     infrastructure
@@ -1067,6 +1070,7 @@ mod tests {
         for (provider, expected) in [
             (ProviderType::Docker, "docker"),
             (ProviderType::Proxmox, "proxmox"),
+            (ProviderType::OpenStack, "openstack"),
         ] {
             let config = CapiProviderConfig::with_versions(
                 provider,

@@ -257,8 +257,10 @@ impl Provider for ProxmoxProvider {
             cert_sans.push(cfg.control_plane_endpoint.clone());
         }
         if let Some(ref endpoints) = cluster.spec.endpoints {
-            if !cert_sans.contains(&endpoints.host) {
-                cert_sans.push(endpoints.host.clone());
+            if let Some(ref host) = endpoints.host {
+                if !cert_sans.contains(host) {
+                    cert_sans.push(host.clone());
+                }
             }
         }
 

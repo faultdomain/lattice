@@ -29,10 +29,6 @@ fi
 
 export LATTICE_MGMT_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-mgmt.yaml"
 export LATTICE_WORKLOAD_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-workload.yaml"
-export LATTICE_MGMT_PROVIDER=proxmox
-export LATTICE_WORKLOAD_PROVIDER=proxmox
-export LATTICE_MGMT_BOOTSTRAP=kubeadm
-export LATTICE_WORKLOAD_BOOTSTRAP=rke2
 export LATTICE_ENABLE_INDEPENDENCE_TEST=true
 export LATTICE_ENABLE_MESH_TEST=true
 

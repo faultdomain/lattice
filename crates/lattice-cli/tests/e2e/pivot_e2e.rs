@@ -200,9 +200,8 @@ fn default_cluster_config_path(env_var: &str) -> Option<PathBuf> {
 fn load_cluster_config(env_var: &str) -> Result<(PathBuf, String, LatticeCluster), String> {
     let path = match std::env::var(env_var) {
         Ok(p) => PathBuf::from(p),
-        Err(_) => default_cluster_config_path(env_var).ok_or_else(|| {
-            format!("No cluster config provided and no default for {}", env_var)
-        })?,
+        Err(_) => default_cluster_config_path(env_var)
+            .ok_or_else(|| format!("No cluster config provided and no default for {}", env_var))?,
     };
 
     if !path.exists() {
@@ -344,7 +343,10 @@ async fn run_provider_e2e() -> Result<(), String> {
 
     println!("Configuration:");
     println!("  Management:  {} + {:?}", mgmt_provider, mgmt_bootstrap);
-    println!("  Workload:    {} + {:?}", workload_provider, workload_bootstrap);
+    println!(
+        "  Workload:    {} + {:?}",
+        workload_provider, workload_bootstrap
+    );
     if let Some((_, _, ref wl2)) = workload2_config {
         let wl2_bootstrap = &wl2.spec.provider.kubernetes.bootstrap;
         println!("  Workload2:   {} + {:?}", workload_provider, wl2_bootstrap);
@@ -779,7 +781,12 @@ async fn run_provider_e2e() -> Result<(), String> {
         if workload_provider == InfraProvider::Docker {
             let workload2_containers = run_cmd_allow_fail(
                 "docker",
-                &["ps", "--filter", &format!("name={}", WORKLOAD2_CLUSTER_NAME), "-q"],
+                &[
+                    "ps",
+                    "--filter",
+                    &format!("name={}", WORKLOAD2_CLUSTER_NAME),
+                    "-q",
+                ],
             );
             if workload2_containers.trim().is_empty() {
                 println!("  SUCCESS: Workload2 Docker containers cleaned up by CAPI");

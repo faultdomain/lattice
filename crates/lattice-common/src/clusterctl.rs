@@ -170,8 +170,9 @@ pub async fn export_to_directory(
     output_dir: &Path,
 ) -> Result<Vec<Vec<u8>>, ClusterctlError> {
     // Ensure output directory exists
-    std::fs::create_dir_all(output_dir)
-        .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to create output dir: {}", e)))?;
+    std::fs::create_dir_all(output_dir).map_err(|e| {
+        ClusterctlError::ExecutionFailed(format!("failed to create output dir: {}", e))
+    })?;
 
     let mut cmd = Command::new("clusterctl");
     cmd.arg("move")
@@ -202,14 +203,20 @@ pub async fn export_to_directory(
 
     // Read all YAML files from the output directory
     let mut manifests = Vec::new();
-    let entries = std::fs::read_dir(output_dir)
-        .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to read output dir: {}", e)))?;
+    let entries = std::fs::read_dir(output_dir).map_err(|e| {
+        ClusterctlError::ExecutionFailed(format!("failed to read output dir: {}", e))
+    })?;
 
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e == "yaml").unwrap_or(false) {
-            let content = std::fs::read(&path)
-                .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to read {}: {}", path.display(), e)))?;
+            let content = std::fs::read(&path).map_err(|e| {
+                ClusterctlError::ExecutionFailed(format!(
+                    "failed to read {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?;
             manifests.push(content);
         }
     }

@@ -1,0 +1,36 @@
+# OpenStack management cluster for E2E testing
+# Uses CAPO (Cluster API Provider OpenStack) with OVH or similar
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: e2e-mgmt
+spec:
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm
+      certSANs:
+        - "127.0.0.1"
+        - "localhost"
+    config:
+      openstack:
+        externalNetworkId: "Ext-Net"
+        cpFlavor: "b2-30"
+        workerFlavor: "b2-15"
+        imageName: "Ubuntu 22.04"
+        sshKeyName: "lattice-e2e"
+        cloudName: "openstack"
+        dnsNameservers:
+          - "8.8.8.8"
+          - "8.8.4.4"
+        cpRootVolumeSizeGb: 50
+        workerRootVolumeSizeGb: 50
+  nodes:
+    controlPlane: 1
+    workers: 1
+  endpoints:
+    # host is auto-discovered from Octavia LB
+    grpcPort: 50051
+    bootstrapPort: 8443
+    service:
+      type: LoadBalancer

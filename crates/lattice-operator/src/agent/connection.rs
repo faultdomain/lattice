@@ -364,9 +364,7 @@ impl AgentRegistry {
     ///
     /// Returns None if no manifests were stored or if they've already been consumed.
     pub fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<Vec<Vec<u8>>> {
-        self.unpivot_manifests
-            .remove(cluster_name)
-            .map(|(_, m)| m)
+        self.unpivot_manifests.remove(cluster_name).map(|(_, m)| m)
     }
 
     /// Check if unpivot manifests are stored for a cluster

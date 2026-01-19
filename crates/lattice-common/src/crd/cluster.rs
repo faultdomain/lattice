@@ -170,6 +170,8 @@ impl LatticeCluster {
     ///
     /// Strips server-managed metadata fields (managedFields, resourceVersion, uid, etc.)
     /// that would cause server-side apply to fail on the target cluster.
+    /// Status is removed entirely since it should be managed by the target cluster's
+    /// controller, not inherited from the source.
     pub fn for_export(&self) -> Self {
         let mut exported = self.clone();
         exported.metadata.managed_fields = None;
@@ -177,6 +179,9 @@ impl LatticeCluster {
         exported.metadata.uid = None;
         exported.metadata.creation_timestamp = None;
         exported.metadata.generation = None;
+        // Remove status entirely - the target cluster's controller will manage status.
+        // This prevents server-side apply from overwriting status set by the controller.
+        exported.status = None;
         exported
     }
 }
@@ -210,7 +215,7 @@ mod tests {
 
     fn endpoints_spec() -> EndpointsSpec {
         EndpointsSpec {
-            host: "172.18.255.1".to_string(),
+            host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
             service: ServiceSpec {
@@ -449,7 +454,10 @@ endpoints:
         assert_eq!(spec.nodes.control_plane, 1);
         assert_eq!(spec.nodes.workers, 2);
         assert_eq!(spec.provider.kubernetes.version, "1.35.0");
-        assert_eq!(spec.endpoints.as_ref().unwrap().host, "172.18.255.1");
+        assert_eq!(
+            spec.endpoints.as_ref().unwrap().host,
+            Some("172.18.255.1".to_string())
+        );
     }
 
     /// Story: User defines production workload cluster in YAML manifest
