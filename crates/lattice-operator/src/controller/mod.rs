@@ -8,7 +8,7 @@ mod service;
 
 pub use cluster::{
     error_policy, reconcile, Context, ContextBuilder, KubeClient, KubeClientImpl, PivotOperations,
-    PivotOperationsImpl,
+    PivotOperationsImpl, UnpivotChannel, UnpivotRequest,
 };
 
 pub use service::{

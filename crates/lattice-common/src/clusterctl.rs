@@ -152,6 +152,72 @@ pub async fn execute_move(
     })
 }
 
+/// Export CAPI resources to a directory using `clusterctl move --to-directory`
+///
+/// This exports all CAPI resources for a cluster to YAML files in the specified directory.
+/// Used during unpivot to extract resources before sending them to the parent cluster.
+///
+/// # Arguments
+/// * `kubeconfig` - Optional path to source cluster kubeconfig
+/// * `namespace` - CAPI namespace containing resources to export
+/// * `output_dir` - Directory to write YAML files to
+///
+/// # Returns
+/// Ok(Vec<Vec<u8>>) containing the raw YAML content of each exported file
+pub async fn export_to_directory(
+    kubeconfig: Option<&Path>,
+    namespace: &str,
+    output_dir: &Path,
+) -> Result<Vec<Vec<u8>>, ClusterctlError> {
+    // Ensure output directory exists
+    std::fs::create_dir_all(output_dir)
+        .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to create output dir: {}", e)))?;
+
+    let mut cmd = Command::new("clusterctl");
+    cmd.arg("move")
+        .arg("--to-directory")
+        .arg(output_dir)
+        .arg("--namespace")
+        .arg(namespace);
+
+    if let Some(kc) = kubeconfig {
+        cmd.arg("--kubeconfig").arg(kc);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ClusterctlError::MoveFailed(stderr.to_string()));
+    }
+
+    info!(
+        namespace = %namespace,
+        output_dir = %output_dir.display(),
+        "clusterctl move --to-directory completed"
+    );
+
+    // Read all YAML files from the output directory
+    let mut manifests = Vec::new();
+    let entries = std::fs::read_dir(output_dir)
+        .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to read output dir: {}", e)))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "yaml").unwrap_or(false) {
+            let content = std::fs::read(&path)
+                .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to read {}: {}", path.display(), e)))?;
+            manifests.push(content);
+        }
+    }
+
+    info!(count = manifests.len(), "exported CAPI manifests");
+    Ok(manifests)
+}
+
 /// Unpause a CAPI cluster
 ///
 /// clusterctl move pauses clusters during the move operation. If the move fails

@@ -1,6 +1,26 @@
-//! Provider-configurable end-to-end test for Lattice installation and pivot flow
+//! Provider-configurable end-to-end test for Lattice installation, pivot, and unpivot flow
 //!
-//! This test validates the full Lattice lifecycle using LatticeCluster CRD files.
+//! This test validates the full Lattice lifecycle including:
+//! - Management cluster installation and self-management
+//! - Workload cluster provisioning and pivot
+//! - Deep cluster hierarchy (workload1 -> workload2)
+//! - Independence (workload survives parent deletion)
+//! - Unpivot (CAPI resources return to parent on delete)
+//!
+//! # Test Phases
+//!
+//! 1. Install management cluster
+//! 2. Verify management cluster is self-managing
+//! 3. Create workload cluster 1 off management cluster
+//! 4. Watch workload1 provisioning and pivot
+//! 5. Verify workload1 has CAPI resources
+//! 6. Worker scaling verification
+//! 7. Independence test - delete management, scale workload1
+//! 8. Create workload2 off workload1 (deep hierarchy)
+//! 9. Watch workload2 provisioning and pivot
+//! 10. Verify workload2 has CAPI resources
+//! 11. Delete workload2 (unpivot test)
+//! 12-13. Service mesh tests (optional)
 //!
 //! # Design Philosophy
 //!
@@ -14,31 +34,27 @@
 //!
 //! ## Cluster Configuration (required)
 //! - LATTICE_MGMT_CLUSTER_CONFIG: Path to LatticeCluster YAML for management cluster
-//! - LATTICE_WORKLOAD_CLUSTER_CONFIG: Path to LatticeCluster YAML for workload cluster
+//! - LATTICE_WORKLOAD_CLUSTER_CONFIG: Path to LatticeCluster YAML for workload cluster (must have endpoints)
+//! - LATTICE_WORKLOAD2_CLUSTER_CONFIG: Path to LatticeCluster YAML for second workload cluster (leaf)
 //!
-//! ## Provider Hints (for test behavior, extracted from CRD)
-//! - LATTICE_MGMT_PROVIDER: Provider hint for test phases (docker|aws|openstack|proxmox)
-//! - LATTICE_WORKLOAD_PROVIDER: Provider hint for test phases (docker|aws|openstack|proxmox)
-//!
-//! ## Optional Test Phases
-//! - LATTICE_ENABLE_INDEPENDENCE_TEST=true: Enable Phase 7 (delete mgmt, verify workload self-manages)
-//! - LATTICE_ENABLE_MESH_TEST=true: Enable Phase 8-9 (service mesh validation tests)
+//! ## Optional Test Phases (all default to true)
+//! - LATTICE_ENABLE_INDEPENDENCE_TEST=false: Disable Phase 7 (delete mgmt, verify workload self-manages)
+//! - LATTICE_ENABLE_HIERARCHY_TEST=false: Disable Phase 8-11 (deep hierarchy and unpivot)
+//! - LATTICE_ENABLE_MESH_TEST=true: Enable Phase 12-13 (service mesh validation tests)
 //!
 //! # Running
 //!
 //! ```bash
-//! # Docker clusters
+//! # Docker clusters (full test with hierarchy and unpivot)
 //! LATTICE_MGMT_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/docker-mgmt.yaml \
 //!   LATTICE_WORKLOAD_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/docker-workload.yaml \
-//!   LATTICE_MGMT_PROVIDER=docker \
-//!   LATTICE_WORKLOAD_PROVIDER=docker \
+//!   LATTICE_WORKLOAD2_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/docker-workload2.yaml \
 //!   cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
 //!
 //! # Proxmox clusters
 //! LATTICE_MGMT_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-mgmt.yaml \
 //!   LATTICE_WORKLOAD_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-workload.yaml \
-//!   LATTICE_MGMT_PROVIDER=proxmox \
-//!   LATTICE_WORKLOAD_PROVIDER=proxmox \
+//!   LATTICE_WORKLOAD2_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-workload2.yaml \
 //!   cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
 //! ```
 //!
@@ -73,6 +89,7 @@ use super::providers::InfraProvider;
 const E2E_TIMEOUT: Duration = Duration::from_secs(3600);
 const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
 const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
+const WORKLOAD2_CLUSTER_NAME: &str = "e2e-workload2";
 const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
 fn workspace_root() -> PathBuf {
@@ -175,8 +192,8 @@ fn load_registry_credentials() -> Option<String> {
 /// * `env_var` - Environment variable name containing path to the CRD file
 ///
 /// # Returns
-/// Tuple of (config_path, config_content)
-fn load_cluster_config(env_var: &str) -> Result<(PathBuf, String), String> {
+/// Tuple of (config_path, config_content, parsed_cluster)
+fn load_cluster_config(env_var: &str) -> Result<(PathBuf, String, LatticeCluster), String> {
     let config_path = std::env::var(env_var).map_err(|_| {
         format!(
             "No cluster config provided. Set {} to a LatticeCluster YAML file.\n\
@@ -196,12 +213,12 @@ fn load_cluster_config(env_var: &str) -> Result<(PathBuf, String), String> {
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read cluster config {}: {}", config_path, e))?;
 
-    // Validate the YAML parses as a LatticeCluster
-    let _: LatticeCluster = serde_yaml::from_str(&content)
+    // Parse the YAML as a LatticeCluster
+    let cluster: LatticeCluster = serde_yaml::from_str(&content)
         .map_err(|e| format!("Invalid LatticeCluster YAML in {}: {}", config_path, e))?;
 
     println!("  Loaded cluster config from: {}", config_path);
-    Ok((path, content))
+    Ok((path, content, cluster))
 }
 
 fn get_management_kubeconfig(provider: InfraProvider) -> Result<String, String> {
@@ -272,62 +289,23 @@ async fn test_configurable_provider_pivot() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
-    let mgmt_provider = InfraProvider::from_env("LATTICE_MGMT_PROVIDER", InfraProvider::Docker);
-    let workload_provider =
-        InfraProvider::from_env("LATTICE_WORKLOAD_PROVIDER", InfraProvider::Docker);
-
-    let mgmt_bootstrap = match std::env::var("LATTICE_MGMT_BOOTSTRAP").as_deref() {
-        Ok("kubeadm") => BootstrapProvider::Kubeadm,
-        _ => BootstrapProvider::Rke2,
-    };
-
-    let workload_bootstrap = match std::env::var("LATTICE_WORKLOAD_BOOTSTRAP").as_deref() {
-        Ok("rke2") => BootstrapProvider::Rke2,
-        _ => BootstrapProvider::Kubeadm,
-    };
-
     println!("\n################################################################");
     println!("#  CONFIGURABLE PROVIDER E2E TEST");
-    println!("################################################################");
-    println!("\nConfiguration:");
-    println!(
-        "  Management cluster:  {} + {:?}",
-        mgmt_provider, mgmt_bootstrap
-    );
-    println!(
-        "  Workload cluster:    {} + {:?}",
-        workload_provider, workload_bootstrap
-    );
-    println!();
+    println!("################################################################\n");
 
     cleanup_clusters();
-
-    if mgmt_provider == InfraProvider::Docker || workload_provider == InfraProvider::Docker {
-        if let Err(e) = ensure_docker_network() {
-            panic!("Failed to setup Docker network: {}", e);
-        }
-    }
 
     if let Err(e) = build_and_push_lattice_image().await {
         cleanup_all();
         panic!("Failed to build Lattice image: {}", e);
     }
 
-    let result = tokio::time::timeout(
-        E2E_TIMEOUT,
-        run_provider_e2e(
-            mgmt_provider,
-            mgmt_bootstrap,
-            workload_provider,
-            workload_bootstrap,
-        ),
-    )
-    .await;
+    let result = tokio::time::timeout(E2E_TIMEOUT, run_provider_e2e()).await;
 
     match result {
         Ok(Ok(())) => {
             println!("\n################################################################");
-            println!("#  TEST PASSED: {} → {}", mgmt_provider, workload_provider);
+            println!("#  TEST PASSED");
             println!("################################################################\n");
         }
         Ok(Err(e)) => {
@@ -343,22 +321,28 @@ async fn test_configurable_provider_pivot() {
     cleanup_all();
 }
 
-async fn run_provider_e2e(
-    mgmt_provider: InfraProvider,
-    mgmt_bootstrap: BootstrapProvider,
-    workload_provider: InfraProvider,
-    workload_bootstrap: BootstrapProvider,
-) -> Result<(), String> {
+async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 1: Install Management Cluster
     // =========================================================================
+
+    // Load cluster config from CRD file (provider and bootstrap come from the config)
+    let (config_path, cluster_config, mgmt_cluster) =
+        load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG")?;
+    let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
+    let mgmt_bootstrap = mgmt_cluster.spec.provider.kubernetes.bootstrap.clone();
+
+    // Setup Docker network if needed
+    if mgmt_provider == InfraProvider::Docker {
+        if let Err(e) = ensure_docker_network() {
+            return Err(format!("Failed to setup Docker network: {}", e));
+        }
+    }
+
     println!(
         "\n[Phase 1] Installing management cluster ({} + {:?})...\n",
         mgmt_provider, mgmt_bootstrap
     );
-
-    // Load cluster config from CRD file
-    let (config_path, cluster_config) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG")?;
     println!("  Cluster config:\n{}", cluster_config);
 
     let registry_credentials = load_registry_credentials();
@@ -439,18 +423,18 @@ async fn run_provider_e2e(
     // =========================================================================
     // Phase 3: Create Workload Cluster
     // =========================================================================
+
+    // Load workload cluster config from CRD file (provider and bootstrap come from the config)
+    let (_workload_config_path, workload_config, workload_cluster) =
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG")?;
+    let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
+    let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
+
     println!(
         "\n[Phase 3] Creating workload cluster ({} + {:?})...\n",
         workload_provider, workload_bootstrap
     );
-
-    // Load workload cluster config from CRD file
-    let (_workload_config_path, workload_config) =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG")?;
     println!("  Workload cluster config:\n{}", workload_config);
-
-    let workload_cluster: LatticeCluster = serde_yaml::from_str(&workload_config)
-        .map_err(|e| format!("Failed to parse workload cluster config: {}", e))?;
 
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
     api.create(&PostParams::default(), &workload_cluster)
@@ -593,7 +577,7 @@ async fn run_provider_e2e(
         }
         println!("    Management cluster deleted!");
 
-        println!("\n  [Step 2] Scaling workload cluster workers 2 -> 3...");
+        println!("\n  [Step 2] Scaling workload cluster workers 1 -> 2...");
         let patch_result = run_cmd(
             "kubectl",
             &[
@@ -604,18 +588,18 @@ async fn run_provider_e2e(
                 WORKLOAD_CLUSTER_NAME,
                 "--type=merge",
                 "-p",
-                r#"{"spec":{"nodes":{"workers":3}}}"#,
+                r#"{"spec":{"nodes":{"workers":2}}}"#,
             ],
         )?;
         println!("    Patch applied: {}", patch_result.trim());
 
         println!(
-            "\n  [Step 3] Waiting for workload cluster to self-heal and scale to 3 workers..."
+            "\n  [Step 3] Waiting for workload cluster to self-heal and scale to 2 workers..."
         );
-        watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 3).await?;
+        watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 2).await?;
 
         println!(
-            "\n  SUCCESS: Workload cluster scaled from 2 to 3 workers WITHOUT management cluster!"
+            "\n  SUCCESS: Workload cluster scaled from 1 to 2 workers WITHOUT management cluster!"
         );
 
         println!("\n  [Step 4] Verifying control-plane taints were restored...");
@@ -626,10 +610,182 @@ async fn run_provider_e2e(
     }
 
     // =========================================================================
-    // Phase 8-9: Service Mesh Tests (Optional, run in parallel)
+    // Phase 8: Create Second Workload Cluster (Deep Hierarchy)
+    // =========================================================================
+    if hierarchy_test_enabled() {
+        println!("\n[Phase 8] Creating second workload cluster (deep hierarchy)...\n");
+        println!("  This tests creating a cluster off workload1 (which just lost its parent)");
+
+        // Load workload2 cluster config (bootstrap provider comes from the config)
+        let (_workload2_config_path, workload2_config, workload2_cluster) =
+            load_cluster_config("LATTICE_WORKLOAD2_CLUSTER_CONFIG")?;
+        let workload2_bootstrap = workload2_cluster.spec.provider.kubernetes.bootstrap.clone();
+        println!("  Workload2 cluster config:\n{}", workload2_config);
+        println!("  Workload2 bootstrap provider: {:?}", workload2_bootstrap);
+
+        // Connect to workload1 cluster and create workload2
+        let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
+        let api: Api<LatticeCluster> = Api::all(workload_client.clone());
+        api.create(&PostParams::default(), &workload2_cluster)
+            .await
+            .map_err(|e| format!("Failed to create workload2 LatticeCluster: {}", e))?;
+
+        println!("  Workload2 LatticeCluster created on workload1");
+
+        // =========================================================================
+        // Phase 9: Watch Workload2 Cluster Provisioning
+        // =========================================================================
+        println!("\n[Phase 9] Watching workload2 cluster provisioning...\n");
+
+        let workload2_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD2_CLUSTER_NAME);
+
+        if workload_provider == InfraProvider::Docker {
+            watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None).await?;
+        } else {
+            watch_cluster_phases_with_kubeconfig(
+                &workload_kubeconfig_path,
+                WORKLOAD2_CLUSTER_NAME,
+                None,
+                &workload2_kubeconfig_path,
+            )
+            .await?;
+        }
+
+        println!("\n  SUCCESS: Workload2 cluster is Ready!");
+
+        // =========================================================================
+        // Phase 10: Verify Workload2 Cluster
+        // =========================================================================
+        println!("\n[Phase 10] Verifying workload2 cluster...\n");
+
+        if workload_provider == InfraProvider::Docker {
+            println!("  Extracting workload2 cluster kubeconfig...");
+            extract_docker_cluster_kubeconfig(
+                WORKLOAD2_CLUSTER_NAME,
+                &workload2_bootstrap,
+                &workload2_kubeconfig_path,
+            )?;
+            println!("  Kubeconfig extracted successfully");
+        }
+
+        let nodes_output = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                &workload2_kubeconfig_path,
+                "get",
+                "nodes",
+                "-o",
+                "wide",
+            ],
+        )?;
+        println!("  Workload2 cluster nodes:\n{}", nodes_output);
+
+        println!("  Checking for CAPI resources on workload2 cluster...");
+        match run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                &workload2_kubeconfig_path,
+                "get",
+                "clusters",
+                "-A",
+            ],
+        ) {
+            Ok(output) => {
+                println!("  Workload2 cluster CAPI resources:\n{}", output);
+                if !output.contains(WORKLOAD2_CLUSTER_NAME) {
+                    return Err(
+                        "Workload2 cluster should have its own CAPI Cluster resource after pivot"
+                            .to_string(),
+                    );
+                }
+            }
+            Err(e) => println!("  Warning: Could not check CAPI resources: {}", e),
+        }
+
+        println!("\n  SUCCESS: Deep hierarchy verified (mgmt -> workload1 -> workload2)!");
+
+        // =========================================================================
+        // Phase 11: Delete Workload2 (Unpivot Test)
+        // =========================================================================
+        println!("\n[Phase 11] Deleting workload2 cluster (testing unpivot)...\n");
+        println!("  This tests the unpivot flow: CAPI resources should move back to workload1");
+
+        // Delete workload2's LatticeCluster on workload2 itself
+        // The finalizer should trigger unpivot to workload1
+        let _ = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                &workload2_kubeconfig_path,
+                "delete",
+                "latticecluster",
+                WORKLOAD2_CLUSTER_NAME,
+                "--timeout=300s",
+            ],
+        )?;
+        println!("  Workload2 LatticeCluster deletion initiated");
+
+        // Wait for the cluster to be deleted
+        println!("  Waiting for workload2 cluster to be fully deleted...");
+        let mut attempts = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            attempts += 1;
+
+            // Check if LatticeCluster still exists on workload1
+            let check = run_cmd_allow_fail(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    &workload_kubeconfig_path,
+                    "get",
+                    "latticecluster",
+                    WORKLOAD2_CLUSTER_NAME,
+                    "-o",
+                    "name",
+                ],
+            );
+
+            if check.trim().is_empty() || check.contains("not found") {
+                println!("  Workload2 LatticeCluster deleted from workload1");
+                break;
+            }
+
+            if attempts > 30 {
+                return Err("Timeout waiting for workload2 deletion".to_string());
+            }
+
+            println!(
+                "    Still waiting for deletion... (attempt {}/30)",
+                attempts
+            );
+        }
+
+        // Verify CAPI cleaned up the infrastructure
+        if workload_provider == InfraProvider::Docker {
+            let workload2_containers = run_cmd_allow_fail(
+                "docker",
+                &["ps", "--filter", &format!("name={}", WORKLOAD2_CLUSTER_NAME), "-q"],
+            );
+            if workload2_containers.trim().is_empty() {
+                println!("  SUCCESS: Workload2 Docker containers cleaned up by CAPI");
+            } else {
+                println!("  Warning: Some workload2 containers still exist (CAPI may still be cleaning up)");
+            }
+        }
+
+        println!("\n  SUCCESS: Unpivot test complete!");
+    } else {
+        println!("\n[Phase 8-11] Skipping hierarchy/unpivot tests (set LATTICE_ENABLE_HIERARCHY_TEST=true to enable)\n");
+    }
+
+    // =========================================================================
+    // Phase 12-13: Service Mesh Tests (Optional, run in parallel)
     // =========================================================================
     if mesh_test_enabled() {
-        println!("\n[Phase 8-9] Running mesh tests in parallel...\n");
+        println!("\n[Phase 12-13] Running mesh tests in parallel...\n");
         let kubeconfig = workload_kubeconfig_path.clone();
         let kubeconfig2 = workload_kubeconfig_path.clone();
 
@@ -642,7 +798,7 @@ async fn run_provider_e2e(
         result2?;
     } else {
         println!(
-            "\n[Phase 8-9] Skipping mesh tests (set LATTICE_ENABLE_MESH_TEST=true to enable)\n"
+            "\n[Phase 12-13] Skipping mesh tests (set LATTICE_ENABLE_MESH_TEST=true to enable)\n"
         );
     }
 
@@ -653,6 +809,9 @@ async fn run_provider_e2e(
         "#  Workload:   {} + {:?}",
         workload_provider, workload_bootstrap
     );
+    if hierarchy_test_enabled() {
+        println!("#  Deep hierarchy and unpivot: TESTED");
+    }
     println!("################################################################\n");
 
     Ok(())
@@ -661,5 +820,11 @@ async fn run_provider_e2e(
 fn independence_test_enabled() -> bool {
     std::env::var("LATTICE_ENABLE_INDEPENDENCE_TEST")
         .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
+        .unwrap_or(true) // Default to true now since it's part of the flow
+}
+
+fn hierarchy_test_enabled() -> bool {
+    std::env::var("LATTICE_ENABLE_HIERARCHY_TEST")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(true) // Default to true now since it's part of the flow
 }

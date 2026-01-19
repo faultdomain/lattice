@@ -100,6 +100,19 @@ pub trait KubeClient: Send + Sync {
         source_namespace: &str,
         target_namespace: &str,
     ) -> Result<(), Error>;
+
+    /// Add a finalizer to a LatticeCluster
+    async fn add_cluster_finalizer(&self, cluster_name: &str, finalizer: &str) -> Result<(), Error>;
+
+    /// Remove a finalizer from a LatticeCluster
+    async fn remove_cluster_finalizer(
+        &self,
+        cluster_name: &str,
+        finalizer: &str,
+    ) -> Result<(), Error>;
+
+    /// Delete a LatticeCluster by name
+    async fn delete_cluster(&self, name: &str) -> Result<(), Error>;
 }
 
 /// Trait abstracting CAPI resource operations
@@ -157,6 +170,12 @@ pub trait CAPIClient: Send + Sync {
         namespace: &str,
         replicas: u32,
     ) -> Result<(), Error>;
+
+    /// Delete a CAPI Cluster resource
+    async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
+
+    /// Get the underlying kube Client for advanced operations
+    fn kube_client(&self) -> Client;
 }
 
 /// Real Kubernetes client implementation
@@ -552,6 +571,80 @@ impl KubeClient for KubeClientImpl {
             Err(e) => Err(e.into()),
         }
     }
+
+    async fn add_cluster_finalizer(&self, cluster_name: &str, finalizer: &str) -> Result<(), Error> {
+        let api: Api<LatticeCluster> = Api::all(self.client.clone());
+
+        // Get current cluster to read existing finalizers
+        let cluster = api.get(cluster_name).await?;
+        let mut finalizers = cluster.metadata.finalizers.unwrap_or_default();
+
+        // Don't add if already present
+        if finalizers.contains(&finalizer.to_string()) {
+            return Ok(());
+        }
+
+        finalizers.push(finalizer.to_string());
+
+        let patch = serde_json::json!({
+            "metadata": {
+                "finalizers": finalizers
+            }
+        });
+
+        api.patch(
+            cluster_name,
+            &PatchParams::apply("lattice-controller"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn remove_cluster_finalizer(
+        &self,
+        cluster_name: &str,
+        finalizer: &str,
+    ) -> Result<(), Error> {
+        let api: Api<LatticeCluster> = Api::all(self.client.clone());
+
+        // Get current cluster to read existing finalizers
+        let cluster = api.get(cluster_name).await?;
+        let finalizers: Vec<String> = cluster
+            .metadata
+            .finalizers
+            .as_ref()
+            .map(|f| f.iter().filter(|s| *s != finalizer).cloned().collect())
+            .unwrap_or_default();
+
+        let patch = serde_json::json!({
+            "metadata": {
+                "finalizers": finalizers
+            }
+        });
+
+        api.patch(
+            cluster_name,
+            &PatchParams::apply("lattice-controller"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn delete_cluster(&self, name: &str) -> Result<(), Error> {
+        let api: Api<LatticeCluster> = Api::all(self.client.clone());
+        match api.delete(name, &Default::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                debug!(cluster = %name, "LatticeCluster not found (already deleted)");
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 /// Real CAPI client implementation using DynamicObject for untyped resources
@@ -892,6 +985,22 @@ impl CAPIClient for CAPIClientImpl {
         );
         Ok(())
     }
+
+    async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error> {
+        let api = self.capi_cluster_api(namespace);
+        match api.delete(cluster_name, &Default::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                debug!(cluster = %cluster_name, "CAPI Cluster not found (already deleted)");
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn kube_client(&self) -> Client {
+        self.client.clone()
+    }
 }
 
 /// Parse API version into group and version components
@@ -1169,6 +1278,36 @@ pub trait PivotOperations: Send + Sync {
 ///     .parent_servers(servers)
 ///     .build();
 /// ```
+
+/// Request to trigger unpivot operation
+#[derive(Debug)]
+pub struct UnpivotRequest {
+    /// Cluster name being unpivoted
+    pub cluster_name: String,
+    /// Namespace containing CAPI resources
+    pub namespace: String,
+    /// Channel to send completion notification
+    pub completion_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+/// Shared channel for sending unpivot requests to the agent
+pub type UnpivotChannel = tokio::sync::mpsc::Sender<UnpivotRequest>;
+
+/// Shared context for the LatticeCluster controller
+///
+/// The context is shared across all reconciliation calls and holds
+/// resources that are expensive to create (like Kubernetes clients).
+///
+/// CAPI resources are created in per-cluster namespaces (`capi-{cluster_name}`)
+/// to enable clean pivot operations.
+///
+/// Use [`ContextBuilder`] to construct instances:
+///
+/// ```text
+/// let ctx = Context::builder(client)
+///     .parent_servers(servers)
+///     .build();
+/// ```
 pub struct Context {
     /// Kubernetes client for API operations (trait object for testability)
     pub kube: Arc<dyn KubeClient>,
@@ -1181,6 +1320,8 @@ pub struct Context {
     /// Name of the cluster this controller is running on (from LATTICE_CLUSTER_NAME env var)
     /// When reconciling this cluster, we skip provisioning since we ARE this cluster
     pub self_cluster_name: Option<String>,
+    /// Channel for sending unpivot requests to the agent task
+    pub unpivot_tx: Option<UnpivotChannel>,
 }
 
 impl Context {
@@ -1223,6 +1364,7 @@ impl Context {
             capi_installer,
             parent_servers: None,
             self_cluster_name: None,
+            unpivot_tx: None,
         }
     }
 }
@@ -1257,6 +1399,7 @@ pub struct ContextBuilder {
     capi_installer: Option<Arc<dyn CapiInstaller>>,
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     self_cluster_name: Option<String>,
+    unpivot_tx: Option<UnpivotChannel>,
 }
 
 impl ContextBuilder {
@@ -1269,6 +1412,7 @@ impl ContextBuilder {
             capi_installer: None,
             parent_servers: None,
             self_cluster_name: None,
+            unpivot_tx: None,
         }
     }
 
@@ -1302,6 +1446,12 @@ impl ContextBuilder {
         self
     }
 
+    /// Set unpivot channel for sending unpivot requests to the agent
+    pub fn unpivot_channel(mut self, tx: UnpivotChannel) -> Self {
+        self.unpivot_tx = Some(tx);
+        self
+    }
+
     /// Build the Context
     pub fn build(self) -> Context {
         use crate::capi::ClusterctlInstaller;
@@ -1318,9 +1468,13 @@ impl ContextBuilder {
                 .unwrap_or_else(|| Arc::new(ClusterctlInstaller::new())),
             parent_servers: self.parent_servers,
             self_cluster_name: self.self_cluster_name,
+            unpivot_tx: self.unpivot_tx,
         }
     }
 }
+
+/// Finalizer name for LatticeCluster unpivot handling
+pub const CLUSTER_FINALIZER: &str = "lattice.dev/unpivot";
 
 /// Reconcile a LatticeCluster resource
 ///
@@ -1342,6 +1496,36 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     let name = cluster.name_any();
     info!("reconciling cluster");
 
+    // Check if we're reconciling our own cluster (the one we're running on)
+    let is_self = is_self_cluster(&name, ctx.self_cluster_name.as_deref());
+
+    // Handle deletion via finalizer
+    // Root/management clusters cannot be unpivoted (they have nowhere to unpivot to)
+    // Only self-managed workload clusters need unpivot handling
+    if cluster.metadata.deletion_timestamp.is_some() {
+        return handle_deletion(&cluster, &ctx, is_self).await;
+    }
+
+    // Ensure finalizer is present for clusters that can unpivot
+    // A cluster can unpivot if:
+    // 1. We're reconciling our own cluster (is_self=true)
+    // 2. The lattice-parent-config secret exists (we have a parent to unpivot to)
+    // Root clusters (those without parent config) don't need the finalizer
+    if is_self && !has_finalizer(&cluster) {
+        // Check if lattice-parent-config secret exists (indicates we have a parent)
+        let has_parent = ctx
+            .kube
+            .get_secret("lattice-parent-config", "lattice-system")
+            .await?
+            .is_some();
+
+        if has_parent {
+            info!("Adding unpivot finalizer (cluster has parent)");
+            add_finalizer(&cluster, &ctx).await?;
+            return Ok(Action::requeue(Duration::from_secs(1)));
+        }
+    }
+
     // Validate the cluster spec
     if let Err(e) = cluster.spec.validate() {
         warn!(error = %e, "cluster validation failed");
@@ -1362,6 +1546,18 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // (worker scaling, tainting, etc.) for its OWN cluster. For workload clusters
     // provisioned by this cell, we only handle CAPI provisioning and pivot.
     let is_self = is_self_cluster(&name, ctx.self_cluster_name.as_deref());
+
+    // Check if this child cluster has unpivot manifests waiting (child is being deleted)
+    // This only applies when we're the parent, not when reconciling our own cluster
+    if !is_self {
+        if let Some(ref parent_servers) = ctx.parent_servers {
+            let registry = parent_servers.agent_registry();
+            if registry.has_unpivot_manifests(&name) {
+                info!(cluster = %name, "Child cluster has unpivot manifests - handling deletion");
+                return handle_child_unpivot(&cluster, &ctx, registry).await;
+            }
+        }
+    }
 
     // Get current status, defaulting to Pending if not set
     let current_phase = cluster
@@ -2277,6 +2473,251 @@ impl PivotOperations for PivotOperationsImpl {
         let _ = tokio::fs::remove_file(&kubeconfig_path).await;
 
         result.map_err(|e| Error::pivot(e.to_string()))
+    }
+}
+
+/// Handle unpivot of a child cluster from the parent's perspective
+///
+/// When a child cluster is being deleted and has sent its CAPI resources back:
+/// 1. Apply the CAPI manifests to restore them on the parent
+/// 2. Delete the CAPI Cluster resource to trigger infrastructure cleanup
+/// 3. Delete the LatticeCluster CRD on parent
+async fn handle_child_unpivot(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+    registry: SharedAgentRegistry,
+) -> Result<Action, Error> {
+    let name = cluster.name_any();
+    let capi_namespace = format!("capi-{}", name);
+
+    // Take the manifests from registry (removes them)
+    let manifests = match registry.take_unpivot_manifests(&name) {
+        Some(m) => m,
+        None => {
+            // Should not happen since we checked has_unpivot_manifests
+            warn!(cluster = %name, "Unpivot manifests disappeared before processing");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+    };
+
+    info!(
+        cluster = %name,
+        manifest_count = manifests.len(),
+        "Applying unpivot manifests from child cluster"
+    );
+
+    // Apply each manifest using server-side apply via kube-rs
+    for (i, manifest_bytes) in manifests.iter().enumerate() {
+        // Parse YAML to DynamicObject
+        let manifest_str = match String::from_utf8(manifest_bytes.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(manifest = i, error = %e, "Invalid UTF-8 in manifest");
+                continue;
+            }
+        };
+
+        // Apply each document in the YAML file (may contain multiple docs)
+        for doc in manifest_str.split("---") {
+            let doc = doc.trim();
+            if doc.is_empty() {
+                continue;
+            }
+
+            if let Err(e) = apply_yaml_manifest(ctx, doc).await {
+                warn!(manifest = i, error = %e, "Failed to apply manifest document");
+            } else {
+                debug!(manifest = i, "Applied manifest document");
+            }
+        }
+    }
+
+    info!(cluster = %name, "Unpivot manifests applied, deleting CAPI Cluster");
+
+    // Delete the CAPI Cluster resource to trigger infrastructure cleanup
+    if let Err(e) = ctx.capi.delete_capi_cluster(&name, &capi_namespace).await {
+        warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster (may not exist)");
+    } else {
+        info!(cluster = %name, "CAPI Cluster deleted, infrastructure cleanup will proceed");
+    }
+
+    // Delete the LatticeCluster CRD on parent
+    info!(cluster = %name, "Deleting LatticeCluster CRD on parent");
+    if let Err(e) = ctx.kube.delete_cluster(&name).await {
+        warn!(cluster = %name, error = %e, "Failed to delete LatticeCluster (may already be deleted)");
+    }
+
+    Ok(Action::await_change())
+}
+
+/// Apply a single YAML manifest document using server-side apply
+async fn apply_yaml_manifest(ctx: &Context, yaml: &str) -> Result<(), Error> {
+    // Parse the YAML to get apiVersion, kind, metadata
+    let value: serde_json::Value = serde_yaml::from_str(yaml)
+        .map_err(|e| Error::serialization(format!("Invalid YAML: {}", e)))?;
+
+    let api_version = value["apiVersion"]
+        .as_str()
+        .ok_or_else(|| Error::serialization("Missing apiVersion".to_string()))?;
+    let kind = value["kind"]
+        .as_str()
+        .ok_or_else(|| Error::serialization("Missing kind".to_string()))?;
+    let name = value["metadata"]["name"]
+        .as_str()
+        .ok_or_else(|| Error::serialization("Missing metadata.name".to_string()))?;
+    let namespace = value["metadata"]["namespace"].as_str();
+
+    // Parse into DynamicObject
+    let obj: DynamicObject = serde_json::from_value(
+        serde_json::to_value(&value).map_err(|e| Error::serialization(e.to_string()))?,
+    )
+    .map_err(|e| Error::serialization(e.to_string()))?;
+
+    // Build ApiResource from apiVersion and kind
+    let (group, version) = parse_api_version(api_version);
+    let ar = ApiResource {
+        group: group.to_string(),
+        version: version.to_string(),
+        api_version: api_version.to_string(),
+        kind: kind.to_string(),
+        plural: pluralize_kind(kind),
+    };
+
+    // Apply the object
+    let params = PatchParams::apply("lattice-controller").force();
+    if let Some(ns) = namespace {
+        let api: Api<DynamicObject> = Api::namespaced_with(
+            ctx.capi.kube_client(),
+            ns,
+            &ar,
+        );
+        api.patch(name, &params, &Patch::Apply(&obj)).await?;
+    } else {
+        let api: Api<DynamicObject> = Api::all_with(ctx.capi.kube_client(), &ar);
+        api.patch(name, &params, &Patch::Apply(&obj)).await?;
+    }
+
+    Ok(())
+}
+
+/// Check if a cluster has the unpivot finalizer
+fn has_finalizer(cluster: &LatticeCluster) -> bool {
+    cluster
+        .metadata
+        .finalizers
+        .as_ref()
+        .is_some_and(|f| f.contains(&CLUSTER_FINALIZER.to_string()))
+}
+
+/// Add the unpivot finalizer to a cluster
+async fn add_finalizer(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
+    let name = cluster.name_any();
+    ctx.kube
+        .add_cluster_finalizer(&name, CLUSTER_FINALIZER)
+        .await
+}
+
+/// Remove the unpivot finalizer from a cluster
+async fn remove_finalizer(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
+    let name = cluster.name_any();
+    ctx.kube
+        .remove_cluster_finalizer(&name, CLUSTER_FINALIZER)
+        .await
+}
+
+/// Handle cluster deletion with unpivot logic
+///
+/// When a self-managed cluster's LatticeCluster is deleted:
+/// 1. Export CAPI resources using clusterctl move --to-directory
+/// 2. Send manifests to parent via gRPC stream
+/// 3. Wait for parent to apply manifests
+/// 4. Remove finalizer to allow deletion
+///
+/// For non-self clusters (child clusters being deleted from parent), we just remove the finalizer.
+/// For root clusters (no parent), we just remove the finalizer.
+async fn handle_deletion(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+    is_self: bool,
+) -> Result<Action, Error> {
+    let name = cluster.name_any();
+
+    // If no finalizer, nothing to do
+    if !has_finalizer(cluster) {
+        debug!(cluster = %name, "No unpivot finalizer, allowing deletion");
+        return Ok(Action::await_change());
+    }
+
+    // For non-self clusters, just remove finalizer (parent manages cleanup)
+    if !is_self {
+        info!(cluster = %name, "Removing finalizer for child cluster deletion");
+        remove_finalizer(cluster, ctx).await?;
+        return Ok(Action::await_change());
+    }
+
+    // For self clusters, check if we have a parent to unpivot to
+    let has_parent = ctx
+        .kube
+        .get_secret("lattice-parent-config", "lattice-system")
+        .await?
+        .is_some();
+
+    if !has_parent {
+        // Root cluster - no unpivot needed, just remove finalizer
+        info!(cluster = %name, "Root cluster deletion - no unpivot needed");
+        remove_finalizer(cluster, ctx).await?;
+        return Ok(Action::await_change());
+    }
+
+    // Self cluster with parent - need to unpivot
+    info!(cluster = %name, "Starting unpivot process for cluster deletion");
+
+    // Check if we have an unpivot channel (agent is running)
+    let unpivot_tx = match &ctx.unpivot_tx {
+        Some(tx) => tx.clone(),
+        None => {
+            warn!(cluster = %name, "No unpivot channel available - agent may not be running");
+            return Ok(Action::requeue(Duration::from_secs(10)));
+        }
+    };
+
+    // Determine the CAPI namespace
+    let namespace = format!("capi-{}", name);
+
+    // Create completion channel
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+    // Send unpivot request to agent
+    let request = UnpivotRequest {
+        cluster_name: name.clone(),
+        namespace,
+        completion_tx,
+    };
+
+    if let Err(e) = unpivot_tx.send(request).await {
+        error!(cluster = %name, error = %e, "Failed to send unpivot request");
+        return Ok(Action::requeue(Duration::from_secs(10)));
+    }
+
+    // Wait for completion (with timeout)
+    match tokio::time::timeout(Duration::from_secs(300), completion_rx).await {
+        Ok(Ok(Ok(()))) => {
+            info!(cluster = %name, "Unpivot completed successfully, removing finalizer");
+            remove_finalizer(cluster, ctx).await?;
+            Ok(Action::await_change())
+        }
+        Ok(Ok(Err(e))) => {
+            error!(cluster = %name, error = %e, "Unpivot failed");
+            Ok(Action::requeue(Duration::from_secs(30)))
+        }
+        Ok(Err(_)) => {
+            error!(cluster = %name, "Unpivot completion channel closed unexpectedly");
+            Ok(Action::requeue(Duration::from_secs(30)))
+        }
+        Err(_) => {
+            error!(cluster = %name, "Unpivot timed out after 5 minutes");
+            Ok(Action::requeue(Duration::from_secs(60)))
+        }
     }
 }
 

@@ -31,7 +31,7 @@ use crate::proto::lattice_agent_client::LatticeAgentClient;
 use crate::proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
     BootstrapComplete, CellCommand, Heartbeat, KubeProxyRequest, KubeProxyResponse, PivotComplete,
-    PivotStarted, StatusResponse,
+    PivotStarted, StatusResponse, UnpivotComplete, UnpivotManifests, UnpivotStarted,
 };
 
 use super::mtls::ClientMtlsConfig;
@@ -535,6 +535,62 @@ impl AgentClient {
         self.send_message(msg).await
     }
 
+    /// Send unpivot started notification
+    ///
+    /// Called when the agent detects LatticeCluster deletion and begins
+    /// exporting CAPI resources back to the parent cluster.
+    pub async fn send_unpivot_started(&self, source_namespace: &str) -> Result<(), ClientError> {
+        self.set_agent_state(AgentState::Unpivoting).await;
+
+        let msg = AgentMessage {
+            cluster_name: self.config.cluster_name.clone(),
+            payload: Some(Payload::UnpivotStarted(UnpivotStarted {
+                source_namespace: source_namespace.to_string(),
+            })),
+        };
+
+        self.send_message(msg).await
+    }
+
+    /// Send CAPI manifests to parent during unpivot
+    ///
+    /// These are the manifests exported via `clusterctl move --to-directory`
+    /// that need to be applied on the parent cluster.
+    pub async fn send_unpivot_manifests(&self, manifests: Vec<Vec<u8>>) -> Result<(), ClientError> {
+        let total = manifests.len() as i32;
+        let msg = AgentMessage {
+            cluster_name: self.config.cluster_name.clone(),
+            payload: Some(Payload::UnpivotManifests(UnpivotManifests {
+                manifests,
+                total_resources: total,
+            })),
+        };
+
+        self.send_message(msg).await
+    }
+
+    /// Send unpivot complete notification
+    pub async fn send_unpivot_complete(
+        &self,
+        success: bool,
+        error_message: &str,
+        resources_exported: i32,
+    ) -> Result<(), ClientError> {
+        // Note: We don't change state here - the cluster is being deleted
+        // so it doesn't matter what state we're in
+
+        let msg = AgentMessage {
+            cluster_name: self.config.cluster_name.clone(),
+            payload: Some(Payload::UnpivotComplete(UnpivotComplete {
+                success,
+                error_message: error_message.to_string(),
+                resources_exported,
+            })),
+        };
+
+        self.send_message(msg).await
+    }
+
     /// Apply a Kubernetes manifest using kube-rs server-side apply
     ///
     /// This is used to apply manifests received via ApplyManifestsCommand
@@ -845,6 +901,18 @@ impl AgentClient {
                     })),
                 };
                 let _ = message_tx.send(msg).await;
+            }
+            Some(Command::UnpivotAck(ack)) => {
+                info!(
+                    success = ack.success,
+                    resources_applied = ack.resources_applied,
+                    "Received unpivot acknowledgment from parent"
+                );
+                // The controller handles the finalizer removal after receiving this
+                // The agent just logs and continues
+                if !ack.success {
+                    error!(error = %ack.error_message, "Parent failed to apply unpivot manifests");
+                }
             }
             None => {
                 warn!(command_id = %command.command_id, "Received command with no payload");

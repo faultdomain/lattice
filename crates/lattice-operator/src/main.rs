@@ -491,14 +491,27 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
             continue;
         }
 
-        // Only re-register clusters that completed bootstrap
-        let bootstrap_complete = cluster
+        // Re-register clusters that need bootstrap (Provisioning, Pivoting, or bootstrap_complete)
+        // BootstrapState is in-memory, so we must re-register on operator restart
+        let phase = cluster
+            .status
+            .as_ref()
+            .map(|s| &s.phase)
+            .cloned()
+            .unwrap_or_default();
+
+        let needs_registration = matches!(
+            phase,
+            lattice_operator::crd::ClusterPhase::Provisioning
+                | lattice_operator::crd::ClusterPhase::Pivoting
+        ) || cluster
             .status
             .as_ref()
             .map(|s| s.bootstrap_complete)
             .unwrap_or(false);
 
-        if !bootstrap_complete {
+        if !needs_registration {
+            tracing::debug!(cluster = %name, phase = ?phase, "Skipping re-registration (not in Provisioning/Pivoting)");
             continue;
         }
 
@@ -703,10 +716,15 @@ async fn run_controller() -> anyhow::Result<()> {
         }
     }
 
+    // Create unpivot channel for controller -> agent communication
+    let (unpivot_tx, unpivot_rx) = tokio::sync::mpsc::channel(10);
+
     // Create controller context with cell servers
     // LATTICE_CLUSTER_NAME tells the controller which cluster it's running on (to avoid self-provisioning)
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
-    let mut ctx_builder = Context::builder(client.clone()).parent_servers(parent_servers.clone());
+    let mut ctx_builder = Context::builder(client.clone())
+        .parent_servers(parent_servers.clone())
+        .unpivot_channel(unpivot_tx);
     if let Some(ref name) = self_cluster_name {
         tracing::info!(cluster = %name, "Running as self-managed cluster");
         ctx_builder = ctx_builder.self_cluster_name(name.clone());
@@ -720,7 +738,7 @@ async fn run_controller() -> anyhow::Result<()> {
         let client_clone = client.clone();
         let cluster_name_clone = cluster_name.clone();
         tokio::spawn(async move {
-            start_agent_with_retry(&client_clone, &cluster_name_clone).await;
+            start_agent_with_retry(&client_clone, &cluster_name_clone, unpivot_rx).await;
         });
     }
 
@@ -841,8 +859,13 @@ async fn run_controller() -> anyhow::Result<()> {
 
 /// Supervise agent connection with automatic reconnection.
 /// If a parent cell is configured, maintains connection indefinitely with retries.
+/// Also handles unpivot requests from the controller.
 /// Runs in background - does not block.
-async fn start_agent_with_retry(client: &Client, cluster_name: &str) {
+async fn start_agent_with_retry(
+    client: &Client,
+    cluster_name: &str,
+    mut unpivot_rx: tokio::sync::mpsc::Receiver<lattice_operator::controller::UnpivotRequest>,
+) {
     let mut retry_delay = Duration::from_secs(1);
     let max_retry_delay = Duration::from_secs(30);
 
@@ -853,24 +876,42 @@ async fn start_agent_with_retry(client: &Client, cluster_name: &str) {
                 // Reset retry delay on successful connection
                 retry_delay = Duration::from_secs(1);
 
-                // Monitor connection - wait until disconnected, then reconnect
+                // Monitor connection and handle unpivot requests
                 loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    let state = agent.state().await;
-                    if state == lattice_operator::agent::client::ClientState::Disconnected
-                        || state == lattice_operator::agent::client::ClientState::Failed
-                    {
-                        tracing::warn!(
-                            state = ?state,
-                            "Agent disconnected from parent cell, will reconnect..."
-                        );
-                        break;
+                    tokio::select! {
+                        // Check for unpivot requests
+                        Some(request) = unpivot_rx.recv() => {
+                            tracing::info!(
+                                cluster = %request.cluster_name,
+                                namespace = %request.namespace,
+                                "Received unpivot request"
+                            );
+                            let result = handle_unpivot_request(&agent, &request).await;
+                            let _ = request.completion_tx.send(result);
+                        }
+                        // Periodic connection check
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                            let state = agent.state().await;
+                            if state == lattice_operator::agent::client::ClientState::Disconnected
+                                || state == lattice_operator::agent::client::ClientState::Failed
+                            {
+                                tracing::warn!(
+                                    state = ?state,
+                                    "Agent disconnected from parent cell, will reconnect..."
+                                );
+                                break;
+                            }
+                        }
                     }
                 }
                 // Fall through to retry connection
             }
             Ok(None) => {
                 tracing::debug!("No parent cell configured, running as standalone");
+                // Still need to drain unpivot requests even if no parent
+                while let Some(request) = unpivot_rx.recv().await {
+                    let _ = request.completion_tx.send(Err("No parent cell configured".to_string()));
+                }
                 return;
             }
             Err(e) => {
@@ -885,6 +926,64 @@ async fn start_agent_with_retry(client: &Client, cluster_name: &str) {
         tokio::time::sleep(retry_delay).await;
         retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
     }
+}
+
+/// Handle an unpivot request by exporting CAPI resources and sending them to the parent
+async fn handle_unpivot_request(
+    agent: &AgentClient,
+    request: &lattice_operator::controller::UnpivotRequest,
+) -> Result<(), String> {
+    use lattice_common::clusterctl::export_to_directory;
+    use std::path::Path;
+
+    tracing::info!(
+        cluster = %request.cluster_name,
+        namespace = %request.namespace,
+        "Starting unpivot: exporting CAPI resources"
+    );
+
+    // Create temp directory for export
+    let export_dir = format!("/tmp/lattice-unpivot-{}", request.cluster_name);
+    let export_path = Path::new(&export_dir);
+
+    // Notify parent that unpivot is starting
+    agent
+        .send_unpivot_started(&request.namespace)
+        .await
+        .map_err(|e| format!("Failed to send unpivot started: {}", e))?;
+
+    // Export CAPI resources using clusterctl move --to-directory
+    let manifests = export_to_directory(None, &request.namespace, export_path)
+        .await
+        .map_err(|e| format!("Failed to export CAPI resources: {}", e))?;
+
+    tracing::info!(
+        cluster = %request.cluster_name,
+        count = manifests.len(),
+        "Exported CAPI manifests, sending to parent"
+    );
+
+    // Send manifests to parent
+    agent
+        .send_unpivot_manifests(manifests.clone())
+        .await
+        .map_err(|e| format!("Failed to send unpivot manifests: {}", e))?;
+
+    // Send completion notification
+    agent
+        .send_unpivot_complete(true, "", manifests.len() as i32)
+        .await
+        .map_err(|e| format!("Failed to send unpivot complete: {}", e))?;
+
+    // Clean up temp directory
+    let _ = std::fs::remove_dir_all(&export_dir);
+
+    tracing::info!(
+        cluster = %request.cluster_name,
+        "Unpivot completed successfully"
+    );
+
+    Ok(())
 }
 
 async fn start_agent_if_needed(

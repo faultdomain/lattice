@@ -1,0 +1,22 @@
+# Docker second-tier workload cluster for E2E testing
+# Used to test deep hierarchy and unpivot flow
+# This is a leaf cluster (no endpoints) - child of e2e-workload
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: e2e-workload2
+spec:
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm
+      certSANs:
+        - "127.0.0.1"
+        - "localhost"
+    config:
+      docker: {}
+  nodes:
+    controlPlane: 1
+    workers: 1
+  environment: e2e-test
+  region: local

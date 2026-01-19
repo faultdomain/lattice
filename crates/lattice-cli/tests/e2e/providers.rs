@@ -5,6 +5,8 @@
 
 #![cfg(feature = "provider-e2e")]
 
+use lattice_operator::crd::ProviderType;
+
 /// Supported infrastructure providers
 ///
 /// Used as hints for test behavior - the actual configuration comes from CRD files.
@@ -17,23 +19,24 @@ pub enum InfraProvider {
 }
 
 impl InfraProvider {
-    /// Parse provider from environment variable
-    pub fn from_env(var: &str, default: Self) -> Self {
-        match std::env::var(var).as_deref() {
-            Ok("aws") | Ok("AWS") => Self::Aws,
-            Ok("openstack") | Ok("OPENSTACK") | Ok("ovh") | Ok("OVH") => Self::OpenStack,
-            Ok("proxmox") | Ok("PROXMOX") => Self::Proxmox,
-            Ok("docker") | Ok("DOCKER") => Self::Docker,
-            _ => default,
-        }
-    }
-
     pub fn name(&self) -> &'static str {
         match self {
             Self::Docker => "docker",
             Self::Aws => "aws",
             Self::OpenStack => "openstack",
             Self::Proxmox => "proxmox",
+        }
+    }
+}
+
+impl From<ProviderType> for InfraProvider {
+    fn from(pt: ProviderType) -> Self {
+        match pt {
+            ProviderType::Docker => Self::Docker,
+            ProviderType::Aws => Self::Aws,
+            ProviderType::OpenStack => Self::OpenStack,
+            ProviderType::Proxmox => Self::Proxmox,
+            ProviderType::Gcp | ProviderType::Azure => Self::Aws, // Treat as cloud provider
         }
     }
 }

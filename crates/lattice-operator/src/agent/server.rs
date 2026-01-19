@@ -182,6 +182,41 @@ async fn handle_agent_message_impl(
                 "Status response received"
             );
         }
+        Some(Payload::UnpivotStarted(us)) => {
+            info!(
+                cluster = %cluster_name,
+                source_namespace = %us.source_namespace,
+                "Unpivot started - cluster is being deleted"
+            );
+            registry.update_state(cluster_name, AgentState::Unpivoting);
+        }
+        Some(Payload::UnpivotManifests(um)) => {
+            info!(
+                cluster = %cluster_name,
+                manifest_count = um.manifests.len(),
+                total_resources = um.total_resources,
+                "Received CAPI manifests for unpivot"
+            );
+            // Store manifests for the controller to apply
+            registry.set_unpivot_manifests(cluster_name, um.manifests.clone());
+        }
+        Some(Payload::UnpivotComplete(uc)) => {
+            if uc.success {
+                info!(
+                    cluster = %cluster_name,
+                    resources_exported = uc.resources_exported,
+                    "Unpivot complete - CAPI resources transferred to parent"
+                );
+            } else {
+                error!(
+                    cluster = %cluster_name,
+                    error = %uc.error_message,
+                    "Unpivot failed"
+                );
+            }
+            // Agent will terminate soon, unregister it
+            registry.unregister(cluster_name);
+        }
         None => {
             warn!(cluster = %cluster_name, "Received message with no payload");
         }

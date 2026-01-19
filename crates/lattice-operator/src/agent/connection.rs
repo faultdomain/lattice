@@ -200,6 +200,8 @@ pub struct AgentRegistry {
     post_pivot_manifests: DashMap<String, PostPivotManifests>,
     /// Proxy channels for each cluster (for central proxy)
     proxy_channels: DashMap<String, Arc<ProxyChannels>>,
+    /// CAPI manifests received from agents during unpivot
+    unpivot_manifests: DashMap<String, Vec<Vec<u8>>>,
 }
 
 impl AgentRegistry {
@@ -209,6 +211,7 @@ impl AgentRegistry {
             agents: DashMap::new(),
             post_pivot_manifests: DashMap::new(),
             proxy_channels: DashMap::new(),
+            unpivot_manifests: DashMap::new(),
         }
     }
 
@@ -341,6 +344,34 @@ impl AgentRegistry {
     /// Check if post-pivot manifests are stored for a cluster
     pub fn has_post_pivot_manifests(&self, cluster_name: &str) -> bool {
         self.post_pivot_manifests.contains_key(cluster_name)
+    }
+
+    /// Store CAPI manifests received during unpivot
+    ///
+    /// These manifests need to be applied to this (parent) cluster so CAPI
+    /// can properly delete the infrastructure when the child terminates.
+    pub fn set_unpivot_manifests(&self, cluster_name: &str, manifests: Vec<Vec<u8>>) {
+        info!(
+            cluster = %cluster_name,
+            count = manifests.len(),
+            "Storing unpivot manifests"
+        );
+        self.unpivot_manifests
+            .insert(cluster_name.to_string(), manifests);
+    }
+
+    /// Get and remove unpivot manifests for a cluster
+    ///
+    /// Returns None if no manifests were stored or if they've already been consumed.
+    pub fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<Vec<Vec<u8>>> {
+        self.unpivot_manifests
+            .remove(cluster_name)
+            .map(|(_, m)| m)
+    }
+
+    /// Check if unpivot manifests are stored for a cluster
+    pub fn has_unpivot_manifests(&self, cluster_name: &str) -> bool {
+        self.unpivot_manifests.contains_key(cluster_name)
     }
 }
 
