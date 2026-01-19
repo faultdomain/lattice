@@ -286,9 +286,13 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
     manifests.extend(bootstrap::generate_flux());
     tracing::debug!("added Flux manifests");
 
-    // kgateway (includes allow policy)
-    manifests.extend(bootstrap::generate_kgateway());
-    tracing::debug!("added kgateway manifests");
+    // Envoy Gateway (includes allow policy)
+    if let Ok(eg) = bootstrap::generate_envoy_gateway() {
+        manifests.extend(eg);
+        tracing::debug!("added Envoy Gateway manifests");
+    } else {
+        tracing::warn!("failed to generate Envoy Gateway manifests");
+    }
 
     // Apply all at once
     tracing::info!(count = manifests.len(), "applying infrastructure manifests");

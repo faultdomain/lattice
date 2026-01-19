@@ -123,14 +123,14 @@ pub struct ResourceSpec {
     /// Outbound traffic policy (caller-side L7 configuration)
     ///
     /// Applied when this service calls the target. Configures retries, timeouts,
-    /// and circuit breakers via kgateway waypoint proxy.
+    /// and circuit breakers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outbound: Option<OutboundTrafficPolicy>,
 
     /// Inbound traffic policy (callee-side L7 configuration)
     ///
     /// Applied when the target calls this service. Configures rate limits and
-    /// header manipulation via kgateway waypoint proxy.
+    /// header manipulation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound: Option<InboundTrafficPolicy>,
 }
@@ -239,13 +239,13 @@ impl ResourceSpec {
 }
 
 // =============================================================================
-// L7 Traffic Policies (kgateway waypoint)
+// L7 Traffic Policies
 // =============================================================================
 
 /// Outbound traffic policy for caller-side L7 configuration
 ///
-/// These policies are applied by the kgateway waypoint proxy when this service
-/// makes outbound calls to the target service.
+/// These policies are applied when this service makes outbound calls to the
+/// target service.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboundTrafficPolicy {
@@ -264,8 +264,7 @@ pub struct OutboundTrafficPolicy {
 
 /// Inbound traffic policy for callee-side L7 configuration
 ///
-/// These policies are applied by the kgateway waypoint proxy when receiving
-/// traffic from the specified caller.
+/// These policies are applied when receiving traffic from the specified caller.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundTrafficPolicy {
@@ -680,7 +679,7 @@ pub struct IngressSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitSpec>,
 
-    /// GatewayClass name (default: "kgateway")
+    /// GatewayClass name (default: "eg" for Envoy Gateway)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_class: Option<String>,
 }
@@ -2110,7 +2109,7 @@ containers:
     }
 
     // =========================================================================
-    // L7 Traffic Policy Tests (kgateway waypoint)
+    // L7 Traffic Policy Tests
     // =========================================================================
 
     /// Story: Service configures outbound traffic policies

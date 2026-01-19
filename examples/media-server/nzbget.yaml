@@ -43,13 +43,15 @@ spec:
         size: 1Gi
         storageClass: local-path
     # Owned shared volume (OWNER - has size)
+    # Uses RWO because local-path doesn't support RWX
+    # Sonarr will be co-located via pod affinity
     downloads:
       type: volume
       id: media-downloads
       params:
         size: 500Gi
         storageClass: local-path
-        accessMode: ReadWriteMany
+        accessMode: ReadWriteOnce
     # Service dependencies (bilateral agreement)
     sonarr:
       type: service

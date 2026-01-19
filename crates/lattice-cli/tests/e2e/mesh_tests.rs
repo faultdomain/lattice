@@ -1511,7 +1511,7 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
 // L7 Traffic Policy Enforcement Tests
 // =============================================================================
 //
-// Tests that verify kgateway TrafficPolicy enforcement:
+// Tests that verify L7 traffic policy enforcement:
 // - Rate limiting: Requests are throttled after exceeding limit
 // - Retries: Failed requests are automatically retried
 // - Timeouts: Slow requests are terminated
@@ -1834,7 +1834,7 @@ async fn verify_policy_enforcement(kubeconfig_path: &str) -> Result<(), String> 
     if all_passed {
         println!("\n  SUCCESS: All L7 policies are being enforced!");
     } else {
-        println!("\n  NOTE: Some policies pending - ensure kgateway waypoint is deployed");
+        println!("\n  NOTE: Some policies pending - L7 traffic policies may require additional configuration");
     }
 
     Ok(())

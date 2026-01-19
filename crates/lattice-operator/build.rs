@@ -12,9 +12,9 @@ struct Versions {
     gateway_api: String,
     cilium: String,
     istio: String,
-    kgateway: String,
     cert_manager: String,
     flux: String,
+    envoy_gateway: String,
 }
 
 /// Load versions from versions.toml in workspace root
@@ -35,9 +35,9 @@ fn load_versions() -> Versions {
         gateway_api: String::new(),
         cilium: String::new(),
         istio: String::new(),
-        kgateway: String::new(),
         cert_manager: String::new(),
         flux: String::new(),
+        envoy_gateway: String::new(),
     };
     let mut section = "";
 
@@ -58,9 +58,9 @@ fn load_versions() -> Versions {
                 ("gateway-api", "version") => versions.gateway_api = value.to_string(),
                 ("charts", "cilium") => versions.cilium = value.to_string(),
                 ("charts", "istio") => versions.istio = value.to_string(),
-                ("charts", "kgateway") => versions.kgateway = value.to_string(),
                 ("charts", "cert-manager") => versions.cert_manager = value.to_string(),
                 ("charts", "flux") => versions.flux = value.to_string(),
+                ("charts", "envoy-gateway") => versions.envoy_gateway = value.to_string(),
                 _ => {}
             }
         }
@@ -92,7 +92,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("cargo:rustc-env=CILIUM_VERSION={}", versions.cilium);
     println!("cargo:rustc-env=ISTIO_VERSION={}", versions.istio);
-    println!("cargo:rustc-env=KGATEWAY_VERSION={}", versions.kgateway);
     println!("cargo:rustc-env=CAPI_VERSION={}", versions.capi);
     println!("cargo:rustc-env=RKE2_VERSION={}", versions.rke2);
     println!("cargo:rustc-env=FLUX_VERSION={}", versions.flux);
@@ -106,6 +105,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "cargo:rustc-env=GATEWAY_API_VERSION={}",
         versions.gateway_api
+    );
+    println!(
+        "cargo:rustc-env=ENVOY_GATEWAY_VERSION={}",
+        versions.envoy_gateway
     );
 
     let config_path = providers_dir.join("clusterctl.yaml");
@@ -130,11 +133,12 @@ fn download_helm_charts(
     let istiod_chart = charts_dir.join(format!("istiod-{}.tgz", versions.istio));
     let cni_chart = charts_dir.join(format!("cni-{}.tgz", versions.istio));
     let ztunnel_chart = charts_dir.join(format!("ztunnel-{}.tgz", versions.istio));
-    let kgateway_crds_chart = charts_dir.join(format!("kgateway-crds-v{}.tgz", versions.kgateway));
-    let kgateway_chart = charts_dir.join(format!("kgateway-v{}.tgz", versions.kgateway));
     let cert_manager_chart =
         charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
     let flux_chart = charts_dir.join(format!("flux2-{}.tgz", versions.flux));
+    // Envoy Gateway (OCI chart from docker.io/envoyproxy/gateway-helm)
+    let envoy_gateway_chart =
+        charts_dir.join(format!("gateway-helm-v{}.tgz", versions.envoy_gateway));
     // Gateway API CRDs (not a helm chart, just a YAML file)
     let gateway_api_crds =
         charts_dir.join(format!("gateway-api-crds-v{}.yaml", versions.gateway_api));
@@ -146,10 +150,9 @@ fn download_helm_charts(
         &istiod_chart,
         &cni_chart,
         &ztunnel_chart,
-        &kgateway_crds_chart,
-        &kgateway_chart,
         &cert_manager_chart,
         &flux_chart,
+        &envoy_gateway_chart,
         &gateway_api_crds,
     ] {
         println!("cargo:rerun-if-changed={}", chart.display());
@@ -161,10 +164,9 @@ fn download_helm_charts(
         &istiod_chart,
         &cni_chart,
         &ztunnel_chart,
-        &kgateway_crds_chart,
-        &kgateway_chart,
         &cert_manager_chart,
         &flux_chart,
+        &envoy_gateway_chart,
         &gateway_api_crds,
     ];
 
@@ -240,30 +242,20 @@ fn download_helm_charts(
         }
     }
 
-    // kgateway uses OCI registry, not helm repo
-    if !kgateway_crds_chart.exists() {
-        eprintln!("Downloading kgateway-crds chart v{}...", versions.kgateway);
+    // Download Envoy Gateway (OCI chart)
+    if !envoy_gateway_chart.exists() {
+        eprintln!(
+            "Downloading Envoy Gateway chart v{}...",
+            versions.envoy_gateway
+        );
         let _ = Command::new("helm")
             .args([
                 "pull",
-                "oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds",
+                "oci://docker.io/envoyproxy/gateway-helm",
                 "--version",
+                &format!("v{}", versions.envoy_gateway),
+                "--destination",
             ])
-            .arg(format!("v{}", versions.kgateway))
-            .arg("--destination")
-            .arg(charts_dir)
-            .status();
-    }
-    if !kgateway_chart.exists() {
-        eprintln!("Downloading kgateway chart v{}...", versions.kgateway);
-        let _ = Command::new("helm")
-            .args([
-                "pull",
-                "oci://cr.kgateway.dev/kgateway-dev/charts/kgateway",
-                "--version",
-            ])
-            .arg(format!("v{}", versions.kgateway))
-            .arg("--destination")
             .arg(charts_dir)
             .status();
     }

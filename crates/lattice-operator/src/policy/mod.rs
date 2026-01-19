@@ -794,11 +794,11 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Compile an AuthorizationPolicy to allow kgateway to reach a service
+    /// Compile an AuthorizationPolicy to allow Envoy Gateway to reach a service
     ///
     /// This policy is generated for services with ingress configuration. It allows
-    /// the kgateway service account to bypass the normal bilateral agreement requirements
-    /// for north-south (external) traffic.
+    /// the Envoy Gateway service account to bypass the normal bilateral agreement
+    /// requirements for north-south (external) traffic.
     ///
     /// # Arguments
     /// * `service_name` - Name of the service
@@ -806,22 +806,17 @@ impl<'a> PolicyCompiler<'a> {
     /// * `ports` - List of ports the service exposes
     ///
     /// # Returns
-    /// An AuthorizationPolicy allowing kgateway to access the service
+    /// An AuthorizationPolicy allowing Envoy Gateway to access the service
     pub fn compile_gateway_allow_policy(
         &self,
         service_name: &str,
         namespace: &str,
         ports: &[u16],
     ) -> AuthorizationPolicy {
-        // kgateway runs in kgateway-system namespace
+        // Envoy Gateway runs in envoy-gateway-system namespace
+        // The gateway proxy pods use the envoy-{gateway-name} service account pattern
         let gateway_principal = format!(
-            "spiffe://{}/ns/kgateway-system/sa/kgateway",
-            self.trust_domain
-        );
-
-        // kgateway-waypoint for east-west L7 traffic
-        let waypoint_principal = format!(
-            "spiffe://{}/ns/kgateway-system/sa/kgateway-waypoint",
+            "spiffe://{}/ns/envoy-gateway-system/sa/envoy-default",
             self.trust_domain
         );
 
@@ -842,7 +837,7 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![gateway_principal, waypoint_principal],
+                            principals: vec![gateway_principal],
                         },
                     }],
                     to: if port_strings.is_empty() {
@@ -1597,21 +1592,18 @@ mod tests {
         assert_eq!(policy.metadata.namespace, "prod-ns");
         assert_eq!(policy.spec.action, "ALLOW");
 
-        // Should have the kgateway principals (both ingress and waypoint)
+        // Should have the Envoy Gateway principal
         let principals = &policy.spec.rules[0].from[0].source.principals;
-        assert!(
-            principals.iter().any(|p| p.contains("/sa/kgateway")),
-            "Should have kgateway principal"
-        );
+        assert_eq!(principals.len(), 1);
         assert!(
             principals
                 .iter()
-                .any(|p| p.contains("/sa/kgateway-waypoint")),
-            "Should have kgateway-waypoint principal"
+                .any(|p| p.contains("envoy-gateway-system")),
+            "Should reference envoy-gateway-system namespace"
         );
         assert!(
-            principals.iter().any(|p| p.contains("kgateway-system")),
-            "Should reference kgateway-system namespace"
+            principals.iter().any(|p| p.contains("/sa/envoy-")),
+            "Should have envoy gateway principal"
         );
 
         // Should have correct ports

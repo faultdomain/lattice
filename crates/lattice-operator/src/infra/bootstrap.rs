@@ -9,7 +9,7 @@
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-use super::{FluxReconciler, IstioReconciler, KgatewayReconciler};
+use super::{FluxReconciler, IstioReconciler};
 use crate::crd::BootstrapProvider;
 
 /// Configuration for infrastructure manifest generation
@@ -25,7 +25,7 @@ pub struct InfrastructureConfig {
 
 /// Generate ALL infrastructure manifests for a self-managing cluster
 ///
-/// Includes: cert-manager, CAPI, Istio, Flux, kgateway
+/// Includes: cert-manager, CAPI, Istio, Flux, Envoy Gateway
 pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     let mut manifests = Vec::new();
 
@@ -51,8 +51,13 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     // Flux
     manifests.extend(generate_flux());
 
-    // kgateway
-    manifests.extend(generate_kgateway());
+    // Envoy Gateway (north-south ingress)
+    if let Ok(eg) = generate_envoy_gateway() {
+        debug!(count = eg.len(), "generated Envoy Gateway manifests");
+        manifests.extend(eg);
+    } else {
+        warn!("failed to generate Envoy Gateway manifests");
+    }
 
     info!(
         total = manifests.len(),
@@ -163,21 +168,52 @@ pub fn generate_flux() -> Vec<String> {
     manifests
 }
 
-/// Generate kgateway manifests including allow policy
-pub fn generate_kgateway() -> Vec<String> {
-    let mut manifests = vec![namespace_yaml("kgateway-system")];
+/// Generate Envoy Gateway manifests for north-south ingress
+pub fn generate_envoy_gateway() -> Result<Vec<String>, String> {
+    let charts_dir = charts_dir();
+    let chart_path = find_chart(&charts_dir, "gateway-helm")?;
 
-    let reconciler = KgatewayReconciler::new();
-    match reconciler.manifests() {
-        Ok(m) => {
-            for manifest in m {
-                manifests.push(inject_namespace(manifest, "kgateway-system"));
-            }
-        }
-        Err(e) => warn!(error = %e, "failed to generate kgateway manifests"),
-    };
-    manifests.push(allow_all_policy("kgateway", "kgateway-system"));
-    manifests
+    let output = Command::new("helm")
+        .args([
+            "template",
+            "envoy-gateway",
+            &chart_path,
+            "--namespace",
+            "envoy-gateway-system",
+        ])
+        .output()
+        .map_err(|e| format!("helm: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let yaml = String::from_utf8_lossy(&output.stdout);
+    let mut manifests = vec![namespace_yaml("envoy-gateway-system")];
+    for m in split_yaml(&yaml) {
+        manifests.push(inject_namespace(&m, "envoy-gateway-system"));
+    }
+
+    // Add GatewayClass for Envoy Gateway (name: "eg")
+    manifests.push(envoy_gateway_class());
+
+    // Add allow policy for Envoy Gateway
+    manifests.push(allow_all_policy("envoy-gateway", "envoy-gateway-system"));
+
+    Ok(manifests)
+}
+
+/// Generate the Envoy Gateway GatewayClass
+fn envoy_gateway_class() -> String {
+    r#"apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller"#
+        .to_string()
 }
 
 fn allow_all_policy(name: &str, namespace: &str) -> String {

@@ -27,9 +27,7 @@
 
 use crate::crd::LatticeService;
 use crate::graph::ServiceGraph;
-use crate::ingress::{
-    GeneratedIngress, GeneratedWaypointPolicies, IngressCompiler, WaypointPolicyCompiler,
-};
+use crate::ingress::{GeneratedIngress, IngressCompiler};
 use crate::policy::{AuthorizationPolicy, GeneratedPolicies, PolicyCompiler};
 use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
 
@@ -47,8 +45,6 @@ pub struct CompiledService {
     pub policies: GeneratedPolicies,
     /// Generated ingress resources (Gateway, HTTPRoute, Certificate)
     pub ingress: GeneratedIngress,
-    /// Generated waypoint policies for east-west L7 traffic (TrafficPolicy)
-    pub waypoint_policies: GeneratedWaypointPolicies,
 }
 
 impl CompiledService {
@@ -59,10 +55,7 @@ impl CompiledService {
 
     /// Check if any resources were generated
     pub fn is_empty(&self) -> bool {
-        self.workloads.is_empty()
-            && self.policies.is_empty()
-            && self.ingress.is_empty()
-            && self.waypoint_policies.is_empty()
+        self.workloads.is_empty() && self.policies.is_empty() && self.ingress.is_empty()
     }
 
     /// Total count of all generated resources
@@ -77,10 +70,7 @@ impl CompiledService {
         .filter(|&&x| x)
         .count();
 
-        workload_count
-            + self.policies.total_count()
-            + self.ingress.total_count()
-            + self.waypoint_policies.total_count()
+        workload_count + self.policies.total_count() + self.ingress.total_count()
     }
 }
 
@@ -159,15 +149,10 @@ impl<'a> ServiceCompiler<'a> {
             GeneratedIngress::new()
         };
 
-        // Compile waypoint policies for east-west L7 traffic
-        let waypoint_policies =
-            WaypointPolicyCompiler::compile(name, namespace, &service.spec.resources);
-
         CompiledService {
             workloads,
             policies,
             ingress,
-            waypoint_policies,
         }
     }
 
@@ -548,149 +533,5 @@ mod tests {
         //                 Gateway + HTTPRoute + Certificate + GatewayAllowPolicy
         // = 3 workloads + 2 policies + 3 ingress = at least 8
         assert!(output.resource_count() >= 6);
-    }
-
-    // =========================================================================
-    // Story: Waypoint Policy Integration
-    // =========================================================================
-
-    use lattice_common::crd::{
-        CircuitBreakerPolicy, OutboundTrafficPolicy, RetryPolicy, TimeoutPolicy,
-    };
-
-    fn make_service_with_l7_policies(name: &str, env: &str) -> LatticeService {
-        let mut containers = BTreeMap::new();
-        containers.insert(
-            "main".to_string(),
-            ContainerSpec {
-                image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-            },
-        );
-
-        let mut ports = BTreeMap::new();
-        ports.insert(
-            "http".to_string(),
-            PortSpec {
-                port: 80,
-                target_port: None,
-                protocol: None,
-            },
-        );
-
-        // Add outbound dependency with L7 policies
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "backend".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Service,
-                direction: DependencyDirection::Outbound,
-                id: None,
-                class: None,
-                metadata: None,
-                params: None,
-                outbound: Some(OutboundTrafficPolicy {
-                    retries: Some(RetryPolicy {
-                        attempts: 3,
-                        per_try_timeout: Some("5s".to_string()),
-                        retry_on: vec!["5xx".to_string()],
-                    }),
-                    timeout: Some(TimeoutPolicy {
-                        request: "30s".to_string(),
-                        idle: None,
-                    }),
-                    circuit_breaker: Some(CircuitBreakerPolicy {
-                        max_pending_requests: Some(100),
-                        max_requests: Some(1000),
-                        max_retries: None,
-                        consecutive_5xx_errors: None,
-                        base_ejection_time: None,
-                        max_ejection_percent: None,
-                    }),
-                }),
-                inbound: None,
-            },
-        );
-
-        LatticeService {
-            metadata: kube::api::ObjectMeta {
-                name: Some(name.to_string()),
-                ..Default::default()
-            },
-            spec: crate::crd::LatticeServiceSpec {
-                environment: env.to_string(),
-                containers,
-                resources,
-                service: Some(ServicePortsSpec { ports }),
-                replicas: ReplicaSpec { min: 1, max: None },
-                deploy: DeploySpec::default(),
-                ingress: None,
-            },
-            status: None,
-        }
-    }
-
-    #[test]
-    fn story_service_with_l7_policies_generates_waypoint_policies() {
-        let graph = ServiceGraph::new();
-
-        let service = make_service_with_l7_policies("frontend", "prod");
-
-        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile(&service);
-
-        // Should have waypoint policies
-        assert!(!output.waypoint_policies.is_empty());
-        assert_eq!(output.waypoint_policies.outbound_policies.len(), 1);
-
-        let policy = &output.waypoint_policies.outbound_policies[0];
-        assert_eq!(policy.metadata.name, "frontend-to-backend-outbound");
-        assert_eq!(policy.metadata.namespace, "prod");
-
-        // Check retry config
-        let retry = policy.spec.retry.as_ref().unwrap();
-        assert_eq!(retry.num_retries, 3);
-
-        // Check timeout config
-        let timeout = policy.spec.timeout.as_ref().unwrap();
-        assert_eq!(timeout.request, "30s");
-
-        // Check circuit breaker config
-        let limits = policy.spec.connection_limits.as_ref().unwrap();
-        assert_eq!(limits.max_pending_requests, Some(100));
-    }
-
-    #[test]
-    fn story_service_without_l7_policies_has_empty_waypoint() {
-        let graph = ServiceGraph::new();
-        let service = make_service("api", "prod");
-
-        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile(&service);
-
-        // Should NOT have waypoint policies
-        assert!(output.waypoint_policies.is_empty());
-    }
-
-    #[test]
-    fn story_resource_count_includes_waypoint_policies() {
-        let graph = ServiceGraph::new();
-        let service = make_service_with_l7_policies("frontend", "prod");
-
-        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile(&service);
-
-        // Should include waypoint policies in count
-        // Deployment + Service + ServiceAccount + 1 waypoint = at least 4
-        assert!(output.resource_count() >= 4);
-        assert!(output.waypoint_policies.total_count() >= 1);
     }
 }
