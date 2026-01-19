@@ -864,7 +864,7 @@ nodes:
             Some(source_path),
             target_path,
             &namespace,
-            &cluster_name,
+            cluster_name,
             &ClusterctlMoveConfig::default(),
         )
         .await
