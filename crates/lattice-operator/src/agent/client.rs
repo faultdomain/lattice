@@ -1,7 +1,7 @@
 //! gRPC client for agent (workload cluster)
 //!
 //! Connects to the parent cell and maintains persistent streams for
-//! control messages and K8s API proxying.
+//! control messages.
 //!
 //! # Certificate Flow
 //!
@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use kube::Client as KubeClient;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::interval;
 use tokio_stream::wrappers::ReceiverStream;
@@ -30,8 +29,8 @@ use crate::pki::AgentCertRequest;
 use crate::proto::lattice_agent_client::LatticeAgentClient;
 use crate::proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
-    BootstrapComplete, CellCommand, Heartbeat, KubeProxyRequest, KubeProxyResponse, PivotComplete,
-    PivotStarted, StatusResponse, UnpivotComplete, UnpivotManifests, UnpivotStarted,
+    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, PivotComplete, PivotStarted,
+    StatusResponse,
 };
 
 use super::mtls::ClientMtlsConfig;
@@ -115,8 +114,6 @@ pub struct AgentClient {
     config: AgentClientConfig,
     state: Arc<RwLock<ClientState>>,
     agent_state: Arc<RwLock<AgentState>>,
-    /// Kubernetes client for proxying API requests
-    kube_client: Option<KubeClient>,
     /// Sender for outgoing messages
     message_tx: Option<mpsc::Sender<AgentMessage>>,
     /// Shutdown signal
@@ -132,7 +129,6 @@ impl AgentClient {
             config,
             state: Arc::new(RwLock::new(ClientState::Disconnected)),
             agent_state: Arc::new(RwLock::new(AgentState::Provisioning)),
-            kube_client: None,
             message_tx: None,
             shutdown_tx: None,
             start_time: Instant::now(),
@@ -153,12 +149,6 @@ impl AgentClient {
                 format!("https://{}:{}", host, port)
             })
             .unwrap_or_default()
-    }
-
-    /// Set the Kubernetes client for API proxying
-    pub fn with_kube_client(mut self, client: KubeClient) -> Self {
-        self.kube_client = Some(client);
-        self
     }
 
     /// Request a signed certificate from the cell
@@ -335,11 +325,6 @@ impl AgentClient {
         // This registers the agent on the server side
         self.send_ready().await?;
 
-        // Start the K8s API proxy stream AFTER agent is registered
-        // This ensures set_proxy_port finds the agent in the registry
-        let cluster_name = self.config.cluster_name.clone();
-        Self::start_proxy_stream(channel, cluster_name).await;
-
         // Install CAPI on this cluster - required for clusterctl move during pivot
         // Retry up to 3 times with backoff for slow clusters (RKE2 image pulls)
         info!("Installing CAPI on local cluster");
@@ -448,14 +433,13 @@ impl AgentClient {
 
     /// Send the ready message to cell
     async fn send_ready(&self) -> Result<(), ClientError> {
-        // Get K8s version from the kube client if available
-        let k8s_version = if let Some(ref client) = self.kube_client {
-            match client.apiserver_version().await {
+        // Get K8s version from in-cluster client
+        let k8s_version = match kube::Client::try_default().await {
+            Ok(client) => match client.apiserver_version().await {
                 Ok(info) => format!("v{}.{}", info.major, info.minor),
                 Err(_) => "unknown".to_string(),
-            }
-        } else {
-            "unknown".to_string()
+            },
+            Err(_) => "unknown".to_string(),
         };
 
         let msg = AgentMessage {
@@ -535,56 +519,34 @@ impl AgentClient {
         self.send_message(msg).await
     }
 
-    /// Send unpivot started notification
+    /// Send cluster deleting notification with CAPI manifests (unpivot)
     ///
-    /// Called when the agent detects LatticeCluster deletion and begins
-    /// exporting CAPI resources back to the parent cluster.
-    pub async fn send_unpivot_started(&self, source_namespace: &str) -> Result<(), ClientError> {
-        self.set_agent_state(AgentState::Unpivoting).await;
-
-        let msg = AgentMessage {
-            cluster_name: self.config.cluster_name.clone(),
-            payload: Some(Payload::UnpivotStarted(UnpivotStarted {
-                source_namespace: source_namespace.to_string(),
-            })),
-        };
-
-        self.send_message(msg).await
-    }
-
-    /// Send CAPI manifests to parent during unpivot
+    /// Unpivot is pivot in reverse:
+    /// 1. Export CAPI resources via --to-directory (pauses them)
+    /// 2. Send manifests to parent
+    /// 3. Parent imports and unpauses
+    /// 4. Parent deletes (which cleans up infrastructure)
     ///
-    /// These are the manifests exported via `clusterctl move --to-directory`
-    /// that need to be applied on the parent cluster.
-    pub async fn send_unpivot_manifests(&self, manifests: Vec<Vec<u8>>) -> Result<(), ClientError> {
-        let total = manifests.len() as i32;
-        let msg = AgentMessage {
-            cluster_name: self.config.cluster_name.clone(),
-            payload: Some(Payload::UnpivotManifests(UnpivotManifests {
-                manifests,
-                total_resources: total,
-            })),
-        };
+    /// This ensures parent has all resources including any nodes added post-pivot.
+    pub async fn send_cluster_deleting(&self, namespace: &str) -> Result<(), ClientError> {
+        // Export CAPI resources via --to-directory (this pauses them)
+        info!(namespace = %namespace, "Exporting CAPI resources for unpivot");
+        let capi_manifests =
+            lattice_common::clusterctl::export_for_pivot(None, namespace, &self.config.cluster_name)
+                .await
+                .map_err(|e| ClientError::ConnectionFailed(format!("failed to export CAPI: {}", e)))?;
 
-        self.send_message(msg).await
-    }
-
-    /// Send unpivot complete notification
-    pub async fn send_unpivot_complete(
-        &self,
-        success: bool,
-        error_message: &str,
-        resources_exported: i32,
-    ) -> Result<(), ClientError> {
-        // Note: We don't change state here - the cluster is being deleted
-        // so it doesn't matter what state we're in
+        info!(
+            namespace = %namespace,
+            manifest_count = capi_manifests.len(),
+            "Sending ClusterDeleting with CAPI manifests"
+        );
 
         let msg = AgentMessage {
             cluster_name: self.config.cluster_name.clone(),
-            payload: Some(Payload::UnpivotComplete(UnpivotComplete {
-                success,
-                error_message: error_message.to_string(),
-                resources_exported,
+            payload: Some(Payload::ClusterDeleting(ClusterDeleting {
+                namespace: namespace.to_string(),
+                capi_manifests,
             })),
         };
 
@@ -661,7 +623,7 @@ impl AgentClient {
         let obj: DynamicObject = serde_yaml::from_str(yaml)
             .map_err(|e| std::io::Error::other(format!("Failed to parse manifest: {}", e)))?;
 
-        let client = KubeClient::try_default()
+        let client = kube::Client::try_default()
             .await
             .map_err(|e| std::io::Error::other(format!("Failed to create client: {}", e)))?;
 
@@ -732,7 +694,7 @@ impl AgentClient {
         use kube::api::Api;
         use tokio::time::{sleep, Duration};
 
-        let client = match KubeClient::try_default().await {
+        let client = match kube::Client::try_default().await {
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "Failed to create client for CRD check");
@@ -816,11 +778,11 @@ impl AgentClient {
                 info!(
                     source_namespace = %cmd.source_namespace,
                     target_namespace = %cmd.target_namespace,
-                    "Received start pivot command"
+                    "Received start pivot command - waiting for PivotManifestsCommand"
                 );
                 *agent_state.write().await = AgentState::Pivoting;
 
-                // Send pivot started
+                // Send pivot started - the actual import happens when we receive PivotManifestsCommand
                 let msg = AgentMessage {
                     cluster_name: cluster_name.to_string(),
                     payload: Some(Payload::PivotStarted(PivotStarted {
@@ -828,22 +790,29 @@ impl AgentClient {
                     })),
                 };
                 let _ = message_tx.send(msg).await;
+            }
+            Some(Command::PivotManifests(cmd)) => {
+                info!(
+                    manifest_count = cmd.manifests.len(),
+                    target_namespace = %cmd.target_namespace,
+                    cluster_name = %cmd.cluster_name,
+                    "Received pivot manifests - importing CAPI resources"
+                );
 
-                // Spawn background task to wait for CAPI resources and send PivotComplete
+                // Spawn background task to import manifests and complete pivot
                 let target_namespace = cmd.target_namespace.clone();
+                let manifests = cmd.manifests.clone();
+                let pivot_cluster_name = cmd.cluster_name.clone();
                 let agent_state_clone = agent_state.clone();
                 let message_tx_clone = message_tx.clone();
                 let cluster_name_clone = cluster_name.to_string();
 
                 tokio::spawn(async move {
+                    // Import CAPI resources via clusterctl move --from-directory
                     let handler = AgentPivotHandler::new().with_capi_namespace(&target_namespace);
 
-                    // Wait up to 10 minutes for CAPI resources with 5s polling
-                    let timeout = Duration::from_secs(600);
-                    let poll_interval = Duration::from_secs(5);
-
                     match handler
-                        .wait_for_capi_resources(timeout, poll_interval)
+                        .import_capi_manifests(&manifests, &pivot_cluster_name)
                         .await
                     {
                         Ok(resource_count) => {
@@ -853,10 +822,7 @@ impl AgentClient {
                             );
 
                             // Patch kubeconfig secret to use internal endpoint for self-management
-                            // CAPI needs to reach the API server from within the cluster
-                            // This MUST succeed before we can report pivot complete
-                            // Use infinite retries with backoff - this is critical for self-management
-                            let cluster_name_for_patch = cluster_name_clone.clone();
+                            let cluster_name_for_patch = pivot_cluster_name.clone();
                             let namespace_for_patch = target_namespace.clone();
                             let patch_result =
                                 retry_with_backoff(
@@ -873,7 +839,6 @@ impl AgentClient {
                                 .await;
 
                             if let Err(e) = patch_result {
-                                // This should only happen if max_attempts is set and exhausted
                                 error!(error = %e, "Failed to patch kubeconfig for self-management");
                                 *agent_state_clone.write().await = AgentState::Failed;
 
@@ -902,7 +867,7 @@ impl AgentClient {
                             let _ = message_tx_clone.send(msg).await;
                         }
                         Err(e) => {
-                            error!(error = %e, "Pivot failed - CAPI resources not detected");
+                            error!(error = %e, "Pivot failed - CAPI import failed");
                             *agent_state_clone.write().await = AgentState::Failed;
 
                             let msg = AgentMessage {
@@ -932,18 +897,6 @@ impl AgentClient {
                 };
                 let _ = message_tx.send(msg).await;
             }
-            Some(Command::UnpivotAck(ack)) => {
-                info!(
-                    success = ack.success,
-                    resources_applied = ack.resources_applied,
-                    "Received unpivot acknowledgment from parent"
-                );
-                // The controller handles the finalizer removal after receiving this
-                // The agent just logs and continues
-                if !ack.success {
-                    error!(error = %ack.error_message, "Parent failed to apply unpivot manifests");
-                }
-            }
             None => {
                 warn!(command_id = %command.command_id, "Received command with no payload");
             }
@@ -956,249 +909,6 @@ impl AgentClient {
             let _ = tx.send(());
         }
         *self.state.write().await = ClientState::Disconnected;
-    }
-
-    /// Start the K8s API proxy stream
-    ///
-    /// This establishes the ProxyKubernetesAPI stream which allows the cell
-    /// to run clusterctl move through the gRPC tunnel. The agent receives
-    /// K8s API requests and forwards them to the local API server.
-    async fn start_proxy_stream(channel: tonic::transport::Channel, cluster_name: String) {
-        tokio::spawn(async move {
-            let mut client = LatticeAgentClient::new(channel);
-
-            // Channel for sending responses back to the cell
-            let (response_tx, response_rx) = mpsc::channel::<KubeProxyResponse>(32);
-            let outbound = ReceiverStream::new(response_rx);
-
-            // Start the proxy stream
-            let response = match client.proxy_kubernetes_api(outbound).await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(error = %e, "Failed to establish proxy stream");
-                    return;
-                }
-            };
-
-            info!("K8s API proxy stream established");
-            let mut inbound = response.into_inner();
-
-            // Send initial handshake response to register proxy channels
-            // The server waits for the first response to identify the cluster
-            let handshake = KubeProxyResponse {
-                request_id: format!("{}:handshake", cluster_name),
-                status_code: 0,
-                headers: vec![],
-                body: vec![],
-                error: String::new(),
-                is_streaming: false,
-                is_final: true,
-            };
-            if response_tx.send(handshake).await.is_err() {
-                warn!("Failed to send proxy handshake");
-                return;
-            }
-            debug!("Proxy handshake sent");
-
-            // Handle incoming proxy requests
-            while let Some(result) = inbound.next().await {
-                match result {
-                    Ok(request) => {
-                        debug!(
-                            request_id = %request.request_id,
-                            method = %request.method,
-                            path = %request.path,
-                            "Received proxy request"
-                        );
-
-                        // Forward to local K8s API with streaming
-                        let tx = response_tx.clone();
-                        tokio::spawn(async move {
-                            Self::handle_proxy_request_streaming(&request, tx).await;
-                        });
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Error receiving proxy request");
-                        break;
-                    }
-                }
-            }
-
-            info!("K8s API proxy stream closed");
-        });
-    }
-
-    /// Handle a proxy request by streaming response chunks back
-    async fn handle_proxy_request_streaming(
-        request: &KubeProxyRequest,
-        response_tx: mpsc::Sender<KubeProxyResponse>,
-    ) {
-        use futures::StreamExt;
-        use reqwest::Method;
-
-        let send_error = |error: String| async {
-            let _ = response_tx
-                .send(KubeProxyResponse {
-                    request_id: request.request_id.clone(),
-                    status_code: 500,
-                    headers: vec![],
-                    body: vec![],
-                    error,
-                    is_streaming: false,
-                    is_final: true,
-                })
-                .await;
-        };
-
-        // Create HTTP client
-        let client = match reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                send_error(format!("Failed to create HTTP client: {}", e)).await;
-                return;
-            }
-        };
-
-        // Build URL to local API server
-        let api_server = std::env::var("KUBERNETES_SERVICE_HOST")
-            .map(|host| {
-                let port =
-                    std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
-                format!("https://{}:{}", host, port)
-            })
-            .unwrap_or_else(|_| "https://kubernetes.default.svc".to_string());
-
-        let url = format!("{}{}", api_server, request.path);
-
-        // Parse method
-        let method = match request.method.to_uppercase().as_str() {
-            "GET" => Method::GET,
-            "POST" => Method::POST,
-            "PUT" => Method::PUT,
-            "PATCH" => Method::PATCH,
-            "DELETE" => Method::DELETE,
-            _ => {
-                send_error(format!("Unsupported method: {}", request.method)).await;
-                return;
-            }
-        };
-
-        // Read service account token
-        let token =
-            match tokio::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/token")
-                .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    send_error(format!("Failed to read service account token: {}", e)).await;
-                    return;
-                }
-            };
-
-        // Build and send request
-        let mut req = client.request(method, &url).bearer_auth(token);
-        for header in &request.headers {
-            req = req.header(&header.key, &header.value);
-        }
-        if !request.body.is_empty() {
-            req = req.body(request.body.clone());
-        }
-
-        let resp = match req.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = response_tx
-                    .send(KubeProxyResponse {
-                        request_id: request.request_id.clone(),
-                        status_code: 502,
-                        headers: vec![],
-                        body: vec![],
-                        error: format!("Proxy request failed: {}", e),
-                        is_streaming: false,
-                        is_final: true,
-                    })
-                    .await;
-                return;
-            }
-        };
-
-        let status_code = resp.status().as_u16() as i32;
-        let headers: Vec<_> = resp
-            .headers()
-            .iter()
-            .filter_map(|(k, v)| {
-                v.to_str().ok().map(|val| crate::proto::HttpHeader {
-                    key: k.to_string(),
-                    value: val.to_string(),
-                })
-            })
-            .collect();
-
-        // Check if this is a watch/streaming request
-        let is_watch = request.path.contains("watch=true");
-
-        if is_watch {
-            // Stream response chunks
-            let mut stream = resp.bytes_stream();
-            let mut first_chunk = true;
-
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        let chunk_bytes: Vec<u8> = chunk.to_vec();
-                        let response = KubeProxyResponse {
-                            request_id: request.request_id.clone(),
-                            status_code: if first_chunk { status_code } else { 0 },
-                            headers: if first_chunk { headers.clone() } else { vec![] },
-                            body: chunk_bytes,
-                            error: String::new(),
-                            is_streaming: true,
-                            is_final: false,
-                        };
-                        first_chunk = false;
-
-                        if response_tx.send(response).await.is_err() {
-                            debug!(request_id = %request.request_id, "Response channel closed during streaming");
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(request_id = %request.request_id, error = %e, "Error reading response chunk");
-                        break;
-                    }
-                }
-            }
-
-            // Send final marker
-            let _ = response_tx
-                .send(KubeProxyResponse {
-                    request_id: request.request_id.clone(),
-                    status_code: 0,
-                    headers: vec![],
-                    body: vec![],
-                    error: String::new(),
-                    is_streaming: true,
-                    is_final: true,
-                })
-                .await;
-        } else {
-            // Non-streaming: read full body and send single response
-            let body = resp.bytes().await.unwrap_or_default().to_vec();
-            let _ = response_tx
-                .send(KubeProxyResponse {
-                    request_id: request.request_id.clone(),
-                    status_code,
-                    headers,
-                    body,
-                    error: String::new(),
-                    is_streaming: false,
-                    is_final: true,
-                })
-                .await;
-        }
     }
 }
 
@@ -1285,7 +995,6 @@ mod tests {
         // Client starts disconnected
         assert!(client.message_tx.is_none());
         assert!(client.shutdown_tx.is_none());
-        assert!(client.kube_client.is_none());
     }
 
     #[tokio::test]
@@ -1774,32 +1483,6 @@ mod tests {
 
         // No shutdown channel yet
         assert!(client.shutdown_tx.is_none());
-
-        // No kube client attached yet
-        assert!(client.kube_client.is_none());
-    }
-
-    /// Story: Agent can be configured with a Kubernetes client for API proxying
-    ///
-    /// The agent needs access to the local Kubernetes API to proxy requests
-    /// from the cell during pivot operations. This test verifies the fluent
-    /// builder pattern for attaching a kube client.
-    #[test]
-    fn story_agent_can_be_configured_with_kube_client() {
-        // NOTE: We can't easily create a real KubeClient in tests without a cluster,
-        // but we can verify the builder pattern works by testing the config flow
-        let config = AgentClientConfig {
-            cluster_name: "kube-proxy-test".to_string(),
-            ..Default::default()
-        };
-
-        let client = AgentClient::new(config);
-
-        // Initially no kube client
-        assert!(client.kube_client.is_none());
-
-        // The with_kube_client method exists and returns Self
-        // (can't actually test with a real client without a cluster)
     }
 
     /// Story: Agent progresses through lifecycle states during provisioning

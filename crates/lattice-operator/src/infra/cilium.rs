@@ -8,7 +8,6 @@
 use std::process::Command;
 use tracing::info;
 
-use crate::agent::CENTRAL_PROXY_PORT;
 use crate::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT};
 
 /// Default charts directory (set by LATTICE_CHARTS_DIR env var in container)
@@ -297,20 +296,17 @@ spec:
   egress:
 {egress}
   ingress:
-    # Allow ingress for bootstrap webhook, gRPC, and central K8s API proxy
+    # Allow ingress for bootstrap webhook and gRPC
     - toPorts:
         - ports:
             - port: "{bootstrap_port}"
               protocol: TCP
             - port: "{grpc_port}"
               protocol: TCP
-            - port: "{proxy_port}"
-              protocol: TCP
 "#,
         egress = egress_rules.join("\n"),
         bootstrap_port = DEFAULT_BOOTSTRAP_PORT,
         grpc_port = DEFAULT_GRPC_PORT,
-        proxy_port = CENTRAL_PROXY_PORT,
     )
 }
 

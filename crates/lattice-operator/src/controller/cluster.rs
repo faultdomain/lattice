@@ -13,11 +13,12 @@ use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams, Patch, PatchPa
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
-use lattice_common::clusterctl::{execute_move, ClusterctlMoveConfig};
 use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(test)]
 use mockall::automock;
+
+use lattice_common::clusterctl::unpause_capi_cluster;
 
 use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
@@ -27,7 +28,7 @@ use crate::crd::{
     LatticeClusterStatus,
 };
 use crate::parent::ParentServers;
-use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
+use crate::proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand, StartPivotCommand};
 use crate::provider::{create_provider, CAPIManifest};
 use crate::Error;
 
@@ -83,11 +84,6 @@ pub trait KubeClient: Send + Sync {
     ) -> Result<(), Error>;
 
     /// Ensure the central proxy ClusterIP Service exists
-    ///
-    /// Creates a ClusterIP Service in lattice-system namespace to expose
-    /// the central K8s API proxy. CAPI uses this to reach workload cluster APIs.
-    async fn ensure_proxy_service(&self, proxy_port: u16) -> Result<(), Error>;
-
     /// Check if the MutatingWebhookConfiguration for LatticeService deployments exists
     async fn is_webhook_config_ready(&self) -> Result<bool, Error>;
 
@@ -512,51 +508,6 @@ impl KubeClient for KubeClientImpl {
             }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
                 info!("creating cell LoadBalancer service");
-                api.create(&PostParams::default(), &service).await?;
-            }
-            Err(e) => return Err(e.into()),
-        }
-
-        Ok(())
-    }
-
-    async fn ensure_proxy_service(&self, proxy_port: u16) -> Result<(), Error> {
-        use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
-        use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-
-        let api: Api<Service> = Api::namespaced(self.client.clone(), "lattice-system");
-
-        let mut labels = std::collections::BTreeMap::new();
-        labels.insert("app".to_string(), "lattice-operator".to_string());
-
-        let service = Service {
-            metadata: ObjectMeta {
-                name: Some("lattice-proxy".to_string()),
-                namespace: Some("lattice-system".to_string()),
-                ..Default::default()
-            },
-            spec: Some(ServiceSpec {
-                type_: Some("ClusterIP".to_string()),
-                selector: Some(labels),
-                ports: Some(vec![ServicePort {
-                    name: Some("https".to_string()),
-                    port: proxy_port as i32,
-                    target_port: Some(IntOrString::Int(proxy_port as i32)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        // Check if service exists
-        match api.get("lattice-proxy").await {
-            Ok(_) => {
-                debug!("proxy service already exists");
-            }
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                info!("creating central proxy ClusterIP service");
                 api.create(&PostParams::default(), &service).await?;
             }
             Err(e) => return Err(e.into()),
@@ -1185,12 +1136,10 @@ pub fn has_etcd_taint(node: &k8s_openapi::api::core::v1::Node) -> bool {
 pub enum PivotAction {
     /// Pivot is complete, transition to Ready
     Complete,
-    /// Execute clusterctl move (agent ready with proxy)
-    ExecuteMove,
-    /// Wait for agent proxy to become available
-    WaitForProxy,
-    /// Send StartPivotCommand to agent
-    SendPivotCommand,
+    /// Wait for agent to complete pivot (manifests sent)
+    WaitForPivotComplete,
+    /// Trigger pivot: send StartPivotCommand, export via --to-directory, send PivotManifestsCommand
+    TriggerPivot,
     /// Wait for agent to connect
     WaitForAgent,
 }
@@ -1201,17 +1150,14 @@ pub enum PivotAction {
 pub fn determine_pivot_action(
     is_pivot_complete: bool,
     is_pivot_in_progress: bool,
-    is_proxy_available: bool,
     is_agent_connected: bool,
 ) -> PivotAction {
     if is_pivot_complete {
         PivotAction::Complete
-    } else if is_pivot_in_progress && is_proxy_available {
-        PivotAction::ExecuteMove
     } else if is_pivot_in_progress {
-        PivotAction::WaitForProxy
+        PivotAction::WaitForPivotComplete
     } else if is_agent_connected {
-        PivotAction::SendPivotCommand
+        PivotAction::TriggerPivot
     } else {
         PivotAction::WaitForAgent
     }
@@ -1227,7 +1173,11 @@ pub fn determine_pivot_action(
 pub trait PivotOperations: Send + Sync {
     /// Trigger pivot for a cluster via connected agent
     ///
-    /// Sends StartPivotCommand to the agent and executes clusterctl move
+    /// This method:
+    /// 1. Sends StartPivotCommand to the agent
+    /// 2. Exports CAPI resources via `clusterctl move --to-directory` (keeps paused on parent)
+    /// 3. Sends PivotManifestsCommand with the exported manifests
+    /// 4. Agent imports via `clusterctl move --from-directory` and sends PivotComplete
     async fn trigger_pivot(
         &self,
         cluster_name: &str,
@@ -1244,31 +1194,27 @@ pub trait PivotOperations: Send + Sync {
     /// Check if pivot is complete (agent reports Ready state)
     fn is_pivot_complete(&self, cluster_name: &str) -> bool;
 
-    /// Check if the agent's K8s API proxy is available
-    fn is_proxy_available(&self, cluster_name: &str) -> bool;
-
-    /// Execute clusterctl move through the agent's K8s API proxy
-    ///
-    /// This starts a local proxy server, generates a kubeconfig pointing to it,
-    /// and executes `clusterctl move --to-kubeconfig <proxy-kubeconfig>`.
-    async fn execute_clusterctl_move(
-        &self,
-        cluster_name: &str,
-        namespace: &str,
-    ) -> Result<(), Error>;
-
     /// Store post-pivot manifests to send after PivotComplete
     ///
-    /// These manifests (LatticeCluster CRD + resource + GitOps resources + network policy)
-    /// will be sent to the agent via ApplyManifestsCommand after pivot succeeds.
+    /// These manifests (GitOps resources + network policy) will be sent to the
+    /// agent via ApplyManifestsCommand after pivot succeeds.
+    /// Note: LatticeCluster CRD and instance are delivered via bootstrap webhook.
     fn store_post_pivot_manifests(
         &self,
         cluster_name: &str,
-        crd_yaml: Option<String>,
-        cluster_yaml: Option<String>,
         flux_manifests: Vec<String>,
         network_policy_yaml: Option<String>,
     );
+
+    /// Take unpivot manifests received from child during deletion
+    ///
+    /// Called during unpivot cleanup to get CAPI manifests that the child
+    /// exported and sent via ClusterDeleting message. Returns None if no
+    /// manifests are available (child hasn't sent them yet).
+    fn take_unpivot_manifests(
+        &self,
+        cluster_name: &str,
+    ) -> Option<crate::agent::connection::UnpivotManifests>;
 }
 
 /// Controller context containing shared state and clients
@@ -1557,19 +1503,12 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
     // Check if this child cluster is being unpivoted (child is being deleted)
     // This only applies when we're the parent, not when reconciling our own cluster
+    // Unpivot flow: child exports CAPI → sends to parent → parent imports → unpauses → deletes
     if !is_self {
-        if let Some(ref parent_servers) = ctx.parent_servers {
-            let registry = parent_servers.agent_registry();
+        if let Some(parent_servers) = &ctx.parent_servers {
             let capi_namespace = format!("capi-{}", name);
 
-            // Check if we have unpivot manifests waiting to be applied
-            if registry.has_unpivot_manifests(&name) {
-                info!(cluster = %name, "Child cluster has unpivot manifests - importing via clusterctl");
-                return handle_child_unpivot(&cluster, &ctx, registry).await;
-            }
-
-            // Check if unpivot is in progress (manifests applied, waiting for cleanup)
-            // Use status field to survive operator restarts
+            // Check if unpivot is pending (set by gRPC server when ClusterDeleting received)
             let unpivot_pending = cluster
                 .status
                 .as_ref()
@@ -1577,6 +1516,35 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 .unwrap_or(false);
 
             if unpivot_pending {
+                let pivot_ops: Arc<dyn PivotOperations> =
+                    Arc::new(PivotOperationsImpl::new(parent_servers.agent_registry()));
+
+                // Import manifests from child if available (sent via ClusterDeleting)
+                if let Some(manifests) = pivot_ops.take_unpivot_manifests(&name) {
+                    info!(
+                        cluster = %name,
+                        manifest_count = manifests.capi_manifests.len(),
+                        namespace = %manifests.namespace,
+                        "Importing CAPI manifests from child for unpivot"
+                    );
+
+                    if let Err(e) = lattice_common::clusterctl::import_from_manifests(
+                        None,
+                        &manifests.namespace,
+                        &manifests.capi_manifests,
+                    )
+                    .await
+                    {
+                        warn!(cluster = %name, error = %e, "Failed to import CAPI manifests from child");
+                        // Continue anyway - manifests may already be imported
+                    }
+                }
+
+                // Unpause CAPI resources so they can reconcile
+                if let Err(e) = unpause_capi_cluster(None, &capi_namespace, &name).await {
+                    debug!(cluster = %name, error = %e, "Failed to unpause CAPI (may already be unpaused)");
+                }
+
                 let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
                 info!(cluster = %name, "Unpivot in progress - waiting for CAPI ready then cleanup");
                 return handle_unpivot_cleanup(&cluster, &ctx, &capi_namespace, bootstrap).await;
@@ -1613,14 +1581,6 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     )
                     .await?;
                 info!("cell LoadBalancer Service created/updated");
-
-                // Create ClusterIP Service for central K8s API proxy
-                // CAPI uses this to reach workload cluster APIs via their path
-                info!("ensuring ClusterIP Service for central proxy");
-                ctx.kube
-                    .ensure_proxy_service(crate::agent::proxy::CENTRAL_PROXY_PORT)
-                    .await?;
-                info!("central proxy ClusterIP Service created/updated");
             }
 
             // Check if we're reconciling our own cluster (the one we're running on)
@@ -1729,32 +1689,6 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Each cluster gets its own CAPI namespace
             let capi_namespace = format!("capi-{}", name);
 
-            // For child clusters, patch kubeconfig to use central proxy when agent connects
-            // This allows CAPI to reach the workload cluster's API server
-            if !is_self {
-                if let Some(ref parent_servers) = ctx.parent_servers {
-                    if parent_servers.is_running()
-                        && parent_servers
-                            .agent_registry()
-                            .get_proxy_channels(&name)
-                            .is_some()
-                    {
-                        // Proxy channels registered = agent connected, patch kubeconfig
-                        let ca_cert_pem = parent_servers.ca().ca_cert_pem();
-                        if let Err(e) = crate::pivot::patch_kubeconfig_for_child_cluster(
-                            &name,
-                            &capi_namespace,
-                            crate::pivot::CENTRAL_PROXY_SERVICE_URL,
-                            ca_cert_pem,
-                        )
-                        .await
-                        {
-                            debug!(error = %e, "Failed to patch kubeconfig for child cluster (may already be patched)");
-                        }
-                    }
-                }
-            }
-
             let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
             let is_ready = ctx
                 .capi
@@ -1802,7 +1736,6 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     if parent_servers.is_running() {
                         Some(Arc::new(PivotOperationsImpl::new(
                             parent_servers.agent_registry(),
-                            parent_servers.ca().ca_cert_pem().to_string(),
                         )))
                     } else {
                         None
@@ -1817,7 +1750,6 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 let action = determine_pivot_action(
                     pivot_ops.is_pivot_complete(&name),
                     pivot_ops.is_pivot_in_progress(&name),
-                    pivot_ops.is_proxy_available(&name),
                     pivot_ops.is_agent_ready(&name),
                 );
 
@@ -1827,38 +1759,15 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                         info!("agent reports pivot complete");
                         try_transition_to_ready(&cluster, &ctx, true).await
                     }
-                    PivotAction::ExecuteMove => {
-                        // Agent in pivoting state with proxy available - execute clusterctl move
-                        info!(
-                            "agent in pivoting state with proxy available, executing clusterctl move"
-                        );
-                        match pivot_ops
-                            .execute_clusterctl_move(&name, &capi_namespace)
-                            .await
-                        {
-                            Ok(()) => {
-                                info!("clusterctl move completed, waiting for agent to confirm");
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "clusterctl move failed, will retry");
-                            }
-                        }
-                        Ok(Action::requeue(Duration::from_secs(10)))
-                    }
-                    PivotAction::WaitForProxy => {
-                        // Pivot in progress but proxy not ready yet
-                        debug!("pivot in progress, waiting for agent proxy to be available");
+                    PivotAction::WaitForPivotComplete => {
+                        // Pivot in progress, waiting for agent to finish importing manifests
+                        debug!("pivot in progress, waiting for agent to complete");
                         Ok(Action::requeue(Duration::from_secs(5)))
                     }
-                    PivotAction::SendPivotCommand => {
+                    PivotAction::TriggerPivot => {
                         // Agent ready for pivot - trigger it
                         // Store post-pivot manifests before triggering pivot
-                        use kube::CustomResourceExt;
-                        let crd_yaml = serde_yaml::to_string(&LatticeCluster::crd())
-                            .map_err(|e| Error::serialization(e.to_string()))?;
-                        // Use for_export() to strip managedFields and other server-set metadata
-                        let cluster_yaml = serde_yaml::to_string(&cluster.for_export())
-                            .map_err(|e| Error::serialization(e.to_string()))?;
+                        // Note: LatticeCluster CRD/instance already delivered via bootstrap webhook
 
                         // Generate GitOps manifests if parent has GitOps config
                         let flux_manifests = generate_flux_manifests_for_child(&ctx, &name).await?;
@@ -1868,20 +1777,19 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
                         pivot_ops.store_post_pivot_manifests(
                             &name,
-                            Some(crd_yaml),
-                            Some(cluster_yaml),
                             flux_manifests,
                             network_policy_yaml,
                         );
 
-                        // Trigger pivot (sends StartPivotCommand)
+                        // Trigger pivot: sends StartPivotCommand, exports via --to-directory,
+                        // and sends PivotManifestsCommand to the agent
                         info!("agent ready, triggering pivot");
                         match pivot_ops
                             .trigger_pivot(&name, &capi_namespace, &capi_namespace)
                             .await
                         {
                             Ok(()) => {
-                                debug!("pivot triggered successfully, waiting for agent to enter pivoting state");
+                                debug!("pivot triggered successfully, waiting for agent to import manifests");
                             }
                             Err(e) => {
                                 warn!(error = %e, "pivot trigger failed, will retry");
@@ -1994,6 +1902,11 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 );
                 Ok(Action::requeue(Duration::from_secs(10)))
             }
+        }
+        ClusterPhase::Unpivoting => {
+            // Unpivoting is handled by handle_deletion, just wait
+            debug!("cluster is Unpivoting, waiting for completion");
+            Ok(Action::requeue(Duration::from_secs(5)))
         }
         ClusterPhase::Failed => {
             // Failed state requires manual intervention
@@ -2312,6 +2225,12 @@ async fn update_cluster_status(
             "StartingPivot",
             "Pivoting cluster to self-managed",
         ),
+        ClusterPhase::Unpivoting => (
+            "Unpivoting",
+            ConditionStatus::True,
+            "StartingUnpivot",
+            "Exporting CAPI resources to parent",
+        ),
         ClusterPhase::Ready => (
             "Ready",
             ConditionStatus::True,
@@ -2348,22 +2267,19 @@ async fn update_cluster_status(
     Ok(())
 }
 
-/// Real implementation of PivotOperations using AgentRegistry and PivotOrchestrator
+/// Real implementation of PivotOperations using AgentRegistry
 pub struct PivotOperationsImpl {
     /// Agent registry for sending commands
     agent_registry: SharedAgentRegistry,
-    /// CA certificate PEM for central proxy TLS
-    ca_cert_pem: String,
     /// Set of clusters where pivot has been triggered (to avoid double-triggering)
     pivot_in_progress: dashmap::DashSet<String>,
 }
 
 impl PivotOperationsImpl {
     /// Create a new PivotOperationsImpl
-    pub fn new(agent_registry: SharedAgentRegistry, ca_cert_pem: String) -> Self {
+    pub fn new(agent_registry: SharedAgentRegistry) -> Self {
         Self {
             agent_registry,
-            ca_cert_pem,
             pivot_in_progress: dashmap::DashSet::new(),
         }
     }
@@ -2377,6 +2293,8 @@ impl PivotOperations for PivotOperationsImpl {
         source_namespace: &str,
         target_namespace: &str,
     ) -> Result<(), Error> {
+        use lattice_common::clusterctl::{export_for_pivot, unpause_capi_cluster};
+
         // Check if pivot is already in progress
         if self.pivot_in_progress.contains(cluster_name) {
             debug!(cluster = %cluster_name, "pivot already in progress");
@@ -2395,7 +2313,7 @@ impl PivotOperations for PivotOperationsImpl {
         // Mark pivot as in progress
         self.pivot_in_progress.insert(cluster_name.to_string());
 
-        // Send StartPivotCommand to agent
+        // Step 1: Send StartPivotCommand to agent
         let command_id = uuid::Uuid::new_v4().to_string();
         let start_pivot_cmd = CellCommand {
             command_id,
@@ -2406,23 +2324,54 @@ impl PivotOperations for PivotOperationsImpl {
             })),
         };
 
-        match self
+        if let Err(e) = self
             .agent_registry
             .send_command(cluster_name, start_pivot_cmd)
             .await
         {
-            Ok(()) => {
-                info!(cluster = %cluster_name, "StartPivotCommand sent to agent");
-                // The actual clusterctl move will be triggered after agent confirms PivotStarted
-                // This is handled by the gRPC server when it receives PivotStarted from agent
-                Ok(())
-            }
-            Err(e) => {
-                // Remove from in-progress on failure
-                self.pivot_in_progress.remove(cluster_name);
-                Err(Error::pivot(format!("failed to send pivot command: {}", e)))
-            }
+            self.pivot_in_progress.remove(cluster_name);
+            return Err(Error::pivot(format!("failed to send StartPivotCommand: {}", e)));
         }
+        info!(cluster = %cluster_name, "StartPivotCommand sent to agent");
+
+        // Step 2: Export CAPI resources via clusterctl move --to-directory
+        // This keeps paused resources on the parent for simplified unpivot
+        // First unpause in case a previous attempt left the cluster paused
+        info!(cluster = %cluster_name, namespace = %source_namespace, "Exporting CAPI resources via --to-directory");
+        if let Err(e) = unpause_capi_cluster(None, source_namespace, cluster_name).await {
+            debug!(cluster = %cluster_name, error = %e, "Unpause failed (may already be unpaused)");
+        }
+        let manifests = match export_for_pivot(None, source_namespace, cluster_name).await {
+            Ok(m) => m,
+            Err(e) => {
+                self.pivot_in_progress.remove(cluster_name);
+                return Err(Error::pivot(format!("clusterctl move --to-directory failed: {}", e)));
+            }
+        };
+        info!(cluster = %cluster_name, manifest_count = manifests.len(), "CAPI resources exported");
+
+        // Step 3: Send PivotManifestsCommand to agent with the exported manifests
+        let command_id = uuid::Uuid::new_v4().to_string();
+        let pivot_manifests_cmd = CellCommand {
+            command_id,
+            command: Some(cell_command::Command::PivotManifests(PivotManifestsCommand {
+                manifests,
+                target_namespace: target_namespace.to_string(),
+                cluster_name: cluster_name.to_string(),
+            })),
+        };
+
+        if let Err(e) = self
+            .agent_registry
+            .send_command(cluster_name, pivot_manifests_cmd)
+            .await
+        {
+            self.pivot_in_progress.remove(cluster_name);
+            return Err(Error::pivot(format!("failed to send PivotManifestsCommand: {}", e)));
+        }
+        info!(cluster = %cluster_name, "PivotManifestsCommand sent to agent, waiting for import");
+
+        Ok(())
     }
 
     fn is_agent_ready(&self, cluster_name: &str) -> bool {
@@ -2449,8 +2398,6 @@ impl PivotOperations for PivotOperationsImpl {
     fn store_post_pivot_manifests(
         &self,
         cluster_name: &str,
-        crd_yaml: Option<String>,
-        cluster_yaml: Option<String>,
         flux_manifests: Vec<String>,
         network_policy_yaml: Option<String>,
     ) {
@@ -2458,115 +2405,23 @@ impl PivotOperations for PivotOperationsImpl {
         self.agent_registry.set_post_pivot_manifests(
             cluster_name,
             PostPivotManifests {
-                crd_yaml,
-                cluster_yaml,
                 flux_manifests,
                 network_policy_yaml,
             },
         );
     }
 
-    fn is_proxy_available(&self, cluster_name: &str) -> bool {
-        // Check for central proxy channels (not per-agent proxy port)
-        self.agent_registry
-            .get_proxy_channels(cluster_name)
-            .is_some()
-    }
-
-    async fn execute_clusterctl_move(
+    fn take_unpivot_manifests(
         &self,
         cluster_name: &str,
-        namespace: &str,
-    ) -> Result<(), Error> {
-        use crate::agent::generate_central_proxy_kubeconfig;
-        use crate::pivot::CENTRAL_PROXY_SERVICE_URL;
-
-        info!(cluster = %cluster_name, namespace = %namespace, "Executing clusterctl move via central proxy");
-
-        // Generate kubeconfig pointing to central proxy with path-based routing
-        let kubeconfig_content = generate_central_proxy_kubeconfig(
-            cluster_name,
-            CENTRAL_PROXY_SERVICE_URL,
-            &self.ca_cert_pem,
-        );
-
-        // Write kubeconfig to temp file
-        let kubeconfig_path = format!("/tmp/lattice-pivot-{}.kubeconfig", cluster_name);
-        tokio::fs::write(&kubeconfig_path, &kubeconfig_content)
-            .await
-            .map_err(|e| Error::pivot(format!("failed to write kubeconfig: {}", e)))?;
-
-        // Execute clusterctl move with retry and automatic unpause
-        // No source kubeconfig - uses default context (parent cluster)
-        let result = execute_move(
-            None, // No source kubeconfig, uses default context
-            std::path::Path::new(&kubeconfig_path),
-            namespace,
-            cluster_name,
-            &ClusterctlMoveConfig::default(),
-        )
-        .await;
-
-        // Clean up kubeconfig
-        let _ = tokio::fs::remove_file(&kubeconfig_path).await;
-
-        result.map_err(|e| Error::pivot(e.to_string()))
+    ) -> Option<crate::agent::connection::UnpivotManifests> {
+        self.agent_registry.take_unpivot_manifests(cluster_name)
     }
 }
 
-/// Import unpivot manifests from a child cluster using clusterctl move
+/// Handle cleanup during unpivot
 ///
-/// Called when a child cluster sends its CAPI resources back during deletion.
-/// Uses `clusterctl move --from-directory` to properly import resources so CAPI
-/// can reconcile and reconnect to the existing infrastructure.
-async fn handle_child_unpivot(
-    cluster: &LatticeCluster,
-    ctx: &Context,
-    registry: SharedAgentRegistry,
-) -> Result<Action, Error> {
-    use lattice_common::clusterctl::import_from_manifests;
-
-    let name = cluster.name_any();
-    let capi_namespace = format!("capi-{}", name);
-
-    // Take the manifests from registry (removes them)
-    let manifests = match registry.take_unpivot_manifests(&name) {
-        Some(m) => m,
-        None => {
-            warn!(cluster = %name, "Unpivot manifests disappeared before processing");
-            return Ok(Action::requeue(Duration::from_secs(5)));
-        }
-    };
-
-    info!(
-        cluster = %name,
-        manifest_count = manifests.len(),
-        "Importing unpivot manifests using clusterctl move --from-directory"
-    );
-
-    // Ensure the CAPI namespace exists
-    ctx.kube.ensure_namespace(&capi_namespace).await?;
-
-    // Import using clusterctl move --from-directory
-    if let Err(e) = import_from_manifests(None, &capi_namespace, &manifests).await {
-        error!(cluster = %name, error = %e, "Failed to import CAPI resources");
-        return Err(Error::pivot(format!("clusterctl move --from-directory failed: {}", e)));
-    }
-
-    // Mark unpivot as pending in status (survives restarts)
-    let status = cluster
-        .status
-        .clone()
-        .unwrap_or_default()
-        .unpivot_pending(true);
-    ctx.kube.patch_status(&name, &status).await?;
-
-    info!(cluster = %name, "CAPI resources imported, requeuing to wait for reconciliation");
-    Ok(Action::requeue(Duration::from_secs(5)))
-}
-
-/// Handle cleanup after unpivot manifests have been applied
-///
+/// Called after CAPI manifests have been imported from the child and unpaused.
 /// Waits for CAPI to reconcile the imported resources, then deletes
 /// the CAPI Cluster to trigger infrastructure cleanup.
 async fn handle_unpivot_cleanup(
@@ -2598,12 +2453,7 @@ async fn handle_unpivot_cleanup(
         info!(cluster = %name, "CAPI Cluster deleted, infrastructure cleanup will proceed");
     }
 
-    // Clear unpivot state from registry (if parent servers exist)
-    if let Some(ref parent_servers) = ctx.parent_servers {
-        parent_servers.agent_registry().clear_unpivot_pending(&name);
-    }
-
-    // Delete the LatticeCluster (this also removes the status)
+    // Delete the LatticeCluster (status.unpivot_pending is cleared with deletion)
     info!(cluster = %name, "Deleting LatticeCluster");
     if let Err(e) = ctx.kube.delete_cluster(&name).await {
         warn!(cluster = %name, error = %e, "Failed to delete LatticeCluster");
@@ -2684,6 +2534,15 @@ async fn handle_deletion(
     // Self cluster with parent - need to unpivot
     info!(cluster = %name, "Starting unpivot process for cluster deletion");
 
+    // Set phase to Unpivoting
+    let status = cluster
+        .status
+        .clone()
+        .unwrap_or_default()
+        .phase(ClusterPhase::Unpivoting)
+        .message("Exporting CAPI resources to parent");
+    ctx.kube.patch_status(&name, &status).await?;
+
     // Check if we have an unpivot channel (agent is running)
     let unpivot_tx = match &ctx.unpivot_tx {
         Some(tx) => tx.clone(),
@@ -2715,11 +2574,38 @@ async fn handle_deletion(
     match tokio::time::timeout(Duration::from_secs(300), completion_rx).await {
         Ok(Ok(Ok(()))) => {
             info!(cluster = %name, "Unpivot completed successfully, removing finalizer");
+
+            // Set UnpivotComplete condition
+            let status = cluster
+                .status
+                .clone()
+                .unwrap_or_default()
+                .condition(Condition::new(
+                    "UnpivotComplete",
+                    ConditionStatus::True,
+                    "Success",
+                    "CAPI resources exported to parent",
+                ));
+            ctx.kube.patch_status(&name, &status).await?;
+
             remove_finalizer(cluster, ctx).await?;
             Ok(Action::await_change())
         }
         Ok(Ok(Err(e))) => {
             error!(cluster = %name, error = %e, "Unpivot failed");
+
+            let status = cluster
+                .status
+                .clone()
+                .unwrap_or_default()
+                .condition(Condition::new(
+                    "UnpivotComplete",
+                    ConditionStatus::False,
+                    "Failed",
+                    &e,
+                ));
+            ctx.kube.patch_status(&name, &status).await?;
+
             Ok(Action::requeue(Duration::from_secs(30)))
         }
         Ok(Err(_)) => {
@@ -2728,6 +2614,19 @@ async fn handle_deletion(
         }
         Err(_) => {
             error!(cluster = %name, "Unpivot timed out after 5 minutes");
+
+            let status = cluster
+                .status
+                .clone()
+                .unwrap_or_default()
+                .condition(Condition::new(
+                    "UnpivotComplete",
+                    ConditionStatus::False,
+                    "Timeout",
+                    "Unpivot timed out after 5 minutes",
+                ));
+            ctx.kube.patch_status(&name, &status).await?;
+
             Ok(Action::requeue(Duration::from_secs(60)))
         }
     }
@@ -3846,6 +3745,7 @@ mod tests {
                 ClusterPhase::Provisioning,
                 ClusterPhase::Pivoting,
                 ClusterPhase::Ready,
+                ClusterPhase::Unpivoting,
                 ClusterPhase::Failed,
             ];
 
@@ -3876,7 +3776,7 @@ mod tests {
         #[test]
         fn story_create_pivot_operations() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
+            let ops = PivotOperationsImpl::new(registry);
             // Just verify it can be created
             assert!(!ops.is_agent_ready("nonexistent-cluster"));
         }
@@ -3885,7 +3785,7 @@ mod tests {
         #[test]
         fn story_agent_not_ready_when_not_connected() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
+            let ops = PivotOperationsImpl::new(registry);
 
             assert!(!ops.is_agent_ready("test-cluster"));
         }
@@ -3894,7 +3794,7 @@ mod tests {
         #[test]
         fn story_pivot_not_complete_when_not_connected() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
+            let ops = PivotOperationsImpl::new(registry);
 
             assert!(!ops.is_pivot_complete("test-cluster"));
         }
@@ -3903,7 +3803,7 @@ mod tests {
         #[tokio::test]
         async fn story_trigger_pivot_fails_when_no_agent() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
+            let ops = PivotOperationsImpl::new(registry);
 
             let result = ops
                 .trigger_pivot("test-cluster", "default", "default")
@@ -3922,7 +3822,7 @@ mod tests {
         #[tokio::test]
         async fn story_double_trigger_is_idempotent() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
+            let ops = PivotOperationsImpl::new(registry);
 
             // First trigger fails (no agent)
             let _ = ops
@@ -4063,39 +3963,31 @@ mod tests {
         #[test]
         fn pivot_action_complete_when_pivot_done() {
             assert_eq!(
-                determine_pivot_action(true, false, false, false),
+                determine_pivot_action(true, false, false),
                 PivotAction::Complete
             );
         }
 
         #[test]
-        fn pivot_action_execute_move_when_proxy_ready() {
+        fn pivot_action_wait_for_pivot_complete_when_in_progress() {
             assert_eq!(
-                determine_pivot_action(false, true, true, true),
-                PivotAction::ExecuteMove
+                determine_pivot_action(false, true, true),
+                PivotAction::WaitForPivotComplete
             );
         }
 
         #[test]
-        fn pivot_action_wait_for_proxy_when_in_progress_no_proxy() {
+        fn pivot_action_trigger_pivot_when_agent_connected() {
             assert_eq!(
-                determine_pivot_action(false, true, false, true),
-                PivotAction::WaitForProxy
-            );
-        }
-
-        #[test]
-        fn pivot_action_send_command_when_agent_connected() {
-            assert_eq!(
-                determine_pivot_action(false, false, false, true),
-                PivotAction::SendPivotCommand
+                determine_pivot_action(false, false, true),
+                PivotAction::TriggerPivot
             );
         }
 
         #[test]
         fn pivot_action_wait_for_agent_when_nothing_ready() {
             assert_eq!(
-                determine_pivot_action(false, false, false, false),
+                determine_pivot_action(false, false, false),
                 PivotAction::WaitForAgent
             );
         }

@@ -12,8 +12,6 @@
 //!
 //! - **Control Stream** (`StreamMessages`): Bidirectional stream for heartbeats,
 //!   commands, and status updates.
-//! - **K8s API Proxy** (`ProxyKubernetesAPI`): Allows the cell to execute kubectl
-//!   commands on the agent's cluster through the gRPC tunnel.
 //!
 //! # Security Model
 //!
@@ -26,18 +24,17 @@
 //!
 //! 1. Cell sends `StartPivotCommand` via control stream
 //! 2. Agent enters PIVOTING state, sends `PivotStarted`
-//! 3. Cell executes `clusterctl move --to-kubeconfig <proxy-kubeconfig>`
-//! 4. Proxy kubeconfig routes requests through `ProxyKubernetesAPI`
-//! 5. Agent detects CAPI resources, sends `PivotComplete`
+//! 3. Cell exports CAPI resources via `clusterctl move --to-directory`
+//! 4. Cell sends `PivotManifestsCommand` with manifests
+//! 5. Agent imports via `clusterctl move --from-directory`
+//! 6. Agent sends `PivotComplete`
 
 pub mod client;
 pub mod connection;
 pub mod mtls;
-pub mod proxy;
 pub mod server;
 
 pub use client::AgentClient;
-pub use connection::{AgentConnection, AgentRegistry, PostPivotManifests, ProxyChannels};
+pub use connection::{AgentConnection, AgentRegistry, PostPivotManifests};
 pub use mtls::{ClientMtlsConfig, MtlsError, ServerMtlsConfig};
-pub use proxy::{generate_central_proxy_kubeconfig, start_central_proxy, CENTRAL_PROXY_PORT};
 pub use server::AgentServer;

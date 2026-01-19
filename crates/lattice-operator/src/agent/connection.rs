@@ -2,15 +2,13 @@
 //!
 //! Manages the registry of connected agents and their state.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use dashmap::{DashMap, DashSet};
-use tokio::sync::{mpsc, RwLock};
+use dashmap::DashMap;
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::proto::{AgentState, CellCommand, KubeProxyRequest, KubeProxyResponse};
+use crate::proto::{AgentState, CellCommand};
 
 /// Represents a connected agent
 pub struct AgentConnection {
@@ -103,90 +101,30 @@ impl std::fmt::Display for SendError {
 impl std::error::Error for SendError {}
 
 /// Post-pivot manifests to send to an agent after PivotComplete
+///
+/// Note: LatticeCluster CRD and instance are delivered via the bootstrap webhook,
+/// not here. This struct only contains manifests that can't be delivered during
+/// bootstrap (e.g., requires Cilium CRDs to exist first).
 #[derive(Clone, Debug, Default)]
 pub struct PostPivotManifests {
-    /// LatticeCluster CRD definition YAML
-    pub crd_yaml: Option<String>,
-    /// LatticeCluster resource YAML (the cluster's spec)
-    pub cluster_yaml: Option<String>,
-    /// Flux manifests (base controllers + GitRepository + Kustomization + credential Secret)
+    /// Flux manifests (GitRepository + Kustomization + credential Secret)
+    /// for syncing child cluster from parent's GitOps repo
     pub flux_manifests: Vec<String>,
     /// CiliumNetworkPolicy for the operator (applied after Cilium CRDs exist)
     pub network_policy_yaml: Option<String>,
 }
 
-/// Sender for streaming proxy responses
-pub type ProxyResponseSender = mpsc::Sender<KubeProxyResponse>;
-
-/// Proxy channel state for a single cluster
+/// CAPI manifests received from child during unpivot
 ///
-/// Holds the channels needed to proxy K8s API requests to an agent.
-/// Supports streaming responses - multiple response chunks per request.
-pub struct ProxyChannels {
-    /// Channel to send proxy requests to the agent
-    pub request_tx: mpsc::Sender<KubeProxyRequest>,
-    /// Pending response senders keyed by request ID (mpsc for streaming)
-    pub pending: Arc<RwLock<HashMap<String, ProxyResponseSender>>>,
-    /// Counter for generating unique request IDs
-    request_counter: AtomicU64,
-}
-
-impl ProxyChannels {
-    /// Create new proxy channels
-    pub fn new(request_tx: mpsc::Sender<KubeProxyRequest>) -> Self {
-        Self {
-            request_tx,
-            pending: Arc::new(RwLock::new(HashMap::new())),
-            request_counter: AtomicU64::new(0),
-        }
-    }
-
-    /// Generate a unique request ID for this cluster
-    pub fn next_request_id(&self, cluster_name: &str) -> String {
-        let id = self.request_counter.fetch_add(1, Ordering::SeqCst);
-        format!("{}-central-{}", cluster_name, id)
-    }
-
-    /// Register a pending request with its response sender
-    pub async fn register_pending(&self, request_id: String, sender: ProxyResponseSender) {
-        let mut pending = self.pending.write().await;
-        pending.insert(request_id, sender);
-    }
-
-    /// Remove a pending request (e.g., on timeout or completion)
-    pub async fn remove_pending(&self, request_id: &str) {
-        let mut pending = self.pending.write().await;
-        pending.remove(request_id);
-    }
-
-    /// Handle a response chunk from the agent
-    ///
-    /// For streaming responses, multiple chunks may arrive with the same request_id.
-    /// The sender is kept until is_final=true or the channel is closed.
-    pub async fn handle_response(&self, response: KubeProxyResponse) {
-        let request_id = response.request_id.clone();
-        let is_final = response.is_final || !response.is_streaming;
-
-        let sender = {
-            let mut pending = self.pending.write().await;
-            if is_final {
-                pending.remove(&request_id)
-            } else {
-                pending.get(&request_id).cloned()
-            }
-        };
-
-        if let Some(tx) = sender {
-            if tx.send(response).await.is_err() {
-                debug!(request_id = %request_id, "Response channel closed");
-                // Clean up if send failed
-                let mut pending = self.pending.write().await;
-                pending.remove(&request_id);
-            }
-        } else {
-            debug!(request_id = %request_id, "No pending request for response");
-        }
-    }
+/// When a child cluster is deleted, it exports its CAPI resources and sends
+/// them to the parent. The parent imports these before cleanup to ensure
+/// it has all resources including any nodes added post-pivot.
+#[derive(Clone, Debug, Default)]
+pub struct UnpivotManifests {
+    /// CAPI manifests exported via clusterctl move --to-directory
+    pub capi_manifests: Vec<Vec<u8>>,
+    /// Namespace to import into
+    pub namespace: String,
 }
 
 /// Registry of connected agents
@@ -198,12 +136,8 @@ pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
     /// Manifests to send to agents after PivotComplete
     post_pivot_manifests: DashMap<String, PostPivotManifests>,
-    /// Proxy channels for each cluster (for central proxy)
-    proxy_channels: DashMap<String, Arc<ProxyChannels>>,
-    /// CAPI manifests received from agents during unpivot
-    unpivot_manifests: DashMap<String, Vec<Vec<u8>>>,
-    /// Clusters with unpivot in progress (persists after manifests are consumed)
-    unpivot_pending: DashSet<String>,
+    /// Manifests received from child during unpivot (deletion)
+    unpivot_manifests: DashMap<String, UnpivotManifests>,
 }
 
 impl AgentRegistry {
@@ -212,31 +146,7 @@ impl AgentRegistry {
         Self {
             agents: DashMap::new(),
             post_pivot_manifests: DashMap::new(),
-            proxy_channels: DashMap::new(),
             unpivot_manifests: DashMap::new(),
-            unpivot_pending: DashSet::new(),
-        }
-    }
-
-    /// Register proxy channels for a cluster
-    ///
-    /// Called when an agent's proxy stream connects to store the channels
-    /// needed for the central proxy to route requests.
-    pub fn register_proxy_channels(&self, cluster_name: &str, channels: Arc<ProxyChannels>) {
-        info!(cluster = %cluster_name, "Proxy channels registered");
-        self.proxy_channels
-            .insert(cluster_name.to_string(), channels);
-    }
-
-    /// Get proxy channels for a cluster
-    pub fn get_proxy_channels(&self, cluster_name: &str) -> Option<Arc<ProxyChannels>> {
-        self.proxy_channels.get(cluster_name).map(|r| r.clone())
-    }
-
-    /// Remove proxy channels for a cluster
-    pub fn remove_proxy_channels(&self, cluster_name: &str) {
-        if self.proxy_channels.remove(cluster_name).is_some() {
-            info!(cluster = %cluster_name, "Proxy channels removed");
         }
     }
 
@@ -327,8 +237,9 @@ impl AgentRegistry {
 
     /// Store manifests to send after pivot completes
     ///
-    /// These manifests (LatticeCluster CRD and resource) will be sent
+    /// These manifests (Flux config, CiliumNetworkPolicy) will be sent
     /// to the agent via ApplyManifestsCommand after PivotComplete is received.
+    /// Note: LatticeCluster CRD and instance are delivered via bootstrap webhook.
     pub fn set_post_pivot_manifests(&self, cluster_name: &str, manifests: PostPivotManifests) {
         info!(cluster = %cluster_name, "Stored post-pivot manifests");
         self.post_pivot_manifests
@@ -349,45 +260,31 @@ impl AgentRegistry {
         self.post_pivot_manifests.contains_key(cluster_name)
     }
 
-    /// Store CAPI manifests received during unpivot
+    /// Store CAPI manifests received from child during unpivot
     ///
-    /// These manifests need to be applied to this (parent) cluster so CAPI
-    /// can properly delete the infrastructure when the child terminates.
-    /// Also marks unpivot as pending for this cluster.
-    pub fn set_unpivot_manifests(&self, cluster_name: &str, manifests: Vec<Vec<u8>>) {
+    /// Called when child sends ClusterDeleting with its exported CAPI resources.
+    /// The controller will import these before cleanup.
+    pub fn set_unpivot_manifests(&self, cluster_name: &str, manifests: UnpivotManifests) {
         info!(
             cluster = %cluster_name,
-            count = manifests.len(),
-            "Storing unpivot manifests"
+            manifest_count = manifests.capi_manifests.len(),
+            namespace = %manifests.namespace,
+            "Stored unpivot manifests from child"
         );
         self.unpivot_manifests
             .insert(cluster_name.to_string(), manifests);
-        self.unpivot_pending.insert(cluster_name.to_string());
     }
 
     /// Get and remove unpivot manifests for a cluster
     ///
     /// Returns None if no manifests were stored or if they've already been consumed.
-    /// Note: unpivot_pending remains true until clear_unpivot_pending is called.
-    pub fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<Vec<Vec<u8>>> {
+    pub fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<UnpivotManifests> {
         self.unpivot_manifests.remove(cluster_name).map(|(_, m)| m)
     }
 
     /// Check if unpivot manifests are stored for a cluster
     pub fn has_unpivot_manifests(&self, cluster_name: &str) -> bool {
         self.unpivot_manifests.contains_key(cluster_name)
-    }
-
-    /// Check if unpivot is pending for a cluster (manifests received but cleanup not done)
-    pub fn is_unpivot_pending(&self, cluster_name: &str) -> bool {
-        self.unpivot_pending.contains(cluster_name)
-    }
-
-    /// Clear unpivot pending state after cleanup is complete
-    pub fn clear_unpivot_pending(&self, cluster_name: &str) {
-        if self.unpivot_pending.remove(cluster_name).is_some() {
-            info!(cluster = %cluster_name, "Unpivot cleanup complete");
-        }
     }
 }
 
@@ -790,172 +687,5 @@ mod tests {
     fn test_registry_default() {
         let registry = AgentRegistry::default();
         assert!(registry.is_empty());
-    }
-
-    // ==========================================================================
-    // ProxyChannels Tests
-    // ==========================================================================
-
-    #[test]
-    fn test_proxy_channels_creation() {
-        let (tx, _rx) = mpsc::channel(32);
-        let channels = ProxyChannels::new(tx);
-        assert!(channels.pending.try_read().is_ok());
-    }
-
-    #[test]
-    fn test_proxy_channels_next_request_id() {
-        let (tx, _rx) = mpsc::channel(32);
-        let channels = ProxyChannels::new(tx);
-
-        let id1 = channels.next_request_id("my-cluster");
-        let id2 = channels.next_request_id("my-cluster");
-        let id3 = channels.next_request_id("my-cluster");
-
-        assert!(id1.contains("my-cluster"));
-        assert!(id1.contains("-central-"));
-        assert_ne!(id1, id2);
-        assert_ne!(id2, id3);
-    }
-
-    #[test]
-    fn test_proxy_channels_request_id_format() {
-        let (tx, _rx) = mpsc::channel(32);
-        let channels = ProxyChannels::new(tx);
-
-        let id = channels.next_request_id("test-cluster");
-        // Format: "{cluster_name}-central-{counter}"
-        assert!(id.starts_with("test-cluster-central-"));
-    }
-
-    #[tokio::test]
-    async fn test_proxy_channels_handle_response() {
-        use crate::proto::KubeProxyResponse;
-
-        let (tx, _rx) = mpsc::channel(32);
-        let channels = ProxyChannels::new(tx);
-
-        // Create a pending request with mpsc channel for streaming
-        let request_id = channels.next_request_id("test");
-        let (response_tx, mut response_rx) = mpsc::channel(16);
-
-        channels
-            .register_pending(request_id.clone(), response_tx)
-            .await;
-
-        // Handle a non-streaming response (is_final implied)
-        channels
-            .handle_response(KubeProxyResponse {
-                request_id: request_id.clone(),
-                status_code: 200,
-                headers: vec![],
-                body: b"test".to_vec(),
-                error: String::new(),
-                is_streaming: false,
-                is_final: false,
-            })
-            .await;
-
-        // Response should be received
-        let response = response_rx.recv().await.expect("should receive response");
-        assert_eq!(response.status_code, 200);
-        assert_eq!(response.body, b"test");
-    }
-
-    #[tokio::test]
-    async fn test_proxy_channels_streaming_response() {
-        use crate::proto::KubeProxyResponse;
-
-        let (tx, _rx) = mpsc::channel(32);
-        let channels = ProxyChannels::new(tx);
-
-        let request_id = channels.next_request_id("test");
-        let (response_tx, mut response_rx) = mpsc::channel(16);
-
-        channels
-            .register_pending(request_id.clone(), response_tx)
-            .await;
-
-        // First chunk (streaming, not final)
-        channels
-            .handle_response(KubeProxyResponse {
-                request_id: request_id.clone(),
-                status_code: 200,
-                headers: vec![],
-                body: b"chunk1".to_vec(),
-                error: String::new(),
-                is_streaming: true,
-                is_final: false,
-            })
-            .await;
-
-        // Second chunk (final)
-        channels
-            .handle_response(KubeProxyResponse {
-                request_id: request_id.clone(),
-                status_code: 0,
-                headers: vec![],
-                body: b"chunk2".to_vec(),
-                error: String::new(),
-                is_streaming: true,
-                is_final: true,
-            })
-            .await;
-
-        // Both chunks should be received
-        let chunk1 = response_rx.recv().await.expect("should receive chunk1");
-        assert_eq!(chunk1.body, b"chunk1");
-        assert!(!chunk1.is_final);
-
-        let chunk2 = response_rx.recv().await.expect("should receive chunk2");
-        assert_eq!(chunk2.body, b"chunk2");
-        assert!(chunk2.is_final);
-    }
-
-    #[tokio::test]
-    async fn test_proxy_channels_handle_response_unknown_id() {
-        use crate::proto::KubeProxyResponse;
-
-        let (tx, _rx) = mpsc::channel(32);
-        let channels = ProxyChannels::new(tx);
-
-        // Handle response for unknown request - should not panic
-        channels
-            .handle_response(KubeProxyResponse {
-                request_id: "unknown-id".to_string(),
-                status_code: 200,
-                headers: vec![],
-                body: vec![],
-                error: String::new(),
-                is_streaming: false,
-                is_final: false,
-            })
-            .await;
-        // No assertion needed - just verify it doesn't panic
-    }
-
-    #[test]
-    fn test_registry_proxy_channels() {
-        let registry = AgentRegistry::new();
-        let (tx, _rx) = mpsc::channel(32);
-        let channels = std::sync::Arc::new(ProxyChannels::new(tx));
-
-        // Initially no channels
-        assert!(registry.get_proxy_channels("my-cluster").is_none());
-
-        // Register channels
-        registry.register_proxy_channels("my-cluster", channels.clone());
-        assert!(registry.get_proxy_channels("my-cluster").is_some());
-
-        // Remove channels
-        registry.remove_proxy_channels("my-cluster");
-        assert!(registry.get_proxy_channels("my-cluster").is_none());
-    }
-
-    #[test]
-    fn test_registry_remove_nonexistent_proxy_channels() {
-        let registry = AgentRegistry::new();
-        // Should not panic
-        registry.remove_proxy_channels("nonexistent");
     }
 }

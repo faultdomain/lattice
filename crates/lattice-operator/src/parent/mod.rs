@@ -22,7 +22,6 @@ use tracing::{error, info};
 
 use crate::agent::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::agent::mtls::ServerMtlsConfig;
-use crate::agent::proxy::start_central_proxy;
 use crate::agent::server::AgentServer;
 use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
@@ -38,8 +37,6 @@ pub struct ParentConfig {
     pub bootstrap_addr: SocketAddr,
     /// Address for the gRPC server
     pub grpc_addr: SocketAddr,
-    /// Port for the central K8s API proxy (internal ClusterIP service)
-    pub central_proxy_port: u16,
     /// Bootstrap token TTL
     pub token_ttl: Duration,
     /// SANs for server certificates (hostnames/IPs that agents will use to connect)
@@ -59,7 +56,6 @@ impl Default for ParentConfig {
             grpc_addr: format!("0.0.0.0:{}", crate::DEFAULT_GRPC_PORT)
                 .parse()
                 .expect("hardcoded socket address is valid"),
-            central_proxy_port: crate::agent::CENTRAL_PROXY_PORT,
             token_ttl: Duration::from_secs(3600),
             server_sans: vec![
                 "localhost".to_string(),
@@ -69,8 +65,6 @@ impl Default for ParentConfig {
                 "127.0.0.1".to_string(),
                 // Webhook service DNS name for in-cluster webhook calls
                 "lattice-webhook.lattice-system.svc".to_string(),
-                // Central proxy service DNS name for CAPI to reach child clusters
-                "lattice-proxy.lattice-system.svc".to_string(),
             ],
             image: std::env::var("LATTICE_IMAGE")
                 .unwrap_or_else(|_| "ghcr.io/evan-hines-js/lattice:latest".to_string()),
@@ -371,6 +365,9 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!(sans = ?self.config.server_sans, "Generated server certificate");
 
+        // Clone kube_client for gRPC server before it's moved into WebhookState
+        let grpc_kube_client = kube_client.clone();
+
         // Create routers
         let bootstrap_router = bootstrap_router(bootstrap_state);
         let webhook_state = Arc::new(WebhookState::new(kube_client));
@@ -414,37 +411,13 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!(addr = %grpc_addr, "Starting gRPC server");
         let grpc_handle = tokio::spawn(async move {
-            if let Err(e) = AgentServer::serve_with_mtls(registry, grpc_addr, mtls_config).await {
+            if let Err(e) =
+                AgentServer::serve_with_mtls(registry, grpc_addr, mtls_config, grpc_kube_client)
+                    .await
+            {
                 error!(error = %e, "gRPC server error");
             }
         });
-
-        // Start central K8s API proxy (internal HTTPS, for CAPI to reach workload clusters)
-        let central_proxy_port = self.config.central_proxy_port;
-        let central_registry = self.agent_registry.clone();
-
-        // Generate cert for central proxy (same SANs as other servers)
-        let (proxy_cert_pem, proxy_key_pem) = self
-            .ca
-            .generate_server_cert(&sans)
-            .map_err(|e| CellServerError::CertGeneration(e.to_string()))?;
-
-        match start_central_proxy(
-            central_registry,
-            central_proxy_port,
-            proxy_cert_pem,
-            proxy_key_pem,
-        )
-        .await
-        {
-            Ok(port) => {
-                info!(port = port, "Central K8s API proxy (HTTPS) started");
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to start central proxy");
-                // Don't fail startup - CAPI proxy is optional for self-managed clusters
-            }
-        }
 
         // Store handles
         *self.handles.write().await = Some(ServerHandles {

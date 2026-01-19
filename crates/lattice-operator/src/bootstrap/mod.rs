@@ -176,8 +176,10 @@ pub trait ManifestGenerator: Send + Sync {
     /// Generate bootstrap manifests for a cluster
     ///
     /// These manifests are applied during initial bootstrap (before pivot).
-    /// They include CNI and operator - NOT LatticeCluster CRD (that comes post-pivot
-    /// via ApplyManifestsCommand to avoid fighting with pivot).
+    /// They include CNI, operator, and LatticeCluster CRD/instance.
+    ///
+    /// Note: The LatticeCluster instance is added by generate_response(), not here.
+    /// This method generates: Cilium, operator deployment, namespace, RBAC, etc.
     ///
     /// Environment variables set on the operator:
     /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on

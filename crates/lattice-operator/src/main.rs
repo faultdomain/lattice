@@ -979,59 +979,30 @@ async fn start_agent_with_retry(
     }
 }
 
-/// Handle an unpivot request by exporting CAPI resources and sending them to the parent
+/// Handle an unpivot request by notifying the parent to clean up CAPI resources
+///
+/// With --to-directory pivot, parent keeps paused CAPI resources.
+/// Child just needs to notify parent to unpause and delete.
 async fn handle_unpivot_request(
     agent: &AgentClient,
     request: &lattice_operator::controller::UnpivotRequest,
 ) -> Result<(), String> {
-    use lattice_common::clusterctl::export_to_directory;
-    use std::path::Path;
-
     tracing::info!(
         cluster = %request.cluster_name,
         namespace = %request.namespace,
-        "Starting unpivot: exporting CAPI resources"
+        "Notifying parent of cluster deletion"
     );
 
-    // Create temp directory for export
-    let export_dir = format!("/tmp/lattice-unpivot-{}", request.cluster_name);
-    let export_path = Path::new(&export_dir);
-
-    // Notify parent that unpivot is starting
+    // Notify parent that this cluster is being deleted
+    // Parent will unpause CAPI resources and trigger infrastructure cleanup
     agent
-        .send_unpivot_started(&request.namespace)
+        .send_cluster_deleting(&request.namespace)
         .await
-        .map_err(|e| format!("Failed to send unpivot started: {}", e))?;
-
-    // Export CAPI resources using clusterctl move --to-directory
-    let manifests = export_to_directory(None, &request.namespace, export_path)
-        .await
-        .map_err(|e| format!("Failed to export CAPI resources: {}", e))?;
+        .map_err(|e| format!("Failed to send cluster deleting: {}", e))?;
 
     tracing::info!(
         cluster = %request.cluster_name,
-        count = manifests.len(),
-        "Exported CAPI manifests, sending to parent"
-    );
-
-    // Send manifests to parent
-    agent
-        .send_unpivot_manifests(manifests.clone())
-        .await
-        .map_err(|e| format!("Failed to send unpivot manifests: {}", e))?;
-
-    // Send completion notification
-    agent
-        .send_unpivot_complete(true, "", manifests.len() as i32)
-        .await
-        .map_err(|e| format!("Failed to send unpivot complete: {}", e))?;
-
-    // Clean up temp directory
-    let _ = std::fs::remove_dir_all(&export_dir);
-
-    tracing::info!(
-        cluster = %request.cluster_name,
-        "Unpivot completed successfully"
+        "Parent notified of cluster deletion"
     );
 
     Ok(())

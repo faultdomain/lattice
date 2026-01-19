@@ -322,7 +322,54 @@ pub async fn import_from_manifests(
     result
 }
 
+/// Export CAPI resources for pivot using --to-directory
+///
+/// This is the recommended way to export resources during pivot:
+/// 1. Creates a temporary directory
+/// 2. Runs `clusterctl move --to-directory` (leaves paused resources on source)
+/// 3. Returns manifest bytes for sending via gRPC
+/// 4. Cleans up temp directory
+///
+/// # Arguments
+/// * `kubeconfig` - Optional path to source cluster kubeconfig
+/// * `namespace` - CAPI namespace containing resources to export
+/// * `cluster_name` - Name of the cluster being exported (for temp dir naming)
+///
+/// # Returns
+/// Ok(Vec<Vec<u8>>) containing the raw YAML content of each exported file
+pub async fn export_for_pivot(
+    kubeconfig: Option<&Path>,
+    namespace: &str,
+    cluster_name: &str,
+) -> Result<Vec<Vec<u8>>, ClusterctlError> {
+    // Create temp directory for export
+    let export_path = std::env::temp_dir().join(format!(
+        "lattice-export-{}-{}",
+        cluster_name,
+        std::process::id()
+    ));
+
+    let result = export_to_directory(kubeconfig, namespace, &export_path).await;
+
+    // Clean up temp directory regardless of success/failure
+    let _ = std::fs::remove_dir_all(&export_path);
+
+    result
+}
+
 /// Unpause a CAPI cluster
+///
+/// Call this before retrying pivot if the previous attempt failed.
+/// clusterctl move --to-directory pauses the cluster as part of the operation.
+pub async fn unpause_capi_cluster(
+    kubeconfig: Option<&Path>,
+    namespace: &str,
+    cluster_name: &str,
+) -> Result<(), ClusterctlError> {
+    unpause_cluster(kubeconfig, namespace, cluster_name).await
+}
+
+/// Unpause a CAPI cluster (internal)
 ///
 /// clusterctl move pauses clusters during the move operation. If the move fails
 /// partway through, the cluster may be left in a paused state, preventing retries.

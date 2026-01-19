@@ -275,6 +275,99 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
 
         Ok(total)
     }
+
+    /// Import CAPI manifests received via gRPC
+    ///
+    /// This is the new pivot flow using --to-directory:
+    /// 1. Cell exports manifests via `clusterctl move --to-directory`
+    /// 2. Cell sends manifests to agent via gRPC PivotManifestsCommand
+    /// 3. Agent saves manifests to temp directory
+    /// 4. Agent imports via `clusterctl move --from-directory`
+    ///
+    /// This approach keeps paused resources on the parent, simplifying unpivot.
+    pub async fn import_capi_manifests(
+        &self,
+        manifests: &[Vec<u8>],
+        cluster_name: &str,
+    ) -> Result<usize, PivotError> {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        if manifests.is_empty() {
+            return Err(PivotError::Internal("no manifests to import".to_string()));
+        }
+
+        // Create temp directory for manifests
+        let temp_dir = std::env::temp_dir().join(format!(
+            "lattice-pivot-{}-{}",
+            cluster_name,
+            std::process::id()
+        ));
+
+        std::fs::create_dir_all(&temp_dir).map_err(|e| {
+            PivotError::Internal(format!("failed to create temp dir: {}", e))
+        })?;
+
+        info!(
+            manifest_count = manifests.len(),
+            temp_dir = %temp_dir.display(),
+            "Saving CAPI manifests to temp directory"
+        );
+
+        // Write each manifest to a file
+        let mut saved_count = 0;
+        for (i, manifest) in manifests.iter().enumerate() {
+            let filename = temp_dir.join(format!("manifest-{:04}.yaml", i));
+            let mut file = std::fs::File::create(&filename).map_err(|e| {
+                PivotError::Internal(format!("failed to create manifest file: {}", e))
+            })?;
+            file.write_all(manifest).map_err(|e| {
+                PivotError::Internal(format!("failed to write manifest: {}", e))
+            })?;
+            saved_count += 1;
+        }
+
+        info!(
+            saved_count = saved_count,
+            "Manifests saved, running clusterctl move --from-directory"
+        );
+
+        // Run clusterctl move --from-directory to import resources
+        // The agent is running in-cluster, so clusterctl uses the default in-cluster config
+        let output = tokio::process::Command::new("clusterctl")
+            .arg("move")
+            .arg("--from-directory")
+            .arg(&temp_dir)
+            .arg("--namespace")
+            .arg(&self.capi_namespace)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| PivotError::ClusterctlFailed(format!("failed to run clusterctl: {}", e)))?;
+
+        // Clean up temp directory
+        if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
+            debug!(error = %e, "Failed to clean up temp directory (non-fatal)");
+        }
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PivotError::ClusterctlFailed(format!(
+                "clusterctl move failed: {}",
+                stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        info!(output = %stdout.trim(), "clusterctl move completed successfully");
+
+        // Wait briefly for resources to appear, then count them
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let count = self.count_capi_resources().await.unwrap_or(saved_count as u32);
+
+        Ok(count as usize)
+    }
 }
 
 impl Default for AgentPivotHandler<RealCommandRunner> {
@@ -408,118 +501,6 @@ pub async fn patch_kubeconfig_for_self_management(
     );
     Ok(())
 }
-
-/// Patch a child cluster's kubeconfig to use the central proxy
-///
-/// Updates the server URL to point to the internal central proxy service
-/// with path-based routing: `/cluster/{cluster_name}`. Includes CA cert for TLS.
-pub async fn patch_kubeconfig_for_child_cluster(
-    cluster_name: &str,
-    namespace: &str,
-    proxy_url: &str,
-    ca_cert_pem: &str,
-) -> Result<(), PivotError> {
-    let client = Client::try_default()
-        .await
-        .map_err(|e| PivotError::Internal(format!("failed to create k8s client: {}", e)))?;
-
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
-    let secret_name = format!("{}-kubeconfig", cluster_name);
-
-    info!(
-        cluster = %cluster_name,
-        namespace = %namespace,
-        secret = %secret_name,
-        "Patching kubeconfig for child cluster to use central proxy"
-    );
-
-    let secret = secrets.get(&secret_name).await.map_err(|e| {
-        PivotError::Internal(format!(
-            "failed to get kubeconfig secret '{}': {}",
-            secret_name, e
-        ))
-    })?;
-
-    let kubeconfig_bytes = secret
-        .data
-        .as_ref()
-        .and_then(|d| d.get("value"))
-        .ok_or_else(|| PivotError::Internal("kubeconfig secret missing 'value' key".to_string()))?;
-
-    let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
-        .map_err(|e| PivotError::Internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
-
-    let mut kubeconfig: serde_yaml::Value = serde_yaml::from_str(&kubeconfig_str)
-        .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
-
-    let proxy_server = format!("{}/cluster/{}", proxy_url, cluster_name);
-
-    let mut updated_count = 0;
-    if let Some(clusters) = kubeconfig
-        .get_mut("clusters")
-        .and_then(|c| c.as_sequence_mut())
-    {
-        for cluster in clusters {
-            if let Some(cluster_config) = cluster.get_mut("cluster") {
-                if let Some(server) = cluster_config.get_mut("server") {
-                    let old_server = server.as_str().unwrap_or("unknown").to_string();
-                    if !old_server.contains("/cluster/") {
-                        *server = serde_yaml::Value::String(proxy_server.clone());
-                        let ca_cert_b64 = STANDARD.encode(ca_cert_pem.as_bytes());
-                        cluster_config["certificate-authority-data"] =
-                            serde_yaml::Value::String(ca_cert_b64);
-                        info!(
-                            cluster = %cluster_name,
-                            old_server = %old_server,
-                            new_server = %proxy_server,
-                            "Updated kubeconfig server URL to use central proxy"
-                        );
-                        updated_count += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    if updated_count == 0 {
-        debug!(
-            cluster = %cluster_name,
-            "Kubeconfig already uses central proxy, skipping patch"
-        );
-        return Ok(());
-    }
-
-    let updated_kubeconfig = serde_yaml::to_string(&kubeconfig)
-        .map_err(|e| PivotError::Internal(format!("failed to serialize kubeconfig: {}", e)))?;
-
-    let encoded = STANDARD.encode(updated_kubeconfig.as_bytes());
-
-    let patch = serde_json::json!({
-        "data": {
-            "value": encoded
-        }
-    });
-
-    secrets
-        .patch(
-            &secret_name,
-            &PatchParams::apply("lattice"),
-            &Patch::Merge(&patch),
-        )
-        .await
-        .map_err(|e| PivotError::Internal(format!("failed to patch kubeconfig secret: {}", e)))?;
-
-    info!(
-        cluster = %cluster_name,
-        updated_servers = updated_count,
-        "Kubeconfig patched to use central proxy"
-    );
-
-    Ok(())
-}
-
-/// URL for the internal central proxy service (HTTPS)
-pub const CENTRAL_PROXY_SERVICE_URL: &str = "https://lattice-proxy.lattice-system.svc:8081";
 
 #[cfg(test)]
 mod tests {

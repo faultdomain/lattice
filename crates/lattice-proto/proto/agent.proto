@@ -4,8 +4,10 @@
 // parent cell (management cluster). All connections are initiated OUTBOUND
 // from workload clusters - cells never connect to agents.
 //
-// Key design: The agent exposes a K8s API proxy through gRPC, allowing the
-// cell to run `clusterctl move --to-kubeconfig` directly through the tunnel.
+// Pivot flow: Parent pauses CAPI → exports via --to-directory → sends to child
+//             → child imports → child unpauses
+// Unpivot flow: Child pauses CAPI → exports via --to-directory → sends to parent
+//               → parent imports → parent unpauses → parent deletes
 
 syntax = "proto3";
 package lattice.agent.v1;
@@ -19,72 +21,11 @@ import "google/protobuf/timestamp.proto";
 // LatticeAgent service - agent connects to cell
 //
 // The agent initiates an outbound connection to the cell's gRPC server.
-// This establishes streams for control messages and K8s API proxying.
+// This establishes a stream for control messages.
 service LatticeAgent {
   // Bidirectional stream for control messages (heartbeat, commands, status)
   // Agent initiates, maintains persistent connection
   rpc StreamMessages(stream AgentMessage) returns (stream CellCommand);
-
-  // K8s API proxy - allows cell to execute kubectl commands on agent's cluster
-  // Used for: clusterctl move --to-kubeconfig, debugging, monitoring
-  // Agent calls this to register, cell sends requests, agent returns responses
-  rpc ProxyKubernetesAPI(stream KubeProxyResponse) returns (stream KubeProxyRequest);
-}
-
-// =============================================================================
-// K8s API Proxy Messages
-// =============================================================================
-
-// Request from cell to agent - proxied K8s API call
-message KubeProxyRequest {
-  // Unique request ID for correlation
-  string request_id = 1;
-
-  // HTTP method (GET, POST, PUT, PATCH, DELETE, etc.)
-  string method = 2;
-
-  // Request path (e.g., /api/v1/namespaces/default/pods)
-  string path = 3;
-
-  // HTTP headers (repeated key-value pairs)
-  repeated HttpHeader headers = 4;
-
-  // Request body (for POST, PUT, PATCH)
-  bytes body = 5;
-}
-
-// Response from agent to cell - proxied K8s API response
-//
-// For streaming responses (like K8s watch), multiple messages with the same
-// request_id will be sent. The first message contains status_code and headers.
-// Subsequent messages contain body chunks. The final message has is_final=true.
-message KubeProxyResponse {
-  // Correlation ID matching the request
-  string request_id = 1;
-
-  // HTTP status code (200, 404, 500, etc.) - only set in first message
-  int32 status_code = 2;
-
-  // Response headers - only set in first message
-  repeated HttpHeader headers = 3;
-
-  // Response body (or chunk for streaming responses)
-  bytes body = 4;
-
-  // Error message if proxy itself failed (not K8s API error)
-  string error = 5;
-
-  // True if this is a streaming response (more chunks may follow)
-  bool is_streaming = 6;
-
-  // True if this is the final chunk of a streaming response
-  bool is_final = 7;
-}
-
-// HTTP header key-value pair
-message HttpHeader {
-  string key = 1;
-  string value = 2;
 }
 
 // =============================================================================
@@ -104,10 +45,21 @@ message AgentMessage {
     Heartbeat heartbeat = 6;
     ClusterHealth cluster_health = 7;
     StatusResponse status_response = 8;
-    UnpivotStarted unpivot_started = 9;
-    UnpivotManifests unpivot_manifests = 10;
-    UnpivotComplete unpivot_complete = 11;
+    ClusterDeleting cluster_deleting = 9;
   }
+}
+
+// Sent when cluster deletion is initiated (unpivot)
+//
+// Unpivot is pivot in reverse: child pauses CAPI, exports via --to-directory,
+// sends manifests to parent. Parent imports, unpauses, then deletes.
+// This ensures parent has all resources including any nodes added post-pivot.
+message ClusterDeleting {
+  // Namespace where CAPI resources live
+  string namespace = 1;
+  // CAPI manifests exported via clusterctl move --to-directory
+  // Parent will import these before cleanup to get any new nodes/machines
+  repeated bytes capi_manifests = 2;
 }
 
 // Sent when agent first connects to cell
@@ -145,39 +97,6 @@ message PivotComplete {
   string error_message = 2;
   // Number of CAPI resources imported
   int32 resources_imported = 3;
-}
-
-// Sent when agent begins unpivot (LatticeCluster deletion detected)
-//
-// Flow:
-// 1. User deletes LatticeCluster on self-managed cluster
-// 2. Agent finalizer triggers, runs clusterctl move --to-directory
-// 3. Agent sends UnpivotStarted
-// 4. Agent sends UnpivotManifests with CAPI resources
-// 5. Cell applies manifests, sends UnpivotAck
-// 6. Agent sends UnpivotComplete, removes finalizer
-// 7. Cluster terminates, cell's CAPI cleans up infrastructure
-message UnpivotStarted {
-  // Namespace where CAPI resources are being exported from
-  string source_namespace = 1;
-}
-
-// CAPI manifests being sent to parent during unpivot
-message UnpivotManifests {
-  // YAML manifests exported via clusterctl move --to-directory
-  repeated bytes manifests = 1;
-  // Total number of resources being sent
-  int32 total_resources = 2;
-}
-
-// Sent when unpivot operation completes
-message UnpivotComplete {
-  // Whether unpivot succeeded
-  bool success = 1;
-  // Error message if success=false
-  string error_message = 2;
-  // Number of CAPI resources exported
-  int32 resources_exported = 3;
 }
 
 // Periodic heartbeat with agent state
@@ -245,8 +164,6 @@ enum AgentState {
   AGENT_STATE_DEGRADED = 4;
   // Cluster is in a failed state
   AGENT_STATE_FAILED = 5;
-  // CAPI resources are being exported back to parent (unpivot in progress)
-  AGENT_STATE_UNPIVOTING = 6;
 }
 
 // =============================================================================
@@ -262,7 +179,7 @@ message CellCommand {
     ApplyManifestsCommand apply_manifests = 2;
     StartPivotCommand start_pivot = 3;
     StatusRequest status_request = 4;
-    UnpivotAck unpivot_ack = 5;
+    PivotManifestsCommand pivot_manifests = 5;
   }
 }
 
@@ -276,13 +193,14 @@ message ApplyManifestsCommand {
   repeated bytes manifests = 1;
 }
 
-// Command to start pivot - cell will use K8s proxy for clusterctl move
+// Command to start pivot - prepares agent for CAPI import
 //
 // Flow:
 // 1. Cell sends StartPivotCommand
 // 2. Agent sends PivotStarted, enters PIVOTING state
-// 3. Cell runs clusterctl move with proxy kubeconfig (via ProxyKubernetesAPI)
-// 4. Agent detects CAPI resources imported, sends PivotComplete
+// 3. Cell sends PivotManifestsCommand with CAPI resources
+// 4. Agent imports via clusterctl move --from-directory
+// 5. Agent sends PivotComplete
 message StartPivotCommand {
   // Source namespace on cell where CAPI resources currently live
   string source_namespace = 1;
@@ -292,22 +210,23 @@ message StartPivotCommand {
   string cluster_name = 3;
 }
 
+// CAPI manifests to import during pivot
+//
+// Sent after StartPivotCommand. Contains manifests exported via
+// `clusterctl move --to-directory` on the parent.
+message PivotManifestsCommand {
+  // YAML manifests exported via clusterctl move --to-directory
+  repeated bytes manifests = 1;
+  // Namespace to import into
+  string target_namespace = 2;
+  // Cluster name
+  string cluster_name = 3;
+}
+
 // Request current cluster status
 message StatusRequest {
   // Whether to include detailed node information
   bool include_nodes = 1;
   // Whether to include CAPI resource status
   bool include_capi = 2;
-}
-
-// Acknowledgment that cell has applied unpivot manifests
-//
-// Agent waits for this before removing finalizer and terminating
-message UnpivotAck {
-  // Whether manifests were successfully applied
-  bool success = 1;
-  // Error message if success=false
-  string error_message = 2;
-  // Number of resources applied
-  int32 resources_applied = 3;
 }
