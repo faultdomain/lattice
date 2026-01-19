@@ -27,12 +27,14 @@
 
 use crate::crd::LatticeService;
 use crate::graph::ServiceGraph;
-use crate::ingress::{GeneratedIngress, IngressCompiler};
+use crate::ingress::{
+    GeneratedIngress, GeneratedTrafficPolicies, IngressCompiler, TrafficPolicyCompiler,
+};
 use crate::policy::{AuthorizationPolicy, GeneratedPolicies, PolicyCompiler};
 use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
 
 // Re-export types for convenience
-pub use crate::ingress::{Certificate, Gateway, HttpRoute};
+pub use crate::ingress::{BackendTrafficPolicy, Certificate, Gateway, HttpRoute};
 pub use crate::policy::{CiliumNetworkPolicy, ServiceEntry};
 pub use crate::workload::{Deployment, HorizontalPodAutoscaler, Service, ServiceAccount};
 
@@ -45,6 +47,8 @@ pub struct CompiledService {
     pub policies: GeneratedPolicies,
     /// Generated ingress resources (Gateway, HTTPRoute, Certificate)
     pub ingress: GeneratedIngress,
+    /// Generated traffic policies (BackendTrafficPolicy for retries, timeouts, rate limits)
+    pub traffic_policies: GeneratedTrafficPolicies,
 }
 
 impl CompiledService {
@@ -55,7 +59,10 @@ impl CompiledService {
 
     /// Check if any resources were generated
     pub fn is_empty(&self) -> bool {
-        self.workloads.is_empty() && self.policies.is_empty() && self.ingress.is_empty()
+        self.workloads.is_empty()
+            && self.policies.is_empty()
+            && self.ingress.is_empty()
+            && self.traffic_policies.is_empty()
     }
 
     /// Total count of all generated resources
@@ -70,7 +77,10 @@ impl CompiledService {
         .filter(|&&x| x)
         .count();
 
-        workload_count + self.policies.total_count() + self.ingress.total_count()
+        workload_count
+            + self.policies.total_count()
+            + self.ingress.total_count()
+            + self.traffic_policies.total_count()
     }
 }
 
@@ -104,6 +114,7 @@ impl<'a> ServiceCompiler<'a> {
     /// - Workloads: Deployment, Service, ServiceAccount, HPA
     /// - Policies: AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
     /// - Ingress: Gateway, HTTPRoute, Certificate (if ingress configured)
+    /// - Traffic: BackendTrafficPolicy for retries, timeouts, rate limits
     ///
     /// The environment (and namespace) comes from `spec.environment`, since
     /// LatticeService is cluster-scoped.
@@ -117,6 +128,10 @@ impl<'a> ServiceCompiler<'a> {
         let workloads = WorkloadCompiler::compile(service, namespace);
         let policy_compiler = PolicyCompiler::new(self.graph, &self.trust_domain);
         let mut policies = policy_compiler.compile(name, namespace, env);
+
+        // Compile traffic policies from resource dependencies
+        let traffic_policies =
+            TrafficPolicyCompiler::compile(name, namespace, &service.spec.resources);
 
         // Compile ingress resources if configured
         let ingress = if let Some(ref ingress_spec) = service.spec.ingress {
@@ -153,6 +168,7 @@ impl<'a> ServiceCompiler<'a> {
             workloads,
             policies,
             ingress,
+            traffic_policies,
         }
     }
 

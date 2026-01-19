@@ -32,7 +32,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use lattice_common::crd::{IngressSpec, IngressTls, PathMatchType, TlsMode};
+use lattice_common::crd::{
+    CircuitBreakerPolicy, InboundTrafficPolicy, IngressSpec, IngressTls, OutboundTrafficPolicy,
+    PathMatchType, RateLimitSpec, ResourceSpec, ResourceType, RetryPolicy, TimeoutPolicy, TlsMode,
+};
 
 // =============================================================================
 // Gateway API Types
@@ -531,6 +534,430 @@ impl IngressCompiler {
 }
 
 // =============================================================================
+// Envoy Gateway BackendTrafficPolicy
+// =============================================================================
+
+/// Envoy Gateway BackendTrafficPolicy for traffic shaping
+///
+/// Used for retries, timeouts, circuit breaking, and rate limiting on
+/// east-west service-to-service traffic.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendTrafficPolicy {
+    /// API version
+    pub api_version: String,
+    /// Kind
+    pub kind: String,
+    /// Metadata
+    pub metadata: GatewayMetadata,
+    /// Spec
+    pub spec: BackendTrafficPolicySpec,
+}
+
+/// BackendTrafficPolicy spec
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendTrafficPolicySpec {
+    /// Target references (Service or HTTPRoute)
+    pub target_refs: Vec<PolicyTargetRef>,
+    /// Retry configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<PolicyRetry>,
+    /// Timeout configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<PolicyTimeout>,
+    /// Circuit breaker configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<PolicyCircuitBreaker>,
+    /// Rate limit configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<PolicyRateLimit>,
+}
+
+/// Policy target reference
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyTargetRef {
+    /// API group
+    pub group: String,
+    /// Kind (Service, HTTPRoute)
+    pub kind: String,
+    /// Resource name
+    pub name: String,
+}
+
+/// Retry configuration for BackendTrafficPolicy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyRetry {
+    /// Number of retries
+    pub num_retries: u32,
+    /// Per-retry settings
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_retry: Option<PerRetryPolicy>,
+    /// Retry conditions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_on: Option<RetryOn>,
+}
+
+/// Per-retry configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerRetryPolicy {
+    /// Timeout per retry attempt
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    /// Backoff configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_off: Option<BackOffPolicy>,
+}
+
+/// Backoff configuration for retries
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackOffPolicy {
+    /// Base interval for backoff
+    pub base_interval: String,
+    /// Maximum interval for backoff
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_interval: Option<String>,
+}
+
+/// Retry trigger conditions
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryOn {
+    /// HTTP status codes to retry on
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_status_codes: Vec<u16>,
+    /// Trigger conditions (connect-failure, retriable-status-codes, etc.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<String>,
+}
+
+/// Timeout configuration for BackendTrafficPolicy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyTimeout {
+    /// HTTP request timeout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<HttpTimeout>,
+}
+
+/// HTTP timeout settings
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpTimeout {
+    /// Request timeout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout: Option<String>,
+    /// Idle timeout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<String>,
+}
+
+/// Circuit breaker configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyCircuitBreaker {
+    /// Maximum pending requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending_requests: Option<u32>,
+    /// Maximum parallel requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel_requests: Option<u32>,
+    /// Maximum parallel retries
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel_retries: Option<u32>,
+}
+
+/// Rate limit configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyRateLimit {
+    /// Local rate limiting (in-proxy)
+    pub local: LocalRateLimit,
+}
+
+/// Local rate limit configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRateLimit {
+    /// Rate limit rules
+    pub rules: Vec<RateLimitRule>,
+}
+
+/// Rate limit rule
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitRule {
+    /// Rate limit
+    pub limit: RateLimitValue,
+}
+
+/// Rate limit value
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitValue {
+    /// Number of requests
+    pub requests: u32,
+    /// Time unit (Second, Minute, Hour)
+    pub unit: String,
+}
+
+// =============================================================================
+// Generated Traffic Policies
+// =============================================================================
+
+/// Collection of traffic policies generated for a service
+#[derive(Clone, Debug, Default)]
+pub struct GeneratedTrafficPolicies {
+    /// Outbound policies (caller-side: retries, timeouts, circuit breaker)
+    pub outbound: Vec<BackendTrafficPolicy>,
+    /// Inbound policies (callee-side: rate limits)
+    pub inbound: Vec<BackendTrafficPolicy>,
+}
+
+impl GeneratedTrafficPolicies {
+    /// Create empty collection
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if any policies were generated
+    pub fn is_empty(&self) -> bool {
+        self.outbound.is_empty() && self.inbound.is_empty()
+    }
+
+    /// Total count of all policies
+    pub fn total_count(&self) -> usize {
+        self.outbound.len() + self.inbound.len()
+    }
+}
+
+// =============================================================================
+// Traffic Policy Compiler
+// =============================================================================
+
+/// Compiler for generating Envoy Gateway BackendTrafficPolicy resources
+pub struct TrafficPolicyCompiler;
+
+impl TrafficPolicyCompiler {
+    /// Compile traffic policies for a service's resource dependencies
+    ///
+    /// # Arguments
+    /// * `service_name` - Name of the source LatticeService
+    /// * `namespace` - Target namespace
+    /// * `resources` - Map of resource name to ResourceSpec
+    ///
+    /// # Returns
+    /// Generated BackendTrafficPolicy resources
+    pub fn compile(
+        service_name: &str,
+        namespace: &str,
+        resources: &std::collections::BTreeMap<String, ResourceSpec>,
+    ) -> GeneratedTrafficPolicies {
+        let mut output = GeneratedTrafficPolicies::new();
+
+        for (resource_name, resource) in resources {
+            // Only process service resources
+            if !matches!(resource.type_, ResourceType::Service) {
+                continue;
+            }
+
+            // Compile outbound policy (caller-side)
+            if let Some(ref outbound) = resource.outbound {
+                if let Some(policy) =
+                    Self::compile_outbound_policy(service_name, resource_name, namespace, outbound)
+                {
+                    output.outbound.push(policy);
+                }
+            }
+
+            // Compile inbound policy (callee-side)
+            if let Some(ref inbound) = resource.inbound {
+                if let Some(policy) =
+                    Self::compile_inbound_policy(service_name, resource_name, namespace, inbound)
+                {
+                    output.inbound.push(policy);
+                }
+            }
+        }
+
+        output
+    }
+
+    /// Compile outbound BackendTrafficPolicy (retries, timeouts, circuit breaker)
+    fn compile_outbound_policy(
+        caller: &str,
+        callee: &str,
+        namespace: &str,
+        outbound: &OutboundTrafficPolicy,
+    ) -> Option<BackendTrafficPolicy> {
+        // Skip if no policies configured
+        if outbound.retries.is_none()
+            && outbound.timeout.is_none()
+            && outbound.circuit_breaker.is_none()
+        {
+            return None;
+        }
+
+        let policy_name = format!("{}-to-{}-traffic", caller, callee);
+
+        Some(BackendTrafficPolicy {
+            api_version: "gateway.envoyproxy.io/v1alpha1".to_string(),
+            kind: "BackendTrafficPolicy".to_string(),
+            metadata: GatewayMetadata::new(policy_name, namespace),
+            spec: BackendTrafficPolicySpec {
+                target_refs: vec![PolicyTargetRef {
+                    group: String::new(),
+                    kind: "Service".to_string(),
+                    name: callee.to_string(),
+                }],
+                retry: outbound.retries.as_ref().map(Self::convert_retry),
+                timeout: outbound.timeout.as_ref().map(Self::convert_timeout),
+                circuit_breaker: outbound
+                    .circuit_breaker
+                    .as_ref()
+                    .map(Self::convert_circuit_breaker),
+                rate_limit: None,
+            },
+        })
+    }
+
+    /// Compile inbound BackendTrafficPolicy (rate limits)
+    ///
+    /// # Arguments
+    /// * `service_name` - The service being compiled (receiving traffic)
+    /// * `caller_name` - The resource name representing the caller
+    fn compile_inbound_policy(
+        service_name: &str,
+        caller_name: &str,
+        namespace: &str,
+        inbound: &InboundTrafficPolicy,
+    ) -> Option<BackendTrafficPolicy> {
+        // Skip if no rate limit configured
+        let rate_limit = inbound.rate_limit.as_ref()?;
+
+        let policy_name = format!("{}-from-{}-ratelimit", service_name, caller_name);
+
+        Some(BackendTrafficPolicy {
+            api_version: "gateway.envoyproxy.io/v1alpha1".to_string(),
+            kind: "BackendTrafficPolicy".to_string(),
+            metadata: GatewayMetadata::new(policy_name, namespace),
+            spec: BackendTrafficPolicySpec {
+                target_refs: vec![PolicyTargetRef {
+                    group: String::new(),
+                    kind: "Service".to_string(),
+                    name: service_name.to_string(),
+                }],
+                retry: None,
+                timeout: None,
+                circuit_breaker: None,
+                rate_limit: Some(Self::convert_rate_limit(rate_limit)),
+            },
+        })
+    }
+
+    /// Convert CRD retry policy to Envoy Gateway format
+    fn convert_retry(retry: &RetryPolicy) -> PolicyRetry {
+        // Convert retry_on conditions to status codes and triggers
+        let mut http_status_codes = Vec::new();
+        let mut triggers = Vec::new();
+
+        for condition in &retry.retry_on {
+            match condition.as_str() {
+                "5xx" => http_status_codes.extend([500, 502, 503, 504]),
+                "gateway-error" => http_status_codes.extend([502, 503, 504]),
+                "reset"
+                | "connect-failure"
+                | "retriable-4xx"
+                | "refused-stream"
+                | "retriable-status-codes"
+                | "retriable-headers" => {
+                    triggers.push(condition.clone());
+                }
+                // Try to parse as status code
+                s if s.parse::<u16>().is_ok() => {
+                    if let Ok(code) = s.parse() {
+                        http_status_codes.push(code);
+                    }
+                }
+                _ => triggers.push(condition.clone()),
+            }
+        }
+
+        PolicyRetry {
+            num_retries: retry.attempts,
+            per_retry: retry
+                .per_try_timeout
+                .as_ref()
+                .map(|timeout| PerRetryPolicy {
+                    timeout: Some(timeout.clone()),
+                    back_off: Some(BackOffPolicy {
+                        base_interval: "100ms".to_string(),
+                        max_interval: Some("10s".to_string()),
+                    }),
+                }),
+            retry_on: if http_status_codes.is_empty() && triggers.is_empty() {
+                None
+            } else {
+                Some(RetryOn {
+                    http_status_codes,
+                    triggers,
+                })
+            },
+        }
+    }
+
+    /// Convert CRD timeout policy to Envoy Gateway format
+    fn convert_timeout(timeout: &TimeoutPolicy) -> PolicyTimeout {
+        PolicyTimeout {
+            http: Some(HttpTimeout {
+                request_timeout: Some(timeout.request.clone()),
+                idle_timeout: timeout.idle.clone(),
+            }),
+        }
+    }
+
+    /// Convert CRD circuit breaker to Envoy Gateway format
+    fn convert_circuit_breaker(cb: &CircuitBreakerPolicy) -> PolicyCircuitBreaker {
+        PolicyCircuitBreaker {
+            max_pending_requests: cb.max_pending_requests,
+            max_parallel_requests: cb.max_requests,
+            max_parallel_retries: cb.max_retries,
+        }
+    }
+
+    /// Convert CRD rate limit to Envoy Gateway format
+    fn convert_rate_limit(rate_limit: &RateLimitSpec) -> PolicyRateLimit {
+        // Convert interval_seconds to unit
+        let (requests, unit) = match rate_limit.interval_seconds {
+            1 => (rate_limit.requests_per_interval, "Second"),
+            60 => (rate_limit.requests_per_interval, "Minute"),
+            3600 => (rate_limit.requests_per_interval, "Hour"),
+            // For non-standard intervals, convert to per-minute
+            secs => {
+                let per_minute =
+                    (rate_limit.requests_per_interval as f64 * 60.0 / secs as f64).round() as u32;
+                (per_minute.max(1), "Minute")
+            }
+        };
+
+        PolicyRateLimit {
+            local: LocalRateLimit {
+                rules: vec![RateLimitRule {
+                    limit: RateLimitValue {
+                        requests,
+                        unit: unit.to_string(),
+                    },
+                }],
+            },
+        }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -707,5 +1134,226 @@ mod tests {
         let output = IngressCompiler::compile("api", "prod", &ingress, 8080);
         assert!(!output.is_empty());
         assert_eq!(output.total_count(), 3); // gateway + route + cert
+    }
+
+    // =========================================================================
+    // Story: Traffic Policy Compilation
+    // =========================================================================
+
+    use lattice_common::crd::DependencyDirection;
+
+    fn make_service_resource(
+        direction: DependencyDirection,
+        outbound: Option<OutboundTrafficPolicy>,
+        inbound: Option<InboundTrafficPolicy>,
+    ) -> ResourceSpec {
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            outbound,
+            inbound,
+        }
+    }
+
+    #[test]
+    fn story_compiles_outbound_retry_policy() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert(
+            "backend".to_string(),
+            make_service_resource(
+                DependencyDirection::Outbound,
+                Some(OutboundTrafficPolicy {
+                    retries: Some(RetryPolicy {
+                        attempts: 3,
+                        per_try_timeout: Some("500ms".to_string()),
+                        retry_on: vec!["5xx".to_string(), "connect-failure".to_string()],
+                    }),
+                    timeout: None,
+                    circuit_breaker: None,
+                }),
+                None,
+            ),
+        );
+
+        let output = TrafficPolicyCompiler::compile("frontend", "prod", &resources);
+
+        assert_eq!(output.outbound.len(), 1);
+        assert!(output.inbound.is_empty());
+
+        let policy = &output.outbound[0];
+        assert_eq!(policy.metadata.name, "frontend-to-backend-traffic");
+        assert_eq!(policy.metadata.namespace, "prod");
+        assert_eq!(policy.api_version, "gateway.envoyproxy.io/v1alpha1");
+        assert_eq!(policy.kind, "BackendTrafficPolicy");
+
+        let retry = policy.spec.retry.as_ref().expect("should have retry");
+        assert_eq!(retry.num_retries, 3);
+        assert!(retry.per_retry.is_some());
+        assert!(retry.retry_on.is_some());
+
+        let retry_on = retry.retry_on.as_ref().unwrap();
+        assert!(retry_on.http_status_codes.contains(&500));
+        assert!(retry_on.triggers.contains(&"connect-failure".to_string()));
+    }
+
+    #[test]
+    fn story_compiles_outbound_timeout_policy() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert(
+            "backend".to_string(),
+            make_service_resource(
+                DependencyDirection::Outbound,
+                Some(OutboundTrafficPolicy {
+                    retries: None,
+                    timeout: Some(TimeoutPolicy {
+                        request: "30s".to_string(),
+                        idle: Some("5m".to_string()),
+                    }),
+                    circuit_breaker: None,
+                }),
+                None,
+            ),
+        );
+
+        let output = TrafficPolicyCompiler::compile("frontend", "prod", &resources);
+
+        assert_eq!(output.outbound.len(), 1);
+        let policy = &output.outbound[0];
+
+        let timeout = policy.spec.timeout.as_ref().expect("should have timeout");
+        let http = timeout.http.as_ref().expect("should have http timeout");
+        assert_eq!(http.request_timeout.as_deref(), Some("30s"));
+        assert_eq!(http.idle_timeout.as_deref(), Some("5m"));
+    }
+
+    #[test]
+    fn story_compiles_outbound_circuit_breaker() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert(
+            "backend".to_string(),
+            make_service_resource(
+                DependencyDirection::Outbound,
+                Some(OutboundTrafficPolicy {
+                    retries: None,
+                    timeout: None,
+                    circuit_breaker: Some(CircuitBreakerPolicy {
+                        max_pending_requests: Some(100),
+                        max_requests: Some(1000),
+                        max_retries: Some(10),
+                        consecutive_5xx_errors: None,
+                        base_ejection_time: None,
+                        max_ejection_percent: None,
+                    }),
+                }),
+                None,
+            ),
+        );
+
+        let output = TrafficPolicyCompiler::compile("frontend", "prod", &resources);
+
+        assert_eq!(output.outbound.len(), 1);
+        let policy = &output.outbound[0];
+
+        let cb = policy
+            .spec
+            .circuit_breaker
+            .as_ref()
+            .expect("should have circuit breaker");
+        assert_eq!(cb.max_pending_requests, Some(100));
+        assert_eq!(cb.max_parallel_requests, Some(1000));
+        assert_eq!(cb.max_parallel_retries, Some(10));
+    }
+
+    #[test]
+    fn story_compiles_inbound_rate_limit() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert(
+            "caller".to_string(),
+            make_service_resource(
+                DependencyDirection::Inbound,
+                None,
+                Some(InboundTrafficPolicy {
+                    rate_limit: Some(RateLimitSpec {
+                        requests_per_interval: 100,
+                        interval_seconds: 60,
+                        burst: None,
+                    }),
+                    headers: None,
+                }),
+            ),
+        );
+
+        let output = TrafficPolicyCompiler::compile("api", "prod", &resources);
+
+        assert!(output.outbound.is_empty());
+        assert_eq!(output.inbound.len(), 1);
+
+        let policy = &output.inbound[0];
+        assert_eq!(policy.metadata.name, "api-from-caller-ratelimit");
+
+        let rate_limit = policy
+            .spec
+            .rate_limit
+            .as_ref()
+            .expect("should have rate limit");
+        assert_eq!(rate_limit.local.rules.len(), 1);
+        assert_eq!(rate_limit.local.rules[0].limit.requests, 100);
+        assert_eq!(rate_limit.local.rules[0].limit.unit, "Minute");
+    }
+
+    #[test]
+    fn story_skips_empty_policies() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert(
+            "backend".to_string(),
+            make_service_resource(
+                DependencyDirection::Outbound,
+                Some(OutboundTrafficPolicy {
+                    retries: None,
+                    timeout: None,
+                    circuit_breaker: None,
+                }),
+                None,
+            ),
+        );
+
+        let output = TrafficPolicyCompiler::compile("frontend", "prod", &resources);
+
+        assert!(output.outbound.is_empty());
+        assert!(output.inbound.is_empty());
+    }
+
+    #[test]
+    fn story_skips_non_service_resources() {
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert(
+            "database".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Volume,
+                direction: DependencyDirection::default(),
+                id: None,
+                class: None,
+                metadata: None,
+                params: None,
+                outbound: Some(OutboundTrafficPolicy {
+                    retries: Some(RetryPolicy {
+                        attempts: 3,
+                        per_try_timeout: None,
+                        retry_on: vec![],
+                    }),
+                    timeout: None,
+                    circuit_breaker: None,
+                }),
+                inbound: None,
+            },
+        );
+
+        let output = TrafficPolicyCompiler::compile("frontend", "prod", &resources);
+
+        assert!(output.is_empty());
     }
 }

@@ -357,6 +357,31 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
+        // BackendTrafficPolicy (Envoy Gateway traffic shaping)
+        let btp_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "gateway.envoyproxy.io".to_string(),
+            version: "v1alpha1".to_string(),
+            kind: "BackendTrafficPolicy".to_string(),
+        });
+        for policy in compiled
+            .traffic_policies
+            .outbound
+            .iter()
+            .chain(compiled.traffic_policies.inbound.iter())
+        {
+            let name = policy.metadata.name.clone();
+            let json = serde_json::to_value(policy)
+                .map_err(|e| Error::serialization(format!("BackendTrafficPolicy: {}", e)))?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &btp_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying BackendTrafficPolicy");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
         // Execute all patches in parallel
         let count = futures.len();
         if count > 0 {
