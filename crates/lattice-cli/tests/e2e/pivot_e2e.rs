@@ -69,7 +69,7 @@ use base64::Engine;
 use kube::api::{Api, PostParams};
 
 use lattice_cli::commands::install::{InstallConfig, Installer};
-use lattice_operator::crd::{BootstrapProvider, LatticeCluster};
+use lattice_operator::crd::LatticeCluster;
 
 use super::helpers::{
     client_from_kubeconfig, ensure_docker_network, extract_docker_cluster_kubeconfig, run_cmd,

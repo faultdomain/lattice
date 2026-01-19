@@ -531,10 +531,13 @@ impl AgentClient {
     pub async fn send_cluster_deleting(&self, namespace: &str) -> Result<(), ClientError> {
         // Export CAPI resources via --to-directory (this pauses them)
         info!(namespace = %namespace, "Exporting CAPI resources for unpivot");
-        let capi_manifests =
-            lattice_common::clusterctl::export_for_pivot(None, namespace, &self.config.cluster_name)
-                .await
-                .map_err(|e| ClientError::ConnectionFailed(format!("failed to export CAPI: {}", e)))?;
+        let capi_manifests = lattice_common::clusterctl::export_for_pivot(
+            None,
+            namespace,
+            &self.config.cluster_name,
+        )
+        .await
+        .map_err(|e| ClientError::ConnectionFailed(format!("failed to export CAPI: {}", e)))?;
 
         info!(
             namespace = %namespace,
@@ -648,30 +651,32 @@ impl AgentClient {
 
     /// Install CAPI and infrastructure provider
     ///
-    /// Uses the shared CAPI installation logic which:
+    /// Reads provider type from LatticeCluster CRD, then:
     /// 1. Installs cert-manager from local helm chart
     /// 2. Runs clusterctl init with air-gapped config (kubeadm + RKE2 providers)
     async fn install_capi() -> Result<String, std::io::Error> {
         use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
-        use crate::crd::ProviderType;
+        use crate::crd::LatticeCluster;
+        use kube::api::ListParams;
 
-        let provider_str = std::env::var("LATTICE_PROVIDER")
-            .map_err(|_| std::io::Error::other("LATTICE_PROVIDER env var not set"))?;
+        // Read provider from LatticeCluster CRD - this is the source of truth
+        let client = kube::Client::try_default()
+            .await
+            .map_err(|e| std::io::Error::other(format!("failed to create kube client: {}", e)))?;
 
-        let infrastructure = match provider_str.as_str() {
-            "docker" => ProviderType::Docker,
-            "proxmox" => ProviderType::Proxmox,
-            "openstack" => ProviderType::OpenStack,
-            "aws" => ProviderType::Aws,
-            "gcp" => ProviderType::Gcp,
-            "azure" => ProviderType::Azure,
-            other => {
-                return Err(std::io::Error::other(format!(
-                    "unknown provider: {}",
-                    other
-                )))
-            }
-        };
+        let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
+        let list = clusters
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| std::io::Error::other(format!("failed to list LatticeCluster: {}", e)))?;
+
+        let cluster = list
+            .items
+            .first()
+            .ok_or_else(|| std::io::Error::other("no LatticeCluster found"))?;
+
+        let infrastructure = cluster.spec.provider.provider_type();
+        let provider_str = infrastructure.to_string();
 
         info!(infrastructure = %provider_str, "Installing CAPI providers");
 
@@ -854,6 +859,10 @@ impl AgentClient {
                                 return;
                             }
 
+                            info!(
+                                resources_imported = resource_count,
+                                "Pivot complete, cluster is now self-managing"
+                            );
                             *agent_state_clone.write().await = AgentState::Ready;
 
                             let msg = AgentMessage {
@@ -867,7 +876,7 @@ impl AgentClient {
                             let _ = message_tx_clone.send(msg).await;
                         }
                         Err(e) => {
-                            error!(error = %e, "Pivot failed - CAPI import failed");
+                            error!(error = %e, "Pivot failed, CAPI import failed");
                             *agent_state_clone.write().await = AgentState::Failed;
 
                             let msg = AgentMessage {
@@ -905,6 +914,7 @@ impl AgentClient {
 
     /// Shutdown the client
     pub async fn shutdown(&mut self) {
+        info!("Shutting down agent client");
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }

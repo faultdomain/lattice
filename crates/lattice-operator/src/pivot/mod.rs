@@ -5,11 +5,11 @@
 //!
 //! # Flow
 //!
-//! 1. Cell triggers pivot via gRPC control stream
-//! 2. Agent enters PIVOTING state
-//! 3. Cell executes `clusterctl move --to-kubeconfig <proxy>` through K8s API proxy
-//! 4. CAPI resources are created on workload cluster
-//! 5. Agent detects resources and confirms pivot complete
+//! 1. Cell exports CAPI manifests via `clusterctl move --to-directory`
+//! 2. Cell sends manifests to agent via gRPC PivotManifestsCommand
+//! 3. Agent imports manifests via `clusterctl move --from-directory`
+//! 4. Agent patches kubeconfig to use internal endpoint
+//! 5. Cluster is now self-managing
 //!
 //! # Why Pivot Matters
 //!
@@ -40,14 +40,6 @@ pub enum PivotError {
     /// Kubeconfig generation failed
     #[error("kubeconfig generation failed: {0}")]
     KubeconfigFailed(String),
-
-    /// Pivot timed out
-    #[error("pivot timed out")]
-    Timeout,
-
-    /// Agent not connected
-    #[error("agent not connected: {0}")]
-    AgentNotConnected(String),
 
     /// Internal error
     #[error("internal error: {0}")]
@@ -209,46 +201,6 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
         &self.capi_namespace
     }
 
-    /// Check if CAPI resources exist in the cluster
-    pub async fn check_capi_resources_present(&self) -> Result<bool, PivotError> {
-        let output = self
-            .runner
-            .run_kubectl_get("clusters.cluster.x-k8s.io", &self.capi_namespace)
-            .await?;
-
-        let has_resources =
-            !output.stdout.trim().is_empty() && !output.stdout.contains("No resources found");
-
-        debug!(
-            has_resources = has_resources,
-            output = %output.stdout.trim(),
-            "Checked for CAPI resources"
-        );
-
-        Ok(has_resources)
-    }
-
-    /// Wait for CAPI resources to be imported
-    pub async fn wait_for_capi_resources(
-        &self,
-        timeout_duration: Duration,
-        poll_interval: Duration,
-    ) -> Result<u32, PivotError> {
-        let start = std::time::Instant::now();
-
-        while start.elapsed() < timeout_duration {
-            if self.check_capi_resources_present().await? {
-                let count = self.count_capi_resources().await?;
-                info!(count = count, "CAPI resources detected");
-                return Ok(count);
-            }
-
-            tokio::time::sleep(poll_interval).await;
-        }
-
-        Err(PivotError::Timeout)
-    }
-
     /// Count CAPI resources in the namespace
     async fn count_capi_resources(&self) -> Result<u32, PivotError> {
         let resource_types = [
@@ -304,9 +256,8 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
             std::process::id()
         ));
 
-        std::fs::create_dir_all(&temp_dir).map_err(|e| {
-            PivotError::Internal(format!("failed to create temp dir: {}", e))
-        })?;
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| PivotError::Internal(format!("failed to create temp dir: {}", e)))?;
 
         info!(
             manifest_count = manifests.len(),
@@ -321,9 +272,8 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
             let mut file = std::fs::File::create(&filename).map_err(|e| {
                 PivotError::Internal(format!("failed to create manifest file: {}", e))
             })?;
-            file.write_all(manifest).map_err(|e| {
-                PivotError::Internal(format!("failed to write manifest: {}", e))
-            })?;
+            file.write_all(manifest)
+                .map_err(|e| PivotError::Internal(format!("failed to write manifest: {}", e)))?;
             saved_count += 1;
         }
 
@@ -344,7 +294,9 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| PivotError::ClusterctlFailed(format!("failed to run clusterctl: {}", e)))?;
+            .map_err(|e| {
+                PivotError::ClusterctlFailed(format!("failed to run clusterctl: {}", e))
+            })?;
 
         // Clean up temp directory
         if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
@@ -364,7 +316,10 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
 
         // Wait briefly for resources to appear, then count them
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let count = self.count_capi_resources().await.unwrap_or(saved_count as u32);
+        let count = self
+            .count_capi_resources()
+            .await
+            .unwrap_or(saved_count as u32);
 
         Ok(count as usize)
     }
@@ -558,36 +513,6 @@ mod tests {
     // ==========================================================================
 
     #[tokio::test]
-    async fn agent_detects_capi_resources() {
-        let mock = MockCommandRunner::new().with_kubectl(|_, _| {
-            Ok(CommandOutput {
-                success: true,
-                stdout: "my-cluster   True   v1.28.0   5m\n".to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let handler = AgentPivotHandler::with_runner(mock);
-        let has_resources = handler.check_capi_resources_present().await.unwrap();
-        assert!(has_resources);
-    }
-
-    #[tokio::test]
-    async fn agent_detects_no_capi_resources() {
-        let mock = MockCommandRunner::new().with_kubectl(|_, _| {
-            Ok(CommandOutput {
-                success: true,
-                stdout: "No resources found in default namespace.\n".to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let handler = AgentPivotHandler::with_runner(mock);
-        let has_resources = handler.check_capi_resources_present().await.unwrap();
-        assert!(!has_resources);
-    }
-
-    #[tokio::test]
     async fn agent_counts_all_capi_resource_types() {
         let mock = MockCommandRunner::new().with_kubectl(|resource_type, _| {
             let stdout = match resource_type {
@@ -610,48 +535,6 @@ mod tests {
         assert_eq!(count, 6);
     }
 
-    #[tokio::test]
-    async fn wait_times_out_when_no_resources() {
-        let mock = MockCommandRunner::new().with_kubectl(|_, _| {
-            Ok(CommandOutput {
-                success: true,
-                stdout: "No resources found in default namespace.\n".to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let handler = AgentPivotHandler::with_runner(mock);
-        let result = handler
-            .wait_for_capi_resources(Duration::from_millis(50), Duration::from_millis(10))
-            .await;
-
-        assert!(matches!(result, Err(PivotError::Timeout)));
-    }
-
-    #[tokio::test]
-    async fn handler_uses_configured_namespace() {
-        use std::sync::Arc;
-
-        let captured_namespace = Arc::new(Mutex::new(String::new()));
-        let ns_clone = captured_namespace.clone();
-
-        let mock = MockCommandRunner::new().with_kubectl(move |_, namespace| {
-            *ns_clone.lock().unwrap() = namespace.to_string();
-            Ok(CommandOutput {
-                success: true,
-                stdout: "cluster-1   True\n".to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let handler = AgentPivotHandler::with_runner(mock).with_capi_namespace("workload-ns");
-        let _ = handler
-            .wait_for_capi_resources(Duration::from_secs(1), Duration::from_millis(10))
-            .await;
-
-        assert_eq!(*captured_namespace.lock().unwrap(), "workload-ns");
-    }
-
     #[test]
     fn handler_default_namespace() {
         let handler = AgentPivotHandler::default();
@@ -671,11 +554,6 @@ mod tests {
         assert_eq!(
             PivotError::KubeconfigFailed("io error".to_string()).to_string(),
             "kubeconfig generation failed: io error"
-        );
-        assert_eq!(PivotError::Timeout.to_string(), "pivot timed out");
-        assert_eq!(
-            PivotError::AgentNotConnected("cluster-1".to_string()).to_string(),
-            "agent not connected: cluster-1"
         );
         assert_eq!(
             PivotError::Internal("panic".to_string()).to_string(),

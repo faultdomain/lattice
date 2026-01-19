@@ -16,6 +16,17 @@ use crate::{Error, Result};
 
 const AWS_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
 
+/// Configuration for generating an AWS machine template
+struct MachineTemplateConfig<'a> {
+    name: &'a str,
+    aws_cfg: &'a AwsConfig,
+    instance_type: &'a str,
+    iam_profile: Option<&'a str>,
+    root_volume_size: Option<u32>,
+    root_volume_type: Option<&'a str>,
+    suffix: &'a str,
+}
+
 /// AWS infrastructure provider
 #[derive(Clone, Debug)]
 pub struct AwsProvider {
@@ -92,41 +103,32 @@ impl AwsProvider {
     }
 
     /// Generate AWSMachineTemplate manifest
-    fn generate_machine_template(
-        &self,
-        name: &str,
-        cfg: &AwsConfig,
-        instance_type: &str,
-        iam_profile: Option<&str>,
-        root_volume_size: Option<u32>,
-        root_volume_type: Option<&str>,
-        suffix: &str,
-    ) -> CAPIManifest {
+    fn generate_machine_template(&self, cfg: MachineTemplateConfig<'_>) -> CAPIManifest {
         let mut spec = serde_json::json!({
-            "instanceType": instance_type,
-            "sshKeyName": &cfg.ssh_key_name
+            "instanceType": cfg.instance_type,
+            "sshKeyName": &cfg.aws_cfg.ssh_key_name
         });
 
         // IAM instance profile
-        if let Some(profile) = iam_profile {
+        if let Some(profile) = cfg.iam_profile {
             spec["iamInstanceProfile"] = serde_json::json!(profile);
         }
 
         // AMI configuration
-        if let Some(ref ami_id) = cfg.ami_id {
+        if let Some(ref ami_id) = cfg.aws_cfg.ami_id {
             spec["ami"] = serde_json::json!({ "id": ami_id });
         }
 
         // Root volume configuration
-        let volume_size = root_volume_size.unwrap_or(80);
-        let volume_type = root_volume_type.unwrap_or("gp3");
+        let volume_size = cfg.root_volume_size.unwrap_or(80);
+        let volume_type = cfg.root_volume_type.unwrap_or("gp3");
         spec["rootVolume"] = serde_json::json!({
             "size": volume_size,
             "type": volume_type
         });
 
         // SSH authorized keys for cloud-init
-        if let Some(keys) = &cfg.ssh_authorized_keys {
+        if let Some(keys) = &cfg.aws_cfg.ssh_authorized_keys {
             if !keys.is_empty() {
                 spec["cloudInit"] = serde_json::json!({
                     "insecureSkipSecretsManager": true
@@ -137,7 +139,7 @@ impl AwsProvider {
         CAPIManifest::new(
             AWS_API_VERSION,
             "AWSMachineTemplate",
-            format!("{}-{}", name, suffix),
+            format!("{}-{}", cfg.name, cfg.suffix),
             &self.namespace,
         )
         .with_spec(serde_json::json!({ "template": { "spec": spec } }))
@@ -216,25 +218,25 @@ impl Provider for AwsProvider {
             generate_cluster(&config, &infra),
             self.generate_aws_cluster(cluster)?,
             generate_control_plane(&config, &infra, &cp_config),
-            self.generate_machine_template(
+            self.generate_machine_template(MachineTemplateConfig {
                 name,
-                cfg,
-                &cfg.cp_instance_type,
-                Some(cp_iam),
-                cfg.cp_root_volume_size_gb,
-                cfg.cp_root_volume_type.as_deref(),
-                "control-plane",
-            ),
+                aws_cfg: cfg,
+                instance_type: &cfg.cp_instance_type,
+                iam_profile: Some(cp_iam),
+                root_volume_size: cfg.cp_root_volume_size_gb,
+                root_volume_type: cfg.cp_root_volume_type.as_deref(),
+                suffix: "control-plane",
+            }),
             generate_machine_deployment(&config, &infra),
-            self.generate_machine_template(
+            self.generate_machine_template(MachineTemplateConfig {
                 name,
-                cfg,
-                &cfg.worker_instance_type,
-                Some(worker_iam),
-                cfg.worker_root_volume_size_gb,
-                cfg.worker_root_volume_type.as_deref(),
-                "md-0",
-            ),
+                aws_cfg: cfg,
+                instance_type: &cfg.worker_instance_type,
+                iam_profile: Some(worker_iam),
+                root_volume_size: cfg.worker_root_volume_size_gb,
+                root_volume_type: cfg.worker_root_volume_type.as_deref(),
+                suffix: "md-0",
+            }),
             generate_bootstrap_config_template(&config),
         ])
     }

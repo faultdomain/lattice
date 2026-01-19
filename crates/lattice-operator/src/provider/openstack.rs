@@ -17,6 +17,17 @@ use crate::{Error, Result};
 const OPENSTACK_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta1";
 const DEFAULT_NODE_CIDR: &str = "10.6.0.0/24";
 
+/// Configuration for generating an OpenStack machine template
+struct MachineTemplateConfig<'a> {
+    name: &'a str,
+    openstack_cfg: &'a OpenStackConfig,
+    flavor: &'a str,
+    root_volume_size: Option<u32>,
+    root_volume_type: Option<&'a str>,
+    availability_zone: Option<&'a str>,
+    suffix: &'a str,
+}
+
 /// OpenStack infrastructure provider
 #[derive(Clone, Debug)]
 pub struct OpenStackProvider {
@@ -109,46 +120,37 @@ impl OpenStackProvider {
     }
 
     /// Generate OpenStackMachineTemplate manifest
-    fn generate_machine_template(
-        &self,
-        name: &str,
-        cfg: &OpenStackConfig,
-        flavor: &str,
-        root_volume_size: Option<u32>,
-        root_volume_type: Option<&str>,
-        availability_zone: Option<&str>,
-        suffix: &str,
-    ) -> CAPIManifest {
+    fn generate_machine_template(&self, cfg: MachineTemplateConfig<'_>) -> CAPIManifest {
         let mut spec = serde_json::json!({
-            "flavor": flavor,
+            "flavor": cfg.flavor,
             "image": {
                 "filter": {
-                    "name": &cfg.image_name
+                    "name": &cfg.openstack_cfg.image_name
                 }
             },
-            "sshKeyName": &cfg.ssh_key_name
+            "sshKeyName": &cfg.openstack_cfg.ssh_key_name
         });
 
         // Root volume configuration
-        if let Some(size) = root_volume_size {
+        if let Some(size) = cfg.root_volume_size {
             let mut volume = serde_json::json!({
                 "sizeGiB": size
             });
-            if let Some(vol_type) = root_volume_type {
+            if let Some(vol_type) = cfg.root_volume_type {
                 volume["type"] = serde_json::json!(vol_type);
             }
             spec["rootVolume"] = volume;
         }
 
         // Availability zone
-        if let Some(az) = availability_zone {
+        if let Some(az) = cfg.availability_zone {
             spec["availabilityZone"] = serde_json::json!(az);
         }
 
         CAPIManifest::new(
             OPENSTACK_API_VERSION,
             "OpenStackMachineTemplate",
-            format!("{}-{}", name, suffix),
+            format!("{}-{}", cfg.name, cfg.suffix),
             &self.namespace,
         )
         .with_spec(serde_json::json!({ "template": { "spec": spec } }))
@@ -217,25 +219,25 @@ impl Provider for OpenStackProvider {
             generate_cluster(&config, &infra),
             self.generate_openstack_cluster(cluster)?,
             generate_control_plane(&config, &infra, &cp_config),
-            self.generate_machine_template(
+            self.generate_machine_template(MachineTemplateConfig {
                 name,
-                cfg,
-                &cfg.cp_flavor,
-                cfg.cp_root_volume_size_gb,
-                cfg.cp_root_volume_type.as_deref(),
-                cfg.cp_availability_zone.as_deref(),
-                "control-plane",
-            ),
+                openstack_cfg: cfg,
+                flavor: &cfg.cp_flavor,
+                root_volume_size: cfg.cp_root_volume_size_gb,
+                root_volume_type: cfg.cp_root_volume_type.as_deref(),
+                availability_zone: cfg.cp_availability_zone.as_deref(),
+                suffix: "control-plane",
+            }),
             generate_machine_deployment(&config, &infra),
-            self.generate_machine_template(
+            self.generate_machine_template(MachineTemplateConfig {
                 name,
-                cfg,
-                &cfg.worker_flavor,
-                cfg.worker_root_volume_size_gb,
-                cfg.worker_root_volume_type.as_deref(),
-                cfg.worker_availability_zone.as_deref(),
-                "md-0",
-            ),
+                openstack_cfg: cfg,
+                flavor: &cfg.worker_flavor,
+                root_volume_size: cfg.worker_root_volume_size_gb,
+                root_volume_type: cfg.worker_root_volume_type.as_deref(),
+                availability_zone: cfg.worker_availability_zone.as_deref(),
+                suffix: "md-0",
+            }),
             generate_bootstrap_config_template(&config),
         ])
     }

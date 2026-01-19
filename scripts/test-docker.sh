@@ -18,4 +18,4 @@ echo "Using management cluster config: $LATTICE_MGMT_CLUSTER_CONFIG"
 echo "Using workload cluster config: $LATTICE_WORKLOAD_CLUSTER_CONFIG"
 echo
 
-RUST_LOG=debug cargo test -p lattice-cli --features provider-e2e --test e2e pivot_e2e -- --nocapture
+RUST_LOG=info cargo test -p lattice-cli --features provider-e2e --test e2e pivot_e2e -- --nocapture

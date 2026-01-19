@@ -264,9 +264,14 @@ async fn ensure_webhook_config(
 ///
 /// Ensures all infrastructure is installed. Server-side apply handles idempotency.
 /// This runs on every controller startup, applying the latest manifests.
-/// No version checks needed - just apply and let K8s handle it.
+///
+/// IMPORTANT: Uses the SAME generate_all() function as the bootstrap webhook.
+/// This guarantees upgrades work by changing Lattice version - on restart,
+/// the operator re-applies identical infrastructure manifests.
 async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
-    use lattice_operator::infra::bootstrap;
+    use kube::api::ListParams;
+    use lattice_operator::crd::LatticeCluster;
+    use lattice_operator::infra::bootstrap::{self, InfrastructureConfig};
 
     let is_bootstrap_cluster = std::env::var("LATTICE_ROOT_INSTALL").is_ok()
         || std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
@@ -275,15 +280,47 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
 
     tracing::info!("Applying infrastructure manifests (server-side apply)...");
 
-    // Generate core infrastructure (Istio, Flux, Gateway API, Envoy Gateway)
-    let manifests = bootstrap::generate_core(is_bootstrap_cluster);
-    tracing::info!(count = manifests.len(), "applying infrastructure manifests");
-    apply_manifests(client, &manifests).await?;
-
-    // CAPI on bootstrap cluster only (KIND cluster running installer)
     if is_bootstrap_cluster {
+        // Bootstrap cluster (KIND): Use generate_core() + clusterctl init
+        // This is a temporary cluster that doesn't need full self-management infra
+        let manifests = bootstrap::generate_core(true);
+        tracing::info!(count = manifests.len(), "applying core infrastructure");
+        apply_manifests(client, &manifests).await?;
+
         tracing::info!("Installing CAPI on bootstrap cluster...");
         ensure_capi_on_bootstrap().await?;
+    } else {
+        // Workload cluster: Read provider/bootstrap from LatticeCluster CRD
+        // This is the source of truth - same values used by bootstrap webhook
+        let clusters: kube::Api<LatticeCluster> = kube::Api::all(client.clone());
+        let list = clusters.list(&ListParams::default()).await?;
+
+        let (provider, bootstrap) = if let Some(cluster) = list.items.first() {
+            let p = cluster.spec.provider.provider_type().to_string();
+            let b = cluster.spec.provider.kubernetes.bootstrap.clone();
+            tracing::info!(provider = %p, bootstrap = ?b, "read config from LatticeCluster CRD");
+            (p, b)
+        } else {
+            // No LatticeCluster yet - use defaults (shouldn't happen on real clusters)
+            tracing::warn!("no LatticeCluster found, using defaults");
+            (
+                "docker".to_string(),
+                lattice_operator::crd::BootstrapProvider::Kubeadm,
+            )
+        };
+
+        let config = InfrastructureConfig {
+            provider,
+            bootstrap,
+            skip_cilium_policies: false,
+        };
+
+        let manifests = bootstrap::generate_all(&config);
+        tracing::info!(
+            count = manifests.len(),
+            "applying all infrastructure (same as bootstrap webhook)"
+        );
+        apply_manifests(client, &manifests).await?;
     }
 
     tracing::info!("Infrastructure installation complete");

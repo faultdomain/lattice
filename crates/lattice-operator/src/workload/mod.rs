@@ -1791,7 +1791,7 @@ mod tests {
         // Non-sensitive goes to ConfigMap
         let cm = output.env_config_map.expect("should have env ConfigMap");
         assert_eq!(cm.data.get("HOST"), Some(&"localhost".to_string()));
-        assert!(cm.data.get("DB_PASSWORD").is_none());
+        assert!(!cm.data.contains_key("DB_PASSWORD"));
 
         // Sensitive goes to Secret
         let secret = output.env_secret.expect("should have env Secret");
@@ -1799,7 +1799,7 @@ mod tests {
             secret.string_data.get("DB_PASSWORD"),
             Some(&"supersecret".to_string())
         );
-        assert!(secret.string_data.get("HOST").is_none());
+        assert!(!secret.string_data.contains_key("HOST"));
     }
 
     #[test]

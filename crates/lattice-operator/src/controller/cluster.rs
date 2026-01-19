@@ -28,7 +28,9 @@ use crate::crd::{
     LatticeClusterStatus,
 };
 use crate::parent::ParentServers;
-use crate::proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand, StartPivotCommand};
+use crate::proto::{
+    cell_command, AgentState, CellCommand, PivotManifestsCommand, StartPivotCommand,
+};
 use crate::provider::{create_provider, CAPIManifest};
 use crate::Error;
 
@@ -1217,22 +1219,6 @@ pub trait PivotOperations: Send + Sync {
     ) -> Option<crate::agent::connection::UnpivotManifests>;
 }
 
-/// Controller context containing shared state and clients
-///
-/// The context is shared across all reconciliation calls and holds
-/// resources that are expensive to create (like Kubernetes clients).
-///
-/// CAPI resources are created in per-cluster namespaces (`capi-{cluster_name}`)
-/// to enable clean pivot operations.
-///
-/// Use [`ContextBuilder`] to construct instances:
-///
-/// ```text
-/// let ctx = Context::builder(client)
-///     .parent_servers(servers)
-///     .build();
-/// ```
-
 /// Request to trigger unpivot operation
 #[derive(Debug)]
 pub struct UnpivotRequest {
@@ -1792,7 +1778,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                                 debug!("pivot triggered successfully, waiting for agent to import manifests");
                             }
                             Err(e) => {
-                                warn!(error = %e, "pivot trigger failed, will retry");
+                                error!(cluster = %name, error = %e, "pivot trigger failed, will retry");
                             }
                         }
                         Ok(Action::requeue(Duration::from_secs(5)))
@@ -2293,7 +2279,7 @@ impl PivotOperations for PivotOperationsImpl {
         source_namespace: &str,
         target_namespace: &str,
     ) -> Result<(), Error> {
-        use lattice_common::clusterctl::{export_for_pivot, unpause_capi_cluster};
+        use lattice_common::clusterctl::{export_for_pivot, is_capi_cluster_ready};
 
         // Check if pivot is already in progress
         if self.pivot_in_progress.contains(cluster_name) {
@@ -2308,6 +2294,19 @@ impl PivotOperations for PivotOperationsImpl {
                 "agent not connected for cluster {}",
                 cluster_name
             )));
+        }
+
+        // Check if CAPI cluster is ready before attempting export
+        match is_capi_cluster_ready(None, source_namespace, cluster_name).await {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(cluster = %cluster_name, namespace = %source_namespace, "CAPI cluster not ready yet");
+                return Err(Error::pivot("CAPI cluster not ready".to_string()));
+            }
+            Err(e) => {
+                warn!(cluster = %cluster_name, error = %e, "failed to check CAPI readiness");
+                return Err(Error::pivot(format!("failed to check CAPI readiness: {}", e)));
+            }
         }
 
         // Mark pivot as in progress
@@ -2330,22 +2329,23 @@ impl PivotOperations for PivotOperationsImpl {
             .await
         {
             self.pivot_in_progress.remove(cluster_name);
-            return Err(Error::pivot(format!("failed to send StartPivotCommand: {}", e)));
+            return Err(Error::pivot(format!(
+                "failed to send StartPivotCommand: {}",
+                e
+            )));
         }
         info!(cluster = %cluster_name, "StartPivotCommand sent to agent");
 
         // Step 2: Export CAPI resources via clusterctl move --to-directory
-        // This keeps paused resources on the parent for simplified unpivot
-        // First unpause in case a previous attempt left the cluster paused
-        info!(cluster = %cluster_name, namespace = %source_namespace, "Exporting CAPI resources via --to-directory");
-        if let Err(e) = unpause_capi_cluster(None, source_namespace, cluster_name).await {
-            debug!(cluster = %cluster_name, error = %e, "Unpause failed (may already be unpaused)");
-        }
+        info!(cluster = %cluster_name, namespace = %source_namespace, "exporting CAPI manifests");
         let manifests = match export_for_pivot(None, source_namespace, cluster_name).await {
             Ok(m) => m,
             Err(e) => {
                 self.pivot_in_progress.remove(cluster_name);
-                return Err(Error::pivot(format!("clusterctl move --to-directory failed: {}", e)));
+                return Err(Error::pivot(format!(
+                    "clusterctl move --to-directory failed: {}",
+                    e
+                )));
             }
         };
         info!(cluster = %cluster_name, manifest_count = manifests.len(), "CAPI resources exported");
@@ -2354,11 +2354,13 @@ impl PivotOperations for PivotOperationsImpl {
         let command_id = uuid::Uuid::new_v4().to_string();
         let pivot_manifests_cmd = CellCommand {
             command_id,
-            command: Some(cell_command::Command::PivotManifests(PivotManifestsCommand {
-                manifests,
-                target_namespace: target_namespace.to_string(),
-                cluster_name: cluster_name.to_string(),
-            })),
+            command: Some(cell_command::Command::PivotManifests(
+                PivotManifestsCommand {
+                    manifests,
+                    target_namespace: target_namespace.to_string(),
+                    cluster_name: cluster_name.to_string(),
+                },
+            )),
         };
 
         if let Err(e) = self
@@ -2367,7 +2369,10 @@ impl PivotOperations for PivotOperationsImpl {
             .await
         {
             self.pivot_in_progress.remove(cluster_name);
-            return Err(Error::pivot(format!("failed to send PivotManifestsCommand: {}", e)));
+            return Err(Error::pivot(format!(
+                "failed to send PivotManifestsCommand: {}",
+                e
+            )));
         }
         info!(cluster = %cluster_name, "PivotManifestsCommand sent to agent, waiting for import");
 

@@ -707,11 +707,20 @@ pub async fn reconcile_external(
     let env = &external.spec.environment;
 
     // Update graph with this external service
-    info!(env = %env, "adding external service to graph");
     ctx.graph.put_external_service(env, &name, &external.spec);
 
-    // Transition to Ready
-    update_external_status_ready(&external, &ctx).await?;
+    // Only update status if not already Ready (avoid reconcile loop)
+    let is_ready = external
+        .status
+        .as_ref()
+        .map(|s| s.phase == crate::crd::ExternalServicePhase::Ready)
+        .unwrap_or(false);
+
+    if !is_ready {
+        info!(env = %env, "external service transitioning to Ready");
+        update_external_status_ready(&external, &ctx).await?;
+    }
+
     Ok(Action::requeue(Duration::from_secs(60)))
 }
 

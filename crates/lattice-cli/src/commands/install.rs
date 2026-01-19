@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::info;
 
-use lattice_common::clusterctl::{execute_move, ClusterctlMoveConfig};
+use lattice_common::clusterctl::{export_for_pivot, import_from_manifests};
 use lattice_operator::bootstrap::{
     capmox_credentials_manifests, generate_all_manifests, generate_crs_yaml_manifests,
     DefaultManifestGenerator, ManifestConfig, ManifestGenerator,
@@ -369,7 +369,6 @@ nodes:
             self.config.registry_credentials.as_deref(),
             Some("lattice-installer"),
             None,
-            None,
         );
 
         let provider_str = self.provider().to_string();
@@ -460,7 +459,6 @@ nodes:
         let generator = DefaultManifestGenerator::new();
         let cluster_name = self.cluster_name();
         let provider_str = self.cluster.spec.provider.provider_type().to_string();
-        let bootstrap_str = self.cluster.spec.provider.kubernetes.bootstrap.to_string();
         let namespace = format!("capi-{}", cluster_name);
 
         // Extract Proxmox ipv4_pool for auto-deriving LB pool (if not explicitly configured)
@@ -480,7 +478,6 @@ nodes:
             proxmox_ipv4_pool,
             cluster_name: Some(cluster_name),
             provider: Some(&provider_str),
-            bootstrap: Some(&bootstrap_str),
             parent_host: None,
             parent_grpc_port: lattice_operator::DEFAULT_GRPC_PORT,
             relax_fips: self
@@ -854,21 +851,21 @@ nodes:
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
 
-        // Run clusterctl move with retries and automatic unpause on failure
-        info!("Running clusterctl move from bootstrap to management cluster...");
+        // Export CAPI resources from bootstrap cluster
+        info!("Exporting CAPI resources from bootstrap cluster...");
         let cluster_name = self.cluster_name();
         let source_path = std::path::Path::new(&bootstrap_kubeconfig);
         let target_path = std::path::Path::new(&kubeconfig_path);
 
-        execute_move(
-            Some(source_path),
-            target_path,
-            &namespace,
-            cluster_name,
-            &ClusterctlMoveConfig::default(),
-        )
-        .await
-        .map_err(|e| Error::command_failed(e.to_string()))
+        let manifests = export_for_pivot(Some(source_path), &namespace, cluster_name)
+            .await
+            .map_err(|e| Error::command_failed(e.to_string()))?;
+
+        // Import into management cluster
+        info!("Importing CAPI resources into management cluster...");
+        import_from_manifests(Some(target_path), &namespace, &manifests)
+            .await
+            .map_err(|e| Error::command_failed(e.to_string()))
     }
 
     async fn run_command(&self, cmd: &str, args: &[&str]) -> Result<String> {
@@ -1133,6 +1130,32 @@ pub async fn run(args: InstallArgs) -> Result<()> {
     installer.run().await
 }
 
+async fn get_repository(args: &InstallArgs) -> Result<PathBuf> {
+    if let Some(ref local_path) = args.local_path {
+        if !local_path.exists() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Local path not found: {}", local_path.display()),
+            )));
+        }
+        return Ok(local_path.clone());
+    }
+
+    if let Some(ref git_url) = args.git_repo {
+        let temp_dir = tempfile::tempdir()?;
+        let repo_path = temp_dir.path().to_path_buf();
+        std::mem::forget(temp_dir);
+
+        info!(url = git_url, "Cloning repository...");
+        git::clone_repo(git_url, &repo_path, args.git_credentials.as_deref())?;
+        git::checkout_branch(&repo_path, &args.git_branch)?;
+
+        return Ok(repo_path);
+    }
+
+    Ok(PathBuf::from("."))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1254,30 +1277,4 @@ mod tests {
         let result = add_bootstrap_env(invalid, "docker");
         assert_eq!(result, invalid);
     }
-}
-
-async fn get_repository(args: &InstallArgs) -> Result<PathBuf> {
-    if let Some(ref local_path) = args.local_path {
-        if !local_path.exists() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Local path not found: {}", local_path.display()),
-            )));
-        }
-        return Ok(local_path.clone());
-    }
-
-    if let Some(ref git_url) = args.git_repo {
-        let temp_dir = tempfile::tempdir()?;
-        let repo_path = temp_dir.path().to_path_buf();
-        std::mem::forget(temp_dir);
-
-        info!(url = git_url, "Cloning repository...");
-        git::clone_repo(git_url, &repo_path, args.git_credentials.as_deref())?;
-        git::checkout_branch(&repo_path, &args.git_branch)?;
-
-        return Ok(repo_path);
-    }
-
-    Ok(PathBuf::from("."))
 }

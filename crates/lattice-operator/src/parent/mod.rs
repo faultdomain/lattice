@@ -488,7 +488,6 @@ mod tests {
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
             _provider: Option<&str>,
-            _bootstrap: Option<&str>,
         ) -> Vec<String> {
             vec!["mock-manifest".to_string()]
         }

@@ -180,18 +180,12 @@ pub trait ManifestGenerator: Send + Sync {
     ///
     /// Note: The LatticeCluster instance is added by generate_response(), not here.
     /// This method generates: Cilium, operator deployment, namespace, RBAC, etc.
-    ///
-    /// Environment variables set on the operator:
-    /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on
-    /// - LATTICE_PROVIDER: So agent knows which infrastructure provider to install
-    /// - LATTICE_BOOTSTRAP: So agent knows which bootstrap provider to use (kubeadm, rke2)
     fn generate(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<&str>,
-        bootstrap: Option<&str>,
     ) -> Vec<String>;
 }
 
@@ -213,8 +207,6 @@ pub struct ManifestConfig<'a> {
     pub cluster_name: Option<&'a str>,
     /// Provider type (docker, aws, etc.)
     pub provider: Option<&'a str>,
-    /// Bootstrap provider (kubeadm, rke2)
-    pub bootstrap: Option<&'a str>,
     /// Parent host (None for root/cell clusters)
     pub parent_host: Option<&'a str>,
     /// Parent gRPC port
@@ -237,7 +229,6 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
         config.registry_credentials,
         config.cluster_name,
         config.provider,
-        config.bootstrap,
     );
 
     // Apply FIPS relaxation if needed (for kubeadm-based bootstrap or non-FIPS targets)
@@ -328,7 +319,6 @@ impl DefaultManifestGenerator {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<&str>,
-        bootstrap: Option<&str>,
     ) -> Result<Vec<String>, serde_json::Error> {
         const NAMESPACE: &str = "lattice-system";
 
@@ -449,17 +439,11 @@ impl DefaultManifestGenerator {
                                         ..Default::default()
                                     });
                                 }
+                                // Provider set for debugging visibility (operator reads from CRD)
                                 if let Some(prov) = provider {
                                     envs.push(EnvVar {
                                         name: "LATTICE_PROVIDER".to_string(),
                                         value: Some(prov.to_string()),
-                                        ..Default::default()
-                                    });
-                                }
-                                if let Some(boot) = bootstrap {
-                                    envs.push(EnvVar {
-                                        name: "LATTICE_BOOTSTRAP".to_string(),
-                                        value: Some(boot.to_string()),
                                         ..Default::default()
                                     });
                                 }
@@ -535,7 +519,6 @@ impl ManifestGenerator for DefaultManifestGenerator {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<&str>,
-        bootstrap: Option<&str>,
     ) -> Vec<String> {
         let mut manifests = Vec::new();
 
@@ -549,16 +532,10 @@ impl ManifestGenerator for DefaultManifestGenerator {
 
         // Then operator manifests
         manifests.extend(
-            self.generate_operator_manifests(
-                image,
-                registry_credentials,
-                cluster_name,
-                provider,
-                bootstrap,
-            )
-            .unwrap_or_else(|e| {
-                panic!("BUG: failed to serialize operator manifests to JSON: {}", e)
-            }),
+            self.generate_operator_manifests(image, registry_credentials, cluster_name, provider)
+                .unwrap_or_else(|e| {
+                    panic!("BUG: failed to serialize operator manifests to JSON: {}", e)
+                }),
         );
 
         manifests
@@ -787,7 +764,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         let (parent_host, grpc_port) = parse_parent_endpoint(&info.cell_endpoint);
 
         // Generate operator + CNI manifests
-        let bootstrap_str = info.bootstrap.to_string();
         let config = ManifestConfig {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
@@ -795,7 +771,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             proxmox_ipv4_pool: info.proxmox_ipv4_pool.as_ref(),
             cluster_name: Some(&info.cluster_id),
             provider: Some(&info.provider),
-            bootstrap: Some(&bootstrap_str),
             parent_host: parent_host.as_deref(),
             parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
@@ -1021,7 +996,6 @@ mod tests {
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
             _provider: Option<&str>,
-            _bootstrap: Option<&str>,
         ) -> Vec<String> {
             vec![format!("# Test manifest with image {}", image)]
         }
@@ -1308,7 +1282,7 @@ mod tests {
     #[test]
     fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // Operator manifests are JSON, check for JSON format
         let has_namespace = manifests
@@ -1320,7 +1294,7 @@ mod tests {
     #[test]
     fn default_generator_creates_operator_deployment() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // Operator manifests are JSON, check for JSON format
         let has_deployment = manifests
@@ -1332,7 +1306,7 @@ mod tests {
     #[test]
     fn default_generator_creates_service_account() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // Should have ServiceAccount for operator
         let has_sa = manifests
@@ -1344,7 +1318,7 @@ mod tests {
     #[test]
     fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // Should include Cilium DaemonSet (rendered from helm template)
         let has_cilium_daemonset = manifests
@@ -1615,7 +1589,7 @@ mod tests {
     #[test]
     fn story_manifest_generation() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // CRD must be first so it's applied before any CR instances
         let has_crd = manifests.iter().any(|m| {
