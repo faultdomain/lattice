@@ -8,6 +8,7 @@
 //! 5. Pivoting CAPI resources to make it self-managing
 //! 6. Optionally installing Flux for GitOps
 
+use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -28,6 +29,20 @@ use lattice_operator::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 use lattice_operator::fips;
 
 use crate::{git, Error, Result};
+
+/// Extension trait to convert errors with Display to CLI Error::CommandFailed.
+///
+/// This reduces boilerplate for the common pattern of `.map_err(|e| Error::command_failed(e.to_string()))`.
+trait CommandErrorExt<T> {
+    /// Convert an error to `Error::CommandFailed` using its Display implementation.
+    fn cmd_err(self) -> Result<T>;
+}
+
+impl<T, E: Display> CommandErrorExt<T> for std::result::Result<T, E> {
+    fn cmd_err(self) -> Result<T> {
+        self.map_err(|e| Error::command_failed(e.to_string()))
+    }
+}
 
 /// Install Lattice from a git repository or local path
 #[derive(Args, Debug)]
@@ -142,6 +157,16 @@ impl Installer {
 
     fn cluster_name(&self) -> &str {
         &self.cluster_name
+    }
+
+    /// Returns the CAPI namespace for this cluster (e.g., "capi-my-cluster")
+    fn capi_namespace(&self) -> String {
+        format!("capi-{}", self.cluster_name)
+    }
+
+    /// Returns the kubeconfig secret name for this cluster (e.g., "my-cluster-kubeconfig")
+    fn kubeconfig_secret_name(&self) -> String {
+        format!("{}-kubeconfig", self.cluster_name)
     }
 
     fn bootstrap_kubeconfig_path(&self) -> PathBuf {
@@ -279,13 +304,13 @@ impl Installer {
     async fn bootstrap_client(&self) -> Result<Client> {
         kube_utils::create_client(Some(&self.bootstrap_kubeconfig_path()))
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))
+            .cmd_err()
     }
 
     async fn management_client(&self) -> Result<Client> {
         kube_utils::create_client(Some(&self.management_kubeconfig_path()))
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))
+            .cmd_err()
     }
 
     async fn create_kind_cluster(&self) -> Result<()> {
@@ -358,7 +383,7 @@ nodes:
         let client = self.bootstrap_client().await?;
         kube_utils::wait_for_nodes_ready(&client, Duration::from_secs(120))
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+            .cmd_err()?;
 
         Ok(())
     }
@@ -403,15 +428,13 @@ nodes:
             .collect();
 
         for manifest in &operator_manifests {
-            kube_utils::apply_manifest(client, manifest)
-                .await
-                .map_err(|e| Error::command_failed(e.to_string()))?;
+            kube_utils::apply_manifest(client, manifest).await.cmd_err()?;
         }
 
         info!("Waiting for Lattice operator to be ready...");
         kube_utils::wait_for_deployment(client, "lattice-operator", "lattice-system", Duration::from_secs(300))
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+            .cmd_err()?;
 
         info!("Waiting for CAPI to be installed...");
         self.wait_for_capi_crds(client).await?;
@@ -429,7 +452,7 @@ nodes:
         for crd in required_crds {
             kube_utils::wait_for_crd(client, crd, Duration::from_secs(300))
                 .await
-                .map_err(|e| Error::command_failed(e.to_string()))?;
+                .cmd_err()?;
         }
 
         Ok(())
@@ -439,7 +462,7 @@ nodes:
         let generator = DefaultManifestGenerator::new();
         let cluster_name = self.cluster_name();
         let provider_str = self.cluster.spec.provider.provider_type().to_string();
-        let namespace = format!("capi-{}", cluster_name);
+        let namespace = self.capi_namespace();
 
         let proxmox_ipv4_pool = self
             .cluster
@@ -486,19 +509,15 @@ nodes:
                 .map(|(u, t, s)| (u.as_str(), t.as_str(), s.as_str())),
         );
 
-        kube_utils::create_namespace(client, &namespace)
-            .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+        kube_utils::create_namespace(client, &namespace).await.cmd_err()?;
 
         for (i, manifest) in crs_manifests.iter().enumerate() {
             if i == crs_manifests.len() - 1 {
                 kube_utils::apply_manifest_with_retry(client, manifest, Duration::from_secs(120))
                     .await
-                    .map_err(|e| Error::command_failed(e.to_string()))?;
+                    .cmd_err()?;
             } else {
-                kube_utils::apply_manifest(client, manifest)
-                    .await
-                    .map_err(|e| Error::command_failed(e.to_string()))?;
+                kube_utils::apply_manifest(client, manifest).await.cmd_err()?;
             }
         }
 
@@ -508,7 +527,7 @@ nodes:
     async fn create_management_cluster_crd(&self, client: &Client) -> Result<()> {
         kube_utils::apply_manifest_with_retry(client, &self.config.cluster_config_content, Duration::from_secs(120))
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+            .cmd_err()?;
         self.create_bootstrap_crs(client).await?;
         Ok(())
     }
@@ -516,8 +535,8 @@ nodes:
     async fn wait_for_management_cluster(&self, client: &Client) -> Result<()> {
         let start = Instant::now();
         let timeout = Duration::from_secs(600);
-        let namespace = format!("capi-{}", self.cluster_name());
-        let secret_name = format!("{}-kubeconfig", self.cluster_name());
+        let namespace = self.capi_namespace();
+        let secret_name = self.kubeconfig_secret_name();
 
         // Wait for Ready/Pivoting phase
         loop {
@@ -538,95 +557,135 @@ nodes:
         // Wait for kubeconfig secret
         kube_utils::wait_for_secret(client, &secret_name, &namespace, timeout)
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+            .cmd_err()?;
 
         Ok(())
     }
 
     async fn apply_bootstrap_to_management(&self, bootstrap_client: &Client) -> Result<()> {
-        let namespace = format!("capi-{}", self.cluster_name());
-        let secret_name = format!("{}-kubeconfig", self.cluster_name());
-
-        // Get kubeconfig from secret
-        let kubeconfig_bytes = kube_utils::get_secret_data(bootstrap_client, &secret_name, &namespace, "value")
-            .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
-
-        let mut kubeconfig = String::from_utf8(kubeconfig_bytes)
-            .map_err(|e| Error::command_failed(format!("Invalid kubeconfig encoding: {}", e)))?;
-
-        // Rewrite Docker provider kubeconfig to use localhost
-        if self.cluster.spec.provider.provider_type() == ProviderType::Docker {
-            let lb_container = format!("{}-lb", self.cluster_name());
-            let port_output = Command::new("docker")
-                .args(["port", &lb_container, "6443"])
-                .output()
-                .await?;
-
-            if port_output.status.success() {
-                let port_str = String::from_utf8_lossy(&port_output.stdout);
-                if let Some(port) = port_str.trim().split(':').next_back() {
-                    let localhost_url = format!("https://127.0.0.1:{}", port);
-                    if let Some(start) = kubeconfig.find("server: https://") {
-                        if let Some(end) = kubeconfig[start..].find('\n') {
-                            let old_server = &kubeconfig[start..start + end];
-                            kubeconfig = kubeconfig.replace(old_server, &format!("server: {}", localhost_url));
-                        }
-                    }
-                }
-            }
-        }
-
+        // Fetch and prepare kubeconfig
+        let kubeconfig = self.fetch_management_kubeconfig(bootstrap_client).await?;
         let kubeconfig_path = self.management_kubeconfig_path();
         tokio::fs::write(&kubeconfig_path, &kubeconfig).await?;
 
-        // Wait for API server
-        let start = Instant::now();
-        loop {
-            if start.elapsed() > Duration::from_secs(300) {
-                return Err(Error::command_failed("Timeout waiting for API server"));
-            }
-
-            match self.management_client().await {
-                Ok(client) => {
-                    if kube_utils::wait_for_nodes_ready(&client, Duration::from_secs(5)).await.is_ok() {
-                        break;
-                    }
-                }
-                Err(_) => {}
-            }
-
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
+        // Wait for management cluster API server to be reachable
+        self.wait_for_api_server().await?;
 
         let mgmt_client = self.management_client().await?;
 
         // Wait for nodes to be ready
         kube_utils::wait_for_nodes_ready(&mgmt_client, Duration::from_secs(300))
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+            .cmd_err()?;
 
-        // Install CAPI via clusterctl
-        let init_args = self.clusterctl_init_args();
-        let init_args_ref: Vec<&str> = init_args.iter().map(|s| s.as_str()).collect();
-        self.run_clusterctl(&init_args_ref, &kubeconfig_path).await?;
-
-        // Wait for CAPI controllers
-        kube_utils::wait_for_all_deployments(&mgmt_client, "capi-system", Duration::from_secs(300))
-            .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
-
-        // Wait for Lattice operator
-        kube_utils::wait_for_deployment(&mgmt_client, "lattice-operator", "lattice-system", Duration::from_secs(120))
-            .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+        // Install CAPI and Lattice on management cluster
+        self.install_capi_on_management(&kubeconfig_path).await?;
+        self.wait_for_management_controllers(&mgmt_client).await?;
 
         // Apply self-referential LatticeCluster CR
         kube_utils::apply_manifest_with_retry(&mgmt_client, &self.config.cluster_config_content, Duration::from_secs(120))
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+            .cmd_err()?;
 
         Ok(())
+    }
+
+    /// Fetches the management cluster kubeconfig from the bootstrap cluster secret,
+    /// rewriting the server URL for Docker provider if needed.
+    async fn fetch_management_kubeconfig(&self, bootstrap_client: &Client) -> Result<String> {
+        let namespace = self.capi_namespace();
+        let secret_name = self.kubeconfig_secret_name();
+
+        let kubeconfig_bytes = kube_utils::get_secret_data(bootstrap_client, &secret_name, &namespace, "value")
+            .await
+            .cmd_err()?;
+
+        let kubeconfig = String::from_utf8(kubeconfig_bytes)
+            .map_err(|e| Error::command_failed(format!("Invalid kubeconfig encoding: {}", e)))?;
+
+        // Rewrite Docker provider kubeconfig to use localhost
+        if self.provider() == ProviderType::Docker {
+            self.rewrite_docker_kubeconfig(&kubeconfig).await
+        } else {
+            Ok(kubeconfig)
+        }
+    }
+
+    /// Rewrites a kubeconfig's server URL to use localhost with the Docker-exposed port.
+    /// Uses YAML parsing for safe manipulation instead of string replacement.
+    async fn rewrite_docker_kubeconfig(&self, kubeconfig: &str) -> Result<String> {
+        let lb_container = format!("{}-lb", self.cluster_name());
+        let port_output = Command::new("docker")
+            .args(["port", &lb_container, "6443"])
+            .output()
+            .await?;
+
+        if !port_output.status.success() {
+            // If we can't get the port, return the original kubeconfig
+            return Ok(kubeconfig.to_string());
+        }
+
+        let port_str = String::from_utf8_lossy(&port_output.stdout);
+        let Some(port) = port_str.trim().split(':').next_back() else {
+            return Ok(kubeconfig.to_string());
+        };
+
+        let localhost_url = format!("https://127.0.0.1:{}", port);
+
+        // Parse kubeconfig as YAML and update the server URL
+        let mut config: serde_yaml::Value = serde_yaml::from_str(kubeconfig)
+            .map_err(|e| Error::command_failed(format!("Failed to parse kubeconfig YAML: {}", e)))?;
+
+        if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+            for cluster in clusters {
+                if let Some(cluster_data) = cluster.get_mut("cluster") {
+                    if let Some(server) = cluster_data.get_mut("server") {
+                        *server = serde_yaml::Value::String(localhost_url.clone());
+                    }
+                }
+            }
+        }
+
+        serde_yaml::to_string(&config)
+            .map_err(|e| Error::command_failed(format!("Failed to serialize kubeconfig YAML: {}", e)))
+    }
+
+    /// Waits for the management cluster API server to become reachable.
+    async fn wait_for_api_server(&self) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(300) {
+                return Err(Error::command_failed("Timeout waiting for API server"));
+            }
+
+            if let Ok(client) = self.management_client().await {
+                if kube_utils::wait_for_nodes_ready(&client, Duration::from_secs(5)).await.is_ok() {
+                    return Ok(());
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    /// Installs CAPI controllers on the management cluster via clusterctl.
+    async fn install_capi_on_management(&self, kubeconfig_path: &Path) -> Result<()> {
+        let init_args = self.clusterctl_init_args();
+        let init_args_ref: Vec<&str> = init_args.iter().map(|s| s.as_str()).collect();
+        self.run_clusterctl(&init_args_ref, kubeconfig_path).await
+    }
+
+    /// Waits for CAPI and Lattice controllers to be ready on the management cluster.
+    async fn wait_for_management_controllers(&self, mgmt_client: &Client) -> Result<()> {
+        // Wait for CAPI controllers
+        kube_utils::wait_for_all_deployments(mgmt_client, "capi-system", Duration::from_secs(300))
+            .await
+            .cmd_err()?;
+
+        // Wait for Lattice operator
+        kube_utils::wait_for_deployment(mgmt_client, "lattice-operator", "lattice-system", Duration::from_secs(120))
+            .await
+            .cmd_err()
     }
 
     fn get_proxmox_credentials() -> Result<(String, String, String)> {
@@ -649,11 +708,11 @@ nodes:
         let manifests = capmox_credentials_manifests(&url, &token, &secret);
         kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))
+            .cmd_err()
     }
 
     async fn pivot_capi_resources(&self) -> Result<()> {
-        let namespace = format!("capi-{}", self.cluster_name());
+        let namespace = self.capi_namespace();
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
         let mgmt_kubeconfig = self.management_kubeconfig_path();
         let bootstrap_client = self.bootstrap_client().await?;
@@ -663,7 +722,7 @@ nodes:
         let mgmt_client = self.management_client().await?;
         kube_utils::wait_for_crd(&mgmt_client, "clusters.cluster.x-k8s.io", Duration::from_secs(300))
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+            .cmd_err()?;
 
         // Wait for all machines to be provisioned
         info!("Waiting for all machines to be provisioned...");
@@ -675,7 +734,7 @@ nodes:
 
             let phases = kube_utils::get_machine_phases(&bootstrap_client, &namespace)
                 .await
-                .map_err(|e| Error::command_failed(e.to_string()))?;
+                .cmd_err()?;
 
             let all_running = !phases.is_empty() && phases.iter().all(|p| p == "Running");
             if all_running {
@@ -691,12 +750,12 @@ nodes:
         info!("Exporting CAPI resources from bootstrap cluster...");
         let manifests = export_for_pivot(Some(&bootstrap_kubeconfig), &namespace, self.cluster_name())
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
+            .cmd_err()?;
 
         info!("Importing CAPI resources into management cluster...");
         import_from_manifests(Some(&mgmt_kubeconfig), &namespace, &manifests)
             .await
-            .map_err(|e| Error::command_failed(e.to_string()))
+            .cmd_err()
     }
 
     async fn run_clusterctl(&self, args: &[&str], kubeconfig: &Path) -> Result<()> {
@@ -735,10 +794,10 @@ async fn get_latticecluster_phase(client: &Client, name: &str) -> Result<String>
     use kube::discovery::ApiResource;
 
     let ar = ApiResource {
-        group: "lattice.io".to_string(),
+        group: "lattice.dev".to_string(),
         version: "v1alpha1".to_string(),
         kind: "LatticeCluster".to_string(),
-        api_version: "lattice.io/v1alpha1".to_string(),
+        api_version: "lattice.dev/v1alpha1".to_string(),
         plural: "latticeclusters".to_string(),
     };
 
@@ -1007,5 +1066,123 @@ mod tests {
         let invalid = "not json";
         let result = add_bootstrap_env(invalid, "docker");
         assert_eq!(result, invalid);
+    }
+
+    #[test]
+    fn test_rewrite_kubeconfig_server_yaml() {
+        let kubeconfig = r#"apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority-data: LS0tLS1CRUdJTg==
+    server: https://10.0.0.1:6443
+  name: my-cluster
+contexts:
+- context:
+    cluster: my-cluster
+    user: admin
+  name: my-context
+current-context: my-context
+users:
+- name: admin
+  user:
+    client-certificate-data: LS0tLS1CRUdJTg==
+"#;
+
+        let new_server = "https://127.0.0.1:12345";
+
+        // Parse and update using the same logic as rewrite_docker_kubeconfig
+        let mut config: serde_yaml::Value = serde_yaml::from_str(kubeconfig).unwrap();
+
+        if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+            for cluster in clusters {
+                if let Some(cluster_data) = cluster.get_mut("cluster") {
+                    if let Some(server) = cluster_data.get_mut("server") {
+                        *server = serde_yaml::Value::String(new_server.to_string());
+                    }
+                }
+            }
+        }
+
+        let result = serde_yaml::to_string(&config).unwrap();
+
+        // Verify the server was updated
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+        let server = parsed["clusters"][0]["cluster"]["server"].as_str().unwrap();
+        assert_eq!(server, new_server);
+
+        // Verify other fields are preserved
+        let ca_data = parsed["clusters"][0]["cluster"]["certificate-authority-data"]
+            .as_str()
+            .unwrap();
+        assert_eq!(ca_data, "LS0tLS1CRUdJTg==");
+    }
+
+    #[test]
+    fn test_rewrite_kubeconfig_multiple_clusters() {
+        let kubeconfig = r#"apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://10.0.0.1:6443
+  name: cluster-1
+- cluster:
+    server: https://10.0.0.2:6443
+  name: cluster-2
+"#;
+
+        let new_server = "https://127.0.0.1:12345";
+
+        let mut config: serde_yaml::Value = serde_yaml::from_str(kubeconfig).unwrap();
+
+        if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+            for cluster in clusters {
+                if let Some(cluster_data) = cluster.get_mut("cluster") {
+                    if let Some(server) = cluster_data.get_mut("server") {
+                        *server = serde_yaml::Value::String(new_server.to_string());
+                    }
+                }
+            }
+        }
+
+        let result = serde_yaml::to_string(&config).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+
+        // Both clusters should be updated
+        let server1 = parsed["clusters"][0]["cluster"]["server"].as_str().unwrap();
+        let server2 = parsed["clusters"][1]["cluster"]["server"].as_str().unwrap();
+        assert_eq!(server1, new_server);
+        assert_eq!(server2, new_server);
+    }
+
+    #[test]
+    fn test_capi_namespace_format() {
+        let config = InstallConfig {
+            cluster_config_content: r#"
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: test-cluster
+spec:
+  provider:
+    config:
+      docker: {}
+    kubernetes:
+      version: "1.28.0"
+      bootstrap: kubeadm
+  nodes:
+    controlPlane: 1
+    workers: 0
+"#
+            .to_string(),
+            image: "test:latest".to_string(),
+            keep_bootstrap_on_failure: false,
+            registry_credentials: None,
+            bootstrap_override: None,
+        };
+
+        let installer = Installer::new(config).unwrap();
+        assert_eq!(installer.capi_namespace(), "capi-test-cluster");
+        assert_eq!(installer.kubeconfig_secret_name(), "test-cluster-kubeconfig");
     }
 }

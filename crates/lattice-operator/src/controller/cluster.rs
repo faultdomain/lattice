@@ -422,7 +422,7 @@ impl KubeClient for KubeClientImpl {
             .get_secret(name, source_namespace)
             .await?
             .ok_or_else(|| {
-                Error::Bootstrap(format!(
+                Error::bootstrap(format!(
                     "source secret {}/{} not found",
                     source_namespace, name
                 ))
@@ -1967,14 +1967,14 @@ async fn generate_capi_manifests(
             .kube
             .get_cluster(self_cluster_name)
             .await?
-            .ok_or_else(|| Error::Bootstrap("self-cluster LatticeCluster not found".into()))?;
+            .ok_or_else(|| Error::bootstrap("self-cluster LatticeCluster not found"))?;
         let endpoints = self_cluster.spec.endpoints.as_ref().ok_or_else(|| {
             Error::validation("self-cluster must have spec.endpoints to provision clusters")
         })?;
 
         // Get bootstrap state from parent_servers
         let bootstrap_state = parent_servers.bootstrap_state().await.ok_or_else(|| {
-            Error::Bootstrap("parent_servers running but bootstrap_state not available".into())
+            Error::bootstrap("parent_servers running but bootstrap_state not available")
         })?;
 
         let ca_cert = bootstrap_state.ca_cert_pem().to_string();

@@ -30,6 +30,18 @@ use tracing::{debug, info};
 // Re-export retry utilities for convenience
 pub use crate::retry::{retry_with_backoff, RetryConfig};
 
+/// Default CAPI namespace for pivot handlers
+const DEFAULT_CAPI_NAMESPACE: &str = "default";
+
+/// Delay after clusterctl move to allow resources to appear in the API server
+const POST_MOVE_STABILIZATION_DELAY: Duration = Duration::from_secs(2);
+
+/// Path to the in-cluster CA certificate
+const IN_CLUSTER_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+
+/// Internal Kubernetes service endpoint for self-management
+const INTERNAL_K8S_ENDPOINT: &str = "https://kubernetes.default.svc:443";
+
 /// Pivot errors
 #[derive(Debug, Error)]
 pub enum PivotError {
@@ -174,10 +186,7 @@ pub struct AgentPivotHandler<R: CommandRunner = RealCommandRunner> {
 impl AgentPivotHandler<RealCommandRunner> {
     /// Create a new agent pivot handler
     pub fn new() -> Self {
-        Self {
-            capi_namespace: "default".to_string(),
-            runner: RealCommandRunner,
-        }
+        Self::with_runner(RealCommandRunner)
     }
 }
 
@@ -185,7 +194,7 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
     /// Create with a custom runner (for testing)
     pub fn with_runner(runner: R) -> Self {
         Self {
-            capi_namespace: "default".to_string(),
+            capi_namespace: DEFAULT_CAPI_NAMESPACE.to_string(),
             runner,
         }
     }
@@ -315,7 +324,7 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
         info!(output = %stdout.trim(), "clusterctl move completed successfully");
 
         // Wait briefly for resources to appear, then count them
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(POST_MOVE_STABILIZATION_DELAY).await;
         let count = self
             .count_capi_resources()
             .await
@@ -335,6 +344,143 @@ impl Default for AgentPivotHandler<RealCommandRunner> {
 // Kubeconfig Patching for Self-Management
 // =============================================================================
 
+/// Read and base64-encode the in-cluster CA certificate.
+fn read_in_cluster_ca_base64() -> Result<String, PivotError> {
+    let in_cluster_ca = std::fs::read_to_string(IN_CLUSTER_CA_PATH).map_err(|e| {
+        PivotError::Internal(format!(
+            "failed to read in-cluster CA from {}: {}",
+            IN_CLUSTER_CA_PATH, e
+        ))
+    })?;
+    Ok(STANDARD.encode(in_cluster_ca.as_bytes()))
+}
+
+/// Fetch and decode the kubeconfig from a Kubernetes secret.
+async fn fetch_kubeconfig_from_secret(
+    secrets: &Api<Secret>,
+    secret_name: &str,
+) -> Result<serde_yaml::Value, PivotError> {
+    let secret = secrets.get(secret_name).await.map_err(|e| {
+        PivotError::Internal(format!(
+            "failed to get kubeconfig secret '{}': {}",
+            secret_name, e
+        ))
+    })?;
+
+    let data = secret
+        .data
+        .ok_or_else(|| PivotError::Internal("kubeconfig secret has no data".to_string()))?;
+
+    let kubeconfig_bytes = data
+        .get("value")
+        .ok_or_else(|| PivotError::Internal("kubeconfig secret missing 'value' key".to_string()))?;
+
+    let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
+        .map_err(|e| PivotError::Internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
+
+    serde_yaml::from_str(&kubeconfig_str)
+        .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))
+}
+
+/// Update a single cluster entry in the kubeconfig to use the internal endpoint.
+///
+/// Returns `true` if the cluster was updated, `false` if it already uses the internal endpoint.
+fn update_cluster_entry(
+    cluster_entry: &mut serde_yaml::Value,
+    in_cluster_ca_b64: &str,
+    cluster_name: &str,
+) -> bool {
+    let Some(cluster_config) = cluster_entry.get_mut("cluster") else {
+        return false;
+    };
+
+    let Some(server) = cluster_config.get_mut("server") else {
+        return false;
+    };
+
+    let old_server = server.as_str().unwrap_or("unknown").to_string();
+    if old_server.contains("kubernetes.default.svc") {
+        return false;
+    }
+
+    // Update server URL
+    *server = serde_yaml::Value::String(INTERNAL_K8S_ENDPOINT.to_string());
+
+    // Update CA certificate
+    if let Some(m) = cluster_config.as_mapping_mut() {
+        m.remove("certificate-authority");
+        m.insert(
+            serde_yaml::Value::String("certificate-authority-data".to_string()),
+            serde_yaml::Value::String(in_cluster_ca_b64.to_string()),
+        );
+    }
+
+    info!(
+        cluster = %cluster_name,
+        old_server = %old_server,
+        new_server = INTERNAL_K8S_ENDPOINT,
+        "Updated kubeconfig server URL and CA"
+    );
+
+    true
+}
+
+/// Update all cluster entries in the kubeconfig to use the internal endpoint.
+///
+/// Returns the number of clusters that were updated.
+fn update_all_cluster_entries(
+    kubeconfig: &mut serde_yaml::Value,
+    in_cluster_ca_b64: &str,
+    cluster_name: &str,
+) -> usize {
+    let Some(clusters) = kubeconfig
+        .get_mut("clusters")
+        .and_then(|c| c.as_sequence_mut())
+    else {
+        return 0;
+    };
+
+    clusters
+        .iter_mut()
+        .filter_map(|entry| {
+            if update_cluster_entry(entry, in_cluster_ca_b64, cluster_name) {
+                Some(())
+            } else {
+                None
+            }
+        })
+        .count()
+}
+
+/// Apply the updated kubeconfig to the secret.
+async fn apply_kubeconfig_patch(
+    secrets: &Api<Secret>,
+    secret_name: &str,
+    kubeconfig: &serde_yaml::Value,
+) -> Result<(), PivotError> {
+    let updated_kubeconfig = serde_yaml::to_string(kubeconfig)
+        .map_err(|e| PivotError::Internal(format!("failed to serialize kubeconfig: {}", e)))?;
+
+    let encoded = STANDARD.encode(updated_kubeconfig.as_bytes());
+
+    let patch = serde_json::json!({
+        "data": {
+            "value": encoded
+        }
+    });
+
+    secrets
+        .patch(
+            secret_name,
+            &PatchParams::apply("lattice"),
+            &Patch::Merge(&patch),
+        )
+        .await
+        .map_err(|e| PivotError::Internal(format!("failed to patch kubeconfig secret: {}", e)))?;
+
+    Ok(())
+}
+
 /// Patch the kubeconfig secret to use the internal Kubernetes service endpoint.
 ///
 /// After clusterctl move, the kubeconfig secret contains the external network IP
@@ -351,15 +497,7 @@ pub async fn patch_kubeconfig_for_self_management(
 ) -> Result<(), PivotError> {
     info!(cluster = %cluster_name, namespace = %namespace, "Patching kubeconfig for self-management");
 
-    // Read the in-cluster CA certificate
-    const IN_CLUSTER_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
-    let in_cluster_ca = std::fs::read_to_string(IN_CLUSTER_CA_PATH).map_err(|e| {
-        PivotError::Internal(format!(
-            "failed to read in-cluster CA from {}: {}",
-            IN_CLUSTER_CA_PATH, e
-        ))
-    })?;
-    let in_cluster_ca_b64 = STANDARD.encode(in_cluster_ca.as_bytes());
+    let in_cluster_ca_b64 = read_in_cluster_ca_base64()?;
 
     let client = kube::Client::try_default()
         .await
@@ -368,86 +506,17 @@ pub async fn patch_kubeconfig_for_self_management(
     let secrets: Api<Secret> = Api::namespaced(client, namespace);
     let secret_name = format!("{}-kubeconfig", cluster_name);
 
-    let secret = secrets.get(&secret_name).await.map_err(|e| {
-        PivotError::Internal(format!(
-            "failed to get kubeconfig secret '{}': {}",
-            secret_name, e
-        ))
-    })?;
+    let mut kubeconfig = fetch_kubeconfig_from_secret(&secrets, &secret_name).await?;
 
-    let data = secret
-        .data
-        .ok_or_else(|| PivotError::Internal("kubeconfig secret has no data".to_string()))?;
-    let kubeconfig_bytes = data
-        .get("value")
-        .ok_or_else(|| PivotError::Internal("kubeconfig secret missing 'value' key".to_string()))?;
-
-    let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
-        .map_err(|e| PivotError::Internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
-
-    let mut kubeconfig: serde_yaml::Value = serde_yaml::from_str(&kubeconfig_str)
-        .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
-
-    // Update ALL cluster server URLs and CA certs to internal endpoint
-    let mut updated_count = 0;
-    if let Some(clusters) = kubeconfig
-        .get_mut("clusters")
-        .and_then(|c| c.as_sequence_mut())
-    {
-        for cluster in clusters {
-            if let Some(cluster_config) = cluster.get_mut("cluster") {
-                if let Some(server) = cluster_config.get_mut("server") {
-                    let old_server = server.as_str().unwrap_or("unknown").to_string();
-                    if !old_server.contains("kubernetes.default.svc") {
-                        *server = serde_yaml::Value::String(
-                            "https://kubernetes.default.svc:443".to_string(),
-                        );
-
-                        if let Some(m) = cluster_config.as_mapping_mut() {
-                            m.remove("certificate-authority");
-                            m.insert(
-                                serde_yaml::Value::String("certificate-authority-data".to_string()),
-                                serde_yaml::Value::String(in_cluster_ca_b64.clone()),
-                            );
-                        }
-
-                        info!(
-                            cluster = %cluster_name,
-                            old_server = %old_server,
-                            new_server = "https://kubernetes.default.svc:443",
-                            "Updated kubeconfig server URL and CA"
-                        );
-                        updated_count += 1;
-                    }
-                }
-            }
-        }
-    }
+    let updated_count =
+        update_all_cluster_entries(&mut kubeconfig, &in_cluster_ca_b64, cluster_name);
 
     if updated_count == 0 {
         debug!(cluster = %cluster_name, "Kubeconfig already uses internal endpoint, skipping patch");
         return Ok(());
     }
 
-    let updated_kubeconfig = serde_yaml::to_string(&kubeconfig)
-        .map_err(|e| PivotError::Internal(format!("failed to serialize kubeconfig: {}", e)))?;
-
-    let encoded = STANDARD.encode(updated_kubeconfig.as_bytes());
-
-    let patch = serde_json::json!({
-        "data": {
-            "value": encoded
-        }
-    });
-
-    secrets
-        .patch(
-            &secret_name,
-            &PatchParams::apply("lattice"),
-            &Patch::Merge(&patch),
-        )
-        .await
-        .map_err(|e| PivotError::Internal(format!("failed to patch kubeconfig secret: {}", e)))?;
+    apply_kubeconfig_patch(&secrets, &secret_name, &kubeconfig).await?;
 
     info!(
         cluster = %cluster_name,

@@ -6,6 +6,9 @@
 
 use thiserror::Error;
 
+/// Default context value when no specific context is available
+pub const UNKNOWN_CONTEXT: &str = "unknown";
+
 /// Main error type for Lattice operations
 #[derive(Debug, Error)]
 
@@ -72,12 +75,22 @@ pub enum Error {
     },
 
     /// Bootstrap/cell server error
-    #[error("bootstrap error: {0}")]
-    Bootstrap(String),
+    #[error("bootstrap error [{context}]: {message}")]
+    Bootstrap {
+        /// Description of what failed
+        message: String,
+        /// Context where the error occurred (e.g., "webhook", "agent", "grpc")
+        context: String,
+    },
 
     /// Internal/operational error
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("internal error [{context}]: {message}")]
+    Internal {
+        /// Description of what failed
+        message: String,
+        /// Context where the error occurred (e.g., "reconciler", "controller", "watcher")
+        context: String,
+    },
 }
 
 impl Error {
@@ -86,7 +99,7 @@ impl Error {
     /// For simple validation errors without cluster context.
     pub fn validation(msg: impl Into<String>) -> Self {
         Self::Validation {
-            cluster: "unknown".to_string(),
+            cluster: UNKNOWN_CONTEXT.to_string(),
             message: msg.into(),
             field: None,
         }
@@ -119,8 +132,8 @@ impl Error {
     /// For simple provider errors without full context.
     pub fn provider(msg: impl Into<String>) -> Self {
         Self::Provider {
-            cluster: "unknown".to_string(),
-            provider: "unknown".to_string(),
+            cluster: UNKNOWN_CONTEXT.to_string(),
+            provider: UNKNOWN_CONTEXT.to_string(),
             message: msg.into(),
             retryable: true,
         }
@@ -157,7 +170,7 @@ impl Error {
     /// Create a pivot error with the given message
     pub fn pivot(msg: impl Into<String>) -> Self {
         Self::Pivot {
-            cluster: "unknown".to_string(),
+            cluster: UNKNOWN_CONTEXT.to_string(),
             message: msg.into(),
             phase: None,
         }
@@ -220,6 +233,42 @@ impl Error {
         }
     }
 
+    /// Create a bootstrap error with the given message
+    ///
+    /// For simple bootstrap errors without specific context.
+    pub fn bootstrap(msg: impl Into<String>) -> Self {
+        Self::Bootstrap {
+            message: msg.into(),
+            context: UNKNOWN_CONTEXT.to_string(),
+        }
+    }
+
+    /// Create a bootstrap error with context
+    pub fn bootstrap_with_context(context: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self::Bootstrap {
+            message: msg.into(),
+            context: context.into(),
+        }
+    }
+
+    /// Create an internal error with the given message
+    ///
+    /// For simple internal errors without specific context.
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::Internal {
+            message: msg.into(),
+            context: UNKNOWN_CONTEXT.to_string(),
+        }
+    }
+
+    /// Create an internal error with context
+    pub fn internal_with_context(context: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self::Internal {
+            message: msg.into(),
+            context: context.into(),
+        }
+    }
+
     /// Check if this error is retryable
     ///
     /// Validation and serialization errors are not retryable (require config fix).
@@ -240,8 +289,8 @@ impl Error {
             Error::Pivot { .. } => true, // Pivots are generally retryable
             Error::Serialization { .. } => false,
             Error::CapiInstallation { .. } => true,
-            Error::Bootstrap(_) => true,
-            Error::Internal(_) => true,
+            Error::Bootstrap { .. } => true,
+            Error::Internal { .. } => true,
         }
     }
 
@@ -254,8 +303,17 @@ impl Error {
             Error::Pivot { cluster, .. } => Some(cluster),
             Error::Serialization { .. } => None,
             Error::CapiInstallation { .. } => None,
-            Error::Bootstrap(_) => None,
-            Error::Internal(_) => None,
+            Error::Bootstrap { .. } => None,
+            Error::Internal { .. } => None,
+        }
+    }
+
+    /// Get the context if this error has one
+    pub fn context(&self) -> Option<&str> {
+        match self {
+            Error::Bootstrap { context, .. } => Some(context),
+            Error::Internal { context, .. } => Some(context),
+            _ => None,
         }
     }
 }
@@ -464,10 +522,7 @@ mod tests {
         assert_eq!(Error::capi_installation("msg").cluster(), None);
 
         // Bootstrap does NOT have cluster
-        assert_eq!(
-            Error::Bootstrap("bootstrap failed".to_string()).cluster(),
-            None
-        );
+        assert_eq!(Error::bootstrap("bootstrap failed").cluster(), None);
     }
 
     #[test]
@@ -487,7 +542,81 @@ mod tests {
 
     #[test]
     fn test_bootstrap_error_is_retryable() {
-        let err = Error::Bootstrap("connection timeout".to_string());
+        let err = Error::bootstrap("connection timeout");
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_bootstrap_error_with_context() {
+        let err = Error::bootstrap_with_context("webhook", "connection timeout");
+        assert!(err.is_retryable());
+        assert_eq!(err.context(), Some("webhook"));
+        assert!(err.to_string().contains("[webhook]"));
+        assert!(err.to_string().contains("connection timeout"));
+    }
+
+    #[test]
+    fn test_bootstrap_error_default_context() {
+        let err = Error::bootstrap("connection timeout");
+        assert_eq!(err.context(), Some(super::UNKNOWN_CONTEXT));
+        assert!(err.to_string().contains("[unknown]"));
+    }
+
+    #[test]
+    fn test_internal_error_with_context() {
+        let err = Error::internal_with_context("reconciler", "unexpected state");
+        assert!(err.is_retryable());
+        assert_eq!(err.context(), Some("reconciler"));
+        assert!(err.to_string().contains("[reconciler]"));
+        assert!(err.to_string().contains("unexpected state"));
+    }
+
+    #[test]
+    fn test_internal_error_default_context() {
+        let err = Error::internal("unexpected state");
+        assert_eq!(err.context(), Some(super::UNKNOWN_CONTEXT));
+        assert!(err.to_string().contains("[unknown]"));
+    }
+
+    #[test]
+    fn test_internal_error_is_retryable() {
+        let err = Error::internal("unexpected failure");
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_unknown_context_constant() {
+        // Ensure the constant is used correctly
+        assert_eq!(super::UNKNOWN_CONTEXT, "unknown");
+
+        // Test that validation uses the constant
+        let err = Error::validation("test");
+        match &err {
+            Error::Validation { cluster, .. } => {
+                assert_eq!(cluster, super::UNKNOWN_CONTEXT);
+            }
+            _ => panic!("Expected Validation variant"),
+        }
+
+        // Test that provider uses the constant
+        let err = Error::provider("test");
+        match &err {
+            Error::Provider {
+                cluster, provider, ..
+            } => {
+                assert_eq!(cluster, super::UNKNOWN_CONTEXT);
+                assert_eq!(provider, super::UNKNOWN_CONTEXT);
+            }
+            _ => panic!("Expected Provider variant"),
+        }
+
+        // Test that pivot uses the constant
+        let err = Error::pivot("test");
+        match &err {
+            Error::Pivot { cluster, .. } => {
+                assert_eq!(cluster, super::UNKNOWN_CONTEXT);
+            }
+            _ => panic!("Expected Pivot variant"),
+        }
     }
 }

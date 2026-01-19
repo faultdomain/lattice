@@ -1196,7 +1196,7 @@ mod tests {
         assert_eq!(action, Action::await_change());
 
         // Bootstrap errors ARE retryable - should requeue with backoff
-        let retryable_error = Error::Bootstrap("connection timeout".to_string());
+        let retryable_error = Error::bootstrap("connection timeout");
         let action = error_policy(service, &retryable_error, ctx);
         assert_eq!(action, Action::requeue(Duration::from_secs(30)));
     }

@@ -2,7 +2,8 @@
 //!
 //! All command executions have timeouts and retry logic to handle transient failures.
 
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kube::api::{Api, Patch, PatchParams};
@@ -20,6 +21,106 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default retry configuration
 const MAX_ATTEMPTS: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+/// RAII wrapper for temporary directories that ensures cleanup on drop.
+///
+/// This wrapper logs cleanup failures instead of silently ignoring them.
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    /// Create a new temporary directory with the given name prefix.
+    fn new(prefix: &str) -> Result<Self, ClusterctlError> {
+        let path = std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()));
+        // Clean up any stale directory from previous runs
+        if path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                warn!(path = %path.display(), error = %e, "failed to clean stale temp directory");
+            }
+        }
+        std::fs::create_dir_all(&path).map_err(|e| {
+            ClusterctlError::ExecutionFailed(format!(
+                "failed to create temp directory {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        Ok(Self { path })
+    }
+
+    /// Get the path to the temporary directory.
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.path) {
+            warn!(path = %self.path.display(), error = %e, "failed to clean up temp directory");
+        }
+    }
+}
+
+/// Type alias for retry callback functions.
+type RetryCallback<'a> =
+    Box<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'a>;
+
+/// Configuration for retry operations.
+struct RetryConfig<'a> {
+    /// Operation name for logging (e.g., "export", "import")
+    operation: &'a str,
+    /// Context identifier for logging (e.g., cluster name or namespace)
+    context_name: &'a str,
+    /// Optional callback to run between retry attempts
+    on_retry: Option<RetryCallback<'a>>,
+    /// Delay between retries (defaults to RETRY_DELAY)
+    retry_delay: Duration,
+}
+
+/// Execute an operation with retry logic.
+///
+/// This is a generic retry wrapper that eliminates duplication between
+/// export_for_pivot and import_from_manifests.
+async fn with_retry<T, F, Fut>(
+    config: RetryConfig<'_>,
+    mut operation_fn: F,
+) -> Result<T, ClusterctlError>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let mut last_error = String::new();
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match operation_fn(attempt).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_error = e;
+                if attempt < MAX_ATTEMPTS {
+                    warn!(
+                        operation = %config.operation,
+                        context = %config.context_name,
+                        attempt,
+                        error = %last_error,
+                        "{} failed, retrying",
+                        config.operation
+                    );
+                    if let Some(ref on_retry) = config.on_retry {
+                        on_retry().await;
+                    }
+                    tokio::time::sleep(config.retry_delay).await;
+                }
+            }
+        }
+    }
+
+    Err(ClusterctlError::RetriesExhausted {
+        attempts: MAX_ATTEMPTS,
+        last_error,
+    })
+}
 
 /// CAPI Cluster resource definition
 fn cluster_api_resource() -> ApiResource {
@@ -79,54 +180,82 @@ pub async fn export_for_pivot(
     namespace: &str,
     cluster_name: &str,
 ) -> Result<Vec<Vec<u8>>, ClusterctlError> {
-    let export_path = std::env::temp_dir().join(format!(
-        "lattice-export-{}-{}",
-        cluster_name,
-        std::process::id()
-    ));
+    let temp_dir = TempDir::new(&format!("lattice-export-{}", cluster_name))?;
 
-    let mut last_error = String::new();
+    // Clone values needed for the retry callback
+    let kubeconfig_path = kubeconfig.map(|p| p.to_path_buf());
+    let ns = namespace.to_string();
+    let cn = cluster_name.to_string();
 
-    for attempt in 1..=MAX_ATTEMPTS {
-        let _ = std::fs::remove_dir_all(&export_path);
-        std::fs::create_dir_all(&export_path).map_err(|e| {
-            ClusterctlError::ExecutionFailed(format!("failed to create export dir: {}", e))
-        })?;
+    let config = RetryConfig {
+        operation: "export",
+        context_name: cluster_name,
+        on_retry: Some(Box::new(move || {
+            let kc = kubeconfig_path.clone();
+            let ns = ns.clone();
+            let cn = cn.clone();
+            Box::pin(async move {
+                // Unpause CAPI cluster before retry to recover from partial move state
+                if let Err(e) = unpause_capi_cluster(kc.as_deref(), &ns, &cn).await {
+                    warn!(
+                        cluster = %cn,
+                        error = %e,
+                        "failed to unpause CAPI cluster before retry"
+                    );
+                }
+            })
+        })),
+        retry_delay: RETRY_DELAY,
+    };
 
-        let mut cmd = Command::new("clusterctl");
-        cmd.arg("move")
-            .arg("--to-directory")
-            .arg(&export_path)
-            .arg("--namespace")
-            .arg(namespace);
+    with_retry(config, |_attempt| {
+        let export_path = temp_dir.path().to_path_buf();
+        let kubeconfig = kubeconfig.map(|p| p.to_path_buf());
+        let namespace = namespace.to_string();
+        let cluster_name = cluster_name.to_string();
 
-        if let Some(kc) = kubeconfig {
-            cmd.arg("--kubeconfig").arg(kc);
-        }
-
-        match run_command(&mut cmd, "clusterctl move --to-directory").await {
-            Ok(()) => {
-                let manifests = read_yaml_files(&export_path)?;
-                let _ = std::fs::remove_dir_all(&export_path);
-                info!(cluster = %cluster_name, count = manifests.len(), "CAPI export complete");
-                return Ok(manifests);
-            }
-            Err(e) => {
-                last_error = e;
-                if attempt < MAX_ATTEMPTS {
-                    warn!(cluster = %cluster_name, attempt, error = %last_error, "export failed, retrying");
-                    let _ = unpause_capi_cluster(kubeconfig, namespace, cluster_name).await;
-                    tokio::time::sleep(RETRY_DELAY).await;
+        async move {
+            // Reset directory for each attempt
+            if let Err(e) = std::fs::remove_dir_all(&export_path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(path = %export_path.display(), error = %e, "failed to reset export directory");
                 }
             }
-        }
-    }
+            std::fs::create_dir_all(&export_path)
+                .map_err(|e| format!("failed to create export dir: {}", e))?;
 
-    let _ = std::fs::remove_dir_all(&export_path);
-    Err(ClusterctlError::RetriesExhausted {
-        attempts: MAX_ATTEMPTS,
-        last_error,
+            let mut cmd = Command::new("clusterctl");
+            cmd.arg("move")
+                .arg("--to-directory")
+                .arg(&export_path)
+                .arg("--namespace")
+                .arg(&namespace);
+
+            if let Some(kc) = kubeconfig.as_ref() {
+                cmd.arg("--kubeconfig").arg(kc);
+            }
+
+            run_command(
+                &mut cmd,
+                &format!("clusterctl move --to-directory (cluster={})", cluster_name),
+            )
+            .await?;
+
+            let manifests = read_yaml_files(&export_path)
+                .map_err(|e| format!("failed to read exported manifests: {}", e))?;
+
+            info!(
+                operation = "export",
+                cluster = %cluster_name,
+                manifest_count = manifests.len(),
+                "CAPI export complete"
+            );
+
+            Ok(manifests)
+        }
     })
+    .await
+    // TempDir is dropped here, ensuring cleanup
 }
 
 /// Import CAPI resources from manifest bytes (used during unpivot)
@@ -135,58 +264,66 @@ pub async fn import_from_manifests(
     namespace: &str,
     manifests: &[Vec<u8>],
 ) -> Result<(), ClusterctlError> {
-    let import_path = std::env::temp_dir().join(format!(
-        "lattice-import-{}-{}",
-        namespace,
-        std::process::id()
-    ));
+    let temp_dir = TempDir::new(&format!("lattice-import-{}", namespace))?;
 
-    let mut last_error = String::new();
+    let config = RetryConfig {
+        operation: "import",
+        context_name: namespace,
+        on_retry: None, // No special action needed between import retries
+        retry_delay: RETRY_DELAY,
+    };
 
-    for attempt in 1..=MAX_ATTEMPTS {
-        let _ = std::fs::remove_dir_all(&import_path);
-        std::fs::create_dir_all(&import_path).map_err(|e| {
-            ClusterctlError::ExecutionFailed(format!("failed to create import dir: {}", e))
-        })?;
+    with_retry(config, |_attempt| {
+        let import_path = temp_dir.path().to_path_buf();
+        let kubeconfig = kubeconfig.map(|p| p.to_path_buf());
+        let namespace = namespace.to_string();
+        let manifests = manifests.to_vec();
 
-        for (i, manifest) in manifests.iter().enumerate() {
-            std::fs::write(import_path.join(format!("{}.yaml", i)), manifest).map_err(|e| {
-                ClusterctlError::ExecutionFailed(format!("failed to write manifest: {}", e))
-            })?;
-        }
-
-        let mut cmd = Command::new("clusterctl");
-        cmd.arg("move")
-            .arg("--from-directory")
-            .arg(&import_path)
-            .arg("--namespace")
-            .arg(namespace);
-
-        if let Some(kc) = kubeconfig {
-            cmd.arg("--to-kubeconfig").arg(kc);
-        }
-
-        match run_command(&mut cmd, "clusterctl move --from-directory").await {
-            Ok(()) => {
-                let _ = std::fs::remove_dir_all(&import_path);
-                info!(namespace = %namespace, count = manifests.len(), "CAPI import complete");
-                return Ok(());
-            }
-            Err(e) => {
-                last_error = e;
-                if attempt < MAX_ATTEMPTS {
-                    warn!(namespace = %namespace, attempt, error = %last_error, "import failed, retrying");
-                    tokio::time::sleep(RETRY_DELAY).await;
+        async move {
+            // Reset directory for each attempt
+            if let Err(e) = std::fs::remove_dir_all(&import_path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(path = %import_path.display(), error = %e, "failed to reset import directory");
                 }
             }
-        }
-    }
+            std::fs::create_dir_all(&import_path)
+                .map_err(|e| format!("failed to create import dir: {}", e))?;
 
-    let _ = std::fs::remove_dir_all(&import_path);
-    Err(ClusterctlError::RetriesExhausted {
-        attempts: MAX_ATTEMPTS,
-        last_error,
+            // Write manifests to temporary files
+            for (i, manifest) in manifests.iter().enumerate() {
+                std::fs::write(import_path.join(format!("{}.yaml", i)), manifest)
+                    .map_err(|e| format!("failed to write manifest {}: {}", i, e))?;
+            }
+
+            let mut cmd = Command::new("clusterctl");
+            cmd.arg("move")
+                .arg("--from-directory")
+                .arg(&import_path)
+                .arg("--namespace")
+                .arg(&namespace);
+
+            if let Some(kc) = kubeconfig.as_ref() {
+                cmd.arg("--to-kubeconfig").arg(kc);
+            }
+
+            run_command(
+                &mut cmd,
+                &format!("clusterctl move --from-directory (namespace={})", namespace),
+            )
+            .await?;
+
+            info!(
+                operation = "import",
+                namespace = %namespace,
+                manifest_count = manifests.len(),
+                "CAPI import complete"
+            );
+
+            Ok(())
+        }
     })
+    .await
+    // TempDir is dropped here, ensuring cleanup
 }
 
 /// Unpause a CAPI cluster (call before retrying after failed move)
@@ -201,7 +338,10 @@ pub async fn unpause_capi_cluster(
     let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &cluster_api_resource());
     let patch = serde_json::json!({"spec": {"paused": false}});
 
-    match api.patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+    match api
+        .patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
         Ok(_) => info!(cluster = %cluster_name, "CAPI cluster unpaused"),
         Err(e) => warn!(cluster = %cluster_name, error = %e, "unpause failed (may not exist)"),
     }
@@ -240,7 +380,10 @@ pub async fn is_capi_cluster_ready(
             Ok(is_ready)
         }
         Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
-        Err(e) => Err(ClusterctlError::ExecutionFailed(format!("failed to get cluster: {}", e))),
+        Err(e) => Err(ClusterctlError::ExecutionFailed(format!(
+            "failed to get cluster: {}",
+            e
+        ))),
     }
 }
 
@@ -268,6 +411,8 @@ fn read_yaml_files(dir: &Path) -> Result<Vec<Vec<u8>>, ClusterctlError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn test_error_display() {
@@ -277,5 +422,161 @@ mod tests {
         };
         assert!(err.to_string().contains("3 attempts"));
         assert!(err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn test_temp_dir_creates_directory() {
+        let temp_dir = TempDir::new("test-create").expect("should create temp dir");
+        assert!(temp_dir.path().exists());
+        assert!(temp_dir.path().is_dir());
+    }
+
+    #[test]
+    fn test_temp_dir_cleanup_on_drop() {
+        let path = {
+            let temp_dir = TempDir::new("test-cleanup").expect("should create temp dir");
+            let path = temp_dir.path().to_path_buf();
+            assert!(path.exists());
+            path
+        };
+        // After drop, directory should be cleaned up
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_temp_dir_cleans_stale_directory() {
+        // Create a directory that would conflict
+        let stale_path = std::env::temp_dir().join(format!("test-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&stale_path).expect("should create stale dir");
+        std::fs::write(stale_path.join("old.txt"), "old content").expect("should write old file");
+
+        // Creating TempDir with same prefix should clean the stale directory
+        let temp_dir = TempDir::new("test-stale").expect("should create temp dir");
+        assert!(temp_dir.path().exists());
+        assert!(!temp_dir.path().join("old.txt").exists()); // Old file should be gone
+    }
+
+    /// Fast retry delay for tests
+    const TEST_RETRY_DELAY: Duration = Duration::from_millis(1);
+
+    #[tokio::test]
+    async fn test_with_retry_succeeds_first_attempt() {
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_count_clone = attempt_count.clone();
+
+        let config = RetryConfig {
+            operation: "test",
+            context_name: "test-context",
+            on_retry: None,
+            retry_delay: TEST_RETRY_DELAY,
+        };
+
+        let result: Result<String, ClusterctlError> = with_retry(config, |_| {
+            let count = attempt_count_clone.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok("success".to_string())
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "success");
+        assert_eq!(attempt_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_with_retry_succeeds_after_failures() {
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_count_clone = attempt_count.clone();
+
+        let config = RetryConfig {
+            operation: "test",
+            context_name: "test-context",
+            on_retry: None,
+            retry_delay: TEST_RETRY_DELAY,
+        };
+
+        let result: Result<String, ClusterctlError> = with_retry(config, |attempt| {
+            let count = attempt_count_clone.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 3 {
+                    Err("transient error".to_string())
+                } else {
+                    Ok("success".to_string())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "success");
+        assert_eq!(attempt_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_with_retry_exhausts_attempts() {
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_count_clone = attempt_count.clone();
+
+        let config = RetryConfig {
+            operation: "test",
+            context_name: "test-context",
+            on_retry: None,
+            retry_delay: TEST_RETRY_DELAY,
+        };
+
+        let result: Result<String, ClusterctlError> = with_retry(config, |_| {
+            let count = attempt_count_clone.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err("persistent error".to_string())
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ClusterctlError::RetriesExhausted {
+                attempts,
+                last_error,
+            } => {
+                assert_eq!(attempts, MAX_ATTEMPTS);
+                assert_eq!(last_error, "persistent error");
+            }
+            _ => panic!("expected RetriesExhausted error"),
+        }
+        assert_eq!(attempt_count.load(Ordering::SeqCst), MAX_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn test_with_retry_calls_on_retry_callback() {
+        let retry_count = Arc::new(AtomicU32::new(0));
+        let retry_count_clone = retry_count.clone();
+
+        let config = RetryConfig {
+            operation: "test",
+            context_name: "test-context",
+            on_retry: Some(Box::new(move || {
+                let count = retry_count_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                })
+            })),
+            retry_delay: TEST_RETRY_DELAY,
+        };
+
+        let _: Result<String, ClusterctlError> = with_retry(config, |attempt| async move {
+            if attempt < 3 {
+                Err("transient error".to_string())
+            } else {
+                Ok("success".to_string())
+            }
+        })
+        .await;
+
+        // on_retry should be called twice (after attempt 1 and 2, not after success on 3)
+        assert_eq!(retry_count.load(Ordering::SeqCst), 2);
     }
 }

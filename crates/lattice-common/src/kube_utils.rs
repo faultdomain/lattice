@@ -3,6 +3,7 @@
 //! Provides kubectl-equivalent operations without shelling out to kubectl.
 //! FIPS compliant - no external binaries needed.
 
+use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
@@ -13,61 +14,170 @@ use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams, PostParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::discovery::ApiResource;
 use kube::{Client, Config};
-use tracing::info;
+use tracing::{debug, info, trace};
 
 use crate::Error;
+
+// Kubernetes condition type constants
+/// The "Ready" condition type for nodes
+pub const CONDITION_READY: &str = "Ready";
+/// The "Available" condition type for deployments
+pub const CONDITION_AVAILABLE: &str = "Available";
+/// The "True" status value for conditions
+pub const STATUS_TRUE: &str = "True";
+
+/// Default polling interval for wait operations
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Check if a Kubernetes condition of the given type has status "True"
+///
+/// This is a helper for checking conditions on nodes, deployments, and other
+/// resources that use the standard Kubernetes condition format.
+///
+/// # Arguments
+/// * `conditions` - Optional slice of conditions (e.g., from status.conditions)
+/// * `condition_type` - The condition type to check (e.g., "Ready", "Available")
+///
+/// # Returns
+/// `true` if a condition with the given type exists and has status "True"
+pub fn has_condition<T>(conditions: Option<&[T]>, condition_type: &str) -> bool
+where
+    T: HasConditionFields,
+{
+    conditions
+        .map(|conds| {
+            conds
+                .iter()
+                .any(|c| c.type_field() == condition_type && c.status_field() == STATUS_TRUE)
+        })
+        .unwrap_or(false)
+}
+
+/// Trait for types that have condition-like fields (type and status)
+pub trait HasConditionFields {
+    /// Get the condition type field value
+    fn type_field(&self) -> &str;
+    /// Get the condition status field value
+    fn status_field(&self) -> &str;
+}
+
+impl HasConditionFields for k8s_openapi::api::core::v1::NodeCondition {
+    fn type_field(&self) -> &str {
+        &self.type_
+    }
+    fn status_field(&self) -> &str {
+        &self.status
+    }
+}
+
+impl HasConditionFields for k8s_openapi::api::apps::v1::DeploymentCondition {
+    fn type_field(&self) -> &str {
+        &self.type_
+    }
+    fn status_field(&self) -> &str {
+        &self.status
+    }
+}
+
+/// Poll until a condition is met or timeout is reached
+///
+/// This is a generic polling function that repeatedly calls a check function
+/// until it returns `Ok(true)` or the timeout is exceeded.
+///
+/// # Arguments
+/// * `timeout` - Maximum time to wait for the condition
+/// * `poll_interval` - Time between polling attempts
+/// * `timeout_msg` - Error message to use on timeout
+/// * `check_fn` - Async function that returns `Ok(true)` when condition is met,
+///   `Ok(false)` to continue polling, or `Err` on failure
+///
+/// # Returns
+/// `Ok(())` if the condition was met, or `Err` on timeout or check failure
+pub async fn poll_until<F, Fut>(
+    timeout: Duration,
+    poll_interval: Duration,
+    timeout_msg: impl Into<String>,
+    mut check_fn: F,
+) -> Result<(), Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<bool, Error>>,
+{
+    let start = std::time::Instant::now();
+    let timeout_msg = timeout_msg.into();
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(Error::internal_with_context("poll_until", timeout_msg));
+        }
+
+        match check_fn().await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                // Condition not met, continue polling
+                trace!("Polling condition not yet met, retrying...");
+            }
+            Err(e) => {
+                // Log at trace level since polling failures are expected
+                trace!("Polling check returned error (retrying): {}", e);
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
 
 /// Create a kube client from optional kubeconfig path
 pub async fn create_client(kubeconfig: Option<&Path>) -> Result<Client, Error> {
     match kubeconfig {
         Some(path) => {
-            let kubeconfig = Kubeconfig::read_from(path)
-                .map_err(|e| Error::Internal(format!("failed to read kubeconfig: {}", e)))?;
+            let kubeconfig = Kubeconfig::read_from(path).map_err(|e| {
+                Error::internal_with_context("create_client", format!("failed to read kubeconfig: {}", e))
+            })?;
             let config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
                 .await
-                .map_err(|e| Error::Internal(format!("failed to load kubeconfig: {}", e)))?;
-            Client::try_from(config)
-                .map_err(|e| Error::Internal(format!("failed to create client: {}", e)))
+                .map_err(|e| {
+                    Error::internal_with_context("create_client", format!("failed to load kubeconfig: {}", e))
+                })?;
+            Client::try_from(config).map_err(|e| {
+                Error::internal_with_context("create_client", format!("failed to create client: {}", e))
+            })
         }
-        None => Client::try_default()
-            .await
-            .map_err(|e| Error::Internal(format!("failed to create client: {}", e))),
+        None => Client::try_default().await.map_err(|e| {
+            Error::internal_with_context("create_client", format!("failed to create client: {}", e))
+        }),
     }
 }
 
 /// Wait for all nodes to be ready
 pub async fn wait_for_nodes_ready(client: &Client, timeout: Duration) -> Result<(), Error> {
-    let start = std::time::Instant::now();
     let nodes: Api<Node> = Api::all(client.clone());
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(Error::Internal("Timeout waiting for nodes to be ready".into()));
-        }
+    poll_until(
+        timeout,
+        DEFAULT_POLL_INTERVAL,
+        "Timeout waiting for nodes to be ready",
+        || async {
+            let node_list = nodes.list(&ListParams::default()).await.map_err(|e| {
+                Error::internal_with_context(
+                    "wait_for_nodes_ready",
+                    format!("Failed to list nodes: {}", e),
+                )
+            })?;
 
-        let node_list = nodes
-            .list(&ListParams::default())
-            .await
-            .map_err(|e| Error::Internal(format!("Failed to list nodes: {}", e)))?;
+            if node_list.items.is_empty() {
+                return Ok(false);
+            }
 
-        let all_ready = node_list.items.iter().all(|node| {
-            node.status
-                .as_ref()
-                .and_then(|s| s.conditions.as_ref())
-                .map(|conditions| {
-                    conditions
-                        .iter()
-                        .any(|c| c.type_ == "Ready" && c.status == "True")
-                })
-                .unwrap_or(false)
-        });
+            let all_ready = node_list.items.iter().all(|node| {
+                let conditions = node.status.as_ref().and_then(|s| s.conditions.as_ref());
+                has_condition(conditions.map(|c| c.as_slice()), CONDITION_READY)
+            });
 
-        if all_ready && !node_list.items.is_empty() {
-            return Ok(());
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+            Ok(all_ready)
+        },
+    )
+    .await
 }
 
 /// Wait for a deployment to be available
@@ -77,47 +187,40 @@ pub async fn wait_for_deployment(
     namespace: &str,
     timeout: Duration,
 ) -> Result<(), Error> {
-    let start = std::time::Instant::now();
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    let name_owned = name.to_string();
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(Error::Internal(format!(
-                "Timeout waiting for deployment {} to be available",
-                name
-            )));
-        }
-
-        match deployments.get(name).await {
-            Ok(deployment) => {
-                let available = deployment
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.conditions.as_ref())
-                    .map(|conditions| {
-                        conditions
-                            .iter()
-                            .any(|c| c.type_ == "Available" && c.status == "True")
-                    })
-                    .unwrap_or(false);
-
-                if available {
-                    return Ok(());
+    poll_until(
+        timeout,
+        DEFAULT_POLL_INTERVAL,
+        format!("Timeout waiting for deployment {} to be available", name),
+        || {
+            let deployments = deployments.clone();
+            let name = name_owned.clone();
+            async move {
+                match deployments.get(&name).await {
+                    Ok(deployment) => {
+                        let conditions =
+                            deployment.status.as_ref().and_then(|s| s.conditions.as_ref());
+                        Ok(has_condition(
+                            conditions.map(|c| c.as_slice()),
+                            CONDITION_AVAILABLE,
+                        ))
+                    }
+                    Err(kube::Error::Api(e)) if e.code == 404 => {
+                        // Deployment doesn't exist yet, keep waiting
+                        trace!("Deployment {} not found yet", name);
+                        Ok(false)
+                    }
+                    Err(e) => Err(Error::internal_with_context(
+                        "wait_for_deployment",
+                        format!("Failed to get deployment {}: {}", name, e),
+                    )),
                 }
             }
-            Err(kube::Error::Api(e)) if e.code == 404 => {
-                // Deployment doesn't exist yet, keep waiting
-            }
-            Err(e) => {
-                return Err(Error::Internal(format!(
-                    "Failed to get deployment {}: {}",
-                    name, e
-                )));
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+        },
+    )
+    .await
 }
 
 /// Wait for all deployments in a namespace to be available
@@ -126,46 +229,43 @@ pub async fn wait_for_all_deployments(
     namespace: &str,
     timeout: Duration,
 ) -> Result<(), Error> {
-    let start = std::time::Instant::now();
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    let namespace_owned = namespace.to_string();
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(Error::Internal(format!(
-                "Timeout waiting for deployments in {} to be available",
-                namespace
-            )));
-        }
+    poll_until(
+        timeout,
+        DEFAULT_POLL_INTERVAL,
+        format!(
+            "Timeout waiting for deployments in {} to be available",
+            namespace
+        ),
+        || {
+            let deployments = deployments.clone();
+            let namespace = namespace_owned.clone();
+            async move {
+                let deployment_list =
+                    deployments.list(&ListParams::default()).await.map_err(|e| {
+                        Error::internal_with_context(
+                            "wait_for_all_deployments",
+                            format!("Failed to list deployments in {}: {}", namespace, e),
+                        )
+                    })?;
 
-        let deployment_list = deployments
-            .list(&ListParams::default())
-            .await
-            .map_err(|e| Error::Internal(format!("Failed to list deployments: {}", e)))?;
+                if deployment_list.items.is_empty() {
+                    return Ok(false);
+                }
 
-        if deployment_list.items.is_empty() {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        }
+                let all_available = deployment_list.items.iter().all(|deployment| {
+                    let conditions =
+                        deployment.status.as_ref().and_then(|s| s.conditions.as_ref());
+                    has_condition(conditions.map(|c| c.as_slice()), CONDITION_AVAILABLE)
+                });
 
-        let all_available = deployment_list.items.iter().all(|deployment| {
-            deployment
-                .status
-                .as_ref()
-                .and_then(|s| s.conditions.as_ref())
-                .map(|conditions| {
-                    conditions
-                        .iter()
-                        .any(|c| c.type_ == "Available" && c.status == "True")
-                })
-                .unwrap_or(false)
-        });
-
-        if all_available {
-            return Ok(());
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+                Ok(all_available)
+            }
+        },
+    )
+    .await
 }
 
 /// Check if a CRD exists
@@ -175,32 +275,35 @@ pub async fn crd_exists(client: &Client, crd_name: &str) -> Result<bool, Error> 
     match crds.get(crd_name).await {
         Ok(_) => Ok(true),
         Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
-        Err(e) => Err(Error::Internal(format!(
-            "Failed to check CRD {}: {}",
-            crd_name, e
-        ))),
+        Err(e) => Err(Error::internal_with_context(
+            "crd_exists",
+            format!("Failed to check CRD {}: {}", crd_name, e),
+        )),
     }
 }
 
 /// Wait for a CRD to be available
 pub async fn wait_for_crd(client: &Client, crd_name: &str, timeout: Duration) -> Result<(), Error> {
-    let start = std::time::Instant::now();
+    let client_clone = client.clone();
+    let crd_name_owned = crd_name.to_string();
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(Error::Internal(format!(
-                "Timeout waiting for CRD: {}",
-                crd_name
-            )));
-        }
-
-        if crd_exists(client, crd_name).await? {
-            info!("CRD ready: {}", crd_name);
-            return Ok(());
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+    poll_until(
+        timeout,
+        DEFAULT_POLL_INTERVAL,
+        format!("Timeout waiting for CRD: {}", crd_name),
+        || {
+            let client = client_clone.clone();
+            let crd_name = crd_name_owned.clone();
+            async move {
+                let exists = crd_exists(&client, &crd_name).await?;
+                if exists {
+                    info!("CRD ready: {}", crd_name);
+                }
+                Ok(exists)
+            }
+        },
+    )
+    .await
 }
 
 /// Create a namespace (idempotent)
@@ -218,10 +321,10 @@ pub async fn create_namespace(client: &Client, name: &str) -> Result<(), Error> 
     match namespaces.create(&PostParams::default(), &ns).await {
         Ok(_) => Ok(()),
         Err(kube::Error::Api(e)) if e.code == 409 => Ok(()), // Already exists
-        Err(e) => Err(Error::Internal(format!(
-            "Failed to create namespace {}: {}",
-            name, e
-        ))),
+        Err(e) => Err(Error::internal_with_context(
+            "create_namespace",
+            format!("Failed to create namespace {}: {}", name, e),
+        )),
     }
 }
 
@@ -242,29 +345,41 @@ pub struct ManifestMetadata {
 pub fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> {
     // Parse the manifest - try JSON first, then YAML
     let value: serde_json::Value = if manifest.trim().starts_with('{') {
-        serde_json::from_str(manifest)
-            .map_err(|e| Error::Internal(format!("Failed to parse manifest as JSON: {}", e)))?
+        serde_json::from_str(manifest).map_err(|e| {
+            Error::internal_with_context(
+                "parse_manifest",
+                format!("Failed to parse manifest as JSON: {}", e),
+            )
+        })?
     } else {
-        serde_yaml::from_str(manifest)
-            .map_err(|e| Error::Internal(format!("Failed to parse manifest as YAML: {}", e)))?
+        serde_yaml::from_str(manifest).map_err(|e| {
+            Error::internal_with_context(
+                "parse_manifest",
+                format!("Failed to parse manifest as YAML: {}", e),
+            )
+        })?
     };
 
     let api_version = value
         .get("apiVersion")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Internal("Manifest missing apiVersion".into()))?
+        .ok_or_else(|| {
+            Error::internal_with_context("parse_manifest", "Manifest missing apiVersion")
+        })?
         .to_string();
 
     let kind = value
         .get("kind")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Internal("Manifest missing kind".into()))?
+        .ok_or_else(|| Error::internal_with_context("parse_manifest", "Manifest missing kind"))?
         .to_string();
 
     let name = value
         .pointer("/metadata/name")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Internal("Manifest missing metadata.name".into()))?
+        .ok_or_else(|| {
+            Error::internal_with_context("parse_manifest", "Manifest missing metadata.name")
+        })?
         .to_string();
 
     let namespace = value
@@ -310,19 +425,47 @@ pub async fn apply_manifest(client: &Client, manifest: &str) -> Result<(), Error
     let patch_params = PatchParams::apply("lattice").force();
 
     if let Some(ns) = &metadata.namespace {
-        let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &metadata.api_resource);
-        api.patch(&metadata.name, &patch_params, &Patch::Apply(&metadata.value))
-            .await
-            .map_err(|e| Error::Internal(format!("Failed to apply {}/{}: {}", metadata.api_resource.kind, metadata.name, e)))?;
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(client.clone(), ns, &metadata.api_resource);
+        api.patch(
+            &metadata.name,
+            &patch_params,
+            &Patch::Apply(&metadata.value),
+        )
+        .await
+        .map_err(|e| {
+            Error::internal_with_context(
+                "apply_manifest",
+                format!(
+                    "Failed to apply {}/{}: {}",
+                    metadata.api_resource.kind, metadata.name, e
+                ),
+            )
+        })?;
     } else {
         let api: Api<DynamicObject> = Api::all_with(client.clone(), &metadata.api_resource);
-        api.patch(&metadata.name, &patch_params, &Patch::Apply(&metadata.value))
-            .await
-            .map_err(|e| Error::Internal(format!("Failed to apply {}/{}: {}", metadata.api_resource.kind, metadata.name, e)))?;
+        api.patch(
+            &metadata.name,
+            &patch_params,
+            &Patch::Apply(&metadata.value),
+        )
+        .await
+        .map_err(|e| {
+            Error::internal_with_context(
+                "apply_manifest",
+                format!(
+                    "Failed to apply {}/{}: {}",
+                    metadata.api_resource.kind, metadata.name, e
+                ),
+            )
+        })?;
     }
 
     Ok(())
 }
+
+/// Retry interval for apply operations
+const APPLY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Apply a manifest with retry
 pub async fn apply_manifest_with_retry(
@@ -330,26 +473,29 @@ pub async fn apply_manifest_with_retry(
     manifest: &str,
     timeout: Duration,
 ) -> Result<(), Error> {
-    let start = std::time::Instant::now();
-    let mut last_error = String::new();
+    let client_clone = client.clone();
+    let manifest_owned = manifest.to_string();
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(Error::Internal(format!(
-                "Timeout waiting for apply: {}",
-                last_error
-            )));
-        }
-
-        match apply_manifest(client, manifest).await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                last_error = e.to_string();
-                info!("Apply failed (retrying): {}", last_error);
-                tokio::time::sleep(Duration::from_secs(2)).await;
+    poll_until(
+        timeout,
+        APPLY_RETRY_INTERVAL,
+        "Timeout waiting for apply",
+        || {
+            let client = client_clone.clone();
+            let manifest = manifest_owned.clone();
+            async move {
+                match apply_manifest(&client, &manifest).await {
+                    Ok(()) => Ok(true),
+                    Err(e) => {
+                        // Use debug! level since retries are expected behavior
+                        debug!("Apply failed (retrying): {}", e);
+                        Ok(false)
+                    }
+                }
             }
-        }
-    }
+        },
+    )
+    .await
 }
 
 /// Get a secret data value
@@ -361,16 +507,23 @@ pub async fn get_secret_data(
 ) -> Result<Vec<u8>, Error> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
 
-    let secret = secrets
-        .get(name)
-        .await
-        .map_err(|e| Error::Internal(format!("Failed to get secret {}/{}: {}", namespace, name, e)))?;
+    let secret = secrets.get(name).await.map_err(|e| {
+        Error::internal_with_context(
+            "get_secret_data",
+            format!("Failed to get secret {}/{}: {}", namespace, name, e),
+        )
+    })?;
 
     let data = secret
         .data
         .as_ref()
         .and_then(|d| d.get(key))
-        .ok_or_else(|| Error::Internal(format!("Secret {}/{} missing key {}", namespace, name, key)))?;
+        .ok_or_else(|| {
+            Error::internal_with_context(
+                "get_secret_data",
+                format!("Secret {}/{} missing key {}", namespace, name, key),
+            )
+        })?;
 
     Ok(data.0.clone())
 }
@@ -382,10 +535,10 @@ pub async fn secret_exists(client: &Client, name: &str, namespace: &str) -> Resu
     match secrets.get(name).await {
         Ok(_) => Ok(true),
         Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
-        Err(e) => Err(Error::Internal(format!(
-            "Failed to check secret {}/{}: {}",
-            namespace, name, e
-        ))),
+        Err(e) => Err(Error::internal_with_context(
+            "secret_exists",
+            format!("Failed to check secret {}/{}: {}", namespace, name, e),
+        )),
     }
 }
 
@@ -396,22 +549,22 @@ pub async fn wait_for_secret(
     namespace: &str,
     timeout: Duration,
 ) -> Result<(), Error> {
-    let start = std::time::Instant::now();
+    let client_clone = client.clone();
+    let name_owned = name.to_string();
+    let namespace_owned = namespace.to_string();
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(Error::Internal(format!(
-                "Timeout waiting for secret {}/{}",
-                namespace, name
-            )));
-        }
-
-        if secret_exists(client, name, namespace).await? {
-            return Ok(());
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+    poll_until(
+        timeout,
+        DEFAULT_POLL_INTERVAL,
+        format!("Timeout waiting for secret {}/{}", namespace, name),
+        || {
+            let client = client_clone.clone();
+            let name = name_owned.clone();
+            let namespace = namespace_owned.clone();
+            async move { secret_exists(&client, &name, &namespace).await }
+        },
+    )
+    .await
 }
 
 /// Get a dynamic resource field value
@@ -441,7 +594,10 @@ pub async fn get_dynamic_resource_status_field(
             Ok(value)
         }
         Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
-        Err(e) => Err(Error::Internal(format!("Failed to get {}/{}: {}", ar.kind, name, e))),
+        Err(e) => Err(Error::internal_with_context(
+            "get_dynamic_resource_status_field",
+            format!("Failed to get {}/{}: {}", ar.kind, name, e),
+        )),
     }
 }
 
@@ -457,10 +613,12 @@ pub async fn get_machine_phases(client: &Client, namespace: &str) -> Result<Vec<
 
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
 
-    let machines = api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| Error::Internal(format!("Failed to list machines: {}", e)))?;
+    let machines = api.list(&ListParams::default()).await.map_err(|e| {
+        Error::internal_with_context(
+            "get_machine_phases",
+            format!("Failed to list machines: {}", e),
+        )
+    })?;
 
     let phases: Vec<String> = machines
         .items
@@ -480,10 +638,12 @@ pub async fn get_machine_phases(client: &Client, namespace: &str) -> Result<Vec<
 /// Get count of ready worker nodes (excludes control-plane)
 pub async fn get_ready_worker_count(client: &Client) -> Result<usize, Error> {
     let nodes: Api<Node> = Api::all(client.clone());
-    let node_list = nodes
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| Error::Internal(format!("Failed to list nodes: {}", e)))?;
+    let node_list = nodes.list(&ListParams::default()).await.map_err(|e| {
+        Error::internal_with_context(
+            "get_ready_worker_count",
+            format!("Failed to list nodes: {}", e),
+        )
+    })?;
 
     let ready_workers = node_list.items.iter().filter(|node| {
         // Check if it's a worker (no control-plane label)
@@ -494,17 +654,9 @@ pub async fn get_ready_worker_count(client: &Client) -> Result<usize, Error> {
             .map(|labels| !labels.contains_key("node-role.kubernetes.io/control-plane"))
             .unwrap_or(true);
 
-        // Check if Ready
-        let is_ready = node
-            .status
-            .as_ref()
-            .and_then(|s| s.conditions.as_ref())
-            .map(|conditions| {
-                conditions
-                    .iter()
-                    .any(|c| c.type_ == "Ready" && c.status == "True")
-            })
-            .unwrap_or(false);
+        // Check if Ready using the has_condition helper
+        let conditions = node.status.as_ref().and_then(|s| s.conditions.as_ref());
+        let is_ready = has_condition(conditions.map(|c| c.as_slice()), CONDITION_READY);
 
         is_worker && is_ready
     });
@@ -518,7 +670,7 @@ fn pluralize(kind: &str) -> String {
     if lower.ends_with("s") {
         format!("{}es", lower)
     } else if lower.ends_with("y") {
-        format!("{}ies", lower[..lower.len() - 1].to_string())
+        format!("{}ies", &lower[..lower.len() - 1])
     } else {
         format!("{}s", lower)
     }
@@ -673,5 +825,87 @@ metadata:
         let manifest = "{not valid json";
         let result = parse_manifest(manifest);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_has_condition_with_ready() {
+        use k8s_openapi::api::core::v1::NodeCondition;
+
+        let conditions = vec![
+            NodeCondition {
+                type_: "Ready".to_string(),
+                status: "True".to_string(),
+                ..Default::default()
+            },
+            NodeCondition {
+                type_: "MemoryPressure".to_string(),
+                status: "False".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        assert!(has_condition(Some(conditions.as_slice()), CONDITION_READY));
+        assert!(!has_condition(
+            Some(conditions.as_slice()),
+            CONDITION_AVAILABLE
+        ));
+    }
+
+    #[test]
+    fn test_has_condition_not_ready() {
+        use k8s_openapi::api::core::v1::NodeCondition;
+
+        let conditions = vec![NodeCondition {
+            type_: "Ready".to_string(),
+            status: "False".to_string(),
+            ..Default::default()
+        }];
+
+        assert!(!has_condition(Some(conditions.as_slice()), CONDITION_READY));
+    }
+
+    #[test]
+    fn test_has_condition_none() {
+        assert!(!has_condition::<k8s_openapi::api::core::v1::NodeCondition>(
+            None,
+            CONDITION_READY
+        ));
+    }
+
+    #[test]
+    fn test_has_condition_empty() {
+        let conditions: Vec<k8s_openapi::api::core::v1::NodeCondition> = vec![];
+        assert!(!has_condition(Some(conditions.as_slice()), CONDITION_READY));
+    }
+
+    #[test]
+    fn test_has_condition_deployment() {
+        use k8s_openapi::api::apps::v1::DeploymentCondition;
+
+        let conditions = vec![
+            DeploymentCondition {
+                type_: "Available".to_string(),
+                status: "True".to_string(),
+                ..Default::default()
+            },
+            DeploymentCondition {
+                type_: "Progressing".to_string(),
+                status: "True".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        assert!(has_condition(
+            Some(conditions.as_slice()),
+            CONDITION_AVAILABLE
+        ));
+        assert!(!has_condition(Some(conditions.as_slice()), CONDITION_READY));
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(CONDITION_READY, "Ready");
+        assert_eq!(CONDITION_AVAILABLE, "Available");
+        assert_eq!(STATUS_TRUE, "True");
     }
 }
