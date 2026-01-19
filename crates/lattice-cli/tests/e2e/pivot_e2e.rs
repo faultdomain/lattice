@@ -32,10 +32,10 @@
 //!
 //! # Environment Variables
 //!
-//! ## Cluster Configuration (required)
+//! ## Cluster Configuration (optional - defaults to Docker fixtures)
 //! - LATTICE_MGMT_CLUSTER_CONFIG: Path to LatticeCluster YAML for management cluster
-//! - LATTICE_WORKLOAD_CLUSTER_CONFIG: Path to LatticeCluster YAML for workload cluster (must have endpoints)
-//! - LATTICE_WORKLOAD2_CLUSTER_CONFIG: Path to LatticeCluster YAML for second workload cluster (leaf)
+//! - LATTICE_WORKLOAD_CLUSTER_CONFIG: Path to LatticeCluster YAML for workload cluster
+//! - LATTICE_WORKLOAD2_CLUSTER_CONFIG: Path to LatticeCluster YAML for second workload cluster
 //!
 //! ## Optional Test Phases (all default to true)
 //! - LATTICE_ENABLE_INDEPENDENCE_TEST=false: Disable Phase 7 (delete mgmt, verify workload self-manages)
@@ -45,13 +45,10 @@
 //! # Running
 //!
 //! ```bash
-//! # Docker clusters (full test with hierarchy and unpivot)
-//! LATTICE_MGMT_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/docker-mgmt.yaml \
-//!   LATTICE_WORKLOAD_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/docker-workload.yaml \
-//!   LATTICE_WORKLOAD2_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/docker-workload2.yaml \
-//!   cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
+//! # Docker clusters (uses default fixtures)
+//! cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
 //!
-//! # Proxmox clusters
+//! # Proxmox clusters (custom configs)
 //! LATTICE_MGMT_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-mgmt.yaml \
 //!   LATTICE_WORKLOAD_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-workload.yaml \
 //!   LATTICE_WORKLOAD2_CLUSTER_CONFIG=crates/lattice-cli/tests/e2e/fixtures/clusters/proxmox-workload2.yaml \
@@ -180,13 +177,20 @@ fn load_registry_credentials() -> Option<String> {
     None
 }
 
+/// Default fixture paths for cluster configs
+fn default_cluster_config_path(env_var: &str) -> Option<PathBuf> {
+    let fixtures_dir = workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/clusters");
+    match env_var {
+        "LATTICE_MGMT_CLUSTER_CONFIG" => Some(fixtures_dir.join("docker-mgmt.yaml")),
+        "LATTICE_WORKLOAD_CLUSTER_CONFIG" => Some(fixtures_dir.join("docker-workload.yaml")),
+        "LATTICE_WORKLOAD2_CLUSTER_CONFIG" => Some(fixtures_dir.join("docker-workload2.yaml")),
+        _ => None,
+    }
+}
+
 /// Load cluster configuration from a CRD file.
 ///
-/// All cluster configuration is defined in LatticeCluster CRD files. This ensures:
-/// - Complete, self-contained cluster definitions
-/// - Proper handling of secrets via secretRef
-/// - Same CRD can be deployed to any cluster
-/// - Consistent approach regardless of provider
+/// Uses env var if set, otherwise falls back to default Docker fixture path.
 ///
 /// # Arguments
 /// * `env_var` - Environment variable name containing path to the CRD file
@@ -194,30 +198,25 @@ fn load_registry_credentials() -> Option<String> {
 /// # Returns
 /// Tuple of (config_path, config_content, parsed_cluster)
 fn load_cluster_config(env_var: &str) -> Result<(PathBuf, String, LatticeCluster), String> {
-    let config_path = std::env::var(env_var).map_err(|_| {
-        format!(
-            "No cluster config provided. Set {} to a LatticeCluster YAML file.\n\
-             Example CRD files are in crates/lattice-cli/tests/e2e/fixtures/clusters/",
-            env_var
-        )
-    })?;
+    let path = match std::env::var(env_var) {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => default_cluster_config_path(env_var).ok_or_else(|| {
+            format!("No cluster config provided and no default for {}", env_var)
+        })?,
+    };
 
-    let path = PathBuf::from(&config_path);
     if !path.exists() {
-        return Err(format!(
-            "Cluster config file not found: {} (specified via {})",
-            config_path, env_var
-        ));
+        return Err(format!("Cluster config file not found: {}", path.display()));
     }
 
     let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read cluster config {}: {}", config_path, e))?;
+        .map_err(|e| format!("Failed to read cluster config {}: {}", path.display(), e))?;
 
     // Parse the YAML as a LatticeCluster
     let cluster: LatticeCluster = serde_yaml::from_str(&content)
-        .map_err(|e| format!("Invalid LatticeCluster YAML in {}: {}", config_path, e))?;
+        .map_err(|e| format!("Invalid LatticeCluster YAML in {}: {}", path.display(), e))?;
 
-    println!("  Loaded cluster config from: {}", config_path);
+    println!("  Loaded cluster config from: {}", path.display());
     Ok((path, content, cluster))
 }
 
@@ -323,14 +322,34 @@ async fn test_configurable_provider_pivot() {
 
 async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
-    // Phase 1: Install Management Cluster
+    // Load all cluster configs upfront (fail early if missing)
     // =========================================================================
+    println!("Loading cluster configurations...\n");
 
-    // Load cluster config from CRD file (provider and bootstrap come from the config)
-    let (config_path, cluster_config, mgmt_cluster) =
+    let (mgmt_config_path, mgmt_config_content, mgmt_cluster) =
         load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG")?;
     let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
     let mgmt_bootstrap = mgmt_cluster.spec.provider.kubernetes.bootstrap.clone();
+
+    let (_, workload_config_content, workload_cluster) =
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG")?;
+    let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
+    let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
+
+    let workload2_config = if hierarchy_test_enabled() {
+        Some(load_cluster_config("LATTICE_WORKLOAD2_CLUSTER_CONFIG")?)
+    } else {
+        None
+    };
+
+    println!("Configuration:");
+    println!("  Management:  {} + {:?}", mgmt_provider, mgmt_bootstrap);
+    println!("  Workload:    {} + {:?}", workload_provider, workload_bootstrap);
+    if let Some((_, _, ref wl2)) = workload2_config {
+        let wl2_bootstrap = &wl2.spec.provider.kubernetes.bootstrap;
+        println!("  Workload2:   {} + {:?}", workload_provider, wl2_bootstrap);
+    }
+    println!();
 
     // Setup Docker network if needed
     if mgmt_provider == InfraProvider::Docker {
@@ -339,11 +358,14 @@ async fn run_provider_e2e() -> Result<(), String> {
         }
     }
 
+    // =========================================================================
+    // Phase 1: Install Management Cluster
+    // =========================================================================
     println!(
         "\n[Phase 1] Installing management cluster ({} + {:?})...\n",
         mgmt_provider, mgmt_bootstrap
     );
-    println!("  Cluster config:\n{}", cluster_config);
+    println!("  Cluster config:\n{}", mgmt_config_content);
 
     let registry_credentials = load_registry_credentials();
     if registry_credentials.is_some() {
@@ -351,8 +373,8 @@ async fn run_provider_e2e() -> Result<(), String> {
     }
 
     let install_config = InstallConfig {
-        cluster_config_path: config_path,
-        cluster_config_content: cluster_config,
+        cluster_config_path: mgmt_config_path,
+        cluster_config_content: mgmt_config_content,
         image: LATTICE_IMAGE.to_string(),
         keep_bootstrap_on_failure: true,
         timeout: Duration::from_secs(2400),
@@ -423,18 +445,11 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 3: Create Workload Cluster
     // =========================================================================
-
-    // Load workload cluster config from CRD file (provider and bootstrap come from the config)
-    let (_workload_config_path, workload_config, workload_cluster) =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG")?;
-    let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
-    let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
-
     println!(
         "\n[Phase 3] Creating workload cluster ({} + {:?})...\n",
         workload_provider, workload_bootstrap
     );
-    println!("  Workload cluster config:\n{}", workload_config);
+    println!("  Workload cluster config:\n{}", workload_config_content);
 
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
     api.create(&PostParams::default(), &workload_cluster)
@@ -612,17 +627,12 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 8: Create Second Workload Cluster (Deep Hierarchy)
     // =========================================================================
-    // Skip hierarchy test if config not provided or explicitly disabled
-    let workload2_config_result = load_cluster_config("LATTICE_WORKLOAD2_CLUSTER_CONFIG");
-    if hierarchy_test_enabled() && workload2_config_result.is_ok() {
+    if let Some((_, workload2_config_content, workload2_cluster)) = workload2_config {
         println!("\n[Phase 8] Creating second workload cluster (deep hierarchy)...\n");
         println!("  This tests creating a cluster off workload1 (which just lost its parent)");
 
-        // Load workload2 cluster config (bootstrap provider comes from the config)
-        let (_workload2_config_path, workload2_config, workload2_cluster) =
-            workload2_config_result.unwrap();
         let workload2_bootstrap = workload2_cluster.spec.provider.kubernetes.bootstrap.clone();
-        println!("  Workload2 cluster config:\n{}", workload2_config);
+        println!("  Workload2 cluster config:\n{}", workload2_config_content);
         println!("  Workload2 bootstrap provider: {:?}", workload2_bootstrap);
 
         // Connect to workload1 cluster and create workload2
@@ -779,10 +789,8 @@ async fn run_provider_e2e() -> Result<(), String> {
         }
 
         println!("\n  SUCCESS: Unpivot test complete!");
-    } else if !hierarchy_test_enabled() {
-        println!("\n[Phase 8-11] Skipping hierarchy/unpivot tests (LATTICE_ENABLE_HIERARCHY_TEST=false)\n");
     } else {
-        println!("\n[Phase 8-11] Skipping hierarchy/unpivot tests (LATTICE_WORKLOAD2_CLUSTER_CONFIG not set)\n");
+        println!("\n[Phase 8-11] Skipping hierarchy/unpivot tests (LATTICE_ENABLE_HIERARCHY_TEST=false)\n");
     }
 
     // =========================================================================
