@@ -222,7 +222,7 @@ spec:
 ///
 /// Waypoint proxies need to connect to the Envoy Gateway control plane in
 /// envoy-gateway-system to receive their xDS configuration. This policy allows
-/// only pods with the Envoy Gateway ownership label to make that connection.
+/// only pods managed by Envoy Gateway (proxy components) to make that connection.
 pub fn generate_waypoint_egress_policy() -> String {
     r#"---
 apiVersion: cilium.io/v2
@@ -235,7 +235,8 @@ spec:
   description: "Allow waypoint proxies to reach Envoy Gateway control plane for xDS"
   endpointSelector:
     matchLabels:
-      gateway.envoyproxy.io/owning-gateway-name: waypoint
+      k8s:app.kubernetes.io/managed-by: envoy-gateway
+      k8s:app.kubernetes.io/component: proxy
   egress:
     # Allow xDS connection to Envoy Gateway control plane
     - toEndpoints:

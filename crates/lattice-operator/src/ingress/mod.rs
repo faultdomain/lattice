@@ -704,20 +704,7 @@ impl WaypointCompiler {
                                 from: "Same".to_string(),
                             },
                         }),
-                    },
-                    // HBONE listener for ztunnel tunnel termination
-                    GatewayListener {
-                        name: "fake-hbone".to_string(),
-                        hostname: None,
-                        port: Self::HBONE_PORT,
-                        protocol: "TCP".to_string(),
-                        tls: None,
-                        allowed_routes: Some(AllowedRoutes {
-                            namespaces: RouteNamespaces {
-                                from: "Same".to_string(),
-                            },
-                        }),
-                    },
+                    }
                 ],
             },
         }

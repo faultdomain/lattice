@@ -87,6 +87,37 @@ impl ServiceKubeClientImpl {
     pub fn new(client: Client) -> Self {
         Self { client }
     }
+
+    /// Ensure a namespace exists with the ambient mode label for Istio traffic routing.
+    ///
+    /// Istio ambient mode requires namespaces to have `istio.io/dataplane-mode: ambient`
+    /// for ztunnel to intercept traffic and route it through waypoint proxies for L7 enforcement.
+    async fn ensure_namespace_with_ambient(&self, name: &str) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::Namespace;
+
+        let api: Api<Namespace> = Api::all(self.client.clone());
+
+        let ns = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": name,
+                "labels": {
+                    "istio.io/dataplane-mode": "ambient"
+                }
+            }
+        });
+
+        api.patch(
+            name,
+            &PatchParams::apply("lattice-service-controller"),
+            &Patch::Apply(&ns),
+        )
+        .await?;
+
+        debug!(namespace = %name, "ensured namespace with ambient mode label");
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -172,6 +203,9 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         use k8s_openapi::api::core::v1::{Service as K8sService, ServiceAccount as K8sSA};
         use kube::api::DynamicObject;
         use kube::discovery::ApiResource;
+
+        // Ensure namespace exists with ambient mode label for Istio traffic routing
+        self.ensure_namespace_with_ambient(namespace).await?;
 
         let params = PatchParams::apply("lattice-service-controller").force();
 
