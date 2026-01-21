@@ -1528,6 +1528,28 @@ fn generate_rate_limit_test_script(target: &str, namespace: &str, rate_limit: u3
 echo "=== Rate Limit Enforcement Test ==="
 echo "Testing rate limit of {rate_limit} requests per minute to {target}..."
 
+# Wait for connectivity (AuthorizationPolicy may not have propagated yet)
+echo "Waiting for connectivity..."
+MAX_CONN_RETRIES=5
+CONN_RETRY=0
+while [ $CONN_RETRY -lt $MAX_CONN_RETRIES ]; do
+    CONN_CHECK=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 http://{target}.{namespace}.svc.cluster.local/)
+    if [ "$CONN_CHECK" != "000" ]; then
+        echo "Connection established (code $CONN_CHECK)"
+        break
+    fi
+    CONN_RETRY=$((CONN_RETRY + 1))
+    echo "Connection failed, waiting for AuthorizationPolicy... (attempt $CONN_RETRY/$MAX_CONN_RETRIES)"
+    sleep 10
+done
+
+if [ "$CONN_CHECK" = "000" ]; then
+    echo "RATE_LIMIT_TEST:FAIL - Could not establish connectivity after $MAX_CONN_RETRIES attempts"
+    echo "=== End Rate Limit Test ==="
+    sleep 60
+    exit 0
+fi
+
 # Make requests at 2x the rate limit
 TOTAL_REQUESTS=$(({rate_limit} * 2))
 SUCCESS=0
@@ -1570,6 +1592,28 @@ fn generate_retry_test_script(target: &str, namespace: &str) -> String {
         r#"
 echo "=== Retry Policy Enforcement Test ==="
 echo "Testing retries against {target} returning 500s..."
+
+# Wait for connectivity (AuthorizationPolicy may not have propagated yet)
+echo "Waiting for connectivity..."
+MAX_CONN_RETRIES=5
+CONN_RETRY=0
+while [ $CONN_RETRY -lt $MAX_CONN_RETRIES ]; do
+    CONN_CHECK=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 http://{target}.{namespace}.svc.cluster.local/status/200)
+    if [ "$CONN_CHECK" != "000" ]; then
+        echo "Connection established (code $CONN_CHECK)"
+        break
+    fi
+    CONN_RETRY=$((CONN_RETRY + 1))
+    echo "Connection failed, waiting for AuthorizationPolicy... (attempt $CONN_RETRY/$MAX_CONN_RETRIES)"
+    sleep 10
+done
+
+if [ "$CONN_CHECK" = "000" ]; then
+    echo "RETRY_TEST:FAIL - Could not establish connectivity after $MAX_CONN_RETRIES attempts"
+    echo "=== End Retry Test ==="
+    sleep 60
+    exit 0
+fi
 
 # Without retries, 500 would fail immediately
 # With retries configured, Istio will retry and we track attempts
@@ -1620,25 +1664,45 @@ fn generate_timeout_test_script(target: &str, namespace: &str, timeout_secs: u32
 echo "=== Timeout Policy Enforcement Test ==="
 echo "Testing {timeout_secs}s timeout against {target}..."
 
-# Request /delay/10 which waits 10 seconds before responding
-# With a {timeout_secs}s timeout, the request should be cut off early
-START=$(date +%s)
-RESPONSE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 15 --max-time 20 http://{target}.{namespace}.svc.cluster.local/delay/10)
-END=$(date +%s)
-ELAPSED=$((END - START))
+# Retry loop for connection failures (AuthorizationPolicy may not have propagated yet)
+MAX_RETRIES=5
+RETRY_DELAY=10
+ATTEMPT=0
 
-echo "Response code: $RESPONSE"
-echo "Elapsed time: $ELAPSED seconds"
+while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+    ATTEMPT=$((ATTEMPT + 1))
+    echo "Attempt $ATTEMPT of $MAX_RETRIES..."
 
-# Response code 000 means curl couldn't connect - not a valid test result
-if [ "$RESPONSE" = "000" ]; then
-    echo "TIMEOUT_TEST:FAIL - Connection failed (code 000), cannot verify timeout"
-# Request should complete in roughly timeout_secs (not 0!), with a timeout-related response
-elif [ $ELAPSED -gt 0 ] && [ $ELAPSED -le $(({timeout_secs} + 2)) ]; then
-    echo "TIMEOUT_TEST:PASS - Request terminated in $ELAPSED seconds (timeout enforced)"
-else
-    echo "TIMEOUT_TEST:FAIL - Request took $ELAPSED seconds (timeout not enforced)"
-fi
+    # Request /delay/10 which waits 10 seconds before responding
+    # With a {timeout_secs}s timeout, the request should be cut off early
+    START=$(date +%s)
+    RESPONSE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 15 --max-time 20 http://{target}.{namespace}.svc.cluster.local/delay/10)
+    END=$(date +%s)
+    ELAPSED=$((END - START))
+
+    echo "Response code: $RESPONSE"
+    echo "Elapsed time: $ELAPSED seconds"
+
+    # Response code 000 means curl couldn't connect - retry (AuthorizationPolicy may not be ready)
+    if [ "$RESPONSE" = "000" ]; then
+        echo "Connection failed (code 000), waiting for AuthorizationPolicy to propagate..."
+        if [ $ATTEMPT -lt $MAX_RETRIES ]; then
+            sleep $RETRY_DELAY
+            continue
+        else
+            echo "TIMEOUT_TEST:FAIL - Connection still failing after $MAX_RETRIES attempts"
+            break
+        fi
+    fi
+
+    # Request should complete in roughly timeout_secs (not 0!), with a timeout-related response
+    if [ $ELAPSED -gt 0 ] && [ $ELAPSED -le $(({timeout_secs} + 2)) ]; then
+        echo "TIMEOUT_TEST:PASS - Request terminated in $ELAPSED seconds (timeout enforced)"
+    else
+        echo "TIMEOUT_TEST:FAIL - Request took $ELAPSED seconds (timeout not enforced)"
+    fi
+    break
+done
 
 echo "=== End Timeout Test ==="
 sleep 60
