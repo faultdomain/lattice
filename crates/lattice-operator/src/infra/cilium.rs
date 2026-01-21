@@ -100,19 +100,7 @@ pub fn generate_cilium_manifests(provider: Option<&str>) -> Result<Vec<String>, 
     }
 
     let yaml_str = String::from_utf8_lossy(&output.stdout);
-
-    let manifests: Vec<String> = yaml_str
-        .split("\n---")
-        .map(|doc| doc.trim())
-        .filter(|doc| !doc.is_empty() && doc.contains("kind:"))
-        .map(|doc| {
-            if doc.starts_with("---") {
-                doc.to_string()
-            } else {
-                format!("---\n{}", doc)
-            }
-        })
-        .collect();
+    let manifests = super::split_yaml_documents(&yaml_str);
 
     info!(
         count = manifests.len(),
@@ -186,7 +174,6 @@ spec:
           - istio-system
           - lattice-system
           - cert-manager
-          - envoy-gateway-system
           - capi-system
           - capi-kubeadm-bootstrap-system
           - capi-kubeadm-control-plane-system
@@ -218,11 +205,15 @@ spec:
     .to_string()
 }
 
-/// Generate a CiliumClusterwideNetworkPolicy for Envoy Gateway waypoint proxies.
+/// Generate a CiliumClusterwideNetworkPolicy for Istio waypoint proxies.
 ///
-/// Waypoint proxies need to connect to the Envoy Gateway control plane in
-/// envoy-gateway-system to receive their xDS configuration. This policy allows
-/// only pods managed by Envoy Gateway (proxy components) to make that connection.
+/// Waypoint proxies need to:
+/// 1. Connect to istiod for xDS configuration and certificate signing
+/// 2. Forward traffic to services (internal and external) after L7 processing
+///
+/// In Istio ambient mode, traffic flows: client -> ztunnel -> waypoint -> service
+/// The waypoint terminates HBONE, evaluates AuthorizationPolicy, then forwards to the service.
+/// L7 AuthorizationPolicy controls access - L4 just needs to allow the waypoint to forward.
 pub fn generate_waypoint_egress_policy() -> String {
     r#"---
 apiVersion: cilium.io/v2
@@ -232,22 +223,32 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: lattice
 spec:
-  description: "Allow waypoint proxies to reach Envoy Gateway control plane for xDS"
+  description: "Allow Istio waypoint proxies to reach istiod and forward to services"
   endpointSelector:
     matchLabels:
-      k8s:app.kubernetes.io/managed-by: envoy-gateway
-      k8s:app.kubernetes.io/component: proxy
+      k8s:istio.io/waypoint-for: service
   egress:
-    # Allow xDS connection to Envoy Gateway control plane
+    # Allow xDS and certificate signing to istiod
     - toEndpoints:
         - matchLabels:
-            k8s:io.kubernetes.pod.namespace: envoy-gateway-system
+            k8s:io.kubernetes.pod.namespace: istio-system
+            k8s:app: istiod
       toPorts:
         - ports:
-            - port: "18000"
+            - port: "15012"
               protocol: TCP
-            - port: "18001"
+    # Allow HBONE traffic
+    - toPorts:
+        - ports:
+            - port: "15008"
               protocol: TCP
+    # Allow waypoints to forward traffic to any internal endpoint on any port
+    # L7 AuthorizationPolicy controls actual access, L4 just allows forwarding
+    - toEndpoints:
+        - {}
+    # Allow waypoints to forward traffic to external services (ServiceEntry)
+    - toCIDR:
+        - "0.0.0.0/0"
 "#
     .to_string()
 }

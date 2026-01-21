@@ -212,7 +212,9 @@ mod tests {
         assert!(result[0].contains("namespace: capi-my-cluster"));
 
         // Last should be ClusterResourceSet
-        let crs = result.last().unwrap();
+        let crs = result
+            .last()
+            .expect("result should have at least one element");
         assert!(crs.contains("kind: ClusterResourceSet"));
         assert!(crs.contains("name: my-cluster-bootstrap"));
         assert!(crs.contains("cluster.x-k8s.io/cluster-name: my-cluster"));
@@ -239,7 +241,9 @@ mod tests {
         assert!(secret.contains("type: addons.cluster.x-k8s.io/resource-set"));
 
         // Check CRS references the secret
-        let crs = result.last().unwrap();
+        let crs = result
+            .last()
+            .expect("result should have at least one element");
         assert!(crs.contains("name: capmox-credentials"));
     }
 
@@ -269,7 +273,9 @@ mod tests {
         let result = generate_crs_yaml_manifests("cluster", "ns", &all_manifests, None);
 
         // Verify CRS uses ApplyOnce strategy
-        let crs = result.last().unwrap();
+        let crs = result
+            .last()
+            .expect("result should have at least one element");
         assert!(crs.contains("strategy: ApplyOnce"));
     }
 
@@ -281,7 +287,9 @@ mod tests {
             generate_crs_yaml_manifests("target-cluster", "capi-target", &all_manifests, None);
 
         // CRS should select the correct cluster
-        let crs = result.last().unwrap();
+        let crs = result
+            .last()
+            .expect("result should have at least one element");
         assert!(crs.contains("clusterSelector:"));
         assert!(crs.contains("matchLabels:"));
         assert!(crs.contains("cluster.x-k8s.io/cluster-name: target-cluster"));
@@ -339,7 +347,7 @@ mod tests {
             .iter()
             .find(|c| c.iter().any(|m| m.len() > TEST_CHUNK_SIZE));
         assert!(huge_chunk.is_some());
-        assert_eq!(huge_chunk.unwrap().len(), 1);
+        assert_eq!(huge_chunk.expect("huge chunk should exist").len(), 1);
     }
 
     #[test]

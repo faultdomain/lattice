@@ -3,7 +3,6 @@
 # =============================================================================
 # All cryptographic operations use FIPS 140-3 validated modules:
 # - Lattice (Rust): aws-lc-rs FIPS module
-# - kubectl/helm/clusterctl (Go 1.24+): Native FIPS crypto module
 # =============================================================================
 
 ARG FIPS=true
@@ -18,7 +17,6 @@ ARG FIPS
 
 # Versions from versions.toml - use scripts/docker-build.sh to build
 # or pass --build-arg to override
-ARG KUBECTL_VERSION
 ARG HELM_VERSION
 ARG CLUSTERCTL_VERSION
 ARG CAPI_VERSION
@@ -29,14 +27,6 @@ WORKDIR /build
 # GOFIPS140=latest selects the FIPS crypto module at build time
 ENV GOFIPS140=${FIPS:+latest}
 ENV CGO_ENABLED=0
-
-# Build kubectl from source with FIPS
-# Use BuildKit cache mount for Go module cache
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    git clone --depth 1 --branch v${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git /build/kubernetes && \
-    cd /build/kubernetes && \
-    go build -o /usr/local/bin/kubectl ./cmd/kubectl
 
 # Build helm from source with FIPS
 # Must use 'make build' to set proper ldflags (k8s version defaults)
@@ -108,7 +98,6 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy FIPS-compliant Go binaries
-COPY --from=go-builder /usr/local/bin/kubectl /usr/local/bin/kubectl
 COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=go-builder /usr/local/bin/clusterctl /usr/local/bin/clusterctl
 
@@ -161,7 +150,7 @@ RUN echo "providers:" > /providers/clusterctl.yaml && \
 ENV GOPROXY=off
 ENV CLUSTERCTL_DISABLE_VERSIONCHECK=true
 
-# Enable FIPS mode at runtime for Go binaries (kubectl, helm, clusterctl)
+# Enable FIPS mode at runtime for Go binaries (helm, clusterctl)
 # Using fips140=on (not =only) because =only rejects X25519 in TLS handshakes,
 # which breaks connections to servers that offer X25519 (like RKE2 with BoringCrypto)
 ENV GODEBUG=fips140=on

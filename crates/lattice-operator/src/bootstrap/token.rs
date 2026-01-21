@@ -14,6 +14,11 @@ use thiserror::Error;
 #[error("failed to generate cryptographically secure random bytes: FIPS RNG unavailable")]
 pub struct TokenGenerationError;
 
+/// Error type for token parsing failures
+#[derive(Debug, Error)]
+#[error("invalid token: not valid base64")]
+pub struct TokenParseError;
+
 /// A bootstrap token for cluster registration
 #[derive(Clone)]
 pub struct BootstrapToken {
@@ -57,12 +62,14 @@ impl BootstrapToken {
     }
 
     /// Create a token from an existing string (for validation)
-    pub fn from_string(s: &str) -> Self {
-        let raw = URL_SAFE_NO_PAD.decode(s).unwrap_or_default();
-        Self {
+    ///
+    /// Returns an error if the string is not valid base64.
+    pub fn from_string(s: &str) -> Result<Self, TokenParseError> {
+        let raw = URL_SAFE_NO_PAD.decode(s).map_err(|_| TokenParseError)?;
+        Ok(Self {
             raw,
             string: s.to_string(),
-        }
+        })
     }
 
     /// Get the token as a string
@@ -158,8 +165,11 @@ impl TokenStore {
                     return false;
                 }
 
-                // Verify hash
-                let provided = BootstrapToken::from_string(token);
+                // Verify hash - invalid base64 is always rejected
+                let provided = match BootstrapToken::from_string(token) {
+                    Ok(t) => t,
+                    Err(_) => return false,
+                };
                 provided.hash() == metadata.token_hash
             }
             None => false,
@@ -180,8 +190,11 @@ impl TokenStore {
                     return false;
                 }
 
-                // Verify hash
-                let provided = BootstrapToken::from_string(token);
+                // Verify hash - invalid base64 is always rejected
+                let provided = match BootstrapToken::from_string(token) {
+                    Ok(t) => t,
+                    Err(_) => return false,
+                };
                 if provided.hash() != metadata.token_hash {
                     return false;
                 }
@@ -278,7 +291,8 @@ mod tests {
 
         // Reconstructed token from string should hash identically
         let token_str = token.as_str().to_string();
-        let reconstructed = BootstrapToken::from_string(&token_str);
+        let reconstructed =
+            BootstrapToken::from_string(&token_str).expect("valid base64 token should parse");
         assert_eq!(
             token.hash(),
             reconstructed.hash(),
@@ -404,6 +418,26 @@ mod tests {
             !store.validate("legitimate-cluster", "forged-token-attempt"),
             "Forged tokens must be rejected"
         );
+    }
+
+    /// Story: Invalid base64 strings fail explicitly when parsing
+    ///
+    /// Tokens must be valid base64. Invalid input returns an error rather
+    /// than silently producing an empty or predictable token.
+    #[test]
+    fn story_invalid_base64_fails_explicitly() {
+        // Valid base64 should parse
+        let valid = BootstrapToken::from_string("dGVzdA");
+        assert!(valid.is_ok(), "Valid base64 should parse");
+
+        // Invalid base64 with illegal characters should fail
+        let invalid = BootstrapToken::from_string("not!valid@base64#");
+        assert!(invalid.is_err(), "Invalid base64 should fail");
+
+        // All invalid tokens would hash to same value if we used unwrap_or_default
+        // This test verifies we fail explicitly instead
+        let invalid2 = BootstrapToken::from_string("also-not-valid");
+        assert!(invalid2.is_err(), "Invalid base64 should fail");
     }
 
     /// Story: Tokens cannot be used for wrong cluster

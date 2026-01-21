@@ -266,18 +266,7 @@ impl Default for IstioReconciler {
 
 /// Parse YAML string into individual documents
 fn parse_yaml_documents(yaml_str: &str) -> Vec<String> {
-    yaml_str
-        .split("\n---")
-        .map(|doc| doc.trim())
-        .filter(|doc| !doc.is_empty() && doc.contains("kind:"))
-        .map(|doc| {
-            if doc.starts_with("---") {
-                doc.to_string()
-            } else {
-                format!("---\n{}", doc)
-            }
-        })
-        .collect()
+    super::split_yaml_documents(yaml_str)
 }
 
 #[cfg(test)]

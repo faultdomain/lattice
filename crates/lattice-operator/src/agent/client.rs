@@ -120,6 +120,10 @@ pub struct AgentClient {
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// Time when the agent was started (for uptime tracking)
     start_time: Instant,
+    /// Handle to heartbeat task for cleanup
+    heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Handle to command handler task for cleanup
+    command_handler_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl AgentClient {
@@ -132,6 +136,8 @@ impl AgentClient {
             message_tx: None,
             shutdown_tx: None,
             start_time: Instant::now(),
+            heartbeat_handle: None,
+            command_handler_handle: None,
         }
     }
 
@@ -274,6 +280,34 @@ impl AgentClient {
         *self.agent_state.write().await = state;
     }
 
+    /// Disconnect from the cell and clean up spawned tasks
+    ///
+    /// Sends shutdown signal to command handler and aborts both spawned tasks.
+    /// Sets client state to Disconnected.
+    pub async fn disconnect(&mut self) {
+        // Send shutdown signal to command handler task
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+
+        // Abort heartbeat task
+        if let Some(handle) = self.heartbeat_handle.take() {
+            handle.abort();
+        }
+
+        // Abort command handler task (if it didn't exit from shutdown signal)
+        if let Some(handle) = self.command_handler_handle.take() {
+            handle.abort();
+        }
+
+        // Clear message sender
+        self.message_tx = None;
+
+        // Update state
+        *self.state.write().await = ClientState::Disconnected;
+        info!("Agent client disconnected and cleaned up");
+    }
+
     /// Connect to the cell and start streaming (without TLS - for testing only)
     #[cfg(test)]
     pub async fn connect(&mut self) -> Result<(), ClientError> {
@@ -372,14 +406,14 @@ impl AgentClient {
         let agent_state = self.agent_state.clone();
         let message_tx_clone = message_tx.clone();
 
-        // Spawn heartbeat task
+        // Spawn heartbeat task and store handle
         let heartbeat_interval = self.config.heartbeat_interval;
         let heartbeat_state = agent_state.clone();
         let heartbeat_tx = message_tx.clone();
         let cluster_name = config.cluster_name.clone();
         let start_time = self.start_time;
 
-        tokio::spawn(async move {
+        self.heartbeat_handle = Some(tokio::spawn(async move {
             let mut ticker = interval(heartbeat_interval);
             loop {
                 ticker.tick().await;
@@ -399,10 +433,10 @@ impl AgentClient {
                     break;
                 }
             }
-        });
+        }));
 
-        // Spawn command handler task
-        tokio::spawn(async move {
+        // Spawn command handler task and store handle
+        self.command_handler_handle = Some(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     Some(result) = inbound.next() => {
@@ -433,7 +467,7 @@ impl AgentClient {
 
             *state.write().await = ClientState::Disconnected;
             info!("Disconnected from cell");
-        });
+        }));
 
         Ok(())
     }
@@ -986,6 +1020,18 @@ impl std::fmt::Display for ClientError {
 
 impl std::error::Error for ClientError {}
 
+impl Drop for AgentClient {
+    fn drop(&mut self) {
+        // Abort spawned tasks on drop to prevent orphaned tasks
+        if let Some(handle) = self.heartbeat_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.command_handler_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Extract domain name from a URL for TLS verification
 fn extract_domain(url: &str) -> Option<String> {
     // Remove protocol prefix
@@ -1345,7 +1391,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify message was received
-        let received = rx.recv().await.unwrap();
+        let received = rx.recv().await.expect("message should be received");
         assert_eq!(received.cluster_name, "test-cluster");
     }
 
@@ -1364,7 +1410,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(client.agent_state().await, AgentState::Ready);
 
-        let received = rx.recv().await.unwrap();
+        let received = rx.recv().await.expect("message should be received");
         match received.payload {
             Some(Payload::PivotComplete(pc)) => {
                 assert!(pc.success);
@@ -1391,7 +1437,7 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        let received = rx.recv().await.unwrap();
+        let received = rx.recv().await.expect("message should be received");
         match received.payload {
             Some(Payload::BootstrapComplete(bc)) => {
                 assert!(bc.capi_ready);
@@ -1532,7 +1578,7 @@ mod tests {
         assert_eq!(client.agent_state().await, AgentState::Ready);
 
         // Verify the message
-        let msg = rx.recv().await.unwrap();
+        let msg = rx.recv().await.expect("message should be received");
         match msg.payload {
             Some(Payload::PivotComplete(pc)) => {
                 assert!(pc.success);
@@ -1572,7 +1618,7 @@ mod tests {
         assert_eq!(client.agent_state().await, AgentState::Failed);
 
         // Verify error message is captured
-        let msg = rx.recv().await.unwrap();
+        let msg = rx.recv().await.expect("message should be received");
         match msg.payload {
             Some(Payload::PivotComplete(pc)) => {
                 assert!(!pc.success);
@@ -1601,7 +1647,7 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        let msg = rx.recv().await.unwrap();
+        let msg = rx.recv().await.expect("message should be received");
         match msg.payload {
             Some(Payload::BootstrapComplete(bc)) => {
                 assert!(bc.capi_ready);
@@ -1627,7 +1673,7 @@ mod tests {
         let result = client.send_bootstrap_complete(false, vec![]).await;
         assert!(result.is_ok());
 
-        let msg = rx.recv().await.unwrap();
+        let msg = rx.recv().await.expect("message should be received");
         match msg.payload {
             Some(Payload::BootstrapComplete(bc)) => {
                 assert!(!bc.capi_ready);
@@ -1995,14 +2041,17 @@ mod tests {
         client
             .send_bootstrap_complete(true, vec!["docker".to_string()])
             .await
-            .unwrap();
-        client.send_pivot_complete(true, "", 5).await.unwrap();
+            .expect("send_bootstrap_complete should succeed");
+        client
+            .send_pivot_complete(true, "", 5)
+            .await
+            .expect("send_pivot_complete should succeed");
 
         // Verify all messages received in order
-        let msg1 = rx.recv().await.unwrap();
+        let msg1 = rx.recv().await.expect("first message should be received");
         assert!(matches!(msg1.payload, Some(Payload::BootstrapComplete(_))));
 
-        let msg2 = rx.recv().await.unwrap();
+        let msg2 = rx.recv().await.expect("second message should be received");
         assert!(matches!(msg2.payload, Some(Payload::PivotComplete(_))));
     }
 
@@ -2025,7 +2074,7 @@ mod tests {
         client
             .send_bootstrap_complete(true, vec!["docker".to_string()])
             .await
-            .unwrap();
+            .expect("send_bootstrap_complete should succeed");
         assert_eq!(client.agent_state().await, AgentState::Provisioning);
 
         // 3. Pivot starts (set state directly as handle_command does)
@@ -2033,7 +2082,10 @@ mod tests {
         assert_eq!(client.agent_state().await, AgentState::Pivoting);
 
         // 4. Pivot completes - transitions to Ready
-        client.send_pivot_complete(true, "", 10).await.unwrap();
+        client
+            .send_pivot_complete(true, "", 10)
+            .await
+            .expect("send_pivot_complete should succeed");
         assert_eq!(client.agent_state().await, AgentState::Ready);
     }
 
@@ -2060,7 +2112,7 @@ mod tests {
         client
             .send_pivot_complete(false, "CAPI CRDs not installed", 0)
             .await
-            .unwrap();
+            .expect("send_pivot_complete should succeed");
         assert_eq!(client.agent_state().await, AgentState::Failed);
     }
 
@@ -2312,7 +2364,7 @@ mod tests {
 
         // All should complete without deadlock
         for handle in handles {
-            handle.await.unwrap();
+            handle.await.expect("task should complete");
         }
     }
 
@@ -2347,9 +2399,9 @@ mod tests {
         }
 
         // All should complete without issues
-        writer.await.unwrap();
+        writer.await.expect("writer task should complete");
         for reader in readers {
-            reader.await.unwrap();
+            reader.await.expect("reader task should complete");
         }
     }
 
@@ -2399,7 +2451,7 @@ mod tests {
     /// the API server endpoint from standard environment variables.
     #[test]
     fn story_api_server_endpoint_from_env() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = ENV_MUTEX.lock().expect("mutex should not be poisoned");
 
         // Save original values
         let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
@@ -2426,7 +2478,7 @@ mod tests {
     /// Story: API server endpoint uses default port when not specified
     #[test]
     fn story_api_server_endpoint_default_port() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = ENV_MUTEX.lock().expect("mutex should not be poisoned");
 
         // Save original values
         let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
@@ -2453,7 +2505,7 @@ mod tests {
     /// Story: API server endpoint is empty when not in cluster
     #[test]
     fn story_api_server_endpoint_empty_outside_cluster() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = ENV_MUTEX.lock().expect("mutex should not be poisoned");
 
         // Save original value
         let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();

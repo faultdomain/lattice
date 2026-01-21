@@ -124,7 +124,9 @@ mod tests {
         let engine = TemplateEngine::new();
         let ctx = basic_context();
 
-        let result = engine.render("${metadata.name}", &ctx).unwrap();
+        let result = engine
+            .render("${metadata.name}", &ctx)
+            .expect("simple variable should render successfully");
         assert_eq!(result, "test-service");
     }
 
@@ -133,7 +135,9 @@ mod tests {
         let engine = TemplateEngine::new();
         let ctx = basic_context();
 
-        let result = engine.render("Hello ${metadata.name}!", &ctx).unwrap();
+        let result = engine
+            .render("Hello ${metadata.name}!", &ctx)
+            .expect("variable in text should render successfully");
         assert_eq!(result, "Hello test-service!");
     }
 
@@ -148,7 +152,7 @@ mod tests {
 
         let result = engine
             .render("${metadata.name}-${config.version}-${config.env}", &ctx)
-            .unwrap();
+            .expect("multiple variables should render successfully");
         assert_eq!(result, "api-1.0-prod");
     }
 
@@ -171,7 +175,7 @@ mod tests {
                 "${resources.postgres.host}:${resources.postgres.port}",
                 &ctx,
             )
-            .unwrap();
+            .expect("resource access should render successfully");
         assert_eq!(result, "pg.svc.cluster.local:5432");
     }
 
@@ -202,7 +206,9 @@ mod tests {
             .build();
 
         let template = r#"{% if config.debug == "true" %}DEBUG{% else %}PROD{% endif %}"#;
-        let result = engine.render(template, &ctx).unwrap();
+        let result = engine
+            .render(template, &ctx)
+            .expect("conditional block should render successfully");
         assert_eq!(result, "DEBUG");
     }
 
@@ -217,7 +223,7 @@ mod tests {
         // Value exists
         let result = engine
             .render("${config.port | default(\"3000\")}", &ctx)
-            .unwrap();
+            .expect("default filter should render successfully");
         assert_eq!(result, "8080");
     }
 
@@ -232,12 +238,12 @@ mod tests {
 
         let encoded = engine
             .render("${config.plain | base64_encode}", &ctx)
-            .unwrap();
+            .expect("base64_encode filter should render successfully");
         assert_eq!(encoded, "aGVsbG8=");
 
         let decoded = engine
             .render("${config.encoded | base64_decode}", &ctx)
-            .unwrap();
+            .expect("base64_decode filter should render successfully");
         assert_eq!(decoded, "hello");
     }
 
@@ -250,11 +256,15 @@ mod tests {
             .build();
 
         assert_eq!(
-            engine.render("${config.name | upper}", &ctx).unwrap(),
+            engine
+                .render("${config.name | upper}", &ctx)
+                .expect("upper filter should render successfully"),
             "HELLO WORLD"
         );
         assert_eq!(
-            engine.render("${config.name | lower}", &ctx).unwrap(),
+            engine
+                .render("${config.name | lower}", &ctx)
+                .expect("lower filter should render successfully"),
             "hello world"
         );
     }
@@ -265,7 +275,9 @@ mod tests {
         let ctx = basic_context();
 
         // Plain $ without { passes through unchanged
-        let result = engine.render("$PATH is set", &ctx).unwrap();
+        let result = engine
+            .render("$PATH is set", &ctx)
+            .expect("literal dollar should pass through");
         assert_eq!(result, "$PATH is set");
     }
 
@@ -275,7 +287,9 @@ mod tests {
         let ctx = basic_context();
 
         // Score spec: $${...} renders as literal ${...}
-        let result = engine.render("$${literal}", &ctx).unwrap();
+        let result = engine
+            .render("$${literal}", &ctx)
+            .expect("score escape should render successfully");
         assert_eq!(result, "${literal}");
     }
 
@@ -290,7 +304,7 @@ mod tests {
         // Mix escaped and non-escaped
         let result = engine
             .render("echo $${VAR}; app=${config.name}", &ctx)
-            .unwrap();
+            .expect("mixed escape and variables should render successfully");
         assert_eq!(result, "echo ${VAR}; app=myapp");
     }
 
@@ -300,7 +314,9 @@ mod tests {
         let ctx = basic_context();
 
         // Multiple escapes in same template
-        let result = engine.render("$${FOO} and $${BAR}", &ctx).unwrap();
+        let result = engine
+            .render("$${FOO} and $${BAR}", &ctx)
+            .expect("multiple escapes should render successfully");
         assert_eq!(result, "${FOO} and ${BAR}");
     }
 
@@ -312,7 +328,7 @@ mod tests {
         // Use {% raw %} to include literal ${...}
         let result = engine
             .render("{% raw %}${literal}{% endraw %}", &ctx)
-            .unwrap();
+            .expect("raw block should render successfully");
         assert_eq!(result, "${literal}");
     }
 
@@ -337,7 +353,9 @@ mod tests {
             .build();
 
         assert_eq!(
-            engine.render("${metadata.annotations.team}", &ctx).unwrap(),
+            engine
+                .render("${metadata.annotations.team}", &ctx)
+                .expect("annotations should render successfully"),
             "platform"
         );
     }
@@ -348,7 +366,9 @@ mod tests {
         let ctx = basic_context();
 
         // Plain strings should pass through unchanged
-        let result = engine.render("plain-text-no-placeholders", &ctx).unwrap();
+        let result = engine
+            .render("plain-text-no-placeholders", &ctx)
+            .expect("plain text should render successfully");
         assert_eq!(result, "plain-text-no-placeholders");
     }
 }

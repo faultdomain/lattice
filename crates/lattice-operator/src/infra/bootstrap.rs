@@ -23,7 +23,7 @@ pub struct InfrastructureConfig {
     pub skip_cilium_policies: bool,
 }
 
-/// Generate core infrastructure manifests (Istio, Gateway API, Envoy Gateway)
+/// Generate core infrastructure manifests (Istio, Gateway API)
 ///
 /// Used by both operator startup and full cluster bootstrap.
 pub fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
@@ -32,7 +32,7 @@ pub fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
     // Istio ambient
     manifests.extend(generate_istio(skip_cilium_policies));
 
-    // Gateway API CRDs (must be installed before Envoy Gateway)
+    // Gateway API CRDs (required for Istio Gateway and waypoints)
     if let Ok(gw_api) = generate_gateway_api_crds() {
         debug!(count = gw_api.len(), "generated Gateway API CRDs");
         manifests.extend(gw_api);
@@ -40,20 +40,12 @@ pub fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
         warn!("failed to generate Gateway API CRDs");
     }
 
-    // Envoy Gateway (north-south ingress)
-    if let Ok(eg) = generate_envoy_gateway() {
-        debug!(count = eg.len(), "generated Envoy Gateway manifests");
-        manifests.extend(eg);
-    } else {
-        warn!("failed to generate Envoy Gateway manifests");
-    }
-
     manifests
 }
 
 /// Generate ALL infrastructure manifests for a self-managing cluster
 ///
-/// Includes: cert-manager, CAPI, plus core infrastructure (Istio, Envoy Gateway)
+/// Includes: cert-manager, CAPI, plus core infrastructure (Istio, Gateway API)
 pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     let mut manifests = Vec::new();
 
@@ -73,7 +65,7 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
         warn!("failed to generate CAPI manifests");
     }
 
-    // Core infrastructure (Istio, Gateway API, Envoy Gateway)
+    // Core infrastructure (Istio, Gateway API)
     manifests.extend(generate_core(config.skip_cilium_policies));
 
     info!(
@@ -182,78 +174,6 @@ pub fn generate_gateway_api_crds() -> Result<Vec<String>, String> {
     Ok(split_yaml(&content))
 }
 
-/// Generate Envoy Gateway manifests for north-south ingress
-pub fn generate_envoy_gateway() -> Result<Vec<String>, String> {
-    let charts_dir = charts_dir();
-    let chart_path = find_chart(&charts_dir, "gateway-helm")?;
-
-    let output = Command::new("helm")
-        .args([
-            "template",
-            "envoy-gateway",
-            &chart_path,
-            "--namespace",
-            "envoy-gateway-system",
-            "--include-crds",
-            // Deploy Envoy Proxy in the Gateway's namespace (not controller namespace)
-            // Required for waypoint proxies to be in the same namespace as services
-            "--set",
-            "config.envoyGateway.provider.kubernetes.deploy.type=GatewayNamespace",
-        ])
-        .output()
-        .map_err(|e| format!("helm: {}", e))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
-    let yaml = String::from_utf8_lossy(&output.stdout);
-    let mut manifests = vec![namespace_yaml("envoy-gateway-system")];
-    for m in split_yaml(&yaml) {
-        manifests.push(inject_namespace(&m, "envoy-gateway-system"));
-    }
-
-    // Add GatewayClass for Envoy Gateway ingress (name: "eg")
-    manifests.push(envoy_gateway_class());
-
-    // NOTE: Waypoint GatewayClass and EnvoyProxy are created per-namespace by WaypointCompiler
-    // (see ingress/mod.rs) to ensure EnvoyProxy is in the same namespace as the Gateway
-
-    // Add allow policy for Envoy Gateway
-    manifests.push(allow_all_policy("envoy-gateway", "envoy-gateway-system"));
-
-    Ok(manifests)
-}
-
-/// Generate the Envoy Gateway GatewayClass for ingress
-fn envoy_gateway_class() -> String {
-    r#"apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: eg
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  controllerName: gateway.envoyproxy.io/gatewayclass-controller"#
-        .to_string()
-}
-
-fn allow_all_policy(name: &str, namespace: &str) -> String {
-    format!(
-        r#"apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: {name}-allow-all
-  namespace: {namespace}
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  action: ALLOW
-  rules:
-  - {{}}"#
-    )
-}
-
 // Helpers
 
 fn charts_dir() -> String {
@@ -291,10 +211,7 @@ fn namespace_yaml(name: &str) -> String {
 }
 
 fn split_yaml(yaml: &str) -> Vec<String> {
-    yaml.split("\n---")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s.contains("kind:"))
-        .collect()
+    super::split_yaml_documents(yaml)
 }
 
 /// Inject namespace into a manifest if it doesn't have one and is a namespaced resource

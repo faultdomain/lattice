@@ -132,11 +132,13 @@ mod tests {
             ..Default::default()
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
+        let yaml =
+            serde_yaml::to_string(&config).expect("OpenStackConfig serialization should succeed");
         assert!(yaml.contains("externalNetworkId: ext-net-123"));
         assert!(yaml.contains("cpFlavor: b2-30"));
 
-        let parsed: OpenStackConfig = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: OpenStackConfig =
+            serde_yaml::from_str(&yaml).expect("OpenStackConfig deserialization should succeed");
         assert_eq!(parsed, config);
     }
 
@@ -149,7 +151,8 @@ workerFlavor: m1.medium
 imageName: ubuntu-22.04
 sshKeyName: default
 "#;
-        let config: OpenStackConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: OpenStackConfig = serde_yaml::from_str(yaml)
+            .expect("minimal OpenStackConfig deserialization should succeed");
         assert_eq!(config.external_network_id, "ext-net");
         assert_eq!(config.cp_flavor, "m1.large");
         assert!(config.cloud_name.is_none());
@@ -173,7 +176,8 @@ cpRootVolumeType: high-speed
 workerRootVolumeSizeGb: 100
 cpAvailabilityZone: nova
 "#;
-        let config: OpenStackConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: OpenStackConfig = serde_yaml::from_str(yaml)
+            .expect("full OpenStackConfig deserialization should succeed");
         assert_eq!(config.cp_root_volume_size_gb, Some(50));
         assert_eq!(config.cp_availability_zone, Some("nova".to_string()));
     }

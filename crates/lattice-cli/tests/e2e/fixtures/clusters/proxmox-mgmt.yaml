@@ -37,7 +37,7 @@ spec:
   nodes:
     controlPlane: 1
     workers: 1
-  endpoints:
+  parentConfig:
     # Must be in Cilium LB pool (auto-derived as 10.0.0.200/27 from gateway)
     host: "10.0.0.201"
     grpcPort: 50051

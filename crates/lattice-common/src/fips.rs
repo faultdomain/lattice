@@ -165,12 +165,13 @@ mod tests {
         let original = sample_deployment();
         let modified = add_fips_relax_env(&original);
 
-        let parsed: serde_json::Value = serde_json::from_str(&modified).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&modified).expect("modified JSON should parse successfully");
         let env = parsed
             .pointer("/spec/template/spec/containers/0/env")
-            .unwrap()
+            .expect("env pointer should resolve")
             .as_array()
-            .unwrap();
+            .expect("env should be an array");
 
         let has_godebug = env.iter().any(|e| {
             e.get("name").and_then(|n| n.as_str()) == Some("GODEBUG")
@@ -188,12 +189,13 @@ mod tests {
         // Try to add again
         let double_modified = add_fips_relax_env(&modified);
 
-        let parsed: serde_json::Value = serde_json::from_str(&double_modified).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&double_modified)
+            .expect("double modified JSON should parse successfully");
         let env = parsed
             .pointer("/spec/template/spec/containers/0/env")
-            .unwrap()
+            .expect("env pointer should resolve")
             .as_array()
-            .unwrap();
+            .expect("env should be an array");
 
         let godebug_count = env
             .iter()

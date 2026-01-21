@@ -27,15 +27,12 @@
 
 use crate::crd::LatticeService;
 use crate::graph::ServiceGraph;
-use crate::ingress::{
-    GeneratedIngress, GeneratedTrafficPolicies, GeneratedWaypoint, IngressCompiler,
-    TrafficPolicyCompiler, WaypointCompiler,
-};
+use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
 use crate::policy::{AuthorizationPolicy, GeneratedPolicies, PolicyCompiler};
 use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
 
 // Re-export types for convenience
-pub use crate::ingress::{BackendTrafficPolicy, Certificate, Gateway, HttpRoute};
+pub use crate::ingress::{Certificate, Gateway, HttpRoute};
 pub use crate::policy::{CiliumNetworkPolicy, ServiceEntry};
 pub use crate::workload::{Deployment, HorizontalPodAutoscaler, Service, ServiceAccount};
 
@@ -48,9 +45,7 @@ pub struct CompiledService {
     pub policies: GeneratedPolicies,
     /// Generated ingress resources (Gateway, HTTPRoute, Certificate)
     pub ingress: GeneratedIngress,
-    /// Generated traffic policies (BackendTrafficPolicy for retries, timeouts, rate limits)
-    pub traffic_policies: GeneratedTrafficPolicies,
-    /// Generated waypoint resources (Gateway, HTTPRoute for east-west L7 policies)
+    /// Generated waypoint Gateway for east-west L7 policy enforcement
     pub waypoint: GeneratedWaypoint,
 }
 
@@ -65,7 +60,6 @@ impl CompiledService {
         self.workloads.is_empty()
             && self.policies.is_empty()
             && self.ingress.is_empty()
-            && self.traffic_policies.is_empty()
             && self.waypoint.is_empty()
     }
 
@@ -81,19 +75,10 @@ impl CompiledService {
         .filter(|&&x| x)
         .count();
 
-        let waypoint_count = [
-            self.waypoint.gateway.is_some(),
-            self.waypoint.http_route.is_some(),
-        ]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-
         workload_count
             + self.policies.total_count()
             + self.ingress.total_count()
-            + self.traffic_policies.total_count()
-            + waypoint_count
+            + self.waypoint.total_count()
     }
 }
 
@@ -127,7 +112,7 @@ impl<'a> ServiceCompiler<'a> {
     /// - Workloads: Deployment, Service, ServiceAccount, HPA
     /// - Policies: AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
     /// - Ingress: Gateway, HTTPRoute, Certificate (if ingress configured)
-    /// - Traffic: BackendTrafficPolicy for retries, timeouts, rate limits
+    /// - Waypoint: Istio ambient mesh L7 policy enforcement
     ///
     /// The environment (and namespace) comes from `spec.environment`, since
     /// LatticeService is cluster-scoped.
@@ -142,35 +127,21 @@ impl<'a> ServiceCompiler<'a> {
         let policy_compiler = PolicyCompiler::new(self.graph, &self.trust_domain);
         let mut policies = policy_compiler.compile(name, namespace, env);
 
-        // Compile traffic policies from resource dependencies
-        let traffic_policies =
-            TrafficPolicyCompiler::compile(name, namespace, &service.spec.resources);
+        // Compile waypoint Gateway for east-west L7 policies (Istio ambient mesh)
+        let waypoint = WaypointCompiler::compile(namespace);
 
-        // Compile waypoint resources for east-west L7 policies
-        // Get primary service port for waypoint routing
-        let waypoint_port = service
+        // Get primary service port for ingress routing
+        let service_port = service
             .spec
             .service
             .as_ref()
             .and_then(|s| s.ports.values().next())
             .map(|p| p.port)
             .unwrap_or(80);
-        let waypoint =
-            WaypointCompiler::compile(name, namespace, waypoint_port, &service.spec.resources);
 
         // Compile ingress resources if configured
         let ingress = if let Some(ref ingress_spec) = service.spec.ingress {
-            // Get primary service port for routing
-            let backend_port = service
-                .spec
-                .service
-                .as_ref()
-                .and_then(|s| s.ports.values().next())
-                .map(|p| p.port)
-                .unwrap_or(80);
-
-            // Generate ingress resources
-            let ingress = IngressCompiler::compile(name, namespace, ingress_spec, backend_port);
+            let ingress = IngressCompiler::compile(name, namespace, ingress_spec, service_port);
 
             // Add gateway allow policy for north-south traffic
             let ports: Vec<u16> = service
@@ -193,7 +164,6 @@ impl<'a> ServiceCompiler<'a> {
             workloads,
             policies,
             ingress,
-            traffic_policies,
             waypoint,
         }
     }
@@ -299,9 +269,7 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
-                    outbound: None,
-                    inbound: None,
+                    volume: None,
                 },
             );
         }
@@ -314,9 +282,7 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
-                    outbound: None,
-                    inbound: None,
+                    volume: None,
                 },
             );
         }
@@ -469,7 +435,8 @@ mod tests {
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
         let output = compiler.compile(&service);
 
-        // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointHTTPRoute = 6
+        // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointAuthPolicy = 6
+        // (VirtualService is generated per dependency, not per service)
         assert_eq!(output.resource_count(), 6);
     }
 
@@ -525,11 +492,17 @@ mod tests {
         assert!(output.ingress.http_route.is_some());
         assert!(output.ingress.certificate.is_some());
 
-        let gateway = output.ingress.gateway.unwrap();
+        let gateway = output
+            .ingress
+            .gateway
+            .expect("gateway should be generated for ingress");
         assert_eq!(gateway.metadata.name, "api-gateway");
         assert_eq!(gateway.metadata.namespace, "prod");
 
-        let route = output.ingress.http_route.unwrap();
+        let route = output
+            .ingress
+            .http_route
+            .expect("http route should be generated for ingress");
         assert_eq!(route.metadata.name, "api-route");
 
         // Should have gateway allow policy

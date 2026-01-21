@@ -25,7 +25,7 @@ spec:
   nodes:
     controlPlane: 1
     workers: 1
-  endpoints:
+  parentConfig:
     # host is auto-discovered from NLB
     grpcPort: 50051
     bootstrapPort: 8443

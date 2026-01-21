@@ -346,9 +346,10 @@ impl VolumeCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ContainerSpec, DependencyDirection, DeploySpec, ReplicaSpec, ResourceSpec};
+    use crate::crd::{
+        ContainerSpec, DependencyDirection, DeploySpec, ReplicaSpec, ResourceSpec, VolumeParams,
+    };
     use crate::template::TemplateString;
-    use serde_json::json;
 
     fn make_spec_with_volumes(
         owned: Vec<(&str, Option<&str>, &str, Option<VolumeAccessMode>)>, // (name, id, size, access_mode)
@@ -359,12 +360,6 @@ mod tests {
 
         // Add owned volumes
         for (name, id, size, access_mode) in owned {
-            let mut params = serde_json::Map::new();
-            params.insert("size".to_string(), json!(size));
-            if let Some(mode) = access_mode {
-                params.insert("accessMode".to_string(), json!(format!("{:?}", mode)));
-            }
-
             resources.insert(
                 name.to_string(),
                 ResourceSpec {
@@ -373,9 +368,11 @@ mod tests {
                     id: id.map(|s: &str| s.to_string()),
                     class: None,
                     metadata: None,
-                    params: Some(serde_json::Value::Object(params)),
-                    outbound: None,
-                    inbound: None,
+                    volume: Some(VolumeParams {
+                        size: Some(size.to_string()),
+                        storage_class: None,
+                        access_mode,
+                    }),
                 },
             );
         }
@@ -390,9 +387,7 @@ mod tests {
                     id: Some(id.to_string()),
                     class: None,
                     metadata: None,
-                    params: None, // No params = reference
-                    outbound: None,
-                    inbound: None,
+                    volume: None, // No volume params = reference
                 },
             );
         }
@@ -483,12 +478,10 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        // Add storage class to params
+        // Add storage class to volume config
         if let Some(resource) = spec.resources.get_mut("config") {
-            if let Some(params) = resource.params.as_mut() {
-                if let Some(obj) = params.as_object_mut() {
-                    obj.insert("storageClass".to_string(), json!("local-path"));
-                }
+            if let Some(volume) = resource.volume.as_mut() {
+                volume.storage_class = Some("local-path".to_string());
             }
         }
 
@@ -541,7 +534,7 @@ mod tests {
             output.volumes[0]
                 .persistent_volume_claim
                 .as_ref()
-                .unwrap()
+                .expect("PVC volume source should be set")
                 .claim_name,
             "vol-media-downloads"
         );
@@ -676,7 +669,10 @@ mod tests {
 
         assert_eq!(output.volumes.len(), 1);
         assert_eq!(output.volumes[0].name, "config");
-        let pvc_source = output.volumes[0].persistent_volume_claim.as_ref().unwrap();
+        let pvc_source = output.volumes[0]
+            .persistent_volume_claim
+            .as_ref()
+            .expect("PVC volume source should be set");
         assert_eq!(pvc_source.claim_name, "myapp-config");
     }
 

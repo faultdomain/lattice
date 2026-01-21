@@ -519,9 +519,7 @@ mod tests {
                 id: Some("postgres".to_string()),
                 class: None,
                 metadata: None,
-                params: None,
-                outbound: None,
-                inbound: None,
+                volume: None,
             },
         );
 
@@ -555,10 +553,12 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "prod", "prod-ns").with_config("log_level", "debug");
 
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.containers["main"], &ctx)
-            .unwrap();
+            .expect("container rendering should succeed");
 
         assert_eq!(
             rendered.variables.get("DB_HOST").map(|v| &v.value),
@@ -573,8 +573,20 @@ mod tests {
             Some(&"debug".to_string())
         );
         // DB_HOST and DB_PORT reference service outputs which are not sensitive
-        assert!(!rendered.variables.get("DB_HOST").unwrap().sensitive);
-        assert!(!rendered.variables.get("DB_PORT").unwrap().sensitive);
+        assert!(
+            !rendered
+                .variables
+                .get("DB_HOST")
+                .expect("DB_HOST should exist")
+                .sensitive
+        );
+        assert!(
+            !rendered
+                .variables
+                .get("DB_PORT")
+                .expect("DB_PORT should exist")
+                .sensitive
+        );
     }
 
     #[test]
@@ -585,13 +597,18 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "prod", "prod-ns").with_config("log_level", "info"); // Required by the test fixture
 
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.containers["main"], &ctx)
-            .unwrap();
+            .expect("container rendering should succeed");
 
         let file = &rendered.files["/etc/app/config.yaml"];
-        let content = file.content.as_ref().unwrap();
+        let content = file
+            .content
+            .as_ref()
+            .expect("file content should be present");
 
         assert!(content.contains("host: postgres.prod-ns.svc.cluster.local"));
         assert!(content.contains("port: 5432"));
@@ -649,11 +666,13 @@ mod tests {
 
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "test", "test-ns");
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
 
         let rendered = renderer
             .render_container("main", &service.spec.containers["main"], &ctx)
-            .unwrap();
+            .expect("container rendering should succeed");
 
         // Should preserve the ${VAR} literally
         assert_eq!(
@@ -670,8 +689,12 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "prod", "prod-ns").with_config("log_level", "info");
 
-        let ctx = renderer.build_context(&service, &config).unwrap();
-        let rendered = renderer.render_all_containers(&service.spec, &ctx).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
+        let rendered = renderer
+            .render_all_containers(&service.spec, &ctx)
+            .expect("all containers should render successfully");
 
         assert!(rendered.contains_key("main"));
         assert_eq!(
@@ -729,11 +752,13 @@ mod tests {
 
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "test", "test-ns");
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
 
         let rendered = renderer
             .render_container("main", &service.spec.containers["main"], &ctx)
-            .unwrap();
+            .expect("container rendering should succeed");
 
         // $${HOME} should become ${HOME}
         assert_eq!(
@@ -791,10 +816,12 @@ mod tests {
             .with_cluster("registry", "gcr.io/myproject")
             .with_env("version", "1.2.3");
 
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.containers["main"], &ctx)
-            .unwrap();
+            .expect("container rendering should succeed");
 
         assert_eq!(
             rendered.variables.get("IMAGE").map(|v| &v.value),
@@ -854,19 +881,45 @@ mod tests {
         };
 
         let renderer = TemplateRenderer::new();
-        let rendered = renderer.render_container("main", &container, &ctx).unwrap();
+        let rendered = renderer
+            .render_container("main", &container, &ctx)
+            .expect("container rendering should succeed");
 
         // DB_HOST only references non-sensitive field
-        assert!(!rendered.variables.get("DB_HOST").unwrap().sensitive);
+        assert!(
+            !rendered
+                .variables
+                .get("DB_HOST")
+                .expect("DB_HOST should exist")
+                .sensitive
+        );
 
         // DB_PASSWORD references sensitive field
-        assert!(rendered.variables.get("DB_PASSWORD").unwrap().sensitive);
+        assert!(
+            rendered
+                .variables
+                .get("DB_PASSWORD")
+                .expect("DB_PASSWORD should exist")
+                .sensitive
+        );
 
         // DB_URL references sensitive field
-        assert!(rendered.variables.get("DB_URL").unwrap().sensitive);
+        assert!(
+            rendered
+                .variables
+                .get("DB_URL")
+                .expect("DB_URL should exist")
+                .sensitive
+        );
 
         // MIXED references both - should be marked sensitive
-        assert!(rendered.variables.get("MIXED").unwrap().sensitive);
+        assert!(
+            rendered
+                .variables
+                .get("MIXED")
+                .expect("MIXED should exist")
+                .sensitive
+        );
     }
 
     // =========================================================================
@@ -915,10 +968,12 @@ mod tests {
         let config = RenderConfig::new(&graph, "prod", "prod-ns")
             .with_config("image", "gcr.io/myproject/my-app:v1.2.3");
 
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.containers["main"], &ctx)
-            .unwrap();
+            .expect("container rendering should succeed");
 
         assert_eq!(rendered.image, "gcr.io/myproject/my-app:v1.2.3");
     }
@@ -981,14 +1036,16 @@ mod tests {
             .with_config("image.main", "gcr.io/myproject/main:v1")
             .with_config("image.sidecar", "gcr.io/myproject/sidecar:v2");
 
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
 
         let main_rendered = renderer
             .render_container("main", &service.spec.containers["main"], &ctx)
-            .unwrap();
+            .expect("main container rendering should succeed");
         let sidecar_rendered = renderer
             .render_container("sidecar", &service.spec.containers["sidecar"], &ctx)
-            .unwrap();
+            .expect("sidecar container rendering should succeed");
 
         assert_eq!(main_rendered.image, "gcr.io/myproject/main:v1");
         assert_eq!(sidecar_rendered.image, "gcr.io/myproject/sidecar:v2");
@@ -1035,7 +1092,9 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "prod", "prod-ns"); // No image config!
 
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
         let result = renderer.render_container("main", &service.spec.containers["main"], &ctx);
 
         assert!(result.is_err());
@@ -1085,10 +1144,12 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "prod", "prod-ns");
 
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.containers["main"], &ctx)
-            .unwrap();
+            .expect("container rendering should succeed");
 
         assert_eq!(rendered.image, "nginx:latest");
     }
@@ -1134,7 +1195,9 @@ mod tests {
         };
 
         let renderer = TemplateRenderer::new();
-        let rendered = renderer.render_container("main", &container, &ctx).unwrap();
+        let rendered = renderer
+            .render_container("main", &container, &ctx)
+            .expect("container rendering should succeed");
 
         assert_eq!(rendered.volumes["/data"].source, "my-pvc");
         assert_eq!(rendered.volumes["/data"].path, Some("subdir".to_string()));
@@ -1173,7 +1236,9 @@ mod tests {
         };
 
         let renderer = TemplateRenderer::new();
-        let rendered = renderer.render_container("main", &container, &ctx).unwrap();
+        let rendered = renderer
+            .render_container("main", &container, &ctx)
+            .expect("container rendering should succeed");
 
         assert_eq!(
             rendered.volumes["/cache"].source,
@@ -1211,7 +1276,9 @@ mod tests {
         };
 
         let renderer = TemplateRenderer::new();
-        let rendered = renderer.render_container("main", &container, &ctx).unwrap();
+        let rendered = renderer
+            .render_container("main", &container, &ctx)
+            .expect("container rendering should succeed");
 
         assert_eq!(rendered.volumes["/logs"].source, "shared-logs-pvc");
     }

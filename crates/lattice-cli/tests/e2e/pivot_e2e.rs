@@ -92,9 +92,9 @@ const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .unwrap()
+        .expect("lattice-cli crate should have a parent directory")
         .parent()
-        .unwrap()
+        .expect("crates directory should have a parent (workspace root)")
         .to_path_buf()
 }
 
@@ -327,8 +327,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     println!("Loading cluster configurations...\n");
 
-    let (mgmt_config_content, mgmt_cluster) =
-        load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG")?;
+    let (mgmt_config_content, mgmt_cluster) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG")?;
     let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
     let mgmt_bootstrap = mgmt_cluster.spec.provider.kubernetes.bootstrap.clone();
 

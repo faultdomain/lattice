@@ -196,7 +196,7 @@ impl Provider for OpenStackProvider {
             .unwrap_or_default();
 
         // Add endpoints.host to SANs if configured
-        if let Some(ref endpoints) = cluster.spec.endpoints {
+        if let Some(ref endpoints) = cluster.spec.parent_config {
             if let Some(ref host) = endpoints.host {
                 if !cert_sans.contains(host) {
                     cert_sans.push(host.clone());
@@ -325,7 +325,7 @@ mod tests {
                     control_plane: 3,
                     workers: 5,
                 },
-                endpoints: None,
+                parent_config: None,
                 networking: None,
                 environment: None,
                 region: None,
@@ -341,7 +341,7 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&test_cluster("test"), &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         // 7 manifests: Cluster, OpenStackCluster, ControlPlane, 2x MachineTemplate, MachineDeployment, ConfigTemplate
         assert_eq!(manifests.len(), 7);
@@ -360,13 +360,14 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&test_cluster("test"), &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let os_cluster = manifests
             .iter()
             .find(|m| m.kind == "OpenStackCluster")
-            .unwrap();
-        let lb_enabled = &os_cluster.spec.as_ref().unwrap()["apiServerLoadBalancer"]["enabled"];
+            .expect("OpenStackCluster manifest should exist");
+        let lb_enabled = &os_cluster.spec.as_ref().expect("spec should exist")
+            ["apiServerLoadBalancer"]["enabled"];
         assert_eq!(lb_enabled, true);
     }
 
@@ -428,12 +429,12 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let cp = manifests
             .iter()
             .find(|m| m.kind.contains("ControlPlane"))
-            .unwrap();
+            .expect("ControlPlane manifest should exist");
         assert!(cp.kind.contains("RKE2"));
     }
 
@@ -451,16 +452,17 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let cp_template = manifests
             .iter()
             .find(|m| {
                 m.kind == "OpenStackMachineTemplate" && m.metadata.name.contains("control-plane")
             })
-            .unwrap();
+            .expect("control plane template should exist");
 
-        let root_volume = &cp_template.spec.as_ref().unwrap()["template"]["spec"]["rootVolume"];
+        let root_volume = &cp_template.spec.as_ref().expect("spec should exist")["template"]
+            ["spec"]["rootVolume"];
         assert_eq!(root_volume["sizeGiB"], 50);
         assert_eq!(root_volume["type"], "high-speed");
     }

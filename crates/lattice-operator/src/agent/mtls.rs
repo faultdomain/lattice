@@ -156,11 +156,14 @@ mod tests {
     use crate::pki::{AgentCertRequest, CertificateAuthority};
 
     fn create_test_certs() -> (CertificateAuthority, String, String, String) {
-        let ca = CertificateAuthority::new("Test CA").unwrap();
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
 
         // Generate agent cert
-        let agent_req = AgentCertRequest::new("test-cluster").unwrap();
-        let agent_cert = ca.sign_csr(agent_req.csr_pem(), "test-cluster").unwrap();
+        let agent_req =
+            AgentCertRequest::new("test-cluster").expect("agent cert request should succeed");
+        let agent_cert = ca
+            .sign_csr(agent_req.csr_pem(), "test-cluster")
+            .expect("CSR signing should succeed");
         let agent_key = agent_req.private_key_pem().to_string();
 
         (ca, agent_cert, agent_key, "test-cluster".to_string())
@@ -171,10 +174,11 @@ mod tests {
         let (_ca, agent_cert, _, _) = create_test_certs();
 
         // Parse PEM to DER
-        let pem_obj = ::pem::parse(agent_cert.as_bytes()).unwrap();
+        let pem_obj = ::pem::parse(agent_cert.as_bytes()).expect("PEM parsing should succeed");
         let cert_der = pem_obj.contents();
 
-        let cluster_id = extract_cluster_id_from_cert(cert_der).unwrap();
+        let cluster_id =
+            extract_cluster_id_from_cert(cert_der).expect("cluster ID extraction should succeed");
         assert_eq!(cluster_id, "test-cluster");
     }
 
@@ -183,10 +187,11 @@ mod tests {
         let (ca, agent_cert, _, _) = create_test_certs();
 
         // Parse PEM to DER
-        let pem_obj = ::pem::parse(agent_cert.as_bytes()).unwrap();
+        let pem_obj = ::pem::parse(agent_cert.as_bytes()).expect("PEM parsing should succeed");
         let cert_der = pem_obj.contents();
 
-        let result = verify_cert_chain(cert_der, ca.ca_cert_pem()).unwrap();
+        let result = verify_cert_chain(cert_der, ca.ca_cert_pem())
+            .expect("cert chain verification should succeed");
         assert!(result);
     }
 
@@ -229,8 +234,10 @@ mod tests {
         );
         params.distinguished_name = dn;
 
-        let key_pair = KeyPair::generate().unwrap();
-        let cert = params.self_signed(&key_pair).unwrap();
+        let key_pair = KeyPair::generate().expect("key pair generation should succeed");
+        let cert = params
+            .self_signed(&key_pair)
+            .expect("self-signed cert creation should succeed");
         let cert_der = cert.der();
 
         let result = extract_cluster_id_from_cert(cert_der);

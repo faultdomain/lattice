@@ -185,7 +185,7 @@ impl Provider for AwsProvider {
             .unwrap_or_default();
 
         // Add endpoints.host to SANs if configured
-        if let Some(ref endpoints) = cluster.spec.endpoints {
+        if let Some(ref endpoints) = cluster.spec.parent_config {
             if let Some(ref host) = endpoints.host {
                 if !cert_sans.contains(host) {
                     cert_sans.push(host.clone());
@@ -322,7 +322,7 @@ mod tests {
                     control_plane: 3,
                     workers: 5,
                 },
-                endpoints: None,
+                parent_config: None,
                 networking: None,
                 environment: None,
                 region: None,
@@ -338,7 +338,7 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&test_cluster("test"), &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         // 7 manifests: Cluster, AWSCluster, ControlPlane, 2x MachineTemplate, MachineDeployment, ConfigTemplate
         assert_eq!(manifests.len(), 7);
@@ -357,11 +357,14 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&test_cluster("test"), &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
-        let aws_cluster = manifests.iter().find(|m| m.kind == "AWSCluster").unwrap();
-        let lb_type =
-            &aws_cluster.spec.as_ref().unwrap()["controlPlaneLoadBalancer"]["loadBalancerType"];
+        let aws_cluster = manifests
+            .iter()
+            .find(|m| m.kind == "AWSCluster")
+            .expect("AWSCluster should exist");
+        let lb_type = &aws_cluster.spec.as_ref().expect("spec should exist")
+            ["controlPlaneLoadBalancer"]["loadBalancerType"];
         assert_eq!(lb_type, "nlb");
     }
 
@@ -442,12 +445,12 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let cp = manifests
             .iter()
             .find(|m| m.kind.contains("ControlPlane"))
-            .unwrap();
+            .expect("ControlPlane should exist");
         assert!(cp.kind.contains("RKE2"));
     }
 
@@ -465,14 +468,15 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let cp_template = manifests
             .iter()
             .find(|m| m.kind == "AWSMachineTemplate" && m.metadata.name.contains("control-plane"))
-            .unwrap();
+            .expect("control plane template should exist");
 
-        let root_volume = &cp_template.spec.as_ref().unwrap()["template"]["spec"]["rootVolume"];
+        let root_volume = &cp_template.spec.as_ref().expect("spec should exist")["template"]
+            ["spec"]["rootVolume"];
         assert_eq!(root_volume["size"], 100);
         assert_eq!(root_volume["type"], "io1");
     }
@@ -483,17 +487,17 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&test_cluster("test"), &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let cp_template = manifests
             .iter()
             .find(|m| m.kind == "AWSMachineTemplate" && m.metadata.name.contains("control-plane"))
-            .unwrap();
+            .expect("control plane template should exist");
 
-        let iam_profile = cp_template.spec.as_ref().unwrap()["template"]["spec"]
+        let iam_profile = cp_template.spec.as_ref().expect("spec should exist")["template"]["spec"]
             ["iamInstanceProfile"]
             .as_str()
-            .unwrap();
+            .expect("iamInstanceProfile should be a string");
         assert_eq!(
             iam_profile,
             "control-plane.cluster-api-provider-aws.sigs.k8s.io"
@@ -513,28 +517,28 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let cp_template = manifests
             .iter()
             .find(|m| m.kind == "AWSMachineTemplate" && m.metadata.name.contains("control-plane"))
-            .unwrap();
+            .expect("control plane template should exist");
 
-        let iam_profile = cp_template.spec.as_ref().unwrap()["template"]["spec"]
+        let iam_profile = cp_template.spec.as_ref().expect("spec should exist")["template"]["spec"]
             ["iamInstanceProfile"]
             .as_str()
-            .unwrap();
+            .expect("iamInstanceProfile should be a string");
         assert_eq!(iam_profile, "custom-cp-profile");
 
         let worker_template = manifests
             .iter()
             .find(|m| m.kind == "AWSMachineTemplate" && m.metadata.name.contains("md-0"))
-            .unwrap();
+            .expect("worker template should exist");
 
-        let worker_iam = worker_template.spec.as_ref().unwrap()["template"]["spec"]
-            ["iamInstanceProfile"]
+        let worker_iam = worker_template.spec.as_ref().expect("spec should exist")["template"]
+            ["spec"]["iamInstanceProfile"]
             .as_str()
-            .unwrap();
+            .expect("iamInstanceProfile should be a string");
         assert_eq!(worker_iam, "custom-worker-profile");
     }
 
@@ -551,18 +555,21 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
-        let aws_cluster = manifests.iter().find(|m| m.kind == "AWSCluster").unwrap();
+        let aws_cluster = manifests
+            .iter()
+            .find(|m| m.kind == "AWSCluster")
+            .expect("AWSCluster should exist");
 
-        let vpc_id = aws_cluster.spec.as_ref().unwrap()["network"]["vpc"]["id"]
+        let vpc_id = aws_cluster.spec.as_ref().expect("spec should exist")["network"]["vpc"]["id"]
             .as_str()
-            .unwrap();
+            .expect("vpc id should be a string");
         assert_eq!(vpc_id, "vpc-12345");
 
-        let subnets = aws_cluster.spec.as_ref().unwrap()["network"]["subnets"]
+        let subnets = aws_cluster.spec.as_ref().expect("spec should exist")["network"]["subnets"]
             .as_array()
-            .unwrap();
+            .expect("subnets should be an array");
         assert_eq!(subnets.len(), 2);
     }
 }

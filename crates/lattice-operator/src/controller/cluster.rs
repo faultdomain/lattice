@@ -28,9 +28,7 @@ use crate::crd::{
     LatticeClusterStatus,
 };
 use crate::parent::ParentServers;
-use crate::proto::{
-    cell_command, AgentState, CellCommand, PivotManifestsCommand,
-};
+use crate::proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand};
 use crate::provider::{create_provider, CAPIManifest};
 use crate::Error;
 
@@ -1272,7 +1270,7 @@ impl Context {
     /// Create a new controller context with cell servers for dynamic startup
     ///
     /// Cell servers will start automatically when Pending LatticeCluster CRDs are detected.
-    /// Cell endpoint configuration is read from the LatticeCluster CRD's spec.endpoints.
+    /// Cell endpoint configuration is read from the LatticeCluster CRD's spec.parent_config.
     pub fn new_with_cell(
         client: Client,
         parent_servers: Arc<ParentServers<DefaultManifestGenerator>>,
@@ -1475,12 +1473,6 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
         return Ok(Action::await_change());
     }
 
-    // Check if we're reconciling our own cluster (the one we're running on)
-    // This is critical: the ClusterController should only do full reconciliation
-    // (worker scaling, tainting, etc.) for its OWN cluster. For workload clusters
-    // provisioned by this cell, we only handle CAPI provisioning and pivot.
-    let is_self = is_self_cluster(&name, ctx.self_cluster_name.as_deref());
-
     // Check if this child cluster is being unpivoted (child is being deleted)
     // This only applies when we're the parent, not when reconciling our own cluster
     // Unpivot flow: child exports CAPI → sends to parent → parent imports → unpauses → deletes
@@ -1499,8 +1491,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 let Some(ref client) = ctx.client else {
                     return Err(Error::internal("client not available for pivot operations"));
                 };
-                let pivot_ops: Arc<dyn PivotOperations> =
-                    Arc::new(PivotOperationsImpl::new(parent_servers.agent_registry(), client.clone()));
+                let pivot_ops: Arc<dyn PivotOperations> = Arc::new(PivotOperationsImpl::new(
+                    parent_servers.agent_registry(),
+                    client.clone(),
+                ));
 
                 // Import manifests from child if available (sent via ClusterDeleting)
                 if let Some(manifests) = pivot_ops.take_unpivot_manifests(&name) {
@@ -1554,7 +1548,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Create LoadBalancer Service if this cluster has a cell spec
             // This exposes cell servers for workload clusters to reach bootstrap + gRPC endpoints
             // Note: Cell servers are started at application startup, not on-demand
-            if let Some(ref cell_spec) = cluster.spec.endpoints {
+            if let Some(ref cell_spec) = cluster.spec.parent_config {
                 info!(host = ?cell_spec.host, "ensuring LoadBalancer Service for cell servers");
                 ctx.kube
                     .ensure_cell_service(
@@ -1715,7 +1709,9 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // We're the parent cell, orchestrating pivot for a child cluster
             // Get pivot operations from parent_servers
             let pivot_ops: Option<Arc<dyn PivotOperations>> =
-                if let (Some(ref parent_servers), Some(ref client)) = (&ctx.parent_servers, &ctx.client) {
+                if let (Some(ref parent_servers), Some(ref client)) =
+                    (&ctx.parent_servers, &ctx.client)
+                {
                     if parent_servers.is_running() {
                         Some(Arc::new(PivotOperationsImpl::new(
                             parent_servers.agent_registry(),
@@ -1965,8 +1961,8 @@ async fn generate_capi_manifests(
             .get_cluster(self_cluster_name)
             .await?
             .ok_or_else(|| Error::bootstrap("self-cluster LatticeCluster not found"))?;
-        let endpoints = self_cluster.spec.endpoints.as_ref().ok_or_else(|| {
-            Error::validation("self-cluster must have spec.endpoints to provision clusters")
+        let endpoints = self_cluster.spec.parent_config.as_ref().ok_or_else(|| {
+            Error::validation("self-cluster must have spec.parent_config to provision clusters")
         })?;
 
         // Get bootstrap state from parent_servers
@@ -2040,7 +2036,7 @@ async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<Strin
         return Ok(None);
     };
 
-    let Some(ref endpoints) = parent_cluster.spec.endpoints else {
+    let Some(ref endpoints) = parent_cluster.spec.parent_config else {
         return Ok(None);
     };
 
@@ -2220,7 +2216,10 @@ impl PivotOperations for PivotOperationsImpl {
             }
             Err(e) => {
                 warn!(cluster = %cluster_name, error = %e, "failed to check CAPI readiness");
-                return Err(Error::pivot(format!("failed to check CAPI readiness: {}", e)));
+                return Err(Error::pivot(format!(
+                    "failed to check CAPI readiness: {}",
+                    e
+                )));
             }
         }
 
@@ -2542,7 +2541,7 @@ mod tests {
                     workers: 2,
                 },
                 networking: None,
-                endpoints: None,
+                parent_config: None,
                 environment: None,
                 region: None,
                 workload: None,
@@ -2554,7 +2553,7 @@ mod tests {
     /// Create a sample cell (management cluster) for testing
     fn sample_parent(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name);
-        cluster.spec.endpoints = Some(EndpointsSpec {
+        cluster.spec.parent_config = Some(EndpointsSpec {
             host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
@@ -2598,7 +2597,7 @@ mod tests {
         fn test_cell_cluster_validation() {
             let cluster = sample_parent("mgmt");
             assert!(cluster.spec.validate().is_ok());
-            assert!(cluster.spec.has_endpoints());
+            assert!(cluster.spec.is_parent());
         }
     }
 
@@ -2662,15 +2661,26 @@ mod tests {
             }
 
             fn record(&self, status: LatticeClusterStatus) {
-                self.updates.lock().unwrap().push(status);
+                self.updates
+                    .lock()
+                    .expect("mutex should not be poisoned")
+                    .push(status);
             }
 
             fn last_phase(&self) -> Option<ClusterPhase> {
-                self.updates.lock().unwrap().last().map(|s| s.phase.clone())
+                self.updates
+                    .lock()
+                    .expect("mutex should not be poisoned")
+                    .last()
+                    .map(|s| s.phase.clone())
             }
 
             fn was_updated(&self) -> bool {
-                !self.updates.lock().unwrap().is_empty()
+                !self
+                    .updates
+                    .lock()
+                    .expect("mutex should not be poisoned")
+                    .is_empty()
             }
         }
 
@@ -3105,7 +3115,7 @@ mod tests {
                         workers: 2,
                     },
                     networking: None,
-                    endpoints: None,
+                    parent_config: None,
                     environment: None,
                     region: None,
                     workload: None,
@@ -3133,7 +3143,7 @@ mod tests {
             let result = generate_capi_manifests(&cluster, &ctx).await;
 
             assert!(result.is_ok());
-            let manifests = result.unwrap();
+            let manifests = result.expect("manifest generation should succeed");
             // Docker provider should generate manifests
             assert!(!manifests.is_empty());
         }
@@ -3306,7 +3316,10 @@ mod tests {
 
             let mut mock = MockKubeClient::new();
             mock.expect_patch_status().returning(move |_, status| {
-                updates_clone.lock().unwrap().push(status.clone());
+                updates_clone
+                    .lock()
+                    .expect("mutex should not be poisoned")
+                    .push(status.clone());
                 Ok(())
             });
 
@@ -3330,9 +3343,12 @@ mod tests {
                 .expect("reconcile should succeed");
 
             // Should transition to Pivoting and requeue quickly
-            let recorded = updates.lock().unwrap();
+            let recorded = updates.lock().expect("mutex should not be poisoned");
             assert!(!recorded.is_empty());
-            assert_eq!(recorded.last().unwrap().phase, ClusterPhase::Pivoting);
+            assert_eq!(
+                recorded.last().expect("should have records").phase,
+                ClusterPhase::Pivoting
+            );
             assert_eq!(action, Action::requeue(Duration::from_secs(5)));
         }
 
@@ -3393,7 +3409,10 @@ mod tests {
 
             let mut mock = MockKubeClient::new();
             mock.expect_patch_status().returning(move |_, status| {
-                updates_clone.lock().unwrap().push(status.clone());
+                updates_clone
+                    .lock()
+                    .expect("mutex should not be poisoned")
+                    .push(status.clone());
                 Ok(())
             });
             mock.expect_ensure_namespace().returning(|_| Ok(()));
@@ -3415,7 +3434,7 @@ mod tests {
 
             assert!(result.is_ok());
             // Should have transitioned to Provisioning
-            let recorded = updates.lock().unwrap();
+            let recorded = updates.lock().expect("mutex should not be poisoned");
             assert!(!recorded.is_empty());
         }
 
@@ -3468,7 +3487,8 @@ mod tests {
 
             let mut mock = MockKubeClient::new();
             mock.expect_patch_status().returning(move |_, status| {
-                *captured_clone.lock().unwrap() = Some(status.clone());
+                *captured_clone.lock().expect("mutex should not be poisoned") =
+                    Some(status.clone());
                 Ok(())
             });
 
@@ -3482,11 +3502,18 @@ mod tests {
 
             update_cluster_status(&cluster, &ctx, ClusterPhase::Provisioning, None, false)
                 .await
-                .unwrap();
+                .expect("update_cluster_status should succeed");
 
-            let status = captured_status.lock().unwrap().clone().unwrap();
+            let status = captured_status
+                .lock()
+                .expect("mutex should not be poisoned")
+                .clone()
+                .expect("status should be set");
             assert_eq!(status.phase, ClusterPhase::Provisioning);
-            assert!(status.message.unwrap().contains("Provisioning"));
+            assert!(status
+                .message
+                .expect("message should be set")
+                .contains("Provisioning"));
             assert!(!status.conditions.is_empty());
 
             let condition = &status.conditions[0];
@@ -3506,7 +3533,8 @@ mod tests {
 
             let mut mock = MockKubeClient::new();
             mock.expect_patch_status().returning(move |_, status| {
-                *captured_clone.lock().unwrap() = Some(status.clone());
+                *captured_clone.lock().expect("mutex should not be poisoned") =
+                    Some(status.clone());
                 Ok(())
             });
 
@@ -3520,11 +3548,18 @@ mod tests {
 
             update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None, false)
                 .await
-                .unwrap();
+                .expect("update_cluster_status should succeed");
 
-            let status = captured_status.lock().unwrap().clone().unwrap();
+            let status = captured_status
+                .lock()
+                .expect("mutex should not be poisoned")
+                .clone()
+                .expect("status should be set");
             assert_eq!(status.phase, ClusterPhase::Pivoting);
-            assert!(status.message.unwrap().contains("Pivoting"));
+            assert!(status
+                .message
+                .expect("message should be set")
+                .contains("Pivoting"));
 
             let condition = &status.conditions[0];
             assert_eq!(condition.type_, "Pivoting");
@@ -3543,7 +3578,8 @@ mod tests {
 
             let mut mock = MockKubeClient::new();
             mock.expect_patch_status().returning(move |_, status| {
-                *captured_clone.lock().unwrap() = Some(status.clone());
+                *captured_clone.lock().expect("mutex should not be poisoned") =
+                    Some(status.clone());
                 Ok(())
             });
 
@@ -3558,11 +3594,18 @@ mod tests {
             let error_msg = "control plane count must be at least 1";
             update_cluster_status(&cluster, &ctx, ClusterPhase::Failed, Some(error_msg), false)
                 .await
-                .unwrap();
+                .expect("update_cluster_status should succeed");
 
-            let status = captured_status.lock().unwrap().clone().unwrap();
+            let status = captured_status
+                .lock()
+                .expect("mutex should not be poisoned")
+                .clone()
+                .expect("status should be set");
             assert_eq!(status.phase, ClusterPhase::Failed);
-            assert_eq!(status.message.as_ref().unwrap(), error_msg);
+            assert_eq!(
+                status.message.as_ref().expect("message should be set"),
+                error_msg
+            );
 
             let condition = &status.conditions[0];
             assert_eq!(condition.type_, "Ready");
@@ -3717,7 +3760,6 @@ mod tests {
                 _ => panic!("Expected Pivot error"),
             }
         }
-
     }
 
     // =========================================================================

@@ -106,9 +106,18 @@ mod tests {
 
     #[test]
     fn test_base64_decode() {
-        assert_eq!(base64_decode("aGVsbG8=").unwrap(), "hello");
-        assert_eq!(base64_decode("").unwrap(), "");
-        assert_eq!(base64_decode("aGVsbG8gd29ybGQ=").unwrap(), "hello world");
+        assert_eq!(
+            base64_decode("aGVsbG8=").expect("valid base64 should decode successfully"),
+            "hello"
+        );
+        assert_eq!(
+            base64_decode("").expect("empty string should decode successfully"),
+            ""
+        );
+        assert_eq!(
+            base64_decode("aGVsbG8gd29ybGQ=").expect("valid base64 should decode successfully"),
+            "hello world"
+        );
     }
 
     #[test]
@@ -163,7 +172,7 @@ mod tests {
     fn test_base64_roundtrip() {
         let original = "test data with special chars: !@#$%^&*()";
         let encoded = base64_encode(original);
-        let decoded = base64_decode(&encoded).unwrap();
+        let decoded = base64_decode(&encoded).expect("base64 roundtrip should decode successfully");
         assert_eq!(decoded, original);
     }
 

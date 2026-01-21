@@ -1,6 +1,6 @@
 # Docker workload cluster for E2E testing
 # Uses CAPD (Cluster API Provider Docker) for local development/CI
-# Has endpoints so it can provision child clusters (deep hierarchy test)
+# Has parentConfig so it can provision child clusters (deep hierarchy test)
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeCluster
 metadata:
@@ -22,7 +22,7 @@ spec:
   networking:
     default:
       cidr: "172.18.255.20/32"
-  endpoints:
+  parentConfig:
     host: 172.18.255.20
     grpcPort: 50051
     bootstrapPort: 8443

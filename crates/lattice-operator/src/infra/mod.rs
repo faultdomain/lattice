@@ -35,3 +35,21 @@ pub use cilium::{
     generate_operator_network_policy, generate_waypoint_egress_policy, generate_ztunnel_allowlist,
 };
 pub use istio::{IstioConfig, IstioReconciler};
+
+/// Split a multi-document YAML string into individual documents.
+///
+/// Filters out empty documents and documents without a `kind:` field.
+/// Normalizes output to always have `---` prefix for kubectl apply compatibility.
+pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
+    yaml.split("\n---")
+        .map(|doc| doc.trim())
+        .filter(|doc| !doc.is_empty() && doc.contains("kind:"))
+        .map(|doc| {
+            if doc.starts_with("---") {
+                doc.to_string()
+            } else {
+                format!("---\n{}", doc)
+            }
+        })
+        .collect()
+}

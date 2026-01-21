@@ -323,19 +323,23 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: None,
-            outbound: None,
-            inbound: None,
+            volume: None,
         };
 
-        let outputs = provisioner.resolve("api", &resource, &ctx).unwrap();
+        let outputs = provisioner
+            .resolve("api", &resource, &ctx)
+            .expect("service resolution should succeed");
 
         assert_eq!(
             outputs.outputs.get("host"),
             Some(&"api.prod-ns.svc.cluster.local".to_string())
         );
         assert_eq!(outputs.outputs.get("port"), Some(&"8080".to_string()));
-        assert!(outputs.outputs.get("url").unwrap().contains("8080"));
+        assert!(outputs
+            .outputs
+            .get("url")
+            .expect("url output should exist")
+            .contains("8080"));
         // Service outputs are never sensitive
         assert!(outputs.sensitive.is_empty());
     }
@@ -352,9 +356,7 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: None,
-            outbound: None,
-            inbound: None,
+            volume: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -378,12 +380,12 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: None,
-            outbound: None,
-            inbound: None,
+            volume: None,
         };
 
-        let outputs = provisioner.resolve("stripe", &resource, &ctx).unwrap();
+        let outputs = provisioner
+            .resolve("stripe", &resource, &ctx)
+            .expect("external service resolution should succeed");
 
         assert_eq!(
             outputs.outputs.get("host"),
@@ -406,9 +408,7 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: None,
-            outbound: None,
-            inbound: None,
+            volume: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -441,9 +441,7 @@ mod tests {
                 id: Some("postgres".to_string()),
                 class: None,
                 metadata: None,
-                params: None,
-                outbound: None,
-                inbound: None,
+                volume: None,
             },
         );
 
@@ -473,7 +471,9 @@ mod tests {
         };
 
         let registry = ProvisionerRegistry::new();
-        let outputs = registry.resolve_all(&spec, &ctx).unwrap();
+        let outputs = registry
+            .resolve_all(&spec, &ctx)
+            .expect("registry resolution should succeed");
 
         assert!(outputs.contains_key("db"));
         // The host uses the resource's id ("postgres"), not the resource name ("db")

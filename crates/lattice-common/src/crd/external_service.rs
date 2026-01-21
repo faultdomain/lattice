@@ -34,7 +34,6 @@ impl Resolution {
 
 /// External service lifecycle phase
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-
 pub enum ExternalServicePhase {
     /// Waiting to be processed
     #[default]
@@ -365,7 +364,8 @@ mod tests {
 
     #[test]
     fn test_parse_https_url() {
-        let endpoint = ParsedEndpoint::parse("https://api.stripe.com").unwrap();
+        let endpoint = ParsedEndpoint::parse("https://api.stripe.com")
+            .expect("HTTPS URL should parse successfully");
         assert_eq!(endpoint.protocol, "https");
         assert_eq!(endpoint.host, "api.stripe.com");
         assert_eq!(endpoint.port, 443);
@@ -373,7 +373,8 @@ mod tests {
 
     #[test]
     fn test_parse_https_url_with_port() {
-        let endpoint = ParsedEndpoint::parse("https://api.example.com:8443").unwrap();
+        let endpoint = ParsedEndpoint::parse("https://api.example.com:8443")
+            .expect("HTTPS URL with port should parse successfully");
         assert_eq!(endpoint.protocol, "https");
         assert_eq!(endpoint.host, "api.example.com");
         assert_eq!(endpoint.port, 8443);
@@ -381,7 +382,8 @@ mod tests {
 
     #[test]
     fn test_parse_http_url() {
-        let endpoint = ParsedEndpoint::parse("http://internal.service.local").unwrap();
+        let endpoint = ParsedEndpoint::parse("http://internal.service.local")
+            .expect("HTTP URL should parse successfully");
         assert_eq!(endpoint.protocol, "http");
         assert_eq!(endpoint.host, "internal.service.local");
         assert_eq!(endpoint.port, 80);
@@ -389,7 +391,8 @@ mod tests {
 
     #[test]
     fn test_parse_tcp_url() {
-        let endpoint = ParsedEndpoint::parse("tcp://10.0.0.5:5432").unwrap();
+        let endpoint = ParsedEndpoint::parse("tcp://10.0.0.5:5432")
+            .expect("TCP URL should parse successfully");
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "10.0.0.5");
         assert_eq!(endpoint.port, 5432);
@@ -397,7 +400,8 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_url() {
-        let endpoint = ParsedEndpoint::parse("grpc://grpc.service.local:9090").unwrap();
+        let endpoint = ParsedEndpoint::parse("grpc://grpc.service.local:9090")
+            .expect("gRPC URL should parse successfully");
         assert_eq!(endpoint.protocol, "grpc");
         assert_eq!(endpoint.host, "grpc.service.local");
         assert_eq!(endpoint.port, 9090);
@@ -405,7 +409,8 @@ mod tests {
 
     #[test]
     fn test_parse_host_port_only() {
-        let endpoint = ParsedEndpoint::parse("redis.default.svc:6379").unwrap();
+        let endpoint = ParsedEndpoint::parse("redis.default.svc:6379")
+            .expect("host:port format should parse successfully");
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "redis.default.svc");
         assert_eq!(endpoint.port, 6379);
@@ -417,7 +422,8 @@ mod tests {
 
     #[test]
     fn test_parse_ipv6_address() {
-        let endpoint = ParsedEndpoint::parse("tcp://[::1]:8080").unwrap();
+        let endpoint = ParsedEndpoint::parse("tcp://[::1]:8080")
+            .expect("IPv6 localhost URL should parse successfully");
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "::1");
         assert_eq!(endpoint.port, 8080);
@@ -425,7 +431,8 @@ mod tests {
 
     #[test]
     fn test_parse_ipv6_full_address() {
-        let endpoint = ParsedEndpoint::parse("tcp://[2001:db8:85a3::8a2e:370:7334]:5432").unwrap();
+        let endpoint = ParsedEndpoint::parse("tcp://[2001:db8:85a3::8a2e:370:7334]:5432")
+            .expect("IPv6 full address URL should parse successfully");
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "2001:db8:85a3::8a2e:370:7334");
         assert_eq!(endpoint.port, 5432);
@@ -433,7 +440,8 @@ mod tests {
 
     #[test]
     fn test_parse_ipv6_https() {
-        let endpoint = ParsedEndpoint::parse("https://[::1]:8443").unwrap();
+        let endpoint = ParsedEndpoint::parse("https://[::1]:8443")
+            .expect("IPv6 HTTPS URL should parse successfully");
         assert_eq!(endpoint.protocol, "https");
         assert_eq!(endpoint.host, "::1");
         assert_eq!(endpoint.port, 8443);
@@ -457,7 +465,8 @@ mod tests {
 
     #[test]
     fn test_parse_url_with_auth() {
-        let endpoint = ParsedEndpoint::parse("https://user:pass@api.example.com:8443").unwrap();
+        let endpoint = ParsedEndpoint::parse("https://user:pass@api.example.com:8443")
+            .expect("URL with auth should parse successfully");
         assert_eq!(endpoint.protocol, "https");
         assert_eq!(endpoint.host, "api.example.com");
         assert_eq!(endpoint.port, 8443);
@@ -465,7 +474,8 @@ mod tests {
 
     #[test]
     fn test_parse_url_with_user_only() {
-        let endpoint = ParsedEndpoint::parse("tcp://admin@db.example.com:5432").unwrap();
+        let endpoint = ParsedEndpoint::parse("tcp://admin@db.example.com:5432")
+            .expect("URL with user only should parse successfully");
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "db.example.com");
         assert_eq!(endpoint.port, 5432);
@@ -484,7 +494,8 @@ mod tests {
 
     #[test]
     fn test_port_max_valid() {
-        let endpoint = ParsedEndpoint::parse("tcp://example.com:65535").unwrap();
+        let endpoint = ParsedEndpoint::parse("tcp://example.com:65535")
+            .expect("max valid port should parse successfully");
         assert_eq!(endpoint.port, 65535);
     }
 
@@ -516,14 +527,16 @@ mod tests {
 
     #[test]
     fn test_url_with_path_extracts_host() {
-        let endpoint = ParsedEndpoint::parse("https://api.stripe.com/v1/charges").unwrap();
+        let endpoint = ParsedEndpoint::parse("https://api.stripe.com/v1/charges")
+            .expect("URL with path should parse successfully");
         assert_eq!(endpoint.host, "api.stripe.com");
         assert_eq!(endpoint.port, 443);
     }
 
     #[test]
     fn test_url_with_port_and_path() {
-        let endpoint = ParsedEndpoint::parse("https://api.example.com:8443/api/v1").unwrap();
+        let endpoint = ParsedEndpoint::parse("https://api.example.com:8443/api/v1")
+            .expect("URL with port and path should parse successfully");
         assert_eq!(endpoint.host, "api.example.com");
         assert_eq!(endpoint.port, 8443);
     }
@@ -646,7 +659,8 @@ allowedRequesters:
 resolution: dns
 description: Stripe payment API
 "#;
-        let spec: LatticeExternalServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeExternalServiceSpec =
+            serde_yaml::from_str(yaml).expect("external service YAML should parse successfully");
 
         assert_eq!(spec.endpoints.len(), 2);
         assert_eq!(spec.allowed_requesters.len(), 2);
@@ -665,7 +679,8 @@ endpoints:
 allowedRequesters:
   - "*"
 "#;
-        let spec: LatticeExternalServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeExternalServiceSpec =
+            serde_yaml::from_str(yaml).expect("wildcard access YAML should parse successfully");
 
         assert!(spec.allows("any-service"));
     }
@@ -680,8 +695,10 @@ allowedRequesters:
             description: Some("Test service".to_string()),
         };
 
-        let yaml = serde_yaml::to_string(&spec).unwrap();
-        let parsed: LatticeExternalServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml::to_string(&spec)
+            .expect("LatticeExternalServiceSpec serialization should succeed");
+        let parsed: LatticeExternalServiceSpec = serde_yaml::from_str(&yaml)
+            .expect("LatticeExternalServiceSpec deserialization should succeed");
         assert_eq!(spec, parsed);
     }
 

@@ -51,14 +51,12 @@ jobs:
             ' versions.toml
           }
 
-          echo "kubectl=$(get_version kubernetes version)" >> $GITHUB_OUTPUT
           echo "helm=$(get_version helm version)" >> $GITHUB_OUTPUT
           echo "clusterctl=$(get_version clusterctl version)" >> $GITHUB_OUTPUT
           echo "capi=$(get_version capi version)" >> $GITHUB_OUTPUT
 
           # Debug output
           echo "Versions:"
-          echo "  kubectl: $(get_version kubernetes version)"
           echo "  helm: $(get_version helm version)"
           echo "  clusterctl: $(get_version clusterctl version)"
           echo "  capi: $(get_version capi version)"
@@ -100,7 +98,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             FIPS=true
-            KUBECTL_VERSION=${{ steps.versions.outputs.kubectl }}
             HELM_VERSION=${{ steps.versions.outputs.helm }}
             CLUSTERCTL_VERSION=${{ steps.versions.outputs.clusterctl }}
             CAPI_VERSION=${{ steps.versions.outputs.capi }}
@@ -118,7 +115,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             FIPS=
-            KUBECTL_VERSION=${{ steps.versions.outputs.kubectl }}
             HELM_VERSION=${{ steps.versions.outputs.helm }}
             CLUSTERCTL_VERSION=${{ steps.versions.outputs.clusterctl }}
             CAPI_VERSION=${{ steps.versions.outputs.capi }}

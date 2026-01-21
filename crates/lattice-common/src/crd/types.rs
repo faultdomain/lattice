@@ -534,13 +534,27 @@ mod tests {
         #[test]
         fn test_from_str_valid() {
             assert_eq!(
-                "docker".parse::<ProviderType>().unwrap(),
+                "docker"
+                    .parse::<ProviderType>()
+                    .expect("docker should be a valid provider type"),
                 ProviderType::Docker
             );
-            assert_eq!("aws".parse::<ProviderType>().unwrap(), ProviderType::Aws);
-            assert_eq!("gcp".parse::<ProviderType>().unwrap(), ProviderType::Gcp);
             assert_eq!(
-                "azure".parse::<ProviderType>().unwrap(),
+                "aws"
+                    .parse::<ProviderType>()
+                    .expect("aws should be a valid provider type"),
+                ProviderType::Aws
+            );
+            assert_eq!(
+                "gcp"
+                    .parse::<ProviderType>()
+                    .expect("gcp should be a valid provider type"),
+                ProviderType::Gcp
+            );
+            assert_eq!(
+                "azure"
+                    .parse::<ProviderType>()
+                    .expect("azure should be a valid provider type"),
                 ProviderType::Azure
             );
         }
@@ -548,14 +562,23 @@ mod tests {
         #[test]
         fn test_from_str_case_insensitive() {
             assert_eq!(
-                "DOCKER".parse::<ProviderType>().unwrap(),
+                "DOCKER"
+                    .parse::<ProviderType>()
+                    .expect("DOCKER should be a valid provider type"),
                 ProviderType::Docker
             );
             assert_eq!(
-                "Docker".parse::<ProviderType>().unwrap(),
+                "Docker"
+                    .parse::<ProviderType>()
+                    .expect("Docker should be a valid provider type"),
                 ProviderType::Docker
             );
-            assert_eq!("AWS".parse::<ProviderType>().unwrap(), ProviderType::Aws);
+            assert_eq!(
+                "AWS"
+                    .parse::<ProviderType>()
+                    .expect("AWS should be a valid provider type"),
+                ProviderType::Aws
+            );
         }
 
         #[test]
@@ -674,8 +697,10 @@ mod tests {
                 ClusterPhase::Failed,
             ];
             for phase in phases {
-                let json = serde_json::to_string(&phase).unwrap();
-                let parsed: ClusterPhase = serde_json::from_str(&json).unwrap();
+                let json = serde_json::to_string(&phase)
+                    .expect("ClusterPhase serialization should succeed");
+                let parsed: ClusterPhase = serde_json::from_str(&json)
+                    .expect("ClusterPhase deserialization should succeed");
                 assert_eq!(phase, parsed);
             }
         }
@@ -746,8 +771,10 @@ mod tests {
         fn test_serde_roundtrip() {
             let providers = [BootstrapProvider::Kubeadm, BootstrapProvider::Rke2];
             for provider in providers {
-                let json = serde_json::to_string(&provider).unwrap();
-                let parsed: BootstrapProvider = serde_json::from_str(&json).unwrap();
+                let json = serde_json::to_string(&provider)
+                    .expect("BootstrapProvider serialization should succeed");
+                let parsed: BootstrapProvider = serde_json::from_str(&json)
+                    .expect("BootstrapProvider deserialization should succeed");
                 assert_eq!(provider, parsed);
             }
         }
@@ -855,8 +882,10 @@ mod tests {
                 },
                 config: ProviderConfig::docker(),
             };
-            let json = serde_json::to_string(&spec).unwrap();
-            let parsed: ProviderSpec = serde_json::from_str(&json).unwrap();
+            let json =
+                serde_json::to_string(&spec).expect("ProviderSpec serialization should succeed");
+            let parsed: ProviderSpec =
+                serde_json::from_str(&json).expect("ProviderSpec deserialization should succeed");
             assert_eq!(spec, parsed);
         }
 
@@ -867,16 +896,19 @@ mod tests {
                 cert_sans: None,
                 bootstrap: BootstrapProvider::default(),
             };
-            let json = serde_json::to_string(&spec).unwrap();
+            let json =
+                serde_json::to_string(&spec).expect("KubernetesSpec serialization should succeed");
             assert!(!json.contains("certSANs"));
-            let parsed: KubernetesSpec = serde_json::from_str(&json).unwrap();
+            let parsed: KubernetesSpec =
+                serde_json::from_str(&json).expect("KubernetesSpec deserialization should succeed");
             assert_eq!(spec, parsed);
         }
 
         #[test]
         fn test_endpoints_spec_default_ports() {
             let json = r#"{"host":"example.com","service":{"type":"LoadBalancer"}}"#;
-            let spec: EndpointsSpec = serde_json::from_str(json).unwrap();
+            let spec: EndpointsSpec =
+                serde_json::from_str(json).expect("EndpointsSpec deserialization should succeed");
             assert_eq!(spec.grpc_port, 50051);
             assert_eq!(spec.bootstrap_port, 8443);
         }

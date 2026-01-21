@@ -18,9 +18,14 @@ struct Versions {
 
 /// Load versions from versions.toml in workspace root
 fn load_versions() -> Versions {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set by cargo");
     // Go up two levels: crates/lattice-operator -> workspace root
-    let workspace_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
+    let workspace_root = Path::new(&manifest_dir)
+        .parent()
+        .expect("lattice-operator crate should have a parent directory")
+        .parent()
+        .expect("crates directory should have a parent (workspace root)");
     let versions_path = workspace_root.join("versions.toml");
     let content = std::fs::read_to_string(&versions_path).expect("Failed to read versions.toml");
 
@@ -70,7 +75,11 @@ fn load_versions() -> Versions {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
-    let workspace_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
+    let workspace_root = Path::new(&manifest_dir)
+        .parent()
+        .expect("lattice-operator crate should have a parent directory")
+        .parent()
+        .expect("crates directory should have a parent (workspace root)");
 
     let versions = load_versions();
 
@@ -513,7 +522,9 @@ fn download_file(url: &str, dest: &Path) {
     }
     eprintln!(
         "  Downloading {}...",
-        dest.file_name().unwrap().to_string_lossy()
+        dest.file_name()
+            .expect("destination path should have a file name")
+            .to_string_lossy()
     );
     let _ = Command::new("curl")
         .args(["-fsSL", "-o"])

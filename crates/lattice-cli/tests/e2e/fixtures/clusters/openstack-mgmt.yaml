@@ -28,7 +28,7 @@ spec:
   nodes:
     controlPlane: 1
     workers: 1
-  endpoints:
+  parentConfig:
     # host is auto-discovered from Octavia LB
     grpcPort: 50051
     bootstrapPort: 8443

@@ -256,7 +256,7 @@ impl Provider for ProxmoxProvider {
         if !cert_sans.contains(&cfg.control_plane_endpoint) {
             cert_sans.push(cfg.control_plane_endpoint.clone());
         }
-        if let Some(ref endpoints) = cluster.spec.endpoints {
+        if let Some(ref endpoints) = cluster.spec.parent_config {
             if let Some(ref host) = endpoints.host {
                 if !cert_sans.contains(host) {
                     cert_sans.push(host.clone());
@@ -408,7 +408,7 @@ mod tests {
                     control_plane: 3,
                     workers: 5,
                 },
-                endpoints: None,
+                parent_config: None,
                 networking: None,
                 environment: None,
                 region: None,
@@ -424,7 +424,7 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&test_cluster("test"), &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         assert_eq!(manifests.len(), 7);
         let kinds: Vec<_> = manifests.iter().map(|m| m.kind.as_str()).collect();
@@ -442,13 +442,13 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&test_cluster("test"), &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let template = manifests
             .iter()
             .find(|m| m.kind == "ProxmoxMachineTemplate")
-            .unwrap();
-        let full = &template.spec.as_ref().unwrap()["template"]["spec"]["full"];
+            .expect("ProxmoxMachineTemplate should exist");
+        let full = &template.spec.as_ref().expect("spec should exist")["template"]["spec"]["full"];
         assert_eq!(full, false);
     }
 
@@ -458,16 +458,16 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&test_cluster("test"), &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let cp = manifests
             .iter()
             .find(|m| m.kind == "KubeadmControlPlane")
-            .unwrap();
-        let spec = cp.spec.as_ref().unwrap();
+            .expect("KubeadmControlPlane should exist");
+        let spec = cp.spec.as_ref().expect("spec should exist");
         let sans = spec["kubeadmConfigSpec"]["clusterConfiguration"]["apiServer"]["certSANs"]
             .as_array()
-            .unwrap();
+            .expect("certSANs should be an array");
         assert!(sans.contains(&serde_json::json!("10.0.0.100")));
     }
 
@@ -505,12 +505,12 @@ mod tests {
         let manifests = provider
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
-            .unwrap();
+            .expect("manifest generation should succeed");
 
         let cp = manifests
             .iter()
             .find(|m| m.kind.contains("ControlPlane"))
-            .unwrap();
+            .expect("ControlPlane should exist");
         assert!(cp.kind.contains("RKE2"));
     }
 }

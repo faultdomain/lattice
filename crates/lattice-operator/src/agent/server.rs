@@ -445,7 +445,9 @@ mod tests {
 
         // Verify agent was registered
         assert!(!registry.is_empty());
-        let conn = registry.get("test-cluster").unwrap();
+        let conn = registry
+            .get("test-cluster")
+            .expect("agent should be registered");
         assert_eq!(conn.cluster_name, "test-cluster");
         assert_eq!(conn.agent_version, "0.1.0");
         assert_eq!(conn.kubernetes_version, "1.28.0");
@@ -481,7 +483,9 @@ mod tests {
         };
         test_handle_message(&registry, &msg2, &tx).await;
 
-        let conn = registry.get("test-cluster").unwrap();
+        let conn = registry
+            .get("test-cluster")
+            .expect("agent should be registered");
         assert_eq!(conn.state, AgentState::Ready);
     }
 
@@ -533,7 +537,9 @@ mod tests {
         test_handle_message(&registry, &msg, &tx).await;
 
         // Verify state changed to Ready
-        let conn = registry.get("test-cluster").unwrap();
+        let conn = registry
+            .get("test-cluster")
+            .expect("agent should be registered");
         assert_eq!(conn.state, AgentState::Ready);
     }
 
@@ -567,7 +573,9 @@ mod tests {
         test_handle_message(&registry, &msg, &tx).await;
 
         // Verify state changed to Failed
-        let conn = registry.get("test-cluster").unwrap();
+        let conn = registry
+            .get("test-cluster")
+            .expect("agent should be registered");
         assert_eq!(conn.state, AgentState::Failed);
     }
 
@@ -601,7 +609,9 @@ mod tests {
         test_handle_message(&registry, &msg, &tx).await;
 
         // State should remain Ready
-        let conn = registry.get("test-cluster").unwrap();
+        let conn = registry
+            .get("test-cluster")
+            .expect("agent should be registered");
         assert_eq!(conn.state, AgentState::Ready);
     }
 
@@ -694,10 +704,14 @@ mod tests {
         // Verify both are registered
         assert_eq!(registry.len(), 2);
 
-        let conn1 = registry.get("cluster-1").unwrap();
+        let conn1 = registry
+            .get("cluster-1")
+            .expect("cluster-1 should be registered");
         assert_eq!(conn1.agent_version, "0.1.0");
 
-        let conn2 = registry.get("cluster-2").unwrap();
+        let conn2 = registry
+            .get("cluster-2")
+            .expect("cluster-2 should be registered");
         assert_eq!(conn2.agent_version, "0.2.0");
     }
 
@@ -719,7 +733,10 @@ mod tests {
         };
         test_handle_message(&registry, &msg, &tx).await;
         assert_eq!(
-            registry.get("test-cluster").unwrap().state,
+            registry
+                .get("test-cluster")
+                .expect("agent should be registered")
+                .state,
             AgentState::Provisioning
         );
 
@@ -734,7 +751,10 @@ mod tests {
         };
         test_handle_message(&registry, &msg, &tx).await;
         assert_eq!(
-            registry.get("test-cluster").unwrap().state,
+            registry
+                .get("test-cluster")
+                .expect("agent should be registered")
+                .state,
             AgentState::Ready
         );
 
@@ -749,7 +769,10 @@ mod tests {
         };
         test_handle_message(&registry, &msg, &tx).await;
         assert_eq!(
-            registry.get("test-cluster").unwrap().state,
+            registry
+                .get("test-cluster")
+                .expect("agent should be registered")
+                .state,
             AgentState::Ready
         );
     }
@@ -820,7 +843,8 @@ mod tests {
             Some(crate::proto::cell_command::Command::ApplyManifests(apply)) => {
                 assert_eq!(apply.manifests.len(), 1, "should include network policy");
                 // Verify manifest contents
-                let manifest = String::from_utf8(apply.manifests[0].clone()).unwrap();
+                let manifest = String::from_utf8(apply.manifests[0].clone())
+                    .expect("manifest should be valid UTF-8");
                 assert!(manifest.contains("CiliumNetworkPolicy"));
             }
             _ => panic!("expected ApplyManifestsCommand"),
@@ -920,7 +944,9 @@ mod tests {
         );
 
         // State should be Failed
-        let conn = registry.get("failed-pivot-cluster").unwrap();
+        let conn = registry
+            .get("failed-pivot-cluster")
+            .expect("agent should be registered");
         assert_eq!(conn.state, AgentState::Failed);
 
         // Manifests should still exist (can retry after fixing pivot)
@@ -983,7 +1009,9 @@ mod tests {
         );
 
         // Verify the restored manifests still have their content
-        let manifests = registry.take_post_pivot_manifests("restore-test").unwrap();
+        let manifests = registry
+            .take_post_pivot_manifests("restore-test")
+            .expect("manifests should exist");
         assert_eq!(
             manifests.network_policy_yaml,
             Some("policy-yaml-content".to_string())

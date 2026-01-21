@@ -151,7 +151,7 @@ mod tests {
         assert!(result.config_map.is_some());
         assert!(result.secret.is_none());
 
-        let cm = result.config_map.unwrap();
+        let cm = result.config_map.expect("config_map should be set");
         assert_eq!(cm.metadata.name, "api-files");
 
         // Should have volume and volume mount
@@ -179,7 +179,7 @@ mod tests {
         assert!(result.config_map.is_none());
         assert!(result.secret.is_some());
 
-        let secret = result.secret.unwrap();
+        let secret = result.secret.expect("secret should be set");
         assert_eq!(secret.metadata.name, "api-files-bin");
 
         // Should have volume and volume mount

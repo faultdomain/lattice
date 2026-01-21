@@ -132,15 +132,24 @@ pub async fn create_client(kubeconfig: Option<&Path>) -> Result<Client, Error> {
     match kubeconfig {
         Some(path) => {
             let kubeconfig = Kubeconfig::read_from(path).map_err(|e| {
-                Error::internal_with_context("create_client", format!("failed to read kubeconfig: {}", e))
+                Error::internal_with_context(
+                    "create_client",
+                    format!("failed to read kubeconfig: {}", e),
+                )
             })?;
             let config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
                 .await
                 .map_err(|e| {
-                    Error::internal_with_context("create_client", format!("failed to load kubeconfig: {}", e))
+                    Error::internal_with_context(
+                        "create_client",
+                        format!("failed to load kubeconfig: {}", e),
+                    )
                 })?;
             Client::try_from(config).map_err(|e| {
-                Error::internal_with_context("create_client", format!("failed to create client: {}", e))
+                Error::internal_with_context(
+                    "create_client",
+                    format!("failed to create client: {}", e),
+                )
             })
         }
         None => Client::try_default().await.map_err(|e| {
@@ -200,8 +209,10 @@ pub async fn wait_for_deployment(
             async move {
                 match deployments.get(&name).await {
                     Ok(deployment) => {
-                        let conditions =
-                            deployment.status.as_ref().and_then(|s| s.conditions.as_ref());
+                        let conditions = deployment
+                            .status
+                            .as_ref()
+                            .and_then(|s| s.conditions.as_ref());
                         Ok(has_condition(
                             conditions.map(|c| c.as_slice()),
                             CONDITION_AVAILABLE,
@@ -244,20 +255,25 @@ pub async fn wait_for_all_deployments(
             let namespace = namespace_owned.clone();
             async move {
                 let deployment_list =
-                    deployments.list(&ListParams::default()).await.map_err(|e| {
-                        Error::internal_with_context(
-                            "wait_for_all_deployments",
-                            format!("Failed to list deployments in {}: {}", namespace, e),
-                        )
-                    })?;
+                    deployments
+                        .list(&ListParams::default())
+                        .await
+                        .map_err(|e| {
+                            Error::internal_with_context(
+                                "wait_for_all_deployments",
+                                format!("Failed to list deployments in {}: {}", namespace, e),
+                            )
+                        })?;
 
                 if deployment_list.items.is_empty() {
                     return Ok(false);
                 }
 
                 let all_available = deployment_list.items.iter().all(|deployment| {
-                    let conditions =
-                        deployment.status.as_ref().and_then(|s| s.conditions.as_ref());
+                    let conditions = deployment
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.conditions.as_ref());
                     has_condition(conditions.map(|c| c.as_slice()), CONDITION_AVAILABLE)
                 });
 
@@ -725,7 +741,8 @@ metadata:
 spec:
   replicas: 1
 "#;
-        let meta = parse_manifest(manifest).unwrap();
+        let meta =
+            parse_manifest(manifest).expect("YAML deployment manifest should parse successfully");
         assert_eq!(meta.name, "my-app");
         assert_eq!(meta.namespace, Some("default".to_string()));
         assert_eq!(meta.api_resource.kind, "Deployment");
@@ -737,7 +754,7 @@ spec:
     #[test]
     fn test_parse_manifest_json() {
         let manifest = r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"my-config"}}"#;
-        let meta = parse_manifest(manifest).unwrap();
+        let meta = parse_manifest(manifest).expect("JSON manifest should parse successfully");
         assert_eq!(meta.name, "my-config");
         assert_eq!(meta.namespace, None);
         assert_eq!(meta.api_resource.kind, "ConfigMap");
@@ -753,7 +770,8 @@ kind: Namespace
 metadata:
   name: my-namespace
 "#;
-        let meta = parse_manifest(manifest).unwrap();
+        let meta =
+            parse_manifest(manifest).expect("cluster-scoped manifest should parse successfully");
         assert_eq!(meta.name, "my-namespace");
         assert_eq!(meta.namespace, None);
         assert_eq!(meta.api_resource.kind, "Namespace");
@@ -769,7 +787,7 @@ metadata:
 spec:
   provider: {}
 "#;
-        let meta = parse_manifest(manifest).unwrap();
+        let meta = parse_manifest(manifest).expect("CRD manifest should parse successfully");
         assert_eq!(meta.name, "my-cluster");
         assert_eq!(meta.api_resource.group, "lattice.io");
         assert_eq!(meta.api_resource.version, "v1alpha1");

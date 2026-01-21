@@ -1279,9 +1279,17 @@ mod tests {
                 .as_array()
                 .expect("files should be array")
                 .first()
-                .unwrap();
-            let path = file.get("path").unwrap().as_str().unwrap();
-            let content = file.get("content").unwrap().as_str().unwrap();
+                .expect("files should not be empty");
+            let path = file
+                .get("path")
+                .expect("file should have path")
+                .as_str()
+                .expect("path should be a string");
+            let content = file
+                .get("content")
+                .expect("file should have content")
+                .as_str()
+                .expect("content should be a string");
 
             assert_eq!(path, "/etc/kubernetes/manifests/kube-vip.yaml");
             assert!(content.contains("kube-vip"));
@@ -1306,7 +1314,9 @@ mod tests {
                 !pre_commands_arr.is_empty(),
                 "preKubeadmCommands should have commands"
             );
-            let cmd = pre_commands_arr[0].as_str().unwrap();
+            let cmd = pre_commands_arr[0]
+                .as_str()
+                .expect("command should be a string");
             assert!(cmd.contains("node-ip"), "should set node-ip for kubelet");
             assert!(
                 cmd.contains("eth0"),
@@ -1363,9 +1373,17 @@ mod tests {
                 .as_array()
                 .expect("files should be array")
                 .first()
-                .unwrap();
-            let path = file.get("path").unwrap().as_str().unwrap();
-            let content = file.get("content").unwrap().as_str().unwrap();
+                .expect("files should not be empty");
+            let path = file
+                .get("path")
+                .expect("file should have path")
+                .as_str()
+                .expect("path should be a string");
+            let content = file
+                .get("content")
+                .expect("file should have content")
+                .as_str()
+                .expect("content should be a string");
 
             // RKE2 uses different path than kubeadm
             assert_eq!(
@@ -1396,7 +1414,9 @@ mod tests {
                 !pre_commands_arr.is_empty(),
                 "preRKE2Commands should have commands"
             );
-            let cmd = pre_commands_arr[0].as_str().unwrap();
+            let cmd = pre_commands_arr[0]
+                .as_str()
+                .expect("command should be a string");
             assert!(cmd.contains("node-ip"), "should set node-ip in RKE2 config");
             assert!(
                 cmd.contains("eth0"),
@@ -1450,13 +1470,23 @@ mod tests {
             let files = spec
                 .pointer("/files")
                 .expect("should have files when SSH keys configured");
-            let file = files.as_array().unwrap().first().unwrap();
+            let file = files
+                .as_array()
+                .expect("files should be an array")
+                .first()
+                .expect("files should not be empty");
 
             assert_eq!(file["path"], "/root/.ssh/authorized_keys");
             assert_eq!(file["permissions"], "0600");
             assert_eq!(file["owner"], "root:root");
-            assert!(file["content"].as_str().unwrap().contains("ssh-ed25519"));
-            assert!(file["content"].as_str().unwrap().contains("ssh-rsa"));
+            assert!(file["content"]
+                .as_str()
+                .expect("content should be a string")
+                .contains("ssh-ed25519"));
+            assert!(file["content"]
+                .as_str()
+                .expect("content should be a string")
+                .contains("ssh-rsa"));
         }
 
         #[test]
@@ -1475,7 +1505,7 @@ mod tests {
             let spec = manifest.spec.expect("should have spec");
 
             let files = spec.pointer("/files").expect("should have files");
-            let files_arr = files.as_array().unwrap();
+            let files_arr = files.as_array().expect("files should be an array");
 
             assert_eq!(
                 files_arr.len(),
@@ -1485,7 +1515,7 @@ mod tests {
 
             let paths: Vec<&str> = files_arr
                 .iter()
-                .map(|f| f["path"].as_str().unwrap())
+                .map(|f| f["path"].as_str().expect("path should be a string"))
                 .collect();
             assert!(paths.contains(&"/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml"));
             assert!(paths.contains(&"/root/.ssh/authorized_keys"));

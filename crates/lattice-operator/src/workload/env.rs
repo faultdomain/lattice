@@ -86,7 +86,7 @@ mod tests {
         assert!(result.config_map.is_some());
         assert!(result.secret.is_none());
 
-        let cm = result.config_map.unwrap();
+        let cm = result.config_map.expect("config_map should be set");
         assert_eq!(cm.metadata.name, "api-env");
         assert_eq!(cm.data.get("HOST"), Some(&"localhost".to_string()));
         assert_eq!(cm.data.get("PORT"), Some(&"8080".to_string()));
@@ -111,7 +111,7 @@ mod tests {
         assert!(result.config_map.is_none());
         assert!(result.secret.is_some());
 
-        let secret = result.secret.unwrap();
+        let secret = result.secret.expect("secret should be set");
         assert_eq!(secret.metadata.name, "api-env");
         assert_eq!(
             secret.string_data.get("DB_PASSWORD"),

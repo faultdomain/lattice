@@ -481,7 +481,7 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "success");
+        assert_eq!(result.expect("retry should succeed"), "success");
         assert_eq!(attempt_count.load(Ordering::SeqCst), 1);
     }
 
@@ -511,7 +511,10 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "success");
+        assert_eq!(
+            result.expect("retry should succeed after failures"),
+            "success"
+        );
         assert_eq!(attempt_count.load(Ordering::SeqCst), 3);
     }
 

@@ -80,9 +80,7 @@ fn outbound_dep(name: &str) -> (String, ResourceSpec) {
             id: None,
             class: None,
             metadata: None,
-            params: None,
-            outbound: None,
-            inbound: None,
+            volume: None,
         },
     )
 }
@@ -96,9 +94,7 @@ fn inbound_allow(name: &str) -> (String, ResourceSpec) {
             id: None,
             class: None,
             metadata: None,
-            params: None,
-            outbound: None,
-            inbound: None,
+            volume: None,
         },
     )
 }
@@ -154,11 +150,31 @@ fn generate_traffic_test_script(source: &str, tests: &[ConnTest]) -> String {
         r#"
 echo "=== {} Traffic Tests ==="
 echo "Testing {} connection permutations..."
-sleep 5
+
+# Wait for AuthorizationPolicy to propagate (indicated by getting 403 on blocked endpoints)
+echo "Waiting for policies to propagate..."
+MAX_RETRIES=30
+RETRY=0
+while [ $RETRY -lt $MAX_RETRIES ]; do
+    # Test a random endpoint - if we get 403, policies are working
+    RESULT=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://cache.{ns}.svc.cluster.local/ 2>/dev/null || echo "000")
+    if [ "$RESULT" = "403" ]; then
+        echo "Policies propagated (got 403 on restricted endpoint)"
+        break
+    fi
+    RETRY=$((RETRY + 1))
+    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES, got $RESULT)"
+    sleep 2
+done
+
+if [ $RETRY -eq $MAX_RETRIES ]; then
+    echo "Warning: Policy propagation wait timed out"
+fi
 
 "#,
         source,
-        tests.len()
+        tests.len(),
+        ns = TEST_SERVICES_NAMESPACE
     );
 
     for test in tests {
@@ -174,9 +190,12 @@ sleep 5
             )
         };
 
+        // Check HTTP status code - 2xx = allowed, 403 = blocked by policy
+        // curl exit code is 0 even for 403, so we must check the actual status
         script.push_str(&format!(
             r#"
-if curl -s --connect-timeout 3 http://{target}.{ns}.svc.cluster.local/ > /dev/null 2>&1; then
+HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{target}.{ns}.svc.cluster.local/ 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
     echo "{success_msg}"
 else
     echo "{fail_msg}"
@@ -661,22 +680,25 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
             let allowed_pattern = format!("{}: ALLOWED", target);
             let blocked_pattern = format!("{}: BLOCKED", target);
 
-            let actual_allowed = logs.contains(&allowed_pattern);
-            let actual_blocked = logs.contains(&blocked_pattern);
+            // Find the LAST occurrence to get the most recent test result
+            let last_allowed = logs.rfind(&allowed_pattern);
+            let last_blocked = logs.rfind(&blocked_pattern);
 
-            let result_ok = if *expected_allowed {
-                actual_allowed
-            } else {
-                actual_blocked && !actual_allowed
+            let actual_str = match (last_allowed, last_blocked) {
+                (Some(a), Some(b)) => {
+                    if a > b {
+                        "ALLOWED"
+                    } else {
+                        "BLOCKED"
+                    }
+                }
+                (Some(_), None) => "ALLOWED",
+                (None, Some(_)) => "BLOCKED",
+                (None, None) => "UNKNOWN",
             };
+
+            let result_ok = actual_str == expected_str;
             let status = if result_ok { "PASS" } else { "FAIL" };
-            let actual_str = if actual_allowed {
-                "ALLOWED"
-            } else if actual_blocked {
-                "BLOCKED"
-            } else {
-                "UNKNOWN"
-            };
 
             println!(
                 "    [{}] {} -> {}: {} (expected: {})",
@@ -734,9 +756,6 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     sleep(Duration::from_secs(60)).await;
     verify_traffic_patterns(kubeconfig_path).await?;
 
-    // Run L7 policy enforcement tests
-    run_policy_enforcement_test(kubeconfig_path).await?;
-
     Ok(())
 }
 
@@ -775,8 +794,6 @@ impl Default for RandomMeshConfig {
 
 #[derive(Debug, Clone)]
 struct RandomExternalService {
-    #[allow(dead_code)]
-    name: String,
     url: String,
     allowed_requesters: HashSet<String>,
     resolution: Resolution,
@@ -785,8 +802,6 @@ struct RandomExternalService {
 #[derive(Debug, Clone)]
 struct RandomService {
     name: String,
-    #[allow(dead_code)]
-    layer: usize,
     outbound: HashSet<String>,
     external_outbound: HashSet<String>,
     inbound: HashSet<String>,
@@ -852,7 +867,6 @@ impl RandomMesh {
                     name.clone(),
                     RandomService {
                         name,
-                        layer: layer_idx,
                         outbound: HashSet::new(),
                         external_outbound: HashSet::new(),
                         inbound: HashSet::new(),
@@ -872,14 +886,14 @@ impl RandomMesh {
                         if rng.gen::<f64>() < config.outbound_probability {
                             services
                                 .get_mut(source_name)
-                                .unwrap()
+                                .expect("source service should exist in services map")
                                 .outbound
                                 .insert(target_name.clone());
                             let is_bilateral = rng.gen::<f64>() < config.bilateral_probability;
                             if is_bilateral {
                                 services
                                     .get_mut(target_name)
-                                    .unwrap()
+                                    .expect("target service should exist in services map")
                                     .inbound
                                     .insert(source_name.clone());
                             }
@@ -952,7 +966,6 @@ impl RandomMesh {
             external_services.insert(
                 name.to_string(),
                 RandomExternalService {
-                    name: name.to_string(),
                     url: url.to_string(),
                     allowed_requesters: HashSet::new(),
                     resolution,
@@ -972,14 +985,14 @@ impl RandomMesh {
                 if rng.gen::<f64>() < config.external_outbound_probability {
                     services
                         .get_mut(source_name)
-                        .unwrap()
+                        .expect("source service should exist in services map")
                         .external_outbound
                         .insert(ext_name.clone());
                     let is_allowed = rng.gen::<f64>() < config.external_allow_probability;
                     if is_allowed {
                         external_services
                             .get_mut(ext_name)
-                            .unwrap()
+                            .expect("external service should exist in external_services map")
                             .allowed_requesters
                             .insert(source_name.clone());
                     }
@@ -1096,9 +1109,7 @@ impl RandomMesh {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
-                    outbound: None,
-                    inbound: None,
+                    volume: None,
                 },
             );
         }
@@ -1111,9 +1122,7 @@ impl RandomMesh {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
-                    outbound: None,
-                    inbound: None,
+                    volume: None,
                 },
             );
         }
@@ -1126,9 +1135,7 @@ impl RandomMesh {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
-                    outbound: None,
-                    inbound: None,
+                    volume: None,
                 },
             );
         }
@@ -1226,12 +1233,76 @@ impl RandomMesh {
     }
 
     fn generate_test_script(&self, source_name: &str, namespace: &str) -> String {
+        // Find blocked internal endpoints for this source to use for policy propagation check
+        let blocked_endpoints: Vec<&str> = self
+            .expected_connections
+            .iter()
+            .filter(|(src, _, allowed, is_external)| {
+                src == source_name && !*allowed && !*is_external
+            })
+            .take(3)
+            .map(|(_, tgt, _, _)| tgt.as_str())
+            .collect();
+
+        // Build the policy wait check - test multiple blocked endpoints
+        let endpoint_checks = if blocked_endpoints.is_empty() {
+            // Fallback if no blocked endpoints (shouldn't happen in practice)
+            format!(
+                r#"RESULT=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://backend-0.{}.svc.cluster.local/ 2>/dev/null || echo "000")"#,
+                namespace
+            )
+        } else {
+            // Test multiple blocked endpoints - any 403 means policies are working
+            blocked_endpoints
+                .iter()
+                .enumerate()
+                .map(|(i, ep)| {
+                    if i == 0 {
+                        format!(
+                            r#"RESULT=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{}.{}.svc.cluster.local/ 2>/dev/null || echo "000")"#,
+                            ep, namespace
+                        )
+                    } else {
+                        format!(
+                            r#"
+    if [ "$RESULT" != "403" ]; then
+        RESULT=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{}.{}.svc.cluster.local/ 2>/dev/null || echo "000")
+    fi"#,
+                            ep, namespace
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        };
+
         let mut script = format!(
             r#"
 echo "=== {} Traffic Tests ==="
-sleep 5
+
+# Wait for AuthorizationPolicy to propagate
+echo "Waiting for policies to propagate..."
+MAX_RETRIES=30
+RETRY=0
+while [ $RETRY -lt $MAX_RETRIES ]; do
+    # Test blocked endpoints - if we get 403, policies are working
+    {endpoint_checks}
+    if [ "$RESULT" = "403" ]; then
+        echo "Policies propagated (got 403 on restricted endpoint)"
+        break
+    fi
+    RETRY=$((RETRY + 1))
+    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES, got $RESULT)"
+    sleep 2
+done
+
+if [ $RETRY -eq $MAX_RETRIES ]; then
+    echo "Warning: Policy propagation wait timed out"
+fi
+
 "#,
-            source_name
+            source_name,
+            endpoint_checks = endpoint_checks
         );
 
         for (_, target, expected_allowed, is_external) in self
@@ -1251,10 +1322,13 @@ sleep 5
                 )
             };
 
+            // Check HTTP status code - 2xx = allowed, 403 = blocked by policy
+            // curl exit code is 0 even for 403, so we must check the actual status
             if *is_external {
                 let url = &self.external_services[target].url;
                 script.push_str(&format!(
-                    r#"if curl -s --connect-timeout 5 {url} >/dev/null 2>&1; then
+                    r#"HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 {url} 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
   echo "{success_msg}"
 else
   echo "{fail_msg}"
@@ -1262,7 +1336,8 @@ fi
 "#
                 ));
             } else {
-                script.push_str(&format!(r#"if curl -s --connect-timeout 2 http://{target}.{namespace}.svc.cluster.local/ >/dev/null 2>&1; then
+                script.push_str(&format!(r#"HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 2 http://{target}.{namespace}.svc.cluster.local/ 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
   echo "{success_msg}"
 else
   echo "{fail_msg}"
@@ -1418,10 +1493,20 @@ async fn verify_random_mesh_traffic(
             if src != source {
                 continue;
             }
-            if logs.contains(&format!("{}->{}:ALLOWED", src, tgt)) {
-                *actual = Some(true);
-            } else if logs.contains(&format!("{}->{}:BLOCKED", src, tgt)) {
-                *actual = Some(false);
+            // Find the LAST occurrence of ALLOWED or BLOCKED (most recent test result)
+            let allowed_pattern = format!("{}->{}:ALLOWED", src, tgt);
+            let blocked_pattern = format!("{}->{}:BLOCKED", src, tgt);
+            let last_allowed = logs.rfind(&allowed_pattern);
+            let last_blocked = logs.rfind(&blocked_pattern);
+
+            match (last_allowed, last_blocked) {
+                (Some(a), Some(b)) => {
+                    // Both found - use the one that appears LAST in the logs
+                    *actual = Some(a > b);
+                }
+                (Some(_), None) => *actual = Some(true),
+                (None, Some(_)) => *actual = Some(false),
+                (None, None) => {} // No result found
             }
         }
     }
@@ -1506,538 +1591,6 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     println!("\n  Waiting for traffic tests to complete (90s)...");
     sleep(Duration::from_secs(90)).await;
     verify_random_mesh_traffic(&mesh, kubeconfig_path).await?;
-
-    Ok(())
-}
-
-// =============================================================================
-// L7 Traffic Policy Enforcement Tests
-// =============================================================================
-//
-// Tests that verify L7 traffic policy enforcement:
-// - Rate limiting: Requests are throttled after exceeding limit
-// - Retries: Failed requests are automatically retried
-// - Timeouts: Slow requests are terminated
-
-const POLICY_TEST_NAMESPACE: &str = "policy-test";
-
-/// Test script that verifies rate limiting is enforced
-fn generate_rate_limit_test_script(target: &str, namespace: &str, rate_limit: u32) -> String {
-    format!(
-        r#"
-echo "=== Rate Limit Enforcement Test ==="
-echo "Testing rate limit of {rate_limit} requests per minute to {target}..."
-
-# Wait for connectivity (AuthorizationPolicy may not have propagated yet)
-echo "Waiting for connectivity..."
-MAX_CONN_RETRIES=5
-CONN_RETRY=0
-while [ $CONN_RETRY -lt $MAX_CONN_RETRIES ]; do
-    CONN_CHECK=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 http://{target}.{namespace}.svc.cluster.local/)
-    if [ "$CONN_CHECK" != "000" ]; then
-        echo "Connection established (code $CONN_CHECK)"
-        break
-    fi
-    CONN_RETRY=$((CONN_RETRY + 1))
-    echo "Connection failed, waiting for AuthorizationPolicy... (attempt $CONN_RETRY/$MAX_CONN_RETRIES)"
-    sleep 10
-done
-
-if [ "$CONN_CHECK" = "000" ]; then
-    echo "RATE_LIMIT_TEST:FAIL - Could not establish connectivity after $MAX_CONN_RETRIES attempts"
-    echo "=== End Rate Limit Test ==="
-    sleep 60
-    exit 0
-fi
-
-# Make requests at 2x the rate limit
-TOTAL_REQUESTS=$(({rate_limit} * 2))
-SUCCESS=0
-RATE_LIMITED=0
-
-for i in $(seq 1 $TOTAL_REQUESTS); do
-    RESPONSE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 2 http://{target}.{namespace}.svc.cluster.local/)
-    if [ "$RESPONSE" = "200" ]; then
-        SUCCESS=$((SUCCESS + 1))
-    elif [ "$RESPONSE" = "429" ]; then
-        RATE_LIMITED=$((RATE_LIMITED + 1))
-    fi
-    # Small delay to spread requests
-    sleep 0.1
-done
-
-echo "Total requests: $TOTAL_REQUESTS"
-echo "Successful: $SUCCESS"
-echo "Rate limited (429): $RATE_LIMITED"
-
-# Verify rate limiting is working - we should see some 429s
-if [ $RATE_LIMITED -gt 0 ]; then
-    echo "RATE_LIMIT_TEST:PASS - Rate limiting enforced"
-else
-    echo "RATE_LIMIT_TEST:FAIL - No rate limiting observed"
-fi
-
-echo "=== End Rate Limit Test ==="
-sleep 60
-"#,
-        rate_limit = rate_limit,
-        target = target,
-        namespace = namespace
-    )
-}
-
-/// Test script that verifies retries are working using httpbin /status/500
-fn generate_retry_test_script(target: &str, namespace: &str) -> String {
-    format!(
-        r#"
-echo "=== Retry Policy Enforcement Test ==="
-echo "Testing retries against {target} returning 500s..."
-
-# Wait for connectivity (AuthorizationPolicy may not have propagated yet)
-echo "Waiting for connectivity..."
-MAX_CONN_RETRIES=5
-CONN_RETRY=0
-while [ $CONN_RETRY -lt $MAX_CONN_RETRIES ]; do
-    CONN_CHECK=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 http://{target}.{namespace}.svc.cluster.local/status/200)
-    if [ "$CONN_CHECK" != "000" ]; then
-        echo "Connection established (code $CONN_CHECK)"
-        break
-    fi
-    CONN_RETRY=$((CONN_RETRY + 1))
-    echo "Connection failed, waiting for AuthorizationPolicy... (attempt $CONN_RETRY/$MAX_CONN_RETRIES)"
-    sleep 10
-done
-
-if [ "$CONN_CHECK" = "000" ]; then
-    echo "RETRY_TEST:FAIL - Could not establish connectivity after $MAX_CONN_RETRIES attempts"
-    echo "=== End Retry Test ==="
-    sleep 60
-    exit 0
-fi
-
-# Without retries, 500 would fail immediately
-# With retries configured, Istio will retry and we track attempts
-TOTAL_REQUESTS=10
-SUCCESS=0
-FAILED=0
-
-for i in $(seq 1 $TOTAL_REQUESTS); do
-    # Request /status/500 which always returns 500
-    # Istio should retry based on retry policy
-    START=$(date +%s%3N)
-    RESPONSE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 10 --max-time 15 http://{target}.{namespace}.svc.cluster.local/status/500)
-    END=$(date +%s%3N)
-    ELAPSED=$((END - START))
-
-    # With retries, request should take longer as Istio retries
-    if [ $ELAPSED -gt 1000 ]; then
-        SUCCESS=$((SUCCESS + 1))
-        echo "  Request $i: took ${{ELAPSED}}ms (retries occurred)"
-    else
-        FAILED=$((FAILED + 1))
-        echo "  Request $i: took ${{ELAPSED}}ms (no retries)"
-    fi
-    sleep 1
-done
-
-echo "Requests with retries: $SUCCESS"
-echo "Requests without retries: $FAILED"
-
-if [ $SUCCESS -ge 5 ]; then
-    echo "RETRY_TEST:PASS - Retries are being attempted"
-else
-    echo "RETRY_TEST:FAIL - Retries may not be configured"
-fi
-
-echo "=== End Retry Test ==="
-sleep 60
-"#,
-        target = target,
-        namespace = namespace
-    )
-}
-
-/// Test script that verifies timeouts are enforced using httpbin /delay/N
-fn generate_timeout_test_script(target: &str, namespace: &str, timeout_secs: u32) -> String {
-    format!(
-        r#"
-echo "=== Timeout Policy Enforcement Test ==="
-echo "Testing {timeout_secs}s timeout against {target}..."
-
-# Retry loop for connection failures (AuthorizationPolicy may not have propagated yet)
-MAX_RETRIES=5
-RETRY_DELAY=10
-ATTEMPT=0
-
-while [ $ATTEMPT -lt $MAX_RETRIES ]; do
-    ATTEMPT=$((ATTEMPT + 1))
-    echo "Attempt $ATTEMPT of $MAX_RETRIES..."
-
-    # Request /delay/10 which waits 10 seconds before responding
-    # With a {timeout_secs}s timeout, the request should be cut off early
-    START=$(date +%s)
-    RESPONSE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 15 --max-time 20 http://{target}.{namespace}.svc.cluster.local/delay/10)
-    END=$(date +%s)
-    ELAPSED=$((END - START))
-
-    echo "Response code: $RESPONSE"
-    echo "Elapsed time: $ELAPSED seconds"
-
-    # Response code 000 means curl couldn't connect - retry (AuthorizationPolicy may not be ready)
-    if [ "$RESPONSE" = "000" ]; then
-        echo "Connection failed (code 000), waiting for AuthorizationPolicy to propagate..."
-        if [ $ATTEMPT -lt $MAX_RETRIES ]; then
-            sleep $RETRY_DELAY
-            continue
-        else
-            echo "TIMEOUT_TEST:FAIL - Connection still failing after $MAX_RETRIES attempts"
-            break
-        fi
-    fi
-
-    # Request should complete in roughly timeout_secs (not 0!), with a timeout-related response
-    if [ $ELAPSED -gt 0 ] && [ $ELAPSED -le $(({timeout_secs} + 2)) ]; then
-        echo "TIMEOUT_TEST:PASS - Request terminated in $ELAPSED seconds (timeout enforced)"
-    else
-        echo "TIMEOUT_TEST:FAIL - Request took $ELAPSED seconds (timeout not enforced)"
-    fi
-    break
-done
-
-echo "=== End Timeout Test ==="
-sleep 60
-"#,
-        target = target,
-        namespace = namespace,
-        timeout_secs = timeout_secs
-    )
-}
-
-// =============================================================================
-// YAML-based LatticeService definitions (loaded from fixtures)
-// =============================================================================
-
-/// Parse a LatticeService from YAML fixture
-fn parse_service(yaml: &str) -> LatticeService {
-    serde_yaml::from_str(yaml).expect("Failed to parse LatticeService YAML")
-}
-
-/// Parse a LatticeService from YAML fixture, replacing script placeholder
-fn parse_service_with_script(yaml: &str, script: &str) -> LatticeService {
-    // Build the full script with loop wrapper
-    let full_script = format!("while true; do\n{}\ndone", script);
-    // Indent each line to match YAML literal block indentation (10 spaces)
-    let indented_script = full_script
-        .lines()
-        .map(|line| format!("          {}", line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let yaml_with_script = yaml.replace("{{SCRIPT}}", indented_script.trim_start());
-    serde_yaml::from_str(&yaml_with_script).expect("Failed to parse LatticeService YAML")
-}
-
-fn create_retry_backend() -> LatticeService {
-    parse_service(include_str!("fixtures/services/backend-retry.yaml"))
-}
-
-fn create_retry_client() -> LatticeService {
-    let script = generate_retry_test_script("backend-retry", POLICY_TEST_NAMESPACE);
-    parse_service_with_script(include_str!("fixtures/services/retry-client.yaml"), &script)
-}
-
-fn create_timeout_backend() -> LatticeService {
-    parse_service(include_str!("fixtures/services/backend-timeout.yaml"))
-}
-
-fn create_timeout_client() -> LatticeService {
-    let script = generate_timeout_test_script("backend-timeout", POLICY_TEST_NAMESPACE, 3);
-    parse_service_with_script(
-        include_str!("fixtures/services/timeout-client.yaml"),
-        &script,
-    )
-}
-
-fn create_rate_limited_backend() -> LatticeService {
-    parse_service(include_str!("fixtures/services/backend-rate-limited.yaml"))
-}
-
-fn create_rate_limit_client() -> LatticeService {
-    let script = generate_rate_limit_test_script("backend-rate-limited", POLICY_TEST_NAMESPACE, 10);
-    parse_service_with_script(
-        include_str!("fixtures/services/rate-limit-client.yaml"),
-        &script,
-    )
-}
-
-/// Deploy L7 policy test services
-async fn deploy_policy_test_services(kubeconfig_path: &str) -> Result<(), String> {
-    println!("  Creating namespace {}...", POLICY_TEST_NAMESPACE);
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "create",
-            "namespace",
-            POLICY_TEST_NAMESPACE,
-        ],
-    );
-
-    let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<LatticeService> = Api::all(client);
-
-    let services = vec![
-        create_rate_limited_backend(),
-        create_rate_limit_client(),
-        create_retry_backend(),
-        create_retry_client(),
-        create_timeout_backend(),
-        create_timeout_client(),
-    ];
-
-    for svc in services {
-        let name = svc.metadata.name.clone().unwrap();
-        println!("  Deploying {}...", name);
-        api.create(&PostParams::default(), &svc)
-            .await
-            .map_err(|e| format!("Failed to create {}: {}", name, e))?;
-    }
-
-    Ok(())
-}
-
-/// Wait for policy test pods to be ready
-async fn wait_for_policy_test_pods(kubeconfig_path: &str) -> Result<(), String> {
-    println!("  Waiting for policy test pods to be ready...");
-
-    for _ in 0..60 {
-        let output = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "get",
-                "pods",
-                "-n",
-                POLICY_TEST_NAMESPACE,
-                "-o",
-                "jsonpath={.items[*].status.phase}",
-            ],
-        );
-
-        if let Ok(phases) = output {
-            let all_running = phases.split_whitespace().all(|p| p == "Running");
-            let count = phases.split_whitespace().count();
-            if all_running && count >= 2 {
-                println!("  All {} pods running", count);
-                return Ok(());
-            }
-        }
-
-        sleep(Duration::from_secs(5)).await;
-    }
-
-    Err("Timeout waiting for policy test pods".to_string())
-}
-
-/// Verify L7 policy enforcement from pod logs
-async fn verify_policy_enforcement(kubeconfig_path: &str) -> Result<(), String> {
-    println!("  Checking policy enforcement results...");
-
-    // Debug: Check waypoint infrastructure
-    println!("\n  --- Waypoint Infrastructure Debug ---");
-
-    // Check for waypoint Gateway
-    let gw_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "gateway",
-            "-n",
-            POLICY_TEST_NAMESPACE,
-            "-o",
-            "wide",
-        ],
-    )
-    .unwrap_or_else(|e| format!("Error: {}", e));
-    println!("  Gateways:\n{}", gw_output);
-
-    // Check for HTTPRoutes
-    let hr_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "httproute",
-            "-n",
-            POLICY_TEST_NAMESPACE,
-            "-o",
-            "wide",
-        ],
-    )
-    .unwrap_or_else(|e| format!("Error: {}", e));
-    println!("  HTTPRoutes:\n{}", hr_output);
-
-    // Check for BackendTrafficPolicy
-    let btp_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "backendtrafficpolicy",
-            "-n",
-            POLICY_TEST_NAMESPACE,
-            "-o",
-            "wide",
-        ],
-    )
-    .unwrap_or_else(|e| format!("Error: {}", e));
-    println!("  BackendTrafficPolicies:\n{}", btp_output);
-
-    // Check service labels for waypoint
-    let svc_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "svc",
-            "-n",
-            POLICY_TEST_NAMESPACE,
-            "-o",
-            "jsonpath={range .items[*]}{.metadata.name}: {.metadata.labels.istio\\.io/use-waypoint}{\"\\n\"}{end}",
-        ],
-    )
-    .unwrap_or_else(|e| format!("Error: {}", e));
-    println!("  Service waypoint labels:\n{}", svc_output);
-
-    // Check waypoint pods
-    let wp_pods = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "pods",
-            "-n",
-            POLICY_TEST_NAMESPACE,
-            "-l",
-            "istio.io/waypoint-for=service",
-            "-o",
-            "wide",
-        ],
-    )
-    .unwrap_or_else(|e| format!("Error: {}", e));
-    println!("  Waypoint pods:\n{}", wp_pods);
-
-    println!("  --- End Debug ---\n");
-
-    // Check all policy test client logs
-    let clients = ["client", "retry-client", "timeout-client"];
-    let mut all_logs = String::new();
-
-    for client in &clients {
-        println!("\n  --- Logs from {} ---", client);
-        let output = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "logs",
-                "-n",
-                POLICY_TEST_NAMESPACE,
-                "-l",
-                &format!("app.kubernetes.io/name={}", client),
-                "--tail=50",
-            ],
-        )
-        .unwrap_or_default();
-        // Print last 20 lines of each client's logs for debugging
-        let lines: Vec<&str> = output.lines().collect();
-        let start = if lines.len() > 20 { lines.len() - 20 } else { 0 };
-        for line in &lines[start..] {
-            println!("    {}", line);
-        }
-        all_logs.push_str(&output);
-        all_logs.push('\n');
-    }
-
-    // Track pass/fail counts - require at least one pass and no failures for success
-    let mut rate_limit_pass_count = 0;
-    let mut rate_limit_fail_count = 0;
-    let mut retry_pass_count = 0;
-    let mut retry_fail_count = 0;
-    let mut timeout_pass_count = 0;
-    let mut timeout_fail_count = 0;
-
-    for line in all_logs.lines() {
-        if line.contains("RATE_LIMIT_TEST:PASS") {
-            rate_limit_pass_count += 1;
-            println!("  [PASS] Rate limiting enforced");
-        } else if line.contains("RATE_LIMIT_TEST:FAIL") {
-            rate_limit_fail_count += 1;
-            println!("  [WARN] Rate limiting not observed");
-        }
-        if line.contains("RETRY_TEST:PASS") {
-            retry_pass_count += 1;
-            println!("  [PASS] Retries are working");
-        } else if line.contains("RETRY_TEST:FAIL") {
-            retry_fail_count += 1;
-            println!("  [WARN] Retries not observed");
-        }
-        if line.contains("TIMEOUT_TEST:PASS") {
-            timeout_pass_count += 1;
-            println!("  [PASS] Timeouts enforced");
-        } else if line.contains("TIMEOUT_TEST:FAIL") {
-            timeout_fail_count += 1;
-            println!("  [WARN] Timeouts not enforced");
-        }
-    }
-
-    // Require at least one pass AND no failures for a test to be considered passing
-    let rate_limit_passed = rate_limit_pass_count > 0 && rate_limit_fail_count == 0;
-    let retry_passed = retry_pass_count > 0 && retry_fail_count == 0;
-    let timeout_passed = timeout_pass_count > 0 && timeout_fail_count == 0;
-
-    println!("\n  ========================================");
-    println!("  L7 POLICY ENFORCEMENT SUMMARY");
-    println!("  ========================================");
-    println!(
-        "  Rate Limiting: {}",
-        if rate_limit_passed { "PASS" } else { "PENDING" }
-    );
-    println!(
-        "  Retries:       {}",
-        if retry_passed { "PASS" } else { "PENDING" }
-    );
-    println!(
-        "  Timeouts:      {}",
-        if timeout_passed { "PASS" } else { "PENDING" }
-    );
-
-    let all_passed = rate_limit_passed && retry_passed && timeout_passed;
-    if all_passed {
-        println!("\n  SUCCESS: All L7 policies are being enforced!");
-    } else {
-        println!("\n  NOTE: Some policies pending - L7 traffic policies may require additional configuration");
-    }
-
-    Ok(())
-}
-
-/// Run the L7 policy enforcement test
-pub async fn run_policy_enforcement_test(kubeconfig_path: &str) -> Result<(), String> {
-    println!("\n[Phase 10] Running L7 traffic policy enforcement test...\n");
-
-    deploy_policy_test_services(kubeconfig_path).await?;
-    wait_for_policy_test_pods(kubeconfig_path).await?;
-    println!("  Waiting for policy tests to run (90s)...");
-    sleep(Duration::from_secs(90)).await;
-    verify_policy_enforcement(kubeconfig_path).await?;
 
     Ok(())
 }

@@ -317,7 +317,7 @@ impl Provider for DockerProvider {
             }
         }
         // Auto-add endpoints.host to certSANs so users don't have to specify it twice
-        if let Some(ref endpoints) = cluster.spec.endpoints {
+        if let Some(ref endpoints) = cluster.spec.parent_config {
             if let Some(ref host) = endpoints.host {
                 if !cert_sans.contains(host) {
                     cert_sans.push(host.clone());
@@ -444,7 +444,7 @@ mod tests {
                     workers,
                 },
                 networking: None,
-                endpoints: None,
+                parent_config: None,
                 environment: None,
                 region: None,
                 workload: None,
@@ -456,7 +456,7 @@ mod tests {
     /// Helper to create a cell (management) cluster
     fn sample_parent_cluster(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name, 2);
-        cluster.spec.endpoints = Some(EndpointsSpec {
+        cluster.spec.parent_config = Some(EndpointsSpec {
             host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
@@ -552,7 +552,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             assert_eq!(manifests.len(), 7);
         }
@@ -568,7 +568,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             // Always 7 manifests - worker resources just have replicas=0
             assert_eq!(manifests.len(), 7);
@@ -578,8 +578,8 @@ mod tests {
                 .iter()
                 .find(|m| m.kind == "MachineDeployment")
                 .expect("should have MachineDeployment");
-            let spec = deployment.spec.as_ref().unwrap();
-            assert_eq!(spec.get("replicas").unwrap(), 0);
+            let spec = deployment.spec.as_ref().expect("spec should exist");
+            assert_eq!(spec.get("replicas").expect("replicas should exist"), 0);
         }
 
         /// Story: The Cluster resource is the top-level CAPI object that ties
@@ -592,7 +592,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let cluster_manifest = manifests
                 .iter()
@@ -606,7 +606,7 @@ mod tests {
                 Some("default".to_string())
             );
 
-            let spec = cluster_manifest.spec.as_ref().unwrap();
+            let spec = cluster_manifest.spec.as_ref().expect("spec should exist");
             assert!(spec.get("controlPlaneRef").is_some());
             assert!(spec.get("infrastructureRef").is_some());
             assert!(spec.get("clusterNetwork").is_some());
@@ -621,7 +621,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let docker_cluster = manifests
                 .iter()
@@ -647,7 +647,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let control_plane = manifests
                 .iter()
@@ -657,9 +657,12 @@ mod tests {
             assert_eq!(control_plane.api_version, CAPI_CONTROLPLANE_API_VERSION);
             assert_eq!(control_plane.metadata.name, "my-cluster-control-plane");
 
-            let spec = control_plane.spec.as_ref().unwrap();
-            assert_eq!(spec.get("replicas").unwrap(), 3);
-            assert_eq!(spec.get("version").unwrap(), "v1.32.0");
+            let spec = control_plane.spec.as_ref().expect("spec should exist");
+            assert_eq!(spec.get("replicas").expect("replicas should exist"), 3);
+            assert_eq!(
+                spec.get("version").expect("version should exist"),
+                "v1.32.0"
+            );
         }
 
         /// Story: MachineDeployment is always created with replicas=0 during initial
@@ -675,7 +678,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let deployment = manifests
                 .iter()
@@ -685,10 +688,13 @@ mod tests {
             assert_eq!(deployment.api_version, CAPI_CLUSTER_API_VERSION);
             assert_eq!(deployment.metadata.name, "my-cluster-md-0");
 
-            let spec = deployment.spec.as_ref().unwrap();
+            let spec = deployment.spec.as_ref().expect("spec should exist");
             // Always 0 - scaling happens after pivot
-            assert_eq!(spec.get("replicas").unwrap(), 0);
-            assert_eq!(spec.get("clusterName").unwrap(), "my-cluster");
+            assert_eq!(spec.get("replicas").expect("replicas should exist"), 0);
+            assert_eq!(
+                spec.get("clusterName").expect("clusterName should exist"),
+                "my-cluster"
+            );
         }
 
         /// Story: Control plane and workers use different machine templates since
@@ -702,7 +708,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let machine_templates: Vec<_> = manifests
                 .iter()
@@ -741,7 +747,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let config_template = manifests
                 .iter()
@@ -763,21 +769,33 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let control_plane = manifests
                 .iter()
                 .find(|m| m.kind == "KubeadmControlPlane")
                 .expect("should have KubeadmControlPlane");
 
-            let spec = control_plane.spec.as_ref().unwrap();
-            let kubeadm_config = spec.get("kubeadmConfigSpec").unwrap();
-            let cluster_config = kubeadm_config.get("clusterConfiguration").unwrap();
-            let api_server = cluster_config.get("apiServer").unwrap();
-            let cert_sans = api_server.get("certSANs").unwrap();
+            let spec = control_plane.spec.as_ref().expect("spec should exist");
+            let kubeadm_config = spec
+                .get("kubeadmConfigSpec")
+                .expect("kubeadmConfigSpec should exist");
+            let cluster_config = kubeadm_config
+                .get("clusterConfiguration")
+                .expect("clusterConfiguration should exist");
+            let api_server = cluster_config
+                .get("apiServer")
+                .expect("apiServer should exist");
+            let cert_sans = api_server.get("certSANs").expect("certSANs should exist");
 
-            assert!(cert_sans.as_array().unwrap().contains(&json!("127.0.0.1")));
-            assert!(cert_sans.as_array().unwrap().contains(&json!("localhost")));
+            assert!(cert_sans
+                .as_array()
+                .expect("certSANs should be an array")
+                .contains(&json!("127.0.0.1")));
+            assert!(cert_sans
+                .as_array()
+                .expect("certSANs should be an array")
+                .contains(&json!("localhost")));
         }
 
         /// Story: All CAPI resources must be labeled with the cluster name so
@@ -791,7 +809,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             for manifest in &manifests {
                 let labels = manifest
@@ -819,7 +837,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             for manifest in &manifests {
                 let yaml = manifest.to_yaml().expect("should serialize to YAML");
@@ -1046,12 +1064,16 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             // Verify we can serialize all manifests to YAML
             let mut yaml_docs = Vec::new();
             for manifest in &manifests {
-                yaml_docs.push(manifest.to_yaml().unwrap());
+                yaml_docs.push(
+                    manifest
+                        .to_yaml()
+                        .expect("manifest should serialize to YAML"),
+                );
             }
 
             // Join with separator for multi-document YAML
@@ -1074,13 +1096,13 @@ mod tests {
             provider
                 .validate_spec(&cluster.spec.provider)
                 .await
-                .unwrap();
+                .expect("spec validation should succeed");
 
             // Then generate
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             assert_eq!(manifests.len(), 7);
 
@@ -1088,9 +1110,12 @@ mod tests {
             let deployment = manifests
                 .iter()
                 .find(|m| m.kind == "MachineDeployment")
-                .unwrap();
-            let spec = deployment.spec.as_ref().unwrap();
-            assert_eq!(spec.get("clusterName").unwrap(), "workload-1");
+                .expect("MachineDeployment should exist");
+            let spec = deployment.spec.as_ref().expect("spec should exist");
+            assert_eq!(
+                spec.get("clusterName").expect("clusterName should exist"),
+                "workload-1"
+            );
         }
 
         /// Story: HA clusters with 3 control plane nodes should generate
@@ -1105,15 +1130,15 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let control_plane = manifests
                 .iter()
                 .find(|m| m.kind == "KubeadmControlPlane")
-                .unwrap();
+                .expect("KubeadmControlPlane should exist");
 
-            let spec = control_plane.spec.as_ref().unwrap();
-            assert_eq!(spec.get("replicas").unwrap(), 3);
+            let spec = control_plane.spec.as_ref().expect("spec should exist");
+            assert_eq!(spec.get("replicas").expect("replicas should exist"), 3);
         }
     }
 
@@ -1142,7 +1167,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             // 8 manifests: Cluster, ConfigMap, DockerCluster, RKE2ControlPlane,
             // DockerMachineTemplate (CP), MachineDeployment, DockerMachineTemplate (workers),
@@ -1160,7 +1185,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let configmap = manifests
                 .iter()
@@ -1193,7 +1218,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             let docker_cluster = manifests
                 .iter()
@@ -1220,7 +1245,7 @@ mod tests {
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
                 .await
-                .unwrap();
+                .expect("manifest generation should succeed");
 
             // Should be 7 manifests (no ConfigMap)
             assert_eq!(manifests.len(), 7);

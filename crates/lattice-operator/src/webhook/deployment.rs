@@ -181,7 +181,8 @@ fn build_patch_operations(
     // Replace containers
     ops.push(PatchOperation::Replace(ReplaceOperation {
         path: PointerBuf::from_tokens(["spec", "template", "spec", "containers"]),
-        value: serde_json::to_value(&pod_spec.containers).unwrap_or_default(),
+        value: serde_json::to_value(&pod_spec.containers)
+            .expect("BUG: Container serialization failed - check struct definition"),
     }));
 
     // Set service account name
@@ -194,7 +195,8 @@ fn build_patch_operations(
     if !pod_spec.volumes.is_empty() {
         ops.push(PatchOperation::Add(AddOperation {
             path: PointerBuf::from_tokens(["spec", "template", "spec", "volumes"]),
-            value: serde_json::to_value(&pod_spec.volumes).unwrap_or_default(),
+            value: serde_json::to_value(&pod_spec.volumes)
+                .expect("BUG: Volume serialization failed - check struct definition"),
         }));
     }
 
@@ -378,8 +380,9 @@ mod tests {
         );
 
         // Verify it's valid JSON array
-        let json_str = serialized.unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let json_str = serialized.expect("patch serialization should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("JSON parsing should succeed");
         assert!(parsed.is_array(), "patch should be a JSON array");
     }
 
@@ -406,7 +409,10 @@ mod tests {
             .expect("should have containers patch");
 
         if let json_patch::PatchOperation::Replace(r) = containers_op {
-            let arr = r.value.as_array().unwrap();
+            let arr = r
+                .value
+                .as_array()
+                .expect("containers value should be an array");
             assert_eq!(arr.len(), 2, "should have two containers");
         }
     }
@@ -457,7 +463,7 @@ mod tests {
 
         // Serialize the patch and verify container details
         let patch = json_patch::Patch(ops);
-        let json_str = serde_json::to_string(&patch).unwrap();
+        let json_str = serde_json::to_string(&patch).expect("patch serialization should succeed");
 
         // Verify key fields are present in serialized output
         assert!(json_str.contains("myapp:v1"), "image should be in patch");

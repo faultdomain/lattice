@@ -294,7 +294,9 @@ mod tests {
             gateway: "10.0.0.1".to_string(),
         };
 
-        let (start, end, prefix) = pool.parse_range().unwrap();
+        let (start, end, prefix) = pool
+            .parse_range()
+            .expect("compact IP range should parse successfully");
         assert_eq!(start, "10.0.0.101");
         assert_eq!(end, "10.0.0.102");
         assert_eq!(prefix, 24);
@@ -307,7 +309,9 @@ mod tests {
             gateway: "10.0.0.1".to_string(),
         };
 
-        let (start, end, prefix) = pool.parse_range().unwrap();
+        let (start, end, prefix) = pool
+            .parse_range()
+            .expect("full IP range should parse successfully");
         assert_eq!(start, "10.0.0.101");
         assert_eq!(end, "10.0.0.120");
         assert_eq!(prefix, 24);
@@ -320,7 +324,9 @@ mod tests {
             gateway: "192.168.0.1".to_string(),
         };
 
-        let (start, end, prefix) = pool.parse_range().unwrap();
+        let (start, end, prefix) = pool
+            .parse_range()
+            .expect("IP range with different prefix should parse successfully");
         assert_eq!(start, "192.168.1.50");
         assert_eq!(end, "192.168.1.100");
         assert_eq!(prefix, 16);
@@ -378,11 +384,13 @@ mod tests {
             gateway: "10.0.0.1".to_string(),
         };
 
-        let yaml = serde_yaml::to_string(&pool).unwrap();
+        let yaml =
+            serde_yaml::to_string(&pool).expect("Ipv4PoolConfig serialization should succeed");
         assert!(yaml.contains("range: 10.0.0.101-102/24"));
         assert!(yaml.contains("gateway: 10.0.0.1"));
 
-        let parsed: Ipv4PoolConfig = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Ipv4PoolConfig =
+            serde_yaml::from_str(&yaml).expect("Ipv4PoolConfig deserialization should succeed");
         assert_eq!(parsed, pool);
     }
 }

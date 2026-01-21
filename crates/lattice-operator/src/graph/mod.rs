@@ -542,7 +542,7 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
+                    volume: None,
                 },
             );
         }
@@ -555,7 +555,7 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
+                    volume: None,
                 },
             );
         }
@@ -603,7 +603,7 @@ mod tests {
 
         graph.put_service("prod", "api", &spec);
 
-        let node = graph.get_service("prod", "api").unwrap();
+        let node = graph.get_service("prod", "api").expect("service should exist");
         assert_eq!(node.name, "api");
         assert_eq!(node.type_, ServiceType::Local);
     }
@@ -615,7 +615,7 @@ mod tests {
 
         graph.put_external_service("prod", "google", &spec);
 
-        let node = graph.get_service("prod", "google").unwrap();
+        let node = graph.get_service("prod", "google").expect("external service should exist");
         assert_eq!(node.name, "google");
         assert_eq!(node.type_, ServiceType::External);
         assert!(node.allows("api"));
@@ -667,7 +667,7 @@ mod tests {
         graph.put_service("prod", "api", &api_spec);
 
         // cache should exist as unknown stub
-        let cache = graph.get_service("prod", "cache").unwrap();
+        let cache = graph.get_service("prod", "cache").expect("cache stub should exist");
         assert_eq!(cache.type_, ServiceType::Unknown);
     }
 
@@ -918,7 +918,7 @@ mod tests {
         }
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.join().expect("thread should complete successfully");
         }
 
         assert_eq!(graph.service_count("prod"), 10);
@@ -990,7 +990,7 @@ mod tests {
 
         graph.put_service("prod", "standalone", &spec);
 
-        let node = graph.get_service("prod", "standalone").unwrap();
+        let node = graph.get_service("prod", "standalone").expect("standalone service should exist");
         assert!(node.dependencies.is_empty());
         assert!(node.allowed_callers.is_empty());
         assert!(graph.get_dependencies("prod", "standalone").is_empty());
@@ -1233,7 +1233,7 @@ mod tests {
         // Update: api allows only frontend
         graph.put_service("prod", "api", &make_service_spec(vec![], vec!["frontend"]));
 
-        let node = graph.get_service("prod", "api").unwrap();
+        let node = graph.get_service("prod", "api").expect("api service should exist");
         assert!(node.allows("frontend"));
         assert!(!node.allows("mobile"));
     }
@@ -1245,14 +1245,14 @@ mod tests {
         // Start as local service
         graph.put_service("prod", "service", &make_service_spec(vec![], vec![]));
         assert_eq!(
-            graph.get_service("prod", "service").unwrap().type_,
+            graph.get_service("prod", "service").expect("local service should exist").type_,
             ServiceType::Local
         );
 
         // Convert to external
         graph.put_external_service("prod", "service", &make_external_spec(vec![]));
         assert_eq!(
-            graph.get_service("prod", "service").unwrap().type_,
+            graph.get_service("prod", "service").expect("external service should exist").type_,
             ServiceType::External
         );
     }
@@ -1430,7 +1430,7 @@ mod tests {
         }
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.join().expect("thread should complete successfully");
         }
 
         // Should have 20 * 50 = 1000 services
@@ -1473,7 +1473,7 @@ mod tests {
         }
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.join().expect("thread should complete successfully");
         }
 
         // Should have 50 services remaining

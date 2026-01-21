@@ -400,13 +400,27 @@ impl<'a> PolicyCompiler<'a> {
             &outbound_edges,
         ));
 
-        // Generate ServiceEntries for external dependencies
+        // Generate ServiceEntries and AuthorizationPolicies for external dependencies
         for edge in &outbound_edges {
             if let Some(callee) = self.graph.get_service(env, &edge.callee) {
                 if callee.type_ == ServiceType::External {
                     if let Some(entry) = self.compile_service_entry(&callee, namespace) {
                         output.service_entries.push(entry);
                     }
+                    // Generate default-deny for this ServiceEntry
+                    // Without this, external services are accessible to everyone
+                    // (mesh-default-deny only applies to workloads, not ServiceEntry)
+                    output
+                        .authorization_policies
+                        .push(Self::compile_external_default_deny(&callee.name, namespace));
+                    // Generate ALLOW policy for THIS service to access the external
+                    output
+                        .authorization_policies
+                        .push(self.compile_external_access_policy(
+                            &service_node.name,
+                            &callee,
+                            namespace,
+                        ));
                 }
             }
         }
@@ -432,44 +446,22 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Compile the ambient waypoint default-deny AuthorizationPolicy
-    ///
-    /// Per Istio best practices for ambient mode, we need a separate policy
-    /// targeting the waypoint GatewayClass.
-    pub fn compile_waypoint_default_deny() -> AuthorizationPolicy {
-        AuthorizationPolicy {
-            api_version: "security.istio.io/v1".to_string(),
-            kind: "AuthorizationPolicy".to_string(),
-            metadata: PolicyMetadata::new("waypoint-default-deny", "istio-system"),
-            spec: AuthorizationPolicySpec {
-                target_refs: vec![TargetRef {
-                    group: "gateway.networking.k8s.io".to_string(),
-                    kind: "GatewayClass".to_string(),
-                    name: "istio-waypoint".to_string(),
-                }],
-                selector: None,
-                action: String::new(), // Empty = implicit deny-all
-                rules: vec![],
-            },
-        }
-    }
-
     /// Check if a string is an IP address (IPv4 or IPv6)
     fn is_ip_address(host: &str) -> bool {
         use std::net::IpAddr;
         host.parse::<IpAddr>().is_ok()
     }
 
+    /// Generate SPIFFE principal for AuthorizationPolicy
+    /// Note: The principals field should NOT include "spiffe://" prefix.
+    /// Istio expects format: "{trust_domain}/ns/{namespace}/sa/{service_account}"
     fn spiffe_principal(&self, namespace: &str, service_name: &str) -> String {
-        format!(
-            "spiffe://{}/ns/{}/sa/{}",
-            self.trust_domain, namespace, service_name
-        )
+        format!("{}/ns/{}/sa/{}", self.trust_domain, namespace, service_name)
     }
 
     fn waypoint_principal(&self, namespace: &str) -> String {
         format!(
-            "spiffe://{}/ns/{}/sa/{}-waypoint",
+            "{}/ns/{}/sa/{}-waypoint",
             self.trust_domain, namespace, namespace
         )
     }
@@ -572,7 +564,11 @@ impl<'a> PolicyCompiler<'a> {
         outbound_edges: &[ActiveEdge],
     ) -> CiliumNetworkPolicy {
         let mut endpoint_labels = BTreeMap::new();
-        endpoint_labels.insert("app.kubernetes.io/name".to_string(), service.name.clone());
+        // Cilium requires k8s: prefix for Kubernetes pod labels
+        endpoint_labels.insert(
+            "k8s:app.kubernetes.io/name".to_string(),
+            service.name.clone(),
+        );
 
         // Build ingress rules
         let mut ingress_rules = Vec::new();
@@ -587,7 +583,11 @@ impl<'a> PolicyCompiler<'a> {
                         "k8s:io.kubernetes.pod.namespace".to_string(),
                         namespace.to_string(),
                     );
-                    labels.insert("app.kubernetes.io/name".to_string(), edge.caller.clone());
+                    // Cilium requires k8s: prefix for Kubernetes pod labels
+                    labels.insert(
+                        "k8s:app.kubernetes.io/name".to_string(),
+                        edge.caller.clone(),
+                    );
                     EndpointSelector {
                         match_labels: labels,
                     }
@@ -623,16 +623,22 @@ impl<'a> PolicyCompiler<'a> {
             });
         }
 
-        // Allow HBONE from waypoint
-        let mut waypoint_labels = BTreeMap::new();
-        waypoint_labels.insert(
+        // Allow traffic from waypoint proxy on HBONE port (15008)
+        // In Istio ambient mode: client -> ztunnel -> waypoint:15008 -> service:15008
+        // The waypoint delivers traffic to the service pod via HBONE tunnel
+        let mut waypoint_ingress_labels = BTreeMap::new();
+        waypoint_ingress_labels.insert(
             "k8s:io.kubernetes.pod.namespace".to_string(),
             namespace.to_string(),
         );
-        waypoint_labels.insert("istio.io/waypoint-for".to_string(), "service".to_string());
+        waypoint_ingress_labels.insert(
+            "k8s:istio.io/waypoint-for".to_string(),
+            "service".to_string(),
+        );
+
         ingress_rules.push(CiliumIngressRule {
             from_endpoints: vec![EndpointSelector {
-                match_labels: waypoint_labels,
+                match_labels: waypoint_ingress_labels,
             }],
             to_ports: vec![CiliumPortRule {
                 ports: vec![CiliumPort {
@@ -674,7 +680,11 @@ impl<'a> PolicyCompiler<'a> {
 
         // Always allow HBONE to waypoint
         let mut waypoint_egress_labels = BTreeMap::new();
-        waypoint_egress_labels.insert("istio.io/waypoint-for".to_string(), "service".to_string());
+        // Cilium requires k8s: prefix for Kubernetes pod labels
+        waypoint_egress_labels.insert(
+            "k8s:istio.io/waypoint-for".to_string(),
+            "service".to_string(),
+        );
         egress_rules.push(CiliumEgressRule {
             to_endpoints: vec![EndpointSelector {
                 match_labels: waypoint_egress_labels,
@@ -699,8 +709,11 @@ impl<'a> PolicyCompiler<'a> {
                             "k8s:io.kubernetes.pod.namespace".to_string(),
                             namespace.to_string(),
                         );
-                        dep_labels
-                            .insert("app.kubernetes.io/name".to_string(), edge.callee.clone());
+                        // Cilium requires k8s: prefix for Kubernetes pod labels
+                        dep_labels.insert(
+                            "k8s:app.kubernetes.io/name".to_string(),
+                            edge.callee.clone(),
+                        );
 
                         let to_ports: Vec<CiliumPortRule> = if callee.ports.is_empty() {
                             vec![]
@@ -827,8 +840,9 @@ impl<'a> PolicyCompiler<'a> {
     ) -> AuthorizationPolicy {
         // Envoy Gateway runs in envoy-gateway-system namespace
         // The gateway proxy pods use the envoy-{gateway-name} service account pattern
+        // Note: principals field should NOT include "spiffe://" prefix
         let gateway_principal = format!(
-            "spiffe://{}/ns/envoy-gateway-system/sa/envoy-default",
+            "{}/ns/envoy-gateway-system/sa/envoy-default",
             self.trust_domain
         );
 
@@ -917,6 +931,84 @@ impl<'a> PolicyCompiler<'a> {
             },
         })
     }
+
+    /// Compile default-deny AuthorizationPolicy for an external service (ServiceEntry).
+    ///
+    /// The mesh-default-deny policy only applies to workloads (pods), not to
+    /// ServiceEntry destinations. We need a separate default-deny per ServiceEntry
+    /// to block unauthorized access to external services.
+    ///
+    /// An empty spec (no rules, no action) denies all traffic to the target.
+    fn compile_external_default_deny(external_name: &str, namespace: &str) -> AuthorizationPolicy {
+        AuthorizationPolicy {
+            api_version: "security.istio.io/v1beta1".to_string(),
+            kind: "AuthorizationPolicy".to_string(),
+            metadata: PolicyMetadata::new(format!("deny-all-to-{}", external_name), namespace),
+            spec: AuthorizationPolicySpec {
+                target_refs: vec![TargetRef {
+                    group: "networking.istio.io".to_string(),
+                    kind: "ServiceEntry".to_string(),
+                    name: external_name.to_string(),
+                }],
+                selector: None,
+                action: String::new(), // Empty = deny all
+                rules: vec![],         // No rules = deny all
+            },
+        }
+    }
+
+    /// Compile AuthorizationPolicy to allow a specific service to access an external service.
+    ///
+    /// With the default-deny in place, only services that explicitly declare an
+    /// external dependency will have an ALLOW policy generated, enabling access.
+    fn compile_external_access_policy(
+        &self,
+        caller: &str,
+        external_service: &ServiceNode,
+        namespace: &str,
+    ) -> AuthorizationPolicy {
+        // Get the ports from the external service endpoints
+        let ports: Vec<String> = external_service
+            .endpoints
+            .values()
+            .map(|ep| ep.port.to_string())
+            .collect();
+
+        AuthorizationPolicy {
+            api_version: "security.istio.io/v1beta1".to_string(),
+            kind: "AuthorizationPolicy".to_string(),
+            metadata: PolicyMetadata::new(
+                format!("allow-{}-to-{}", caller, external_service.name),
+                namespace,
+            ),
+            spec: AuthorizationPolicySpec {
+                target_refs: vec![TargetRef {
+                    group: "networking.istio.io".to_string(),
+                    kind: "ServiceEntry".to_string(),
+                    name: external_service.name.clone(),
+                }],
+                selector: None,
+                action: "ALLOW".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![AuthorizationSource {
+                        source: SourceSpec {
+                            principals: vec![self.spiffe_principal(namespace, caller)],
+                        },
+                    }],
+                    to: if ports.is_empty() {
+                        vec![]
+                    } else {
+                        vec![AuthorizationOperation {
+                            operation: OperationSpec {
+                                ports,
+                                hosts: vec![],
+                            },
+                        }]
+                    },
+                }],
+            },
+        }
+    }
 }
 
 // =============================================================================
@@ -956,9 +1048,7 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
-                    outbound: None,
-                    inbound: None,
+                    volume: None,
                 },
             );
         }
@@ -971,9 +1061,7 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
-                    outbound: None,
-                    inbound: None,
+                    volume: None,
                 },
             );
         }
@@ -1103,7 +1191,9 @@ mod tests {
         let principals = &output.authorization_policies[0].spec.rules[0].from[0]
             .source
             .principals;
-        assert!(principals[0].starts_with("spiffe://my-cluster.example.com/"));
+        // Principal format should be "{trust_domain}/ns/{namespace}/sa/{service_account}"
+        // without the "spiffe://" prefix (Istio adds it internally)
+        assert!(principals[0].starts_with("my-cluster.example.com/"));
         assert!(principals[0].contains("/ns/prod-ns/sa/gateway"));
     }
 
@@ -1132,7 +1222,18 @@ mod tests {
             .iter()
             .any(|pr| pr.ports.iter().any(|p| p.port == "53"))));
 
-        // Should always have waypoint HBONE ingress
+        // Should always have waypoint ingress on HBONE port (ambient mode)
+        assert!(cnp
+            .spec
+            .ingress
+            .iter()
+            .any(|i| i.from_endpoints.iter().any(|ep| ep
+                .match_labels
+                .get("k8s:istio.io/waypoint-for")
+                .map(|v| v == "service")
+                .unwrap_or(false))));
+
+        // Waypoint ingress should be on HBONE port 15008
         assert!(cnp.spec.ingress.iter().any(|i| i
             .to_ports
             .iter()
@@ -1222,6 +1323,75 @@ mod tests {
     }
 
     // =========================================================================
+    // Story: External Service Access Control
+    // =========================================================================
+
+    #[test]
+    fn story_external_service_generates_access_control_policies() {
+        let graph = ServiceGraph::new();
+        let env = "prod";
+
+        // api depends on stripe (external)
+        let api_spec = make_service_spec(vec!["stripe"], vec![]);
+        graph.put_service(env, "api", &api_spec);
+
+        // frontend does NOT depend on stripe
+        let frontend_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(env, "frontend", &frontend_spec);
+
+        graph.put_external_service(env, "stripe", &make_external_spec(vec!["api"]));
+
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+
+        // Compile for api (has stripe dependency)
+        let api_output = compiler.compile("api", "prod-ns", env);
+
+        // Should have deny-all and allow-api policies for stripe
+        let deny_policy = api_output
+            .authorization_policies
+            .iter()
+            .find(|p| p.metadata.name == "deny-all-to-stripe");
+        assert!(
+            deny_policy.is_some(),
+            "Should generate deny-all for external"
+        );
+        let deny = deny_policy.unwrap();
+        assert!(deny.spec.action.is_empty()); // Empty = deny all
+        assert!(deny.spec.rules.is_empty());
+        assert_eq!(deny.spec.target_refs[0].kind, "ServiceEntry");
+        assert_eq!(deny.spec.target_refs[0].name, "stripe");
+
+        let allow_policy = api_output
+            .authorization_policies
+            .iter()
+            .find(|p| p.metadata.name == "allow-api-to-stripe");
+        assert!(
+            allow_policy.is_some(),
+            "Should generate allow for declared dependency"
+        );
+        let allow = allow_policy.unwrap();
+        assert_eq!(allow.spec.action, "ALLOW");
+        assert_eq!(allow.spec.target_refs[0].kind, "ServiceEntry");
+        assert_eq!(
+            allow.spec.rules[0].from[0].source.principals[0],
+            "prod.lattice.local/ns/prod-ns/sa/api"
+        );
+
+        // Compile for frontend (no stripe dependency)
+        let frontend_output = compiler.compile("frontend", "prod-ns", env);
+
+        // Should NOT have any stripe policies (no dependency declared)
+        let has_stripe_policy = frontend_output
+            .authorization_policies
+            .iter()
+            .any(|p| p.metadata.name.contains("stripe"));
+        assert!(
+            !has_stripe_policy,
+            "Frontend should not have stripe policies"
+        );
+    }
+
+    // =========================================================================
     // Story: Mesh Default Deny
     // =========================================================================
 
@@ -1234,21 +1404,6 @@ mod tests {
         // Per Istio best practices: empty spec denies all
         assert!(policy.spec.action.is_empty()); // Empty = implicit deny
         assert!(policy.spec.rules.is_empty()); // No rules = no traffic allowed
-    }
-
-    #[test]
-    fn story_waypoint_default_deny() {
-        let policy = PolicyCompiler::compile_waypoint_default_deny();
-
-        assert_eq!(policy.metadata.name, "waypoint-default-deny");
-        assert_eq!(policy.metadata.namespace, "istio-system");
-        // Per Istio best practices: empty spec denies all
-        assert!(policy.spec.action.is_empty());
-        assert!(policy.spec.rules.is_empty());
-        // Targets the waypoint GatewayClass for ambient mode
-        assert_eq!(policy.spec.target_refs.len(), 1);
-        assert_eq!(policy.spec.target_refs[0].kind, "GatewayClass");
-        assert_eq!(policy.spec.target_refs[0].name, "istio-waypoint");
     }
 
     // =========================================================================
@@ -1271,8 +1426,10 @@ mod tests {
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
         let output = compiler.compile("api", "prod-ns", env);
 
-        // 2 auth policies (allow + waypoint) + 1 cilium + 1 service entry = 4
-        assert_eq!(output.total_count(), 4);
+        // 2 auth policies (allow + waypoint) for inbound
+        // + 2 auth policies (deny-all + allow-api) for external
+        // + 1 cilium + 1 service entry = 6
+        assert_eq!(output.total_count(), 6);
     }
 
     // =========================================================================
@@ -1323,7 +1480,7 @@ mod tests {
         let api_egress = cnp.spec.egress.iter().find(|e| {
             e.to_endpoints.iter().any(|ep| {
                 ep.match_labels
-                    .get("app.kubernetes.io/name")
+                    .get("k8s:app.kubernetes.io/name")
                     .map(|v| v == "api")
                     .unwrap_or(false)
             })
@@ -1335,7 +1492,7 @@ mod tests {
         );
 
         // Verify namespace label is set
-        let rule = api_egress.unwrap();
+        let rule = api_egress.expect("api egress rule should exist");
         assert!(rule.to_endpoints[0]
             .match_labels
             .contains_key("k8s:io.kubernetes.pod.namespace"));
@@ -1365,7 +1522,7 @@ mod tests {
             .find(|e| {
                 e.to_endpoints.iter().any(|ep| {
                     ep.match_labels
-                        .get("app.kubernetes.io/name")
+                        .get("k8s:app.kubernetes.io/name")
                         .map(|v| v == "api")
                         .unwrap_or(false)
                 })
@@ -1401,7 +1558,7 @@ mod tests {
             to_ports: vec![],
         };
 
-        let json = serde_json::to_string(&rule).unwrap();
+        let json = serde_json::to_string(&rule).expect("rule should serialize to JSON");
 
         // Must use "toFQDNs" (uppercase) not "toFqdns" (camelCase)
         assert!(
@@ -1644,8 +1801,9 @@ mod tests {
         let policy = compiler.compile_gateway_allow_policy("api", "prod", &[80]);
 
         let principals = &policy.spec.rules[0].from[0].source.principals;
+        // Principal format should NOT include "spiffe://" prefix
         assert!(principals
             .iter()
-            .any(|p| p.starts_with("spiffe://custom.trust.domain/")));
+            .any(|p| p.starts_with("custom.trust.domain/")));
     }
 }

@@ -512,6 +512,22 @@ impl DefaultManifestGenerator {
     }
 }
 
+/// Error type for manifest generation failures
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestError {
+    /// Serialization failed
+    #[error("failed to serialize {resource}: {message}")]
+    Serialization {
+        /// Resource being serialized
+        resource: String,
+        /// Error message
+        message: String,
+    },
+    /// Cilium manifest generation failed
+    #[error("Cilium manifest generation failed: {0}")]
+    Cilium(String),
+}
+
 impl ManifestGenerator for DefaultManifestGenerator {
     fn generate(
         &self,
@@ -520,25 +536,47 @@ impl ManifestGenerator for DefaultManifestGenerator {
         cluster_name: Option<&str>,
         provider: Option<&str>,
     ) -> Vec<String> {
+        match self.try_generate(image, registry_credentials, cluster_name, provider) {
+            Ok(manifests) => manifests,
+            Err(e) => {
+                // Log the error but return empty manifests - callers will detect the failure
+                // when the cluster doesn't come up properly
+                tracing::error!(error = %e, "Failed to generate manifests");
+                Vec::new()
+            }
+        }
+    }
+}
+
+impl DefaultManifestGenerator {
+    /// Try to generate manifests, returning errors instead of panicking
+    fn try_generate(
+        &self,
+        image: &str,
+        registry_credentials: Option<&str>,
+        cluster_name: Option<&str>,
+        provider: Option<&str>,
+    ) -> Result<Vec<String>, ManifestError> {
         let mut manifests = Vec::new();
 
         // CNI manifests first (Cilium) - rendered on-demand based on provider
         match crate::infra::generate_cilium_manifests(provider) {
             Ok(cilium_manifests) => manifests.extend(cilium_manifests),
             Err(e) => {
-                tracing::error!(error = %e, "Failed to generate Cilium manifests");
+                return Err(ManifestError::Cilium(e.to_string()));
             }
         }
 
         // Then operator manifests
-        manifests.extend(
-            self.generate_operator_manifests(image, registry_credentials, cluster_name, provider)
-                .unwrap_or_else(|e| {
-                    panic!("BUG: failed to serialize operator manifests to JSON: {}", e)
-                }),
-        );
+        let operator_manifests = self
+            .generate_operator_manifests(image, registry_credentials, cluster_name, provider)
+            .map_err(|e| ManifestError::Serialization {
+                resource: "operator manifests".to_string(),
+                message: e.to_string(),
+            })?;
+        manifests.extend(operator_manifests);
 
-        manifests
+        Ok(manifests)
     }
 }
 
@@ -694,8 +732,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 return Err(BootstrapError::InvalidToken);
             }
 
-            // Verify token hash
-            let token_obj = BootstrapToken::from_string(token);
+            // Verify token hash - invalid base64 is rejected as invalid token
+            let token_obj =
+                BootstrapToken::from_string(token).map_err(|_| BootstrapError::InvalidToken)?;
             if token_obj.hash() != info.token_hash {
                 return Err(BootstrapError::InvalidToken);
             }
@@ -759,7 +798,10 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     ///
     /// Everything installs in parallel with the operator starting up.
     /// Operator will "adopt" pre-installed components (server-side apply is idempotent).
-    pub fn generate_response(&self, info: &ClusterBootstrapInfo) -> BootstrapResponse {
+    pub fn generate_response(
+        &self,
+        info: &ClusterBootstrapInfo,
+    ) -> Result<BootstrapResponse, BootstrapError> {
         // Parse parent endpoint for network policy
         let (parent_host, grpc_port) = parse_parent_endpoint(&info.cell_endpoint);
 
@@ -793,13 +835,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
         // Add the LatticeCluster CRD definition (CustomResourceDefinition)
         // The CRD is needed so the LatticeCluster instance can be applied
-        let crd_definition = serde_yaml::to_string(&LatticeCluster::crd()).unwrap_or_else(|e| {
-            panic!(
-                "BUG: failed to serialize LatticeCluster CRD to YAML: {}. \
-                 This indicates a bug in the CRD definition.",
-                e
-            )
-        });
+        let crd_definition = serde_yaml::to_string(&LatticeCluster::crd()).map_err(|e| {
+            BootstrapError::Internal(format!("failed to serialize LatticeCluster CRD: {}", e))
+        })?;
         manifests.push(crd_definition);
 
         // Include the LatticeCluster instance in bootstrap manifests.
@@ -822,13 +860,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             ])),
             ..Default::default()
         };
-        manifests.push(serde_json::to_string(&parent_config).unwrap_or_else(|e| {
-            panic!(
-                "BUG: failed to serialize parent config Secret to JSON: {}. \
-                 This indicates a bug in the Secret definition.",
-                e
-            )
-        }));
+        manifests.push(serde_json::to_string(&parent_config).map_err(|e| {
+            BootstrapError::Internal(format!("failed to serialize parent config Secret: {}", e))
+        })?);
 
         // Add CAPMOX credentials if provider is Proxmox and credentials are available
         if info.provider.to_lowercase() == "proxmox" {
@@ -842,12 +876,12 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             }
         }
 
-        BootstrapResponse {
+        Ok(BootstrapResponse {
             cluster_id: info.cluster_id.clone(),
             cell_endpoint: info.cell_endpoint.clone(),
             ca_certificate: info.ca_certificate.clone(),
             manifests,
-        }
+        })
     }
 
     /// Sign a CSR for a cluster
@@ -952,7 +986,7 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     info!(cluster_id = %cluster_id, "Bootstrap token validated, returning manifests");
 
     // Generate full bootstrap response (includes CNI, operator, LatticeCluster CRD, parent config)
-    let response = state.generate_response(&info);
+    let response = state.generate_response(&info)?;
 
     // Join with YAML document separator
     let yaml_output = response.manifests.join("\n---\n");
@@ -1002,7 +1036,7 @@ mod tests {
     }
 
     fn test_ca() -> Arc<CertificateAuthority> {
-        Arc::new(CertificateAuthority::new("Test CA").unwrap())
+        Arc::new(CertificateAuthority::new("Test CA").expect("test CA creation should succeed"))
     }
 
     fn test_state() -> BootstrapState<TestManifestGenerator> {
@@ -1081,7 +1115,7 @@ mod tests {
         let info = state
             .validate_and_consume("test-cluster", token.as_str())
             .await
-            .unwrap();
+            .expect("token validation should succeed");
 
         assert_eq!(info.cluster_id, "test-cluster");
     }
@@ -1119,7 +1153,7 @@ mod tests {
         let _ = state
             .validate_and_consume("test-cluster", token.as_str())
             .await
-            .unwrap();
+            .expect("first token use should succeed");
 
         // Second use fails
         let result = state
@@ -1172,8 +1206,10 @@ mod tests {
         let info = state
             .validate_and_consume("test-cluster", token.as_str())
             .await
-            .unwrap();
-        let response = state.generate_response(&info);
+            .expect("token validation should succeed");
+        let response = state
+            .generate_response(&info)
+            .expect("generating bootstrap response should succeed");
 
         assert_eq!(response.cluster_id, "test-cluster");
         assert_eq!(response.cell_endpoint, "cell.example.com:8443:50051");
@@ -1197,7 +1233,8 @@ mod tests {
             "cert".to_string(),
         );
 
-        let agent_req = AgentCertRequest::new("not-bootstrapped").unwrap();
+        let agent_req = AgentCertRequest::new("not-bootstrapped")
+            .expect("agent cert request creation should succeed");
         let result = state.sign_csr("not-bootstrapped", agent_req.csr_pem());
 
         assert!(matches!(
@@ -1210,7 +1247,8 @@ mod tests {
     fn csr_rejected_for_unknown_cluster() {
         let state = test_state();
 
-        let agent_req = AgentCertRequest::new("unknown").unwrap();
+        let agent_req =
+            AgentCertRequest::new("unknown").expect("agent cert request creation should succeed");
         let result = state.sign_csr("unknown", agent_req.csr_pem());
 
         assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
@@ -1230,14 +1268,15 @@ mod tests {
         state
             .validate_and_consume("csr-test", token.as_str())
             .await
-            .unwrap();
+            .expect("token validation should succeed");
 
         // Now CSR signing should work
-        let agent_req = AgentCertRequest::new("csr-test").unwrap();
+        let agent_req =
+            AgentCertRequest::new("csr-test").expect("agent cert request creation should succeed");
         let result = state.sign_csr("csr-test", agent_req.csr_pem());
 
         assert!(result.is_ok());
-        let response = result.unwrap();
+        let response = result.expect("CSR signing should succeed");
         assert!(response.certificate_pem.contains("BEGIN CERTIFICATE"));
         assert!(response.ca_certificate_pem.contains("BEGIN CERTIFICATE"));
     }
@@ -1256,25 +1295,28 @@ mod tests {
         state
             .validate_and_consume("cluster-xyz", token.as_str())
             .await
-            .unwrap();
+            .expect("token validation should succeed");
 
         // Sign CSR
-        let agent_req = AgentCertRequest::new("cluster-xyz").unwrap();
-        let response = state.sign_csr("cluster-xyz", agent_req.csr_pem()).unwrap();
+        let agent_req = AgentCertRequest::new("cluster-xyz")
+            .expect("agent cert request creation should succeed");
+        let response = state
+            .sign_csr("cluster-xyz", agent_req.csr_pem())
+            .expect("CSR signing should succeed");
 
         // Verify the cert contains cluster ID in CN
         // Parse and check (using x509-parser)
         let cert_pem = &response.certificate_pem;
-        let pem_obj = ::pem::parse(cert_pem.as_bytes()).unwrap();
-        let (_, cert) =
-            x509_parser::prelude::X509Certificate::from_der(pem_obj.contents()).unwrap();
+        let pem_obj = ::pem::parse(cert_pem.as_bytes()).expect("PEM parsing should succeed");
+        let (_, cert) = x509_parser::prelude::X509Certificate::from_der(pem_obj.contents())
+            .expect("X509 certificate parsing should succeed");
 
         let cn = cert
             .subject()
             .iter_common_name()
             .next()
             .and_then(|cn| cn.as_str().ok())
-            .unwrap();
+            .expect("certificate should have common name");
 
         assert!(cn.contains("cluster-xyz"));
     }
@@ -1336,9 +1378,14 @@ mod tests {
     #[test]
     fn bearer_token_extracted_correctly() {
         let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Bearer test-token-123".parse().unwrap());
+        headers.insert(
+            "authorization",
+            "Bearer test-token-123"
+                .parse()
+                .expect("header value parsing should succeed"),
+        );
 
-        let token = extract_bearer_token(&headers).unwrap();
+        let token = extract_bearer_token(&headers).expect("bearer token extraction should succeed");
         assert_eq!(token, "test-token-123");
     }
 
@@ -1352,7 +1399,12 @@ mod tests {
     #[test]
     fn non_bearer_auth_rejected() {
         let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Basic abc123".parse().unwrap());
+        headers.insert(
+            "authorization",
+            "Basic abc123"
+                .parse()
+                .expect("header value parsing should succeed"),
+        );
 
         let result = extract_bearer_token(&headers);
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
@@ -1398,13 +1450,15 @@ mod tests {
         let info = state
             .validate_and_consume("prod-us-west-001", token.as_str())
             .await
-            .unwrap();
+            .expect("token validation should succeed");
         assert_eq!(info.cluster_id, "prod-us-west-001");
         assert_eq!(info.cell_endpoint, "cell.lattice.example.com:8443:50051");
 
         // Chapter 3: Cell returns bootstrap response with manifests
         // ----------------------------------------------------------
-        let response = state.generate_response(&info);
+        let response = state
+            .generate_response(&info)
+            .expect("bootstrap response generation should succeed");
         assert!(!response.manifests.is_empty());
         assert!(!response.ca_certificate.is_empty());
         assert_eq!(
@@ -1415,14 +1469,15 @@ mod tests {
         // Chapter 4: Agent generates keypair and submits CSR
         // ---------------------------------------------------
         // Agent's private key NEVER leaves the workload cluster
-        let agent_request = AgentCertRequest::new("prod-us-west-001").unwrap();
+        let agent_request = AgentCertRequest::new("prod-us-west-001")
+            .expect("agent cert request creation should succeed");
         assert!(!agent_request.csr_pem().contains("PRIVATE KEY")); // CSR doesn't contain key
 
         // Chapter 5: Cell signs the CSR
         // ------------------------------
         let csr_response = state
             .sign_csr("prod-us-west-001", agent_request.csr_pem())
-            .unwrap();
+            .expect("CSR signing should succeed");
         assert!(csr_response.certificate_pem.contains("BEGIN CERTIFICATE"));
         assert!(csr_response
             .ca_certificate_pem
@@ -1454,7 +1509,7 @@ mod tests {
         let _ = state
             .validate_and_consume("secure-cluster", token.as_str())
             .await
-            .unwrap();
+            .expect("legitimate bootstrap should succeed");
 
         // Attacker captures the token and tries to replay it
         let replay_result = state
@@ -1522,7 +1577,8 @@ mod tests {
         );
 
         // Try to get CSR signed without completing bootstrap
-        let agent_request = AgentCertRequest::new("premature-cluster").unwrap();
+        let agent_request = AgentCertRequest::new("premature-cluster")
+            .expect("agent cert request creation should succeed");
         let result = state.sign_csr("premature-cluster", agent_request.csr_pem());
 
         // Blocked! Must complete bootstrap first
@@ -1547,7 +1603,8 @@ mod tests {
         assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
 
         // Unknown cluster can't get CSR signed either
-        let agent_request = AgentCertRequest::new("hacker-cluster").unwrap();
+        let agent_request = AgentCertRequest::new("hacker-cluster")
+            .expect("agent cert request creation should succeed");
         let csr_result = state.sign_csr("hacker-cluster", agent_request.csr_pem());
         assert!(matches!(
             csr_result,
@@ -1624,8 +1681,13 @@ mod tests {
     fn story_bearer_token_authentication() {
         // Valid Bearer token
         let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Bearer my-secret-token".parse().unwrap());
-        let token = extract_bearer_token(&headers).unwrap();
+        headers.insert(
+            "authorization",
+            "Bearer my-secret-token"
+                .parse()
+                .expect("header value parsing should succeed"),
+        );
+        let token = extract_bearer_token(&headers).expect("bearer token extraction should succeed");
         assert_eq!(token, "my-secret-token");
 
         // Missing header
@@ -1635,7 +1697,12 @@ mod tests {
 
         // Wrong auth scheme (Basic instead of Bearer)
         let mut basic_headers = HeaderMap::new();
-        basic_headers.insert("authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
+        basic_headers.insert(
+            "authorization",
+            "Basic dXNlcjpwYXNz"
+                .parse()
+                .expect("header value parsing should succeed"),
+        );
         let wrong_scheme = extract_bearer_token(&basic_headers);
         assert!(matches!(wrong_scheme, Err(BootstrapError::InvalidToken)));
     }
@@ -1714,7 +1781,7 @@ mod tests {
         state
             .validate_and_consume("malformed-csr-test", token.as_str())
             .await
-            .unwrap();
+            .expect("token validation should succeed");
 
         // Try to sign a malformed CSR
         let result = state.sign_csr("malformed-csr-test", "not a valid CSR");
@@ -1742,8 +1809,10 @@ mod tests {
         let info = state
             .validate_and_consume("ca-test", token.as_str())
             .await
-            .unwrap();
-        let response = state.generate_response(&info);
+            .expect("validate_and_consume should succeed");
+        let response = state
+            .generate_response(&info)
+            .expect("generate_response should succeed");
 
         assert_eq!(response.ca_certificate, ca_cert);
     }
@@ -1783,16 +1852,20 @@ mod tests {
             .uri("/api/clusters/http-test/manifests")
             .header("authorization", format!("Bearer {}", token.as_str()))
             .body(Body::empty())
-            .unwrap();
+            .expect("request building should succeed");
 
-        let response = router.oneshot(request).await.unwrap();
+        let response = router
+            .oneshot(request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
 
         // Response is raw YAML for kubectl apply
         let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
-            .unwrap();
-        let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
+            .expect("body reading should succeed");
+        let manifests_yaml =
+            String::from_utf8(body.to_vec()).expect("response should be valid UTF-8");
 
         // Should contain test manifest from TestManifestGenerator
         assert!(manifests_yaml.contains("# Test manifest"));
@@ -1816,9 +1889,12 @@ mod tests {
             .uri("/api/clusters/auth-test/manifests")
             // No authorization header
             .body(Body::empty())
-            .unwrap();
+            .expect("request building should succeed");
 
-        let response = router.oneshot(request).await.unwrap();
+        let response = router
+            .oneshot(request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -1840,9 +1916,12 @@ mod tests {
             .uri("/api/clusters/token-test/manifests")
             .header("authorization", "Bearer wrong-token")
             .body(Body::empty())
-            .unwrap();
+            .expect("request building should succeed");
 
-        let response = router.oneshot(request).await.unwrap();
+        let response = router
+            .oneshot(request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -1857,9 +1936,12 @@ mod tests {
             .uri("/api/clusters/nonexistent/manifests")
             .header("authorization", "Bearer any-token")
             .body(Body::empty())
-            .unwrap();
+            .expect("request building should succeed");
 
-        let response = router.oneshot(request).await.unwrap();
+        let response = router
+            .oneshot(request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1878,10 +1960,11 @@ mod tests {
         state
             .validate_and_consume("csr-http-test", token.as_str())
             .await
-            .unwrap();
+            .expect("token validation should succeed");
 
         // Generate CSR
-        let agent_req = AgentCertRequest::new("csr-http-test").unwrap();
+        let agent_req = AgentCertRequest::new("csr-http-test")
+            .expect("agent cert request creation should succeed");
         let csr_request = CsrRequest {
             csr_pem: agent_req.csr_pem().to_string(),
         };
@@ -1892,17 +1975,23 @@ mod tests {
             .method("POST")
             .uri("/api/clusters/csr-http-test/csr")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&csr_request).unwrap()))
-            .unwrap();
+            .body(Body::from(
+                serde_json::to_string(&csr_request).expect("JSON serialization should succeed"),
+            ))
+            .expect("request building should succeed");
 
-        let response = router.oneshot(request).await.unwrap();
+        let response = router
+            .oneshot(request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
 
         // Parse response
         let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
-            .unwrap();
-        let csr_response: CsrResponse = serde_json::from_slice(&body).unwrap();
+            .expect("body reading should succeed");
+        let csr_response: CsrResponse =
+            serde_json::from_slice(&body).expect("JSON parsing should succeed");
 
         assert!(csr_response.certificate_pem.contains("BEGIN CERTIFICATE"));
         assert!(csr_response
@@ -1923,7 +2012,8 @@ mod tests {
             "cert".to_string(),
         );
 
-        let agent_req = AgentCertRequest::new("not-bootstrapped").unwrap();
+        let agent_req = AgentCertRequest::new("not-bootstrapped")
+            .expect("agent cert request creation should succeed");
         let csr_request = CsrRequest {
             csr_pem: agent_req.csr_pem().to_string(),
         };
@@ -1934,10 +2024,15 @@ mod tests {
             .method("POST")
             .uri("/api/clusters/not-bootstrapped/csr")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&csr_request).unwrap()))
-            .unwrap();
+            .body(Body::from(
+                serde_json::to_string(&csr_request).expect("JSON serialization should succeed"),
+            ))
+            .expect("request building should succeed");
 
-        let response = router.oneshot(request).await.unwrap();
+        let response = router
+            .oneshot(request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
     }
 
@@ -1946,7 +2041,8 @@ mod tests {
     async fn integration_csr_handler_unknown_cluster() {
         let state = Arc::new(test_state());
 
-        let agent_req = AgentCertRequest::new("unknown").unwrap();
+        let agent_req =
+            AgentCertRequest::new("unknown").expect("agent cert request creation should succeed");
         let csr_request = CsrRequest {
             csr_pem: agent_req.csr_pem().to_string(),
         };
@@ -1957,10 +2053,15 @@ mod tests {
             .method("POST")
             .uri("/api/clusters/unknown/csr")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&csr_request).unwrap()))
-            .unwrap();
+            .body(Body::from(
+                serde_json::to_string(&csr_request).expect("JSON serialization should succeed"),
+            ))
+            .expect("request building should succeed");
 
-        let response = router.oneshot(request).await.unwrap();
+        let response = router
+            .oneshot(request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1986,39 +2087,49 @@ mod tests {
             .uri("/api/clusters/full-flow-test/manifests")
             .header("authorization", format!("Bearer {}", token.as_str()))
             .body(Body::empty())
-            .unwrap();
+            .expect("request building should succeed");
 
-        let response = router.clone().oneshot(manifests_request).await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(manifests_request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
-            .unwrap();
-        let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
+            .expect("body reading should succeed");
+        let manifests_yaml =
+            String::from_utf8(body.to_vec()).expect("response should be valid UTF-8");
         // Manifest contains image from TestManifestGenerator, not cluster ID
         assert!(manifests_yaml.contains("# Test manifest"));
 
         // Step 3: CSR signing
-        let agent_req = AgentCertRequest::new("full-flow-test").unwrap();
+        let agent_req = AgentCertRequest::new("full-flow-test")
+            .expect("agent cert request creation should succeed");
         let csr_body = serde_json::to_string(&CsrRequest {
             csr_pem: agent_req.csr_pem().to_string(),
         })
-        .unwrap();
+        .expect("JSON serialization should succeed");
 
         let csr_request = Request::builder()
             .method("POST")
             .uri("/api/clusters/full-flow-test/csr")
             .header("content-type", "application/json")
             .body(Body::from(csr_body))
-            .unwrap();
+            .expect("request building should succeed");
 
-        let response = router.oneshot(csr_request).await.unwrap();
+        let response = router
+            .oneshot(csr_request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
-            .unwrap();
-        let csr_response: CsrResponse = serde_json::from_slice(&body).unwrap();
+            .expect("body reading should succeed");
+        let csr_response: CsrResponse =
+            serde_json::from_slice(&body).expect("JSON parsing should succeed");
         assert!(csr_response.certificate_pem.contains("BEGIN CERTIFICATE"));
     }
 
@@ -2069,8 +2180,14 @@ mod tests {
             },
         );
 
-        let info = state.clusters.get("kubeadm-test").unwrap().clone();
-        let response = state.generate_response(&info);
+        let info = state
+            .clusters
+            .get("kubeadm-test")
+            .expect("kubeadm-test cluster should exist")
+            .clone();
+        let response = state
+            .generate_response(&info)
+            .expect("generate_response should succeed");
 
         // Should have GODEBUG=fips140=on in the deployment
         let manifests_str = response.manifests.join("\n");
@@ -2117,8 +2234,14 @@ mod tests {
             },
         );
 
-        let info = state.clusters.get("rke2-test").unwrap().clone();
-        let response = state.generate_response(&info);
+        let info = state
+            .clusters
+            .get("rke2-test")
+            .expect("rke2-test cluster should exist")
+            .clone();
+        let response = state
+            .generate_response(&info)
+            .expect("generate_response should succeed");
 
         // Should NOT have GODEBUG=fips140=on in the deployment
         let manifests_str = response.manifests.join("\n");

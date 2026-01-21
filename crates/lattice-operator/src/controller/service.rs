@@ -394,48 +394,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
-        // Waypoint EnvoyProxy (configures HBONE port on waypoint Service)
-        let envoy_proxy_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-            group: "gateway.envoyproxy.io".to_string(),
-            version: "v1alpha1".to_string(),
-            kind: "EnvoyProxy".to_string(),
-        });
-        if let Some(ref envoy_proxy) = compiled.waypoint.envoy_proxy {
-            let name = envoy_proxy.metadata.name.clone();
-            let json = serde_json::to_value(envoy_proxy)
-                .map_err(|e| Error::serialization(format!("EnvoyProxy: {}", e)))?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &envoy_proxy_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying waypoint EnvoyProxy");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // Waypoint GatewayClass (references namespace-local EnvoyProxy)
-        let gateway_class_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-            group: "gateway.networking.k8s.io".to_string(),
-            version: "v1".to_string(),
-            kind: "GatewayClass".to_string(),
-        });
-        if let Some(ref gateway_class) = compiled.waypoint.gateway_class {
-            let name = gateway_class.metadata.name.clone();
-            let json = serde_json::to_value(gateway_class)
-                .map_err(|e| Error::serialization(format!("GatewayClass: {}", e)))?;
-            // GatewayClass is cluster-scoped
-            let api: Api<DynamicObject> =
-                Api::all_with(self.client.clone(), &gateway_class_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying waypoint GatewayClass");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // Waypoint Gateway (for east-west L7 policies via Envoy Gateway)
+        // Waypoint Gateway (for east-west L7 policies via Istio ambient mesh)
         if let Some(ref gateway) = compiled.waypoint.gateway {
             let name = gateway.metadata.name.clone();
             let json = serde_json::to_value(gateway)
@@ -450,41 +409,19 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
-        // Waypoint HTTPRoute (routes mesh traffic through waypoint)
-        if let Some(ref route) = compiled.waypoint.http_route {
-            let name = route.metadata.name.clone();
-            let json = serde_json::to_value(route)
-                .map_err(|e| Error::serialization(format!("Waypoint HTTPRoute: {}", e)))?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &route_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying waypoint HTTPRoute");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // BackendTrafficPolicy (Envoy Gateway traffic shaping)
-        let btp_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-            group: "gateway.envoyproxy.io".to_string(),
-            version: "v1alpha1".to_string(),
-            kind: "BackendTrafficPolicy".to_string(),
-        });
-        for policy in compiled
-            .traffic_policies
-            .outbound
-            .iter()
-            .chain(compiled.traffic_policies.inbound.iter())
-        {
+        // Waypoint allow-to-waypoint AuthorizationPolicy
+        // This allows any authenticated traffic to reach the waypoint on port 15008 (HBONE)
+        // Without this, mesh-default-deny blocks traffic before it reaches the waypoint
+        if let Some(ref policy) = compiled.waypoint.allow_to_waypoint_policy {
             let name = policy.metadata.name.clone();
-            let json = serde_json::to_value(policy)
-                .map_err(|e| Error::serialization(format!("BackendTrafficPolicy: {}", e)))?;
+            let json = serde_json::to_value(policy).map_err(|e| {
+                Error::serialization(format!("Waypoint AuthorizationPolicy: {}", e))
+            })?;
             let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &btp_ar);
+                Api::namespaced_with(self.client.clone(), namespace, &authz_ar);
             let params = params.clone();
             futures.push(Box::pin(async move {
-                debug!(name = %name, "applying BackendTrafficPolicy");
+                debug!(name = %name, "applying waypoint AuthorizationPolicy");
                 api.patch(&name, &params, &Patch::Apply(&json)).await?;
                 Ok(())
             }));
@@ -1017,9 +954,7 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
-                    outbound: None,
-                    inbound: None,
+                    volume: None,
                 },
             );
         }
@@ -1045,9 +980,7 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
-                    outbound: None,
-                    inbound: None,
+                    volume: None,
                 },
             );
         }
@@ -1112,7 +1045,9 @@ mod tests {
         let mock_kube = mock_kube_success();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
-        let action = reconcile(service, ctx.clone()).await.unwrap();
+        let action = reconcile(service, ctx.clone())
+            .await
+            .expect("reconcile should succeed");
 
         // Should requeue quickly to check dependencies
         assert_eq!(action, Action::requeue(Duration::from_secs(5)));
@@ -1135,7 +1070,9 @@ mod tests {
         // Put the service in the graph first
         ctx.graph.put_service("test", "frontend", &service.spec);
 
-        let action = reconcile(service, ctx).await.unwrap();
+        let action = reconcile(service, ctx)
+            .await
+            .expect("reconcile should succeed");
 
         // Should requeue to wait for dependencies
         assert_eq!(action, Action::requeue(Duration::from_secs(10)));
@@ -1156,7 +1093,9 @@ mod tests {
         ctx.graph
             .put_service("test", "backend", &sample_service_spec());
 
-        let action = reconcile(service, ctx).await.unwrap();
+        let action = reconcile(service, ctx)
+            .await
+            .expect("reconcile should succeed");
 
         // Should transition to Ready and requeue periodically
         assert_eq!(action, Action::requeue(Duration::from_secs(60)));
@@ -1174,7 +1113,9 @@ mod tests {
 
         ctx.graph.put_service("test", "my-service", &service.spec);
 
-        let action = reconcile(service, ctx).await.unwrap();
+        let action = reconcile(service, ctx)
+            .await
+            .expect("reconcile should succeed");
 
         // Should requeue for periodic drift check
         assert_eq!(action, Action::requeue(Duration::from_secs(60)));
@@ -1191,7 +1132,9 @@ mod tests {
         let mock_kube = mock_kube_success();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
-        let action = reconcile(service, ctx).await.unwrap();
+        let action = reconcile(service, ctx)
+            .await
+            .expect("reconcile should succeed");
 
         // Should await change (no requeue)
         assert_eq!(action, Action::await_change());
@@ -1204,7 +1147,9 @@ mod tests {
         let mock_kube = mock_kube_success();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
-        let action = reconcile_external(external, ctx.clone()).await.unwrap();
+        let action = reconcile_external(external, ctx.clone())
+            .await
+            .expect("reconcile_external should succeed");
 
         // Should requeue periodically
         assert_eq!(action, Action::requeue(Duration::from_secs(60)));

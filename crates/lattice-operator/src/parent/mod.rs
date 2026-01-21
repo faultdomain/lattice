@@ -111,7 +111,11 @@ const SECRET_SYNC_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 const DISTRIBUTE_LABEL: &str = "lattice.io/distribute=true";
 
 /// Push distributable resources to all connected agents
-async fn push_resources_to_agents(registry: &SharedAgentRegistry, resources: DistributableResources, full_sync: bool) {
+async fn push_resources_to_agents(
+    registry: &SharedAgentRegistry,
+    resources: DistributableResources,
+    full_sync: bool,
+) {
     let agents = registry.list_clusters();
     if agents.is_empty() {
         debug!("No connected agents to push resources to");
@@ -120,11 +124,13 @@ async fn push_resources_to_agents(registry: &SharedAgentRegistry, resources: Dis
 
     let cmd = CellCommand {
         command_id: uuid::Uuid::new_v4().to_string(),
-        command: Some(cell_command::Command::SyncResources(SyncDistributedResourcesCommand {
-            secrets: resources.secrets.clone(),
-            configmaps: resources.configmaps.clone(),
-            full_sync,
-        })),
+        command: Some(cell_command::Command::SyncResources(
+            SyncDistributedResourcesCommand {
+                secrets: resources.secrets.clone(),
+                configmaps: resources.configmaps.clone(),
+                full_sync,
+            },
+        )),
     };
 
     for agent_name in &agents {
@@ -636,11 +642,12 @@ mod tests {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let config = ParentConfig {
-            bootstrap_addr: "127.0.0.1:0".parse().unwrap(),
-            grpc_addr: "127.0.0.1:0".parse().unwrap(),
+            bootstrap_addr: "127.0.0.1:0".parse().expect("valid address"),
+            grpc_addr: "127.0.0.1:0".parse().expect("valid address"),
             ..Default::default()
         };
-        let ca = Arc::new(CertificateAuthority::new("Test CA").unwrap());
+        let ca =
+            Arc::new(CertificateAuthority::new("Test CA").expect("CA creation should succeed"));
         ParentServers::with_ca(config, ca)
     }
 
@@ -657,13 +664,13 @@ mod tests {
             config.bootstrap_addr,
             format!("0.0.0.0:{}", crate::DEFAULT_BOOTSTRAP_PORT)
                 .parse()
-                .unwrap()
+                .expect("valid address")
         );
         assert_eq!(
             config.grpc_addr,
             format!("0.0.0.0:{}", crate::DEFAULT_GRPC_PORT)
                 .parse()
-                .unwrap()
+                .expect("valid address")
         );
         assert_eq!(config.token_ttl, Duration::from_secs(3600));
         assert!(!config.server_sans.is_empty());
@@ -673,7 +680,8 @@ mod tests {
     fn test_parent_servers_creation() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let config = ParentConfig::default();
-        let ca = Arc::new(CertificateAuthority::new("Test CA").unwrap());
+        let ca =
+            Arc::new(CertificateAuthority::new("Test CA").expect("CA creation should succeed"));
         let servers: ParentServers<MockManifestGenerator> = ParentServers::with_ca(config, ca);
         assert!(!servers.is_running());
     }
@@ -701,7 +709,7 @@ mod tests {
             .ensure_running_with(MockManifestGenerator, &[], client.clone())
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap()); // Should return true (started)
+        assert!(result.expect("ensure_running should succeed")); // Should return true (started)
         assert!(servers.is_running());
 
         // Second call should return false (already running)
@@ -709,7 +717,7 @@ mod tests {
             .ensure_running_with(MockManifestGenerator, &[], client)
             .await;
         assert!(result.is_ok());
-        assert!(!result.unwrap()); // Should return false (was already running)
+        assert!(!result.expect("ensure_running should succeed")); // Should return false (was already running)
 
         // Cleanup
         servers.shutdown().await;
@@ -729,7 +737,7 @@ mod tests {
             servers
                 .ensure_running_with(MockManifestGenerator, &[], client)
                 .await
-                .unwrap();
+                .expect("ensure_running should succeed");
             servers.shutdown().await;
             assert!(!servers.is_running());
 
@@ -758,7 +766,7 @@ mod tests {
         servers
             .ensure_running_with(MockManifestGenerator, &[], client)
             .await
-            .unwrap();
+            .expect("ensure_running should succeed");
         assert!(servers.bootstrap_state().await.is_some());
 
         // After shutdown, bootstrap state should be None again

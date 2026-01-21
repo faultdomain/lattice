@@ -42,9 +42,12 @@ pub struct LatticeClusterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub networking: Option<NetworkingSpec>,
 
-    /// Parent configuration - if present, this cluster can have children
+    /// Parent configuration - if present, this cluster can accept child connections
+    ///
+    /// When set, the cluster acts as a parent (cell) that can provision and manage
+    /// child clusters. Contains the host and ports for child agent connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoints: Option<EndpointsSpec>,
+    pub parent_config: Option<EndpointsSpec>,
 
     /// Environment identifier (e.g., prod, staging, dev)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,8 +64,8 @@ pub struct LatticeClusterSpec {
 
 impl LatticeClusterSpec {
     /// Returns true if this cluster can have children (has parent config)
-    pub fn has_endpoints(&self) -> bool {
-        self.endpoints.is_some()
+    pub fn is_parent(&self) -> bool {
+        self.parent_config.is_some()
     }
 
     /// Validate the cluster specification
@@ -78,6 +81,13 @@ impl LatticeClusterSpec {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeClusterStatus {
+    /// The generation of the spec that was last processed by the controller.
+    ///
+    /// Consumers can compare this to `metadata.generation` to determine if the
+    /// controller has processed the most recent spec changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+
     /// Current phase of the cluster lifecycle
     #[serde(default)]
     pub phase: ClusterPhase,
@@ -176,6 +186,12 @@ impl LatticeClusterStatus {
         self.unpivot_pending = pending;
         self
     }
+
+    /// Set the observed generation
+    pub fn observed_generation(mut self, generation: i64) -> Self {
+        self.observed_generation = Some(generation);
+        self
+    }
 }
 
 impl LatticeCluster {
@@ -255,13 +271,13 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            endpoints: Some(endpoints_spec()),
+            parent_config: Some(endpoints_spec()),
             environment: None,
             region: None,
             workload: None,
         };
 
-        assert!(spec.has_endpoints(), "Should be recognized as a parent");
+        assert!(spec.is_parent(), "Should be recognized as a parent");
     }
 
     /// Story: A cluster without parent configuration is a leaf cluster
@@ -274,13 +290,13 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            endpoints: None,
+            parent_config: None,
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
             workload: None,
         };
 
-        assert!(!spec.has_endpoints(), "Leaf cluster cannot have children");
+        assert!(!spec.is_parent(), "Leaf cluster cannot have children");
     }
 
     // =========================================================================
@@ -298,7 +314,7 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            endpoints: Some(endpoints_spec()),
+            parent_config: Some(endpoints_spec()),
             environment: None,
             region: None,
             workload: None,
@@ -319,7 +335,7 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            endpoints: None,
+            parent_config: None,
             environment: None,
             region: None,
             workload: None,
@@ -343,7 +359,7 @@ mod tests {
                 workers: 2,
             },
             networking: None,
-            endpoints: None,
+            parent_config: None,
             environment: None,
             region: None,
             workload: None,
@@ -455,19 +471,23 @@ nodes:
 networking:
   default:
     cidr: "172.18.255.1/32"
-endpoints:
+parentConfig:
   host: "172.18.255.1"
   service:
     type: LoadBalancer
 "#;
-        let spec: LatticeClusterSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeClusterSpec =
+            serde_yaml::from_str(yaml).expect("parent cluster YAML should parse successfully");
 
-        assert!(spec.has_endpoints(), "Should be a parent cluster");
+        assert!(spec.is_parent(), "Should be a parent cluster");
         assert_eq!(spec.nodes.control_plane, 1);
         assert_eq!(spec.nodes.workers, 2);
         assert_eq!(spec.provider.kubernetes.version, "1.35.0");
         assert_eq!(
-            spec.endpoints.as_ref().unwrap().host,
+            spec.parent_config
+                .as_ref()
+                .expect("parent_config should be present")
+                .host,
             Some("172.18.255.1".to_string())
         );
     }
@@ -496,13 +516,14 @@ workload:
     - name: curl-tester
     - name: simple-nginx
 "#;
-        let spec: LatticeClusterSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeClusterSpec =
+            serde_yaml::from_str(yaml).expect("workload cluster YAML should parse successfully");
 
-        assert!(!spec.has_endpoints(), "Should be workload cluster");
+        assert!(!spec.is_parent(), "Should be workload cluster");
         assert_eq!(spec.environment.as_deref(), Some("prod"));
         assert_eq!(spec.region.as_deref(), Some("us-west"));
 
-        let workload = spec.workload.unwrap();
+        let workload = spec.workload.expect("workload config should be present");
         assert_eq!(workload.services.len(), 2);
         assert_eq!(workload.services[0].name, "curl-tester");
         assert_eq!(workload.services[1].name, "simple-nginx");
@@ -518,14 +539,16 @@ workload:
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            endpoints: None,
+            parent_config: None,
             environment: Some("staging".to_string()),
             region: None,
             workload: None,
         };
 
-        let yaml = serde_yaml::to_string(&spec).unwrap();
-        let parsed: LatticeClusterSpec = serde_yaml::from_str(&yaml).unwrap();
+        let yaml =
+            serde_yaml::to_string(&spec).expect("LatticeClusterSpec serialization should succeed");
+        let parsed: LatticeClusterSpec =
+            serde_yaml::from_str(&yaml).expect("LatticeClusterSpec deserialization should succeed");
 
         assert_eq!(spec, parsed, "Spec should survive roundtrip");
     }

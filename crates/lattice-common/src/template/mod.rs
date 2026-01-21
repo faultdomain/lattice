@@ -58,7 +58,9 @@ mod tests {
             .build();
 
         assert_eq!(
-            engine.render("${metadata.name}", &ctx).unwrap(),
+            engine
+                .render("${metadata.name}", &ctx)
+                .expect("metadata.name should render successfully"),
             "my-service"
         );
     }
@@ -76,7 +78,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${metadata.annotations.version}", &ctx)
-                .unwrap(),
+                .expect("metadata.annotations.version should render successfully"),
             "1.2.3"
         );
     }
@@ -98,7 +100,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${resources.db.host}:${resources.db.port}", &ctx)
-                .unwrap(),
+                .expect("resource outputs should render successfully"),
             "postgres.svc:5432"
         );
     }
@@ -117,11 +119,15 @@ mod tests {
             .build();
 
         assert_eq!(
-            engine.render("${cluster.name}", &ctx).unwrap(),
+            engine
+                .render("${cluster.name}", &ctx)
+                .expect("cluster.name should render successfully"),
             "prod-cluster"
         );
         assert_eq!(
-            engine.render("${cluster.environment}", &ctx).unwrap(),
+            engine
+                .render("${cluster.environment}", &ctx)
+                .expect("cluster.environment should render successfully"),
             "production"
         );
     }
@@ -134,7 +140,12 @@ mod tests {
             .env("log_level", "debug")
             .build();
 
-        assert_eq!(engine.render("${env.log_level}", &ctx).unwrap(), "debug");
+        assert_eq!(
+            engine
+                .render("${env.log_level}", &ctx)
+                .expect("env.log_level should render successfully"),
+            "debug"
+        );
     }
 
     #[test]
@@ -146,7 +157,12 @@ mod tests {
             .config("replicas", "3")
             .build();
 
-        assert_eq!(engine.render("${config.version}", &ctx).unwrap(), "2.0.0");
+        assert_eq!(
+            engine
+                .render("${config.version}", &ctx)
+                .expect("config.version should render successfully"),
+            "2.0.0"
+        );
     }
 
     #[test]
@@ -158,7 +174,12 @@ mod tests {
             .build();
 
         let template = r#"{% if config.debug == "true" %}--debug{% endif %}"#;
-        assert_eq!(engine.render(template, &ctx).unwrap(), "--debug");
+        assert_eq!(
+            engine
+                .render(template, &ctx)
+                .expect("conditional block should render successfully"),
+            "--debug"
+        );
     }
 
     // =========================================================================
@@ -203,7 +224,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${config.port | default(\"3000\")}", &ctx)
-                .unwrap(),
+                .expect("default filter should render successfully"),
             "8080"
         );
     }
@@ -219,7 +240,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${config.secret | base64_encode}", &ctx)
-                .unwrap(),
+                .expect("base64_encode filter should render successfully"),
             "aGVsbG8=" // base64("hello")
         );
     }
@@ -235,7 +256,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${config.encoded | base64_decode}", &ctx)
-                .unwrap(),
+                .expect("base64_decode filter should render successfully"),
             "hello"
         );
     }
@@ -248,7 +269,10 @@ mod tests {
     fn test_static_string_accepts_plain_text() {
         let result: Result<StaticString, _> = "my-service".to_string().try_into();
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().as_str(), "my-service");
+        assert_eq!(
+            result.expect("static string should be valid").as_str(),
+            "my-service"
+        );
     }
 
     #[test]
@@ -338,13 +362,17 @@ mod tests {
 
         let template = "${cluster.registry}/api:${config.version}";
         assert_eq!(
-            engine.render(template, &ctx).unwrap(),
+            engine
+                .render(template, &ctx)
+                .expect("cluster registry template should render successfully"),
             "gcr.io/myproject/api:1.0.0"
         );
 
         let conn_template = "postgres://${resources.postgres.host}:${resources.postgres.port}/mydb";
         assert_eq!(
-            engine.render(conn_template, &ctx).unwrap(),
+            engine
+                .render(conn_template, &ctx)
+                .expect("connection template should render successfully"),
             "postgres://pg.svc:5432/mydb"
         );
     }
@@ -361,7 +389,12 @@ mod tests {
             .build();
 
         // Score spec: $${...} renders as literal ${...}
-        assert_eq!(engine.render("$${literal}", &ctx).unwrap(), "${literal}");
+        assert_eq!(
+            engine
+                .render("$${literal}", &ctx)
+                .expect("escape syntax should render successfully"),
+            "${literal}"
+        );
     }
 
     #[test]
@@ -376,7 +409,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("PORT=$${PORT:-${config.port}}", &ctx)
-                .unwrap(),
+                .expect("mixed escape and variables should render successfully"),
             "PORT=${PORT:-8080}"
         );
     }
@@ -389,8 +422,18 @@ mod tests {
             .build();
 
         // Plain $ without { passes through unchanged
-        assert_eq!(engine.render("$PATH", &ctx).unwrap(), "$PATH");
-        assert_eq!(engine.render("cost: $100", &ctx).unwrap(), "cost: $100");
+        assert_eq!(
+            engine
+                .render("$PATH", &ctx)
+                .expect("dollar without brace should pass through"),
+            "$PATH"
+        );
+        assert_eq!(
+            engine
+                .render("cost: $100", &ctx)
+                .expect("literal dollar should pass through"),
+            "cost: $100"
+        );
     }
 
     // =========================================================================
@@ -409,7 +452,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${config.missing | default(\"fallback\")}", &ctx)
-                .unwrap(),
+                .expect("default filter with undefined should render fallback"),
             "fallback"
         );
     }
@@ -425,7 +468,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${config.required_value | required}", &ctx)
-                .unwrap(),
+                .expect("required filter with defined value should pass"),
             "present"
         );
     }
@@ -453,7 +496,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${config.name | lower | default(\"unknown\")}", &ctx)
-                .unwrap(),
+                .expect("chained filters should render successfully"),
             "myservice"
         );
     }
@@ -471,7 +514,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${config.secret | base64_encode}", &ctx)
-                .unwrap(),
+                .expect("base64_encode filter should render successfully"),
             "cGFzc3dvcmQxMjM="
         );
 
@@ -479,7 +522,7 @@ mod tests {
         assert_eq!(
             engine
                 .render("${config.encoded | base64_decode}", &ctx)
-                .unwrap(),
+                .expect("base64_decode filter should render successfully"),
             "password123"
         );
     }
@@ -493,11 +536,15 @@ mod tests {
             .build();
 
         assert_eq!(
-            engine.render("${config.name | upper}", &ctx).unwrap(),
+            engine
+                .render("${config.name | upper}", &ctx)
+                .expect("upper filter should render successfully"),
             "MYSERVICENAME"
         );
         assert_eq!(
-            engine.render("${config.name | lower}", &ctx).unwrap(),
+            engine
+                .render("${config.name | lower}", &ctx)
+                .expect("lower filter should render successfully"),
             "myservicename"
         );
     }

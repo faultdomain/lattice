@@ -372,7 +372,9 @@ mod tests {
         registry.register(conn);
         registry.update_state("test-cluster", AgentState::Ready);
 
-        let agent = registry.get("test-cluster").unwrap();
+        let agent = registry
+            .get("test-cluster")
+            .expect("agent should be registered");
         assert_eq!(agent.state, AgentState::Ready);
     }
 
@@ -419,9 +421,9 @@ mod tests {
         registry
             .send_command("test-cluster", command)
             .await
-            .unwrap();
+            .expect("send_command should succeed");
 
-        let received = rx.recv().await.unwrap();
+        let received = rx.recv().await.expect("command should be received");
         assert_eq!(received.command_id, "cmd-1");
     }
 
@@ -461,7 +463,9 @@ mod tests {
         registry.update_state("workload-cluster-1", AgentState::Ready);
         registry.set_capi_ready("workload-cluster-1", true);
         {
-            let agent = registry.get("workload-cluster-1").unwrap();
+            let agent = registry
+                .get("workload-cluster-1")
+                .expect("agent should be registered");
             assert_eq!(agent.state, AgentState::Ready);
             assert!(agent.is_ready_for_pivot());
         }
@@ -474,16 +478,18 @@ mod tests {
         registry
             .send_command("workload-cluster-1", pivot_command)
             .await
-            .unwrap();
+            .expect("send_command should succeed");
 
         // Agent receives the command
-        let received = cmd_rx.recv().await.unwrap();
+        let received = cmd_rx.recv().await.expect("command should be received");
         assert_eq!(received.command_id, "pivot-001");
 
         // Act 4: Agent begins pivoting
         registry.update_state("workload-cluster-1", AgentState::Pivoting);
         {
-            let agent = registry.get("workload-cluster-1").unwrap();
+            let agent = registry
+                .get("workload-cluster-1")
+                .expect("agent should be registered");
             assert!(!agent.is_ready_for_pivot()); // Can't pivot while pivoting
         }
 
@@ -538,15 +544,24 @@ mod tests {
         // dev-local stays in Provisioning
 
         assert_eq!(
-            registry.get("prod-us-west").unwrap().state,
+            registry
+                .get("prod-us-west")
+                .expect("agent should be registered")
+                .state,
             AgentState::Ready
         );
         assert_eq!(
-            registry.get("staging-us-east").unwrap().state,
+            registry
+                .get("staging-us-east")
+                .expect("agent should be registered")
+                .state,
             AgentState::Pivoting
         );
         assert_eq!(
-            registry.get("dev-local").unwrap().state,
+            registry
+                .get("dev-local")
+                .expect("agent should be registered")
+                .state,
             AgentState::Provisioning
         );
 
@@ -560,7 +575,7 @@ mod tests {
                 },
             )
             .await
-            .unwrap();
+            .expect("send_command should succeed");
 
         registry
             .send_command(
@@ -571,13 +586,13 @@ mod tests {
                 },
             )
             .await
-            .unwrap();
+            .expect("send_command should succeed");
 
         // Each cluster receives only its command
-        let prod_cmd = rx_prod.recv().await.unwrap();
+        let prod_cmd = rx_prod.recv().await.expect("command should be received");
         assert_eq!(prod_cmd.command_id, "reconcile-prod");
 
-        let staging_cmd = rx_staging.recv().await.unwrap();
+        let staging_cmd = rx_staging.recv().await.expect("command should be received");
         assert_eq!(staging_cmd.command_id, "pivot-staging");
 
         // Sending to unknown cluster fails
@@ -668,9 +683,9 @@ mod tests {
             command: None,
         })
         .await
-        .unwrap();
+        .expect("send_command should succeed");
 
-        let received = rx.recv().await.unwrap();
+        let received = rx.recv().await.expect("command should be received");
         assert_eq!(received.command_id, "health-check");
 
         // When agent disconnects, sends fail
@@ -697,7 +712,9 @@ mod tests {
         }
 
         // Verify the update persisted
-        let agent = registry.get("mutable-cluster").unwrap();
+        let agent = registry
+            .get("mutable-cluster")
+            .expect("agent should be registered");
         assert_eq!(agent.state, AgentState::Ready);
     }
 

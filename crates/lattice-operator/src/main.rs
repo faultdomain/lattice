@@ -574,7 +574,7 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
             }
         };
 
-        let endpoints = match self_cluster.spec.endpoints.as_ref() {
+        let endpoints = match self_cluster.spec.parent_config.as_ref() {
             Some(e) => e,
             None => {
                 tracing::warn!("Self cluster has no endpoints, cannot re-register");
@@ -625,7 +625,7 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
 /// Run in controller mode - manages clusters
 ///
 /// Cell servers (gRPC + bootstrap HTTP) start automatically when needed.
-/// Cell endpoint configuration is read from the local LatticeCluster CRD's spec.endpoints.
+/// Cell endpoint configuration is read from the local LatticeCluster CRD's spec.parent_config.
 ///
 /// If this cluster has a cellRef (parent), the controller also connects as an agent
 /// to the parent cell for pivot coordination and health reporting.
@@ -647,7 +647,7 @@ async fn run_controller() -> anyhow::Result<()> {
 
     // Create cell servers (but don't start them yet - wait for LatticeCluster to get SANs)
     // The webhook is always needed for LatticeService → Deployment mutation
-    // External exposure (LoadBalancer) is configured per-cluster based on spec.endpoints
+    // External exposure (LoadBalancer) is configured per-cluster based on spec.parent_config
     // CA is loaded from Secret (or created and persisted) to survive operator restarts
     let parent_servers = Arc::new(
         ParentServers::new(ParentConfig::default(), &client)
@@ -660,12 +660,12 @@ async fn run_controller() -> anyhow::Result<()> {
     ensure_webhook_config(&client, parent_servers.ca()).await?;
 
     // Start cell servers BEFORE controllers - webhook must be ready for deployment creation
-    // This ensures TLS certificate has correct SANs (spec.endpoints.host) before serving
+    // This ensures TLS certificate has correct SANs (spec.parent_config.host) before serving
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
     {
         let manifest_generator = lattice_operator::bootstrap::DefaultManifestGenerator::new();
 
-        // Get extra SANs from LatticeCluster - MUST wait for it to exist with endpoints
+        // Get extra SANs from LatticeCluster - MUST wait for it to exist with parent_config
         // The server certificate needs the correct SANs for workload clusters to connect
         //
         // Skip waiting for:
@@ -698,7 +698,7 @@ async fn run_controller() -> anyhow::Result<()> {
                     kube::Api::all(client.clone());
                 match clusters.get(cluster_name).await {
                     Ok(cluster) => {
-                        if let Some(ref endpoints) = cluster.spec.endpoints {
+                        if let Some(ref endpoints) = cluster.spec.parent_config {
                             if let Some(ref host) = endpoints.host {
                                 tracing::info!(
                                     host = %host,
@@ -740,7 +740,7 @@ async fn run_controller() -> anyhow::Result<()> {
             loop {
                 match clusters.get(cluster_name).await {
                     Ok(cluster) => {
-                        if let Some(ref endpoints) = cluster.spec.endpoints {
+                        if let Some(ref endpoints) = cluster.spec.parent_config {
                             if let Some(ref host) = endpoints.host {
                                 tracing::info!(host = %host, "Adding cell host to server certificate SANs");
                                 break vec![host.clone()];

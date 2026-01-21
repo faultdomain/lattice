@@ -14,12 +14,11 @@ pub use external_service::{
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
 };
 pub use service::{
-    CertIssuerRef, CircuitBreakerPolicy, ContainerSpec, DependencyDirection, DeploySpec,
-    DeployStrategy, ExecProbe, FileMount, GrpcProbe, HeaderPolicy, HttpGetProbe, HttpHeader,
-    InboundTrafficPolicy, IngressPath, IngressSpec, IngressTls, LatticeService, LatticeServiceSpec,
-    LatticeServiceStatus, OutboundTrafficPolicy, PathMatchType, PortSpec, Probe, RateLimitSpec,
-    ReplicaSpec, ResourceSpec, ResourceType, RetryPolicy, ServicePhase, ServicePortsSpec,
-    TcpSocketProbe, TimeoutPolicy, TlsMode, VolumeAccessMode, VolumeMount, VolumeParams,
+    CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec, DeployStrategy, ExecProbe,
+    FileMount, GrpcProbe, HttpGetProbe, HttpHeader, IngressPath, IngressSpec, IngressTls,
+    LatticeService, LatticeServiceSpec, LatticeServiceStatus, PathMatchType, PortSpec, Probe,
+    RateLimitSpec, ReplicaSpec, ResourceSpec, ResourceType, ServicePhase, ServicePortsSpec,
+    TcpSocketProbe, TlsMode, VolumeAccessMode, VolumeMount, VolumeParams,
 };
 pub use types::{
     AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,

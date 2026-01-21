@@ -294,12 +294,14 @@ mod tests {
             .build();
 
         // Non-sensitive field
-        let (value, sensitive) = outputs.get("host").unwrap();
+        let (value, sensitive) = outputs.get("host").expect("host output should exist");
         assert_eq!(value, "db.svc");
         assert!(!sensitive);
 
         // Sensitive field
-        let (value, sensitive) = outputs.get("password").unwrap();
+        let (value, sensitive) = outputs
+            .get("password")
+            .expect("password output should exist");
         assert_eq!(value, "secret");
         assert!(sensitive);
 

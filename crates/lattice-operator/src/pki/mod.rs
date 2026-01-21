@@ -472,14 +472,15 @@ mod tests {
 
     #[test]
     fn ca_can_be_created() {
-        let ca = CertificateAuthority::new("Lattice Test CA").unwrap();
+        let ca = CertificateAuthority::new("Lattice Test CA").expect("CA creation should succeed");
         assert!(!ca.ca_cert_pem().is_empty());
         assert!(ca.ca_cert_pem().contains("BEGIN CERTIFICATE"));
     }
 
     #[test]
     fn agent_can_generate_csr() {
-        let request = AgentCertRequest::new("test-cluster-123").unwrap();
+        let request =
+            AgentCertRequest::new("test-cluster-123").expect("CSR generation should succeed");
 
         // CSR should be generated
         assert!(!request.csr_pem().is_empty());
@@ -493,11 +494,13 @@ mod tests {
     #[test]
     fn ca_can_sign_csr() {
         // Setup: CA and agent CSR
-        let ca = CertificateAuthority::new("Lattice Test CA").unwrap();
-        let request = AgentCertRequest::new("my-cluster").unwrap();
+        let ca = CertificateAuthority::new("Lattice Test CA").expect("CA creation should succeed");
+        let request = AgentCertRequest::new("my-cluster").expect("CSR generation should succeed");
 
         // Sign the CSR
-        let signed_cert = ca.sign_csr(request.csr_pem(), "my-cluster").unwrap();
+        let signed_cert = ca
+            .sign_csr(request.csr_pem(), "my-cluster")
+            .expect("CSR signing should succeed");
 
         // Should be a valid certificate
         assert!(signed_cert.contains("BEGIN CERTIFICATE"));
@@ -507,15 +510,19 @@ mod tests {
     #[test]
     fn signed_cert_can_be_verified() {
         // Setup: CA signs agent CSR
-        let ca = CertificateAuthority::new("Lattice Test CA").unwrap();
-        let request = AgentCertRequest::new("verified-cluster").unwrap();
-        let signed_cert_pem = ca.sign_csr(request.csr_pem(), "verified-cluster").unwrap();
+        let ca = CertificateAuthority::new("Lattice Test CA").expect("CA creation should succeed");
+        let request =
+            AgentCertRequest::new("verified-cluster").expect("CSR generation should succeed");
+        let signed_cert_pem = ca
+            .sign_csr(request.csr_pem(), "verified-cluster")
+            .expect("CSR signing should succeed");
 
         // Parse to DER for verification
-        let cert_der = parse_pem(&signed_cert_pem).unwrap();
+        let cert_der = parse_pem(&signed_cert_pem).expect("PEM parsing should succeed");
 
         // Verify
-        let result = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+        let result = verify_client_cert(&cert_der, ca.ca_cert_pem())
+            .expect("certificate verification should succeed");
 
         assert!(result.valid);
         assert_eq!(result.cluster_id, "verified-cluster");
@@ -525,27 +532,30 @@ mod tests {
     #[test]
     fn invalid_signature_rejected() {
         // Create two different CAs
-        let ca1 = CertificateAuthority::new("CA One").unwrap();
-        let ca2 = CertificateAuthority::new("CA Two").unwrap();
+        let ca1 = CertificateAuthority::new("CA One").expect("CA1 creation should succeed");
+        let ca2 = CertificateAuthority::new("CA Two").expect("CA2 creation should succeed");
 
         // Agent gets cert signed by CA1
-        let request = AgentCertRequest::new("cluster").unwrap();
-        let signed_cert_pem = ca1.sign_csr(request.csr_pem(), "cluster").unwrap();
+        let request = AgentCertRequest::new("cluster").expect("CSR generation should succeed");
+        let signed_cert_pem = ca1
+            .sign_csr(request.csr_pem(), "cluster")
+            .expect("CSR signing should succeed");
 
         // Try to verify with CA2 (should fail)
-        let cert_der = parse_pem(&signed_cert_pem).unwrap();
-        let result = verify_client_cert(&cert_der, ca2.ca_cert_pem()).unwrap();
+        let cert_der = parse_pem(&signed_cert_pem).expect("PEM parsing should succeed");
+        let result = verify_client_cert(&cert_der, ca2.ca_cert_pem())
+            .expect("verification call should succeed");
 
         assert!(!result.valid);
         assert!(result
             .reason
-            .unwrap()
+            .expect("reason should be set for invalid result")
             .contains("signature verification failed"));
     }
 
     #[test]
     fn invalid_csr_rejected() {
-        let ca = CertificateAuthority::new("Test CA").unwrap();
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
 
         let result = ca.sign_csr("not a valid csr", "cluster");
 
@@ -554,12 +564,16 @@ mod tests {
 
     #[test]
     fn cluster_id_extracted_from_cert() {
-        let ca = CertificateAuthority::new("Test CA").unwrap();
-        let request = AgentCertRequest::new("prod-us-west-123").unwrap();
-        let signed_cert_pem = ca.sign_csr(request.csr_pem(), "prod-us-west-123").unwrap();
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+        let request =
+            AgentCertRequest::new("prod-us-west-123").expect("CSR generation should succeed");
+        let signed_cert_pem = ca
+            .sign_csr(request.csr_pem(), "prod-us-west-123")
+            .expect("CSR signing should succeed");
 
-        let cert_der = parse_pem(&signed_cert_pem).unwrap();
-        let result = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+        let cert_der = parse_pem(&signed_cert_pem).expect("PEM parsing should succeed");
+        let result =
+            verify_client_cert(&cert_der, ca.ca_cert_pem()).expect("verification should succeed");
 
         assert!(result.valid);
         assert_eq!(result.cluster_id, "prod-us-west-123");
@@ -567,7 +581,8 @@ mod tests {
 
     #[test]
     fn private_key_never_in_csr() {
-        let request = AgentCertRequest::new("secure-cluster").unwrap();
+        let request =
+            AgentCertRequest::new("secure-cluster").expect("CSR generation should succeed");
 
         // CSR should NOT contain private key
         assert!(!request.csr_pem().contains("PRIVATE KEY"));
@@ -578,15 +593,16 @@ mod tests {
 
     #[test]
     fn ca_can_be_saved_and_loaded() {
-        let ca1 = CertificateAuthority::new("Persistent CA").unwrap();
+        let ca1 = CertificateAuthority::new("Persistent CA").expect("CA creation should succeed");
         let cert_pem = ca1.ca_cert_pem().to_string();
         let key_pem = ca1.ca_key_pem().to_string();
 
         // Load from saved PEM
-        let ca2 = CertificateAuthority::from_pem(&cert_pem, &key_pem).unwrap();
+        let ca2 =
+            CertificateAuthority::from_pem(&cert_pem, &key_pem).expect("CA loading should succeed");
 
         // Should be able to sign CSRs
-        let request = AgentCertRequest::new("test").unwrap();
+        let request = AgentCertRequest::new("test").expect("CSR generation should succeed");
         let signed = ca2.sign_csr(request.csr_pem(), "test");
         assert!(signed.is_ok());
     }
@@ -610,14 +626,16 @@ mod tests {
     fn story_complete_certificate_lifecycle() {
         // Chapter 1: Cell creates its CA during initialization
         // -----------------------------------------------------
-        let ca = CertificateAuthority::new("Lattice Production CA").unwrap();
+        let ca =
+            CertificateAuthority::new("Lattice Production CA").expect("CA creation should succeed");
         let ca_cert = ca.ca_cert_pem();
         assert!(ca_cert.contains("BEGIN CERTIFICATE"));
 
         // Chapter 2: New workload cluster needs a certificate
         // ----------------------------------------------------
         // Agent generates its own keypair - private key NEVER transmitted
-        let agent_request = AgentCertRequest::new("workload-east-1").unwrap();
+        let agent_request =
+            AgentCertRequest::new("workload-east-1").expect("agent CSR generation should succeed");
 
         // Verify the CSR doesn't leak the private key
         assert!(!agent_request.csr_pem().contains("PRIVATE KEY"));
@@ -630,14 +648,15 @@ mod tests {
         // ------------------------------
         let signed_cert = ca
             .sign_csr(agent_request.csr_pem(), "workload-east-1")
-            .unwrap();
+            .expect("CSR signing should succeed");
         assert!(signed_cert.contains("BEGIN CERTIFICATE"));
 
         // Chapter 4: Agent uses certificate for mTLS connection
         // -------------------------------------------------------
         // When agent connects, cell verifies the certificate
-        let cert_der = parse_pem(&signed_cert).unwrap();
-        let verification = verify_client_cert(&cert_der, ca_cert).unwrap();
+        let cert_der = parse_pem(&signed_cert).expect("PEM parsing should succeed");
+        let verification =
+            verify_client_cert(&cert_der, ca_cert).expect("verification call should succeed");
 
         assert!(verification.valid);
         assert_eq!(verification.cluster_id, "workload-east-1");
@@ -651,27 +670,31 @@ mod tests {
     #[test]
     fn story_cross_ca_attack_prevention() {
         // Legitimate cell CA
-        let legitimate_ca = CertificateAuthority::new("Legitimate CA").unwrap();
+        let legitimate_ca = CertificateAuthority::new("Legitimate CA")
+            .expect("legitimate CA creation should succeed");
 
         // Attacker creates their own CA
-        let attacker_ca = CertificateAuthority::new("Attacker CA").unwrap();
+        let attacker_ca =
+            CertificateAuthority::new("Attacker CA").expect("attacker CA creation should succeed");
 
         // Attacker signs their own agent's CSR
-        let evil_agent = AgentCertRequest::new("trojan-cluster").unwrap();
+        let evil_agent = AgentCertRequest::new("trojan-cluster")
+            .expect("evil agent CSR generation should succeed");
         let evil_cert = attacker_ca
             .sign_csr(evil_agent.csr_pem(), "trojan-cluster")
-            .unwrap();
+            .expect("attacker CSR signing should succeed");
 
         // Attacker tries to connect to legitimate cell
-        let cert_der = parse_pem(&evil_cert).unwrap();
-        let verification = verify_client_cert(&cert_der, legitimate_ca.ca_cert_pem()).unwrap();
+        let cert_der = parse_pem(&evil_cert).expect("PEM parsing should succeed");
+        let verification = verify_client_cert(&cert_der, legitimate_ca.ca_cert_pem())
+            .expect("verification call should succeed");
 
         // Attack detected and blocked!
         assert!(!verification.valid);
         assert!(verification
             .reason
             .as_ref()
-            .unwrap()
+            .expect("reason should be set for invalid result")
             .contains("signature verification failed"));
     }
 
@@ -682,17 +705,20 @@ mod tests {
     /// identity it was issued for.
     #[test]
     fn story_cluster_identity_binding() {
-        let ca = CertificateAuthority::new("Identity CA").unwrap();
+        let ca = CertificateAuthority::new("Identity CA").expect("CA creation should succeed");
 
         // Sign certificates for different clusters
         let clusters = ["prod-us-west", "staging-eu-central", "dev-local"];
 
         for cluster_id in clusters {
-            let request = AgentCertRequest::new(cluster_id).unwrap();
-            let signed_cert = ca.sign_csr(request.csr_pem(), cluster_id).unwrap();
+            let request = AgentCertRequest::new(cluster_id).expect("CSR generation should succeed");
+            let signed_cert = ca
+                .sign_csr(request.csr_pem(), cluster_id)
+                .expect("CSR signing should succeed");
 
-            let cert_der = parse_pem(&signed_cert).unwrap();
-            let verification = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+            let cert_der = parse_pem(&signed_cert).expect("PEM parsing should succeed");
+            let verification = verify_client_cert(&cert_der, ca.ca_cert_pem())
+                .expect("verification should succeed");
 
             // Each certificate is bound to its specific cluster ID
             assert!(verification.valid);
@@ -707,26 +733,31 @@ mod tests {
     #[test]
     fn story_ca_persistence_and_recovery() {
         // Initial setup: Create CA and issue a certificate
-        let original_ca = CertificateAuthority::new("Persistent CA").unwrap();
-        let agent_request = AgentCertRequest::new("long-lived-cluster").unwrap();
+        let original_ca =
+            CertificateAuthority::new("Persistent CA").expect("CA creation should succeed");
+        let agent_request =
+            AgentCertRequest::new("long-lived-cluster").expect("CSR generation should succeed");
         let original_cert = original_ca
             .sign_csr(agent_request.csr_pem(), "long-lived-cluster")
-            .unwrap();
+            .expect("CSR signing should succeed");
 
         // Simulate disaster: Save CA state
         let saved_cert_pem = original_ca.ca_cert_pem().to_string();
         let saved_key_pem = original_ca.ca_key_pem().to_string();
 
         // Recovery: Restore CA from saved state
-        let restored_ca = CertificateAuthority::from_pem(&saved_cert_pem, &saved_key_pem).unwrap();
+        let restored_ca = CertificateAuthority::from_pem(&saved_cert_pem, &saved_key_pem)
+            .expect("CA restoration should succeed");
 
         // Restored CA can verify certificates issued by original
-        let cert_der = parse_pem(&original_cert).unwrap();
-        let verification = verify_client_cert(&cert_der, restored_ca.ca_cert_pem()).unwrap();
+        let cert_der = parse_pem(&original_cert).expect("PEM parsing should succeed");
+        let verification = verify_client_cert(&cert_der, restored_ca.ca_cert_pem())
+            .expect("verification should succeed");
         assert!(verification.valid);
 
         // Restored CA can issue new certificates
-        let new_agent = AgentCertRequest::new("new-cluster").unwrap();
+        let new_agent =
+            AgentCertRequest::new("new-cluster").expect("new agent CSR generation should succeed");
         let new_cert = restored_ca.sign_csr(new_agent.csr_pem(), "new-cluster");
         assert!(new_cert.is_ok());
     }
@@ -737,7 +768,7 @@ mod tests {
     /// is handled gracefully with a descriptive message.
     #[test]
     fn story_malformed_csr_rejection() {
-        let ca = CertificateAuthority::new("Strict CA").unwrap();
+        let ca = CertificateAuthority::new("Strict CA").expect("CA creation should succeed");
 
         // Various forms of invalid CSR data
         let invalid_inputs = [
@@ -765,7 +796,7 @@ mod tests {
     /// errors are caught before any certificates can be issued.
     #[test]
     fn story_corrupted_ca_detection() {
-        let good_ca = CertificateAuthority::new("Good CA").unwrap();
+        let good_ca = CertificateAuthority::new("Good CA").expect("CA creation should succeed");
 
         // Corrupted key
         let result = CertificateAuthority::from_pem(good_ca.ca_cert_pem(), "invalid key pem");
@@ -814,7 +845,7 @@ mod tests {
     /// Test parsing invalid certificate DER data
     #[test]
     fn test_verify_invalid_cert_data() {
-        let ca = CertificateAuthority::new("Test CA").unwrap();
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
 
         // Invalid DER data
         let invalid_der = b"not valid DER data";
@@ -832,12 +863,14 @@ mod tests {
     /// Test verify_client_cert with invalid CA certificate
     #[test]
     fn test_verify_with_invalid_ca() {
-        let ca = CertificateAuthority::new("Test CA").unwrap();
-        let request = AgentCertRequest::new("test").unwrap();
-        let signed_cert = ca.sign_csr(request.csr_pem(), "test").unwrap();
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+        let request = AgentCertRequest::new("test").expect("CSR generation should succeed");
+        let signed_cert = ca
+            .sign_csr(request.csr_pem(), "test")
+            .expect("CSR signing should succeed");
 
         // Try to verify with invalid CA PEM
-        let cert_der = parse_pem(&signed_cert).unwrap();
+        let cert_der = parse_pem(&signed_cert).expect("PEM parsing should succeed");
         let result = verify_client_cert(&cert_der, "not valid PEM");
 
         assert!(result.is_err());
@@ -860,7 +893,10 @@ mod tests {
             reason: Some("test reason".to_string()),
         };
         assert!(!invalid_result.valid);
-        assert_eq!(invalid_result.reason.unwrap(), "test reason");
+        assert_eq!(
+            invalid_result.reason.expect("reason should be set"),
+            "test reason"
+        );
     }
 
     /// Test VerificationResult debug and clone
@@ -886,21 +922,24 @@ mod tests {
     #[test]
     fn test_invalid_cn_format_rejected() {
         // Create a CA and generate a cert with a non-standard CN
-        let ca = CertificateAuthority::new("Test CA").unwrap();
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
 
         // Generate a server cert (which has CN "Lattice Server", not "lattice-agent-...")
-        let (server_cert_pem, _) = ca.generate_server_cert(&["localhost"]).unwrap();
-        let cert_der = parse_pem(&server_cert_pem).unwrap();
+        let (server_cert_pem, _) = ca
+            .generate_server_cert(&["localhost"])
+            .expect("server cert generation should succeed");
+        let cert_der = parse_pem(&server_cert_pem).expect("PEM parsing should succeed");
 
         // Try to verify it as a client cert - should fail due to CN format
-        let result = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+        let result = verify_client_cert(&cert_der, ca.ca_cert_pem())
+            .expect("verification call should succeed");
 
         assert!(!result.valid);
         assert!(result.cluster_id.is_empty());
         assert!(result
             .reason
             .as_ref()
-            .unwrap()
+            .expect("reason should be set for invalid result")
             .contains("invalid CN format"));
     }
 
@@ -913,13 +952,17 @@ mod tests {
         // For this test, we'll create a normal cert and check the validation logic
         // by verifying the code path exists
 
-        let ca = CertificateAuthority::new("Test CA").unwrap();
-        let request = AgentCertRequest::new("future-cluster").unwrap();
-        let signed_cert_pem = ca.sign_csr(request.csr_pem(), "future-cluster").unwrap();
-        let cert_der = parse_pem(&signed_cert_pem).unwrap();
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+        let request =
+            AgentCertRequest::new("future-cluster").expect("CSR generation should succeed");
+        let signed_cert_pem = ca
+            .sign_csr(request.csr_pem(), "future-cluster")
+            .expect("CSR signing should succeed");
+        let cert_der = parse_pem(&signed_cert_pem).expect("PEM parsing should succeed");
 
         // Parse to verify the notBefore check logic is reachable
-        let (_, cert) = X509Certificate::from_der(&cert_der).unwrap();
+        let (_, cert) =
+            X509Certificate::from_der(&cert_der).expect("X509 DER parsing should succeed");
         let not_before = cert.validity().not_before.timestamp();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -934,7 +977,8 @@ mod tests {
         );
 
         // Verify normal path works
-        let result = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+        let result =
+            verify_client_cert(&cert_der, ca.ca_cert_pem()).expect("verification should succeed");
         assert!(result.valid);
     }
 
@@ -943,13 +987,17 @@ mod tests {
     fn test_certificate_expiration_check() {
         use x509_parser::prelude::*;
 
-        let ca = CertificateAuthority::new("Test CA").unwrap();
-        let request = AgentCertRequest::new("expiry-cluster").unwrap();
-        let signed_cert_pem = ca.sign_csr(request.csr_pem(), "expiry-cluster").unwrap();
-        let cert_der = parse_pem(&signed_cert_pem).unwrap();
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+        let request =
+            AgentCertRequest::new("expiry-cluster").expect("CSR generation should succeed");
+        let signed_cert_pem = ca
+            .sign_csr(request.csr_pem(), "expiry-cluster")
+            .expect("CSR signing should succeed");
+        let cert_der = parse_pem(&signed_cert_pem).expect("PEM parsing should succeed");
 
         // Parse to verify the notAfter check logic is reachable
-        let (_, cert) = X509Certificate::from_der(&cert_der).unwrap();
+        let (_, cert) =
+            X509Certificate::from_der(&cert_der).expect("X509 DER parsing should succeed");
         let not_before = cert.validity().not_before.timestamp();
         let not_after = cert.validity().not_after.timestamp();
         let now = std::time::SystemTime::now()
@@ -971,7 +1019,8 @@ mod tests {
         assert!(now < not_after, "cert notAfter should be in the future");
 
         // Verify normal path works
-        let result = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+        let result =
+            verify_client_cert(&cert_der, ca.ca_cert_pem()).expect("verification should succeed");
         assert!(result.valid);
     }
 
@@ -980,9 +1029,10 @@ mod tests {
     fn test_ca_certificate_validity_period() {
         use x509_parser::prelude::*;
 
-        let ca = CertificateAuthority::new("Test CA").unwrap();
-        let cert_der = parse_pem(ca.ca_cert_pem()).unwrap();
-        let (_, cert) = X509Certificate::from_der(&cert_der).unwrap();
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+        let cert_der = parse_pem(ca.ca_cert_pem()).expect("CA PEM parsing should succeed");
+        let (_, cert) =
+            X509Certificate::from_der(&cert_der).expect("X509 DER parsing should succeed");
 
         let not_before = cert.validity().not_before.timestamp();
         let not_after = cert.validity().not_after.timestamp();

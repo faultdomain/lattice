@@ -113,11 +113,12 @@ mod tests {
             ..Default::default()
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
+        let yaml = serde_yaml::to_string(&config).expect("AwsConfig serialization should succeed");
         assert!(yaml.contains("region: us-west-2"));
         assert!(yaml.contains("cpInstanceType: m5.xlarge"));
 
-        let parsed: AwsConfig = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: AwsConfig =
+            serde_yaml::from_str(&yaml).expect("AwsConfig deserialization should succeed");
         assert_eq!(parsed, config);
     }
 
@@ -129,7 +130,8 @@ cpInstanceType: m5.xlarge
 workerInstanceType: m5.large
 sshKeyName: default
 "#;
-        let config: AwsConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: AwsConfig =
+            serde_yaml::from_str(yaml).expect("minimal AwsConfig deserialization should succeed");
         assert_eq!(config.region, "us-east-1");
         assert_eq!(config.cp_instance_type, "m5.xlarge");
         assert!(config.vpc_id.is_none());
@@ -153,7 +155,8 @@ cpRootVolumeSizeGb: 100
 cpRootVolumeType: gp3
 workerRootVolumeSizeGb: 200
 "#;
-        let config: AwsConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: AwsConfig =
+            serde_yaml::from_str(yaml).expect("full AwsConfig deserialization should succeed");
         assert_eq!(config.vpc_id, Some("vpc-12345".to_string()));
         assert_eq!(config.cp_root_volume_size_gb, Some(100));
         assert_eq!(config.load_balancer_type, Some("nlb".to_string()));

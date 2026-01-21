@@ -24,24 +24,6 @@ use serde::{Deserialize, Serialize};
 use super::types::Condition;
 use crate::template::TemplateString;
 
-/// Generate a schema for arbitrary JSON objects
-///
-/// This is used for fields like `params` that can contain any JSON structure.
-/// Kubernetes requires a type to be specified, so we use "object" with
-/// x-kubernetes-preserve-unknown-fields to allow arbitrary content.
-fn arbitrary_json_object(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-    schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-        instance_type: Some(schemars::schema::InstanceType::Object.into()),
-        extensions: [(
-            "x-kubernetes-preserve-unknown-fields".to_string(),
-            true.into(),
-        )]
-        .into_iter()
-        .collect(),
-        ..Default::default()
-    })
-}
-
 /// Direction of a service dependency
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -112,27 +94,12 @@ pub struct ResourceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ResourceMetadata>,
 
-    /// Resource-specific parameters (Score-compatible, currently unused)
+    /// Volume-specific configuration (only valid when type is "volume")
     ///
-    /// Reserved for future use with external provisioners. The Score spec allows
-    /// arbitrary parameters here for resource-specific configuration.
+    /// Sets storage size, class, and access mode for volume resources.
+    /// Presence of `size` determines ownership (creates PVC vs references shared PVC).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "arbitrary_json_object")]
-    pub params: Option<serde_json::Value>,
-
-    /// Outbound traffic policy (caller-side L7 configuration)
-    ///
-    /// Applied when this service calls the target. Configures retries, timeouts,
-    /// and circuit breakers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outbound: Option<OutboundTrafficPolicy>,
-
-    /// Inbound traffic policy (callee-side L7 configuration)
-    ///
-    /// Applied when the target calls this service. Configures rate limits and
-    /// header manipulation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inbound: Option<InboundTrafficPolicy>,
+    pub volume: Option<VolumeParams>,
 }
 
 // =============================================================================
@@ -145,14 +112,14 @@ pub struct ResourceSpec {
 /// - With `size`: This service OWNS the volume (creates the PVC)
 /// - Without `size`: This service REFERENCES a shared volume
 ///
-/// For shared volumes, use the `id` field on ResourceSpec (Score-native):
+/// For shared volumes, use the `id` field on ResourceSpec:
 /// ```yaml
 /// # Owner (has size)
 /// resources:
 ///   downloads:
 ///     type: volume
 ///     id: media-downloads
-///     params:
+///     volume:
 ///       size: 500Gi
 ///
 /// # Reference (no size)
@@ -191,16 +158,13 @@ pub enum VolumeAccessMode {
 }
 
 impl ResourceSpec {
-    /// Parse params as VolumeParams if this is a volume resource
+    /// Get volume params if this is a volume resource
     pub fn volume_params(&self) -> Option<VolumeParams> {
         if self.type_ != ResourceType::Volume {
             return None;
         }
-        // If no params, return default (empty) VolumeParams
-        match &self.params {
-            Some(p) => serde_json::from_value(p.clone()).ok(),
-            None => Some(VolumeParams::default()),
-        }
+        // Return the volume params or default if not specified
+        Some(self.volume.clone().unwrap_or_default())
     }
 
     /// Returns true if this is a volume resource that owns (creates) the PVC
@@ -236,126 +200,6 @@ impl ResourceSpec {
             None => format!("{}-{}", service_name, resource_name),
         })
     }
-}
-
-// =============================================================================
-// L7 Traffic Policies
-// =============================================================================
-
-/// Outbound traffic policy for caller-side L7 configuration
-///
-/// These policies are applied when this service makes outbound calls to the
-/// target service.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct OutboundTrafficPolicy {
-    /// Retry policy for failed requests
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retries: Option<RetryPolicy>,
-
-    /// Request timeout
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<TimeoutPolicy>,
-
-    /// Circuit breaker configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub circuit_breaker: Option<CircuitBreakerPolicy>,
-}
-
-/// Inbound traffic policy for callee-side L7 configuration
-///
-/// These policies are applied when receiving traffic from the specified caller.
-/// For Istio Ambient waypoints, these are enforced on the target service's waypoint.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct InboundTrafficPolicy {
-    /// Rate limiting for this specific caller
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limit: Option<RateLimitSpec>,
-
-    /// Header manipulation rules
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub headers: Option<HeaderPolicy>,
-
-    /// Timeout policy for requests from this caller
-    /// Applied on the waypoint HTTPRoute (Gateway API native)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<TimeoutPolicy>,
-
-    /// Retry policy for requests from this caller
-    /// Applied on the waypoint HTTPRoute (Gateway API native)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retries: Option<RetryPolicy>,
-}
-
-/// Retry policy for failed requests
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RetryPolicy {
-    /// Maximum number of retry attempts
-    pub attempts: u32,
-
-    /// Per-try timeout (e.g., "5s", "500ms")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub per_try_timeout: Option<String>,
-
-    /// Retry on specific conditions (e.g., "5xx", "reset", "connect-failure")
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub retry_on: Vec<String>,
-}
-
-/// Timeout policy for requests
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TimeoutPolicy {
-    /// Request timeout (e.g., "30s", "1m")
-    pub request: String,
-
-    /// Idle timeout for long-lived connections (e.g., "5m")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idle: Option<String>,
-}
-
-/// Circuit breaker configuration
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CircuitBreakerPolicy {
-    /// Maximum number of pending requests
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_pending_requests: Option<u32>,
-
-    /// Maximum number of concurrent requests
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_requests: Option<u32>,
-
-    /// Maximum number of concurrent retries
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_retries: Option<u32>,
-
-    /// Consecutive 5xx errors before ejection
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consecutive_5xx_errors: Option<u32>,
-
-    /// Base ejection time (e.g., "30s")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_ejection_time: Option<String>,
-
-    /// Maximum ejection percentage (0-100)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_ejection_percent: Option<u32>,
-}
-
-/// Header manipulation policy
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct HeaderPolicy {
-    /// Headers to add to requests
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub add: BTreeMap<String, String>,
-
-    /// Headers to remove from requests
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub remove: Vec<String>,
 }
 
 /// Container resource limits and requests
@@ -779,7 +623,6 @@ pub struct CertIssuerRef {
 
 /// Service lifecycle phase
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-
 pub enum ServicePhase {
     /// Service is waiting for configuration
     #[default]
@@ -1324,9 +1167,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
-                outbound: None,
-                inbound: None,
+                volume: None,
             },
         );
         resources.insert(
@@ -1337,9 +1178,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
-                outbound: None,
-                inbound: None,
+                volume: None,
             },
         );
 
@@ -1364,9 +1203,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
-                outbound: None,
-                inbound: None,
+                volume: None,
             },
         );
         resources.insert(
@@ -1377,9 +1214,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
-                outbound: None,
-                inbound: None,
+                volume: None,
             },
         );
 
@@ -1404,9 +1239,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
-                outbound: None,
-                inbound: None,
+                volume: None,
             },
         );
 
@@ -1430,9 +1263,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
-                outbound: None,
-                inbound: None,
+                volume: None,
             },
         );
         resources.insert(
@@ -1443,9 +1274,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
-                outbound: None,
-                inbound: None,
+                volume: None,
             },
         );
 
@@ -1525,7 +1354,8 @@ replicas:
   min: 1
   max: 3
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("simple service YAML should parse successfully");
 
         assert_eq!(spec.containers.len(), 1);
         assert_eq!(spec.containers["main"].image, "nginx:latest");
@@ -1561,7 +1391,8 @@ service:
     http:
       port: 8080
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml)
+            .expect("service with dependencies YAML should parse successfully");
 
         // Check dependencies
         let deps = spec.dependencies();
@@ -1599,10 +1430,11 @@ deploy:
     maxWeight: 50
     stepWeight: 10
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("canary deployment YAML should parse successfully");
 
         assert_eq!(spec.deploy.strategy, DeployStrategy::Canary);
-        let canary = spec.deploy.canary.unwrap();
+        let canary = spec.deploy.canary.expect("canary config should be present");
         assert_eq!(canary.interval, Some("1m".to_string()));
         assert_eq!(canary.threshold, Some(5));
         assert_eq!(canary.max_weight, Some(50));
@@ -1613,8 +1445,10 @@ deploy:
     #[test]
     fn story_spec_survives_yaml_roundtrip() {
         let spec = sample_service_spec();
-        let yaml = serde_yaml::to_string(&spec).unwrap();
-        let parsed: LatticeServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+        let yaml =
+            serde_yaml::to_string(&spec).expect("LatticeServiceSpec serialization should succeed");
+        let parsed: LatticeServiceSpec =
+            serde_yaml::from_str(&yaml).expect("LatticeServiceSpec deserialization should succeed");
         assert_eq!(spec, parsed);
     }
 
@@ -1848,7 +1682,8 @@ containers:
       DB_PORT: "${resources.postgres.port}"
       STATIC: "plain-value"
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("template variables YAML should parse successfully");
         let vars = &spec.containers["main"].variables;
 
         assert!(vars["DB_HOST"].has_placeholders());
@@ -1871,10 +1706,15 @@ containers:
             host: ${resources.db.host}
             port: ${resources.db.port}
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("file content YAML should parse successfully");
         let file = &spec.containers["main"].files["/etc/config.yaml"];
 
-        assert!(file.content.as_ref().unwrap().has_placeholders());
+        assert!(file
+            .content
+            .as_ref()
+            .expect("file content should be present")
+            .has_placeholders());
     }
 
     /// Story: Volume source supports Score placeholders
@@ -1889,7 +1729,8 @@ containers:
       /data:
         source: "${resources.volume.name}"
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("volume source YAML should parse successfully");
         let volume = &spec.containers["main"].volumes["/data"];
 
         assert!(volume.source.has_placeholders());
@@ -1917,8 +1758,12 @@ containers:
       successThreshold: 1
       failureThreshold: 3
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let probe = spec.containers["main"].liveness_probe.as_ref().unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("probe timing YAML should parse successfully");
+        let probe = spec.containers["main"]
+            .liveness_probe
+            .as_ref()
+            .expect("liveness probe should be present");
 
         assert_eq!(probe.initial_delay_seconds, Some(30));
         assert_eq!(probe.period_seconds, Some(10));
@@ -1926,7 +1771,10 @@ containers:
         assert_eq!(probe.success_threshold, Some(1));
         assert_eq!(probe.failure_threshold, Some(3));
 
-        let http = probe.http_get.as_ref().unwrap();
+        let http = probe
+            .http_get
+            .as_ref()
+            .expect("HTTP probe should be configured");
         assert_eq!(http.path, "/healthz");
         assert_eq!(http.port, 8080);
     }
@@ -1944,10 +1792,17 @@ containers:
         port: 6379
       periodSeconds: 5
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let probe = spec.containers["main"].readiness_probe.as_ref().unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("TCP probe YAML should parse successfully");
+        let probe = spec.containers["main"]
+            .readiness_probe
+            .as_ref()
+            .expect("readiness probe should be present");
 
-        let tcp = probe.tcp_socket.as_ref().unwrap();
+        let tcp = probe
+            .tcp_socket
+            .as_ref()
+            .expect("TCP socket probe should be configured");
         assert_eq!(tcp.port, 6379);
         assert_eq!(probe.period_seconds, Some(5));
     }
@@ -1966,10 +1821,17 @@ containers:
         service: my.health.Service
       initialDelaySeconds: 10
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let probe = spec.containers["main"].liveness_probe.as_ref().unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("gRPC probe YAML should parse successfully");
+        let probe = spec.containers["main"]
+            .liveness_probe
+            .as_ref()
+            .expect("liveness probe should be present");
 
-        let grpc = probe.grpc.as_ref().unwrap();
+        let grpc = probe
+            .grpc
+            .as_ref()
+            .expect("gRPC probe should be configured");
         assert_eq!(grpc.port, 50051);
         assert_eq!(grpc.service, Some("my.health.Service".to_string()));
         assert_eq!(probe.initial_delay_seconds, Some(10));
@@ -1990,10 +1852,17 @@ containers:
       failureThreshold: 30
       periodSeconds: 10
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let probe = spec.containers["main"].startup_probe.as_ref().unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("startup probe YAML should parse successfully");
+        let probe = spec.containers["main"]
+            .startup_probe
+            .as_ref()
+            .expect("startup probe should be present");
 
-        let http = probe.http_get.as_ref().unwrap();
+        let http = probe
+            .http_get
+            .as_ref()
+            .expect("HTTP startup probe should be configured");
         assert_eq!(http.path, "/ready");
         assert_eq!(probe.failure_threshold, Some(30));
         assert_eq!(probe.period_seconds, Some(10));
@@ -2014,10 +1883,17 @@ containers:
           - /tmp/healthy
       periodSeconds: 5
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let probe = spec.containers["main"].liveness_probe.as_ref().unwrap();
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("exec probe YAML should parse successfully");
+        let probe = spec.containers["main"]
+            .liveness_probe
+            .as_ref()
+            .expect("liveness probe should be present");
 
-        let exec = probe.exec.as_ref().unwrap();
+        let exec = probe
+            .exec
+            .as_ref()
+            .expect("exec probe should be configured");
         assert_eq!(exec.command, vec!["cat", "/tmp/healthy"]);
     }
 
@@ -2030,232 +1906,10 @@ containers:
   main:
     image: "."
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml)
+            .expect("image dot placeholder YAML should parse successfully");
         assert_eq!(spec.containers["main"].image, ".");
         assert!(spec.validate().is_ok());
-    }
-
-    // =========================================================================
-    // L7 Traffic Policy Tests
-    // =========================================================================
-
-    /// Story: Service configures outbound traffic policies
-    #[test]
-    fn test_outbound_traffic_policy() {
-        let yaml = r#"
-environment: test
-containers:
-  main:
-    image: app:latest
-resources:
-  backend:
-    type: service
-    direction: outbound
-    outbound:
-      retries:
-        attempts: 3
-        perTryTimeout: "5s"
-        retryOn:
-          - "5xx"
-          - "reset"
-      timeout:
-        request: "30s"
-        idle: "5m"
-      circuitBreaker:
-        maxPendingRequests: 100
-        maxRequests: 1000
-        consecutive5xxErrors: 5
-        baseEjectionTime: "30s"
-"#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let resource = &spec.resources["backend"];
-
-        let outbound = resource.outbound.as_ref().unwrap();
-
-        // Check retries
-        let retries = outbound.retries.as_ref().unwrap();
-        assert_eq!(retries.attempts, 3);
-        assert_eq!(retries.per_try_timeout, Some("5s".to_string()));
-        assert_eq!(retries.retry_on, vec!["5xx", "reset"]);
-
-        // Check timeout
-        let timeout = outbound.timeout.as_ref().unwrap();
-        assert_eq!(timeout.request, "30s");
-        assert_eq!(timeout.idle, Some("5m".to_string()));
-
-        // Check circuit breaker
-        let cb = outbound.circuit_breaker.as_ref().unwrap();
-        assert_eq!(cb.max_pending_requests, Some(100));
-        assert_eq!(cb.max_requests, Some(1000));
-        assert_eq!(cb.consecutive_5xx_errors, Some(5));
-        assert_eq!(cb.base_ejection_time, Some("30s".to_string()));
-    }
-
-    /// Story: Service configures inbound traffic policies for callers
-    #[test]
-    fn test_inbound_traffic_policy() {
-        let yaml = r#"
-environment: test
-containers:
-  main:
-    image: app:latest
-resources:
-  frontend:
-    type: service
-    direction: inbound
-    inbound:
-      rateLimit:
-        requestsPerInterval: 100
-        intervalSeconds: 60
-        burst: 150
-      headers:
-        add:
-          X-Request-ID: "${request.id}"
-          X-Caller: "frontend"
-        remove:
-          - "X-Internal-Header"
-"#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let resource = &spec.resources["frontend"];
-
-        let inbound = resource.inbound.as_ref().unwrap();
-
-        // Check rate limit
-        let rate_limit = inbound.rate_limit.as_ref().unwrap();
-        assert_eq!(rate_limit.requests_per_interval, 100);
-        assert_eq!(rate_limit.interval_seconds, 60);
-        assert_eq!(rate_limit.burst, Some(150));
-
-        // Check headers
-        let headers = inbound.headers.as_ref().unwrap();
-        assert_eq!(headers.add.get("X-Caller"), Some(&"frontend".to_string()));
-        assert_eq!(headers.remove, vec!["X-Internal-Header"]);
-    }
-
-    /// Story: Bidirectional service with both inbound and outbound policies
-    #[test]
-    fn test_bidirectional_traffic_policies() {
-        let yaml = r#"
-environment: test
-containers:
-  main:
-    image: app:latest
-resources:
-  cache:
-    type: service
-    direction: both
-    outbound:
-      timeout:
-        request: "100ms"
-    inbound:
-      rateLimit:
-        requestsPerInterval: 1000
-"#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let resource = &spec.resources["cache"];
-
-        // Check outbound policy
-        let outbound = resource.outbound.as_ref().unwrap();
-        assert_eq!(outbound.timeout.as_ref().unwrap().request, "100ms");
-
-        // Check inbound policy
-        let inbound = resource.inbound.as_ref().unwrap();
-        assert_eq!(
-            inbound.rate_limit.as_ref().unwrap().requests_per_interval,
-            1000
-        );
-    }
-
-    /// Story: Minimal retry policy with just attempts
-    #[test]
-    fn test_minimal_retry_policy() {
-        let yaml = r#"
-environment: test
-containers:
-  main:
-    image: app:latest
-resources:
-  backend:
-    type: service
-    direction: outbound
-    outbound:
-      retries:
-        attempts: 2
-"#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let resource = &spec.resources["backend"];
-
-        let retries = resource
-            .outbound
-            .as_ref()
-            .unwrap()
-            .retries
-            .as_ref()
-            .unwrap();
-        assert_eq!(retries.attempts, 2);
-        assert!(retries.per_try_timeout.is_none());
-        assert!(retries.retry_on.is_empty());
-    }
-
-    /// Story: Circuit breaker with outlier detection
-    #[test]
-    fn test_circuit_breaker_outlier_detection() {
-        let yaml = r#"
-environment: test
-containers:
-  main:
-    image: app:latest
-resources:
-  database:
-    type: service
-    direction: outbound
-    outbound:
-      circuitBreaker:
-        consecutive5xxErrors: 10
-        baseEjectionTime: "1m"
-        maxEjectionPercent: 50
-"#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let resource = &spec.resources["database"];
-
-        let cb = resource
-            .outbound
-            .as_ref()
-            .unwrap()
-            .circuit_breaker
-            .as_ref()
-            .unwrap();
-        assert_eq!(cb.consecutive_5xx_errors, Some(10));
-        assert_eq!(cb.base_ejection_time, Some("1m".to_string()));
-        assert_eq!(cb.max_ejection_percent, Some(50));
-    }
-
-    /// Story: Header manipulation without rate limiting
-    #[test]
-    fn test_header_only_policy() {
-        let yaml = r#"
-environment: test
-containers:
-  main:
-    image: app:latest
-resources:
-  api:
-    type: service
-    direction: inbound
-    inbound:
-      headers:
-        add:
-          X-Environment: "production"
-"#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
-        let resource = &spec.resources["api"];
-
-        let headers = resource.inbound.as_ref().unwrap().headers.as_ref().unwrap();
-        assert_eq!(
-            headers.add.get("X-Environment"),
-            Some(&"production".to_string())
-        );
-        assert!(resource.inbound.as_ref().unwrap().rate_limit.is_none());
     }
 
     // =========================================================================
@@ -2272,9 +1926,11 @@ resources:
                 id: Some(id.to_string()),
                 class: None,
                 metadata: None,
-                params: Some(serde_json::json!({ "size": size })),
-                outbound: None,
-                inbound: None,
+                volume: Some(VolumeParams {
+                    size: Some(size.to_string()),
+                    storage_class: None,
+                    access_mode: None,
+                }),
             },
         );
         spec
@@ -2290,9 +1946,7 @@ resources:
                 id: Some(id.to_string()),
                 class: None,
                 metadata: None,
-                params: None, // No params = reference
-                outbound: None,
-                inbound: None,
+                volume: None, // No volume config = reference
             },
         );
         spec

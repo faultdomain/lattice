@@ -506,7 +506,9 @@ impl DistributableResources {
 /// during pivot and via periodic sync. Use cases:
 /// - Secrets: provider credentials, ESO vault creds, registry pull secrets
 /// - ConfigMaps: feature flags, environment config, operator settings
-pub async fn fetch_distributable_resources(client: &Client) -> Result<DistributableResources, PivotError> {
+pub async fn fetch_distributable_resources(
+    client: &Client,
+) -> Result<DistributableResources, PivotError> {
     use k8s_openapi::api::core::v1::ConfigMap;
     use kube::api::ListParams;
 
@@ -538,12 +540,23 @@ pub async fn fetch_distributable_resources(client: &Client) -> Result<Distributa
         configmaps.push(yaml);
     }
 
-    debug!(secrets = secrets.len(), configmaps = configmaps.len(), "fetched distributable resources");
-    Ok(DistributableResources { secrets, configmaps })
+    debug!(
+        secrets = secrets.len(),
+        configmaps = configmaps.len(),
+        "fetched distributable resources"
+    );
+    Ok(DistributableResources {
+        secrets,
+        configmaps,
+    })
 }
 
 /// Serialize a Kubernetes resource for distribution, stripping cluster-specific metadata
-fn serialize_for_distribution<T: serde::Serialize + Clone + k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>>(
+fn serialize_for_distribution<
+    T: serde::Serialize
+        + Clone
+        + k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>,
+>(
     resource: &T,
 ) -> Result<Vec<u8>, PivotError> {
     let mut clean = resource.clone();
@@ -562,7 +575,9 @@ fn serialize_for_distribution<T: serde::Serialize + Clone + k8s_openapi::Metadat
 ///
 /// During pivot and periodic sync, parent clusters send resources labeled
 /// `lattice.io/distribute: "true"` to child clusters.
-pub async fn apply_distributed_resources(resources: &DistributableResources) -> Result<(), PivotError> {
+pub async fn apply_distributed_resources(
+    resources: &DistributableResources,
+) -> Result<(), PivotError> {
     use k8s_openapi::api::core::v1::ConfigMap;
     use kube::api::{Patch, PatchParams};
 
@@ -583,10 +598,14 @@ pub async fn apply_distributed_resources(resources: &DistributableResources) -> 
         let secret: Secret = serde_yaml::from_str(&yaml_str)
             .map_err(|e| PivotError::Internal(format!("failed to parse secret YAML: {}", e)))?;
 
-        let name = secret.metadata.name.as_ref()
+        let name = secret
+            .metadata
+            .name
+            .as_ref()
             .ok_or_else(|| PivotError::Internal("secret has no name".to_string()))?;
 
-        secret_api.patch(name, &params, &Patch::Apply(&secret))
+        secret_api
+            .patch(name, &params, &Patch::Apply(&secret))
             .await
             .map_err(|e| PivotError::Internal(format!("failed to apply secret {}: {}", name, e)))?;
 
@@ -600,12 +619,18 @@ pub async fn apply_distributed_resources(resources: &DistributableResources) -> 
         let cm: ConfigMap = serde_yaml::from_str(&yaml_str)
             .map_err(|e| PivotError::Internal(format!("failed to parse configmap YAML: {}", e)))?;
 
-        let name = cm.metadata.name.as_ref()
+        let name = cm
+            .metadata
+            .name
+            .as_ref()
             .ok_or_else(|| PivotError::Internal("configmap has no name".to_string()))?;
 
-        cm_api.patch(name, &params, &Patch::Apply(&cm))
+        cm_api
+            .patch(name, &params, &Patch::Apply(&cm))
             .await
-            .map_err(|e| PivotError::Internal(format!("failed to apply configmap {}: {}", name, e)))?;
+            .map_err(|e| {
+                PivotError::Internal(format!("failed to apply configmap {}: {}", name, e))
+            })?;
 
         info!(configmap = %name, "Applied distributed configmap");
     }
@@ -685,7 +710,10 @@ mod tests {
         where
             F: Fn(&str, &str) -> Result<CommandOutput, PivotError> + Send + Sync + 'static,
         {
-            *self.list_fn.lock().unwrap() = Some(Box::new(f));
+            *self
+                .list_fn
+                .lock()
+                .expect("list_fn mutex should not be poisoned") = Some(Box::new(f));
             self
         }
     }
@@ -697,7 +725,10 @@ mod tests {
             resource_type: &str,
             namespace: &str,
         ) -> Result<CommandOutput, PivotError> {
-            let guard = self.list_fn.lock().unwrap();
+            let guard = self
+                .list_fn
+                .lock()
+                .expect("list_fn mutex should not be poisoned");
             match &*guard {
                 Some(f) => f(resource_type, namespace),
                 None => Ok(CommandOutput {
@@ -731,7 +762,10 @@ mod tests {
         });
 
         let handler = AgentPivotHandler::with_runner(mock);
-        let count = handler.count_capi_resources().await.unwrap();
+        let count = handler
+            .count_capi_resources()
+            .await
+            .expect("counting CAPI resources should succeed");
         // 1 cluster + 3 machines + 1 machinedeployment + 1 controlplane = 6
         assert_eq!(count, 6);
     }
@@ -814,7 +848,11 @@ data:
         let result = apply_distributed_resources(&resources).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("secret has no name"), "Expected 'secret has no name' error, got: {}", err);
+        assert!(
+            err.contains("secret has no name"),
+            "Expected 'secret has no name' error, got: {}",
+            err
+        );
     }
 
     /// Story: Valid secret YAML should be parsed correctly
@@ -831,7 +869,8 @@ metadata:
 data:
   key: dmFsdWU=
 "#;
-        let secret: Secret = serde_yaml::from_str(valid_secret).unwrap();
+        let secret: Secret =
+            serde_yaml::from_str(valid_secret).expect("valid secret YAML should parse");
         assert_eq!(secret.metadata.name.as_deref(), Some("test-secret"));
     }
 

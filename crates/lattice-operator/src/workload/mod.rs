@@ -1447,7 +1447,7 @@ mod tests {
         let service = make_service("my-app", "default");
         let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
-        let deployment = output.deployment.unwrap();
+        let deployment = output.deployment.expect("deployment should be set");
         assert_eq!(
             deployment
                 .spec
@@ -1474,7 +1474,7 @@ mod tests {
         let service = make_service("my-app", "default");
         let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
-        let deployment = output.deployment.unwrap();
+        let deployment = output.deployment.expect("deployment should be set");
 
         // Skeleton deployment has empty containers (webhook fills these)
         assert!(deployment.spec.template.spec.containers.is_empty());
@@ -1559,9 +1559,16 @@ mod tests {
         let service = make_service("my-app", "default");
         let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
-        let strategy = output.deployment.unwrap().spec.strategy.unwrap();
+        let strategy = output
+            .deployment
+            .expect("deployment should be generated")
+            .spec
+            .strategy
+            .expect("strategy should be set");
         assert_eq!(strategy.type_, "RollingUpdate");
-        let rolling = strategy.rolling_update.unwrap();
+        let rolling = strategy
+            .rolling_update
+            .expect("rolling update should be configured");
         assert_eq!(rolling.max_unavailable, Some("25%".to_string()));
         assert_eq!(rolling.max_surge, Some("25%".to_string()));
     }
@@ -1573,9 +1580,16 @@ mod tests {
 
         let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
-        let strategy = output.deployment.unwrap().spec.strategy.unwrap();
+        let strategy = output
+            .deployment
+            .expect("deployment should be generated")
+            .spec
+            .strategy
+            .expect("strategy should be set");
         assert_eq!(strategy.type_, "RollingUpdate");
-        let rolling = strategy.rolling_update.unwrap();
+        let rolling = strategy
+            .rolling_update
+            .expect("rolling update should be configured");
         assert_eq!(rolling.max_unavailable, Some("0".to_string()));
         assert_eq!(rolling.max_surge, Some("100%".to_string()));
     }
@@ -1587,7 +1601,11 @@ mod tests {
     #[test]
     fn story_container_environment_variables() {
         let mut service = make_service("my-app", "default");
-        let container = service.spec.containers.get_mut("main").unwrap();
+        let container = service
+            .spec
+            .containers
+            .get_mut("main")
+            .expect("main container should exist");
         container
             .variables
             .insert("LOG_LEVEL".to_string(), TemplateString::from("debug"));
@@ -1599,7 +1617,7 @@ mod tests {
             .containers
             .iter()
             .find(|c| c.name == "main")
-            .unwrap()
+            .expect("main container should exist")
             .env;
         assert!(env
             .iter()
@@ -1617,7 +1635,7 @@ mod tests {
             .containers
             .iter()
             .find(|c| c.name == "main")
-            .unwrap()
+            .expect("main container should exist")
             .ports;
         assert!(ports.iter().any(|p| p.container_port == 80));
     }
@@ -1863,13 +1881,13 @@ mod tests {
         let output1 = WorkloadCompiler::compile_rendered(&service, "prod", &rendered1);
         let hash1 = output1
             .deployment
-            .unwrap()
+            .expect("deployment should be generated")
             .spec
             .template
             .metadata
             .annotations
             .get("lattice.dev/config-hash")
-            .unwrap()
+            .expect("config-hash annotation should be set")
             .clone();
 
         // Second compilation with different value
@@ -1892,13 +1910,13 @@ mod tests {
         let output2 = WorkloadCompiler::compile_rendered(&service, "prod", &rendered2);
         let hash2 = output2
             .deployment
-            .unwrap()
+            .expect("deployment should be generated")
             .spec
             .template
             .metadata
             .annotations
             .get("lattice.dev/config-hash")
-            .unwrap()
+            .expect("config-hash annotation should be set")
             .clone();
 
         // Hashes should differ when config changes
