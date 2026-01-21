@@ -16,11 +16,9 @@
 //! 5. Verify workload1 has CAPI resources
 //! 6. Worker scaling verification
 //! 7. Independence test - delete management, scale workload1
-//! 8. Create workload2 off workload1 (deep hierarchy)
-//! 9. Watch workload2 provisioning and pivot
-//! 10. Verify workload2 has CAPI resources
-//! 11. Delete workload2 (unpivot test)
-//! 12-13. Service mesh tests (optional)
+//! 8-9. Run in parallel:
+//!      - Hierarchy test (workload2 create/verify/delete)
+//!      - Service mesh tests (bilateral + randomized)
 //!
 //! # Design Philosophy
 //!
@@ -626,218 +624,72 @@ async fn run_provider_e2e() -> Result<(), String> {
     }
 
     // =========================================================================
-    // Phase 8: Create Second Workload Cluster (Deep Hierarchy)
+    // Phase 8-9: Run hierarchy test and mesh tests in parallel
     // =========================================================================
-    if let Some((workload2_config_content, workload2_cluster)) = workload2_config {
-        println!("\n[Phase 8] Creating second workload cluster (deep hierarchy)...\n");
-        println!("  This tests creating a cluster off workload1 (which just lost its parent)");
+    let run_hierarchy = workload2_config.is_some();
+    let run_mesh = mesh_test_enabled();
 
-        let workload2_bootstrap = workload2_cluster.spec.provider.kubernetes.bootstrap.clone();
-        println!("  Workload2 cluster config:\n{}", workload2_config_content);
-        println!("  Workload2 bootstrap provider: {:?}", workload2_bootstrap);
+    if run_hierarchy || run_mesh {
+        println!("\n[Phase 8-9] Running tests in parallel...\n");
+        if run_hierarchy {
+            println!("  - Hierarchy test (workload2 provisioning)");
+        }
+        if run_mesh {
+            println!("  - Service mesh bilateral agreement test");
+            println!("  - Service mesh randomized large-scale test");
+        }
+        println!();
 
-        // Connect to workload1 cluster and create workload2
-        let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
-        let api: Api<LatticeCluster> = Api::all(workload_client.clone());
-        api.create(&PostParams::default(), &workload2_cluster)
-            .await
-            .map_err(|e| format!("Failed to create workload2 LatticeCluster: {}", e))?;
-
-        println!("  Workload2 LatticeCluster created on workload1");
-
-        // =========================================================================
-        // Phase 9: Watch Workload2 Cluster Provisioning
-        // =========================================================================
-        println!("\n[Phase 9] Watching workload2 cluster provisioning...\n");
-
-        let workload2_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD2_CLUSTER_NAME);
-
-        if workload_provider == InfraProvider::Docker {
-            watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None).await?;
+        // Spawn hierarchy test if enabled
+        let hierarchy_handle = if let Some((workload2_config_content, workload2_cluster)) =
+            workload2_config
+        {
+            let kubeconfig = workload_kubeconfig_path.clone();
+            let provider = workload_provider;
+            Some(tokio::spawn(async move {
+                run_hierarchy_test(
+                    workload2_config_content,
+                    workload2_cluster,
+                    &kubeconfig,
+                    provider,
+                )
+                .await
+            }))
         } else {
-            watch_cluster_phases_with_kubeconfig(
-                &workload_kubeconfig_path,
-                WORKLOAD2_CLUSTER_NAME,
-                None,
-                &workload2_kubeconfig_path,
-            )
-            .await?;
-        }
+            None
+        };
 
-        println!("\n  SUCCESS: Workload2 cluster is Ready!");
-
-        // =========================================================================
-        // Phase 10: Verify Workload2 Cluster
-        // =========================================================================
-        println!("\n[Phase 10] Verifying workload2 cluster...\n");
-
-        if workload_provider == InfraProvider::Docker {
-            println!("  Extracting workload2 cluster kubeconfig...");
-            extract_docker_cluster_kubeconfig(
-                WORKLOAD2_CLUSTER_NAME,
-                &workload2_bootstrap,
-                &workload2_kubeconfig_path,
-            )?;
-            println!("  Kubeconfig extracted successfully");
-        }
-
-        let nodes_output = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                &workload2_kubeconfig_path,
-                "get",
-                "nodes",
-                "-o",
-                "wide",
-            ],
-        )?;
-        println!("  Workload2 cluster nodes:\n{}", nodes_output);
-
-        println!("  Checking for CAPI resources on workload2 cluster...");
-        match run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                &workload2_kubeconfig_path,
-                "get",
-                "clusters",
-                "-A",
-            ],
-        ) {
-            Ok(output) => {
-                println!("  Workload2 cluster CAPI resources:\n{}", output);
-                if !output.contains(WORKLOAD2_CLUSTER_NAME) {
-                    return Err(
-                        "Workload2 cluster should have its own CAPI Cluster resource after pivot"
-                            .to_string(),
-                    );
-                }
-            }
-            Err(e) => println!("  Warning: Could not check CAPI resources: {}", e),
-        }
-
-        println!("\n  SUCCESS: Deep hierarchy verified (mgmt -> workload1 -> workload2)!");
-
-        // =========================================================================
-        // Phase 11: Delete Workload2 (Unpivot Test)
-        // =========================================================================
-        println!("\n[Phase 11] Deleting workload2 cluster (testing unpivot)...\n");
-        println!("  This tests the unpivot flow: CAPI resources should move back to workload1");
-
-        // Delete workload2's LatticeCluster on workload2 itself
-        // The finalizer should trigger unpivot to workload1
-        let _ = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                &workload2_kubeconfig_path,
-                "delete",
-                "latticecluster",
-                WORKLOAD2_CLUSTER_NAME,
-                "--timeout=300s",
-            ],
-        )?;
-        println!("  Workload2 LatticeCluster deletion initiated");
-
-        // Wait for the cluster to be deleted
-        println!("  Waiting for workload2 cluster to be fully deleted...");
-        let mut attempts = 0;
-        loop {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            attempts += 1;
-
-            // Check if LatticeCluster still exists on workload1
-            let check = run_cmd_allow_fail(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    &workload_kubeconfig_path,
-                    "get",
-                    "latticecluster",
-                    WORKLOAD2_CLUSTER_NAME,
-                    "-o",
-                    "name",
-                ],
-            );
-
-            if check.trim().is_empty() || check.contains("not found") {
-                println!("  Workload2 LatticeCluster deleted from workload1");
-                break;
-            }
-
-            if attempts > 30 {
-                return Err("Timeout waiting for workload2 deletion".to_string());
-            }
-
-            println!(
-                "    Still waiting for deletion... (attempt {}/30)",
-                attempts
-            );
-        }
-
-        // Verify CAPI cleaned up the infrastructure - wait for containers to be deleted
-        if workload_provider == InfraProvider::Docker {
-            println!("  Waiting for workload2 Docker containers to be cleaned up...");
-            let mut container_attempts = 0;
-            loop {
-                container_attempts += 1;
-                std::thread::sleep(std::time::Duration::from_secs(5));
-
-                let workload2_containers = run_cmd_allow_fail(
-                    "docker",
-                    &[
-                        "ps",
-                        "-a", // Include stopped containers
-                        "--filter",
-                        &format!("name={}", WORKLOAD2_CLUSTER_NAME),
-                        "-q",
-                    ],
+        // Spawn mesh tests if enabled
+        let mesh_handle = if run_mesh {
+            let kubeconfig = workload_kubeconfig_path.clone();
+            Some(tokio::spawn(async move {
+                let kubeconfig2 = kubeconfig.clone();
+                let (result1, result2) = tokio::join!(
+                    run_mesh_test(&kubeconfig),
+                    run_random_mesh_test(&kubeconfig2)
                 );
+                result1?;
+                result2
+            }))
+        } else {
+            None
+        };
 
-                if workload2_containers.trim().is_empty() {
-                    println!("  SUCCESS: Workload2 Docker containers cleaned up by CAPI");
-                    break;
-                }
-
-                if container_attempts > 30 {
-                    return Err(format!(
-                        "Timeout waiting for workload2 containers to be deleted. Still running: {}",
-                        workload2_containers.trim()
-                    ));
-                }
-
-                println!(
-                    "    Still waiting for container cleanup... (attempt {}/30)",
-                    container_attempts
-                );
-            }
+        // Wait for both to complete
+        if let Some(handle) = hierarchy_handle {
+            handle
+                .await
+                .map_err(|e| format!("Hierarchy test task failed: {}", e))??;
         }
-
-        println!("\n  SUCCESS: Unpivot test complete!");
+        if let Some(handle) = mesh_handle {
+            handle
+                .await
+                .map_err(|e| format!("Mesh test task failed: {}", e))??;
+        }
     } else {
-        println!("\n[Phase 8-11] Skipping hierarchy/unpivot tests (LATTICE_ENABLE_HIERARCHY_TEST=false)\n");
-    }
-
-    // =========================================================================
-    // Phase 12-13: Service Mesh Tests (Optional, run in parallel)
-    // =========================================================================
-    if mesh_test_enabled() {
-        println!("\n[Phase 12-13] Running mesh tests in parallel...\n");
-        let kubeconfig = workload_kubeconfig_path.clone();
-        let kubeconfig2 = workload_kubeconfig_path.clone();
-
-        let (result1, result2) = tokio::join!(
-            run_mesh_test(&kubeconfig),
-            run_random_mesh_test(&kubeconfig2)
-        );
-
-        result1?;
-        result2?;
-    } else {
-        println!(
-            "\n[Phase 12-13] Skipping mesh tests (set LATTICE_ENABLE_MESH_TEST=true to enable)\n"
-        );
+        println!("\n[Phase 8-9] Skipping optional tests\n");
+        println!("  Set LATTICE_ENABLE_HIERARCHY_TEST=true for hierarchy test");
+        println!("  Set LATTICE_ENABLE_MESH_TEST=true for mesh tests");
     }
 
     println!("\n################################################################");
@@ -847,11 +699,196 @@ async fn run_provider_e2e() -> Result<(), String> {
         "#  Workload:   {} + {:?}",
         workload_provider, workload_bootstrap
     );
-    if hierarchy_test_enabled() {
-        println!("#  Deep hierarchy and unpivot: TESTED");
+    if run_hierarchy {
+        println!("#  Hierarchy + unpivot: TESTED (parallel)");
+    }
+    if run_mesh {
+        println!("#  Service mesh: TESTED (parallel)");
     }
     println!("################################################################\n");
 
+    Ok(())
+}
+
+/// Run hierarchy test: create workload2 off workload1, verify, then delete (unpivot)
+async fn run_hierarchy_test(
+    workload2_config_content: String,
+    workload2_cluster: LatticeCluster,
+    workload_kubeconfig_path: &str,
+    workload_provider: InfraProvider,
+) -> Result<(), String> {
+    println!("[Hierarchy] Creating second workload cluster (deep hierarchy)...\n");
+    println!("  This tests creating a cluster off workload1 (which just lost its parent)");
+
+    let workload2_bootstrap = workload2_cluster.spec.provider.kubernetes.bootstrap.clone();
+    println!("  Workload2 cluster config:\n{}", workload2_config_content);
+    println!("  Workload2 bootstrap provider: {:?}", workload2_bootstrap);
+
+    // Connect to workload1 cluster and create workload2
+    let workload_client = client_from_kubeconfig(workload_kubeconfig_path).await?;
+    let api: Api<LatticeCluster> = Api::all(workload_client.clone());
+    api.create(&PostParams::default(), &workload2_cluster)
+        .await
+        .map_err(|e| format!("Failed to create workload2 LatticeCluster: {}", e))?;
+
+    println!("  Workload2 LatticeCluster created on workload1");
+
+    println!("\n[Hierarchy] Watching workload2 cluster provisioning...\n");
+
+    let workload2_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD2_CLUSTER_NAME);
+
+    if workload_provider == InfraProvider::Docker {
+        watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None).await?;
+    } else {
+        watch_cluster_phases_with_kubeconfig(
+            workload_kubeconfig_path,
+            WORKLOAD2_CLUSTER_NAME,
+            None,
+            &workload2_kubeconfig_path,
+        )
+        .await?;
+    }
+
+    println!("\n  SUCCESS: Workload2 cluster is Ready!");
+
+    println!("\n[Hierarchy] Verifying workload2 cluster...\n");
+
+    if workload_provider == InfraProvider::Docker {
+        println!("  Extracting workload2 cluster kubeconfig...");
+        extract_docker_cluster_kubeconfig(
+            WORKLOAD2_CLUSTER_NAME,
+            &workload2_bootstrap,
+            &workload2_kubeconfig_path,
+        )?;
+        println!("  Kubeconfig extracted successfully");
+    }
+
+    let nodes_output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            &workload2_kubeconfig_path,
+            "get",
+            "nodes",
+            "-o",
+            "wide",
+        ],
+    )?;
+    println!("  Workload2 cluster nodes:\n{}", nodes_output);
+
+    println!("  Checking for CAPI resources on workload2 cluster...");
+    match run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            &workload2_kubeconfig_path,
+            "get",
+            "clusters",
+            "-A",
+        ],
+    ) {
+        Ok(output) => {
+            println!("  Workload2 cluster CAPI resources:\n{}", output);
+            if !output.contains(WORKLOAD2_CLUSTER_NAME) {
+                return Err(
+                    "Workload2 cluster should have its own CAPI Cluster resource after pivot"
+                        .to_string(),
+                );
+            }
+        }
+        Err(e) => println!("  Warning: Could not check CAPI resources: {}", e),
+    }
+
+    println!("\n  SUCCESS: Deep hierarchy verified (mgmt -> workload1 -> workload2)!");
+
+    println!("\n[Hierarchy] Deleting workload2 cluster (testing unpivot)...\n");
+    println!("  This tests the unpivot flow: CAPI resources should move back to workload1");
+
+    let _ = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            &workload2_kubeconfig_path,
+            "delete",
+            "latticecluster",
+            WORKLOAD2_CLUSTER_NAME,
+            "--timeout=300s",
+        ],
+    )?;
+    println!("  Workload2 LatticeCluster deletion initiated");
+
+    println!("  Waiting for workload2 cluster to be fully deleted...");
+    let mut attempts = 0;
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        attempts += 1;
+
+        let check = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                workload_kubeconfig_path,
+                "get",
+                "latticecluster",
+                WORKLOAD2_CLUSTER_NAME,
+                "-o",
+                "name",
+            ],
+        );
+
+        if check.trim().is_empty() || check.contains("not found") {
+            println!("  Workload2 LatticeCluster deleted from workload1");
+            break;
+        }
+
+        if attempts > 30 {
+            return Err("Timeout waiting for workload2 deletion".to_string());
+        }
+
+        println!(
+            "    Still waiting for deletion... (attempt {}/30)",
+            attempts
+        );
+    }
+
+    if workload_provider == InfraProvider::Docker {
+        println!("  Waiting for workload2 Docker containers to be cleaned up...");
+        let mut container_attempts = 0;
+        loop {
+            container_attempts += 1;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            let workload2_containers = run_cmd_allow_fail(
+                "docker",
+                &[
+                    "ps",
+                    "-a",
+                    "--filter",
+                    &format!("name={}", WORKLOAD2_CLUSTER_NAME),
+                    "-q",
+                ],
+            );
+
+            if workload2_containers.trim().is_empty() {
+                println!("  SUCCESS: Workload2 Docker containers cleaned up by CAPI");
+                break;
+            }
+
+            if container_attempts > 30 {
+                return Err(format!(
+                    "Timeout waiting for workload2 containers to be deleted. Still running: {}",
+                    workload2_containers.trim()
+                ));
+            }
+
+            println!(
+                "    Still waiting for container cleanup... (attempt {}/30)",
+                container_attempts
+            );
+        }
+    }
+
+    println!("\n[Hierarchy] SUCCESS: Unpivot test complete!");
     Ok(())
 }
 
