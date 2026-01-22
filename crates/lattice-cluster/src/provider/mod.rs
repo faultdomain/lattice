@@ -464,6 +464,17 @@ fn build_controller_manager_extra_args(provider_type: ProviderType) -> Vec<serde
     args
 }
 
+/// Get the node name template for kubeadm nodeRegistration
+///
+/// For AWS, this uses cloud-init datasource to get the EC2 local hostname,
+/// which the AWS CCM needs to look up the instance and set the correct providerID.
+fn get_node_name_template(provider_type: ProviderType) -> Option<&'static str> {
+    match provider_type {
+        ProviderType::Aws => Some("{{ ds.meta_data.local_hostname }}"),
+        _ => None,
+    }
+}
+
 /// Generate KubeadmConfigTemplate manifest for workers
 fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
     let template_name = format!("{}-md-0", config.name);
@@ -471,15 +482,21 @@ fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
     // Build kubelet extra args using the shared function
     let kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
 
+    // Build nodeRegistration with optional name field for cloud providers
+    let mut node_registration = serde_json::json!({
+        "criSocket": "/var/run/containerd/containerd.sock",
+        "kubeletExtraArgs": kubelet_extra_args
+    });
+    if let Some(name_template) = get_node_name_template(config.provider_type) {
+        node_registration["name"] = serde_json::json!(name_template);
+    }
+
     // In CAPI v1beta2, kubeletExtraArgs is a list of {name, value} objects
     let spec = serde_json::json!({
         "template": {
             "spec": {
                 "joinConfiguration": {
-                    "nodeRegistration": {
-                        "criSocket": "/var/run/containerd/containerd.sock",
-                        "kubeletExtraArgs": kubelet_extra_args
-                    }
+                    "nodeRegistration": node_registration
                 }
             }
         }
@@ -600,6 +617,20 @@ fn generate_kubeadm_control_plane(
     let api_server_extra_args = build_api_server_extra_args(config.provider_type);
     let controller_manager_extra_args = build_controller_manager_extra_args(config.provider_type);
 
+    // Build nodeRegistration with optional name field for cloud providers
+    let mut init_node_registration = serde_json::json!({
+        "criSocket": "/var/run/containerd/containerd.sock",
+        "kubeletExtraArgs": kubelet_extra_args.clone()
+    });
+    let mut join_node_registration = serde_json::json!({
+        "criSocket": "/var/run/containerd/containerd.sock",
+        "kubeletExtraArgs": kubelet_extra_args
+    });
+    if let Some(name_template) = get_node_name_template(config.provider_type) {
+        init_node_registration["name"] = serde_json::json!(name_template);
+        join_node_registration["name"] = serde_json::json!(name_template);
+    }
+
     // In CAPI v1beta2, extraArgs changed from map to list of {name, value} objects
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
@@ -617,16 +648,10 @@ fn generate_kubeadm_control_plane(
             }
         },
         "initConfiguration": {
-            "nodeRegistration": {
-                "criSocket": "/var/run/containerd/containerd.sock",
-                "kubeletExtraArgs": kubelet_extra_args.clone()
-            }
+            "nodeRegistration": init_node_registration
         },
         "joinConfiguration": {
-            "nodeRegistration": {
-                "criSocket": "/var/run/containerd/containerd.sock",
-                "kubeletExtraArgs": kubelet_extra_args
-            }
+            "nodeRegistration": join_node_registration
         }
     });
 
