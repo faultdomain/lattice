@@ -183,6 +183,7 @@ spec:
           - rke2-control-plane-system
           - capd-system
           - capo-system
+          - capa-system
           - capmox-system
           - capi-ipam-in-cluster-system
   egress:

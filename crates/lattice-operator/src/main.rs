@@ -639,6 +639,55 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
     }
 }
 
+/// Discover the cell service endpoint for TLS certificate SANs.
+///
+/// The cell service is the LoadBalancer that exposes the Lattice operator's
+/// gRPC and bootstrap endpoints. Child clusters connect to this endpoint.
+///
+/// Checks two sources in order:
+/// 1. LatticeCluster's spec.parent_config.host (explicit config, for on-prem/static IPs)
+/// 2. Cell Service's status.loadBalancer.ingress (cloud provider assigned hostname/IP)
+///
+/// Returns None if neither source has the endpoint yet.
+async fn discover_cell_endpoint(client: &Client, cluster_name: &str) -> Option<String> {
+    use k8s_openapi::api::core::v1::Service;
+
+    // First, check LatticeCluster's parent_config.host (explicit config)
+    let lattice_clusters: Api<lattice_operator::crd::LatticeCluster> = Api::all(client.clone());
+    if let Ok(cluster) = lattice_clusters.get(cluster_name).await {
+        if let Some(host) = cluster
+            .spec
+            .parent_config
+            .as_ref()
+            .and_then(|pc| pc.host.as_ref())
+        {
+            return Some(host.clone());
+        }
+    }
+
+    // Fall back to cell Service's LoadBalancer ingress (cloud provider assigned)
+    let services: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
+    if let Ok(svc) = services.get("lattice-cell").await {
+        if let Some(status) = svc.status {
+            if let Some(lb) = status.load_balancer {
+                if let Some(ingress) = lb.ingress {
+                    if let Some(first) = ingress.first() {
+                        // Prefer hostname (AWS ELB) over IP
+                        if let Some(hostname) = &first.hostname {
+                            return Some(hostname.clone());
+                        }
+                        if let Some(ip) = &first.ip {
+                            return Some(ip.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Run in controller mode - manages clusters and/or services
 ///
 /// Cell servers (gRPC + bootstrap HTTP) start automatically when needed.
@@ -704,95 +753,37 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         };
 
         let extra_sans: Vec<String> = if is_bootstrap_cluster {
-            tracing::info!("Running as bootstrap cluster, using default SANs");
+            tracing::info!("Bootstrap cluster, using default SANs");
             vec![]
-        } else if is_child_cluster {
-            // Child clusters get LatticeCluster via pivot, so we can't block waiting for it.
-            // But if the cluster is already pivoted and has endpoints, we need those SANs
-            // for the server certificate (child clusters can also become parents).
-            if let Some(ref cluster_name) = self_cluster_name {
-                let clusters: kube::Api<lattice_operator::crd::LatticeCluster> =
-                    kube::Api::all(client.clone());
-                match clusters.get(cluster_name).await {
-                    Ok(cluster) => {
-                        if let Some(ref endpoints) = cluster.spec.parent_config {
-                            if let Some(ref host) = endpoints.host {
-                                tracing::info!(
-                                    host = %host,
-                                    "Child cluster has endpoints, adding to server certificate SANs"
-                                );
-                                vec![host.clone()]
-                            } else {
-                                tracing::info!(
-                                    "Child cluster has endpoints but host not yet discovered, using default SANs"
-                                );
-                                vec![]
-                            }
-                        } else {
-                            tracing::info!(
-                                "Child cluster exists but has no endpoints (pre-pivot), using default SANs"
-                            );
-                            vec![]
-                        }
-                    }
-                    Err(_) => {
-                        tracing::info!(
-                            "Child cluster LatticeCluster not found yet (pre-pivot), using default SANs"
-                        );
-                        vec![]
-                    }
+        } else if let Some(ref cluster_name) = self_cluster_name {
+            // Try to discover cell endpoint for TLS SANs
+            // - Child clusters: don't block (endpoint may not exist yet)
+            // - Management clusters: wait for endpoint to be discovered
+            if is_child_cluster {
+                // Child clusters can't block - check once and continue
+                if let Some(host) = discover_cell_endpoint(&client, cluster_name).await {
+                    tracing::info!(host = %host, "Cell endpoint found");
+                    vec![host]
+                } else {
+                    tracing::info!("Cell endpoint not yet available, using default SANs");
+                    vec![]
                 }
             } else {
-                tracing::info!("Running as child cluster without cluster name, using default SANs");
-                vec![]
-            }
-        } else if let Some(ref cluster_name) = self_cluster_name {
-            let clusters: kube::Api<lattice_operator::crd::LatticeCluster> =
-                kube::Api::all(client.clone());
+                // Management cluster - wait for endpoint
+                tracing::info!(cluster = %cluster_name, "Waiting for cell endpoint...");
+                let mut retry_delay = std::time::Duration::from_secs(1);
+                let max_delay = std::time::Duration::from_secs(10);
 
-            tracing::info!(cluster = %cluster_name, "Waiting for LatticeCluster with endpoints...");
-            let mut retry_delay = std::time::Duration::from_secs(1);
-            let max_retry_delay = std::time::Duration::from_secs(10);
+                loop {
+                    if let Some(host) = discover_cell_endpoint(&client, cluster_name).await {
+                        tracing::info!(host = %host, "Cell endpoint discovered");
+                        break vec![host];
+                    }
 
-            loop {
-                match clusters.get(cluster_name).await {
-                    Ok(cluster) => {
-                        if let Some(ref endpoints) = cluster.spec.parent_config {
-                            if let Some(ref host) = endpoints.host {
-                                tracing::info!(host = %host, "Adding cell host to server certificate SANs");
-                                break vec![host.clone()];
-                            } else {
-                                tracing::info!(
-                                    cluster = %cluster_name,
-                                    retry_in = ?retry_delay,
-                                    "LatticeCluster has endpoints but host not yet discovered, waiting..."
-                                );
-                            }
-                        } else {
-                            tracing::info!(
-                                cluster = %cluster_name,
-                                retry_in = ?retry_delay,
-                                "LatticeCluster exists but has no endpoints, waiting..."
-                            );
-                        }
-                    }
-                    Err(kube::Error::Api(e)) if e.code == 404 => {
-                        tracing::info!(
-                            cluster = %cluster_name,
-                            retry_in = ?retry_delay,
-                            "LatticeCluster not found yet, waiting..."
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            retry_in = ?retry_delay,
-                            "Failed to read LatticeCluster, retrying..."
-                        );
-                    }
+                    tracing::debug!(retry_in = ?retry_delay, "Cell endpoint not ready, retrying...");
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = std::cmp::min(retry_delay * 2, max_delay);
                 }
-                tokio::time::sleep(retry_delay).await;
-                retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
             }
         } else {
             vec![]
