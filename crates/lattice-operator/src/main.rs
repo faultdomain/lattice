@@ -32,6 +32,18 @@ struct Cli {
     command: Option<Commands>,
 }
 
+/// Controller mode selection
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum ControllerMode {
+    /// Run all controllers (cluster + service)
+    #[default]
+    All,
+    /// Run only cluster controller (LatticeCluster management)
+    Cluster,
+    /// Run only service controller (LatticeService/ExternalService management)
+    Service,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Run as controller (default mode)
@@ -42,7 +54,11 @@ enum Commands {
     /// - If this cluster has a cell spec, starts cell servers for child clusters
     ///
     /// This unified mode means every cluster is self-managing.
-    Controller,
+    Controller {
+        /// Which controllers to run
+        #[arg(long, short, value_enum, default_value = "all")]
+        mode: ControllerMode,
+    },
 }
 
 #[tokio::main]
@@ -99,7 +115,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Controller) | None => run_controller().await,
+        Some(Commands::Controller { mode }) => run_controller(mode).await,
+        None => run_controller(ControllerMode::All).await,
     }
 }
 
@@ -622,15 +639,15 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
     }
 }
 
-/// Run in controller mode - manages clusters
+/// Run in controller mode - manages clusters and/or services
 ///
 /// Cell servers (gRPC + bootstrap HTTP) start automatically when needed.
 /// Cell endpoint configuration is read from the local LatticeCluster CRD's spec.parent_config.
 ///
 /// If this cluster has a cellRef (parent), the controller also connects as an agent
 /// to the parent cell for pivot coordination and health reporting.
-async fn run_controller() -> anyhow::Result<()> {
-    tracing::info!("Lattice controller starting...");
+async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
+    tracing::info!(mode = ?mode, "Lattice controller starting...");
 
     // Create Kubernetes client
     let client = Client::try_default()
@@ -782,12 +799,27 @@ async fn run_controller() -> anyhow::Result<()> {
         };
 
         // Start cell servers - MUST complete before controllers start
+        // If running in service mode, also add the webhook router for Deployment injection
+        let run_service = matches!(mode, ControllerMode::All | ControllerMode::Service);
+        let webhook_router = if run_service {
+            let webhook_state =
+                std::sync::Arc::new(lattice_service::webhook::WebhookState::new(client.clone()));
+            Some(lattice_service::webhook::webhook_router(webhook_state))
+        } else {
+            None
+        };
+
         parent_servers
-            .ensure_running_with(manifest_generator, &extra_sans, client.clone())
+            .ensure_running_with(
+                manifest_generator,
+                &extra_sans,
+                client.clone(),
+                webhook_router,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start cell servers: {}", e))?;
 
-        tracing::info!("Cell servers started (webhook + bootstrap + gRPC)");
+        tracing::info!("Cell servers started (bootstrap + gRPC + optional webhook)");
 
         // Re-register any clusters that are past Pending phase
         // This handles operator restarts where BootstrapState was lost but clusters are mid-provisioning
@@ -836,103 +868,139 @@ async fn run_controller() -> anyhow::Result<()> {
     // Create service context for service controllers
     let service_ctx = Arc::new(ServiceContext::from_client(client, "cluster.local"));
 
+    // Log which controllers will be started
     tracing::info!("Starting Lattice controllers...");
-    tracing::info!("LatticeCluster controller");
-    tracing::info!("LatticeService controller");
-    tracing::info!("LatticeExternalService controller");
+    let run_cluster = matches!(mode, ControllerMode::All | ControllerMode::Cluster);
+    let run_service = matches!(mode, ControllerMode::All | ControllerMode::Service);
 
-    // Create all controllers
-    let cluster_controller = Controller::new(clusters, WatcherConfig::default())
-        .shutdown_on_signal()
-        .run(reconcile, error_policy, ctx.clone())
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => {
-                    tracing::debug!(?action, "Cluster reconciliation completed");
-                }
-                Err(e) => {
-                    tracing::error!(error = ?e, "Cluster reconciliation error");
-                }
-            }
-        });
+    if run_cluster {
+        tracing::info!("  - LatticeCluster controller");
+    }
+    if run_service {
+        tracing::info!("  - LatticeService controller");
+        tracing::info!("  - LatticeExternalService controller");
+    }
 
-    // Clone graph for the watch mapper closure
-    let graph_for_watch = service_ctx.graph.clone();
-
-    let service_controller = Controller::new(services.clone(), WatcherConfig::default())
-        // Watch all LatticeService changes and trigger re-reconciliation of dependent services
-        // This enables eventual consistency: when service B is created, services that
-        // depend on B get re-reconciled to update their egress policies. When service A
-        // is created with deps, services that A depends on get re-reconciled to update
-        // their ingress policies (if they allow A).
-        .watches(services, WatcherConfig::default(), move |service| {
-            let graph = graph_for_watch.clone();
-            let env = &service.spec.environment;
-            let name = service.metadata.name.as_deref().unwrap_or_default();
-
-            // Get services that this service depends on (they need to update ingress)
-            let dependencies = graph.get_dependencies(env, name);
-            // Get services that depend on this service (they need to update egress)
-            let dependents = graph.get_dependents(env, name);
-
-            // Combine and deduplicate
-            let mut affected: Vec<String> = dependencies;
-            affected.extend(dependents);
-            affected.sort();
-            affected.dedup();
-
-            tracing::debug!(
-                service = %name,
-                env = %env,
-                affected_count = affected.len(),
-                "Service changed, triggering re-reconciliation of affected services"
-            );
-
-            affected
-                .into_iter()
-                .map(|dep_name| ObjectRef::<LatticeService>::new(&dep_name))
-        })
-        .shutdown_on_signal()
-        .run(service_reconcile, service_error_policy, service_ctx.clone())
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => {
-                    tracing::debug!(?action, "Service reconciliation completed");
-                }
-                Err(e) => {
-                    tracing::error!(error = ?e, "Service reconciliation error");
-                }
-            }
-        });
-
-    let external_service_controller = Controller::new(external_services, WatcherConfig::default())
-        .shutdown_on_signal()
-        .run(
-            reconcile_external,
-            error_policy_external,
-            service_ctx.clone(),
+    // Create cluster controller if needed
+    let cluster_controller = if run_cluster {
+        Some(
+            Controller::new(clusters, WatcherConfig::default())
+                .shutdown_on_signal()
+                .run(reconcile, error_policy, ctx.clone())
+                .for_each(|result| async move {
+                    match result {
+                        Ok(action) => {
+                            tracing::debug!(?action, "Cluster reconciliation completed");
+                        }
+                        Err(e) => {
+                            tracing::error!(error = ?e, "Cluster reconciliation error");
+                        }
+                    }
+                }),
         )
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => {
-                    tracing::debug!(?action, "External service reconciliation completed");
-                }
-                Err(e) => {
-                    tracing::error!(error = ?e, "External service reconciliation error");
-                }
-            }
-        });
+    } else {
+        None
+    };
 
-    // Run all controllers concurrently
-    tokio::select! {
-        _ = cluster_controller => {
+    // Create service controllers if needed
+    let (service_controller, external_service_controller) = if run_service {
+        // Clone graph for the watch mapper closure
+        let graph_for_watch = service_ctx.graph.clone();
+
+        let svc_ctrl = Controller::new(services.clone(), WatcherConfig::default())
+            // Watch all LatticeService changes and trigger re-reconciliation of dependent services
+            // This enables eventual consistency: when service B is created, services that
+            // depend on B get re-reconciled to update their egress policies. When service A
+            // is created with deps, services that A depends on get re-reconciled to update
+            // their ingress policies (if they allow A).
+            .watches(services, WatcherConfig::default(), move |service| {
+                let graph = graph_for_watch.clone();
+                let env = &service.spec.environment;
+                let name = service.metadata.name.as_deref().unwrap_or_default();
+
+                // Get services that this service depends on (they need to update ingress)
+                let dependencies = graph.get_dependencies(env, name);
+                // Get services that depend on this service (they need to update egress)
+                let dependents = graph.get_dependents(env, name);
+
+                // Combine and deduplicate
+                let mut affected: Vec<String> = dependencies;
+                affected.extend(dependents);
+                affected.sort();
+                affected.dedup();
+
+                tracing::debug!(
+                    service = %name,
+                    env = %env,
+                    affected_count = affected.len(),
+                    "Service changed, triggering re-reconciliation of affected services"
+                );
+
+                affected
+                    .into_iter()
+                    .map(|dep_name| ObjectRef::<LatticeService>::new(&dep_name))
+            })
+            .shutdown_on_signal()
+            .run(service_reconcile, service_error_policy, service_ctx.clone())
+            .for_each(|result| async move {
+                match result {
+                    Ok(action) => {
+                        tracing::debug!(?action, "Service reconciliation completed");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = ?e, "Service reconciliation error");
+                    }
+                }
+            });
+
+        let ext_ctrl = Controller::new(external_services, WatcherConfig::default())
+            .shutdown_on_signal()
+            .run(
+                reconcile_external,
+                error_policy_external,
+                service_ctx.clone(),
+            )
+            .for_each(|result| async move {
+                match result {
+                    Ok(action) => {
+                        tracing::debug!(?action, "External service reconciliation completed");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = ?e, "External service reconciliation error");
+                    }
+                }
+            });
+
+        (Some(svc_ctrl), Some(ext_ctrl))
+    } else {
+        (None, None)
+    };
+
+    // Run selected controllers concurrently
+    match (
+        cluster_controller,
+        service_controller,
+        external_service_controller,
+    ) {
+        (Some(cluster), Some(service), Some(external)) => {
+            tokio::select! {
+                _ = cluster => tracing::info!("Cluster controller completed"),
+                _ = service => tracing::info!("Service controller completed"),
+                _ = external => tracing::info!("External service controller completed"),
+            }
+        }
+        (Some(cluster), None, None) => {
+            cluster.await;
             tracing::info!("Cluster controller completed");
         }
-        _ = service_controller => {
-            tracing::info!("Service controller completed");
+        (None, Some(service), Some(external)) => {
+            tokio::select! {
+                _ = service => tracing::info!("Service controller completed"),
+                _ = external => tracing::info!("External service controller completed"),
+            }
         }
-        _ = external_service_controller => {
-            tracing::info!("External service controller completed");
+        _ => {
+            tracing::warn!("No controllers to run");
         }
     }
 

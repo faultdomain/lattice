@@ -23,14 +23,14 @@ use lattice_common::clusterctl::unpause_capi_cluster;
 use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
 use crate::capi::{ensure_capi_installed, CapiInstaller, CapiProviderConfig};
-use crate::crd::{
+use crate::parent::ParentServers;
+use crate::provider::{create_provider, CAPIManifest};
+use lattice_common::crd::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, LatticeCluster,
     LatticeClusterStatus,
 };
-use crate::parent::ParentServers;
-use crate::proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand};
-use crate::provider::{create_provider, CAPIManifest};
-use crate::Error;
+use lattice_common::Error;
+use lattice_proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand};
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
 ///
@@ -1586,8 +1586,8 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 let cluster_name = name.clone();
                 let namespace = capi_namespace.clone();
                 let patch_result =
-                    crate::retry::retry_with_backoff(
-                        &crate::retry::RetryConfig::with_max_attempts(10),
+                    lattice_common::retry::retry_with_backoff(
+                        &lattice_common::retry::RetryConfig::with_max_attempts(10),
                         "patch_kubeconfig_for_self_management",
                         || {
                             let cn = cluster_name.clone();
@@ -2059,7 +2059,7 @@ async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<Strin
         Error::validation(format!("Invalid gRPC port in cell_endpoint: {}", parts[2]))
     })?;
 
-    Ok(Some(crate::infra::generate_operator_network_policy(
+    Ok(Some(lattice_infra::generate_operator_network_policy(
         Some(parent_host),
         grpc_port,
     )))
@@ -2514,24 +2514,11 @@ async fn handle_deletion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use lattice_common::crd::{
         BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
         ProviderConfig, ProviderSpec, ServiceSpec,
     };
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_cluster::capi::CapiProviderConfig;
-    use mockall::mock;
-
-    // Local mock for CapiInstaller since the mockall-generated mock is only
-    // available within the lattice-cluster crate's test configuration
-    mock! {
-        pub CapiInstaller {}
-
-        #[async_trait::async_trait]
-        impl CapiInstaller for CapiInstaller {
-            async fn ensure(&self, config: &CapiProviderConfig) -> Result<(), Error>;
-        }
-    }
 
     /// Create a sample LatticeCluster for testing
     fn sample_cluster(name: &str) -> LatticeCluster {
@@ -2655,7 +2642,7 @@ mod tests {
     /// - Status capture allows verifying phase transitions without tight coupling
     mod cluster_lifecycle_flow {
         use super::*;
-
+        use crate::capi::MockCapiInstaller;
         use std::sync::{Arc as StdArc, Mutex};
 
         /// Captured status update for verification without coupling to mock internals.
@@ -2974,7 +2961,7 @@ mod tests {
 
     mod error_policy_tests {
         use super::*;
-
+        use crate::capi::MockCapiInstaller;
         use rstest::rstest;
 
         fn mock_context_no_updates() -> Arc<Context> {
@@ -3011,6 +2998,7 @@ mod tests {
     /// These tests focus on error propagation which is a separate concern.
     mod status_error_handling {
         use super::*;
+        use crate::capi::MockCapiInstaller;
 
         /// Story: When the Kubernetes API fails during status update, the error
         /// should propagate up so the controller can retry the reconciliation.
@@ -3105,6 +3093,7 @@ mod tests {
 
     mod generate_manifests_tests {
         use super::*;
+        use crate::capi::MockCapiInstaller;
 
         fn cluster_with_docker_config(name: &str) -> LatticeCluster {
             LatticeCluster {
@@ -3274,6 +3263,7 @@ mod tests {
     /// infrastructure is ready based on the Cluster resource status.
     mod infrastructure_ready_detection {
         use super::*;
+        use crate::capi::MockCapiInstaller;
 
         /// Story: When CAPI reports infrastructure NOT ready, the controller
         /// should continue polling with the Provisioning phase requeue interval.
@@ -3404,7 +3394,7 @@ mod tests {
     /// clusterctl init is always called (it's idempotent).
     mod capi_installation_flow {
         use super::*;
-
+        use crate::capi::MockCapiInstaller;
         use std::sync::{Arc as StdArc, Mutex};
 
         /// Story: Controller always calls clusterctl init before provisioning
@@ -3482,7 +3472,7 @@ mod tests {
     /// message, and conditions as the cluster progresses through its lifecycle.
     mod status_update_content {
         use super::*;
-
+        use crate::capi::MockCapiInstaller;
         use std::sync::{Arc as StdArc, Mutex};
 
         /// Story: When transitioning to Provisioning, the status should include
@@ -3631,6 +3621,7 @@ mod tests {
     /// types of errors and returns appropriate requeue actions.
     mod error_policy_behavior {
         use super::*;
+        use crate::capi::MockCapiInstaller;
 
         fn mock_context_minimal() -> Arc<Context> {
             Arc::new(Context::for_testing(

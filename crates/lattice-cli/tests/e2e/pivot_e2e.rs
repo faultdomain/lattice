@@ -638,23 +638,22 @@ async fn run_provider_e2e() -> Result<(), String> {
         println!();
 
         // Spawn hierarchy test if enabled
-        let hierarchy_handle = if let Some((workload2_config_content, workload2_cluster)) =
-            workload2_config
-        {
-            let kubeconfig = workload_kubeconfig_path.clone();
-            let provider = workload_provider;
-            Some(tokio::spawn(async move {
-                run_hierarchy_test(
-                    workload2_config_content,
-                    workload2_cluster,
-                    &kubeconfig,
-                    provider,
-                )
-                .await
-            }))
-        } else {
-            None
-        };
+        let hierarchy_handle =
+            if let Some((workload2_config_content, workload2_cluster)) = workload2_config {
+                let kubeconfig = workload_kubeconfig_path.clone();
+                let provider = workload_provider;
+                Some(tokio::spawn(async move {
+                    run_hierarchy_test(
+                        workload2_config_content,
+                        workload2_cluster,
+                        &kubeconfig,
+                        provider,
+                    )
+                    .await
+                }))
+            } else {
+                None
+            };
 
         // Spawn mesh tests if enabled
         let mesh_handle = if run_mesh {

@@ -1931,6 +1931,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-cluster"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-lc-rs",
+ "axum 0.8.8",
+ "axum-server",
+ "base64",
+ "chrono",
+ "crossbeam",
+ "dashmap",
+ "futures",
+ "json-patch",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-infra",
+ "lattice-proto",
+ "minijinja",
+ "mockall",
+ "parking_lot",
+ "pem",
+ "prost",
+ "prost-types",
+ "rand 0.8.5",
+ "rcgen",
+ "reqwest",
+ "rstest",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.17",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-test",
+ "tonic",
+ "tower 0.5.2",
+ "tracing",
+ "uuid",
+ "x509-parser 0.16.0",
+]
+
+[[package]]
 name = "lattice-common"
 version = "0.1.0"
 dependencies = [
@@ -1956,6 +2004,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-infra"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "axum 0.8.8",
+ "axum-server",
+ "base64",
+ "chrono",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "pem",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.17",
+ "time",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "x509-parser 0.16.0",
+]
+
+[[package]]
 name = "lattice-operator"
 version = "0.1.0"
 dependencies = [
@@ -1977,8 +2055,11 @@ dependencies = [
  "jsonptr",
  "k8s-openapi",
  "kube",
+ "lattice-cluster",
  "lattice-common",
+ "lattice-infra",
  "lattice-proto",
+ "lattice-service",
  "minijinja",
  "mockall",
  "parking_lot",
@@ -2018,6 +2099,38 @@ dependencies = [
  "prost-types",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "lattice-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-lc-rs",
+ "axum 0.8.8",
+ "chrono",
+ "dashmap",
+ "futures",
+ "json-patch",
+ "jsonptr",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-infra",
+ "mockall",
+ "parking_lot",
+ "proptest",
+ "rstest",
+ "rustls",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-test",
+ "tracing",
 ]
 
 [[package]]

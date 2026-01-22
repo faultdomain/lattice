@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/lattice-common",
     "crates/lattice-proto",
+    "crates/lattice-infra",
+    "crates/lattice-cluster",
+    "crates/lattice-service",
     "crates/lattice-operator",
     "crates/lattice-cli",
 ]
@@ -16,6 +19,9 @@ license = "Apache-2.0"
 # Internal crates
 lattice-common = { path = "crates/lattice-common" }
 lattice-proto = { path = "crates/lattice-proto" }
+lattice-infra = { path = "crates/lattice-infra" }
+lattice-cluster = { path = "crates/lattice-cluster" }
+lattice-service = { path = "crates/lattice-service" }
 
 # Kubernetes
 kube = { version = "0.98", features = ["runtime", "derive", "client", "rustls-tls", "admission"] }

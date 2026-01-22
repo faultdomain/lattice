@@ -1,0 +1,83 @@
+[package]
+name = "lattice-cluster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cluster lifecycle management for Lattice"
+
+[features]
+default = []
+fips = ["lattice-common/fips", "lattice-infra/fips"]
+
+[dependencies]
+# Internal
+lattice-common = { workspace = true }
+lattice-infra = { workspace = true }
+lattice-proto = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+json-patch = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# gRPC
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+# HTTP
+axum = { workspace = true }
+axum-server = { workspace = true }
+reqwest = { workspace = true }
+
+# Crypto
+rustls = { workspace = true }
+aws-lc-rs = { workspace = true }
+rustls-pemfile = { workspace = true }
+base64 = { workspace = true }
+x509-parser = { workspace = true }
+rcgen = { workspace = true }
+pem = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+time = { workspace = true }
+
+# Templating
+minijinja = { workspace = true }
+
+# Concurrency
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+# Random
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true }
+rstest = { workspace = true }

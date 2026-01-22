@@ -1,0 +1,61 @@
+[package]
+name = "lattice-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Service mesh management for Lattice"
+
+[features]
+default = []
+fips = ["lattice-common/fips", "lattice-infra/fips"]
+
+[dependencies]
+# Internal
+lattice-common = { workspace = true }
+lattice-infra = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+json-patch = { workspace = true }
+jsonptr = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# HTTP
+axum = { workspace = true }
+
+# Crypto
+rustls = { workspace = true }
+aws-lc-rs = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Concurrency
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+
+# Schema
+schemars = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }
+rstest = { workspace = true }
+proptest = { workspace = true }

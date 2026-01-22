@@ -3,21 +3,34 @@
 exclude-files = [
     # Entry points - tested by E2E
     "crates/lattice-operator/src/main.rs",
+
+    # === lattice-cluster exclusions ===
     # Agent gRPC - requires real network connections
-    "crates/lattice-operator/src/agent/client.rs",
-    "crates/lattice-operator/src/agent/server.rs",
+    "crates/lattice-cluster/src/agent/client.rs",
+    "crates/lattice-cluster/src/agent/server.rs",
     # Parent/Cell server - requires gRPC server, TLS, network binding
-    "crates/lattice-operator/src/parent/*",
+    "crates/lattice-cluster/src/parent/*",
     # Pivot - requires real k8s clusters, clusterctl binary
-    "crates/lattice-operator/src/pivot/*",
+    "crates/lattice-cluster/src/pivot/*",
     # CAPI - requires clusterctl binary
-    "crates/lattice-operator/src/capi/*",
+    "crates/lattice-cluster/src/capi/*",
+    # Cluster controller - requires real k8s API, tested by E2E
+    "crates/lattice-cluster/src/controller.rs",
+
+    # === lattice-service exclusions ===
+    # Service controller - requires real k8s API, tested by E2E
+    "crates/lattice-service/src/controller.rs",
+
+    # === lattice-operator exclusions ===
     # Controllers - require real k8s API, tested by E2E
     "crates/lattice-operator/src/controller/*",
+
+    # === Other exclusions ===
     # Generated proto code - no logic to test
     "crates/lattice-proto/src/*",
     # E2E test helpers and tests - require real k8s clusters
     "crates/lattice-operator/tests/*",
+    "crates/lattice-cluster/tests/*",
     # CLI - requires file I/O, git operations, and k8s clusters (tested by E2E)
     "crates/lattice-cli/src/*",
     # clusterctl wrapper - requires clusterctl binary
