@@ -66,7 +66,7 @@ use std::time::Duration;
 use base64::Engine;
 use kube::api::{Api, PostParams};
 
-use lattice_cli::commands::install::{InstallConfig, Installer};
+use lattice_cli::commands::install::Installer;
 use lattice_operator::crd::LatticeCluster;
 
 use super::helpers::{
@@ -370,16 +370,14 @@ async fn run_provider_e2e() -> Result<(), String> {
         println!("  Registry credentials loaded");
     }
 
-    let install_config = InstallConfig {
-        cluster_config_content: mgmt_config_content,
-        image: LATTICE_IMAGE.to_string(),
-        keep_bootstrap_on_failure: true,
+    let installer = Installer::new(
+        mgmt_config_content,
+        LATTICE_IMAGE.to_string(),
+        true, // keep_bootstrap_on_failure
         registry_credentials,
-        bootstrap_override: None,
-    };
-
-    let installer =
-        Installer::new(install_config).map_err(|e| format!("Failed to create installer: {}", e))?;
+        None, // bootstrap_override
+    )
+    .map_err(|e| format!("Failed to create installer: {}", e))?;
     installer
         .run()
         .await

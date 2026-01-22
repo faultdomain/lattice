@@ -76,6 +76,10 @@ pub struct InstallArgs {
     /// Dry run - show what would be done without making changes
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Write kubeconfig to this path after installation
+    #[arg(long)]
+    pub kubeconfig_out: Option<PathBuf>,
 }
 
 fn parse_bootstrap_provider(s: &str) -> std::result::Result<BootstrapProvider, String> {
@@ -103,13 +107,18 @@ pub struct Installer {
 const BOOTSTRAP_CLUSTER_NAME: &str = "lattice-bootstrap";
 
 impl Installer {
-    /// Create a new installer from CLI args
-    pub async fn from_args(args: &InstallArgs) -> Result<Self> {
-        let cluster_yaml = tokio::fs::read_to_string(&args.config_file).await?;
+    /// Create a new installer
+    pub fn new(
+        cluster_yaml: String,
+        image: String,
+        keep_bootstrap_on_failure: bool,
+        registry_credentials: Option<String>,
+        bootstrap_override: Option<BootstrapProvider>,
+    ) -> Result<Self> {
         let mut cluster: LatticeCluster = serde_yaml::from_str(&cluster_yaml)?;
 
-        if let Some(bootstrap) = &args.bootstrap {
-            cluster.spec.provider.kubernetes.bootstrap = bootstrap.clone();
+        if let Some(bootstrap) = bootstrap_override {
+            cluster.spec.provider.kubernetes.bootstrap = bootstrap;
         }
 
         let cluster_name = cluster
@@ -118,19 +127,31 @@ impl Installer {
             .clone()
             .ok_or_else(|| Error::validation("LatticeCluster must have metadata.name"))?;
 
+        Ok(Self {
+            cluster_yaml,
+            cluster,
+            cluster_name,
+            image,
+            keep_bootstrap_on_failure,
+            registry_credentials,
+        })
+    }
+
+    /// Create a new installer from CLI args
+    pub async fn from_args(args: &InstallArgs) -> Result<Self> {
+        let cluster_yaml = tokio::fs::read_to_string(&args.config_file).await?;
         let registry_credentials = match &args.registry_credentials_file {
             Some(path) => Some(tokio::fs::read_to_string(path).await?),
             None => None,
         };
 
-        Ok(Self {
+        Self::new(
             cluster_yaml,
-            cluster,
-            cluster_name,
-            image: args.image.clone(),
-            keep_bootstrap_on_failure: args.keep_bootstrap_on_failure,
+            args.image.clone(),
+            args.keep_bootstrap_on_failure,
             registry_credentials,
-        })
+            args.bootstrap.clone(),
+        )
     }
 
     fn cluster_name(&self) -> &str {
@@ -151,7 +172,8 @@ impl Installer {
         PathBuf::from(format!("/tmp/{}-kubeconfig", BOOTSTRAP_CLUSTER_NAME))
     }
 
-    fn management_kubeconfig_path(&self) -> PathBuf {
+    /// Returns the path where the management cluster kubeconfig is stored
+    pub fn kubeconfig_path(&self) -> PathBuf {
         PathBuf::from(format!("/tmp/{}-kubeconfig", self.cluster_name))
     }
 
@@ -301,7 +323,7 @@ impl Installer {
     }
 
     async fn management_client(&self) -> Result<Client> {
-        kube_utils::create_client(Some(&self.management_kubeconfig_path()))
+        kube_utils::create_client(Some(&self.kubeconfig_path()))
             .await
             .cmd_err()
     }
@@ -579,7 +601,7 @@ nodes:
     async fn apply_bootstrap_to_management(&self, bootstrap_client: &Client) -> Result<()> {
         // Fetch and prepare kubeconfig
         let kubeconfig = self.fetch_management_kubeconfig(bootstrap_client).await?;
-        let kubeconfig_path = self.management_kubeconfig_path();
+        let kubeconfig_path = self.kubeconfig_path();
         tokio::fs::write(&kubeconfig_path, &kubeconfig).await?;
 
         // Wait for management cluster API server to be reachable
@@ -775,7 +797,7 @@ nodes:
     async fn pivot_capi_resources(&self) -> Result<()> {
         let namespace = self.capi_namespace();
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
-        let mgmt_kubeconfig = self.management_kubeconfig_path();
+        let mgmt_kubeconfig = self.kubeconfig_path();
         let bootstrap_client = self.bootstrap_client().await?;
 
         // Wait for CAPI CRDs on target cluster
@@ -942,10 +964,22 @@ pub async fn run(args: InstallArgs) -> Result<()> {
         info!("  4. Wait for cluster provisioning");
         info!("  5. Pivot CAPI resources to make cluster self-managing");
         info!("  6. Delete bootstrap cluster");
+        if let Some(out) = &args.kubeconfig_out {
+            info!("  7. Write kubeconfig to: {}", out.display());
+        }
         return Ok(());
     }
 
-    installer.run().await
+    installer.run().await?;
+
+    // Copy kubeconfig to output path if specified
+    if let Some(out) = &args.kubeconfig_out {
+        let src = installer.kubeconfig_path();
+        tokio::fs::copy(&src, out).await?;
+        info!("Kubeconfig written to: {}", out.display());
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
