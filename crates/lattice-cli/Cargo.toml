@@ -33,12 +33,6 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-# Git
-git2.workspace = true
-
-# File system
-tempfile.workspace = true
-
 # Kubernetes
 kube.workspace = true
 k8s-openapi.workspace = true

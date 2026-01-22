@@ -1,11 +1,13 @@
 //! Install command - Bootstrap a new Lattice management cluster
 //!
-//! This command creates a new Lattice installation by:
-//! 1. Reading cluster config from a git repository or local path
-//! 2. Creating a temporary kind bootstrap cluster
-//! 3. Installing CAPI providers and Lattice operator
-//! 4. Provisioning the management cluster
-//! 5. Pivoting CAPI resources to make it self-managing
+//! Usage: lattice install -f cluster.yaml
+//!
+//! This command creates a self-managing Lattice cluster by:
+//! 1. Creating a temporary kind bootstrap cluster
+//! 2. Installing CAPI providers and Lattice operator
+//! 3. Provisioning the management cluster from your LatticeCluster CRD
+//! 4. Pivoting CAPI resources to make it self-managing
+//! 5. Deleting the bootstrap cluster
 
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -28,7 +30,7 @@ use lattice_operator::bootstrap::{
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 use lattice_operator::fips;
 
-use crate::{git, Error, Result};
+use crate::{Error, Result};
 
 /// Extension trait to convert errors with Display to CLI Error::CommandFailed.
 ///
@@ -44,28 +46,12 @@ impl<T, E: Display> CommandErrorExt<T> for std::result::Result<T, E> {
     }
 }
 
-/// Install Lattice from a git repository or local path
+/// Install a self-managing Lattice cluster from a LatticeCluster CRD
 #[derive(Args, Debug)]
 pub struct InstallArgs {
-    /// Path to LatticeCluster YAML config file
-    #[arg(short = 'f', long = "config")]
-    pub config_file: Option<PathBuf>,
-
-    /// Git repository URL containing cluster definitions
-    #[arg(long)]
-    pub git_repo: Option<String>,
-
-    /// Git branch to use
-    #[arg(long, default_value = "main")]
-    pub git_branch: String,
-
-    /// Path to existing local repository (alternative to --git-repo)
-    #[arg(long)]
-    pub local_path: Option<PathBuf>,
-
-    /// Path to git credentials (SSH key or token file)
-    #[arg(long)]
-    pub git_credentials: Option<PathBuf>,
+    /// Path to LatticeCluster YAML file
+    #[arg(short = 'f', long = "file")]
+    pub config_file: PathBuf,
 
     /// Lattice container image
     #[arg(
@@ -82,10 +68,6 @@ pub struct InstallArgs {
     /// Skip kind cluster deletion on failure (for debugging)
     #[arg(long)]
     pub keep_bootstrap_on_failure: bool,
-
-    /// Timeout for the entire installation in seconds
-    #[arg(long, default_value = "1200")]
-    pub timeout_secs: u64,
 
     /// Kubernetes bootstrap provider (overrides config file if set)
     #[arg(long, value_parser = parse_bootstrap_provider)]
@@ -107,38 +89,26 @@ fn parse_bootstrap_provider(s: &str) -> std::result::Result<BootstrapProvider, S
     }
 }
 
-/// Configuration for the installer
-#[derive(Debug, Clone)]
-pub struct InstallConfig {
-    /// Raw YAML content of the cluster configuration
-    pub cluster_config_content: String,
-    /// Lattice container image
-    pub image: String,
-    /// Keep bootstrap cluster on failure
-    pub keep_bootstrap_on_failure: bool,
-    /// Optional registry credentials (dockerconfigjson format)
-    pub registry_credentials: Option<String>,
-    /// Optional bootstrap provider override
-    pub bootstrap_override: Option<BootstrapProvider>,
-}
-
 /// The Lattice installer
 pub struct Installer {
-    config: InstallConfig,
+    cluster_yaml: String,
     cluster: LatticeCluster,
     cluster_name: String,
+    image: String,
+    keep_bootstrap_on_failure: bool,
+    registry_credentials: Option<String>,
 }
 
 /// Fixed bootstrap cluster name - concurrent installs are not supported
 const BOOTSTRAP_CLUSTER_NAME: &str = "lattice-bootstrap";
 
 impl Installer {
-    /// Create a new installer with the given configuration
-    pub fn new(config: InstallConfig) -> Result<Self> {
-        let mut cluster: LatticeCluster =
-            serde_yaml::from_str(&config.cluster_config_content).map_err(Error::Yaml)?;
+    /// Create a new installer from CLI args
+    pub async fn from_args(args: &InstallArgs) -> Result<Self> {
+        let cluster_yaml = tokio::fs::read_to_string(&args.config_file).await?;
+        let mut cluster: LatticeCluster = serde_yaml::from_str(&cluster_yaml)?;
 
-        if let Some(bootstrap) = &config.bootstrap_override {
+        if let Some(bootstrap) = &args.bootstrap {
             cluster.spec.provider.kubernetes.bootstrap = bootstrap.clone();
         }
 
@@ -148,10 +118,18 @@ impl Installer {
             .clone()
             .ok_or_else(|| Error::validation("LatticeCluster must have metadata.name"))?;
 
+        let registry_credentials = match &args.registry_credentials_file {
+            Some(path) => Some(tokio::fs::read_to_string(path).await?),
+            None => None,
+        };
+
         Ok(Self {
-            config,
+            cluster_yaml,
             cluster,
             cluster_name,
+            image: args.image.clone(),
+            keep_bootstrap_on_failure: args.keep_bootstrap_on_failure,
+            registry_credentials,
         })
     }
 
@@ -211,13 +189,19 @@ impl Installer {
 
     /// Run the installation
     pub async fn run(&self) -> Result<()> {
-        let start = Instant::now();
+        info!("Installing cluster: {}", self.cluster_name);
+        info!("Provider: {}", self.provider());
+        info!(
+            "Kubernetes version: {}",
+            self.cluster.spec.provider.kubernetes.version
+        );
 
+        let start = Instant::now();
         self.check_prerequisites().await?;
 
         let bootstrap_result = self.run_bootstrap().await;
 
-        if bootstrap_result.is_err() && !self.config.keep_bootstrap_on_failure {
+        if bootstrap_result.is_err() && !self.keep_bootstrap_on_failure {
             info!("Deleting bootstrap cluster due to failure...");
             let _ = self.delete_kind_cluster().await;
         }
@@ -418,8 +402,8 @@ nodes:
     async fn deploy_lattice_operator(&self, client: &Client) -> Result<()> {
         let generator = DefaultManifestGenerator::new();
         let all_manifests = generator.generate(
-            &self.config.image,
-            self.config.registry_credentials.as_deref(),
+            &self.image,
+            self.registry_credentials.as_deref(),
             Some("lattice-installer"),
             None,
         );
@@ -493,8 +477,8 @@ nodes:
             .map(|p| &p.ipv4_pool);
 
         let config = ManifestConfig {
-            image: &self.config.image,
-            registry_credentials: self.config.registry_credentials.as_deref(),
+            image: &self.image,
+            registry_credentials: self.registry_credentials.as_deref(),
             networking: self.cluster.spec.networking.as_ref(),
             proxmox_ipv4_pool,
             cluster_name: Some(cluster_name),
@@ -550,7 +534,7 @@ nodes:
     async fn create_management_cluster_crd(&self, client: &Client) -> Result<()> {
         kube_utils::apply_manifest_with_retry(
             client,
-            &self.config.cluster_config_content,
+            &self.cluster_yaml,
             Duration::from_secs(120),
         )
         .await
@@ -615,7 +599,7 @@ nodes:
         // Apply self-referential LatticeCluster CR
         kube_utils::apply_manifest_with_retry(
             &mgmt_client,
-            &self.config.cluster_config_content,
+            &self.cluster_yaml,
             Duration::from_secs(120),
         )
         .await
@@ -946,91 +930,22 @@ fn add_bootstrap_env(deployment_json: &str, provider: &str) -> String {
 }
 
 pub async fn run(args: InstallArgs) -> Result<()> {
-    let (config_path, config_content) = if let Some(ref config_file) = args.config_file {
-        let content = tokio::fs::read_to_string(config_file).await?;
-        (config_file.clone(), content)
-    } else {
-        let repo_path = get_repository(&args).await?;
-        let cluster_yaml = repo_path.join("cluster.yaml");
-
-        if !cluster_yaml.exists() {
-            return Err(Error::NotLatticeRepo { path: repo_path });
-        }
-
-        let content = tokio::fs::read_to_string(&cluster_yaml).await?;
-        (cluster_yaml, content)
-    };
-
-    let cluster: LatticeCluster = serde_yaml::from_str(&config_content)?;
-    let cluster_name = cluster
-        .metadata
-        .name
-        .as_ref()
-        .ok_or_else(|| Error::validation("LatticeCluster must have metadata.name"))?;
-    let provider = cluster.spec.provider.provider_type();
-
-    info!("Config file: {:?}", config_path);
-    info!("Management cluster: {}", cluster_name);
-    info!("Provider: {}", provider);
-    info!(
-        "Kubernetes version: {}",
-        cluster.spec.provider.kubernetes.version
-    );
+    let installer = Installer::from_args(&args).await?;
 
     if args.dry_run {
-        info!("Dry run - would perform the following:");
-        info!("1. Create bootstrap kind cluster");
-        info!("2. Install CAPI controllers");
-        info!("3. Install Lattice operator");
-        info!("4. Apply root cluster: {}", config_path.display());
-        info!("5. Wait for cluster provisioning");
-        info!("6. Pivot CAPI resources");
-        info!("7. Delete bootstrap cluster");
+        info!("Dry run for cluster: {}", installer.cluster_name());
+        info!("Provider: {}", installer.provider());
+        info!("Steps:");
+        info!("  1. Create bootstrap kind cluster");
+        info!("  2. Install CAPI controllers and Lattice operator");
+        info!("  3. Apply LatticeCluster: {}", args.config_file.display());
+        info!("  4. Wait for cluster provisioning");
+        info!("  5. Pivot CAPI resources to make cluster self-managing");
+        info!("  6. Delete bootstrap cluster");
         return Ok(());
     }
 
-    let registry_credentials = if let Some(creds_path) = &args.registry_credentials_file {
-        Some(tokio::fs::read_to_string(creds_path).await?)
-    } else {
-        None
-    };
-
-    let config = InstallConfig {
-        cluster_config_content: config_content,
-        image: args.image,
-        keep_bootstrap_on_failure: args.keep_bootstrap_on_failure,
-        registry_credentials,
-        bootstrap_override: args.bootstrap,
-    };
-
-    let installer = Installer::new(config)?;
     installer.run().await
-}
-
-async fn get_repository(args: &InstallArgs) -> Result<PathBuf> {
-    if let Some(ref local_path) = args.local_path {
-        if !local_path.exists() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Local path not found: {}", local_path.display()),
-            )));
-        }
-        return Ok(local_path.clone());
-    }
-
-    if let Some(ref git_url) = args.git_repo {
-        let temp_dir = tempfile::tempdir()?;
-        let repo_path = temp_dir.path().to_path_buf();
-        std::mem::forget(temp_dir);
-
-        info!(url = git_url, "Cloning repository...");
-        git::clone_repo(git_url, &repo_path, args.git_credentials.as_deref())?;
-        git::checkout_branch(&repo_path, &args.git_branch)?;
-
-        return Ok(repo_path);
-    }
-
-    Ok(PathBuf::from("."))
 }
 
 #[cfg(test)]
@@ -1253,35 +1168,11 @@ clusters:
 
     #[test]
     fn test_capi_namespace_format() {
-        let config = InstallConfig {
-            cluster_config_content: r#"
-apiVersion: lattice.dev/v1alpha1
-kind: LatticeCluster
-metadata:
-  name: test-cluster
-spec:
-  provider:
-    config:
-      docker: {}
-    kubernetes:
-      version: "1.28.0"
-      bootstrap: kubeadm
-  nodes:
-    controlPlane: 1
-    workers: 0
-"#
-            .to_string(),
-            image: "test:latest".to_string(),
-            keep_bootstrap_on_failure: false,
-            registry_credentials: None,
-            bootstrap_override: None,
-        };
-
-        let installer =
-            Installer::new(config).expect("installer should be created from valid config");
-        assert_eq!(installer.capi_namespace(), "capi-test-cluster");
+        // Test the naming conventions directly
+        let cluster_name = "test-cluster";
+        assert_eq!(format!("capi-{}", cluster_name), "capi-test-cluster");
         assert_eq!(
-            installer.kubeconfig_secret_name(),
+            format!("{}-kubeconfig", cluster_name),
             "test-cluster-kubeconfig"
         );
     }

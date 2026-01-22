@@ -2,7 +2,6 @@
 
 pub mod commands;
 pub mod error;
-pub mod git;
 
 pub use error::{Error, Result};
 
@@ -19,7 +18,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Install Lattice from a git repository
+    /// Install a self-managing Lattice cluster from a LatticeCluster CRD
     Install(commands::install::InstallArgs),
 }
 
