@@ -30,6 +30,20 @@ if [[ -z "$AWS_REGION" ]]; then
     exit 1
 fi
 
+# Generate AWS_B64ENCODED_CREDENTIALS for CAPA
+# This is the format clusterctl expects
+AWS_CREDENTIALS="[default]
+aws_access_key_id = $AWS_ACCESS_KEY_ID
+aws_secret_access_key = $AWS_SECRET_ACCESS_KEY
+region = $AWS_REGION"
+
+if [[ -n "$AWS_SESSION_TOKEN" ]]; then
+    AWS_CREDENTIALS="$AWS_CREDENTIALS
+aws_session_token = $AWS_SESSION_TOKEN"
+fi
+
+export AWS_B64ENCODED_CREDENTIALS=$(echo "$AWS_CREDENTIALS" | base64 | tr -d '\n')
+
 export LATTICE_MGMT_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e/fixtures/clusters/aws-mgmt.yaml"
 export LATTICE_WORKLOAD_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e/fixtures/clusters/aws-workload.yaml"
 export LATTICE_ENABLE_INDEPENDENCE_TEST=true
