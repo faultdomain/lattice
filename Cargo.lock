@@ -1969,6 +1969,7 @@ dependencies = [
  "aws-lc-rs",
  "base64",
  "chrono",
+ "criterion",
  "dashmap",
  "k8s-openapi",
  "kube",

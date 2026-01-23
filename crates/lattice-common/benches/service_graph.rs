@@ -10,11 +10,11 @@ use std::thread;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::*;
 
-use lattice::crd::{
+use lattice_common::crd::{
     ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalServiceSpec, LatticeServiceSpec,
     PortSpec, ReplicaSpec, Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
 };
-use lattice::graph::ServiceGraph;
+use lattice_common::graph::ServiceGraph;
 
 // =============================================================================
 // Test Fixtures
@@ -31,6 +31,7 @@ fn simple_container() -> ContainerSpec {
         volumes: BTreeMap::new(),
         liveness_probe: None,
         readiness_probe: None,
+        startup_probe: None,
     }
 }
 
@@ -48,7 +49,7 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
+                volume: None,
             },
         );
     }
@@ -61,7 +62,7 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
+                volume: None,
             },
         );
     }
@@ -77,11 +78,13 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
     );
 
     LatticeServiceSpec {
+        environment: "default".to_string(),
         containers,
         resources,
         service: Some(ServicePortsSpec { ports }),
         replicas: ReplicaSpec::default(),
         deploy: DeploySpec::default(),
+        ingress: None,
     }
 }
 
@@ -95,6 +98,7 @@ fn external_service_spec() -> LatticeExternalServiceSpec {
     endpoints.insert("api".to_string(), "https://api.example.com".to_string());
 
     LatticeExternalServiceSpec {
+        environment: "default".to_string(),
         endpoints,
         allowed_requesters: vec!["*".to_string()],
         resolution: Resolution::Dns,

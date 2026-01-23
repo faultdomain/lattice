@@ -31,3 +31,8 @@ dashmap.workspace = true
 [dev-dependencies]
 rstest.workspace = true
 proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "service_graph"
+harness = false
