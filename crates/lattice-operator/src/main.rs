@@ -639,6 +639,79 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
     }
 }
 
+/// Ensure the cell LoadBalancer Service exists.
+///
+/// Creates the lattice-cell Service if it doesn't exist. This must be called
+/// during startup BEFORE waiting for the cell endpoint, otherwise we have a
+/// chicken-and-egg problem (controllers create Service, but controllers wait for endpoint).
+///
+/// - Cloud providers: `load_balancer_ip` is None, cloud assigns address
+/// - On-prem: `load_balancer_ip` is set from parent_config.host, Cilium L2 announces it
+async fn ensure_cell_service_exists(
+    client: &Client,
+    load_balancer_ip: Option<String>,
+    bootstrap_port: u16,
+    grpc_port: u16,
+) -> anyhow::Result<()> {
+    use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+    use kube::api::PostParams;
+
+    let api: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
+
+    // Check if it already exists
+    if api.get("lattice-cell").await.is_ok() {
+        tracing::debug!("lattice-cell Service already exists");
+        return Ok(());
+    }
+
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert("app".to_string(), "lattice-operator".to_string());
+
+    let service = Service {
+        metadata: ObjectMeta {
+            name: Some("lattice-cell".to_string()),
+            namespace: Some("lattice-system".to_string()),
+            labels: Some(labels.clone()),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            type_: Some("LoadBalancer".to_string()),
+            selector: Some(labels),
+            load_balancer_ip: load_balancer_ip.clone(),
+            ports: Some(vec![
+                ServicePort {
+                    name: Some("bootstrap".to_string()),
+                    port: bootstrap_port as i32,
+                    target_port: Some(IntOrString::Int(bootstrap_port as i32)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                },
+                ServicePort {
+                    name: Some("grpc".to_string()),
+                    port: grpc_port as i32,
+                    target_port: Some(IntOrString::Int(grpc_port as i32)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    api.create(&PostParams::default(), &service).await?;
+    tracing::info!(
+        load_balancer_ip = ?load_balancer_ip,
+        bootstrap_port,
+        grpc_port,
+        "Created lattice-cell LoadBalancer Service"
+    );
+
+    Ok(())
+}
+
 /// Discover the cell service endpoint for TLS certificate SANs.
 ///
 /// The cell service is the LoadBalancer that exposes the Lattice operator's
@@ -769,20 +842,43 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
                     vec![]
                 }
             } else {
-                // Management cluster - wait for endpoint
-                tracing::info!(cluster = %cluster_name, "Waiting for cell endpoint...");
-                let mut retry_delay = std::time::Duration::from_secs(1);
-                let max_delay = std::time::Duration::from_secs(10);
+                // Management cluster - wait for LatticeCluster, create cell Service, wait for endpoint
+                let lattice_clusters: Api<LatticeCluster> = Api::all(client.clone());
 
+                // Step 1: Wait for LatticeCluster to exist (arrives via pivot)
+                tracing::info!(cluster = %cluster_name, "Waiting for LatticeCluster...");
+                let cluster = loop {
+                    match lattice_clusters.get(cluster_name).await {
+                        Ok(c) => break c,
+                        Err(_) => {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                };
+
+                // Step 2: Create cell Service if parent_config exists
+                if let Some(ref parent_config) = cluster.spec.parent_config {
+                    tracing::info!("Creating cell Service");
+                    if let Err(e) = ensure_cell_service_exists(
+                        &client,
+                        parent_config.host.clone(),
+                        parent_config.bootstrap_port,
+                        parent_config.grpc_port,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "Failed to create cell Service");
+                    }
+                }
+
+                // Step 3: Wait for cell endpoint
+                tracing::info!(cluster = %cluster_name, "Waiting for cell endpoint...");
                 loop {
                     if let Some(host) = discover_cell_endpoint(&client, cluster_name).await {
                         tracing::info!(host = %host, "Cell endpoint discovered");
                         break vec![host];
                     }
-
-                    tracing::debug!(retry_in = ?retry_delay, "Cell endpoint not ready, retrying...");
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = std::cmp::min(retry_delay * 2, max_delay);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
             }
         } else {

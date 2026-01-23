@@ -20,6 +20,8 @@ pub struct Cli {
 pub enum Commands {
     /// Install a self-managing Lattice cluster from a LatticeCluster CRD
     Install(commands::install::InstallArgs),
+    /// Uninstall a self-managing Lattice cluster (reverse pivot and destroy)
+    Uninstall(commands::uninstall::UninstallArgs),
 }
 
 impl Cli {
@@ -27,6 +29,7 @@ impl Cli {
     pub async fn run(self) -> Result<()> {
         match self.command {
             Commands::Install(args) => commands::install::run(args).await,
+            Commands::Uninstall(args) => commands::uninstall::run(args).await,
         }
     }
 }

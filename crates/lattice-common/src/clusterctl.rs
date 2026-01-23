@@ -360,11 +360,19 @@ pub async fn is_capi_cluster_ready(
     let client = kube_utils::create_client(kubeconfig)
         .await
         .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
-    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &cluster_api_resource());
+    is_cluster_ready(&client, namespace, cluster_name).await
+}
+
+/// Check if cluster has InfrastructureReady=True condition
+async fn is_cluster_ready(
+    client: &kube::Client,
+    namespace: &str,
+    cluster_name: &str,
+) -> Result<bool, ClusterctlError> {
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
 
     match api.get(cluster_name).await {
         Ok(cluster) => {
-            // Check for Ready condition in status.conditions
             let is_ready = cluster
                 .data
                 .get("status")
@@ -372,7 +380,7 @@ pub async fn is_capi_cluster_ready(
                 .and_then(|c| c.as_array())
                 .map(|conditions| {
                     conditions.iter().any(|cond| {
-                        cond.get("type").and_then(|t| t.as_str()) == Some("Ready")
+                        cond.get("type").and_then(|t| t.as_str()) == Some("InfrastructureReady")
                             && cond.get("status").and_then(|s| s.as_str()) == Some("True")
                     })
                 })
@@ -385,6 +393,176 @@ pub async fn is_capi_cluster_ready(
             e
         ))),
     }
+}
+
+/// Wait for CAPI cluster to have InfrastructureReady=True
+///
+/// Used after importing CAPI resources to ensure controllers have reconciled
+/// before triggering deletion.
+pub async fn wait_for_infrastructure_ready(
+    client: &kube::Client,
+    namespace: &str,
+    cluster_name: &str,
+    timeout: std::time::Duration,
+) -> Result<(), ClusterctlError> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(ClusterctlError::ExecutionFailed(
+                "timeout waiting for cluster infrastructure to be ready".to_string(),
+            ));
+        }
+
+        match is_cluster_ready(client, namespace, cluster_name).await {
+            Ok(true) => {
+                info!(cluster = %cluster_name, "Cluster infrastructure ready");
+                return Ok(());
+            }
+            Ok(false) => {
+                info!(cluster = %cluster_name, "Waiting for infrastructure ready...");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            Err(e) => {
+                warn!(error = %e, "Error checking cluster status");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Delete a CAPI Cluster resource
+pub async fn delete_cluster(
+    client: &kube::Client,
+    namespace: &str,
+    cluster_name: &str,
+) -> Result<(), ClusterctlError> {
+    use kube::api::DeleteParams;
+
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
+
+    api.delete(cluster_name, &DeleteParams::default())
+        .await
+        .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to delete cluster: {}", e)))?;
+
+    info!(cluster = %cluster_name, "Cluster deletion initiated");
+    Ok(())
+}
+
+/// Wait for CAPI Cluster to be fully deleted
+///
+/// Waits for the Cluster resource to return 404, indicating all
+/// infrastructure (VPCs, instances, etc.) has been cleaned up.
+pub async fn wait_for_cluster_deletion(
+    client: &kube::Client,
+    namespace: &str,
+    cluster_name: &str,
+    timeout: std::time::Duration,
+) -> Result<(), ClusterctlError> {
+    use std::time::Instant;
+
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(ClusterctlError::ExecutionFailed(
+                "timeout waiting for cluster deletion".to_string(),
+            ));
+        }
+
+        match api.get(cluster_name).await {
+            Ok(_) => {
+                info!(cluster = %cluster_name, "Waiting for cluster deletion...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                info!(cluster = %cluster_name, "Cluster deleted");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(error = %e, "Error checking cluster status");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Configuration for cluster teardown
+#[derive(Debug, Clone)]
+pub struct TeardownConfig {
+    /// Timeout for waiting for infrastructure ready
+    pub ready_timeout: Duration,
+    /// Timeout for waiting for deletion to complete
+    pub deletion_timeout: Duration,
+}
+
+impl Default for TeardownConfig {
+    fn default() -> Self {
+        Self {
+            ready_timeout: Duration::from_secs(300),   // 5 minutes
+            deletion_timeout: Duration::from_secs(600), // 10 minutes
+        }
+    }
+}
+
+/// Teardown a CAPI-managed cluster
+///
+/// This is the shared logic for both `lattice uninstall` (CLI) and unpivot (controller).
+/// The flow is:
+/// 1. Import manifests (if provided) via clusterctl move --from-directory
+/// 2. Unpause CAPI cluster to allow reconciliation
+/// 3. Wait for InfrastructureReady=True
+/// 4. Delete the Cluster resource
+/// 5. Wait for cluster deletion (infrastructure cleanup)
+///
+/// # Arguments
+/// * `client` - Kubernetes client for the cluster where CAPI is running
+/// * `namespace` - CAPI namespace (e.g., "capi-{cluster_name}")
+/// * `cluster_name` - Name of the CAPI Cluster resource
+/// * `manifests` - Optional CAPI manifests to import before teardown
+/// * `config` - Teardown configuration (timeouts)
+/// * `kubeconfig` - Optional kubeconfig path for clusterctl commands (None = in-cluster)
+pub async fn teardown_cluster(
+    client: &kube::Client,
+    namespace: &str,
+    cluster_name: &str,
+    manifests: Option<&[Vec<u8>]>,
+    config: &TeardownConfig,
+    kubeconfig: Option<&Path>,
+) -> Result<(), ClusterctlError> {
+    // Step 1: Import manifests if provided
+    if let Some(manifests) = manifests {
+        if !manifests.is_empty() {
+            info!(
+                cluster = %cluster_name,
+                manifest_count = manifests.len(),
+                "Importing CAPI manifests"
+            );
+            import_from_manifests(kubeconfig, namespace, manifests).await?;
+        }
+    }
+
+    // Step 2: Unpause CAPI cluster to allow reconciliation
+    info!(cluster = %cluster_name, "Unpausing CAPI cluster");
+    unpause_capi_cluster(kubeconfig, namespace, cluster_name).await?;
+
+    // Step 3: Wait for infrastructure ready
+    info!(cluster = %cluster_name, "Waiting for infrastructure ready");
+    wait_for_infrastructure_ready(client, namespace, cluster_name, config.ready_timeout).await?;
+
+    // Step 4: Delete the Cluster resource
+    info!(cluster = %cluster_name, "Deleting CAPI Cluster resource");
+    delete_cluster(client, namespace, cluster_name).await?;
+
+    // Step 5: Wait for cluster deletion (infrastructure cleanup)
+    info!(cluster = %cluster_name, "Waiting for infrastructure cleanup");
+    wait_for_cluster_deletion(client, namespace, cluster_name, config.deletion_timeout).await?;
+
+    info!(cluster = %cluster_name, "Cluster teardown complete");
+    Ok(())
 }
 
 fn read_yaml_files(dir: &Path) -> Result<Vec<Vec<u8>>, ClusterctlError> {

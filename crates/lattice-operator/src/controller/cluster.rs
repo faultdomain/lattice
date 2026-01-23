@@ -172,6 +172,9 @@ pub trait CAPIClient: Send + Sync {
     /// Delete a CAPI Cluster resource
     async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
 
+    /// Check if a CAPI Cluster resource exists
+    async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
+
     /// Get the underlying kube Client for advanced operations
     fn kube_client(&self) -> Client;
 }
@@ -472,6 +475,7 @@ impl KubeClient for KubeClientImpl {
             metadata: ObjectMeta {
                 name: Some("lattice-cell".to_string()),
                 namespace: Some("lattice-system".to_string()),
+                labels: Some(labels.clone()),
                 ..Default::default()
             },
             spec: Some(ServiceSpec {
@@ -953,6 +957,15 @@ impl CAPIClient for CAPIClientImpl {
                 debug!(cluster = %cluster_name, "CAPI Cluster not found (already deleted)");
                 Ok(())
             }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error> {
+        let api = self.capi_cluster_api(namespace);
+        match api.get(cluster_name).await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
@@ -2300,9 +2313,13 @@ impl PivotOperations for PivotOperationsImpl {
 
 /// Handle cleanup during unpivot
 ///
-/// Called after CAPI manifests have been imported from the child and unpaused.
-/// Waits for CAPI to reconcile the imported resources, then deletes
-/// the CAPI Cluster to trigger infrastructure cleanup.
+/// This follows the same logic as `lattice uninstall`:
+/// 1. Wait for CAPI to reconcile (InfrastructureReady)
+/// 2. Delete CAPI Cluster to trigger infrastructure cleanup
+/// 3. Wait for CAPI Cluster deletion (infrastructure cleanup complete)
+/// 4. Delete LatticeCluster
+///
+/// Uses requeue pattern for non-blocking waits.
 async fn handle_unpivot_cleanup(
     cluster: &LatticeCluster,
     ctx: &Context,
@@ -2311,29 +2328,39 @@ async fn handle_unpivot_cleanup(
 ) -> Result<Action, Error> {
     let name = cluster.name_any();
 
-    // Check if CAPI has reconciled and is ready
-    let capi_ready = ctx
+    // Check if CAPI Cluster still exists
+    let capi_exists = ctx
         .capi
-        .is_infrastructure_ready(&name, capi_namespace, bootstrap)
+        .capi_cluster_exists(&name, capi_namespace)
         .await
-        .unwrap_or(false);
+        .unwrap_or(true); // Assume exists on error to avoid premature deletion
 
-    if !capi_ready {
-        debug!(cluster = %name, "CAPI not ready yet, waiting for reconciliation");
-        return Ok(Action::requeue(Duration::from_secs(5)));
+    if capi_exists {
+        // Step 1: Wait for CAPI to reconcile (InfrastructureReady)
+        let capi_ready = ctx
+            .capi
+            .is_infrastructure_ready(&name, capi_namespace, bootstrap)
+            .await
+            .unwrap_or(false);
+
+        if !capi_ready {
+            debug!(cluster = %name, "CAPI not ready yet, waiting for reconciliation");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+
+        // Step 2: Delete CAPI Cluster to trigger infrastructure cleanup
+        info!(cluster = %name, "CAPI ready, deleting Cluster to trigger infrastructure cleanup");
+        if let Err(e) = ctx.capi.delete_capi_cluster(&name, capi_namespace).await {
+            warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
+        }
+
+        // Step 3: Requeue to wait for CAPI Cluster deletion
+        info!(cluster = %name, "Waiting for infrastructure cleanup...");
+        return Ok(Action::requeue(Duration::from_secs(10)));
     }
 
-    info!(cluster = %name, "CAPI ready, deleting Cluster to trigger infrastructure cleanup");
-
-    // Delete the CAPI Cluster resource to trigger infrastructure cleanup
-    if let Err(e) = ctx.capi.delete_capi_cluster(&name, capi_namespace).await {
-        warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
-    } else {
-        info!(cluster = %name, "CAPI Cluster deleted, infrastructure cleanup will proceed");
-    }
-
-    // Delete the LatticeCluster (status.unpivot_pending is cleared with deletion)
-    info!(cluster = %name, "Deleting LatticeCluster");
+    // Step 4: CAPI Cluster is gone (infrastructure cleanup complete), delete LatticeCluster
+    info!(cluster = %name, "Infrastructure cleanup complete, deleting LatticeCluster");
     if let Err(e) = ctx.kube.delete_cluster(&name).await {
         warn!(cluster = %name, error = %e, "Failed to delete LatticeCluster");
     }

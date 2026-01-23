@@ -26,6 +26,8 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::ProviderType;
 use lattice_common::Error;
 
+use crate::bootstrap::AwsCredentials;
+
 /// Provider types supported by CAPI
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapiProviderType {
@@ -682,8 +684,11 @@ impl ClusterctlInstaller {
             if let Ok(secret) = Self::read_secret(client, namespace, secret_name).await {
                 // AWS requires special handling: generate AWS_B64ENCODED_CREDENTIALS
                 if config.infrastructure == ProviderType::Aws {
-                    if let Some(encoded) = Self::generate_aws_b64_credentials(&secret) {
-                        env_vars.push(("AWS_B64ENCODED_CREDENTIALS".to_string(), encoded));
+                    if let Some(creds) = AwsCredentials::from_secret(&secret) {
+                        env_vars.push((
+                            "AWS_B64ENCODED_CREDENTIALS".to_string(),
+                            creds.to_b64_encoded(),
+                        ));
                         info!(
                             provider = "aws",
                             secret = format!("{}/{}", namespace, secret_name),
@@ -710,36 +715,6 @@ impl ClusterctlInstaller {
         }
 
         env_vars
-    }
-
-    /// Generate AWS_B64ENCODED_CREDENTIALS from individual AWS credentials
-    ///
-    /// clusterctl for AWS requires credentials in a base64-encoded INI profile format:
-    /// ```text
-    /// [default]
-    /// aws_access_key_id = <access_key>
-    /// aws_secret_access_key = <secret_key>
-    /// region = <region>
-    /// aws_session_token = <token>  # optional
-    /// ```
-    fn generate_aws_b64_credentials(secret: &HashMap<String, String>) -> Option<String> {
-        use base64::Engine;
-
-        let access_key = secret.get("AWS_ACCESS_KEY_ID")?;
-        let secret_key = secret.get("AWS_SECRET_ACCESS_KEY")?;
-        let region = secret.get("AWS_REGION")?;
-
-        let mut profile = format!(
-            "[default]\naws_access_key_id = {}\naws_secret_access_key = {}\nregion = {}",
-            access_key, secret_key, region
-        );
-
-        // Add session token if present (for temporary credentials)
-        if let Some(token) = secret.get("AWS_SESSION_TOKEN") {
-            profile.push_str(&format!("\naws_session_token = {}", token));
-        }
-
-        Some(base64::engine::general_purpose::STANDARD.encode(profile))
     }
 
     /// Read a secret and return its string data
