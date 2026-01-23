@@ -181,7 +181,8 @@ pub trait CAPIClient: Send + Sync {
     async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
 
     /// Check if a CAPI Cluster resource exists
-    async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
+    async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str)
+        -> Result<bool, Error>;
 
     /// Get the underlying kube Client for advanced operations
     fn kube_client(&self) -> Client;
@@ -990,7 +991,11 @@ impl CAPIClient for CAPIClientImpl {
         }
     }
 
-    async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error> {
+    async fn capi_cluster_exists(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+    ) -> Result<bool, Error> {
         let api = self.capi_cluster_api(namespace);
         match api.get(cluster_name).await {
             Ok(_) => Ok(true),

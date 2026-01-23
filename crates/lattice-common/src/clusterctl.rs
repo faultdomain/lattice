@@ -369,7 +369,8 @@ async fn is_cluster_ready(
     namespace: &str,
     cluster_name: &str,
 ) -> Result<bool, ClusterctlError> {
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
 
     match api.get(cluster_name).await {
         Ok(cluster) => {
@@ -441,11 +442,14 @@ pub async fn delete_cluster(
 ) -> Result<(), ClusterctlError> {
     use kube::api::DeleteParams;
 
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
 
     api.delete(cluster_name, &DeleteParams::default())
         .await
-        .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to delete cluster: {}", e)))?;
+        .map_err(|e| {
+            ClusterctlError::ExecutionFailed(format!("failed to delete cluster: {}", e))
+        })?;
 
     info!(cluster = %cluster_name, "Cluster deletion initiated");
     Ok(())
@@ -463,7 +467,8 @@ pub async fn wait_for_cluster_deletion(
 ) -> Result<(), ClusterctlError> {
     use std::time::Instant;
 
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
     let start = Instant::now();
 
     loop {
@@ -502,7 +507,7 @@ pub struct TeardownConfig {
 impl Default for TeardownConfig {
     fn default() -> Self {
         Self {
-            ready_timeout: Duration::from_secs(300),   // 5 minutes
+            ready_timeout: Duration::from_secs(300),    // 5 minutes
             deletion_timeout: Duration::from_secs(600), // 10 minutes
         }
     }

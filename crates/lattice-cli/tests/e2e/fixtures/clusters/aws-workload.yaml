@@ -25,9 +25,14 @@ spec:
         # BYOI: share VPC/subnets across clusters
         vpcId: "vpc-02334e828aa108521"
         subnetIds:
+          # Private subnets (for nodes)
           - "subnet-0baada5edd89b23c1"
           - "subnet-0b0d0d0ff4909e119"
           - "subnet-0d4feb8582c12782d"
+          # Public subnets (for load balancers)
+          - "subnet-0482c8a493e96c631"
+          - "subnet-08cb587698200615b"
+          - "subnet-002e2a39388d962c9"
   nodes:
     controlPlane: 1
     workers: 1

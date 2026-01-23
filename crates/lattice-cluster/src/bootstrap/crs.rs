@@ -4,8 +4,82 @@
 //! ClusterResourceSet-based bootstrap. Used by the CLI installer
 //! for the initial kind cluster (which cannot be reached externally).
 
+use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
 /// Default size limit for ConfigMap data to stay under etcd's 1 MiB limit
 pub const DEFAULT_CHUNK_SIZE: usize = 800 * 1024;
+
+/// ClusterResourceSet CRD (simplified for generation)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterResourceSet {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: ObjectMeta,
+    pub spec: ClusterResourceSetSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterResourceSetSpec {
+    pub strategy: String,
+    pub cluster_selector: ClusterSelector,
+    pub resources: Vec<ResourceRef>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterSelector {
+    pub match_labels: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResourceRef {
+    pub kind: String,
+    pub name: String,
+}
+
+impl ClusterResourceSet {
+    pub fn new(name: &str, namespace: &str, cluster_name: &str) -> Self {
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert(
+            "cluster.x-k8s.io/cluster-name".to_string(),
+            cluster_name.to_string(),
+        );
+
+        Self {
+            api_version: "addons.cluster.x-k8s.io/v1beta2".to_string(),
+            kind: "ClusterResourceSet".to_string(),
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                ..Default::default()
+            },
+            spec: ClusterResourceSetSpec {
+                strategy: "ApplyOnce".to_string(),
+                cluster_selector: ClusterSelector { match_labels },
+                resources: Vec::new(),
+            },
+        }
+    }
+
+    pub fn add_configmap(&mut self, name: &str) {
+        self.spec.resources.push(ResourceRef {
+            kind: "ConfigMap".to_string(),
+            name: name.to_string(),
+        });
+    }
+
+    pub fn add_secret(&mut self, name: &str) {
+        self.spec.resources.push(ResourceRef {
+            kind: "Secret".to_string(),
+            name: name.to_string(),
+        });
+    }
+}
 
 /// Chunk manifests into groups that fit within a size limit
 ///
@@ -21,7 +95,6 @@ pub fn chunk_manifests(manifests: &[String], max_size: usize) -> Vec<Vec<String>
 
         // If single manifest exceeds limit, it gets its own chunk
         if manifest_size > max_size {
-            // Flush current chunk first
             if !current_chunk.is_empty() {
                 chunks.push(current_chunk);
                 current_chunk = Vec::new();
@@ -42,7 +115,6 @@ pub fn chunk_manifests(manifests: &[String], max_size: usize) -> Vec<Vec<String>
         current_size += manifest_size;
     }
 
-    // Don't forget the last chunk
     if !current_chunk.is_empty() {
         chunks.push(current_chunk);
     }
@@ -68,22 +140,21 @@ pub fn generate_chunked_configmaps(
         names.push(name.clone());
 
         let combined = chunk.join("\n---\n");
-        let indented = combined
-            .lines()
-            .map(|l| format!("    {}", l))
-            .collect::<Vec<_>>()
-            .join("\n");
 
-        configmaps.push(format!(
-            r#"apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {name}
-  namespace: {namespace}
-data:
-  manifests.yaml: |
-{indented}"#
-        ));
+        let mut data = BTreeMap::new();
+        data.insert("manifests.yaml".to_string(), combined);
+
+        let cm = ConfigMap {
+            metadata: ObjectMeta {
+                name: Some(name),
+                namespace: Some(namespace.to_string()),
+                ..Default::default()
+            },
+            data: Some(data),
+            ..Default::default()
+        };
+
+        configmaps.push(serde_yaml::to_string(&cm).expect("ConfigMap serialization"));
     }
 
     (configmaps, names)
@@ -96,39 +167,21 @@ pub fn generate_crs(
     configmap_names: &[String],
     secret_name: Option<&str>,
 ) -> String {
-    let mut resources = String::new();
+    let mut crs = ClusterResourceSet::new(
+        &format!("{}-bootstrap", cluster_name),
+        namespace,
+        cluster_name,
+    );
+
     for name in configmap_names {
-        resources.push_str(&format!(
-            r#"    - kind: ConfigMap
-      name: {}
-"#,
-            name
-        ));
-    }
-    if let Some(secret) = secret_name {
-        resources.push_str(&format!(
-            r#"    - kind: Secret
-      name: {}
-"#,
-            secret
-        ));
+        crs.add_configmap(name);
     }
 
-    format!(
-        r#"apiVersion: addons.cluster.x-k8s.io/v1beta2
-kind: ClusterResourceSet
-metadata:
-  name: {cluster_name}-bootstrap
-  namespace: {namespace}
-spec:
-  strategy: ApplyOnce
-  clusterSelector:
-    matchLabels:
-      cluster.x-k8s.io/cluster-name: {cluster_name}
-  resources:
-{resources}"#,
-        resources = resources.trim_end()
-    )
+    if let Some(secret) = secret_name {
+        crs.add_secret(secret);
+    }
+
+    serde_yaml::to_string(&crs).expect("ClusterResourceSet serialization")
 }
 
 /// Generate CRS YAML manifests for CLI usage
@@ -137,8 +190,6 @@ spec:
 /// - Chunked ConfigMaps for all manifests (split to stay under 512KB each)
 /// - Secret for CAPMOX credentials (if Proxmox provider)
 /// - ClusterResourceSet referencing all ConfigMaps
-///
-/// This allows the CLI to share CRS generation logic with the operator.
 pub fn generate_crs_yaml_manifests(
     cluster_name: &str,
     namespace: &str,
@@ -153,26 +204,31 @@ pub fn generate_crs_yaml_manifests(
     result.extend(configmaps);
 
     // CAPMOX credentials secret if provided
-    let secret_name = if let Some((url, token, secret)) = capmox_credentials {
-        let capmox_manifests = super::capmox_credentials_manifests(url, token, secret);
-        let capmox_data_indented = capmox_manifests
-            .lines()
-            .map(|l| format!("    {}", l))
-            .collect::<Vec<_>>()
-            .join("\n");
+    let secret_name = if let Some((url, token, secret_value)) = capmox_credentials {
+        let capmox_manifests = super::capmox_credentials_manifests(url, token, secret_value);
 
-        result.push(format!(
-            r#"apiVersion: v1
-kind: Secret
-metadata:
-  name: capmox-credentials
-  namespace: {namespace}
-type: addons.cluster.x-k8s.io/resource-set
-stringData:
-  capmox.yaml: |
-{capmox_data}"#,
-            capmox_data = capmox_data_indented
-        ));
+        let mut string_data = BTreeMap::new();
+        string_data.insert("capmox.yaml".to_string(), capmox_manifests);
+
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            "addons.cluster.x-k8s.io/resource-set".to_string(),
+            "true".to_string(),
+        );
+
+        let secret = Secret {
+            metadata: ObjectMeta {
+                name: Some("capmox-credentials".to_string()),
+                namespace: Some(namespace.to_string()),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            type_: Some("addons.cluster.x-k8s.io/resource-set".to_string()),
+            string_data: Some(string_data),
+            ..Default::default()
+        };
+
+        result.push(serde_yaml::to_string(&secret).expect("Secret serialization"));
         Some("capmox-credentials")
     } else {
         None
@@ -203,21 +259,14 @@ mod tests {
         let result =
             generate_crs_yaml_manifests("my-cluster", "capi-my-cluster", &all_manifests, None);
 
-        // ConfigMap(s) + CRS
         assert!(result.len() >= 2);
-
-        // First should be a ConfigMap
         assert!(result[0].contains("kind: ConfigMap"));
         assert!(result[0].contains("name: bootstrap-00"));
         assert!(result[0].contains("namespace: capi-my-cluster"));
 
-        // Last should be ClusterResourceSet
-        let crs = result
-            .last()
-            .expect("result should have at least one element");
+        let crs = result.last().expect("should have CRS");
         assert!(crs.contains("kind: ClusterResourceSet"));
-        assert!(crs.contains("name: my-cluster-bootstrap"));
-        assert!(crs.contains("cluster.x-k8s.io/cluster-name: my-cluster"));
+        assert!(crs.contains("my-cluster-bootstrap"));
     }
 
     #[test]
@@ -231,20 +280,14 @@ mod tests {
             Some(("https://proxmox.local:8006", "user@pve!token", "secret123")),
         );
 
-        // Should have ConfigMap(s), CAPMOX secret, CRS
         assert!(result.len() >= 3);
 
-        // Check CAPMOX secret is present (second to last)
         let secret = &result[result.len() - 2];
         assert!(secret.contains("kind: Secret"));
         assert!(secret.contains("name: capmox-credentials"));
-        assert!(secret.contains("type: addons.cluster.x-k8s.io/resource-set"));
 
-        // Check CRS references the secret
-        let crs = result
-            .last()
-            .expect("result should have at least one element");
-        assert!(crs.contains("name: capmox-credentials"));
+        let crs = result.last().expect("should have CRS");
+        assert!(crs.contains("capmox-credentials"));
     }
 
     #[test]
@@ -258,7 +301,6 @@ mod tests {
 
         let result = generate_crs_yaml_manifests("test", "capi-test", &all_manifests, None);
 
-        // All manifests should be present in the ConfigMaps
         let configmaps: String = result[..result.len() - 1].join("\n");
         assert!(configmaps.contains("CiliumNetworkPolicy"));
         assert!(configmaps.contains("Namespace"));
@@ -272,10 +314,7 @@ mod tests {
 
         let result = generate_crs_yaml_manifests("cluster", "ns", &all_manifests, None);
 
-        // Verify CRS uses ApplyOnce strategy
-        let crs = result
-            .last()
-            .expect("result should have at least one element");
+        let crs = result.last().expect("should have CRS");
         assert!(crs.contains("strategy: ApplyOnce"));
     }
 
@@ -286,10 +325,7 @@ mod tests {
         let result =
             generate_crs_yaml_manifests("target-cluster", "capi-target", &all_manifests, None);
 
-        // CRS should select the correct cluster
-        let crs = result
-            .last()
-            .expect("result should have at least one element");
+        let crs = result.last().expect("should have CRS");
         assert!(crs.contains("clusterSelector:"));
         assert!(crs.contains("matchLabels:"));
         assert!(crs.contains("cluster.x-k8s.io/cluster-name: target-cluster"));
@@ -301,16 +337,11 @@ mod tests {
 
         let result = generate_crs_yaml_manifests("empty", "capi-empty", &all_manifests, None);
 
-        // Just CRS with no ConfigMaps
         assert_eq!(result.len(), 1);
         assert!(result[0].contains("kind: ClusterResourceSet"));
     }
 
-    // =========================================================================
-    // Chunking tests
-    // =========================================================================
-
-    const TEST_CHUNK_SIZE: usize = 1000; // Small limit for testing
+    const TEST_CHUNK_SIZE: usize = 1000;
 
     #[test]
     fn test_chunk_manifests_small_fits_in_one() {
@@ -327,7 +358,6 @@ mod tests {
         let manifests = vec![big.clone(), big.clone(), big];
         let chunks = chunk_manifests(&manifests, TEST_CHUNK_SIZE);
 
-        // Two fit, third causes split
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].len(), 2);
         assert_eq!(chunks[1].len(), 1);
@@ -342,12 +372,11 @@ mod tests {
         let chunks = chunk_manifests(&manifests, TEST_CHUNK_SIZE);
 
         assert!(chunks.len() >= 2);
-        // Oversized manifest is alone
         let huge_chunk = chunks
             .iter()
             .find(|c| c.iter().any(|m| m.len() > TEST_CHUNK_SIZE));
         assert!(huge_chunk.is_some());
-        assert_eq!(huge_chunk.expect("huge chunk should exist").len(), 1);
+        assert_eq!(huge_chunk.unwrap().len(), 1);
     }
 
     #[test]

@@ -380,9 +380,9 @@ nodes:
 
         // Export kubeconfig
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
-        let bootstrap_kubeconfig_str = bootstrap_kubeconfig
-            .to_str()
-            .ok_or_else(|| Error::command_failed("bootstrap kubeconfig path contains invalid UTF-8"))?;
+        let bootstrap_kubeconfig_str = bootstrap_kubeconfig.to_str().ok_or_else(|| {
+            Error::command_failed("bootstrap kubeconfig path contains invalid UTF-8")
+        })?;
         let export_output = Command::new("kind")
             .args([
                 "export",
@@ -559,13 +559,9 @@ nodes:
     }
 
     async fn create_management_cluster_crd(&self, client: &Client) -> Result<()> {
-        kube_utils::apply_manifest_with_retry(
-            client,
-            &self.cluster_yaml,
-            Duration::from_secs(120),
-        )
-        .await
-        .cmd_err()?;
+        kube_utils::apply_manifest_with_retry(client, &self.cluster_yaml, Duration::from_secs(120))
+            .await
+            .cmd_err()?;
         self.create_bootstrap_crs(client).await?;
         Ok(())
     }

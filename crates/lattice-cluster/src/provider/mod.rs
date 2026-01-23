@@ -232,6 +232,11 @@ fn generate_kube_vip_manifest(
     vip: &VipConfig,
     bootstrap: &lattice_common::crd::BootstrapProvider,
 ) -> String {
+    use k8s_openapi::api::core::v1::{
+        Capabilities, Container, EnvVar, HostAlias, HostPathVolumeSource, Pod, PodSpec,
+        SecurityContext, Volume, VolumeMount,
+    };
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::BootstrapProvider;
 
     let kubeconfig_path = match bootstrap {
@@ -239,62 +244,98 @@ fn generate_kube_vip_manifest(
         BootstrapProvider::Kubeadm => "/etc/kubernetes/super-admin.conf",
     };
 
-    format!(
-        r#"apiVersion: v1
-kind: Pod
-metadata:
-  name: kube-vip
-  namespace: kube-system
-spec:
-  containers:
-  - name: kube-vip
-    image: {image}
-    imagePullPolicy: IfNotPresent
-    args:
-    - manager
-    env:
-    - name: cp_enable
-      value: "true"
-    - name: vip_interface
-      value: "{interface}"
-    - name: address
-      value: "{address}"
-    - name: port
-      value: "6443"
-    - name: vip_arp
-      value: "true"
-    - name: vip_leaderelection
-      value: "true"
-    - name: vip_leaseduration
-      value: "60"
-    - name: vip_renewdeadline
-      value: "40"
-    - name: vip_retryperiod
-      value: "5"
-    securityContext:
-      capabilities:
-        add:
-        - NET_ADMIN
-        - NET_RAW
-    volumeMounts:
-    - mountPath: /etc/kubernetes/admin.conf
-      name: kubeconfig
-  hostAliases:
-  - hostnames:
-    - kubernetes
-    ip: 127.0.0.1
-  hostNetwork: true
-  volumes:
-  - hostPath:
-      path: {kubeconfig_path}
-      type: FileOrCreate
-    name: kubeconfig
-"#,
-        image = vip.image,
-        interface = vip.interface,
-        address = vip.address,
-        kubeconfig_path = kubeconfig_path,
-    )
+    let pod = Pod {
+        metadata: ObjectMeta {
+            name: Some("kube-vip".to_string()),
+            namespace: Some("kube-system".to_string()),
+            ..Default::default()
+        },
+        spec: Some(PodSpec {
+            host_network: Some(true),
+            host_aliases: Some(vec![HostAlias {
+                hostnames: Some(vec!["kubernetes".to_string()]),
+                ip: "127.0.0.1".to_string(),
+            }]),
+            containers: vec![Container {
+                name: "kube-vip".to_string(),
+                image: Some(vip.image.clone()),
+                image_pull_policy: Some("IfNotPresent".to_string()),
+                args: Some(vec!["manager".to_string()]),
+                env: Some(vec![
+                    EnvVar {
+                        name: "cp_enable".to_string(),
+                        value: Some("true".to_string()),
+                        ..Default::default()
+                    },
+                    EnvVar {
+                        name: "vip_interface".to_string(),
+                        value: Some(vip.interface.clone()),
+                        ..Default::default()
+                    },
+                    EnvVar {
+                        name: "address".to_string(),
+                        value: Some(vip.address.clone()),
+                        ..Default::default()
+                    },
+                    EnvVar {
+                        name: "port".to_string(),
+                        value: Some("6443".to_string()),
+                        ..Default::default()
+                    },
+                    EnvVar {
+                        name: "vip_arp".to_string(),
+                        value: Some("true".to_string()),
+                        ..Default::default()
+                    },
+                    EnvVar {
+                        name: "vip_leaderelection".to_string(),
+                        value: Some("true".to_string()),
+                        ..Default::default()
+                    },
+                    EnvVar {
+                        name: "vip_leaseduration".to_string(),
+                        value: Some("60".to_string()),
+                        ..Default::default()
+                    },
+                    EnvVar {
+                        name: "vip_renewdeadline".to_string(),
+                        value: Some("40".to_string()),
+                        ..Default::default()
+                    },
+                    EnvVar {
+                        name: "vip_retryperiod".to_string(),
+                        value: Some("5".to_string()),
+                        ..Default::default()
+                    },
+                ]),
+                security_context: Some(SecurityContext {
+                    capabilities: Some(Capabilities {
+                        add: Some(vec!["NET_ADMIN".to_string(), "NET_RAW".to_string()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                volume_mounts: Some(vec![VolumeMount {
+                    name: "kubeconfig".to_string(),
+                    mount_path: "/etc/kubernetes/admin.conf".to_string(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }],
+            volumes: Some(vec![Volume {
+                name: "kubeconfig".to_string(),
+                host_path: Some(HostPathVolumeSource {
+                    path: kubeconfig_path.to_string(),
+                    type_: Some("FileOrCreate".to_string()),
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    serde_yaml::to_string(&pod).expect("kube-vip pod serialization")
 }
 
 /// Generate a MachineDeployment manifest

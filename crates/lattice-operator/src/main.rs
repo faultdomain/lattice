@@ -734,10 +734,7 @@ async fn discover_cell_host(client: &Client) -> Option<String> {
     let first = ingress.first()?;
 
     // Prefer hostname (AWS ELB) over IP
-    first
-        .hostname
-        .clone()
-        .or_else(|| first.ip.clone())
+    first.hostname.clone().or_else(|| first.ip.clone())
 }
 
 /// Run in controller mode - manages clusters and/or services
