@@ -650,21 +650,12 @@ impl IngressCompiler {
             }]
         };
 
-        let mut parent_refs = vec![ParentRef {
+        let parent_refs = vec![ParentRef {
             group: Some("gateway.networking.k8s.io".to_string()),
             kind: Some("Gateway".to_string()),
             name: format!("{}-gateway", service_name),
             namespace: Some(namespace.to_string()),
         }];
-
-        if ingress.tls.is_some() {
-            parent_refs.push(ParentRef {
-                group: Some("gateway.networking.k8s.io".to_string()),
-                kind: Some("Gateway".to_string()),
-                name: format!("{}-gateway", service_name),
-                namespace: Some(namespace.to_string()),
-            });
-        }
 
         HttpRoute {
             api_version: "gateway.networking.k8s.io/v1".to_string(),
