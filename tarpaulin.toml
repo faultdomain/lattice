@@ -35,4 +35,6 @@ exclude-files = [
     "crates/lattice-cli/src/*",
     # clusterctl wrapper - requires clusterctl binary
     "crates/lattice-common/src/clusterctl.rs",
+    # kube utilities - async K8s API calls tested by E2E
+    "crates/lattice-common/src/kube_utils.rs",
 ]
