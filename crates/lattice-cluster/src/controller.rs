@@ -885,8 +885,11 @@ impl CAPIClient for CAPIClientImpl {
         let cp_initialized = match cp_api.get(&cp_name).await {
             Ok(cp) => {
                 if let Some(status) = cp.data.get("status") {
+                    // v1beta2 uses status.initialization.controlPlaneInitialized
+                    // v1beta1 used status.initialized
                     status
-                        .get("initialized")
+                        .get("initialization")
+                        .and_then(|init| init.get("controlPlaneInitialized"))
                         .and_then(|i| i.as_bool())
                         .unwrap_or(false)
                 } else {
