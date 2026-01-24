@@ -37,17 +37,15 @@ Traffic only flows when **both sides agree**:
 ```yaml
 # api-gateway declares: "I call auth-service"
 resources:
-  auth:
+  auth-service:
     type: service
     direction: outbound
-    id: auth-service
 
 # auth-service declares: "api-gateway can call me"
 resources:
-  api-gateway-caller:
+  api-gateway:
     type: service
     direction: inbound
-    id: api-gateway
 ```
 
 If either side removes their declaration, traffic stops. This compiles to:
@@ -120,19 +118,16 @@ spec:
         port: 8080
   resources:
     # Outbound: I call these services
-    auth:
+    auth-service:
       type: service
       direction: outbound
-      id: auth-service
-    database:
+    postgres:
       type: service
       direction: outbound
-      id: postgres
     # Inbound: These services call me
-    frontend:
+    web-frontend:
       type: service
       direction: inbound
-      id: web-frontend
 ```
 
 ### External Services
