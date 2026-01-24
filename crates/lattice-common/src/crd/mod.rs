@@ -15,10 +15,11 @@ pub use external_service::{
 };
 pub use service::{
     CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec, DeployStrategy, ExecProbe,
-    FileMount, GrpcProbe, HttpGetProbe, HttpHeader, IngressPath, IngressSpec, IngressTls,
-    LatticeService, LatticeServiceSpec, LatticeServiceStatus, PathMatchType, PortSpec, Probe,
-    RateLimitSpec, ReplicaSpec, ResourceSpec, ResourceType, ServicePhase, ServicePortsSpec,
-    TcpSocketProbe, TlsMode, VolumeAccessMode, VolumeMount, VolumeParams,
+    FileMount, GrpcProbe, HttpGetProbe, HttpHeader, InboundPolicy, IngressPath, IngressSpec,
+    IngressTls, LatticeService, LatticeServiceSpec, LatticeServiceStatus, OutboundPolicy,
+    PathMatchType, PortSpec, Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata,
+    ResourceSpec, ResourceType, RetryConfig, ServicePhase, ServicePortsSpec, TcpSocketProbe,
+    TimeoutConfig, TlsMode, VolumeAccessMode, VolumeMount, VolumeParams,
 };
 pub use types::{
     AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,

@@ -546,7 +546,9 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    volume: None,
+                    params: None,
+                    inbound: None,
+                    outbound: None,
                 },
             );
         }
@@ -559,7 +561,9 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    volume: None,
+                    params: None,
+                    inbound: None,
+                    outbound: None,
                 },
             );
         }

@@ -71,6 +71,7 @@ use super::helpers::{
     load_registry_credentials, run_cmd, run_cmd_allow_fail, watch_cluster_phases,
     watch_cluster_phases_with_kubeconfig, watch_worker_scaling,
 };
+use super::media_server_e2e::{cleanup_media_server_test, run_media_server_test};
 use super::mesh_tests::{run_mesh_test, run_random_mesh_test};
 use super::providers::InfraProvider;
 
@@ -349,10 +350,25 @@ async fn run_provider_e2e() -> Result<(), String> {
         Some(tokio::spawn(async move {
             println!("  [Mesh] Running service mesh tests...");
             let kubeconfig2 = kubeconfig.clone();
-            let (r1, r2) = tokio::join!(run_mesh_test(&kubeconfig), run_random_mesh_test(&kubeconfig2));
+            let kubeconfig3 = kubeconfig.clone();
+
+            // Run all mesh tests in parallel:
+            // - Fixed 9-service bilateral agreement test
+            // - Randomized large-scale mesh test (50-100 services)
+            // - Media server test (Score-compliant volumes, L7 policies)
+            let (r1, r2, r3) = tokio::join!(
+                run_mesh_test(&kubeconfig),
+                run_random_mesh_test(&kubeconfig2),
+                run_media_server_test(&kubeconfig3)
+            );
+
+            // Cleanup media server test resources
+            cleanup_media_server_test(&kubeconfig).await;
+
             r1?;
             r2?;
-            println!("  [Mesh] Tests complete!");
+            r3?;
+            println!("  [Mesh] All tests complete!");
             Ok::<_, String>(())
         }))
     } else {

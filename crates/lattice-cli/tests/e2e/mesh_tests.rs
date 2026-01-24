@@ -73,7 +73,9 @@ fn outbound_dep(name: &str) -> (String, ResourceSpec) {
             id: None,
             class: None,
             metadata: None,
-            volume: None,
+            params: None,
+            inbound: None,
+            outbound: None,
         },
     )
 }
@@ -87,7 +89,9 @@ fn inbound_allow(name: &str) -> (String, ResourceSpec) {
             id: None,
             class: None,
             metadata: None,
-            volume: None,
+            params: None,
+            inbound: None,
+            outbound: None,
         },
     )
 }
@@ -1104,7 +1108,9 @@ impl RandomMesh {
                     id: None,
                     class: None,
                     metadata: None,
-                    volume: None,
+                    params: None,
+            inbound: None,
+            outbound: None,
                 },
             );
         }
@@ -1117,7 +1123,9 @@ impl RandomMesh {
                     id: None,
                     class: None,
                     metadata: None,
-                    volume: None,
+                    params: None,
+            inbound: None,
+            outbound: None,
                 },
             );
         }
@@ -1130,7 +1138,9 @@ impl RandomMesh {
                     id: None,
                     class: None,
                     metadata: None,
-                    volume: None,
+                    params: None,
+            inbound: None,
+            outbound: None,
                 },
             );
         }

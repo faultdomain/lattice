@@ -70,69 +70,163 @@ pub struct ResourceMetadata {
     pub annotations: BTreeMap<String, String>,
 }
 
-/// Resource dependency specification
+/// Resource dependency specification (Score-compatible with Lattice extensions)
+///
+/// ## Score Standard Fields
+/// - `type`: Resource type (volume, service, etc.)
+/// - `class`: Optional specialization
+/// - `id`: Resource identifier for sharing across workloads
+/// - `metadata`: Annotations and other metadata
+/// - `params`: Provisioner-interpreted parameters (generic object)
+///
+/// ## Lattice Extensions
+/// - `direction`: Bilateral agreement direction (inbound/outbound/both)
+/// - `inbound`: L7 policies for inbound traffic (rate limiting)
+/// - `outbound`: L7 policies for outbound traffic (retries, timeouts)
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceSpec {
-    /// Type of resource
+    // =========================================================================
+    // Score Standard Fields
+    // =========================================================================
+
+    /// Type of resource (Score: type)
     #[serde(rename = "type")]
     pub type_: ResourceType,
 
-    /// Direction of the dependency (Lattice extension)
-    #[serde(default)]
-    pub direction: DependencyDirection,
-
-    /// Optional identifier for resource sharing
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-
-    /// Optional specialization class
+    /// Optional specialization class (Score: class)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
 
-    /// Resource metadata (Score-compatible)
+    /// Optional identifier for resource sharing (Score: id)
+    ///
+    /// When two resources share the same type, class, and id, they are
+    /// considered the same resource when used across related Workloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Resource metadata (Score: metadata)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ResourceMetadata>,
 
-    /// Volume-specific configuration (only valid when type is "volume")
+    /// Provisioner-interpreted parameters (Score: params)
     ///
-    /// Sets storage size, class, and access mode for volume resources.
-    /// Presence of `size` determines ownership (creates PVC vs references shared PVC).
+    /// Generic parameters that Lattice interprets based on resource type:
+    /// - volume: size, storageClass, accessMode
+    /// - service: (none - uses Lattice extensions)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub volume: Option<VolumeParams>,
+    pub params: Option<serde_json::Value>,
+
+    // =========================================================================
+    // Lattice Extensions (additions to Score, not replacements)
+    // =========================================================================
+
+    /// Direction of the dependency (Lattice extension)
+    ///
+    /// Used for bilateral service mesh agreements:
+    /// - outbound: This service calls the target
+    /// - inbound: The target calls this service
+    /// - both: Bidirectional communication
+    #[serde(default)]
+    pub direction: DependencyDirection,
+
+    /// L7 policies for inbound traffic (Lattice extension)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound: Option<InboundPolicy>,
+
+    /// L7 policies for outbound traffic (Lattice extension)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound: Option<OutboundPolicy>,
+}
+
+/// L7 policies for inbound traffic (Lattice extension)
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InboundPolicy {
+    /// Rate limiting configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitConfig>,
+}
+
+/// L7 policies for outbound traffic (Lattice extension)
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundPolicy {
+    /// Retry configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<RetryConfig>,
+    /// Timeout configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<TimeoutConfig>,
+}
+
+/// Rate limiting configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitConfig {
+    /// Maximum requests per interval
+    pub requests_per_interval: u32,
+    /// Interval in seconds (default: 60)
+    #[serde(default = "default_rate_limit_interval_config")]
+    pub interval_seconds: u32,
+}
+
+fn default_rate_limit_interval_config() -> u32 {
+    60
+}
+
+/// Retry configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryConfig {
+    /// Number of retry attempts
+    pub attempts: u32,
+    /// Timeout per attempt
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_try_timeout: Option<String>,
+    /// Conditions that trigger a retry
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_on: Vec<String>,
+}
+
+/// Timeout configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeoutConfig {
+    /// Request timeout
+    pub request: String,
 }
 
 // =============================================================================
-// Volume Resource Configuration
+// Volume Resource Configuration (parsed from Score params)
 // =============================================================================
 
-/// Parameters for volume resources (type: volume)
+/// Parsed volume parameters from Score's generic `params` field
 ///
 /// Volume ownership is determined by the presence of `size`:
 /// - With `size`: This service OWNS the volume (creates the PVC)
 /// - Without `size`: This service REFERENCES a shared volume
 ///
-/// For shared volumes, use the `id` field on ResourceSpec:
 /// ```yaml
-/// # Owner (has size)
+/// # Owner (has size in params)
 /// resources:
 ///   downloads:
 ///     type: volume
 ///     id: media-downloads
-///     volume:
+///     params:
 ///       size: 500Gi
+///       storageClass: local-path
 ///
-/// # Reference (no size)
+/// # Reference (no params or no size)
 /// resources:
 ///   downloads:
 ///     type: volume
 ///     id: media-downloads
 /// ```
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeParams {
     /// Storage size (e.g., "10Gi", "500Gi")
-    /// Required for owned volumes. Omit for shared volume references.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
 
@@ -146,7 +240,7 @@ pub struct VolumeParams {
 }
 
 /// Volume access mode
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum VolumeAccessMode {
     /// Single node read-write (default)
     #[default]
@@ -158,17 +252,21 @@ pub enum VolumeAccessMode {
 }
 
 impl ResourceSpec {
-    /// Get volume params if this is a volume resource
+    /// Parse volume params from the generic Score `params` field
+    ///
+    /// Returns None if this is not a volume resource.
+    /// Returns default VolumeParams if params is missing or empty.
     pub fn volume_params(&self) -> Option<VolumeParams> {
         if self.type_ != ResourceType::Volume {
             return None;
         }
-        // Return the volume params or default if not specified
-        Some(self.volume.clone().unwrap_or_default())
+        match &self.params {
+            Some(params) => serde_json::from_value(params.clone()).ok(),
+            None => Some(VolumeParams::default()),
+        }
     }
 
     /// Returns true if this is a volume resource that owns (creates) the PVC
-    /// Owner = has size in params
     pub fn is_volume_owner(&self) -> bool {
         self.volume_params()
             .map(|p| p.size.is_some())
@@ -176,12 +274,9 @@ impl ResourceSpec {
     }
 
     /// Returns true if this is a volume resource that references a shared PVC
-    /// Reference = has id but no size
     pub fn is_volume_reference(&self) -> bool {
-        if self.type_ != ResourceType::Volume {
-            return false;
-        }
-        self.id.is_some()
+        self.type_ == ResourceType::Volume
+            && self.id.is_some()
             && self
                 .volume_params()
                 .map(|p| p.size.is_none())
@@ -189,15 +284,13 @@ impl ResourceSpec {
     }
 
     /// Get the PVC name for this volume resource
-    /// - If `id` is set: `vol-{id}`
-    /// - Otherwise: `{service}-{resource-name}` (caller must provide service name)
     pub fn volume_pvc_name(&self, service_name: &str, resource_name: &str) -> Option<String> {
         if self.type_ != ResourceType::Volume {
             return None;
         }
         Some(match &self.id {
-            Some(id) => format!("vol-{}", id),
-            None => format!("{}-{}", service_name, resource_name),
+            Some(id) => format!("vol-{id}"),
+            None => format!("{service_name}-{resource_name}"),
         })
     }
 }
@@ -1167,7 +1260,9 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                volume: None,
+                params: None,
+                inbound: None,
+                outbound: None,
             },
         );
         resources.insert(
@@ -1178,7 +1273,9 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                volume: None,
+                params: None,
+                inbound: None,
+                outbound: None,
             },
         );
 
@@ -1203,7 +1300,9 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                volume: None,
+                params: None,
+                inbound: None,
+                outbound: None,
             },
         );
         resources.insert(
@@ -1214,7 +1313,9 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                volume: None,
+                params: None,
+                inbound: None,
+                outbound: None,
             },
         );
 
@@ -1239,7 +1340,9 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                volume: None,
+                params: None,
+                inbound: None,
+                outbound: None,
             },
         );
 
@@ -1263,7 +1366,9 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                volume: None,
+                params: None,
+                inbound: None,
+                outbound: None,
             },
         );
         resources.insert(
@@ -1274,7 +1379,9 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                volume: None,
+                params: None,
+                inbound: None,
+                outbound: None,
             },
         );
 
@@ -1926,11 +2033,9 @@ containers:
                 id: Some(id.to_string()),
                 class: None,
                 metadata: None,
-                volume: Some(VolumeParams {
-                    size: Some(size.to_string()),
-                    storage_class: None,
-                    access_mode: None,
-                }),
+                params: Some(serde_json::json!({ "size": size })),
+                inbound: None,
+                outbound: None,
             },
         );
         spec
@@ -1946,7 +2051,9 @@ containers:
                 id: Some(id.to_string()),
                 class: None,
                 metadata: None,
-                volume: None, // No volume config = reference
+                params: None, // No params = reference
+                inbound: None,
+                outbound: None,
             },
         );
         spec
@@ -1966,5 +2073,212 @@ containers:
         let refs = spec.referenced_volume_ids();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0], ("data", "shared-data"));
+    }
+
+    // =========================================================================
+    // Score Compatibility Tests
+    // =========================================================================
+
+    /// Story: Score-compatible params field parses for volumes
+    #[test]
+    fn test_score_compatible_volume_params() {
+        let yaml = r#"
+environment: media
+containers:
+  main:
+    image: jellyfin/jellyfin:latest
+resources:
+  config:
+    type: volume
+    params:
+      size: 10Gi
+      storageClass: local-path
+  media:
+    type: volume
+    id: media-library
+    params:
+      size: 1Ti
+      storageClass: local-path
+      accessMode: ReadWriteOnce
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Score-compatible YAML should parse");
+
+        // Verify config volume
+        let config = spec.resources.get("config").expect("config should exist");
+        assert!(config.is_volume_owner());
+        let config_params = config.volume_params().expect("config volume params");
+        assert_eq!(config_params.size, Some("10Gi".to_string()));
+        assert_eq!(config_params.storage_class, Some("local-path".to_string()));
+
+        // Verify media volume with id
+        let media = spec.resources.get("media").expect("media should exist");
+        assert!(media.is_volume_owner());
+        assert_eq!(media.id, Some("media-library".to_string()));
+        let media_params = media.volume_params().expect("media volume params");
+        assert_eq!(media_params.size, Some("1Ti".to_string()));
+        assert_eq!(media_params.access_mode, Some(VolumeAccessMode::ReadWriteOnce));
+    }
+
+    /// Story: Score-compatible volume reference (no params)
+    #[test]
+    fn test_score_compatible_volume_reference() {
+        let yaml = r#"
+environment: media
+containers:
+  main:
+    image: sonarr:latest
+resources:
+  media:
+    type: volume
+    id: media-library
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Volume reference YAML should parse");
+
+        let media = spec.resources.get("media").expect("media should exist");
+        assert!(!media.is_volume_owner()); // No params means not an owner
+        assert!(media.is_volume_reference()); // Has id but no size
+        assert_eq!(media.id, Some("media-library".to_string()));
+    }
+
+    /// Story: Lattice extensions for bilateral agreements with L7 policies
+    #[test]
+    fn test_lattice_bilateral_agreement_extensions() {
+        let yaml = r#"
+environment: media
+containers:
+  main:
+    image: jellyfin/jellyfin:latest
+resources:
+  sonarr:
+    type: service
+    direction: inbound
+    inbound:
+      rateLimit:
+        requestsPerInterval: 100
+        intervalSeconds: 60
+  nzbget:
+    type: service
+    direction: outbound
+    outbound:
+      retries:
+        attempts: 3
+        perTryTimeout: 5s
+        retryOn:
+          - 5xx
+          - connect-failure
+      timeout:
+        request: 30s
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Bilateral agreement YAML should parse");
+
+        // Verify inbound policy
+        let sonarr = spec.resources.get("sonarr").expect("sonarr should exist");
+        assert_eq!(sonarr.direction, DependencyDirection::Inbound);
+        let inbound = sonarr.inbound.as_ref().expect("inbound policy should exist");
+        let rate_limit = inbound.rate_limit.as_ref().expect("rate limit should exist");
+        assert_eq!(rate_limit.requests_per_interval, 100);
+        assert_eq!(rate_limit.interval_seconds, 60);
+
+        // Verify outbound policy
+        let nzbget = spec.resources.get("nzbget").expect("nzbget should exist");
+        assert_eq!(nzbget.direction, DependencyDirection::Outbound);
+        let outbound = nzbget.outbound.as_ref().expect("outbound policy should exist");
+        let retries = outbound.retries.as_ref().expect("retries should exist");
+        assert_eq!(retries.attempts, 3);
+        assert_eq!(retries.per_try_timeout, Some("5s".to_string()));
+        assert_eq!(retries.retry_on, vec!["5xx", "connect-failure"]);
+        let timeout = outbound.timeout.as_ref().expect("timeout should exist");
+        assert_eq!(timeout.request, "30s");
+    }
+
+    /// Story: Full media-server jellyfin-style spec parses correctly
+    #[test]
+    fn test_media_server_style_spec() {
+        let yaml = r#"
+environment: media
+containers:
+  main:
+    image: jellyfin/jellyfin:latest
+    variables:
+      JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
+    volumes:
+      /config:
+        source: ${resources.config}
+      /media:
+        source: ${resources.media}
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 4000m
+        memory: 8Gi
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 8096
+      initialDelaySeconds: 30
+service:
+  ports:
+    http:
+      port: 8096
+      protocol: TCP
+resources:
+  config:
+    type: volume
+    params:
+      size: 10Gi
+      storageClass: local-path
+  media:
+    type: volume
+    id: media-library
+    params:
+      size: 1Ti
+      storageClass: local-path
+      accessMode: ReadWriteOnce
+  sonarr:
+    type: service
+    direction: inbound
+    inbound:
+      rateLimit:
+        requestsPerInterval: 100
+        intervalSeconds: 60
+ingress:
+  hosts:
+    - jellyfin.home.local
+  tls:
+    mode: auto
+    issuerRef:
+      name: letsencrypt-prod
+replicas:
+  min: 1
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Media server YAML should parse");
+
+        // Verify containers
+        assert_eq!(spec.containers.len(), 1);
+        let main = spec.containers.get("main").expect("main container");
+        assert_eq!(main.image, "jellyfin/jellyfin:latest");
+        assert!(!main.volumes.is_empty());
+
+        // Verify resources
+        assert_eq!(spec.resources.len(), 3);
+        assert!(spec.resources.get("config").expect("config").is_volume_owner());
+        assert!(spec.resources.get("media").expect("media").is_volume_owner());
+
+        // Verify service
+        let service = spec.service.as_ref().expect("service should exist");
+        assert!(service.ports.contains_key("http"));
+
+        // Verify ingress
+        let ingress = spec.ingress.as_ref().expect("ingress should exist");
+        assert_eq!(ingress.hosts, vec!["jellyfin.home.local"]);
+
+        // Validate the spec
+        spec.validate().expect("spec should be valid");
     }
 }

@@ -323,7 +323,9 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            volume: None,
+            params: None,
+            inbound: None,
+            outbound: None,
         };
 
         let outputs = provisioner
@@ -356,7 +358,9 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            volume: None,
+            params: None,
+            inbound: None,
+            outbound: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -380,7 +384,9 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            volume: None,
+            params: None,
+            inbound: None,
+            outbound: None,
         };
 
         let outputs = provisioner
@@ -408,7 +414,9 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            volume: None,
+            params: None,
+            inbound: None,
+            outbound: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -441,7 +449,9 @@ mod tests {
                 id: Some("postgres".to_string()),
                 class: None,
                 metadata: None,
-                volume: None,
+                params: None,
+            inbound: None,
+            outbound: None,
             },
         );
 

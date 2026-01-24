@@ -346,9 +346,7 @@ impl VolumeCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{
-        ContainerSpec, DependencyDirection, DeploySpec, ReplicaSpec, ResourceSpec, VolumeParams,
-    };
+    use crate::crd::{ContainerSpec, DependencyDirection, DeploySpec, ReplicaSpec, ResourceSpec};
     use lattice_common::template::TemplateString;
 
     fn make_spec_with_volumes(
@@ -360,6 +358,14 @@ mod tests {
 
         // Add owned volumes
         for (name, id, size, access_mode) in owned {
+            let mut params = serde_json::json!({ "size": size });
+            if let Some(mode) = access_mode {
+                params["accessMode"] = serde_json::json!(match mode {
+                    VolumeAccessMode::ReadWriteOnce => "ReadWriteOnce",
+                    VolumeAccessMode::ReadWriteMany => "ReadWriteMany",
+                    VolumeAccessMode::ReadOnlyMany => "ReadOnlyMany",
+                });
+            }
             resources.insert(
                 name.to_string(),
                 ResourceSpec {
@@ -368,11 +374,9 @@ mod tests {
                     id: id.map(|s: &str| s.to_string()),
                     class: None,
                     metadata: None,
-                    volume: Some(VolumeParams {
-                        size: Some(size.to_string()),
-                        storage_class: None,
-                        access_mode,
-                    }),
+                    params: Some(params),
+                    inbound: None,
+                    outbound: None,
                 },
             );
         }
@@ -387,7 +391,9 @@ mod tests {
                     id: Some(id.to_string()),
                     class: None,
                     metadata: None,
-                    volume: None, // No volume params = reference
+                    params: None, // No params = reference
+                    inbound: None,
+                    outbound: None,
                 },
             );
         }
@@ -478,10 +484,10 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        // Add storage class to volume config
+        // Add storage class to volume config via params
         if let Some(resource) = spec.resources.get_mut("config") {
-            if let Some(volume) = resource.volume.as_mut() {
-                volume.storage_class = Some("local-path".to_string());
+            if let Some(params) = resource.params.as_mut() {
+                params["storageClass"] = serde_json::json!("local-path");
             }
         }
 

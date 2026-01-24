@@ -519,7 +519,9 @@ mod tests {
                 id: Some("postgres".to_string()),
                 class: None,
                 metadata: None,
-                volume: None,
+                params: None,
+                inbound: None,
+                outbound: None,
             },
         );
 
