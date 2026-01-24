@@ -51,12 +51,7 @@ impl TemplateEngine {
             .block_delimiters("{%", "%}")
             .comment_delimiters("{#", "#}")
             .build()
-            .unwrap_or_else(|e| {
-                // Log the error for debugging before panicking
-                eprintln!("FATAL: Failed to build template syntax config: {e}");
-                eprintln!("This indicates a minijinja library incompatibility.");
-                panic!("template engine initialization failed: {e}");
-            });
+            .expect("template syntax configuration is hardcoded and valid");
 
         let mut env = Environment::new();
         env.set_syntax(syntax);

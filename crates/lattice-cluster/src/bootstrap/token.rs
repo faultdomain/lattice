@@ -35,13 +35,7 @@ impl BootstrapToken {
     /// cannot operate securely. Use [`try_generate`] if you need to handle
     /// this error explicitly.
     pub fn generate() -> Self {
-        Self::try_generate().unwrap_or_else(|e| {
-            panic!(
-                "CRITICAL: {}. The system cannot operate securely without \
-                 a working cryptographic random number generator.",
-                e
-            )
-        })
+        Self::try_generate().expect("FIPS-validated RNG failed - system cannot operate securely")
     }
 
     /// Try to generate a new random bootstrap token

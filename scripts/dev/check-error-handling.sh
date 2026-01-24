@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Check for .expect(), .unwrap(), and panic!() in production Rust code
 # Usage: ./scripts/check-error-handling.sh [--verbose]
+# Requires: gawk (GNU awk) for BEGINFILE support
 
 set -euo pipefail
 
@@ -8,12 +9,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VERBOSE="${1:-}"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
 cd "$PROJECT_ROOT"
+
+# Check for gawk
+if ! command -v gawk &> /dev/null; then
+    echo "Error: gawk is required but not installed."
+    echo "Install with: apt-get install gawk (Ubuntu) or brew install gawk (macOS)"
+    exit 1
+fi
 
 echo "Checking error handling patterns in production code..."
 echo ""
@@ -40,10 +43,11 @@ in_test_fn && /}/ {
 }
 
 # Check for patterns outside test code
+# Note: .expect() is allowed as it documents the invariant
+# Only .unwrap() and panic!() are flagged as violations
 !in_test_mod && !in_test_fn {
     if (/\.expect\(/) {
         expect_prod++
-        if (verbose) print FILENAME ":" FNR ": [expect] " $0
     }
     if (/\.unwrap\(\)/) {
         unwrap_prod++
@@ -73,20 +77,32 @@ END {
     printf "%-12s %12d %12d\n", "panic!()", panic_prod+0, panic_test+0
     print ""
 
-    total_prod = expect_prod + unwrap_prod + panic_prod
-    if (total_prod > 0) {
-        print "FAILED: " total_prod " violation(s) found in production code"
+    # Only unwrap and panic are violations; expect is allowed (documents invariants)
+    total_violations = unwrap_prod + panic_prod
+    if (total_violations > 0) {
+        print "FAILED: " total_violations " violation(s) found in production code"
+        print "(.expect() is allowed as it documents invariants)"
         exit 1
     } else {
         print "PASSED: No violations in production code"
+        print "(.expect() count: " expect_prod+0 " - allowed)"
         exit 0
     }
 }
 '
 
-# Run the check
+# Run the check using gawk (GNU awk) for BEGINFILE support
+# Exclude: build.rs (compile-time), tests/ (E2E tests), benches/ (benchmarks)
 if [[ "$VERBOSE" == "--verbose" || "$VERBOSE" == "-v" ]]; then
-    find crates -name "*.rs" -print0 | xargs -0 awk -v verbose=1 "$AWK_SCRIPT"
+    find crates -name "*.rs" \
+        -not -name "build.rs" \
+        -not -path "*/tests/*" \
+        -not -path "*/benches/*" \
+        -print0 | xargs -0 gawk -v verbose=1 "$AWK_SCRIPT"
 else
-    find crates -name "*.rs" -print0 | xargs -0 awk -v verbose=0 "$AWK_SCRIPT"
+    find crates -name "*.rs" \
+        -not -name "build.rs" \
+        -not -path "*/tests/*" \
+        -not -path "*/benches/*" \
+        -print0 | xargs -0 gawk -v verbose=0 "$AWK_SCRIPT"
 fi

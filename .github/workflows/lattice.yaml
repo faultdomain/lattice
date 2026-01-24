@@ -36,6 +36,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install gawk
+        run: sudo apt-get update && sudo apt-get install -y gawk
+
       - name: Run error handling checks
         run: ./scripts/dev/check-error-handling.sh
 

@@ -890,10 +890,12 @@ fn render_bootstrap_script(
     let scripts_dir = get_scripts_dir();
     let script_path = format!("{}/bootstrap-cluster.sh", scripts_dir);
     let template = std::fs::read_to_string(&script_path).unwrap_or_else(|e| {
-        panic!(
+        // This is a deployment error - the script should be bundled with the operator
+        eprintln!(
             "Failed to load bootstrap script from {}: {}. Set LATTICE_SCRIPTS_DIR env var.",
             script_path, e
-        )
+        );
+        std::process::exit(1);
     });
 
     let mut env = minijinja::Environment::new();

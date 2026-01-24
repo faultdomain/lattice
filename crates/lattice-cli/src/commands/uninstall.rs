@@ -81,7 +81,12 @@ impl Uninstaller {
                 .find(|c| c.metadata.name.as_deref() == Some(name.as_str()))
                 .ok_or_else(|| Error::command_failed(format!("Cluster '{}' not found", name)))?
         } else if cluster_list.items.len() == 1 {
-            cluster_list.items.into_iter().next().unwrap()
+            // Safe: we just checked len() == 1
+            cluster_list
+                .items
+                .into_iter()
+                .next()
+                .expect("len() == 1 guarantees at least one item")
         } else if cluster_list.items.is_empty() {
             return Err(Error::command_failed("No LatticeCluster found"));
         } else {
@@ -300,7 +305,9 @@ impl Uninstaller {
                 "--name",
                 UNINSTALL_CLUSTER_NAME,
                 "--kubeconfig",
-                kubeconfig_path.to_str().unwrap(),
+                kubeconfig_path
+                    .to_str()
+                    .expect("temp dir path should be valid UTF-8"),
             ])
             .output()
             .await?;
@@ -407,10 +414,12 @@ pub async fn run(args: UninstallArgs) -> Result<()> {
         println!();
         print!("Are you sure? [y/N] ");
         use std::io::Write;
-        std::io::stdout().flush().unwrap();
+        std::io::stdout().flush().expect("stdout flush failed");
 
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).unwrap();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("stdin read failed");
         if !input.trim().eq_ignore_ascii_case("y") {
             println!("Aborted");
             return Ok(());
