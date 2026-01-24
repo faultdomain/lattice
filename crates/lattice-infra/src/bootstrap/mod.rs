@@ -108,7 +108,7 @@ pub fn generate_certmanager() -> Result<Vec<String>, String> {
 
     let yaml = String::from_utf8_lossy(&output.stdout);
     let mut manifests = vec![namespace_yaml("cert-manager")];
-    for m in split_yaml(&yaml) {
+    for m in split_yaml_documents(&yaml) {
         manifests.push(inject_namespace(&m, "cert-manager"));
     }
     Ok(manifests)
@@ -144,7 +144,7 @@ pub fn generate_capi(provider: &str) -> Result<Vec<String>, String> {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
 
-    Ok(split_yaml(&String::from_utf8_lossy(&output.stdout)))
+    Ok(split_yaml_documents(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// Generate Istio manifests
@@ -181,17 +181,15 @@ pub fn generate_gateway_api_crds() -> Result<Vec<String>, String> {
     let content =
         std::fs::read_to_string(&crds_path).map_err(|e| format!("read {}: {}", crds_path, e))?;
 
-    Ok(split_yaml(&content))
+    Ok(split_yaml_documents(&content))
 }
 
 // Helpers
 
-fn charts_dir() -> String {
-    std::env::var("LATTICE_CHARTS_DIR").unwrap_or_else(|_| {
-        option_env!("LATTICE_CHARTS_DIR")
-            .unwrap_or("/charts")
-            .to_string()
-    })
+/// Get charts directory from environment or use default
+pub fn charts_dir() -> String {
+    std::env::var("LATTICE_CHARTS_DIR")
+        .unwrap_or_else(|_| option_env!("LATTICE_CHARTS_DIR").unwrap_or("/charts").to_string())
 }
 
 fn find_chart(dir: &str, name: &str) -> Result<String, String> {
@@ -218,10 +216,6 @@ fn namespace_yaml(name: &str) -> String {
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}",
         name
     )
-}
-
-fn split_yaml(yaml: &str) -> Vec<String> {
-    split_yaml_documents(yaml)
 }
 
 /// Split a multi-document YAML string into individual documents.
@@ -307,9 +301,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_split_yaml() {
+    fn test_split_yaml_documents() {
         let yaml = "kind: A\n---\nkind: B\n---\n";
-        let docs = split_yaml(yaml);
+        let docs = split_yaml_documents(yaml);
         assert_eq!(docs.len(), 2);
     }
 

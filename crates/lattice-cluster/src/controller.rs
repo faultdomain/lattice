@@ -24,15 +24,15 @@ use lattice_common::crd::{
     LatticeClusterStatus,
 };
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::Error;
+use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::generate_operator_network_policy;
 use lattice_proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand};
 
 use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
-use crate::capi::{ensure_capi_installed, CapiInstaller, CapiProviderConfig};
+use crate::capi::{ensure_capi_installed, ensure_provider_credentials, CapiInstaller, CapiProviderConfig};
 use crate::parent::ParentServers;
-use crate::provider::{create_provider, CAPIManifest};
+use crate::provider::{create_provider, CAPIManifest, CAPI_CLUSTER_API_VERSION};
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
 ///
@@ -119,6 +119,15 @@ pub trait KubeClient: Send + Sync {
     /// Returns the hostname or IP from the lattice-cell Service's LoadBalancer ingress.
     /// Returns None if the Service doesn't exist or has no ingress assigned yet.
     async fn get_cell_host(&self) -> Result<Option<String>, Error>;
+
+    /// Delete the cell LoadBalancer Service
+    ///
+    /// Called during unpivot to clean up the LoadBalancer before cluster deletion.
+    /// This prevents orphaning cloud load balancer resources.
+    async fn delete_cell_service(&self) -> Result<(), Error>;
+
+    /// Check if the cell LoadBalancer Service exists
+    async fn cell_service_exists(&self) -> Result<bool, Error>;
 }
 
 /// Trait abstracting CAPI resource operations
@@ -475,7 +484,7 @@ impl KubeClient for KubeClientImpl {
         use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
         use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
-        let api: Api<Service> = Api::namespaced(self.client.clone(), "lattice-system");
+        let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         let mut labels = std::collections::BTreeMap::new();
         labels.insert("app".to_string(), "lattice-operator".to_string());
@@ -483,7 +492,7 @@ impl KubeClient for KubeClientImpl {
         let service = Service {
             metadata: ObjectMeta {
                 name: Some("lattice-cell".to_string()),
-                namespace: Some("lattice-system".to_string()),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 labels: Some(labels.clone()),
                 ..Default::default()
             },
@@ -621,7 +630,7 @@ impl KubeClient for KubeClientImpl {
     async fn get_cell_host(&self) -> Result<Option<String>, Error> {
         use k8s_openapi::api::core::v1::Service;
 
-        let api: Api<Service> = Api::namespaced(self.client.clone(), "lattice-system");
+        let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
         let svc = match api.get("lattice-cell").await {
             Ok(s) => s,
             Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(None),
@@ -637,6 +646,35 @@ impl KubeClient for KubeClientImpl {
             .and_then(|first| first.hostname.or(first.ip));
 
         Ok(host)
+    }
+
+    async fn delete_cell_service(&self) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::Service;
+        use kube::api::DeleteParams;
+
+        let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        match api.delete("lattice-cell", &DeleteParams::default()).await {
+            Ok(_) => {
+                info!("Deleted lattice-cell LoadBalancer service");
+                Ok(())
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                debug!("lattice-cell service not found (already deleted)");
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn cell_service_exists(&self) -> Result<bool, Error> {
+        use k8s_openapi::api::core::v1::Service;
+
+        let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        match api.get("lattice-cell").await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -707,8 +745,8 @@ impl CAPIClientImpl {
         use kube::discovery::ApiResource;
         let ar = ApiResource {
             group: "cluster.x-k8s.io".to_string(),
-            version: "v1beta1".to_string(),
-            api_version: "cluster.x-k8s.io/v1beta1".to_string(),
+            version: "v1beta2".to_string(),
+            api_version: CAPI_CLUSTER_API_VERSION.to_string(),
             kind: "Cluster".to_string(),
             plural: "clusters".to_string(),
         };
@@ -820,9 +858,17 @@ impl CAPIClient for CAPIClientImpl {
 
         // Check 2: Control plane is Initialized (KubeadmControlPlane or RKE2ControlPlane)
         // clusterctl move requires this before it will proceed
-        let (cp_kind, cp_group) = match bootstrap {
-            BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
-            BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
+        let (cp_kind, cp_group, cp_version) = match bootstrap {
+            BootstrapProvider::Kubeadm => (
+                "KubeadmControlPlane",
+                "controlplane.cluster.x-k8s.io",
+                "v1beta2",
+            ),
+            BootstrapProvider::Rke2 => (
+                "RKE2ControlPlane",
+                "controlplane.cluster.x-k8s.io",
+                "v1beta1",
+            ),
         };
 
         let cp_api: Api<DynamicObject> = Api::namespaced_with(
@@ -830,7 +876,7 @@ impl CAPIClient for CAPIClientImpl {
             namespace,
             &ApiResource::from_gvk(&GroupVersionKind {
                 group: cp_group.to_string(),
-                version: "v1beta1".to_string(),
+                version: cp_version.to_string(),
                 kind: cp_kind.to_string(),
             }),
         );
@@ -866,7 +912,7 @@ impl CAPIClient for CAPIClientImpl {
             namespace,
             &ApiResource::from_gvk(&GroupVersionKind {
                 group: "cluster.x-k8s.io".to_string(),
-                version: "v1beta1".to_string(),
+                version: "v1beta2".to_string(),
                 kind: "Machine".to_string(),
             }),
         );
@@ -912,7 +958,7 @@ impl CAPIClient for CAPIClientImpl {
             namespace,
             &ApiResource::from_gvk(&GroupVersionKind {
                 group: "cluster.x-k8s.io".to_string(),
-                version: "v1beta1".to_string(),
+                version: "v1beta2".to_string(),
                 kind: "MachineDeployment".to_string(),
             }),
         );
@@ -956,7 +1002,7 @@ impl CAPIClient for CAPIClientImpl {
             namespace,
             &ApiResource::from_gvk(&GroupVersionKind {
                 group: "cluster.x-k8s.io".to_string(),
-                version: "v1beta1".to_string(),
+                version: "v1beta2".to_string(),
                 kind: "MachineDeployment".to_string(),
             }),
         );
@@ -1485,21 +1531,27 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
         return handle_deletion(&cluster, &ctx, is_self).await;
     }
 
-    // Ensure finalizer is present for clusters that can unpivot
-    // A cluster can unpivot if:
-    // 1. We're reconciling our own cluster (is_self=true)
-    // 2. The lattice-parent-config secret exists (we have a parent to unpivot to)
-    // Root clusters (those without parent config) don't need the finalizer
-    if is_self && !has_finalizer(&cluster) {
-        // Check if lattice-parent-config secret exists (indicates we have a parent)
-        let has_parent = ctx
-            .kube
-            .get_secret("lattice-parent-config", "lattice-system")
-            .await?
-            .is_some();
+    // Ensure finalizer is present for clusters that need cleanup on deletion
+    // Two cases:
+    // 1. Self cluster with parent - needs unpivot (export CAPI to parent)
+    // 2. Non-self cluster (child) - needs CAPI cleanup (delete infrastructure)
+    if !has_finalizer(&cluster) {
+        if is_self {
+            // Check if lattice-parent-config secret exists (indicates we have a parent)
+            let has_parent = ctx
+                .kube
+                .get_secret("lattice-parent-config", LATTICE_SYSTEM_NAMESPACE)
+                .await?
+                .is_some();
 
-        if has_parent {
-            info!("Adding unpivot finalizer (cluster has parent)");
+            if has_parent {
+                info!("Adding finalizer (self cluster with parent - needs unpivot)");
+                add_finalizer(&cluster, &ctx).await?;
+                return Ok(Action::requeue(Duration::from_secs(1)));
+            }
+        } else {
+            // Non-self cluster (we're the parent) - add finalizer for CAPI cleanup
+            info!("Adding finalizer (child cluster - needs CAPI cleanup on deletion)");
             add_finalizer(&cluster, &ctx).await?;
             return Ok(Action::requeue(Duration::from_secs(1)));
         }
@@ -1655,9 +1707,16 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 return try_transition_to_ready(&cluster, &ctx, true).await;
             }
 
+            // Copy provider credentials from lattice-system to provider namespace
+            // This must happen before clusterctl init
+            let provider_type = cluster.spec.provider.provider_type();
+            if let Some(ref client) = ctx.client {
+                ensure_provider_credentials(client, provider_type).await?;
+            }
+
             // Ensure CAPI is installed before provisioning
             info!("ensuring CAPI is installed for provider");
-            let capi_config = CapiProviderConfig::new(cluster.spec.provider.provider_type())?;
+            let capi_config = CapiProviderConfig::new(provider_type)?;
             ensure_capi_installed(ctx.capi_installer.as_ref(), &capi_config).await?;
 
             // Generate and apply CAPI manifests, then transition to Provisioning
@@ -2059,6 +2118,7 @@ async fn generate_capi_manifests(
             proxmox_ipv4_pool,
             provider: cluster.spec.provider.provider_type().to_string(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+            k8s_version: cluster.spec.provider.kubernetes.version.clone(),
         };
         let token = bootstrap_state.register_cluster(registration, false);
 
@@ -2418,6 +2478,34 @@ async fn remove_finalizer(cluster: &LatticeCluster, ctx: &Context) -> Result<(),
         .await
 }
 
+/// Wait for the cell service to be fully deleted
+///
+/// Polls until the service is gone or timeout (60s). Returns true if deleted, false on timeout.
+async fn wait_for_cell_service_deleted(ctx: &Context) -> bool {
+    let timeout = Duration::from_secs(60);
+    let poll_interval = Duration::from_secs(2);
+    let start = std::time::Instant::now();
+
+    while start.elapsed() < timeout {
+        match ctx.kube.cell_service_exists().await {
+            Ok(false) => {
+                debug!("Cell service deleted");
+                return true;
+            }
+            Ok(true) => {
+                debug!("Cell service still exists, waiting...");
+            }
+            Err(e) => {
+                debug!(error = %e, "Error checking cell service, assuming deleted");
+                return true;
+            }
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+
+    false
+}
+
 /// Handle cluster deletion with unpivot logic
 ///
 /// When a self-managed cluster's LatticeCluster is deleted:
@@ -2426,7 +2514,11 @@ async fn remove_finalizer(cluster: &LatticeCluster, ctx: &Context) -> Result<(),
 /// 3. Wait for parent to apply manifests
 /// 4. Remove finalizer to allow deletion
 ///
-/// For non-self clusters (child clusters being deleted from parent), we just remove the finalizer.
+/// For non-self clusters (child clusters being deleted from parent):
+/// 1. Delete CAPI Cluster to trigger infrastructure cleanup
+/// 2. Wait for CAPI Cluster deletion
+/// 3. Remove finalizer to allow deletion
+///
 /// For root clusters (no parent), we just remove the finalizer.
 async fn handle_deletion(
     cluster: &LatticeCluster,
@@ -2437,13 +2529,33 @@ async fn handle_deletion(
 
     // If no finalizer, nothing to do
     if !has_finalizer(cluster) {
-        debug!(cluster = %name, "No unpivot finalizer, allowing deletion");
+        debug!(cluster = %name, "No finalizer, allowing deletion");
         return Ok(Action::await_change());
     }
 
-    // For non-self clusters, just remove finalizer (parent manages cleanup)
+    // For non-self clusters (we're the parent), delete CAPI infrastructure
     if !is_self {
-        info!(cluster = %name, "Removing finalizer for child cluster deletion");
+        let capi_namespace = format!("capi-{}", name);
+
+        // Check if CAPI Cluster still exists
+        let capi_exists = ctx
+            .capi
+            .capi_cluster_exists(&name, &capi_namespace)
+            .await
+            .unwrap_or(true); // Assume exists on error to avoid premature deletion
+
+        if capi_exists {
+            // Delete CAPI Cluster to trigger infrastructure cleanup
+            info!(cluster = %name, "Deleting CAPI Cluster to trigger infrastructure cleanup");
+            if let Err(e) = ctx.capi.delete_capi_cluster(&name, &capi_namespace).await {
+                warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
+            }
+            // Requeue to wait for deletion
+            return Ok(Action::requeue(Duration::from_secs(10)));
+        }
+
+        // CAPI Cluster is gone, remove finalizer
+        info!(cluster = %name, "Infrastructure cleanup complete, removing finalizer");
         remove_finalizer(cluster, ctx).await?;
         return Ok(Action::await_change());
     }
@@ -2451,7 +2563,7 @@ async fn handle_deletion(
     // For self clusters, check if we have a parent to unpivot to
     let has_parent = ctx
         .kube
-        .get_secret("lattice-parent-config", "lattice-system")
+        .get_secret("lattice-parent-config", LATTICE_SYSTEM_NAMESPACE)
         .await?
         .is_some();
 
@@ -2466,6 +2578,25 @@ async fn handle_deletion(
     info!(cluster = %name, "Starting unpivot process for cluster deletion");
 
     // Set phase to Unpivoting
+    let status = cluster
+        .status
+        .clone()
+        .unwrap_or_default()
+        .phase(ClusterPhase::Unpivoting)
+        .message("Cleaning up LoadBalancer services");
+    ctx.kube.patch_status(&name, &status).await?;
+
+    // Delete the lattice-cell LoadBalancer service first to prevent orphaning cloud LB resources
+    // This must complete before unpivot so the cloud provider can clean up
+    info!(cluster = %name, "Deleting lattice-cell LoadBalancer service before unpivot");
+    ctx.kube.delete_cell_service().await?;
+
+    // Wait for the service to be fully deleted (cloud provider needs time to clean up LB)
+    let deleted = wait_for_cell_service_deleted(ctx).await;
+    if !deleted {
+        warn!(cluster = %name, "Timeout waiting for cell service deletion, proceeding with unpivot anyway");
+    }
+
     let status = cluster
         .status
         .clone()
@@ -2585,10 +2716,12 @@ mod tests {
     }
 
     /// Create a sample LatticeCluster for testing
+    /// Note: Includes finalizer by default since non-self clusters get one on first reconcile
     fn sample_cluster(name: &str) -> LatticeCluster {
         LatticeCluster {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                finalizers: Some(vec![CLUSTER_FINALIZER.to_string()]),
                 ..Default::default()
             },
             spec: LatticeClusterSpec {
@@ -2633,6 +2766,8 @@ mod tests {
     fn cluster_with_phase(name: &str, phase: ClusterPhase) -> LatticeCluster {
         let mut cluster = sample_cluster(name);
         cluster.status = Some(LatticeClusterStatus::with_phase(phase));
+        // Add finalizer - non-self clusters get this on first reconcile
+        cluster.metadata.finalizers = Some(vec![CLUSTER_FINALIZER.to_string()]);
         cluster
     }
 
@@ -2771,6 +2906,9 @@ mod tests {
                 Ok(())
             });
             mock.expect_ensure_namespace().returning(|_| Ok(()));
+            // Non-self clusters get a finalizer added on first reconcile
+            mock.expect_add_cluster_finalizer()
+                .returning(|_, _| Ok(()));
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
@@ -2794,6 +2932,9 @@ mod tests {
             mock.expect_are_control_plane_nodes_tainted()
                 .returning(|| Ok(true));
             mock.expect_taint_control_plane_nodes().returning(|| Ok(()));
+            // Non-self clusters get a finalizer added on first reconcile
+            mock.expect_add_cluster_finalizer()
+                .returning(|_, _| Ok(()));
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
@@ -2820,6 +2961,9 @@ mod tests {
                 capture_clone.record(status.clone());
                 Ok(())
             });
+            // Non-self clusters get a finalizer added on first reconcile
+            mock.expect_add_cluster_finalizer()
+                .returning(|_, _| Ok(()));
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock

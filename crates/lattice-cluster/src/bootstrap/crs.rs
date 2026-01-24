@@ -184,17 +184,27 @@ pub fn generate_crs(
     serde_yaml::to_string(&crs).expect("ClusterResourceSet serialization")
 }
 
+/// Provider credentials for CRS bootstrap
+pub struct ProviderCredentials {
+    /// Secret name in the CRS namespace
+    pub secret_name: String,
+    /// Key name in the Secret's stringData
+    pub key_name: String,
+    /// The credential manifest YAML content
+    pub manifest: String,
+}
+
 /// Generate CRS YAML manifests for CLI usage
 ///
 /// Returns a vector of YAML strings that can be applied via kubectl:
 /// - Chunked ConfigMaps for all manifests (split to stay under 512KB each)
-/// - Secret for CAPMOX credentials (if Proxmox provider)
-/// - ClusterResourceSet referencing all ConfigMaps
+/// - Secret for provider credentials (if provided)
+/// - ClusterResourceSet referencing all ConfigMaps and secrets
 pub fn generate_crs_yaml_manifests(
     cluster_name: &str,
     namespace: &str,
     all_manifests: &[String],
-    capmox_credentials: Option<(&str, &str, &str)>,
+    credentials: Option<ProviderCredentials>,
 ) -> Vec<String> {
     let mut result = Vec::new();
 
@@ -203,12 +213,10 @@ pub fn generate_crs_yaml_manifests(
         generate_chunked_configmaps(namespace, "bootstrap", all_manifests, DEFAULT_CHUNK_SIZE);
     result.extend(configmaps);
 
-    // CAPMOX credentials secret if provided
-    let secret_name = if let Some((url, token, secret_value)) = capmox_credentials {
-        let capmox_manifests = super::capmox_credentials_manifests(url, token, secret_value);
-
+    // Provider credentials secret if provided
+    let secret_name = if let Some(creds) = credentials {
         let mut string_data = BTreeMap::new();
-        string_data.insert("capmox.yaml".to_string(), capmox_manifests);
+        string_data.insert(creds.key_name, creds.manifest);
 
         let mut annotations = BTreeMap::new();
         annotations.insert(
@@ -218,7 +226,7 @@ pub fn generate_crs_yaml_manifests(
 
         let secret = Secret {
             metadata: ObjectMeta {
-                name: Some("capmox-credentials".to_string()),
+                name: Some(creds.secret_name.clone()),
                 namespace: Some(namespace.to_string()),
                 annotations: Some(annotations),
                 ..Default::default()
@@ -229,7 +237,7 @@ pub fn generate_crs_yaml_manifests(
         };
 
         result.push(serde_yaml::to_string(&secret).expect("Secret serialization"));
-        Some("capmox-credentials")
+        Some(creds.secret_name)
     } else {
         None
     };
@@ -239,7 +247,7 @@ pub fn generate_crs_yaml_manifests(
         cluster_name,
         namespace,
         &configmap_names,
-        secret_name,
+        secret_name.as_deref(),
     ));
 
     result
@@ -270,24 +278,30 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_crs_yaml_manifests_with_capmox() {
+    fn test_generate_crs_yaml_manifests_with_credentials() {
         let all_manifests = vec!["apiVersion: v1\nkind: ConfigMap".to_string()];
 
+        let credentials = ProviderCredentials {
+            secret_name: "provider-credentials".to_string(),
+            key_name: "credentials.yaml".to_string(),
+            manifest: "apiVersion: v1\nkind: Secret\nmetadata:\n  name: test".to_string(),
+        };
+
         let result = generate_crs_yaml_manifests(
-            "proxmox-cluster",
-            "capi-proxmox-cluster",
+            "test-cluster",
+            "capi-test-cluster",
             &all_manifests,
-            Some(("https://proxmox.local:8006", "user@pve!token", "secret123")),
+            Some(credentials),
         );
 
         assert!(result.len() >= 3);
 
         let secret = &result[result.len() - 2];
         assert!(secret.contains("kind: Secret"));
-        assert!(secret.contains("name: capmox-credentials"));
+        assert!(secret.contains("name: provider-credentials"));
 
         let crs = result.last().expect("should have CRS");
-        assert!(crs.contains("capmox-credentials"));
+        assert!(crs.contains("provider-credentials"));
     }
 
     #[test]

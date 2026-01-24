@@ -574,49 +574,193 @@ pub async fn watch_worker_scaling(
 }
 
 // =============================================================================
-// Control Plane Taint Verification
+// Shared Test Configuration
 // =============================================================================
 
-/// Verify control-plane taints are restored on a cluster
-///
-/// Checks that control-plane nodes have the NoSchedule taint.
 #[cfg(feature = "provider-e2e")]
-pub async fn verify_control_plane_taints(kubeconfig_path: &str) -> Result<(), String> {
-    println!("  Verifying control-plane taints are restored...");
+use std::path::PathBuf;
 
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(45);
+#[cfg(feature = "provider-e2e")]
+use lattice_operator::crd::LatticeCluster;
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err("Timeout waiting for control-plane taints to be restored".to_string());
+/// Get the workspace root directory
+#[cfg(feature = "provider-e2e")]
+pub fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("lattice-cli crate should have a parent directory")
+        .parent()
+        .expect("crates directory should have a parent (workspace root)")
+        .to_path_buf()
+}
+
+/// Get the fixtures directory for cluster configs
+#[cfg(feature = "provider-e2e")]
+pub fn fixtures_dir() -> PathBuf {
+    workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/clusters")
+}
+
+/// Build and push the lattice Docker image
+#[cfg(feature = "provider-e2e")]
+pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
+    println!("  Building lattice Docker image...");
+
+    let output = Command::new("./scripts/docker-build.sh")
+        .args(["-t", image])
+        .env("DOCKER_BUILDKIT", "1")
+        .current_dir(workspace_root())
+        .output()
+        .map_err(|e| format!("Failed to run docker build: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Docker build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    println!("  Image built successfully");
+    println!("  Pushing image to registry...");
+
+    let output = Command::new("docker")
+        .args(["push", image])
+        .output()
+        .map_err(|e| format!("Failed to push image: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Docker push failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    println!("  Image pushed successfully");
+    Ok(())
+}
+
+/// Load registry credentials from .env file or environment
+#[cfg(feature = "provider-e2e")]
+pub fn load_registry_credentials() -> Option<String> {
+    use base64::Engine;
+
+    let env_path = workspace_root().join(".env");
+    if let Ok(content) = std::fs::read_to_string(&env_path) {
+        let mut user = None;
+        let mut token = None;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("export GHCR_USER=") {
+                user = Some(line.trim_start_matches("export GHCR_USER=").to_string());
+            } else if line.starts_with("export GHCR_TOKEN=") {
+                token = Some(line.trim_start_matches("export GHCR_TOKEN=").to_string());
+            } else if line.starts_with("GHCR_USER=") {
+                user = Some(line.trim_start_matches("GHCR_USER=").to_string());
+            } else if line.starts_with("GHCR_TOKEN=") {
+                token = Some(line.trim_start_matches("GHCR_TOKEN=").to_string());
+            }
         }
 
-        // Get control-plane nodes and their taints
-        let taints_output = run_cmd_allow_fail(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "get",
-                "nodes",
-                "-l",
-                "node-role.kubernetes.io/control-plane",
-                "-o",
-                "jsonpath={range .items[*]}{.metadata.name}: {.spec.taints[*].key}{\"\\n\"}{end}",
-            ],
-        );
-
-        // Check if control-plane taint exists
-        let has_taint = taints_output
-            .lines()
-            .any(|line| line.contains("node-role.kubernetes.io/control-plane"));
-
-        if has_taint {
-            println!("    Control-plane taints verified");
-            return Ok(());
+        if let (Some(u), Some(t)) = (user, token) {
+            let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", u, t));
+            return Some(serde_json::json!({"auths": {"ghcr.io": {"auth": auth}}}).to_string());
         }
+    }
 
-        sleep(Duration::from_secs(5)).await;
+    if let (Ok(u), Ok(t)) = (std::env::var("GHCR_USER"), std::env::var("GHCR_TOKEN")) {
+        let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", u, t));
+        return Some(serde_json::json!({"auths": {"ghcr.io": {"auth": auth}}}).to_string());
+    }
+
+    None
+}
+
+/// Load a LatticeCluster config from a fixture file or env var
+#[cfg(feature = "provider-e2e")]
+pub fn load_cluster_config(env_var: &str, default_fixture: &str) -> Result<(String, LatticeCluster), String> {
+    let path = match std::env::var(env_var) {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => fixtures_dir().join(default_fixture),
+    };
+
+    if !path.exists() {
+        return Err(format!("Cluster config not found: {}", path.display()));
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    let cluster: LatticeCluster = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
+
+    println!("  Loaded cluster config: {}", path.display());
+    Ok((content, cluster))
+}
+
+/// Get a localhost-accessible kubeconfig for a Docker cluster
+#[cfg(feature = "provider-e2e")]
+pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
+    let kubeconfig_path = format!("/tmp/{}-kubeconfig", cluster_name);
+    let kubeconfig = std::fs::read_to_string(&kubeconfig_path)
+        .map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
+
+    let lb_container = format!("{}-lb", cluster_name);
+    let port_output = run_cmd_allow_fail("docker", &["port", &lb_container, "6443/tcp"]);
+
+    if port_output.trim().is_empty() {
+        return Err(format!("LB container {} not found", lb_container));
+    }
+
+    let parts: Vec<&str> = port_output.trim().split(':').collect();
+    if parts.len() != 2 {
+        return Err(format!("Failed to parse LB port: {}", port_output));
+    }
+
+    let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
+    let patched = kubeconfig
+        .lines()
+        .map(|line| {
+            if line.trim().starts_with("server:") {
+                format!("    server: {}", localhost_endpoint)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let patched_path = format!("/tmp/{}-kubeconfig-local", cluster_name);
+    std::fs::write(&patched_path, &patched)
+        .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
+
+    Ok(patched_path)
+}
+
+// =============================================================================
+// Docker Cleanup Helpers
+// =============================================================================
+
+/// Force delete all Docker containers for a cluster (Docker provider only)
+#[cfg(feature = "provider-e2e")]
+pub fn force_delete_docker_cluster(cluster_name: &str) {
+    let containers = run_cmd_allow_fail(
+        "docker",
+        &["ps", "-a", "--filter", &format!("name={}", cluster_name), "-q"],
+    );
+    for id in containers.lines() {
+        if !id.trim().is_empty() {
+            let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
+        }
     }
 }
+
+/// Check if all containers for a cluster are deleted
+#[cfg(feature = "provider-e2e")]
+pub fn docker_containers_deleted(cluster_name: &str) -> bool {
+    let containers = run_cmd_allow_fail(
+        "docker",
+        &["ps", "-a", "--filter", &format!("name={}", cluster_name), "-q"],
+    );
+    containers.trim().is_empty()
+}
+

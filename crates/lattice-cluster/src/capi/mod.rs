@@ -24,9 +24,125 @@ use mockall::automock;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::ProviderType;
-use lattice_common::Error;
+use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
 
-use crate::bootstrap::AwsCredentials;
+use crate::bootstrap::{
+    AwsCredentials, AWS_CREDENTIALS_SECRET, CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE,
+    OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+};
+
+/// Copy provider credentials from lattice-system to the provider namespace.
+///
+/// Credentials are stored in `lattice-system` with the distribute label so they sync
+/// to child clusters. CAPI providers (CAPA, CAPMOX) expect credentials in their own
+/// namespaces. This function copies the credentials to where they're expected.
+///
+/// For AWS: `lattice-system/aws-credentials` → `capa-system/capa-manager-bootstrap-credentials`
+/// For Proxmox: `lattice-system/proxmox-credentials` → `capmox-system/proxmox-credentials`
+pub async fn ensure_provider_credentials(
+    client: &KubeClient,
+    provider: ProviderType,
+) -> Result<(), Error> {
+    let (source_secret, target_namespace, target_secret) = match provider {
+        ProviderType::Aws => (
+            AWS_CREDENTIALS_SECRET,
+            CAPA_NAMESPACE,
+            "capa-manager-bootstrap-credentials",
+        ),
+        ProviderType::Proxmox => (
+            PROXMOX_CREDENTIALS_SECRET,
+            CAPMOX_NAMESPACE,
+            PROXMOX_CREDENTIALS_SECRET,
+        ),
+        ProviderType::OpenStack => (
+            OPENSTACK_CREDENTIALS_SECRET,
+            CAPO_NAMESPACE,
+            OPENSTACK_CREDENTIALS_SECRET,
+        ),
+        // Docker and other providers don't need credentials
+        _ => return Ok(()),
+    };
+
+    copy_secret(client, source_secret, target_namespace, target_secret).await
+}
+
+/// Copy a secret from lattice-system to a target namespace
+async fn copy_secret(
+    client: &KubeClient,
+    source_name: &str,
+    target_namespace: &str,
+    target_name: &str,
+) -> Result<(), Error> {
+    use k8s_openapi::api::core::v1::{Namespace, Secret};
+
+    let source_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let target_api: Api<Secret> = Api::namespaced(client.clone(), target_namespace);
+    let ns_api: Api<Namespace> = Api::all(client.clone());
+
+    // Read source secret
+    let source = match source_api.get(source_name).await {
+        Ok(s) => s,
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            debug!(
+                secret = source_name,
+                namespace = LATTICE_SYSTEM_NAMESPACE,
+                "Credentials not found, skipping copy"
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(Error::capi_installation(format!(
+                "Failed to read {}/{}: {}",
+                LATTICE_SYSTEM_NAMESPACE, source_name, e
+            )));
+        }
+    };
+
+    // Create target namespace if needed
+    let ns = Namespace {
+        metadata: kube::core::ObjectMeta {
+            name: Some(target_namespace.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let _ = ns_api.create(&PostParams::default(), &ns).await;
+
+    // Copy secret to target namespace (without distribute label)
+    let target = Secret {
+        metadata: kube::core::ObjectMeta {
+            name: Some(target_name.to_string()),
+            namespace: Some(target_namespace.to_string()),
+            ..Default::default()
+        },
+        type_: Some("Opaque".to_string()),
+        data: source.data.clone(),
+        string_data: source.string_data.clone(),
+        ..Default::default()
+    };
+
+    target_api
+        .patch(
+            target_name,
+            &PatchParams::apply("lattice-operator").force(),
+            &Patch::Apply(&target),
+        )
+        .await
+        .map_err(|e| {
+            Error::capi_installation(format!(
+                "Failed to copy credentials to {}/{}: {}",
+                target_namespace, target_name, e
+            ))
+        })?;
+
+    info!(
+        source = format!("{}/{}", LATTICE_SYSTEM_NAMESPACE, source_name),
+        target = format!("{}/{}", target_namespace, target_name),
+        "Copied provider credentials"
+    );
+
+    Ok(())
+}
 
 /// Provider types supported by CAPI
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -138,7 +254,7 @@ impl InfraProviderInfo {
             ProviderType::OpenStack => Ok(Self {
                 name: "openstack",
                 version: env!("CAPO_VERSION").to_string(),
-                credentials_secret: Some(("capo-system", "openstack-cloud-config")),
+                credentials_secret: Some((CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET)),
                 // OpenStack uses clouds.yaml in the secret, not individual env vars
                 // The secret key "clouds.yaml" contains the full clouds.yaml file
                 credentials_env_map: &[],
@@ -147,7 +263,7 @@ impl InfraProviderInfo {
             ProviderType::Proxmox => Ok(Self {
                 name: "proxmox",
                 version: env!("CAPMOX_VERSION").to_string(),
-                credentials_secret: Some(("capmox-system", "proxmox-credentials")),
+                credentials_secret: Some((CAPMOX_NAMESPACE, PROXMOX_CREDENTIALS_SECRET)),
                 credentials_env_map: &[
                     ("url", "PROXMOX_URL"),
                     ("token", "PROXMOX_TOKEN"),
@@ -365,9 +481,9 @@ impl ClusterctlInstaller {
                 CapiProviderType::ControlPlane,
             ),
             ("capd-system", "docker", CapiProviderType::Infrastructure),
-            ("capmox-system", "proxmox", CapiProviderType::Infrastructure),
-            ("capo-system", "openstack", CapiProviderType::Infrastructure),
-            ("capa-system", "aws", CapiProviderType::Infrastructure),
+            (CAPMOX_NAMESPACE, "proxmox", CapiProviderType::Infrastructure),
+            (CAPO_NAMESPACE, "openstack", CapiProviderType::Infrastructure),
+            (CAPA_NAMESPACE, "aws", CapiProviderType::Infrastructure),
             ("capg-system", "gcp", CapiProviderType::Infrastructure),
             ("capz-system", "azure", CapiProviderType::Infrastructure),
         ];

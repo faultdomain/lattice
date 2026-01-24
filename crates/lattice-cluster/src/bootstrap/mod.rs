@@ -29,8 +29,8 @@ mod aws_addons;
 mod crs;
 mod token;
 
-pub use aws_addons::generate_all_aws_addon_crs;
-pub use crs::generate_crs_yaml_manifests;
+pub use aws_addons::generate_aws_addon_manifests;
+pub use crs::{generate_crs_yaml_manifests, ProviderCredentials};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -57,9 +57,12 @@ use tracing::{debug, info, warn};
 use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
 use lattice_common::crd::LatticeCluster;
+use lattice_common::{DISTRIBUTE_LABEL_KEY, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::pki::{CertificateAuthority, PkiError};
 
-pub use token::{BootstrapToken, TokenGenerationError, TokenStore};
+use crate::pivot::fetch_distributable_resources;
+
+pub use token::BootstrapToken;
 
 /// Bootstrap endpoint errors
 #[derive(Debug, Error)]
@@ -171,6 +174,8 @@ pub struct ClusterRegistration {
     pub provider: String,
     /// Bootstrap mechanism (kubeadm or rke2)
     pub bootstrap: lattice_common::crd::BootstrapProvider,
+    /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons
+    pub k8s_version: String,
 }
 
 /// Bootstrap manifest generator
@@ -209,6 +214,8 @@ pub struct ManifestConfig<'a> {
     pub cluster_name: Option<&'a str>,
     /// Provider type (docker, aws, etc.)
     pub provider: Option<&'a str>,
+    /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons
+    pub k8s_version: Option<&'a str>,
     /// Parent host (None for root/cell clusters)
     pub parent_host: Option<&'a str>,
     /// Parent gRPC port
@@ -218,10 +225,16 @@ pub struct ManifestConfig<'a> {
     pub relax_fips: bool,
 }
 
-/// Generate all bootstrap manifests including LB-IPAM resources if networking is configured
+/// Generate all bootstrap manifests including provider-specific addons
 ///
 /// This is the single entry point for manifest generation - both CRS (management cluster)
-/// and bootstrap webhook (child clusters) should call this function to avoid drift.
+/// and bootstrap webhook (child clusters) MUST call this function to ensure consistency.
+///
+/// Includes:
+/// - CNI (Cilium)
+/// - Lattice operator
+/// - LB-IPAM resources (if networking configured)
+/// - Provider-specific addons (AWS CCM/CSI)
 pub fn generate_all_manifests<G: ManifestGenerator>(
     generator: &G,
     config: &ManifestConfig<'_>,
@@ -256,52 +269,54 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
         manifests.extend(crate::cilium::generate_lb_resources_from_proxmox(ipv4_pool));
     }
 
-    // NOTE: CiliumNetworkPolicy is NOT included in bootstrap manifests because
-    // Cilium CRDs may not be ready yet. The operator applies network policies
-    // after Cilium is running.
+    // Add provider-specific addons
+    if let Some(provider) = config.provider {
+        if provider.eq_ignore_ascii_case("aws") {
+            if let Some(k8s_version) = config.k8s_version {
+                manifests.push(generate_aws_addon_manifests(k8s_version));
+            }
+        }
+    }
 
     manifests
 }
 
-/// Label key for identifying provider credential secrets
-pub const CREDENTIAL_TYPE_LABEL: &str = "lattice.dev/credential-type";
 /// Label key for identifying the provider type
 pub const PROVIDER_LABEL: &str = "lattice.dev/provider";
-/// Label value for provider credentials
-pub const CREDENTIAL_TYPE_PROVIDER: &str = "provider";
 
-/// CAPMOX namespace where credentials Secret is stored
+/// Secret name for Proxmox credentials
+pub const PROXMOX_CREDENTIALS_SECRET: &str = "proxmox-credentials";
+/// Secret name for AWS credentials
+pub const AWS_CREDENTIALS_SECRET: &str = "aws-credentials";
+/// Secret name for OpenStack credentials (clouds.yaml)
+pub const OPENSTACK_CREDENTIALS_SECRET: &str = "openstack-cloud-config";
+
+/// Target namespace for CAPMOX provider
 pub const CAPMOX_NAMESPACE: &str = "capmox-system";
-/// CAPMOX Secret name containing Proxmox API credentials
-pub const CAPMOX_SECRET_NAME: &str = "proxmox-credentials";
-
-/// CAPA namespace where credentials Secret is stored
+/// Target namespace for CAPA provider
 pub const CAPA_NAMESPACE: &str = "capa-system";
-/// CAPA Secret name containing AWS API credentials
-pub const CAPA_SECRET_NAME: &str = "capa-manager-bootstrap-credentials";
+/// Target namespace for CAPO provider (OpenStack)
+pub const CAPO_NAMESPACE: &str = "capo-system";
 
-/// Generate CAPMOX credentials manifests (namespace + secret)
+/// Generate Proxmox credentials manifest
 ///
-/// Used by both CLI (for CRS) and webhook (for bootstrap response) to ensure
-/// consistent credential propagation through the cluster hierarchy.
-///
-/// The secret is labeled with:
-/// - `lattice.dev/credential-type: provider` - marks it for propagation
-/// - `lattice.dev/provider: proxmox` - identifies the provider type
-pub fn capmox_credentials_manifests(url: &str, token: &str, secret: &str) -> String {
+/// Creates a secret in lattice-system with the distribute label so it syncs to children.
+/// The controller copies this to capmox-system when running clusterctl.
+/// Includes namespace creation to ensure it exists before the secret is created.
+pub fn proxmox_credentials_manifests(url: &str, token: &str, secret: &str) -> String {
     format!(
         r#"apiVersion: v1
 kind: Namespace
 metadata:
-  name: {CAPMOX_NAMESPACE}
+  name: {LATTICE_SYSTEM_NAMESPACE}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {CAPMOX_SECRET_NAME}
-  namespace: {CAPMOX_NAMESPACE}
+  name: {PROXMOX_CREDENTIALS_SECRET}
+  namespace: {LATTICE_SYSTEM_NAMESPACE}
   labels:
-    {CREDENTIAL_TYPE_LABEL}: {CREDENTIAL_TYPE_PROVIDER}
+    {DISTRIBUTE_LABEL_KEY}: "true"
     {PROVIDER_LABEL}: proxmox
 type: Opaque
 stringData:
@@ -362,15 +377,12 @@ impl AwsCredentials {
     }
 }
 
-/// Generate CAPA credentials manifests (namespace + secret)
+/// Generate AWS credentials manifest
 ///
-/// The secret contains individual AWS credential fields which the operator
-/// uses to generate AWS_B64ENCODED_CREDENTIALS for clusterctl.
-///
-/// The secret is labeled with:
-/// - `lattice.dev/credential-type: provider` - marks it for propagation
-/// - `lattice.dev/provider: aws` - identifies the provider type
-pub fn capa_credentials_manifests(creds: &AwsCredentials) -> String {
+/// Creates a secret in lattice-system with the distribute label so it syncs to children.
+/// The controller copies this to capa-system when running clusterctl.
+/// Includes namespace creation to ensure it exists before the secret is created.
+pub fn aws_credentials_manifests(creds: &AwsCredentials) -> String {
     let session_token_line = creds
         .session_token
         .as_ref()
@@ -381,15 +393,15 @@ pub fn capa_credentials_manifests(creds: &AwsCredentials) -> String {
         r#"apiVersion: v1
 kind: Namespace
 metadata:
-  name: {CAPA_NAMESPACE}
+  name: {LATTICE_SYSTEM_NAMESPACE}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {CAPA_SECRET_NAME}
-  namespace: {CAPA_NAMESPACE}
+  name: {AWS_CREDENTIALS_SECRET}
+  namespace: {LATTICE_SYSTEM_NAMESPACE}
   labels:
-    {CREDENTIAL_TYPE_LABEL}: {CREDENTIAL_TYPE_PROVIDER}
+    {DISTRIBUTE_LABEL_KEY}: "true"
     {PROVIDER_LABEL}: aws
 type: Opaque
 stringData:
@@ -431,14 +443,12 @@ impl DefaultManifestGenerator {
         cluster_name: Option<&str>,
         provider: Option<&str>,
     ) -> Result<Vec<String>, serde_json::Error> {
-        const NAMESPACE: &str = "lattice-system";
-
         let registry_creds = registry_credentials.map(|s| s.to_string());
 
         // 1. Namespace
         let namespace = Namespace {
             metadata: ObjectMeta {
-                name: Some(NAMESPACE.to_string()),
+                name: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
             ..Default::default()
@@ -448,7 +458,7 @@ impl DefaultManifestGenerator {
         let registry_secret = registry_creds.as_ref().map(|creds| Secret {
             metadata: ObjectMeta {
                 name: Some("lattice-registry".to_string()),
-                namespace: Some(NAMESPACE.to_string()),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
             type_: Some("kubernetes.io/dockerconfigjson".to_string()),
@@ -463,7 +473,7 @@ impl DefaultManifestGenerator {
         let service_account = ServiceAccount {
             metadata: ObjectMeta {
                 name: Some("lattice-operator".to_string()),
-                namespace: Some(NAMESPACE.to_string()),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
             ..Default::default()
@@ -483,7 +493,7 @@ impl DefaultManifestGenerator {
             subjects: Some(vec![Subject {
                 kind: "ServiceAccount".to_string(),
                 name: "lattice-operator".to_string(),
-                namespace: Some(NAMESPACE.to_string()),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             }]),
         };
@@ -495,7 +505,7 @@ impl DefaultManifestGenerator {
         let operator_deployment = Deployment {
             metadata: ObjectMeta {
                 name: Some("lattice-operator".to_string()),
-                namespace: Some(NAMESPACE.to_string()),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
             spec: Some(DeploymentSpec {
@@ -625,7 +635,7 @@ impl DefaultManifestGenerator {
 
 /// Error type for manifest generation failures
 #[derive(Debug, thiserror::Error)]
-pub enum ManifestError {
+enum ManifestError {
     /// Serialization failed
     #[error("failed to serialize {resource}: {message}")]
     Serialization {
@@ -670,8 +680,8 @@ impl DefaultManifestGenerator {
     ) -> Result<Vec<String>, ManifestError> {
         let mut manifests = Vec::new();
 
-        // CNI manifests first (Cilium) - rendered on-demand based on provider
-        match lattice_infra::generate_cilium_manifests(provider) {
+        // CNI manifests first (Cilium) - rendered on-demand
+        match lattice_infra::generate_cilium_manifests() {
             Ok(cilium_manifests) => manifests.extend(cilium_manifests),
             Err(e) => {
                 return Err(ManifestError::Cilium(e.to_string()));
@@ -716,6 +726,8 @@ pub struct ClusterBootstrapInfo {
     pub provider: String,
     /// Bootstrap mechanism (kubeadm or rke2) - determines FIPS relaxation needs
     pub bootstrap: lattice_common::crd::BootstrapProvider,
+    /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons like CCM
+    pub k8s_version: String,
 }
 
 /// Bootstrap endpoint state
@@ -732,10 +744,10 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
     token_ttl: Duration,
     /// Certificate authority for signing CSRs
     ca: Arc<CertificateAuthority>,
-    /// Kubernetes client for updating CRD status (None in tests)
+    /// Kubernetes client for updating CRD status and fetching distributed secrets (None in tests)
     kube_client: Option<Client>,
-    /// CAPMOX credentials (url, token, secret) for propagating to child clusters
-    capmox_credentials: Option<(String, String, String)>,
+    // Note: Provider credentials (AWS, Proxmox) are fetched at bootstrap time from
+    // lattice-system secrets with lattice.io/distribute=true label.
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
@@ -747,7 +759,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         image: String,
         registry_credentials: Option<String>,
         kube_client: Option<Client>,
-        capmox_credentials: Option<(String, String, String)>,
     ) -> Self {
         Self {
             clusters: DashMap::new(),
@@ -757,7 +768,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             token_ttl,
             ca,
             kube_client,
-            capmox_credentials,
         }
     }
 
@@ -774,13 +784,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// Get registry credentials
     pub fn registry_credentials(&self) -> Option<&str> {
         self.registry_credentials.as_deref()
-    }
-
-    /// Get CAPMOX credentials if available
-    pub fn capmox_credentials(&self) -> Option<(&str, &str, &str)> {
-        self.capmox_credentials
-            .as_ref()
-            .map(|(url, token, secret)| (url.as_str(), token.as_str(), secret.as_str()))
     }
 
     /// Register a cluster for bootstrap
@@ -809,6 +812,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             proxmox_ipv4_pool: registration.proxmox_ipv4_pool,
             provider: registration.provider,
             bootstrap: registration.bootstrap,
+            k8s_version: registration.k8s_version,
         };
 
         self.clusters.insert(cluster_id, info);
@@ -916,7 +920,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // Parse parent endpoint for network policy
         let (parent_host, grpc_port) = parse_parent_endpoint(&info.cell_endpoint);
 
-        // Generate operator + CNI manifests
+        // Generate operator + CNI + provider-specific addon manifests
         let config = ManifestConfig {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
@@ -924,6 +928,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             proxmox_ipv4_pool: info.proxmox_ipv4_pool.as_ref(),
             cluster_name: Some(&info.cluster_id),
             provider: Some(&info.provider),
+            k8s_version: Some(&info.k8s_version),
             parent_host: parent_host.as_deref(),
             parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
@@ -975,17 +980,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             BootstrapError::Internal(format!("failed to serialize parent config Secret: {}", e))
         })?);
 
-        // Add CAPMOX credentials if provider is Proxmox and credentials are available
-        if info.provider.to_lowercase() == "proxmox" {
-            if let Some((url, token, secret)) = &self.capmox_credentials {
-                manifests.push(capmox_credentials_manifests(url, token, secret));
-            } else {
-                warn!(
-                    cluster_id = %info.cluster_id,
-                    "Proxmox provider requested but no CAPMOX credentials available"
-                );
-            }
-        }
+        // Note: Provider credentials (with lattice.io/distribute=true label) are added by the
+        // bootstrap_manifests_handler after calling this method. This ensures credentials are
+        // available when the operator starts, before the gRPC connection is established.
 
         Ok(BootstrapResponse {
             cluster_id: info.cluster_id.clone(),
@@ -1083,6 +1080,9 @@ pub async fn csr_handler<G: ManifestGenerator>(
 /// This endpoint is called by kubeadm postKubeadmCommands. It validates the
 /// one-time token and returns the manifests as concatenated YAML that can
 /// be piped directly to `kubectl apply -f -`.
+///
+/// Includes distributed secrets (credentials with `lattice.io/distribute=true` label)
+/// from the parent cluster so they're available immediately when the operator starts.
 pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     State(state): State<Arc<BootstrapState<G>>>,
     Path(cluster_id): Path<String>,
@@ -1101,8 +1101,51 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     // Generate full bootstrap response (includes CNI, operator, LatticeCluster CRD, parent config)
     let response = state.generate_response(&info)?;
 
+    // Collect all manifests
+    let mut all_manifests = response.manifests;
+
+    // Include distributed secrets from parent (credentials with lattice.io/distribute=true)
+    // This ensures credentials are available when the operator starts, before the gRPC connection
+    if let Some(ref client) = state.kube_client {
+        match fetch_distributable_resources(client).await {
+            Ok(resources) => {
+                let secret_count = resources.secrets.len();
+                let configmap_count = resources.configmaps.len();
+
+                // Convert secret bytes to strings and add to manifests
+                for secret_bytes in resources.secrets {
+                    if let Ok(yaml) = String::from_utf8(secret_bytes) {
+                        all_manifests.push(yaml);
+                    }
+                }
+
+                // Convert configmap bytes to strings and add to manifests
+                for cm_bytes in resources.configmaps {
+                    if let Ok(yaml) = String::from_utf8(cm_bytes) {
+                        all_manifests.push(yaml);
+                    }
+                }
+
+                info!(
+                    cluster_id = %cluster_id,
+                    secrets = secret_count,
+                    configmaps = configmap_count,
+                    "included distributed resources in bootstrap"
+                );
+            }
+            Err(e) => {
+                // Log but don't fail - operator can still sync later via gRPC
+                warn!(
+                    cluster_id = %cluster_id,
+                    error = %e,
+                    "failed to fetch distributed resources, credentials may be delayed"
+                );
+            }
+        }
+    }
+
     // Join with YAML document separator
-    let yaml_output = response.manifests.join("\n---\n");
+    let yaml_output = all_manifests.join("\n---\n");
 
     Ok((
         [(axum::http::header::CONTENT_TYPE, "application/x-yaml")],
@@ -1160,7 +1203,6 @@ mod tests {
             "test:latest".to_string(),
             None,
             None, // No kube client for tests
-            None, // No CAPMOX credentials for tests
         )
     }
 
@@ -1172,7 +1214,6 @@ mod tests {
             "test:latest".to_string(),
             None,
             None, // No kube client for tests
-            None, // No CAPMOX credentials for tests
         )
     }
 
@@ -1195,6 +1236,7 @@ mod tests {
                 proxmox_ipv4_pool: None,
                 provider: "docker".to_string(),
                 bootstrap: lattice_common::crd::BootstrapProvider::default(),
+                k8s_version: "1.32.0".to_string(),
             },
             false,
         )
@@ -2270,8 +2312,7 @@ mod tests {
             test_ca(),
             "test:latest".to_string(),
             None,
-            None,
-            None, // No CAPMOX credentials for tests
+            None, // No kube client for tests
         );
 
         // Register cluster with kubeadm bootstrap
@@ -2290,6 +2331,7 @@ mod tests {
                 proxmox_ipv4_pool: None,
                 provider: "docker".to_string(),
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
+                k8s_version: "1.32.0".to_string(),
             },
         );
 
@@ -2324,8 +2366,7 @@ mod tests {
             test_ca(),
             "test:latest".to_string(),
             None,
-            None,
-            None, // No CAPMOX credentials for tests
+            None, // No kube client for tests
         );
 
         // Register cluster with RKE2 bootstrap
@@ -2344,6 +2385,7 @@ mod tests {
                 proxmox_ipv4_pool: None,
                 provider: "docker".to_string(),
                 bootstrap: lattice_common::crd::BootstrapProvider::Rke2,
+                k8s_version: "1.32.0".to_string(),
             },
         );
 
@@ -2376,5 +2418,124 @@ mod tests {
         // RKE2 is FIPS-native, no relaxation needed
         assert!(!BootstrapProvider::Rke2.needs_fips_relax());
         assert!(BootstrapProvider::Rke2.is_fips_native());
+    }
+
+    /// Story: AWS clusters get CCM and EBS CSI driver in bootstrap manifests
+    ///
+    /// Both CRS path (CLI) and webhook path use generate_all_manifests(),
+    /// which includes AWS addons when provider is "aws".
+    #[test]
+    fn story_aws_clusters_include_ccm_and_csi() {
+        // Use real DefaultManifestGenerator
+        let state = BootstrapState::new(
+            DefaultManifestGenerator::new(),
+            Duration::from_secs(3600),
+            test_ca(),
+            "test:latest".to_string(),
+            None,
+            None, // No kube client for tests
+        );
+
+        // Register AWS cluster
+        let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"aws-test"}}"#.to_string();
+        state.clusters.insert(
+            "aws-test".to_string(),
+            ClusterBootstrapInfo {
+                cluster_id: "aws-test".to_string(),
+                cell_endpoint: "cell:8443:50051".to_string(),
+                ca_certificate: "ca-cert".to_string(),
+                cluster_manifest,
+                token_hash: "hash".to_string(),
+                token_created: std::time::Instant::now(),
+                token_used: true,
+                networking: None,
+                proxmox_ipv4_pool: None,
+                provider: "aws".to_string(),
+                bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
+                k8s_version: "1.32.0".to_string(),
+            },
+        );
+
+        let info = state
+            .clusters
+            .get("aws-test")
+            .expect("aws-test cluster should exist")
+            .clone();
+        let response = state
+            .generate_response(&info)
+            .expect("generate_response should succeed");
+
+        let manifests_str = response.manifests.join("\n");
+
+        // Should include AWS CCM
+        assert!(
+            manifests_str.contains("cloud-controller-manager"),
+            "AWS clusters should include CCM in bootstrap manifests"
+        );
+        assert!(
+            manifests_str.contains("v1.32.0"),
+            "CCM should use correct k8s version"
+        );
+
+        // Should include EBS CSI driver
+        assert!(
+            manifests_str.contains("ebs.csi.aws.com"),
+            "AWS clusters should include EBS CSI driver in bootstrap manifests"
+        );
+    }
+
+    /// Story: Non-AWS clusters don't get AWS addons
+    #[test]
+    fn story_non_aws_clusters_no_ccm() {
+        // Use real DefaultManifestGenerator
+        let state = BootstrapState::new(
+            DefaultManifestGenerator::new(),
+            Duration::from_secs(3600),
+            test_ca(),
+            "test:latest".to_string(),
+            None,
+            None, // No kube client for tests
+        );
+
+        // Register Docker cluster
+        let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"docker-test"}}"#.to_string();
+        state.clusters.insert(
+            "docker-test".to_string(),
+            ClusterBootstrapInfo {
+                cluster_id: "docker-test".to_string(),
+                cell_endpoint: "cell:8443:50051".to_string(),
+                ca_certificate: "ca-cert".to_string(),
+                cluster_manifest,
+                token_hash: "hash".to_string(),
+                token_created: std::time::Instant::now(),
+                token_used: true,
+                networking: None,
+                proxmox_ipv4_pool: None,
+                provider: "docker".to_string(),
+                bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
+                k8s_version: "1.32.0".to_string(),
+            },
+        );
+
+        let info = state
+            .clusters
+            .get("docker-test")
+            .expect("docker-test cluster should exist")
+            .clone();
+        let response = state
+            .generate_response(&info)
+            .expect("generate_response should succeed");
+
+        let manifests_str = response.manifests.join("\n");
+
+        // Should NOT include AWS CCM
+        assert!(
+            !manifests_str.contains("cloud-controller-manager"),
+            "Non-AWS clusters should not include CCM"
+        );
+        assert!(
+            !manifests_str.contains("ebs.csi.aws.com"),
+            "Non-AWS clusters should not include EBS CSI driver"
+        );
     }
 }

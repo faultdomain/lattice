@@ -487,11 +487,13 @@ fn uses_external_cloud_provider(provider_type: ProviderType) -> bool {
 
 /// Build API server extra args based on provider type
 fn build_api_server_extra_args(provider_type: ProviderType) -> Vec<serde_json::Value> {
+    let mut args = vec![serde_json::json!({"name": "bind-address", "value": "0.0.0.0"})];
+
     if uses_external_cloud_provider(provider_type) {
-        vec![serde_json::json!({"name": "cloud-provider", "value": "external"})]
-    } else {
-        vec![]
+        args.push(serde_json::json!({"name": "cloud-provider", "value": "external"}));
     }
+
+    args
 }
 
 /// Build controller manager extra args based on provider type
@@ -672,7 +674,6 @@ fn generate_kubeadm_control_plane(
         join_node_registration["name"] = serde_json::json!(name_template);
     }
 
-    // In CAPI v1beta2, extraArgs changed from map to list of {name, value} objects
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
             "apiServer": {

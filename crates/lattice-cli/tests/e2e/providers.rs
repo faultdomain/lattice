@@ -18,17 +18,6 @@ pub enum InfraProvider {
     Proxmox,
 }
 
-impl InfraProvider {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Docker => "docker",
-            Self::Aws => "aws",
-            Self::OpenStack => "openstack",
-            Self::Proxmox => "proxmox",
-        }
-    }
-}
-
 impl From<ProviderType> for InfraProvider {
     fn from(pt: ProviderType) -> Self {
         match pt {
@@ -43,6 +32,12 @@ impl From<ProviderType> for InfraProvider {
 
 impl std::fmt::Display for InfraProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name())
+        let name = match self {
+            Self::Docker => "docker",
+            Self::Aws => "aws",
+            Self::OpenStack => "openstack",
+            Self::Proxmox => "proxmox",
+        };
+        write!(f, "{}", name)
     }
 }

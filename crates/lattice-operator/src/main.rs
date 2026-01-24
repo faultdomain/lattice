@@ -12,7 +12,9 @@ use kube::{Api, Client, CustomResourceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lattice_operator::agent::client::{AgentClient, AgentClientConfig, AgentCredentials};
-use lattice_operator::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
+use lattice_operator::capi::{
+    ensure_capi_installed, ensure_provider_credentials, CapiProviderConfig, ClusterctlInstaller,
+};
 use lattice_operator::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
     service_reconcile, Context, ServiceContext,
@@ -305,7 +307,7 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
         apply_manifests(client, &manifests).await?;
 
         tracing::info!("Installing CAPI on bootstrap cluster...");
-        ensure_capi_on_bootstrap().await?;
+        ensure_capi_on_bootstrap(client).await?;
     } else {
         // Workload cluster: Read provider/bootstrap from LatticeCluster CRD
         // This is the source of truth - same values used by bootstrap webhook
@@ -352,7 +354,7 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
 /// a LatticeCluster is reconciled (Phase 3).
 ///
 /// Uses LATTICE_PROVIDER env var to determine which infrastructure provider to install.
-async fn ensure_capi_on_bootstrap() -> anyhow::Result<()> {
+async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
     let provider_str = std::env::var("LATTICE_PROVIDER").unwrap_or_else(|_| "docker".to_string());
 
     let infrastructure = match provider_str.to_lowercase().as_str() {
@@ -366,6 +368,11 @@ async fn ensure_capi_on_bootstrap() -> anyhow::Result<()> {
     };
 
     tracing::info!(infrastructure = %provider_str, "Installing CAPI providers for bootstrap cluster");
+
+    // Copy provider credentials from lattice-system to provider namespace
+    ensure_provider_credentials(client, infrastructure)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to copy provider credentials: {}", e))?;
 
     let config = CapiProviderConfig::new(infrastructure)
         .map_err(|e| anyhow::anyhow!("Failed to create CAPI config: {}", e))?;
@@ -638,6 +645,7 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
                 .map(|p| p.ipv4_pool.clone()),
             provider: cluster.spec.provider.provider_type().to_string(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+            k8s_version: cluster.spec.provider.kubernetes.version.clone(),
         };
 
         bootstrap_state.register_cluster(registration, true);
@@ -647,10 +655,6 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
 
 /// Ensure the cell LoadBalancer Service exists.
 ///
-/// Creates the lattice-cell Service if it doesn't exist. This must be called
-/// during startup BEFORE waiting for the cell endpoint, otherwise we have a
-/// chicken-and-egg problem (controllers create Service, but controllers wait for endpoint).
-///
 /// - Cloud providers: `load_balancer_ip` is None, cloud assigns address
 /// - On-prem: `load_balancer_ip` is set from parent_config.host, Cilium L2 announces it
 async fn ensure_cell_service_exists(
@@ -658,6 +662,7 @@ async fn ensure_cell_service_exists(
     load_balancer_ip: Option<String>,
     bootstrap_port: u16,
     grpc_port: u16,
+    provider_type: ProviderType,
 ) -> anyhow::Result<()> {
     use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -675,11 +680,15 @@ async fn ensure_cell_service_exists(
     let mut labels = std::collections::BTreeMap::new();
     labels.insert("app".to_string(), "lattice-operator".to_string());
 
+    // Cloud-specific LoadBalancer annotations
+    let annotations = provider_type.load_balancer_annotations();
+
     let service = Service {
         metadata: ObjectMeta {
             name: Some("lattice-cell".to_string()),
             namespace: Some("lattice-system".to_string()),
             labels: Some(labels.clone()),
+            annotations: if annotations.is_empty() { None } else { Some(annotations) },
             ..Default::default()
         },
         spec: Some(ServiceSpec {
@@ -720,9 +729,6 @@ async fn ensure_cell_service_exists(
 
 /// Discover the cell service host from the LoadBalancer Service.
 ///
-/// The cell service is the LoadBalancer that exposes the Lattice operator's
-/// gRPC and bootstrap endpoints. Child clusters connect to this endpoint.
-///
 /// Returns the host (hostname or IP) from the Service's LoadBalancer status,
 /// or None if not yet assigned by the cloud provider.
 async fn discover_cell_host(client: &Client) -> Option<String> {
@@ -733,8 +739,73 @@ async fn discover_cell_host(client: &Client) -> Option<String> {
     let ingress = svc.status?.load_balancer?.ingress?;
     let first = ingress.first()?;
 
-    // Prefer hostname (AWS ELB) over IP
+    // Prefer hostname (AWS NLB) over IP
     first.hostname.clone().or_else(|| first.ip.clone())
+}
+
+/// Get extra SANs for cell server TLS certificate.
+///
+/// If this cluster provisions children (has parent_config), creates the cell
+/// LoadBalancer Service and waits for an external address. Returns the address
+/// to include in TLS SANs so children can connect via HTTPS.
+async fn get_cell_server_sans(
+    client: &Client,
+    cluster_name: &Option<String>,
+    is_bootstrap_cluster: bool,
+) -> Vec<String> {
+    if is_bootstrap_cluster {
+        tracing::info!("Bootstrap cluster, using default SANs");
+        return vec![];
+    }
+
+    let Some(ref name) = cluster_name else {
+        return vec![];
+    };
+
+    // Wait for our LatticeCluster to exist
+    tracing::info!(cluster = %name, "Waiting for LatticeCluster...");
+    let clusters: Api<LatticeCluster> = Api::all(client.clone());
+    let cluster = loop {
+        match clusters.get(name).await {
+            Ok(c) => break c,
+            Err(e) => {
+                tracing::debug!(error = %e, "LatticeCluster not found, retrying...");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    };
+    tracing::info!(cluster = %name, "LatticeCluster found");
+
+    // If we don't provision children, no need for cell host in SANs
+    let Some(ref parent_config) = cluster.spec.parent_config else {
+        tracing::info!("No parent_config, cluster doesn't provision children");
+        return vec![];
+    };
+
+    // Create the cell LoadBalancer Service
+    let provider_type = cluster.spec.provider.provider_type();
+    tracing::info!(?provider_type, "Creating cell LoadBalancer Service...");
+    if let Err(e) = ensure_cell_service_exists(
+        client,
+        parent_config.host.clone(),
+        parent_config.bootstrap_port,
+        parent_config.grpc_port,
+        provider_type,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "Failed to create cell Service");
+    }
+
+    // Wait for LoadBalancer to get external address
+    tracing::info!("Waiting for cell LoadBalancer address...");
+    loop {
+        if let Some(host) = discover_cell_host(client).await {
+            tracing::info!(host = %host, "Cell host discovered, adding to TLS SANs");
+            return vec![host];
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
 }
 
 /// Run in controller mode - manages clusters and/or services
@@ -755,154 +826,73 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     // Operator installs its own CRDs on startup
     ensure_crds_installed(&client).await?;
 
-    // Ensure infrastructure components are installed (Istio)
-    // This enables day-2 upgrades: new Lattice version has new component versions
-    // Infrastructure is required for service mesh - fail startup if it can't be installed
+    // Ensure infrastructure (Istio, etc.) is installed
     ensure_infrastructure(&client).await?;
 
-    // Create cell servers (but don't start them yet - wait for LatticeCluster to get SANs)
-    // The webhook is always needed for LatticeService → Deployment mutation
-    // External exposure (LoadBalancer) is configured per-cluster based on spec.parent_config
-    // CA is loaded from Secret (or created and persisted) to survive operator restarts
+    // Create cell servers (started later with correct TLS SANs)
     let parent_servers = Arc::new(
         ParentServers::new(ParentConfig::default(), &client)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create cell servers: {}", e))?,
     );
 
-    // Install MutatingWebhookConfiguration for Deployment injection
-    // CA is available immediately from parent_servers (created in ParentServers::new)
+    // Install MutatingWebhookConfiguration
     ensure_webhook_config(&client, parent_servers.ca()).await?;
 
-    // Start cell servers BEFORE controllers - webhook must be ready for deployment creation
-    // This ensures TLS certificate has correct SANs (spec.parent_config.host) before serving
+    // Get cluster identity from environment
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
-    {
-        let manifest_generator = lattice_operator::bootstrap::DefaultManifestGenerator::new();
-
-        // Get extra SANs from LatticeCluster - MUST wait for it to exist with parent_config
-        // The server certificate needs the correct SANs for workload clusters to connect
-        //
-        // Skip waiting for:
-        // - Bootstrap clusters (LATTICE_BOOTSTRAP_CLUSTER=true): temporary kind cluster
-        // - Child clusters (have lattice-parent-config secret): LatticeCluster comes via pivot
-        //
-        // Only wait for root/management clusters that provision children.
-        let is_bootstrap_cluster = std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-
-        // Check if this is a child cluster (has parent config secret)
-        // Child clusters get their LatticeCluster via pivot, so we can't wait for it
-        let is_child_cluster = {
-            use k8s_openapi::api::core::v1::Secret;
-            let secrets: kube::Api<Secret> =
-                kube::Api::namespaced(client.clone(), "lattice-system");
-            secrets.get("lattice-parent-config").await.is_ok()
-        };
-
-        let extra_sans: Vec<String> = if is_bootstrap_cluster {
-            tracing::info!("Bootstrap cluster, using default SANs");
-            vec![]
-        } else if let Some(ref cluster_name) = self_cluster_name {
-            // Try to discover cell endpoint for TLS SANs
-            // - Child clusters: don't block (endpoint may not exist yet)
-            // - Management clusters: wait for endpoint to be discovered
-            if is_child_cluster {
-                // Child clusters can't block - check once and continue
-                if let Some(host) = discover_cell_host(&client).await {
-                    tracing::info!(host = %host, "Cell host found");
-                    vec![host]
-                } else {
-                    tracing::info!("Cell host not yet available, using default SANs");
-                    vec![]
-                }
-            } else {
-                // Management cluster - wait for LatticeCluster, create cell Service, wait for endpoint
-                let lattice_clusters: Api<LatticeCluster> = Api::all(client.clone());
-
-                // Step 1: Wait for LatticeCluster to exist (arrives via pivot)
-                tracing::info!(cluster = %cluster_name, "Waiting for LatticeCluster...");
-                let cluster = loop {
-                    match lattice_clusters.get(cluster_name).await {
-                        Ok(c) => break c,
-                        Err(_) => {
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        }
-                    }
-                };
-
-                // Step 2: Create cell Service if parent_config exists
-                if let Some(ref parent_config) = cluster.spec.parent_config {
-                    tracing::info!("Creating cell Service");
-                    if let Err(e) = ensure_cell_service_exists(
-                        &client,
-                        parent_config.host.clone(),
-                        parent_config.bootstrap_port,
-                        parent_config.grpc_port,
-                    )
-                    .await
-                    {
-                        tracing::warn!(error = %e, "Failed to create cell Service");
-                    }
-                }
-
-                // Step 3: Wait for cell host from LoadBalancer
-                tracing::info!(cluster = %cluster_name, "Waiting for cell host...");
-                loop {
-                    if let Some(host) = discover_cell_host(&client).await {
-                        tracing::info!(host = %host, "Cell host discovered");
-                        break vec![host];
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
-            }
-        } else {
-            vec![]
-        };
-
-        // Start cell servers - MUST complete before controllers start
-        // If running in service mode, also add the webhook router for Deployment injection
-        let run_service = matches!(mode, ControllerMode::All | ControllerMode::Service);
-        let webhook_router = if run_service {
-            let webhook_state =
-                std::sync::Arc::new(lattice_service::webhook::WebhookState::new(client.clone()));
-            Some(lattice_service::webhook::webhook_router(webhook_state))
-        } else {
-            None
-        };
-
-        parent_servers
-            .ensure_running_with(
-                manifest_generator,
-                &extra_sans,
-                client.clone(),
-                webhook_router,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to start cell servers: {}", e))?;
-
-        tracing::info!("Cell servers started (bootstrap + gRPC + optional webhook)");
-
-        // Re-register any clusters that are past Pending phase
-        // This handles operator restarts where BootstrapState was lost but clusters are mid-provisioning
-        if let Some(bootstrap_state) = parent_servers.bootstrap_state().await {
-            re_register_existing_clusters(
-                &client,
-                &bootstrap_state,
-                &self_cluster_name,
-                &parent_servers,
-            )
-            .await;
-        }
-    }
+    let is_bootstrap_cluster = std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
 
     // Create unpivot channel for controller -> agent communication
     let (unpivot_tx, unpivot_rx) = tokio::sync::mpsc::channel(10);
 
-    // Create controller context with cell servers
-    // LATTICE_CLUSTER_NAME tells the controller which cluster it's running on (to avoid self-provisioning)
-    let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
+    // Start agent (outbound to parent) before cell servers (inbound from children)
+    let agent_cancel_token = tokio_util::sync::CancellationToken::new();
+    if let Some(ref cluster_name) = self_cluster_name {
+        let client_clone = client.clone();
+        let cluster_name_clone = cluster_name.clone();
+        let token = agent_cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    tracing::info!("Agent connection cancelled");
+                }
+                _ = start_agent_with_retry(&client_clone, &cluster_name_clone, unpivot_rx) => {}
+            }
+        });
+    }
+
+    // Determine which controllers to run
+    let run_cluster = matches!(mode, ControllerMode::All | ControllerMode::Cluster);
+    let run_service = matches!(mode, ControllerMode::All | ControllerMode::Service);
+
+    // Get TLS SANs (waits for LoadBalancer if needed)
+    let extra_sans = get_cell_server_sans(&client, &self_cluster_name, is_bootstrap_cluster).await;
+
+    let webhook_router = if run_service {
+        let state = Arc::new(lattice_service::webhook::WebhookState::new(client.clone()));
+        Some(lattice_service::webhook::webhook_router(state))
+    } else {
+        None
+    };
+
+    let manifest_generator = lattice_operator::bootstrap::DefaultManifestGenerator::new();
+    parent_servers
+        .ensure_running_with(manifest_generator, &extra_sans, client.clone(), webhook_router)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to start cell servers: {}", e))?;
+
+    tracing::info!("Cell servers started");
+
+    // Re-register any clusters that are past Pending phase (handles operator restarts)
+    if let Some(bootstrap_state) = parent_servers.bootstrap_state().await {
+        re_register_existing_clusters(&client, &bootstrap_state, &self_cluster_name, &parent_servers)
+            .await;
+    }
+
+    // Create controller context
     let mut ctx_builder = Context::builder(client.clone())
         .parent_servers(parent_servers.clone())
         .unpivot_channel(unpivot_tx);
@@ -912,26 +902,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     }
     let ctx = Arc::new(ctx_builder.build());
 
-    // Check if we need to connect as an agent to a parent cell
-    // This happens when the cluster has a cellRef (was provisioned by a parent)
-    // Connection happens in background with retries - don't block controller startup
-    // Agent task is cancelled when parent_servers shuts down
-    let agent_cancel_token = tokio_util::sync::CancellationToken::new();
-    if let Some(ref cluster_name) = self_cluster_name {
-        let client_clone = client.clone();
-        let cluster_name_clone = cluster_name.clone();
-        let token = agent_cancel_token.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = token.cancelled() => {
-                    tracing::info!("Agent connection loop cancelled during shutdown");
-                }
-                _ = start_agent_with_retry(&client_clone, &cluster_name_clone, unpivot_rx) => {}
-            }
-        });
-    }
-
-    // Create APIs for all CRDs (cluster-scoped)
+    // Create APIs for all CRDs
     let clusters: Api<LatticeCluster> = Api::all(client.clone());
     let services: Api<LatticeService> = Api::all(client.clone());
     let external_services: Api<LatticeExternalService> = Api::all(client.clone());
@@ -939,10 +910,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     // Create service context for service controllers
     let service_ctx = Arc::new(ServiceContext::from_client(client, "cluster.local"));
 
-    // Log which controllers will be started
     tracing::info!("Starting Lattice controllers...");
-    let run_cluster = matches!(mode, ControllerMode::All | ControllerMode::Cluster);
-    let run_service = matches!(mode, ControllerMode::All | ControllerMode::Service);
 
     if run_cluster {
         tracing::info!("  - LatticeCluster controller");

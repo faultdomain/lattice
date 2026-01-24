@@ -55,7 +55,7 @@ impl ServiceNode {
     /// Create a new local service node from a LatticeService spec
     pub fn from_service_spec(name: &str, spec: &LatticeServiceSpec) -> Self {
         let callers = spec.allowed_callers();
-        let allows_all = callers.iter().any(|c| *c == "*");
+        let allows_all = callers.contains(&"*");
         Self {
             name: name.to_string(),
             type_: ServiceType::Local,

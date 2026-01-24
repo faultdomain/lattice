@@ -10,31 +10,13 @@ use tracing::info;
 
 use lattice_common::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT};
 
-use super::split_yaml_documents;
-
-/// Default charts directory (set by LATTICE_CHARTS_DIR env var in container)
-const DEFAULT_CHARTS_DIR: &str = "/charts";
-
-/// Get charts directory - checks runtime env var first, then compile-time, then default
-fn get_charts_dir() -> String {
-    // Runtime env var takes precedence (for container override)
-    if let Ok(dir) = std::env::var("LATTICE_CHARTS_DIR") {
-        return dir;
-    }
-    // Compile-time env var set by build.rs (for local development)
-    if let Some(dir) = option_env!("LATTICE_CHARTS_DIR") {
-        return dir.to_string();
-    }
-    // Default for container
-    DEFAULT_CHARTS_DIR.to_string()
-}
+use super::{charts_dir, split_yaml_documents};
 
 /// Generate Cilium manifests for a cluster
 ///
-/// Renders via `helm template` on-demand. Provider is passed for future
-/// provider-specific configuration if needed.
-pub fn generate_cilium_manifests(provider: Option<&str>) -> Result<Vec<String>, String> {
-    let charts_dir = get_charts_dir();
+/// Renders via `helm template` on-demand.
+pub fn generate_cilium_manifests() -> Result<Vec<String>, String> {
+    let charts_dir = charts_dir();
     let version = env!("CILIUM_VERSION");
     let chart_path = format!("{}/cilium-{}.tgz", charts_dir, version);
 
@@ -81,7 +63,7 @@ pub fn generate_cilium_manifests(provider: Option<&str>) -> Result<Vec<String>, 
         "bpf.hostLegacyRouting=true",
     ];
 
-    info!(provider = ?provider, "Rendering Cilium manifests");
+    info!("Rendering Cilium manifests");
 
     let output = Command::new("helm")
         .args([
@@ -356,7 +338,7 @@ mod tests {
     #[test]
     fn test_cilium_manifests() {
         // Only runs if helm is available
-        if let Ok(manifests) = generate_cilium_manifests(Some("docker")) {
+        if let Ok(manifests) = generate_cilium_manifests() {
             assert!(!manifests.is_empty());
             let combined = manifests.join("\n");
             // Check for core Cilium components

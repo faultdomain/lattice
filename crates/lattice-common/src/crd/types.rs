@@ -50,6 +50,30 @@ impl ProviderType {
     pub fn is_cloud(&self) -> bool {
         matches!(self, Self::Aws | Self::Gcp | Self::Azure)
     }
+
+    /// Returns LoadBalancer Service annotations for this provider
+    pub fn load_balancer_annotations(&self) -> std::collections::BTreeMap<String, String> {
+        let mut annotations = std::collections::BTreeMap::new();
+        match self {
+            Self::Aws => {
+                // NLB works reliably with CAPA security groups (Classic ELB doesn't)
+                annotations.insert(
+                    "service.beta.kubernetes.io/aws-load-balancer-type".to_string(),
+                    "nlb".to_string(),
+                );
+            }
+            Self::Gcp => {
+                // GCP uses regional external LB by default, no special annotations needed
+            }
+            Self::Azure => {
+                // Azure uses Standard LB by default, no special annotations needed
+            }
+            Self::Docker | Self::Proxmox | Self::OpenStack => {
+                // On-prem uses Cilium L2 announcements, no cloud LB annotations
+            }
+        }
+        annotations
+    }
 }
 
 impl std::str::FromStr for ProviderType {

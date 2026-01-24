@@ -28,9 +28,9 @@ use crate::agent::mtls::ServerMtlsConfig;
 use crate::agent::server::AgentServer;
 use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
-    CAPMOX_NAMESPACE, CAPMOX_SECRET_NAME,
 };
 use crate::pivot::{fetch_distributable_resources, DistributableResources};
+use lattice_common::{DISTRIBUTE_LABEL_SELECTOR, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::pki::CertificateAuthority;
 use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
 
@@ -107,9 +107,6 @@ struct ServerHandles {
 /// Interval for periodic secret sync (safety net)
 const SECRET_SYNC_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 
-/// Label selector for distributable secrets
-const DISTRIBUTE_LABEL: &str = "lattice.io/distribute=true";
-
 /// Push distributable resources to all connected agents
 async fn push_resources_to_agents(
     registry: &SharedAgentRegistry,
@@ -155,11 +152,11 @@ async fn push_resources_to_agents(
 async fn run_resource_sync(client: Client, registry: SharedAgentRegistry) {
     use k8s_openapi::api::core::v1::ConfigMap;
 
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
-    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), "lattice-system");
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     // Create watchers for distributable resources
-    let watcher_config = watcher::Config::default().labels(DISTRIBUTE_LABEL);
+    let watcher_config = watcher::Config::default().labels(DISTRIBUTE_LABEL_SELECTOR);
     let secret_watcher = watcher::watcher(secret_api, watcher_config.clone());
     let cm_watcher = watcher::watcher(cm_api, watcher_config);
 
@@ -235,8 +232,6 @@ async fn handle_resource_event<T>(
 
 /// Secret name for persisting the CA
 const CA_SECRET_NAME: &str = "lattice-ca";
-/// Namespace for the CA secret
-const CA_SECRET_NAMESPACE: &str = "lattice-system";
 
 /// Error type for cell server operations
 #[derive(Debug, thiserror::Error)]
@@ -272,7 +267,7 @@ pub enum CellServerError {
 /// # Returns
 /// The CA, either loaded from the Secret or newly created
 pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, CellServerError> {
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), CA_SECRET_NAMESPACE);
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     // Try to load existing CA from Secret
     match secrets.get(CA_SECRET_NAME).await {
@@ -309,7 +304,7 @@ pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, 
 
             info!(
                 "Loaded existing CA from Secret {}/{}",
-                CA_SECRET_NAMESPACE, CA_SECRET_NAME
+                LATTICE_SYSTEM_NAMESPACE, CA_SECRET_NAME
             );
             Ok(ca)
         }
@@ -324,7 +319,7 @@ pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, 
             let secret = Secret {
                 metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
                     name: Some(CA_SECRET_NAME.to_string()),
-                    namespace: Some(CA_SECRET_NAMESPACE.to_string()),
+                    namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                     ..Default::default()
                 },
                 type_: Some("Opaque".to_string()),
@@ -350,7 +345,7 @@ pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, 
 
             info!(
                 "Created and persisted new CA to Secret {}/{}",
-                CA_SECRET_NAMESPACE, CA_SECRET_NAME
+                LATTICE_SYSTEM_NAMESPACE, CA_SECRET_NAME
             );
             Ok(ca)
         }
@@ -422,22 +417,6 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         self.config.registry_credentials.as_deref()
     }
 
-    /// Get CAPMOX credentials (blocking read of bootstrap state)
-    ///
-    /// Returns None if servers not running or no credentials available.
-    /// Returns owned strings to avoid lifetime issues with the lock.
-    pub fn capmox_credentials(&self) -> Option<(String, String, String)> {
-        // Use try_read to avoid blocking - if locked, return None
-        if let Ok(guard) = self.bootstrap_state.try_read() {
-            if let Some(ref state) = *guard {
-                return state
-                    .capmox_credentials()
-                    .map(|(u, t, s)| (u.to_string(), t.to_string(), s.to_string()));
-            }
-        }
-        None
-    }
-
     /// Start the cell servers if not already running
     ///
     /// This is idempotent - calling multiple times is safe.
@@ -468,13 +447,9 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!("Starting cell servers...");
 
-        // Try to read CAPMOX credentials from Secret (if this cluster has them)
-        let capmox_credentials = Self::read_capmox_credentials(&kube_client).await;
-        if capmox_credentials.is_some() {
-            info!("CAPMOX credentials loaded, will propagate to Proxmox child clusters");
-        }
-
         // Create bootstrap state
+        // Note: Provider credentials are synced via the distribute mechanism
+        // (secrets with lattice.io/distribute=true label in lattice-system)
         let bootstrap_state = Arc::new(BootstrapState::new(
             manifest_generator,
             self.config.token_ttl,
@@ -482,7 +457,6 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             self.config.image.clone(),
             self.config.registry_credentials.clone(),
             Some(kube_client.clone()),
-            capmox_credentials,
         ));
 
         // Store bootstrap state
@@ -499,7 +473,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             .generate_server_cert(&sans)
             .map_err(|e| CellServerError::CertGeneration(e.to_string()))?;
 
-        info!(sans = ?self.config.server_sans, "Generated server certificate");
+        info!(sans = ?sans, "Generated server certificate");
 
         // Clone kube_client for services before it's moved
         let grpc_kube_client = kube_client.clone();
@@ -573,30 +547,6 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!("Cell servers started successfully");
         Ok(true)
-    }
-
-    /// Read CAPMOX credentials from the local Secret if it exists
-    async fn read_capmox_credentials(client: &Client) -> Option<(String, String, String)> {
-        let secrets: Api<Secret> = Api::namespaced(client.clone(), CAPMOX_NAMESPACE);
-
-        match secrets.get(CAPMOX_SECRET_NAME).await {
-            Ok(secret) => {
-                let data = secret.data.as_ref()?;
-
-                let url = data
-                    .get("url")
-                    .and_then(|b| String::from_utf8(b.0.clone()).ok())?;
-                let token = data
-                    .get("token")
-                    .and_then(|b| String::from_utf8(b.0.clone()).ok())?;
-                let secret_val = data
-                    .get("secret")
-                    .and_then(|b| String::from_utf8(b.0.clone()).ok())?;
-
-                Some((url, token, secret_val))
-            }
-            Err(_) => None,
-        }
     }
 
     /// Shutdown the servers

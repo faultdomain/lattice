@@ -24,13 +24,6 @@ use lattice_operator::crd::{
 
 use super::helpers::{client_from_kubeconfig, run_cmd, run_cmd_allow_fail};
 
-/// Check if mesh tests are enabled via environment variable
-pub fn mesh_test_enabled() -> bool {
-    std::env::var("LATTICE_ENABLE_MESH_TEST")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
-}
-
 // =============================================================================
 // Fixed 9-Service Mesh Test
 // =============================================================================
@@ -574,14 +567,16 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
 async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(300);
+    // +1 for the Istio ambient waypoint proxy pod created per namespace
+    let expected_pods = TOTAL_SERVICES + 1;
 
-    println!("  Waiting for {} pods to be ready...", TOTAL_SERVICES);
+    println!("  Waiting for {} pods to be ready...", expected_pods);
 
     loop {
         if start.elapsed() > timeout {
             return Err(format!(
                 "Timeout waiting for test pods (expected {})",
-                TOTAL_SERVICES
+                expected_pods
             ));
         }
 
@@ -600,10 +595,10 @@ async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
         );
 
         let running_count = pods_output.lines().filter(|l| *l == "Running").count();
-        println!("    {}/{} pods running", running_count, TOTAL_SERVICES);
+        println!("    {}/{} pods running", running_count, expected_pods);
 
-        if running_count >= TOTAL_SERVICES {
-            println!("  All {} test pods are running!", TOTAL_SERVICES);
+        if running_count >= expected_pods {
+            println!("  All {} pods are running!", expected_pods);
             return Ok(());
         }
 
@@ -749,7 +744,7 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
 
 /// Run the fixed 9-service mesh test
 pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
-    println!("\n[Phase 8] Running service mesh bilateral agreement test...\n");
+    println!("\n[Mesh Test] Running service mesh bilateral agreement test...\n");
     deploy_test_services(kubeconfig_path).await?;
     wait_for_service_pods(kubeconfig_path).await?;
     println!("  Waiting for traffic tests to complete (90s)...");
@@ -1414,7 +1409,8 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
 async fn wait_for_random_mesh_pods(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<(), String> {
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(600);
-    let expected_pods = mesh.services.len();
+    // +1 for the Istio ambient waypoint proxy pod created per namespace
+    let expected_pods = mesh.services.len() + 1;
 
     println!("  Waiting for {} pods to be ready...", expected_pods);
 
@@ -1579,7 +1575,7 @@ async fn verify_random_mesh_traffic(
 
 /// Run the randomized 50-100 service mesh test
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
-    println!("\n[Phase 9] Running randomized large-scale mesh test (50-75 services)...\n");
+    println!("\n[Mesh Test] Running randomized large-scale mesh test (50-75 services)...\n");
 
     let mesh = RandomMesh::generate(&RandomMeshConfig::default());
     println!("{}", mesh.stats());

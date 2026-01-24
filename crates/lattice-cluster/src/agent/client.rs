@@ -679,10 +679,14 @@ impl AgentClient {
     /// Install CAPI and infrastructure provider
     ///
     /// Reads provider type from LatticeCluster CRD, then:
-    /// 1. Installs cert-manager from local helm chart
-    /// 2. Runs clusterctl init with air-gapped config (kubeadm + RKE2 providers)
+    /// 1. Copies provider credentials from lattice-system to provider namespace
+    /// 2. Installs cert-manager from local helm chart
+    /// 3. Runs clusterctl init with air-gapped config (kubeadm + RKE2 providers)
     async fn install_capi() -> Result<String, std::io::Error> {
-        use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
+        use crate::capi::{
+            ensure_capi_installed, ensure_provider_credentials, CapiProviderConfig,
+            ClusterctlInstaller,
+        };
         use kube::api::ListParams;
         use lattice_common::crd::LatticeCluster;
 
@@ -691,7 +695,7 @@ impl AgentClient {
             .await
             .map_err(|e| std::io::Error::other(format!("failed to create kube client: {}", e)))?;
 
-        let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
+        let clusters: kube::Api<LatticeCluster> = kube::Api::all(client.clone());
         let list = clusters
             .list(&ListParams::default())
             .await
@@ -706,6 +710,13 @@ impl AgentClient {
         let provider_str = infrastructure.to_string();
 
         info!(infrastructure = %provider_str, "Installing CAPI providers");
+
+        // Copy credentials from lattice-system to provider namespace
+        ensure_provider_credentials(&client, infrastructure)
+            .await
+            .map_err(|e| {
+                std::io::Error::other(format!("Failed to copy provider credentials: {}", e))
+            })?;
 
         let config = CapiProviderConfig::new(infrastructure)
             .map_err(|e| std::io::Error::other(format!("Failed to create CAPI config: {}", e)))?;

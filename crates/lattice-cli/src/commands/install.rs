@@ -23,9 +23,9 @@ use tracing::info;
 use lattice_common::clusterctl::{export_for_pivot, import_from_manifests};
 use lattice_common::kube_utils;
 use lattice_operator::bootstrap::{
-    capa_credentials_manifests, capmox_credentials_manifests, generate_all_aws_addon_crs,
-    generate_all_manifests, generate_crs_yaml_manifests, AwsCredentials, DefaultManifestGenerator,
-    ManifestConfig, ManifestGenerator,
+    aws_credentials_manifests, generate_all_manifests, generate_crs_yaml_manifests,
+    proxmox_credentials_manifests, AwsCredentials, DefaultManifestGenerator, ManifestConfig,
+    ManifestGenerator, ProviderCredentials,
 };
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 use lattice_operator::fips;
@@ -284,11 +284,11 @@ impl Installer {
         match self.provider() {
             ProviderType::Proxmox => {
                 info!("[Phase 1.5] Creating Proxmox credentials...");
-                self.create_capmox_credentials(&bootstrap_client).await?;
+                self.create_proxmox_credentials(&bootstrap_client).await?;
             }
             ProviderType::Aws => {
                 info!("[Phase 1.5] Creating AWS credentials...");
-                self.create_capa_credentials(&bootstrap_client).await?;
+                self.create_aws_credentials(&bootstrap_client).await?;
             }
             _ => {}
         }
@@ -296,10 +296,7 @@ impl Installer {
         info!("[Phase 2] Deploying Lattice operator...");
         self.deploy_lattice_operator(&bootstrap_client).await?;
 
-        if self.provider() == ProviderType::Aws {
-            info!("[Phase 2.5] Creating AWS addon ClusterResourceSets...");
-            self.create_aws_addon_crs(&bootstrap_client).await?;
-        }
+        // Note: AWS addons (CCM/CSI) are now included in the main CRS via generate_all_manifests()
 
         info!("[Phase 3] Creating management cluster LatticeCluster CR...");
         self.create_management_cluster_crd(&bootstrap_client)
@@ -334,21 +331,6 @@ impl Installer {
     }
 
     async fn create_kind_cluster(&self) -> Result<()> {
-        let kind_config = r#"kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-  extraMounts:
-  - hostPath: /var/run/docker.sock
-    containerPath: /var/run/docker.sock
-  kubeadmConfigPatches:
-  - |
-    kind: ClusterConfiguration
-    apiServer:
-      extraArgs:
-        tls-cipher-suites: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-"#;
-
         info!("Creating bootstrap cluster: {}", BOOTSTRAP_CLUSTER_NAME);
 
         let mut child = Command::new("kind")
@@ -367,7 +349,7 @@ nodes:
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin.write_all(kind_config.as_bytes()).await?;
+            stdin.write_all(super::KIND_CONFIG_WITH_DOCKER.as_bytes()).await?;
         }
 
         let output = child.wait_with_output().await?;
@@ -503,6 +485,7 @@ nodes:
             .as_ref()
             .map(|p| &p.ipv4_pool);
 
+        let k8s_version = &self.cluster.spec.provider.kubernetes.version;
         let config = ManifestConfig {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
@@ -510,6 +493,7 @@ nodes:
             proxmox_ipv4_pool,
             cluster_name: Some(cluster_name),
             provider: Some(&provider_str),
+            k8s_version: Some(k8s_version),
             parent_host: None,
             parent_grpc_port: lattice_operator::DEFAULT_GRPC_PORT,
             relax_fips: self
@@ -523,21 +507,29 @@ nodes:
 
         let all_manifests = generate_all_manifests(&generator, &config);
 
-        let capmox_credentials = if self.provider() == ProviderType::Proxmox {
-            let (url, token, secret) = Self::get_proxmox_credentials()?;
-            Some((url, token, secret))
-        } else {
-            None
+        // Get provider credentials for the CRS (applied to management cluster)
+        let credentials = match self.provider() {
+            ProviderType::Proxmox => {
+                let (url, token, secret) = Self::get_proxmox_credentials()?;
+                Some(ProviderCredentials {
+                    secret_name: "provider-credentials".to_string(),
+                    key_name: "credentials.yaml".to_string(),
+                    manifest: proxmox_credentials_manifests(&url, &token, &secret),
+                })
+            }
+            ProviderType::Aws => {
+                let creds = Self::get_aws_credentials()?;
+                Some(ProviderCredentials {
+                    secret_name: "provider-credentials".to_string(),
+                    key_name: "credentials.yaml".to_string(),
+                    manifest: aws_credentials_manifests(&creds),
+                })
+            }
+            _ => None,
         };
 
-        let crs_manifests = generate_crs_yaml_manifests(
-            cluster_name,
-            &namespace,
-            &all_manifests,
-            capmox_credentials
-                .as_ref()
-                .map(|(u, t, s)| (u.as_str(), t.as_str(), s.as_str())),
-        );
+        let crs_manifests =
+            generate_crs_yaml_manifests(cluster_name, &namespace, &all_manifests, credentials);
 
         kube_utils::create_namespace(client, &namespace)
             .await
@@ -753,11 +745,11 @@ nodes:
         Ok((url, token, secret))
     }
 
-    async fn create_capmox_credentials(&self, client: &Client) -> Result<()> {
+    async fn create_proxmox_credentials(&self, client: &Client) -> Result<()> {
         let (url, token, secret) = Self::get_proxmox_credentials()?;
         info!("PROXMOX_URL: {}", url);
 
-        let manifests = capmox_credentials_manifests(&url, &token, &secret);
+        let manifests = proxmox_credentials_manifests(&url, &token, &secret);
         kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
             .await
             .cmd_err()
@@ -785,39 +777,14 @@ nodes:
         })
     }
 
-    async fn create_capa_credentials(&self, client: &Client) -> Result<()> {
+    async fn create_aws_credentials(&self, client: &Client) -> Result<()> {
         let creds = Self::get_aws_credentials()?;
         info!("AWS_REGION: {}", creds.region);
 
-        let manifests = capa_credentials_manifests(&creds);
+        let manifests = aws_credentials_manifests(&creds);
         kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
             .await
             .cmd_err()
-    }
-
-    /// Create AWS addon ClusterResourceSets (CCM + EBS CSI)
-    ///
-    /// The CCM sets correct providerID format (aws:///ZONE/INSTANCE_ID) on nodes,
-    /// which CAPI requires to match Machine to Node resources.
-    /// The EBS CSI driver provides persistent volume support.
-    ///
-    /// Uses retry logic because the CAPI webhook may not be ready immediately
-    /// after CRDs are installed.
-    async fn create_aws_addon_crs(&self, client: &Client) -> Result<()> {
-        let namespace = self.capi_namespace();
-        kube_utils::create_namespace(client, &namespace)
-            .await
-            .cmd_err()?;
-
-        let manifests = generate_all_aws_addon_crs(&namespace);
-        for manifest in &manifests {
-            kube_utils::apply_manifest_with_retry(client, manifest, Duration::from_secs(60))
-                .await
-                .cmd_err()?;
-        }
-
-        info!("AWS addon ClusterResourceSets created (CCM + EBS CSI)");
-        Ok(())
     }
 
     async fn pivot_capi_resources(&self) -> Result<()> {

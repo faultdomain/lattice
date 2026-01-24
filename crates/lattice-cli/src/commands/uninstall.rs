@@ -15,13 +15,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Args;
-use kube::api::Api;
+use k8s_openapi::api::core::v1::Service;
+use kube::api::{Api, DeleteParams};
 use kube::Client;
 use tokio::process::Command;
-use tracing::info;
+use tracing::{debug, info};
 
 use lattice_common::clusterctl::{export_for_pivot, teardown_cluster, TeardownConfig};
 use lattice_common::kube_utils;
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_operator::bootstrap::AwsCredentials;
 use lattice_operator::crd::{LatticeCluster, ProviderType};
 
@@ -123,10 +125,67 @@ impl Uninstaller {
         std::env::temp_dir().join("lattice-uninstall-bootstrap.kubeconfig")
     }
 
+    async fn target_client(&self) -> Result<Client> {
+        kube_utils::create_client(Some(&self.kubeconfig))
+            .await
+            .map_err(|e| Error::command_failed(format!("Failed to create target client: {}", e)))
+    }
+
     async fn bootstrap_client(&self) -> Result<Client> {
         kube_utils::create_client(Some(&self.bootstrap_kubeconfig_path()))
             .await
             .map_err(|e| Error::command_failed(format!("Failed to create bootstrap client: {}", e)))
+    }
+
+    /// Delete the lattice-cell LoadBalancer service and wait for cleanup
+    ///
+    /// This prevents orphaning cloud LB resources when the cluster is deleted.
+    async fn delete_cell_service(&self) -> Result<()> {
+        let client = self.target_client().await?;
+        let api: Api<Service> = Api::namespaced(client, LATTICE_SYSTEM_NAMESPACE);
+
+        // Delete the service
+        match api.delete("lattice-cell", &DeleteParams::default()).await {
+            Ok(_) => {
+                info!("Deleted lattice-cell LoadBalancer service");
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                debug!("lattice-cell service not found (already deleted)");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(Error::command_failed(format!(
+                    "Failed to delete lattice-cell service: {}",
+                    e
+                )));
+            }
+        }
+
+        // Wait for the service to be fully deleted
+        info!("Waiting for LoadBalancer cleanup...");
+        let timeout = Duration::from_secs(60);
+        let poll_interval = Duration::from_secs(2);
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout {
+            match api.get("lattice-cell").await {
+                Ok(_) => {
+                    debug!("Cell service still exists, waiting...");
+                }
+                Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                    debug!("Cell service deleted");
+                    return Ok(());
+                }
+                Err(e) => {
+                    debug!(error = %e, "Error checking cell service, assuming deleted");
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        tracing::warn!("Timeout waiting for cell service deletion, proceeding anyway");
+        Ok(())
     }
 
     pub async fn run(&self) -> Result<()> {
@@ -161,7 +220,12 @@ impl Uninstaller {
         info!("Installing CAPI providers on kind cluster...");
         self.install_capi_providers().await?;
 
-        // Step 3: Export CAPI resources from target cluster
+        // Step 3: Delete LoadBalancer service to clean up cloud LB resources
+        // Must be done before export/teardown to give cloud provider time to cleanup
+        info!("Cleaning up LoadBalancer service...");
+        self.delete_cell_service().await?;
+
+        // Step 4: Export CAPI resources from target cluster
         info!("Exporting CAPI resources from target cluster...");
         let manifests = export_for_pivot(
             Some(&self.kubeconfig),
@@ -171,7 +235,7 @@ impl Uninstaller {
         .await
         .map_err(|e| Error::command_failed(e.to_string()))?;
 
-        // Steps 4-6: Teardown cluster (import → unpause → wait ready → delete → wait deletion)
+        // Steps 5-7: Teardown cluster (import → unpause → wait ready → delete → wait deletion)
         // This is the same logic used by the controller's unpivot flow
         info!("Tearing down cluster on kind...");
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
@@ -197,10 +261,26 @@ impl Uninstaller {
             .output()
             .await;
 
-        let output = Command::new("kind")
-            .args(["create", "cluster", "--name", UNINSTALL_CLUSTER_NAME])
-            .output()
-            .await?;
+        let mut child = Command::new("kind")
+            .args([
+                "create",
+                "cluster",
+                "--name",
+                UNINSTALL_CLUSTER_NAME,
+                "--config",
+                "-",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(super::KIND_CONFIG_WITH_DOCKER.as_bytes()).await?;
+        }
+
+        let output = child.wait_with_output().await?;
 
         if !output.status.success() {
             return Err(Error::command_failed(format!(

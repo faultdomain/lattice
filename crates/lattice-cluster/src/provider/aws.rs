@@ -69,10 +69,18 @@ impl AwsProvider {
             "sshKeyName": &cfg.ssh_key_name
         });
 
+        // Cilium CNI ingress rules (CAPA defaults to Calico which won't work)
+        let cni_ingress_rules = serde_json::json!([
+            { "description": "VXLAN (cilium)", "fromPort": 8472, "toPort": 8472, "protocol": "udp" },
+            { "description": "health (cilium)", "fromPort": 4240, "toPort": 4240, "protocol": "tcp" },
+            { "description": "ICMP", "fromPort": -1, "toPort": -1, "protocol": "icmp" }
+        ]);
+
         // BYOI: use existing VPC and subnets
         if let Some(ref vpc_id) = cfg.vpc_id {
             let mut network = serde_json::json!({
-                "vpc": { "id": vpc_id }
+                "vpc": { "id": vpc_id },
+                "cni": { "cniIngressRules": cni_ingress_rules }
             });
 
             if let Some(ref subnets) = cfg.subnet_ids {
@@ -84,6 +92,11 @@ impl AwsProvider {
             }
 
             spec["network"] = network;
+        } else {
+            // Non-BYOI: still need Cilium CNI rules
+            spec["network"] = serde_json::json!({
+                "cni": { "cniIngressRules": cni_ingress_rules }
+            });
         }
 
         // Control plane load balancer configuration (NLB by default)
@@ -576,5 +589,41 @@ mod tests {
         let spec = aws_cluster.spec.as_ref().expect("spec");
         assert_eq!(spec["network"]["vpc"]["id"].as_str().unwrap(), "vpc-12345");
         assert_eq!(spec["network"]["subnets"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn uses_custom_ami_when_configured() {
+        let provider = AwsProvider::with_namespace("capi-system");
+        let mut cluster = test_cluster("test");
+
+        if let Some(ref mut cfg) = cluster.spec.provider.config.aws {
+            cfg.ami_id = Some("ami-custom123".to_string());
+        }
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &BootstrapInfo::default())
+            .await
+            .expect("manifest generation");
+
+        // Both control plane and worker templates should use the custom AMI
+        let cp_template = manifests
+            .iter()
+            .find(|m| m.kind == "AWSMachineTemplate" && m.metadata.name.contains("control-plane"))
+            .expect("control plane template");
+
+        let cp_ami = cp_template.spec.as_ref().expect("spec")["template"]["spec"]["ami"]["id"]
+            .as_str()
+            .expect("ami id");
+        assert_eq!(cp_ami, "ami-custom123");
+
+        let worker_template = manifests
+            .iter()
+            .find(|m| m.kind == "AWSMachineTemplate" && m.metadata.name.contains("md-0"))
+            .expect("worker template");
+
+        let worker_ami = worker_template.spec.as_ref().expect("spec")["template"]["spec"]["ami"]["id"]
+            .as_str()
+            .expect("ami id");
+        assert_eq!(worker_ami, "ami-custom123");
     }
 }

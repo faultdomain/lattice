@@ -7,22 +7,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use tracing::info;
 
-/// Default charts directory (set by LATTICE_CHARTS_DIR env var in container)
-const DEFAULT_CHARTS_DIR: &str = "/charts";
-
-/// Get charts directory - checks runtime env var first, then compile-time, then default
-fn get_charts_dir() -> String {
-    // Runtime env var takes precedence (for container override)
-    if let Ok(dir) = std::env::var("LATTICE_CHARTS_DIR") {
-        return dir;
-    }
-    // Compile-time env var set by build.rs (for local development)
-    if let Some(dir) = option_env!("LATTICE_CHARTS_DIR") {
-        return dir.to_string();
-    }
-    // Default for container
-    DEFAULT_CHARTS_DIR.to_string()
-}
+use super::charts_dir;
 
 /// Istio configuration
 #[derive(Debug, Clone)]
@@ -170,11 +155,11 @@ spec:
         let mut all_manifests = Vec::new();
 
         // Use local chart tarballs (pulled at Docker build time or by build.rs)
-        let charts_dir = get_charts_dir();
-        let base_chart = format!("{}/base-{}.tgz", charts_dir, config.version);
-        let istiod_chart = format!("{}/istiod-{}.tgz", charts_dir, config.version);
-        let cni_chart = format!("{}/cni-{}.tgz", charts_dir, config.version);
-        let ztunnel_chart = format!("{}/ztunnel-{}.tgz", charts_dir, config.version);
+        let charts = charts_dir();
+        let base_chart = format!("{}/base-{}.tgz", charts, config.version);
+        let istiod_chart = format!("{}/istiod-{}.tgz", charts, config.version);
+        let cni_chart = format!("{}/cni-{}.tgz", charts, config.version);
+        let ztunnel_chart = format!("{}/ztunnel-{}.tgz", charts, config.version);
 
         // 1. Render istio base chart (CRDs)
         info!(version = config.version, "Rendering Istio base chart");

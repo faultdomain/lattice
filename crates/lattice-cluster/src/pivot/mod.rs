@@ -29,6 +29,7 @@ use tracing::{debug, info};
 
 // Re-export retry utilities for convenience
 pub use lattice_common::retry::{retry_with_backoff, RetryConfig};
+use lattice_common::{DISTRIBUTE_LABEL_SELECTOR, LATTICE_SYSTEM_NAMESPACE};
 
 /// Default CAPI namespace for pivot handlers
 const DEFAULT_CAPI_NAMESPACE: &str = "default";
@@ -481,9 +482,6 @@ async fn apply_kubeconfig_patch(
     Ok(())
 }
 
-/// Label selector for distributable resources
-const DISTRIBUTE_LABEL: &str = "lattice.io/distribute=true";
-
 /// Resources labeled for distribution to child clusters
 #[derive(Debug, Default, Clone)]
 pub struct DistributableResources {
@@ -512,10 +510,10 @@ pub async fn fetch_distributable_resources(
     use k8s_openapi::api::core::v1::ConfigMap;
     use kube::api::ListParams;
 
-    let lp = ListParams::default().labels(DISTRIBUTE_LABEL);
+    let lp = ListParams::default().labels(DISTRIBUTE_LABEL_SELECTOR);
 
     // Fetch secrets
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let secrets_list = secret_api
         .list(&lp)
         .await
@@ -528,7 +526,7 @@ pub async fn fetch_distributable_resources(
     }
 
     // Fetch configmaps
-    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), "lattice-system");
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let cms_list = cm_api
         .list(&lp)
         .await
@@ -592,7 +590,7 @@ pub async fn apply_distributed_resources(
     let params = PatchParams::apply("lattice-pivot").force();
 
     // Apply secrets
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for secret_bytes in &resources.secrets {
         let yaml_str = String::from_utf8_lossy(secret_bytes);
         let secret: Secret = serde_yaml::from_str(&yaml_str)
@@ -613,7 +611,7 @@ pub async fn apply_distributed_resources(
     }
 
     // Apply configmaps
-    let cm_api: Api<ConfigMap> = Api::namespaced(client, "lattice-system");
+    let cm_api: Api<ConfigMap> = Api::namespaced(client, LATTICE_SYSTEM_NAMESPACE);
     for cm_bytes in &resources.configmaps {
         let yaml_str = String::from_utf8_lossy(cm_bytes);
         let cm: ConfigMap = serde_yaml::from_str(&yaml_str)
