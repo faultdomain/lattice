@@ -86,16 +86,27 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
 // Verification
 // =============================================================================
 
-/// Wait for all pods to be running
+/// Wait for all pods to be running with containers ready
 async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(300);
-    let expected_pods = 3;
+    println!("Waiting for media pods to be ready...");
 
-    println!("Waiting for {} media pods to be ready...", expected_pods);
-
-    loop {
-        if start.elapsed() > timeout {
+    // Use kubectl wait for proper container readiness (not just pod phase)
+    for deploy in &["jellyfin", "nzbget", "sonarr"] {
+        println!("  Waiting for {}...", deploy);
+        let result = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "wait",
+                "--for=condition=Available",
+                "-n",
+                NAMESPACE,
+                &format!("deployment/{}", deploy),
+                "--timeout=300s",
+            ],
+        );
+        if result.contains("error") || result.contains("timed out") {
             let debug = run_cmd_allow_fail(
                 "kubectl",
                 &[
@@ -110,37 +121,12 @@ async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
                 ],
             );
             println!("  Pod status:\n{}", debug);
-
-            return Err(format!(
-                "Timeout waiting for media pods (expected {})",
-                expected_pods
-            ));
+            return Err(format!("Timeout waiting for deployment {}", deploy));
         }
-
-        let pods_output = run_cmd_allow_fail(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "get",
-                "pods",
-                "-n",
-                NAMESPACE,
-                "-o",
-                "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}",
-            ],
-        );
-
-        let running_count = pods_output.lines().filter(|l| *l == "Running").count();
-        println!("  {}/{} pods running", running_count, expected_pods);
-
-        if running_count >= expected_pods {
-            println!("  All pods are running!");
-            return Ok(());
-        }
-
-        sleep(Duration::from_secs(10)).await;
     }
+
+    println!("  All pods are ready!");
+    Ok(())
 }
 
 /// Verify PVCs were created correctly

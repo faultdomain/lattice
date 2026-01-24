@@ -85,8 +85,15 @@ echo ""
 
 # Check 5: SQL/Command injection patterns (template strings with user input)
 echo "=== Checking for potential injection vulnerabilities ==="
-INJECTION_PATTERNS='format!\s*\([^)]*\$\{|execute\s*\(\s*&format!'
-INJECTION_MATCHES=$(grep -rniE "$INJECTION_PATTERNS" crates --include="*.rs" 2>/dev/null | grep -v '#\[cfg(test)\]' | head -10 || true)
+# Use gawk to properly track test modules (like check-error-handling.sh)
+INJECTION_AWK='
+BEGINFILE { in_test_mod = 0 }
+/^[[:space:]]*#\[cfg\(test\)\]/ { in_test_mod = 1 }
+!in_test_mod && /format!\s*\([^)]*\$\{|execute\s*\(\s*&format!/ {
+    print FILENAME ":" FNR ": " $0
+}
+'
+INJECTION_MATCHES=$(find crates -name "*.rs" -not -path "*/tests/*" -print0 2>/dev/null | xargs -0 gawk "$INJECTION_AWK" 2>/dev/null | head -10 || true)
 if [[ -n "$INJECTION_MATCHES" ]]; then
     echo "$INJECTION_MATCHES"
     echo -e "${YELLOW}WARNING: Potential injection vulnerability patterns found (review manually)${NC}"
