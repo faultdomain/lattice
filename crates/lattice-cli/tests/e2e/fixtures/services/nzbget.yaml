@@ -25,9 +25,8 @@ spec:
           cpu: 2000m
           memory: 2Gi
       readinessProbe:
-        httpGet:
-          path: /
-          port: 6789
+        exec:
+          command: ["nc", "-z", "127.0.0.1", "6789"]
   service:
     ports:
       http:
