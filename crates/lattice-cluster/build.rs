@@ -23,7 +23,7 @@ fn main() {
             println!("cargo:rustc-env=CAPO_VERSION=0.11.0");
             println!("cargo:rustc-env=IPAM_IN_CLUSTER_VERSION=0.2.0");
 
-            let scripts_dir = workspace_root.join("scripts");
+            let scripts_dir = workspace_root.join("scripts/runtime");
             println!(
                 "cargo:rustc-env=LATTICE_SCRIPTS_DIR={}",
                 scripts_dir.display()
@@ -74,7 +74,7 @@ fn main() {
     println!("cargo:rustc-env=IPAM_IN_CLUSTER_VERSION={}", ipam);
 
     // Set paths for local development
-    let scripts_dir = workspace_root.join("scripts");
+    let scripts_dir = workspace_root.join("scripts/runtime");
     println!(
         "cargo:rustc-env=LATTICE_SCRIPTS_DIR={}",
         scripts_dir.display()

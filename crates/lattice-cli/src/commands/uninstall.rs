@@ -413,12 +413,18 @@ pub async fn run(args: UninstallArgs) -> Result<()> {
         println!("Provider: {}", uninstaller.provider());
         println!();
         print!("Are you sure? [y/N] ");
-        use std::io::Write;
-        std::io::stdout().flush().expect("stdout flush failed");
+
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        tokio::io::stdout()
+            .flush()
+            .await
+            .expect("stdout flush failed");
 
         let mut input = String::new();
-        std::io::stdin()
+        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+        reader
             .read_line(&mut input)
+            .await
             .expect("stdin read failed");
         if !input.trim().eq_ignore_ascii_case("y") {
             println!("Aborted");

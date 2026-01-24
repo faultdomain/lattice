@@ -1,27 +1,21 @@
 #!/usr/bin/env bash
 # Check for .expect(), .unwrap(), and panic!() in production Rust code
-# Usage: ./scripts/check-error-handling.sh [--verbose]
+# Usage: ./scripts/dev/check-error-handling.sh [--verbose]
 # Requires: gawk (GNU awk) for BEGINFILE support
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-VERBOSE="${1:-}"
-
+# shellcheck source=check-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/check-lib.sh"
+require_gawk
 cd "$PROJECT_ROOT"
 
-# Check for gawk
-if ! command -v gawk &> /dev/null; then
-    echo "Error: gawk is required but not installed."
-    echo "Install with: apt-get install gawk (Ubuntu) or brew install gawk (macOS)"
-    exit 1
-fi
+VERBOSE="${1:-}"
+MAX_EXPECT=$(parse_config_value "expect_calls" "max_allowed" "30")
 
 echo "Checking error handling patterns in production code..."
 echo ""
 
-# Create a temporary awk script for reuse
 AWK_SCRIPT='
 BEGINFILE {
     in_test_mod = 0
@@ -43,8 +37,6 @@ in_test_fn && /}/ {
 }
 
 # Check for patterns outside test code
-# Note: .expect() is allowed as it documents the invariant
-# Only .unwrap() and panic!() are flagged as violations
 !in_test_mod && !in_test_fn {
     if (/\.expect\(/) {
         expect_prod++
@@ -77,32 +69,35 @@ END {
     printf "%-12s %12d %12d\n", "panic!()", panic_prod+0, panic_test+0
     print ""
 
-    # Only unwrap and panic are violations; expect is allowed (documents invariants)
     total_violations = unwrap_prod + panic_prod
     if (total_violations > 0) {
         print "FAILED: " total_violations " violation(s) found in production code"
         print "(.expect() is allowed as it documents invariants)"
         exit 1
+    } else if (expect_prod > max_expect) {
+        print "FAILED: .expect() count " expect_prod " exceeds max " max_expect
+        print "Update check-config.toml [expect_calls] max_allowed if intentional"
+        exit 1
     } else {
         print "PASSED: No violations in production code"
-        print "(.expect() count: " expect_prod+0 " - allowed)"
+        print "(.expect() count: " expect_prod+0 "/" max_expect " allowed)"
         exit 0
     }
 }
 '
 
-# Run the check using gawk (GNU awk) for BEGINFILE support
+# Run the check
 # Exclude: build.rs (compile-time), tests/ (E2E tests), benches/ (benchmarks)
 if [[ "$VERBOSE" == "--verbose" || "$VERBOSE" == "-v" ]]; then
     find crates -name "*.rs" \
         -not -name "build.rs" \
         -not -path "*/tests/*" \
         -not -path "*/benches/*" \
-        -print0 | xargs -0 gawk -v verbose=1 "$AWK_SCRIPT"
+        -print0 | xargs -0 gawk -v verbose=1 -v max_expect="$MAX_EXPECT" "$AWK_SCRIPT"
 else
     find crates -name "*.rs" \
         -not -name "build.rs" \
         -not -path "*/tests/*" \
         -not -path "*/benches/*" \
-        -print0 | xargs -0 gawk -v verbose=0 "$AWK_SCRIPT"
+        -print0 | xargs -0 gawk -v verbose=0 -v max_expect="$MAX_EXPECT" "$AWK_SCRIPT"
 fi

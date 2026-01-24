@@ -1,59 +1,42 @@
 #!/usr/bin/env bash
 # Check for common security anti-patterns in Rust code
-# Usage: ./scripts/check-security-patterns.sh
+# Usage: ./scripts/dev/check-security-patterns.sh
 # Requires: gawk (GNU awk) for BEGINFILE support
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
+# shellcheck source=check-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/check-lib.sh"
+require_gawk
 cd "$PROJECT_ROOT"
-
-# Check for gawk
-if ! command -v gawk &> /dev/null; then
-    echo "Error: gawk is required but not installed."
-    echo "Install with: apt-get install gawk (Ubuntu) or brew install gawk (macOS)"
-    exit 1
-fi
 
 echo "Running security pattern checks..."
 echo ""
 
 VIOLATIONS=0
 
-# Common AWK preamble to track test modules
-AWK_TEST_TRACKING='
-BEGINFILE { in_test_mod = 0 }
-/^[[:space:]]*#\[cfg\(test\)\]/ { in_test_mod = 1 }
-'
-
 # =============================================================================
 # Check 1: Hardcoded secrets patterns
 # =============================================================================
 echo "=== Checking for potential hardcoded secrets ==="
 
+mapfile -t SECRET_IGNORE < <(parse_array_patterns "hardcoded_secrets.ignore_patterns" "patterns")
+
 SECRETS_AWK="${AWK_TEST_TRACKING}"'
 !in_test_mod && /(password|secret|api_key|apikey|credential)[[:space:]]*=[[:space:]]*"[^"]+"/ {
-    # Skip common false positives
-    if (/assert|mock|Mock|sample|Sample|example|Example|fixture|test_|_test/) next
     print FILENAME ":" FNR ": " $0
-    found++
 }
-END { exit (found > 0 ? 1 : 0) }
 '
 
-SECRETS_MATCHES=$(find crates -name "*.rs" -not -path "*/tests/*" -exec gawk "$SECRETS_AWK" {} + 2>/dev/null | head -10 || true)
-if [[ -n "$SECRETS_MATCHES" ]]; then
-    echo "$SECRETS_MATCHES"
-    echo -e "${YELLOW}WARNING: Potential hardcoded secrets found (review manually)${NC}"
-else
+SECRETS_MATCHES=$(find crates -name "*.rs" -not -path "*/tests/*" -exec gawk "$SECRETS_AWK" {} + 2>/dev/null || true)
+SECRETS_VIOLATIONS=$(filter_allowed "$SECRETS_MATCHES" "${SECRET_IGNORE[@]+"${SECRET_IGNORE[@]}"}")
+
+if [[ -z "$SECRETS_VIOLATIONS" ]]; then
     echo -e "${GREEN}PASSED: No obvious hardcoded secrets${NC}"
+else
+    echo "$SECRETS_VIOLATIONS" | head -10
+    echo -e "${RED}FAILED: Potential hardcoded secrets found${NC}"
+    VIOLATIONS=$((VIOLATIONS + 1))
 fi
 echo ""
 
@@ -62,23 +45,25 @@ echo ""
 # =============================================================================
 echo "=== Checking for weak cryptographic algorithms ==="
 
+mapfile -t WEAK_CRYPTO_ALLOWED < <(parse_allowed_patterns "weak_crypto")
+
 WEAK_CRYPTO_AWK="${AWK_TEST_TRACKING}"'
 !in_test_mod && /\b(md5|sha1|sha-1|des|3des|rc4|arcfour|blowfish)\b/ {
     # Skip comments
     if (/^[[:space:]]*(\/\/|\/\*|\*)/) next
     print FILENAME ":" FNR ": " $0
-    found++
 }
-END { exit (found > 0 ? 1 : 0) }
 '
 
-WEAK_MATCHES=$(find crates -name "*.rs" -not -path "*/tests/*" -exec gawk "$WEAK_CRYPTO_AWK" {} + 2>/dev/null | head -10 || true)
-if [[ -n "$WEAK_MATCHES" ]]; then
-    echo "$WEAK_MATCHES"
+WEAK_MATCHES=$(find crates -name "*.rs" -not -path "*/tests/*" -exec gawk "$WEAK_CRYPTO_AWK" {} + 2>/dev/null || true)
+WEAK_VIOLATIONS=$(filter_allowed "$WEAK_MATCHES" "${WEAK_CRYPTO_ALLOWED[@]+"${WEAK_CRYPTO_ALLOWED[@]}"}")
+
+if [[ -z "$WEAK_VIOLATIONS" ]]; then
+    echo -e "${GREEN}PASSED: No weak cryptographic algorithms${NC}"
+else
+    echo "$WEAK_VIOLATIONS" | head -10
     echo -e "${RED}FAILED: Weak cryptographic algorithms found${NC}"
     VIOLATIONS=$((VIOLATIONS + 1))
-else
-    echo -e "${GREEN}PASSED: No weak cryptographic algorithms${NC}"
 fi
 echo ""
 
@@ -99,22 +84,24 @@ echo ""
 # =============================================================================
 echo "=== Checking for unsafe blocks ==="
 
-UNSAFE_AWK='
-BEGINFILE { in_test_mod = 0 }
-/^[[:space:]]*#\[cfg\(test\)\]/ { in_test_mod = 1 }
+mapfile -t UNSAFE_ALLOWED < <(parse_allowed_patterns "unsafe_blocks")
+
+UNSAFE_AWK="${AWK_TEST_TRACKING}"'
 !in_test_mod && /unsafe[[:space:]]*\{/ {
     print FILENAME ":" FNR ": " $0
 }
 '
 
-UNSAFE_MATCHES=$(find crates -name "*.rs" -not -path "*/tests/*" -exec gawk "$UNSAFE_AWK" {} + 2>/dev/null | head -10 || true)
-UNSAFE_COUNT=$(find crates -name "*.rs" -not -path "*/tests/*" -exec gawk "$UNSAFE_AWK" {} + 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+UNSAFE_MATCHES=$(find crates -name "*.rs" -not -path "*/tests/*" -exec gawk "$UNSAFE_AWK" {} + 2>/dev/null || true)
+UNSAFE_VIOLATIONS=$(filter_allowed "$UNSAFE_MATCHES" "${UNSAFE_ALLOWED[@]+"${UNSAFE_ALLOWED[@]}"}")
 
-if [[ "$UNSAFE_COUNT" -gt 0 ]]; then
-    echo "$UNSAFE_MATCHES"
-    echo -e "${YELLOW}WARNING: $UNSAFE_COUNT unsafe block(s) found in production code (review manually)${NC}"
+if [[ -z "$UNSAFE_VIOLATIONS" ]]; then
+    echo -e "${GREEN}PASSED: No unauthorized unsafe blocks in production code${NC}"
 else
-    echo -e "${GREEN}PASSED: No unsafe blocks in production code${NC}"
+    echo "$UNSAFE_VIOLATIONS" | head -10
+    echo -e "${RED}FAILED: Unauthorized unsafe blocks found${NC}"
+    echo "Add to $CONFIG_FILE [unsafe_blocks.allowed] if this is intentional"
+    VIOLATIONS=$((VIOLATIONS + 1))
 fi
 echo ""
 
@@ -126,17 +113,16 @@ echo "=== Checking for potential injection vulnerabilities ==="
 INJECTION_AWK="${AWK_TEST_TRACKING}"'
 !in_test_mod && /format!\s*\([^)]*\$\{|execute\s*\(\s*&format!/ {
     print FILENAME ":" FNR ": " $0
-    found++
 }
-END { exit (found > 0 ? 1 : 0) }
 '
 
-INJECTION_MATCHES=$(find crates -name "*.rs" -not -path "*/tests/*" -exec gawk "$INJECTION_AWK" {} + 2>/dev/null | head -10 || true)
-if [[ -n "$INJECTION_MATCHES" ]]; then
-    echo "$INJECTION_MATCHES"
-    echo -e "${YELLOW}WARNING: Potential injection vulnerability patterns found (review manually)${NC}"
-else
+INJECTION_MATCHES=$(find crates -name "*.rs" -not -path "*/tests/*" -exec gawk "$INJECTION_AWK" {} + 2>/dev/null || true)
+if [[ -z "$INJECTION_MATCHES" ]]; then
     echo -e "${GREEN}PASSED: No obvious injection patterns${NC}"
+else
+    echo "$INJECTION_MATCHES" | head -10
+    echo -e "${RED}FAILED: Potential injection vulnerability patterns found${NC}"
+    VIOLATIONS=$((VIOLATIONS + 1))
 fi
 echo ""
 
@@ -149,8 +135,9 @@ HAS_NATIVE=$(grep -rE 'native-tls' Cargo.toml crates/*/Cargo.toml 2>/dev/null ||
 if [[ -n "$HAS_RUSTLS" ]] && [[ -z "$HAS_NATIVE" ]]; then
     echo -e "${GREEN}PASSED: Using rustls-tls (not native-tls)${NC}"
 elif [[ -n "$HAS_NATIVE" ]]; then
-    echo -e "${YELLOW}WARNING: native-tls found - prefer rustls-tls${NC}"
+    echo -e "${RED}FAILED: native-tls found - use rustls-tls instead${NC}"
     echo "$HAS_NATIVE"
+    VIOLATIONS=$((VIOLATIONS + 1))
 else
     echo -e "${YELLOW}WARNING: No TLS configuration found${NC}"
 fi
@@ -161,9 +148,9 @@ echo ""
 # =============================================================================
 echo "=== Security Check Summary ==="
 if [[ "$VIOLATIONS" -eq 0 ]]; then
-    echo -e "${GREEN}All critical security checks passed${NC}"
+    echo -e "${GREEN}All security checks passed${NC}"
     exit 0
 else
-    echo -e "${RED}$VIOLATIONS critical security violation(s) found${NC}"
+    echo -e "${RED}$VIOLATIONS security violation(s) found${NC}"
     exit 1
 fi

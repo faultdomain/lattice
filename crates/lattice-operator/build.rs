@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set env vars pointing to workspace root directories
     let charts_dir = workspace_root.join("test-charts");
     let providers_dir = workspace_root.join("test-providers");
-    let scripts_dir = workspace_root.join("scripts");
+    let scripts_dir = workspace_root.join("scripts/runtime");
 
     println!(
         "cargo:rustc-env=LATTICE_CHARTS_DIR={}",
