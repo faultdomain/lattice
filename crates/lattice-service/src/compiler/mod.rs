@@ -128,7 +128,8 @@ impl<'a> ServiceCompiler<'a> {
             .expect("LatticeService must have a namespace");
 
         // Compile volumes first (PVCs must exist before Deployment references them)
-        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec);
+        // Pass the graph so VolumeCompiler can compute cross-owner affinity for RWO volumes
+        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec, Some(self.graph));
 
         // Delegate to specialized compilers
         let mut workloads = WorkloadCompiler::compile(service, namespace, &compiled_volumes);

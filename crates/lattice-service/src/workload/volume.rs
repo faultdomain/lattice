@@ -70,6 +70,19 @@ pub struct PodAffinity {
     /// Required affinity terms - pods must satisfy these
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_during_scheduling_ignored_during_execution: Vec<PodAffinityTerm>,
+    /// Preferred affinity terms - soft preferences for scheduling
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred_during_scheduling_ignored_during_execution: Vec<WeightedPodAffinityTerm>,
+}
+
+/// Weighted pod affinity term for soft scheduling preferences
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WeightedPodAffinityTerm {
+    /// Weight (1-100, higher = stronger preference)
+    pub weight: i32,
+    /// The affinity term
+    pub pod_affinity_term: PodAffinityTerm,
 }
 
 /// Pod affinity term
@@ -181,14 +194,27 @@ impl VolumeCompiler {
     /// * `service_name` - Name of the service
     /// * `namespace` - Target namespace
     /// * `spec` - LatticeService spec
+    /// * `graph` - Optional service graph for cross-owner affinity computation
     ///
     /// # Returns
     /// Generated volume resources including PVCs, pod labels, affinity rules,
     /// and volume mounts
+    ///
+    /// # Cross-Owner Affinity
+    ///
+    /// When multiple services own RWO volumes that are referenced by the same
+    /// consumer service, those owners need to be on the same node. This method
+    /// uses the service graph to compute these relationships and adds preferred
+    /// affinity between owners that share a referencer.
+    ///
+    /// Example: jellyfin owns media-library, nzbget owns media-downloads, and
+    /// sonarr references both. jellyfin and nzbget will get preferred affinity
+    /// to each other so sonarr can schedule on a node with both.
     pub fn compile(
         service_name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
+        graph: Option<&crate::graph::ServiceGraph>,
     ) -> GeneratedVolumes {
         let mut output = GeneratedVolumes::new();
 
@@ -221,6 +247,51 @@ impl VolumeCompiler {
                     if access_mode == VolumeAccessMode::ReadWriteOnce {
                         let label_key = format!("{}{}", VOLUME_OWNER_LABEL_PREFIX, id);
                         output.pod_labels.insert(label_key, "true".to_string());
+
+                        // Use the graph to find other owners we need cross-affinity with
+                        if let Some(graph) = graph {
+                            let cross_affinity_owners =
+                                graph.find_rwo_cross_affinity_owners(namespace, service_name, id);
+
+                            for other_owner in cross_affinity_owners {
+                                // Add preferred affinity to other owner's label
+                                // Find the volume ID they own by looking it up in the graph
+                                if let Some(other_node) = graph.get_service(namespace, &other_owner)
+                                {
+                                    for other_volume_id in &other_node.owned_rwo_volumes {
+                                        let other_label_key = format!(
+                                            "{}{}",
+                                            VOLUME_OWNER_LABEL_PREFIX, other_volume_id
+                                        );
+
+                                        let affinity_term = WeightedPodAffinityTerm {
+                                            weight: 100, // Strong preference
+                                            pod_affinity_term: PodAffinityTerm {
+                                                label_selector: LabelSelector {
+                                                    match_labels: {
+                                                        let mut labels = BTreeMap::new();
+                                                        labels
+                                                            .insert(other_label_key, "true".to_string());
+                                                        labels
+                                                    },
+                                                },
+                                                topology_key: "kubernetes.io/hostname".to_string(),
+                                                namespaces: Some(vec![namespace.to_string()]),
+                                            },
+                                        };
+
+                                        let affinity =
+                                            output.affinity.get_or_insert_with(Affinity::default);
+                                        let pod_affinity = affinity
+                                            .pod_affinity
+                                            .get_or_insert_with(PodAffinity::default);
+                                        pod_affinity
+                                            .preferred_during_scheduling_ignored_during_execution
+                                            .push(affinity_term);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -454,7 +525,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, None);
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -472,7 +543,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec);
+        let output = VolumeCompiler::compile("nzbget", "media", &spec, None);
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -494,7 +565,7 @@ mod tests {
             }
         }
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, None);
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.storage_class_name, Some("local-path".to_string()));
@@ -513,7 +584,7 @@ mod tests {
             vec![("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("jellyfin", "media", &spec);
+        let output = VolumeCompiler::compile("jellyfin", "media", &spec, None);
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.access_modes, vec!["ReadWriteMany"]);
@@ -531,7 +602,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec);
+        let output = VolumeCompiler::compile("sonarr", "media", &spec, None);
 
         // No PVCs - this is a reference
         assert!(output.pvcs.is_empty());
@@ -566,7 +637,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec);
+        let output = VolumeCompiler::compile("nzbget", "media", &spec, None);
 
         // Should have owner label for RWO volume
         assert_eq!(
@@ -590,7 +661,7 @@ mod tests {
             vec![("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("jellyfin", "media", &spec);
+        let output = VolumeCompiler::compile("jellyfin", "media", &spec, None);
 
         // No owner label for RWX - no affinity needed
         assert!(output.pod_labels.is_empty());
@@ -608,7 +679,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec);
+        let output = VolumeCompiler::compile("sonarr", "media", &spec, None);
 
         // Should have affinity to owner
         let affinity = output.affinity.expect("should have affinity");
@@ -634,7 +705,7 @@ mod tests {
             vec![("/downloads", "downloads"), ("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec);
+        let output = VolumeCompiler::compile("sonarr", "media", &spec, None);
 
         let affinity = output.affinity.expect("should have affinity");
         let pod_affinity = affinity.pod_affinity.expect("should have pod affinity");
@@ -655,7 +726,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, None);
 
         let mounts = output
             .volume_mounts
@@ -674,7 +745,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, None);
 
         assert_eq!(output.volumes.len(), 1);
         assert_eq!(output.volumes[0].name, "config");
@@ -718,8 +789,157 @@ mod tests {
             ingress: None,
         };
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, None);
 
         assert!(output.is_empty());
+    }
+
+    // =========================================================================
+    // Story: Cross-Owner Affinity via Graph
+    // =========================================================================
+
+    #[test]
+    fn story_cross_owner_affinity_via_graph() {
+        use crate::graph::ServiceGraph;
+
+        // Scenario: jellyfin owns media-library, nzbget owns media-downloads,
+        // sonarr references both. jellyfin and nzbget should get cross-affinity.
+
+        let graph = ServiceGraph::new();
+
+        // 1. Register jellyfin (owns media-library RWO)
+        let jellyfin_spec = make_spec_with_volumes(
+            vec![(
+                "media",
+                Some("media-library"),
+                "1Ti",
+                Some(VolumeAccessMode::ReadWriteOnce),
+            )],
+            vec![],
+            vec![("/media", "media")],
+        );
+        graph.put_service("media-test", "jellyfin", &jellyfin_spec);
+
+        // 2. Register nzbget (owns media-downloads RWO)
+        let nzbget_spec = make_spec_with_volumes(
+            vec![(
+                "downloads",
+                Some("media-downloads"),
+                "500Gi",
+                Some(VolumeAccessMode::ReadWriteOnce),
+            )],
+            vec![],
+            vec![("/downloads", "downloads")],
+        );
+        graph.put_service("media-test", "nzbget", &nzbget_spec);
+
+        // 3. Register sonarr (references both volumes)
+        let sonarr_spec = make_spec_with_volumes(
+            vec![],
+            vec![("media", "media-library"), ("downloads", "media-downloads")],
+            vec![("/media", "media"), ("/downloads", "downloads")],
+        );
+        graph.put_service("media-test", "sonarr", &sonarr_spec);
+
+        // 4. Compile jellyfin with graph - should get cross-affinity to nzbget
+        let jellyfin_output =
+            VolumeCompiler::compile("jellyfin", "media-test", &jellyfin_spec, Some(&graph));
+
+        // jellyfin should have preferred affinity to nzbget's volume label
+        let affinity = jellyfin_output
+            .affinity
+            .expect("jellyfin should have affinity");
+        let pod_affinity = affinity.pod_affinity.expect("should have pod affinity");
+        let preferred = &pod_affinity.preferred_during_scheduling_ignored_during_execution;
+
+        assert!(!preferred.is_empty(), "jellyfin should have preferred affinity to nzbget");
+
+        // Check that the preferred affinity is to nzbget's volume owner label
+        let has_nzbget_affinity = preferred.iter().any(|term| {
+            term.pod_affinity_term
+                .label_selector
+                .match_labels
+                .contains_key("lattice.dev/volume-owner-media-downloads")
+        });
+        assert!(
+            has_nzbget_affinity,
+            "jellyfin should have affinity to media-downloads owner"
+        );
+
+        // 5. Compile nzbget with graph - should get cross-affinity to jellyfin
+        let nzbget_output =
+            VolumeCompiler::compile("nzbget", "media-test", &nzbget_spec, Some(&graph));
+
+        let affinity = nzbget_output
+            .affinity
+            .expect("nzbget should have affinity");
+        let pod_affinity = affinity.pod_affinity.expect("should have pod affinity");
+        let preferred = &pod_affinity.preferred_during_scheduling_ignored_during_execution;
+
+        let has_jellyfin_affinity = preferred.iter().any(|term| {
+            term.pod_affinity_term
+                .label_selector
+                .match_labels
+                .contains_key("lattice.dev/volume-owner-media-library")
+        });
+        assert!(
+            has_jellyfin_affinity,
+            "nzbget should have affinity to media-library owner"
+        );
+    }
+
+    #[test]
+    fn story_no_cross_affinity_for_unrelated_owners() {
+        use crate::graph::ServiceGraph;
+
+        // Scenario: Two unrelated volume owners (no common referencer)
+        // should NOT get cross-affinity
+
+        let graph = ServiceGraph::new();
+
+        // serviceA owns volume-a
+        let service_a_spec = make_spec_with_volumes(
+            vec![(
+                "data",
+                Some("volume-a"),
+                "10Gi",
+                Some(VolumeAccessMode::ReadWriteOnce),
+            )],
+            vec![],
+            vec![("/data", "data")],
+        );
+        graph.put_service("test", "service-a", &service_a_spec);
+
+        // serviceB owns volume-b (no common referencer with volume-a)
+        let service_b_spec = make_spec_with_volumes(
+            vec![(
+                "data",
+                Some("volume-b"),
+                "10Gi",
+                Some(VolumeAccessMode::ReadWriteOnce),
+            )],
+            vec![],
+            vec![("/data", "data")],
+        );
+        graph.put_service("test", "service-b", &service_b_spec);
+
+        // Compile service-a - should NOT have cross-affinity since no shared referencer
+        let output = VolumeCompiler::compile("service-a", "test", &service_a_spec, Some(&graph));
+
+        // Should have owner label but no preferred affinity
+        assert!(output
+            .pod_labels
+            .contains_key("lattice.dev/volume-owner-volume-a"));
+
+        if let Some(affinity) = &output.affinity {
+            if let Some(pod_affinity) = &affinity.pod_affinity {
+                assert!(
+                    pod_affinity
+                        .preferred_during_scheduling_ignored_during_execution
+                        .is_empty(),
+                    "unrelated owners should not have cross-affinity"
+                );
+            }
+        }
     }
 }

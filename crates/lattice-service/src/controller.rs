@@ -43,6 +43,7 @@ pub trait ServiceKubeClient: Send + Sync {
     async fn patch_service_status(
         &self,
         name: &str,
+        namespace: &str,
         status: &LatticeServiceStatus,
     ) -> Result<(), Error>;
 
@@ -50,22 +51,25 @@ pub trait ServiceKubeClient: Send + Sync {
     async fn patch_external_service_status(
         &self,
         name: &str,
+        namespace: &str,
         status: &LatticeExternalServiceStatus,
     ) -> Result<(), Error>;
 
-    /// Get a LatticeService by name
-    async fn get_service(&self, name: &str) -> Result<Option<LatticeService>, Error>;
+    /// Get a LatticeService by name and namespace
+    async fn get_service(&self, name: &str, namespace: &str)
+        -> Result<Option<LatticeService>, Error>;
 
-    /// Get a LatticeExternalService by name
+    /// Get a LatticeExternalService by name and namespace
     async fn get_external_service(
         &self,
         name: &str,
+        namespace: &str,
     ) -> Result<Option<LatticeExternalService>, Error>;
 
-    /// List all LatticeServices
+    /// List all LatticeServices across all namespaces
     async fn list_services(&self) -> Result<Vec<LatticeService>, Error>;
 
-    /// List all LatticeExternalServices
+    /// List all LatticeExternalServices across all namespaces
     async fn list_external_services(&self) -> Result<Vec<LatticeExternalService>, Error>;
 
     /// Apply compiled workloads and policies to the cluster
@@ -128,9 +132,10 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
     async fn patch_service_status(
         &self,
         name: &str,
+        namespace: &str,
         status: &LatticeServiceStatus,
     ) -> Result<(), Error> {
-        let api: Api<LatticeService> = Api::all(self.client.clone());
+        let api: Api<LatticeService> = Api::namespaced(self.client.clone(), namespace);
         let status_patch = serde_json::json!({ "status": status });
 
         api.patch_status(
@@ -146,9 +151,10 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
     async fn patch_external_service_status(
         &self,
         name: &str,
+        namespace: &str,
         status: &LatticeExternalServiceStatus,
     ) -> Result<(), Error> {
-        let api: Api<LatticeExternalService> = Api::all(self.client.clone());
+        let api: Api<LatticeExternalService> = Api::namespaced(self.client.clone(), namespace);
         let status_patch = serde_json::json!({ "status": status });
 
         api.patch_status(
@@ -161,8 +167,12 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         Ok(())
     }
 
-    async fn get_service(&self, name: &str) -> Result<Option<LatticeService>, Error> {
-        let api: Api<LatticeService> = Api::all(self.client.clone());
+    async fn get_service(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<LatticeService>, Error> {
+        let api: Api<LatticeService> = Api::namespaced(self.client.clone(), namespace);
         match api.get(name).await {
             Ok(svc) => Ok(Some(svc)),
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
@@ -173,8 +183,9 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
     async fn get_external_service(
         &self,
         name: &str,
+        namespace: &str,
     ) -> Result<Option<LatticeExternalService>, Error> {
-        let api: Api<LatticeExternalService> = Api::all(self.client.clone());
+        let api: Api<LatticeExternalService> = Api::namespaced(self.client.clone(), namespace);
         match api.get(name).await {
             Ok(svc) => Ok(Some(svc)),
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
@@ -844,6 +855,7 @@ async fn update_service_status_compiling(
     ctx: &ServiceContext,
 ) -> Result<(), Error> {
     let name = service.name_any();
+    let namespace = service.namespace().unwrap_or_default();
     let status = LatticeServiceStatus::with_phase(ServicePhase::Compiling)
         .message("Compiling service dependencies")
         .condition(Condition::new(
@@ -853,7 +865,7 @@ async fn update_service_status_compiling(
             "Checking service dependencies",
         ));
 
-    ctx.kube.patch_service_status(&name, &status).await
+    ctx.kube.patch_service_status(&name, &namespace, &status).await
 }
 
 async fn update_service_status_ready(
@@ -861,6 +873,7 @@ async fn update_service_status_ready(
     ctx: &ServiceContext,
 ) -> Result<(), Error> {
     let name = service.name_any();
+    let namespace = service.namespace().unwrap_or_default();
     let status = LatticeServiceStatus::with_phase(ServicePhase::Ready)
         .message("Service is operational")
         .compiled_at(Utc::now())
@@ -871,7 +884,7 @@ async fn update_service_status_ready(
             "All dependencies resolved",
         ));
 
-    ctx.kube.patch_service_status(&name, &status).await
+    ctx.kube.patch_service_status(&name, &namespace, &status).await
 }
 
 async fn update_service_status_failed(
@@ -880,6 +893,7 @@ async fn update_service_status_failed(
     message: &str,
 ) -> Result<(), Error> {
     let name = service.name_any();
+    let namespace = service.namespace().unwrap_or_default();
     let status = LatticeServiceStatus::with_phase(ServicePhase::Failed)
         .message(message)
         .condition(Condition::new(
@@ -889,7 +903,7 @@ async fn update_service_status_failed(
             message,
         ));
 
-    ctx.kube.patch_service_status(&name, &status).await
+    ctx.kube.patch_service_status(&name, &namespace, &status).await
 }
 
 async fn update_external_status_ready(
@@ -899,6 +913,7 @@ async fn update_external_status_ready(
     use crate::crd::ExternalServicePhase;
 
     let name = external.name_any();
+    let namespace = external.namespace().unwrap_or_default();
     let status = LatticeExternalServiceStatus::with_phase(ExternalServicePhase::Ready)
         .message("External service is configured")
         .condition(Condition::new(
@@ -908,7 +923,7 @@ async fn update_external_status_ready(
             "All endpoints are configured",
         ));
 
-    ctx.kube.patch_external_service_status(&name, &status).await
+    ctx.kube.patch_external_service_status(&name, &namespace, &status).await
 }
 
 async fn update_external_status_failed(
@@ -919,6 +934,7 @@ async fn update_external_status_failed(
     use crate::crd::ExternalServicePhase;
 
     let name = external.name_any();
+    let namespace = external.namespace().unwrap_or_default();
     let status = LatticeExternalServiceStatus::with_phase(ExternalServicePhase::Failed)
         .message(message)
         .condition(Condition::new(
@@ -928,7 +944,7 @@ async fn update_external_status_failed(
             message,
         ));
 
-    ctx.kube.patch_external_service_status(&name, &status).await
+    ctx.kube.patch_external_service_status(&name, &namespace, &status).await
 }
 
 // =============================================================================
@@ -1076,11 +1092,13 @@ mod tests {
 
     fn mock_kube_success() -> MockServiceKubeClient {
         let mut mock = MockServiceKubeClient::new();
-        mock.expect_patch_service_status().returning(|_, _| Ok(()));
+        mock.expect_patch_service_status()
+            .returning(|_, _, _| Ok(()));
         mock.expect_patch_external_service_status()
-            .returning(|_, _| Ok(()));
-        mock.expect_get_service().returning(|_| Ok(None));
-        mock.expect_get_external_service().returning(|_| Ok(None));
+            .returning(|_, _, _| Ok(()));
+        mock.expect_get_service().returning(|_, _| Ok(None));
+        mock.expect_get_external_service()
+            .returning(|_, _| Ok(None));
         mock.expect_list_services().returning(|| Ok(vec![]));
         mock.expect_list_external_services()
             .returning(|| Ok(vec![]));

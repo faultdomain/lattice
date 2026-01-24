@@ -51,11 +51,17 @@ pub struct ServiceNode {
     pub endpoints: BTreeMap<String, ParsedEndpoint>,
     /// Resolution strategy (for external services)
     pub resolution: Option<Resolution>,
+    /// RWO volume IDs this service owns (has size in params)
+    pub owned_rwo_volumes: HashSet<String>,
+    /// RWO volume IDs this service references (no params, just id)
+    pub referenced_rwo_volumes: HashSet<String>,
 }
 
 impl ServiceNode {
     /// Create a new local service node from a LatticeService spec
     pub fn from_service_spec(namespace: &str, name: &str, spec: &LatticeServiceSpec) -> Self {
+        use crate::crd::{ResourceType, VolumeAccessMode};
+
         let caller_refs = spec.allowed_callers(namespace);
         let allows_all = caller_refs.iter().any(|r| r.name == "*");
 
@@ -69,6 +75,32 @@ impl ServiceNode {
             .into_iter()
             .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
             .collect();
+
+        // Extract RWO volume ownership and references
+        let mut owned_rwo_volumes = HashSet::new();
+        let mut referenced_rwo_volumes = HashSet::new();
+
+        for resource_spec in spec.resources.values() {
+            if resource_spec.type_ != ResourceType::Volume {
+                continue;
+            }
+
+            let Some(volume_id) = &resource_spec.id else {
+                continue;
+            };
+
+            if resource_spec.is_volume_owner() {
+                // Owner - check if RWO
+                let params = resource_spec.volume_params().unwrap_or_default();
+                let access_mode = params.access_mode.unwrap_or(VolumeAccessMode::ReadWriteOnce);
+                if access_mode == VolumeAccessMode::ReadWriteOnce {
+                    owned_rwo_volumes.insert(volume_id.clone());
+                }
+            } else if resource_spec.is_volume_reference() {
+                // Reference - assume RWO (owner decides, we comply)
+                referenced_rwo_volumes.insert(volume_id.clone());
+            }
+        }
 
         Self {
             namespace: namespace.to_string(),
@@ -85,6 +117,8 @@ impl ServiceNode {
                 .collect(),
             endpoints: BTreeMap::new(),
             resolution: None,
+            owned_rwo_volumes,
+            referenced_rwo_volumes,
         }
     }
 
@@ -111,6 +145,8 @@ impl ServiceNode {
             ports: BTreeMap::new(),
             endpoints: spec.valid_endpoints(),
             resolution: Some(spec.resolution.clone()),
+            owned_rwo_volumes: HashSet::new(),
+            referenced_rwo_volumes: HashSet::new(),
         }
     }
 
@@ -127,6 +163,8 @@ impl ServiceNode {
             ports: BTreeMap::new(),
             endpoints: BTreeMap::new(),
             resolution: None,
+            owned_rwo_volumes: HashSet::new(),
+            referenced_rwo_volumes: HashSet::new(),
         }
     }
 
@@ -457,6 +495,56 @@ impl ServiceGraph {
         self.edges_out.clear();
         self.edges_in.clear();
         self.ns_index.clear();
+    }
+
+    /// Find other RWO volume owners that share a referencer with this owner
+    ///
+    /// When service A owns volume V1 and service B owns volume V2, and service C
+    /// references BOTH V1 and V2, then A and B need cross-affinity so C can schedule.
+    ///
+    /// # Arguments
+    /// * `namespace` - Namespace of the owner service
+    /// * `owner_name` - Name of the owner service
+    /// * `volume_id` - The RWO volume ID owned by this service
+    ///
+    /// # Returns
+    /// List of other owner service names that need cross-affinity with this owner
+    pub fn find_rwo_cross_affinity_owners(
+        &self,
+        namespace: &str,
+        owner_name: &str,
+        volume_id: &str,
+    ) -> Vec<String> {
+        let mut cross_affinity_owners = HashSet::new();
+
+        // Find all services in this namespace that reference our volume
+        let services = self.list_services(namespace);
+
+        for service in &services {
+            // Skip if this service doesn't reference our volume
+            if !service.referenced_rwo_volumes.contains(volume_id) {
+                continue;
+            }
+
+            // This service references our volume - check if it also references other volumes
+            for other_volume_id in &service.referenced_rwo_volumes {
+                if other_volume_id == volume_id {
+                    continue;
+                }
+
+                // Find the owner of this other volume
+                for other_service in &services {
+                    if other_service.name == owner_name {
+                        continue; // Skip self
+                    }
+                    if other_service.owned_rwo_volumes.contains(other_volume_id) {
+                        cross_affinity_owners.insert(other_service.name.clone());
+                    }
+                }
+            }
+        }
+
+        cross_affinity_owners.into_iter().collect()
     }
 }
 

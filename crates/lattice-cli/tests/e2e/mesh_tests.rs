@@ -144,24 +144,55 @@ struct ConnTest {
 }
 
 fn generate_traffic_test_script(source: &str, tests: &[ConnTest]) -> String {
+    // Collect blocked endpoints for this source to verify policy propagation
+    let blocked_targets: Vec<&str> = tests
+        .iter()
+        .filter(|t| !t.expected)
+        .map(|t| t.target)
+        .collect();
+
+    // Build checks for ALL blocked endpoints (not just one)
+    let blocked_checks: String = blocked_targets
+        .iter()
+        .enumerate()
+        .map(|(i, target)| {
+            format!(
+                r#"
+    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{target}.{ns}.svc.cluster.local/ 2>/dev/null || echo "000")"#,
+                i = i,
+                target = target,
+                ns = TEST_SERVICES_NAMESPACE
+            )
+        })
+        .collect();
+
+    let all_403_check: String = blocked_targets
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("\"$R{}\" = \"403\"", i))
+        .collect::<Vec<_>>()
+        .join(" ] && [ ");
+
     let mut script = format!(
         r#"
 echo "=== {} Traffic Tests ==="
 echo "Testing {} connection permutations..."
 
-# Wait for AuthorizationPolicy to propagate (indicated by getting 403 on blocked endpoints)
-echo "Waiting for policies to propagate..."
-MAX_RETRIES=30
+# Wait for AuthorizationPolicy to propagate on ALL blocked endpoints
+echo "Waiting for policies to propagate on {} blocked endpoints..."
+MAX_RETRIES=60
 RETRY=0
 while [ $RETRY -lt $MAX_RETRIES ]; do
-    # Test a random endpoint - if we get 403, policies are working
-    RESULT=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://cache.{ns}.svc.cluster.local/ 2>/dev/null || echo "000")
-    if [ "$RESULT" = "403" ]; then
-        echo "Policies propagated (got 403 on restricted endpoint)"
+    # Test ALL blocked endpoints - all must return 403{blocked_checks}
+    if [ {all_403_check} ]; then
+        echo "All policies propagated (all blocked endpoints returning 403)"
+        # Additional stabilization wait
+        echo "Stabilization wait (10s)..."
+        sleep 10
         break
     fi
     RETRY=$((RETRY + 1))
-    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES, got $RESULT)"
+    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES)"
     sleep 2
 done
 
@@ -172,7 +203,9 @@ fi
 "#,
         source,
         tests.len(),
-        ns = TEST_SERVICES_NAMESPACE
+        blocked_targets.len(),
+        blocked_checks = blocked_checks,
+        all_403_check = if blocked_targets.is_empty() { "true".to_string() } else { all_403_check },
     );
 
     for test in tests {
@@ -526,7 +559,7 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
     );
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<LatticeService> = Api::all(client);
+    let api: Api<LatticeService> = Api::namespaced(client, TEST_SERVICES_NAMESPACE);
 
     println!("  [Layer 3] Deploying backend services...");
     for (name, svc) in [
@@ -1241,66 +1274,62 @@ impl RandomMesh {
     }
 
     fn generate_test_script(&self, source_name: &str, namespace: &str) -> String {
-        // Find blocked internal endpoints for this source to use for policy propagation check
+        // Find ALL blocked internal endpoints for this source
         let blocked_endpoints: Vec<&str> = self
             .expected_connections
             .iter()
             .filter(|(src, _, allowed, is_external)| {
                 src == source_name && !*allowed && !*is_external
             })
-            .take(3)
             .map(|(_, tgt, _, _)| tgt.as_str())
             .collect();
 
-        // Build the policy wait check - test multiple blocked endpoints
-        let endpoint_checks = if blocked_endpoints.is_empty() {
-            // Fallback if no blocked endpoints (shouldn't happen in practice)
-            format!(
-                r#"RESULT=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://backend-0.{}.svc.cluster.local/ 2>/dev/null || echo "000")"#,
-                namespace
-            )
+        // Build checks for ALL blocked endpoints
+        let endpoint_checks: String = blocked_endpoints
+            .iter()
+            .enumerate()
+            .map(|(i, ep)| {
+                format!(
+                    r#"
+    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{ep}.{ns}.svc.cluster.local/ 2>/dev/null || echo "000")"#,
+                    i = i,
+                    ep = ep,
+                    ns = namespace
+                )
+            })
+            .collect();
+
+        // Check that ALL blocked endpoints return 403
+        let all_403_check: String = if blocked_endpoints.is_empty() {
+            "true".to_string()
         } else {
-            // Test multiple blocked endpoints - any 403 means policies are working
             blocked_endpoints
                 .iter()
                 .enumerate()
-                .map(|(i, ep)| {
-                    if i == 0 {
-                        format!(
-                            r#"RESULT=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{}.{}.svc.cluster.local/ 2>/dev/null || echo "000")"#,
-                            ep, namespace
-                        )
-                    } else {
-                        format!(
-                            r#"
-    if [ "$RESULT" != "403" ]; then
-        RESULT=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{}.{}.svc.cluster.local/ 2>/dev/null || echo "000")
-    fi"#,
-                            ep, namespace
-                        )
-                    }
-                })
+                .map(|(i, _)| format!("\"$R{}\" = \"403\"", i))
                 .collect::<Vec<_>>()
-                .join("")
+                .join(" ] && [ ")
         };
 
         let mut script = format!(
             r#"
 echo "=== {} Traffic Tests ==="
 
-# Wait for AuthorizationPolicy to propagate
-echo "Waiting for policies to propagate..."
-MAX_RETRIES=30
+# Wait for AuthorizationPolicy to propagate on ALL blocked endpoints
+echo "Waiting for policies to propagate on {} blocked endpoints..."
+MAX_RETRIES=60
 RETRY=0
 while [ $RETRY -lt $MAX_RETRIES ]; do
-    # Test blocked endpoints - if we get 403, policies are working
-    {endpoint_checks}
-    if [ "$RESULT" = "403" ]; then
-        echo "Policies propagated (got 403 on restricted endpoint)"
+    # Test ALL blocked endpoints - all must return 403{endpoint_checks}
+    if [ {all_403_check} ]; then
+        echo "All policies propagated"
+        # Stabilization wait
+        echo "Stabilization wait (10s)..."
+        sleep 10
         break
     fi
     RETRY=$((RETRY + 1))
-    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES, got $RESULT)"
+    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES)"
     sleep 2
 done
 
@@ -1310,7 +1339,9 @@ fi
 
 "#,
             source_name,
-            endpoint_checks = endpoint_checks
+            blocked_endpoints.len(),
+            endpoint_checks = endpoint_checks,
+            all_403_check = all_403_check,
         );
 
         for (_, target, expected_allowed, is_external) in self
@@ -1388,7 +1419,8 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
             "  Deploying {} external services...",
             mesh.external_services.len()
         );
-        let ext_api: Api<LatticeExternalService> = Api::all(client.clone());
+        let ext_api: Api<LatticeExternalService> =
+            Api::namespaced(client.clone(), RANDOM_MESH_NAMESPACE);
         for name in mesh.external_services.keys() {
             let ext_svc = mesh.create_external_service(name, RANDOM_MESH_NAMESPACE);
             ext_api
@@ -1398,7 +1430,7 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
         }
     }
 
-    let api: Api<LatticeService> = Api::all(client);
+    let api: Api<LatticeService> = Api::namespaced(client, RANDOM_MESH_NAMESPACE);
 
     for (layer_idx, layer) in mesh.layers.iter().enumerate().rev() {
         println!(

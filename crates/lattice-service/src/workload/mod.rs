@@ -1145,7 +1145,7 @@ mod tests {
     fn compile_service(service: &LatticeService) -> GeneratedWorkloads {
         let name = service.metadata.name.as_deref().expect("test service must have a name");
         let namespace = service.metadata.namespace.as_deref().expect("test service must have a namespace");
-        let volumes = VolumeCompiler::compile(name, namespace, &service.spec);
+        let volumes = VolumeCompiler::compile(name, namespace, &service.spec, None);
         WorkloadCompiler::compile(service, namespace, &volumes)
     }
 

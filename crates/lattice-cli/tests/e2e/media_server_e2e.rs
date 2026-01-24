@@ -549,7 +549,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     )?;
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<LatticeService> = Api::all(client);
+    let api: Api<LatticeService> = Api::namespaced(client, MEDIA_NAMESPACE);
 
     // Deploy ALL services simultaneously - Kubernetes handles ordering via pod affinity
     // Volume references have requiredDuringSchedulingIgnoredDuringExecution affinity

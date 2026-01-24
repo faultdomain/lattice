@@ -50,6 +50,7 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -65,6 +66,7 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -82,7 +84,6 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
     );
 
     LatticeServiceSpec {
-        environment: "default".to_string(),
         containers,
         resources,
         service: Some(ServicePortsSpec { ports }),
@@ -102,7 +103,6 @@ fn external_service_spec() -> LatticeExternalServiceSpec {
     endpoints.insert("api".to_string(), "https://api.example.com".to_string());
 
     LatticeExternalServiceSpec {
-        environment: "default".to_string(),
         endpoints,
         allowed_requesters: vec!["*".to_string()],
         resolution: Resolution::Dns,
@@ -154,31 +154,6 @@ fn setup_star_graph(n: usize) -> ServiceGraph {
     for i in 0..n {
         let spec = service_spec_with_deps(&["hub"], &[]);
         graph.put_service("default", &format!("spoke-{}", i), &spec);
-    }
-
-    graph
-}
-
-/// Create a mesh topology: every service connected to every other
-fn setup_mesh_graph(n: usize) -> ServiceGraph {
-    let graph = ServiceGraph::new();
-
-    // First pass: create all services with their dependencies
-    for i in 0..n {
-        let dep_names: Vec<String> = (0..n)
-            .filter(|&j| j != i && j > i) // Only depend on services with higher indices
-            .map(|j| format!("svc-{}", j))
-            .collect();
-        let dep_refs: Vec<&str> = dep_names.iter().map(|s| s.as_str()).collect();
-
-        let caller_names: Vec<String> = (0..n)
-            .filter(|&j| j != i && j < i) // Allow services with lower indices
-            .map(|j| format!("svc-{}", j))
-            .collect();
-        let caller_refs: Vec<&str> = caller_names.iter().map(|s| s.as_str()).collect();
-
-        let spec = service_spec_with_deps(&dep_refs, &caller_refs);
-        graph.put_service("default", &format!("svc-{}", i), &spec);
     }
 
     graph
@@ -401,89 +376,6 @@ fn bench_get_active_edges(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_list_active_edges(c: &mut Criterion) {
-    let mut group = c.benchmark_group("list_active_edges");
-
-    for size in [10usize, 100, 500] {
-        group.throughput(Throughput::Elements(1));
-
-        group.bench_with_input(BenchmarkId::new("realistic", size), &size, |b, &size| {
-            let graph = setup_realistic_graph(size);
-            b.iter(|| {
-                black_box(graph.list_active_edges("default"));
-            });
-        });
-    }
-
-    group.finish();
-
-    // Mesh benchmarks are O(n²) and very slow - use reduced sample size
-    let mut mesh_group = c.benchmark_group("list_active_edges_mesh");
-    mesh_group.sample_size(10);
-
-    for size in [10usize, 100, 500] {
-        mesh_group.throughput(Throughput::Elements(1));
-
-        mesh_group.bench_with_input(BenchmarkId::new("mesh", size), &size, |b, &size| {
-            let graph = setup_mesh_graph(size);
-            b.iter(|| {
-                black_box(graph.list_active_edges("default"));
-            });
-        });
-    }
-
-    mesh_group.finish();
-}
-
-// =============================================================================
-// Benchmarks: Transitive Closure (Affected Services)
-// =============================================================================
-
-fn bench_get_affected_services(c: &mut Criterion) {
-    let mut group = c.benchmark_group("affected_services");
-
-    for size in [10usize, 100, 500] {
-        group.throughput(Throughput::Elements(1));
-
-        // Chain - affects all downstream
-        group.bench_with_input(BenchmarkId::new("chain_head", size), &size, |b, &size| {
-            let graph = setup_chain_graph(size);
-            b.iter(|| {
-                // Modify head of chain - affects all downstream
-                black_box(graph.get_affected_services("default", "svc-0"));
-            });
-        });
-
-        // Chain - affects only self at tail
-        group.bench_with_input(BenchmarkId::new("chain_tail", size), &size, |b, &size| {
-            let graph = setup_chain_graph(size);
-            b.iter(|| {
-                // Modify tail - affects only itself
-                black_box(graph.get_affected_services("default", &format!("svc-{}", size - 1)));
-            });
-        });
-
-        // Star - hub affects all spokes
-        group.bench_with_input(BenchmarkId::new("star_hub", size), &size, |b, &size| {
-            let graph = setup_star_graph(size);
-            b.iter(|| {
-                black_box(graph.get_affected_services("default", "hub"));
-            });
-        });
-
-        // Realistic random
-        group.bench_with_input(BenchmarkId::new("realistic", size), &size, |b, &size| {
-            let graph = setup_realistic_graph(size);
-            let mut rng = rand::thread_rng();
-            b.iter(|| {
-                let idx = rng.gen_range(0..size);
-                black_box(graph.get_affected_services("default", &format!("svc-{}", idx)));
-            });
-        });
-    }
-
-    group.finish();
-}
 
 // =============================================================================
 // Benchmarks: Concurrent Operations
@@ -573,6 +465,134 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 }
 
 // =============================================================================
+// Benchmarks: Volume Cross-Affinity
+// =============================================================================
+
+/// Create a graph with volume sharing pattern:
+/// - `n` volume owners, each owning an RWO volume
+/// - `m` referencers, each referencing `refs_per_service` random volumes
+fn setup_volume_sharing_graph(owners: usize, referencers: usize, refs_per_service: usize) -> ServiceGraph {
+    let graph = ServiceGraph::new();
+    let mut rng = rand::thread_rng();
+
+    // Create owner services, each with an RWO volume
+    for i in 0..owners {
+        let volume_id = format!("volume-{}", i);
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "data".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Volume,
+                direction: DependencyDirection::default(),
+                id: Some(volume_id),
+                class: None,
+                metadata: None,
+                params: Some(BTreeMap::from([
+                    ("size".to_string(), serde_json::json!("10Gi")),
+                    ("accessMode".to_string(), serde_json::json!("ReadWriteOnce")),
+                ])),
+                namespace: None,
+                inbound: None,
+                outbound: None,
+            },
+        );
+
+        let spec = LatticeServiceSpec {
+            containers: {
+                let mut c = BTreeMap::new();
+                c.insert("main".to_string(), simple_container());
+                c
+            },
+            resources,
+            service: None,
+            replicas: ReplicaSpec::default(),
+            deploy: DeploySpec::default(),
+            ingress: None,
+        };
+
+        graph.put_service("test", &format!("owner-{}", i), &spec);
+    }
+
+    // Create referencer services, each referencing multiple volumes
+    for i in 0..referencers {
+        let mut resources = BTreeMap::new();
+
+        // Pick random volumes to reference
+        let volume_indices: Vec<usize> = (0..owners)
+            .choose_multiple(&mut rng, refs_per_service.min(owners));
+
+        for (j, vol_idx) in volume_indices.iter().enumerate() {
+            let volume_id = format!("volume-{}", vol_idx);
+            resources.insert(
+                format!("vol-{}", j),
+                ResourceSpec {
+                    type_: ResourceType::Volume,
+                    direction: DependencyDirection::default(),
+                    id: Some(volume_id),
+                    class: None,
+                    metadata: None,
+                    params: None, // Reference - no params
+                    namespace: None,
+                    inbound: None,
+                    outbound: None,
+                },
+            );
+        }
+
+        let spec = LatticeServiceSpec {
+            containers: {
+                let mut c = BTreeMap::new();
+                c.insert("main".to_string(), simple_container());
+                c
+            },
+            resources,
+            service: None,
+            replicas: ReplicaSpec::default(),
+            deploy: DeploySpec::default(),
+            ingress: None,
+        };
+
+        graph.put_service("test", &format!("ref-{}", i), &spec);
+    }
+
+    graph
+}
+
+fn bench_volume_cross_affinity(c: &mut Criterion) {
+    let mut group = c.benchmark_group("volume_cross_affinity");
+
+    // Test finding cross-affinity owners in graphs of varying sizes
+    for (owners, referencers, refs_per) in [
+        (10, 5, 3),     // Small: 10 owners, 5 referencers each referencing 3 volumes
+        (50, 20, 5),    // Medium: 50 owners, 20 referencers each referencing 5 volumes
+        (100, 50, 10),  // Large: 100 owners, 50 referencers each referencing 10 volumes
+    ] {
+        group.throughput(Throughput::Elements(1));
+
+        let label = format!("{}owners_{}refs_{}per", owners, referencers, refs_per);
+        group.bench_with_input(
+            BenchmarkId::new("find_cross_affinity", &label),
+            &(owners, referencers, refs_per),
+            |b, &(owners, referencers, refs_per)| {
+                let graph = setup_volume_sharing_graph(owners, referencers, refs_per);
+                let mut rng = rand::thread_rng();
+
+                b.iter(|| {
+                    // Query cross-affinity for a random owner
+                    let idx = rng.gen_range(0..owners);
+                    let volume_id = format!("volume-{}", idx);
+                    let owner_name = format!("owner-{}", idx);
+
+                    black_box(graph.find_rwo_cross_affinity_owners("test", &owner_name, &volume_id));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
 // Benchmarks: Reconciliation Patterns
 // =============================================================================
 
@@ -582,7 +602,7 @@ fn bench_reconcile_pattern(c: &mut Criterion) {
     for size in [100usize, 500] {
         group.throughput(Throughput::Elements(1));
 
-        // Typical reconcile: get service, update, check deps, get affected
+        // Typical reconcile: get service, update, check deps, get edges
         group.bench_with_input(
             BenchmarkId::new("full_reconcile", size),
             &size,
@@ -610,24 +630,6 @@ fn bench_reconcile_pattern(c: &mut Criterion) {
                     // 4. Get active edges for network policy
                     let _ = black_box(graph.get_active_inbound_edges("default", &name));
                     let _ = black_box(graph.get_active_outbound_edges("default", &name));
-
-                    // 5. Notify affected services
-                    let _ = black_box(graph.get_affected_services("default", &name));
-                });
-            },
-        );
-
-        // Policy generation: list all active edges for environment
-        group.bench_with_input(
-            BenchmarkId::new("policy_generation", size),
-            &size,
-            |b, &size| {
-                let graph = setup_realistic_graph(size);
-
-                b.iter(|| {
-                    // Get all active edges for policy generation
-                    let edges = graph.list_active_edges("default");
-                    black_box(edges);
                 });
             },
         );
@@ -648,11 +650,10 @@ criterion_group!(
     bench_get_dependencies,
     bench_get_dependents,
     bench_get_active_edges,
-    bench_list_active_edges,
-    bench_get_affected_services,
     bench_concurrent_reads,
     bench_concurrent_mixed,
     bench_reconcile_pattern,
+    bench_volume_cross_affinity,
 );
 
 criterion_main!(benches);
