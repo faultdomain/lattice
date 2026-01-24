@@ -53,9 +53,10 @@ impl DependencyDirection {
 ///
 /// Built-in types have strong typing; custom types use `Custom(String)` for extensibility.
 /// Built-ins always win during deserialization - explicit match before Custom.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ResourceType {
     /// Internal service (another LatticeService)
+    #[default]
     Service,
     /// External service (LatticeExternalService)
     ExternalService,
@@ -94,12 +95,6 @@ impl Serialize for ResourceType {
         S: serde::Serializer,
     {
         serializer.serialize_str(self.as_str())
-    }
-}
-
-impl Default for ResourceType {
-    fn default() -> Self {
-        Self::Service
     }
 }
 

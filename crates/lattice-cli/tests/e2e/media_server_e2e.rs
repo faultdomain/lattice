@@ -353,7 +353,9 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
 
     // jellyfin's /media (library/) should NOT see nzbget's marker
     if result.contains("nzbget-marker") {
-        return Err("Subpath isolation failed: jellyfin sees nzbget's file in library/".to_string());
+        return Err(
+            "Subpath isolation failed: jellyfin sees nzbget's file in library/".to_string(),
+        );
     }
     println!("    [OK] Subpaths are properly isolated");
 
@@ -389,7 +391,9 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
 
     let code = result.trim();
     if code == "403" {
-        return Err("sonarr->jellyfin returned 403 (blocked). Bilateral agreement not working!".to_string());
+        return Err(
+            "sonarr->jellyfin returned 403 (blocked). Bilateral agreement not working!".to_string(),
+        );
     }
     println!("    [OK] sonarr->jellyfin: HTTP {} (allowed)", code);
 
@@ -413,7 +417,9 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
 
     let code = result.trim();
     if code == "403" {
-        return Err("sonarr->nzbget returned 403 (blocked). Bilateral agreement not working!".to_string());
+        return Err(
+            "sonarr->nzbget returned 403 (blocked). Bilateral agreement not working!".to_string(),
+        );
     }
     println!("    [OK] sonarr->nzbget: HTTP {} (allowed)", code);
 

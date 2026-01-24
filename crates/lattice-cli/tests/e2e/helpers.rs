@@ -677,7 +677,10 @@ pub fn load_registry_credentials() -> Option<String> {
 
 /// Load a LatticeCluster config from a fixture file or env var
 #[cfg(feature = "provider-e2e")]
-pub fn load_cluster_config(env_var: &str, default_fixture: &str) -> Result<(String, LatticeCluster), String> {
+pub fn load_cluster_config(
+    env_var: &str,
+    default_fixture: &str,
+) -> Result<(String, LatticeCluster), String> {
     let path = match std::env::var(env_var) {
         Ok(p) => PathBuf::from(p),
         Err(_) => fixtures_dir().join(default_fixture),
@@ -745,7 +748,13 @@ pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
 pub fn force_delete_docker_cluster(cluster_name: &str) {
     let containers = run_cmd_allow_fail(
         "docker",
-        &["ps", "-a", "--filter", &format!("name={}", cluster_name), "-q"],
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name={}", cluster_name),
+            "-q",
+        ],
     );
     for id in containers.lines() {
         if !id.trim().is_empty() {
@@ -759,8 +768,13 @@ pub fn force_delete_docker_cluster(cluster_name: &str) {
 pub fn docker_containers_deleted(cluster_name: &str) -> bool {
     let containers = run_cmd_allow_fail(
         "docker",
-        &["ps", "-a", "--filter", &format!("name={}", cluster_name), "-q"],
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name={}", cluster_name),
+            "-q",
+        ],
     );
     containers.trim().is_empty()
 }
-

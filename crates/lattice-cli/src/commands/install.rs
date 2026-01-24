@@ -349,7 +349,9 @@ impl Installer {
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin.write_all(super::KIND_CONFIG_WITH_DOCKER.as_bytes()).await?;
+            stdin
+                .write_all(super::KIND_CONFIG_WITH_DOCKER.as_bytes())
+                .await?;
         }
 
         let output = child.wait_with_output().await?;

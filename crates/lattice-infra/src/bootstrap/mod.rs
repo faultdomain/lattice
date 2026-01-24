@@ -144,7 +144,9 @@ pub fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String> {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
 
-    Ok(split_yaml_documents(&String::from_utf8_lossy(&output.stdout)))
+    Ok(split_yaml_documents(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 /// Generate Istio manifests
@@ -188,8 +190,11 @@ pub fn generate_gateway_api_crds() -> Result<Vec<String>, String> {
 
 /// Get charts directory from environment or use default
 pub fn charts_dir() -> String {
-    std::env::var("LATTICE_CHARTS_DIR")
-        .unwrap_or_else(|_| option_env!("LATTICE_CHARTS_DIR").unwrap_or("/charts").to_string())
+    std::env::var("LATTICE_CHARTS_DIR").unwrap_or_else(|_| {
+        option_env!("LATTICE_CHARTS_DIR")
+            .unwrap_or("/charts")
+            .to_string()
+    })
 }
 
 fn find_chart(dir: &str, name: &str) -> Result<String, String> {

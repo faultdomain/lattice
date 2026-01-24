@@ -30,7 +30,9 @@ use lattice_proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand
 
 use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
-use crate::capi::{ensure_capi_installed, ensure_provider_credentials, CapiInstaller, CapiProviderConfig};
+use crate::capi::{
+    ensure_capi_installed, ensure_provider_credentials, CapiInstaller, CapiProviderConfig,
+};
 use crate::parent::ParentServers;
 use crate::provider::{create_provider, CAPIManifest, CAPI_CLUSTER_API_VERSION};
 
@@ -2880,8 +2882,7 @@ mod tests {
             });
             mock.expect_ensure_namespace().returning(|_| Ok(()));
             // Non-self clusters get a finalizer added on first reconcile
-            mock.expect_add_cluster_finalizer()
-                .returning(|_, _| Ok(()));
+            mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
@@ -2906,8 +2907,7 @@ mod tests {
                 .returning(|| Ok(true));
             mock.expect_taint_control_plane_nodes().returning(|| Ok(()));
             // Non-self clusters get a finalizer added on first reconcile
-            mock.expect_add_cluster_finalizer()
-                .returning(|_, _| Ok(()));
+            mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
@@ -2935,8 +2935,7 @@ mod tests {
                 Ok(())
             });
             // Non-self clusters get a finalizer added on first reconcile
-            mock.expect_add_cluster_finalizer()
-                .returning(|_, _| Ok(()));
+            mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock

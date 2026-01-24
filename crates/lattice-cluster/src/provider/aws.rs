@@ -621,7 +621,8 @@ mod tests {
             .find(|m| m.kind == "AWSMachineTemplate" && m.metadata.name.contains("md-0"))
             .expect("worker template");
 
-        let worker_ami = worker_template.spec.as_ref().expect("spec")["template"]["spec"]["ami"]["id"]
+        let worker_ami = worker_template.spec.as_ref().expect("spec")["template"]["spec"]["ami"]
+            ["id"]
             .as_str()
             .expect("ami id");
         assert_eq!(worker_ami, "ami-custom123");

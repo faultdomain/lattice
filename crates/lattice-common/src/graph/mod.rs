@@ -471,7 +471,6 @@ impl ServiceGraph {
         self.edges_in.clear();
         self.ns_index.clear();
     }
-
 }
 
 /// Thread-safe shared reference to a service graph

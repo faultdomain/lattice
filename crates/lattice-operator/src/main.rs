@@ -576,7 +576,11 @@ async fn ensure_cell_service_exists(
             name: Some("lattice-cell".to_string()),
             namespace: Some("lattice-system".to_string()),
             labels: Some(labels.clone()),
-            annotations: if annotations.is_empty() { None } else { Some(annotations) },
+            annotations: if annotations.is_empty() {
+                None
+            } else {
+                Some(annotations)
+            },
             ..Default::default()
         },
         spec: Some(ServiceSpec {
@@ -766,8 +770,13 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 
     // Re-register any clusters that are past Pending phase (handles operator restarts)
     if let Some(bootstrap_state) = parent_servers.bootstrap_state().await {
-        re_register_existing_clusters(&client, &bootstrap_state, &self_cluster_name, &parent_servers)
-            .await;
+        re_register_existing_clusters(
+            &client,
+            &bootstrap_state,
+            &self_cluster_name,
+            &parent_servers,
+        )
+        .await;
     }
 
     // Create controller context

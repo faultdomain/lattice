@@ -171,7 +171,13 @@ async fn run_independence_test(
 
     let capi_check = run_cmd(
         "kubectl",
-        &["--kubeconfig", &workload_kubeconfig, "get", "clusters", "-A"],
+        &[
+            "--kubeconfig",
+            &workload_kubeconfig,
+            "get",
+            "clusters",
+            "-A",
+        ],
     )?;
 
     if !capi_check.contains(&workload_cluster_name) {

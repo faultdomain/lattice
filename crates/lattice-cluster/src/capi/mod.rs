@@ -481,8 +481,16 @@ impl ClusterctlInstaller {
                 CapiProviderType::ControlPlane,
             ),
             ("capd-system", "docker", CapiProviderType::Infrastructure),
-            (CAPMOX_NAMESPACE, "proxmox", CapiProviderType::Infrastructure),
-            (CAPO_NAMESPACE, "openstack", CapiProviderType::Infrastructure),
+            (
+                CAPMOX_NAMESPACE,
+                "proxmox",
+                CapiProviderType::Infrastructure,
+            ),
+            (
+                CAPO_NAMESPACE,
+                "openstack",
+                CapiProviderType::Infrastructure,
+            ),
             (CAPA_NAMESPACE, "aws", CapiProviderType::Infrastructure),
             ("capg-system", "gcp", CapiProviderType::Infrastructure),
             ("capz-system", "azure", CapiProviderType::Infrastructure),

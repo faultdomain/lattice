@@ -25,6 +25,182 @@ use lattice_operator::crd::{
 use super::helpers::{client_from_kubeconfig, run_cmd, run_cmd_allow_fail};
 
 // =============================================================================
+// Shared Test Script Generation
+// =============================================================================
+
+struct TestTarget {
+    url: String,
+    expected_allowed: bool,
+    success_msg: String,
+    fail_msg: String,
+}
+
+impl TestTarget {
+    /// Create a test target for an internal service
+    fn internal(name: &str, namespace: &str, expected: bool, reason: &str) -> Self {
+        let (success_msg, fail_msg) = if expected {
+            (
+                format!("{}: ALLOWED ({})", name, reason),
+                format!("{}: BLOCKED (UNEXPECTED - {})", name, reason),
+            )
+        } else {
+            (
+                format!("{}: ALLOWED (UNEXPECTED - {})", name, reason),
+                format!("{}: BLOCKED ({})", name, reason),
+            )
+        };
+        Self {
+            url: format!("http://{}.{}.svc.cluster.local/", name, namespace),
+            expected_allowed: expected,
+            success_msg,
+            fail_msg,
+        }
+    }
+
+    /// Create a test target for an external service (random mesh format)
+    fn external(source: &str, target: &str, url: &str, expected: bool) -> Self {
+        let (success_msg, fail_msg) = if expected {
+            (
+                format!("{}->{}:ALLOWED", source, target),
+                format!("{}->{}:BLOCKED(UNEXPECTED)", source, target),
+            )
+        } else {
+            (
+                format!("{}->{}:ALLOWED(UNEXPECTED)", source, target),
+                format!("{}->{}:BLOCKED", source, target),
+            )
+        };
+        Self {
+            url: url.to_string(),
+            expected_allowed: expected,
+            success_msg,
+            fail_msg,
+        }
+    }
+
+    /// Create a test target for an internal service (random mesh format)
+    fn internal_random(source: &str, target: &str, namespace: &str, expected: bool) -> Self {
+        let (success_msg, fail_msg) = if expected {
+            (
+                format!("{}->{}:ALLOWED", source, target),
+                format!("{}->{}:BLOCKED(UNEXPECTED)", source, target),
+            )
+        } else {
+            (
+                format!("{}->{}:ALLOWED(UNEXPECTED)", source, target),
+                format!("{}->{}:BLOCKED", source, target),
+            )
+        };
+        Self {
+            url: format!("http://{}.{}.svc.cluster.local/", target, namespace),
+            expected_allowed: expected,
+            success_msg,
+            fail_msg,
+        }
+    }
+}
+
+/// Generate a traffic test script that waits for policies and tests connections
+fn generate_test_script(source_name: &str, targets: Vec<TestTarget>) -> String {
+    // Separate blocked endpoints for policy wait check
+    let blocked_targets: Vec<&TestTarget> =
+        targets.iter().filter(|t| !t.expected_allowed).collect();
+
+    // Build checks for blocked endpoints
+    let endpoint_checks: String = blocked_targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            format!(
+                r#"
+    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 {url} 2>/dev/null || echo "000")"#,
+                i = i,
+                url = t.url
+            )
+        })
+        .collect();
+
+    // Check that ALL blocked endpoints return non-2xx
+    let all_blocked_check: String = if blocked_targets.is_empty() {
+        "true".to_string()
+    } else {
+        blocked_targets
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                format!(
+                    "\"$R{}\" != \"200\" ] && [ \"$R{}\" != \"201\" ] && [ \"$R{}\" != \"204\"",
+                    i, i, i
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ] && [ ")
+    };
+
+    let mut script = format!(
+        r#"
+echo "=== {} Traffic Tests ==="
+echo "Testing {} endpoints..."
+
+# Wait for blocked endpoints to NOT return 2xx (policy active or service not ready)
+echo "Waiting for policies on {} blocked endpoints..."
+MAX_RETRIES=30
+RETRY=0
+while [ $RETRY -lt $MAX_RETRIES ]; do{endpoint_checks}
+    if [ {all_blocked_check} ]; then
+        echo "Blocked endpoints not returning 2xx - policies likely active"
+        sleep 5
+        break
+    fi
+    RETRY=$((RETRY + 1))
+    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES)"
+    sleep 2
+done
+
+if [ $RETRY -eq $MAX_RETRIES ]; then
+    echo "Warning: Policy propagation wait timed out, proceeding anyway"
+fi
+
+"#,
+        source_name,
+        targets.len(),
+        blocked_targets.len(),
+        endpoint_checks = endpoint_checks,
+        all_blocked_check = all_blocked_check,
+    );
+
+    // Add individual test checks
+    for target in &targets {
+        script.push_str(&format!(
+            r#"HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 {url} 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+    echo "{success_msg}"
+else
+    echo "{fail_msg}"
+fi
+"#,
+            url = target.url,
+            success_msg = target.success_msg,
+            fail_msg = target.fail_msg,
+        ));
+    }
+
+    script.push_str(&format!(
+        r#"
+echo "=== End {} Tests ==="
+sleep 30
+"#,
+        source_name
+    ));
+
+    // Loop forever
+    script.insert_str(0, "while true; do\n");
+    script.push_str("done\n");
+
+    script
+}
+
+// =============================================================================
 // Fixed 9-Service Mesh Test
 // =============================================================================
 //
@@ -137,171 +313,20 @@ fn create_service(
     }
 }
 
-struct ConnTest {
-    target: &'static str,
-    expected: bool,
-    reason: &'static str,
-}
-
-fn generate_traffic_test_script(source: &str, tests: &[ConnTest]) -> String {
-    // Collect blocked endpoints for this source to verify policy propagation
-    let blocked_targets: Vec<&str> = tests
-        .iter()
-        .filter(|t| !t.expected)
-        .map(|t| t.target)
-        .collect();
-
-    // Build checks for ALL blocked endpoints (not just one)
-    let blocked_checks: String = blocked_targets
-        .iter()
-        .enumerate()
-        .map(|(i, target)| {
-            format!(
-                r#"
-    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{target}.{ns}.svc.cluster.local/ 2>/dev/null || echo "000")"#,
-                i = i,
-                target = target,
-                ns = TEST_SERVICES_NAMESPACE
-            )
-        })
-        .collect();
-
-    let all_403_check: String = blocked_targets
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("\"$R{}\" = \"403\"", i))
-        .collect::<Vec<_>>()
-        .join(" ] && [ ");
-
-    let mut script = format!(
-        r#"
-echo "=== {} Traffic Tests ==="
-echo "Testing {} connection permutations..."
-
-# Wait for AuthorizationPolicy to propagate on ALL blocked endpoints
-echo "Waiting for policies to propagate on {} blocked endpoints..."
-MAX_RETRIES=60
-RETRY=0
-while [ $RETRY -lt $MAX_RETRIES ]; do
-    # Test ALL blocked endpoints - all must return 403{blocked_checks}
-    if [ {all_403_check} ]; then
-        echo "All policies propagated (all blocked endpoints returning 403)"
-        # Additional stabilization wait
-        echo "Stabilization wait (10s)..."
-        sleep 10
-        break
-    fi
-    RETRY=$((RETRY + 1))
-    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES)"
-    sleep 2
-done
-
-if [ $RETRY -eq $MAX_RETRIES ]; then
-    echo "Warning: Policy propagation wait timed out"
-fi
-
-"#,
-        source,
-        tests.len(),
-        blocked_targets.len(),
-        blocked_checks = blocked_checks,
-        all_403_check = if blocked_targets.is_empty() { "true".to_string() } else { all_403_check },
-    );
-
-    for test in tests {
-        let (success_msg, fail_msg) = if test.expected {
-            (
-                format!("{}: ALLOWED ({})", test.target, test.reason),
-                format!("{}: BLOCKED (UNEXPECTED - {})", test.target, test.reason),
-            )
-        } else {
-            (
-                format!("{}: ALLOWED (UNEXPECTED - {})", test.target, test.reason),
-                format!("{}: BLOCKED ({})", test.target, test.reason),
-            )
-        };
-
-        // Check HTTP status code - 2xx = allowed, 403 = blocked by policy
-        // curl exit code is 0 even for 403, so we must check the actual status
-        script.push_str(&format!(
-            r#"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{target}.{ns}.svc.cluster.local/ 2>/dev/null || echo "000")
-if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
-    echo "{success_msg}"
-else
-    echo "{fail_msg}"
-fi
-"#,
-            target = test.target,
-            ns = TEST_SERVICES_NAMESPACE,
-            success_msg = success_msg,
-            fail_msg = fail_msg,
-        ));
-    }
-
-    script.push_str(&format!(
-        r#"
-echo "=== End {} Tests ==="
-sleep 30
-"#,
-        source
-    ));
-
-    format!(
-        r#"
-while true; do
-{}
-done
-"#,
-        script
-    )
-}
-
 fn create_frontend_web() -> LatticeService {
-    let tests = vec![
-        ConnTest {
-            target: "api-gateway",
-            expected: true,
-            reason: "bilateral agreement",
-        },
-        ConnTest {
-            target: "api-users",
-            expected: true,
-            reason: "bilateral agreement",
-        },
-        ConnTest {
-            target: "api-orders",
-            expected: false,
-            reason: "web not allowed by orders",
-        },
-        ConnTest {
-            target: "db-users",
-            expected: false,
-            reason: "no direct DB access",
-        },
-        ConnTest {
-            target: "db-orders",
-            expected: false,
-            reason: "no direct DB access",
-        },
-        ConnTest {
-            target: "cache",
-            expected: false,
-            reason: "no direct cache access",
-        },
-        ConnTest {
-            target: "frontend-mobile",
-            expected: false,
-            reason: "no peer access",
-        },
-        ConnTest {
-            target: "frontend-admin",
-            expected: false,
-            reason: "no peer access",
-        },
+    let ns = TEST_SERVICES_NAMESPACE;
+    let targets = vec![
+        TestTarget::internal("api-gateway", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-users", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-orders", ns, false, "web not allowed by orders"),
+        TestTarget::internal("db-users", ns, false, "no direct DB access"),
+        TestTarget::internal("db-orders", ns, false, "no direct DB access"),
+        TestTarget::internal("cache", ns, false, "no direct cache access"),
+        TestTarget::internal("frontend-mobile", ns, false, "no peer access"),
+        TestTarget::internal("frontend-admin", ns, false, "no peer access"),
     ];
 
-    let script = generate_traffic_test_script("frontend-web", &tests);
+    let script = generate_test_script("frontend-web", targets);
     let container = ContainerSpec {
         image: "curlimages/curl:latest".to_string(),
         command: Some(vec!["/bin/sh".to_string()]),
@@ -334,50 +359,19 @@ fn create_frontend_web() -> LatticeService {
 }
 
 fn create_frontend_mobile() -> LatticeService {
-    let tests = vec![
-        ConnTest {
-            target: "api-gateway",
-            expected: true,
-            reason: "bilateral agreement",
-        },
-        ConnTest {
-            target: "api-users",
-            expected: false,
-            reason: "mobile not allowed by users",
-        },
-        ConnTest {
-            target: "api-orders",
-            expected: true,
-            reason: "bilateral agreement",
-        },
-        ConnTest {
-            target: "db-users",
-            expected: false,
-            reason: "no direct DB access",
-        },
-        ConnTest {
-            target: "db-orders",
-            expected: false,
-            reason: "no direct DB access",
-        },
-        ConnTest {
-            target: "cache",
-            expected: false,
-            reason: "no direct cache access",
-        },
-        ConnTest {
-            target: "frontend-web",
-            expected: false,
-            reason: "no peer access",
-        },
-        ConnTest {
-            target: "frontend-admin",
-            expected: false,
-            reason: "no peer access",
-        },
+    let ns = TEST_SERVICES_NAMESPACE;
+    let targets = vec![
+        TestTarget::internal("api-gateway", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-users", ns, false, "mobile not allowed by users"),
+        TestTarget::internal("api-orders", ns, true, "bilateral agreement"),
+        TestTarget::internal("db-users", ns, false, "no direct DB access"),
+        TestTarget::internal("db-orders", ns, false, "no direct DB access"),
+        TestTarget::internal("cache", ns, false, "no direct cache access"),
+        TestTarget::internal("frontend-web", ns, false, "no peer access"),
+        TestTarget::internal("frontend-admin", ns, false, "no peer access"),
     ];
 
-    let script = generate_traffic_test_script("frontend-mobile", &tests);
+    let script = generate_test_script("frontend-mobile", targets);
     let container = ContainerSpec {
         image: "curlimages/curl:latest".to_string(),
         command: Some(vec!["/bin/sh".to_string()]),
@@ -410,50 +404,19 @@ fn create_frontend_mobile() -> LatticeService {
 }
 
 fn create_frontend_admin() -> LatticeService {
-    let tests = vec![
-        ConnTest {
-            target: "api-gateway",
-            expected: true,
-            reason: "bilateral agreement",
-        },
-        ConnTest {
-            target: "api-users",
-            expected: true,
-            reason: "bilateral agreement",
-        },
-        ConnTest {
-            target: "api-orders",
-            expected: true,
-            reason: "bilateral agreement",
-        },
-        ConnTest {
-            target: "db-users",
-            expected: false,
-            reason: "no direct DB access",
-        },
-        ConnTest {
-            target: "db-orders",
-            expected: false,
-            reason: "no direct DB access",
-        },
-        ConnTest {
-            target: "cache",
-            expected: false,
-            reason: "no direct cache access",
-        },
-        ConnTest {
-            target: "frontend-web",
-            expected: false,
-            reason: "no peer access",
-        },
-        ConnTest {
-            target: "frontend-mobile",
-            expected: false,
-            reason: "no peer access",
-        },
+    let ns = TEST_SERVICES_NAMESPACE;
+    let targets = vec![
+        TestTarget::internal("api-gateway", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-users", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-orders", ns, true, "bilateral agreement"),
+        TestTarget::internal("db-users", ns, false, "no direct DB access"),
+        TestTarget::internal("db-orders", ns, false, "no direct DB access"),
+        TestTarget::internal("cache", ns, false, "no direct cache access"),
+        TestTarget::internal("frontend-web", ns, false, "no peer access"),
+        TestTarget::internal("frontend-mobile", ns, false, "no peer access"),
     ];
 
-    let script = generate_traffic_test_script("frontend-admin", &tests);
+    let script = generate_test_script("frontend-admin", targets);
     let container = ContainerSpec {
         image: "curlimages/curl:latest".to_string(),
         command: Some(vec!["/bin/sh".to_string()]),
@@ -785,8 +748,9 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     println!("\n[Mesh Test] Running service mesh bilateral agreement test...\n");
     deploy_test_services(kubeconfig_path).await?;
     wait_for_service_pods(kubeconfig_path).await?;
-    println!("  Waiting for traffic tests to complete (90s)...");
-    sleep(Duration::from_secs(90)).await;
+    // Traffic generators wait up to 120s for policy propagation + 10s stabilization + test time
+    println!("  Waiting for traffic tests to complete (150s)...");
+    sleep(Duration::from_secs(150)).await;
     verify_traffic_patterns(kubeconfig_path).await?;
 
     Ok(())
@@ -914,8 +878,8 @@ impl RandomMesh {
 
         for layer_idx in 0..config.num_layers.saturating_sub(1) {
             for source_name in &layers[layer_idx] {
-                for target_layer_idx in (layer_idx + 1)..config.num_layers {
-                    for target_name in &layers[target_layer_idx] {
+                for target_layer in layers.iter().skip(layer_idx + 1) {
+                    for target_name in target_layer {
                         if rng.gen::<f64>() < config.outbound_probability {
                             services
                                 .get_mut(source_name)
@@ -943,8 +907,8 @@ impl RandomMesh {
                 }
 
                 if services[source_name].is_traffic_generator {
-                    for target_layer_idx in (layer_idx + 1)..config.num_layers {
-                        let not_dependent: Vec<_> = layers[target_layer_idx]
+                    for target_layer in layers.iter().skip(layer_idx + 1) {
+                        let not_dependent: Vec<_> = target_layer
                             .iter()
                             .filter(|t| !services[source_name].outbound.contains(*t))
                             .collect();
@@ -989,8 +953,7 @@ impl RandomMesh {
         let mut external_services = BTreeMap::new();
         let num_external = config.num_external_services.min(external_urls.len());
 
-        for i in 0..num_external {
-            let (name, url) = external_urls[i];
+        for (name, url) in external_urls.iter().take(num_external) {
             let resolution = if Self::is_ip_based_url(url) {
                 Resolution::Static
             } else {
@@ -1183,7 +1146,8 @@ impl RandomMesh {
         }
 
         if svc.is_traffic_generator {
-            let script = self.generate_test_script(name, namespace);
+            let targets = self.build_test_targets(name, namespace);
+            let script = generate_test_script(name, targets);
             containers.insert(
                 "main".to_string(),
                 ContainerSpec {
@@ -1273,127 +1237,19 @@ impl RandomMesh {
         }
     }
 
-    fn generate_test_script(&self, source_name: &str, namespace: &str) -> String {
-        // Find ALL blocked internal endpoints for this source
-        let blocked_endpoints: Vec<&str> = self
-            .expected_connections
-            .iter()
-            .filter(|(src, _, allowed, is_external)| {
-                src == source_name && !*allowed && !*is_external
-            })
-            .map(|(_, tgt, _, _)| tgt.as_str())
-            .collect();
-
-        // Build checks for ALL blocked endpoints
-        let endpoint_checks: String = blocked_endpoints
-            .iter()
-            .enumerate()
-            .map(|(i, ep)| {
-                format!(
-                    r#"
-    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 http://{ep}.{ns}.svc.cluster.local/ 2>/dev/null || echo "000")"#,
-                    i = i,
-                    ep = ep,
-                    ns = namespace
-                )
-            })
-            .collect();
-
-        // Check that ALL blocked endpoints return 403
-        let all_403_check: String = if blocked_endpoints.is_empty() {
-            "true".to_string()
-        } else {
-            blocked_endpoints
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("\"$R{}\" = \"403\"", i))
-                .collect::<Vec<_>>()
-                .join(" ] && [ ")
-        };
-
-        let mut script = format!(
-            r#"
-echo "=== {} Traffic Tests ==="
-
-# Wait for AuthorizationPolicy to propagate on ALL blocked endpoints
-echo "Waiting for policies to propagate on {} blocked endpoints..."
-MAX_RETRIES=60
-RETRY=0
-while [ $RETRY -lt $MAX_RETRIES ]; do
-    # Test ALL blocked endpoints - all must return 403{endpoint_checks}
-    if [ {all_403_check} ]; then
-        echo "All policies propagated"
-        # Stabilization wait
-        echo "Stabilization wait (10s)..."
-        sleep 10
-        break
-    fi
-    RETRY=$((RETRY + 1))
-    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES)"
-    sleep 2
-done
-
-if [ $RETRY -eq $MAX_RETRIES ]; then
-    echo "Warning: Policy propagation wait timed out"
-fi
-
-"#,
-            source_name,
-            blocked_endpoints.len(),
-            endpoint_checks = endpoint_checks,
-            all_403_check = all_403_check,
-        );
-
-        for (_, target, expected_allowed, is_external) in self
-            .expected_connections
+    fn build_test_targets(&self, source_name: &str, namespace: &str) -> Vec<TestTarget> {
+        self.expected_connections
             .iter()
             .filter(|(src, _, _, _)| src == source_name)
-        {
-            let (success_msg, fail_msg) = if *expected_allowed {
-                (
-                    format!("{}->{}:ALLOWED", source_name, target),
-                    format!("{}->{}:BLOCKED(UNEXPECTED)", source_name, target),
-                )
-            } else {
-                (
-                    format!("{}->{}:ALLOWED(UNEXPECTED)", source_name, target),
-                    format!("{}->{}:BLOCKED", source_name, target),
-                )
-            };
-
-            // Check HTTP status code - 2xx = allowed, 403 = blocked by policy
-            // curl exit code is 0 even for 403, so we must check the actual status
-            if *is_external {
-                let url = &self.external_services[target].url;
-                script.push_str(&format!(
-                    r#"HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 {url} 2>/dev/null || echo "000")
-if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
-  echo "{success_msg}"
-else
-  echo "{fail_msg}"
-fi
-"#
-                ));
-            } else {
-                script.push_str(&format!(r#"HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 2 http://{target}.{namespace}.svc.cluster.local/ 2>/dev/null || echo "000")
-if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
-  echo "{success_msg}"
-else
-  echo "{fail_msg}"
-fi
-"#));
-            }
-        }
-
-        script.push_str(&format!(
-            r#"
-echo "=== End {} Tests ==="
-sleep 10
-"#,
-            source_name
-        ));
-
-        format!("while true; do\n{}\ndone\n", script)
+            .map(|(_, target, expected_allowed, is_external)| {
+                if *is_external {
+                    let url = &self.external_services[target].url;
+                    TestTarget::external(source_name, target, url, *expected_allowed)
+                } else {
+                    TestTarget::internal_random(source_name, target, namespace, *expected_allowed)
+                }
+            })
+            .collect()
     }
 }
 
@@ -1629,8 +1485,9 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     deploy_random_mesh(&mesh, kubeconfig_path).await?;
     println!("\n  Waiting for pods...");
     wait_for_random_mesh_pods(&mesh, kubeconfig_path).await?;
-    println!("\n  Waiting for traffic tests to complete (90s)...");
-    sleep(Duration::from_secs(90)).await;
+    // Traffic generators wait up to 120s for policy propagation + 10s stabilization + test time
+    println!("\n  Waiting for traffic tests to complete (150s)...");
+    sleep(Duration::from_secs(150)).await;
     verify_random_mesh_traffic(&mesh, kubeconfig_path).await?;
 
     Ok(())

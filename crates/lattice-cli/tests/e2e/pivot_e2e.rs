@@ -102,7 +102,10 @@ fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String,
 fn cleanup_bootstrap_clusters() {
     println!("  Cleaning up kind bootstrap clusters...");
     let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-install"]);
-    let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-uninstall"]);
+    let _ = run_cmd_allow_fail(
+        "kind",
+        &["delete", "cluster", "--name", "lattice-uninstall"],
+    );
 }
 
 // =============================================================================
@@ -173,8 +176,14 @@ async fn run_provider_e2e() -> Result<(), String> {
 
     println!("Configuration:");
     println!("  Management:  {} + {:?}", mgmt_provider, mgmt_bootstrap);
-    println!("  Workload:    {} + {:?}", workload_provider, workload_bootstrap);
-    println!("  Workload2:   {} + {:?}", workload_provider, workload2_bootstrap);
+    println!(
+        "  Workload:    {} + {:?}",
+        workload_provider, workload_bootstrap
+    );
+    println!(
+        "  Workload2:   {} + {:?}",
+        workload_provider, workload2_bootstrap
+    );
     println!();
 
     // Setup Docker network if needed
@@ -223,7 +232,15 @@ async fn run_provider_e2e() -> Result<(), String> {
     println!("  Checking for CAPI Cluster resource...");
     let capi_check = run_cmd(
         "kubectl",
-        &["--kubeconfig", &mgmt_kubeconfig_path, "get", "clusters", "-A", "-o", "wide"],
+        &[
+            "--kubeconfig",
+            &mgmt_kubeconfig_path,
+            "get",
+            "clusters",
+            "-A",
+            "-o",
+            "wide",
+        ],
     )?;
     println!("  CAPI clusters:\n{}", capi_check);
 
@@ -549,7 +566,13 @@ async fn delete_cluster_and_wait(
 
             let containers = run_cmd_allow_fail(
                 "docker",
-                &["ps", "-a", "--filter", &format!("name={}", cluster_name), "-q"],
+                &[
+                    "ps",
+                    "-a",
+                    "--filter",
+                    &format!("name={}", cluster_name),
+                    "-q",
+                ],
             );
 
             if containers.trim().is_empty() {
@@ -565,7 +588,10 @@ async fn delete_cluster_and_wait(
                 ));
             }
 
-            println!("    Still waiting for container cleanup... (attempt {}/30)", attempt);
+            println!(
+                "    Still waiting for container cleanup... (attempt {}/30)",
+                attempt
+            );
         }
     }
 
