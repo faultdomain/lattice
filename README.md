@@ -1,17 +1,20 @@
 # Lattice
 
-A Kubernetes operator for multi-cluster management with service mesh integration.
+Kubernetes multi-cluster management with zero-trust service networking.
 
-## What It Does
+## The Problem
 
-Lattice manages two things:
+Managing Kubernetes at scale has two hard problems:
 
-1. **Clusters** - Provisions Kubernetes clusters via Cluster API (CAPI) and makes them self-managing through a pivot process
-2. **Services** - Compiles service dependency declarations into Cilium and Istio network policies
+1. **Cluster lifecycle** - Management clusters become single points of failure. If the parent dies, child clusters can't scale or heal.
 
-## Cluster Management
+2. **Service networking** - Default-allow policies require constant vigilance. One misconfigured service exposes your network.
 
-Lattice provisions clusters that own their own lifecycle. After provisioning, CAPI resources are pivoted into the cluster itself, so it can scale, upgrade, and heal without depending on a parent.
+## How Lattice Solves It
+
+### Self-Managing Clusters
+
+Lattice provisions clusters that own their own lifecycle. After provisioning, CAPI resources pivot into the workload cluster itself. The parent can be deleted - the cluster keeps running and can scale, upgrade, and heal independently.
 
 ```
 Parent Cluster                    Workload Cluster
@@ -25,18 +28,47 @@ Parent Cluster                    Workload Cluster
                                  self-managing
 ```
 
-Workload clusters communicate with their parent via outbound gRPC streams only. No inbound connections required.
+Child clusters connect to parents via outbound gRPC only - no inbound ports, no attack surface.
 
-### Supported Providers
+### Bilateral Service Agreements
 
-| Provider | Notes |
-|----------|-------|
-| Docker | Local development via CAPD |
-| Proxmox | On-premises with kube-vip HA |
-| AWS | Via CAPA |
-| OpenStack | Via CAPO |
+Traffic only flows when **both sides agree**:
 
-### Cluster Definition
+```yaml
+# api-gateway declares: "I call auth-service"
+resources:
+  auth:
+    type: service
+    direction: outbound
+    id: auth-service
+
+# auth-service declares: "api-gateway can call me"
+resources:
+  api-gateway-caller:
+    type: service
+    direction: inbound
+    id: api-gateway
+```
+
+If either side removes their declaration, traffic stops. This compiles to:
+- **CiliumNetworkPolicy** - L4 eBPF enforcement
+- **Istio AuthorizationPolicy** - L7 mTLS identity enforcement
+
+No YAML sprawl. No forgotten allow rules. The service graph is the policy.
+
+## Quick Start
+
+```bash
+# Build
+cargo build --release
+
+# Install a self-managing cluster
+lattice install -f cluster.yaml
+```
+
+The installer creates a temporary kind cluster, provisions your cluster via CAPI, pivots the resources in, then deletes kind. Your cluster is now self-managing.
+
+## Cluster Definition
 
 ```yaml
 apiVersion: lattice.dev/v1alpha1
@@ -47,22 +79,27 @@ spec:
   provider:
     kubernetes:
       version: "1.32.0"
-      bootstrap: kubeadm  # or rke2
+      bootstrap: kubeadm  # or rke2 for FIPS
     config:
       proxmox:
         template_id: 9000
         cp_cores: 4
         cp_memory_mib: 8192
-        worker_cores: 8
-        worker_memory_mib: 32768
   nodes:
     controlPlane: 3
     workers: 10
 ```
 
-## Service Graph
+### Supported Providers
 
-Services declare their dependencies and allowed callers. Lattice compiles these into network policies.
+| Provider | Use Case |
+|----------|----------|
+| Docker | Local development (CAPD) |
+| Proxmox | On-premises with kube-vip HA |
+| AWS | Cloud via CAPA |
+| OpenStack | Private cloud via CAPO |
+
+## Service Definition
 
 ```yaml
 apiVersion: lattice.dev/v1alpha1
@@ -70,30 +107,33 @@ kind: LatticeService
 metadata:
   name: api-gateway
 spec:
-  environment: production
   containers:
-    api:
+    main:
       image: myorg/api:v1.2.3
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+  service:
+    ports:
+      http:
+        port: 8080
   resources:
-    # I call auth-service
+    # Outbound: I call these services
     auth:
       type: service
       direction: outbound
       id: auth-service
-    # frontend calls me
-    frontend-caller:
+    database:
+      type: service
+      direction: outbound
+      id: postgres
+    # Inbound: These services call me
+    frontend:
       type: service
       direction: inbound
-      id: frontend
+      id: web-frontend
 ```
-
-Traffic only flows when **both sides agree**:
-- Caller declares `direction: outbound`
-- Callee declares `direction: inbound`
-
-This generates:
-- **CiliumNetworkPolicy** - L4 eBPF enforcement
-- **Istio AuthorizationPolicy** - L7 mTLS identity enforcement
 
 ### External Services
 
@@ -105,38 +145,31 @@ kind: LatticeExternalService
 metadata:
   name: stripe-api
 spec:
-  environment: production
   endpoints:
     api: "https://api.stripe.com:443"
   allowed_requesters:
     - payment-service
 ```
 
-## Installation
+### Shared Volumes
 
-Prerequisites:
-- Docker
-- kind
-- clusterctl
+Services can share volumes with automatic pod co-location:
 
-```bash
-cargo build --release
+```yaml
+# Owner declares the volume with size
+resources:
+  media-storage:
+    type: volume
+    id: shared-media
+    params:
+      size: 1Ti
 
-# From a git repo containing cluster.yaml
-lattice install --git-repo https://github.com/myorg/infrastructure
-
-# Or from a local file
-lattice install -f cluster.yaml
+# Consumer references without size (gets co-located)
+resources:
+  media-storage:
+    type: volume
+    id: shared-media
 ```
-
-The installer:
-1. Creates a temporary kind cluster
-2. Installs CAPI providers and the Lattice operator
-3. Provisions your management cluster
-4. Pivots CAPI resources into it
-5. Deletes the kind cluster
-
-After installation, the management cluster is self-managing.
 
 ## Architecture
 
@@ -159,20 +192,13 @@ After installation, the management cluster is self-managing.
 
 ## FIPS Compliance
 
-Cryptography uses FIPS-validated implementations via AWS-LC:
+All cryptography uses FIPS 140-2 validated implementations via AWS-LC:
 
 - TLS: rustls with aws-lc-rs backend
 - Hashing: SHA-256/384/512
 - Signatures: ECDSA P-256/P-384, RSA 2048+
 
-For full FIPS compliance, use RKE2 bootstrap:
-
-```yaml
-spec:
-  provider:
-    kubernetes:
-      bootstrap: rke2
-```
+For full FIPS compliance, use RKE2 bootstrap which provides FIPS-validated Kubernetes components.
 
 ## Development
 
@@ -180,21 +206,26 @@ spec:
 cargo build
 cargo test
 cargo clippy
+
+# Run E2E tests (requires Docker)
+cargo test --features provider-e2e --test e2e
 ```
 
 ## Project Structure
 
 ```
 crates/
-├── lattice-operator/   # Kubernetes operator
-├── lattice-cli/        # CLI (install command)
+├── lattice-operator/   # Kubernetes operator (controllers, gRPC server)
+├── lattice-cli/        # CLI (install, uninstall commands)
 ├── lattice-common/     # Shared CRD definitions
+├── lattice-service/    # Service compilation (policies, workloads)
+├── lattice-cluster/    # Cluster provisioning
 └── lattice-proto/      # gRPC protocol definitions
 ```
 
 ## Status
 
-This is pre-release software. APIs may change.
+Pre-release. APIs may change.
 
 ## License
 
