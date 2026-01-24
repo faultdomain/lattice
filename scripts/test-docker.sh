@@ -7,6 +7,19 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Clean up previous test runs
+echo "Cleaning up previous test runs..."
+kind delete cluster --name lattice-bootstrap 2>/dev/null || true
+kind delete cluster --name e2e-mgmt 2>/dev/null || true
+kind delete cluster --name e2e-workload 2>/dev/null || true
+kind delete cluster --name e2e-workload2 2>/dev/null || true
+
+# Clean up any orphaned CAPD containers
+docker rm -f $(docker ps -aq --filter "name=e2e-mgmt" --filter "name=e2e-workload") 2>/dev/null || true
+
+echo "Cleanup complete."
+echo
+
 export LATTICE_MGMT_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e/fixtures/clusters/docker-mgmt.yaml"
 export LATTICE_WORKLOAD_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e/fixtures/clusters/docker-workload.yaml"
 export LATTICE_WORKLOAD2_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e/fixtures/clusters/docker-workload2.yaml"

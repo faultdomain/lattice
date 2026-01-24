@@ -40,6 +40,16 @@ use lattice_operator::crd::{
 
 use super::helpers::{client_from_kubeconfig, run_cmd, run_cmd_allow_fail};
 
+/// Helper to create params BTreeMap from key-value pairs
+fn volume_params(entries: &[(&str, &str)]) -> Option<BTreeMap<String, serde_json::Value>> {
+    Some(
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+            .collect(),
+    )
+}
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -154,10 +164,7 @@ fn create_jellyfin() -> LatticeService {
             id: None,
             class: None,
             metadata: None,
-            params: Some(serde_json::json!({
-                "size": "1Gi",
-                "storageClass": "standard"
-            })),
+            params: volume_params(&[("size", "1Gi"), ("storageClass", "standard")]),
             inbound: None,
             outbound: None,
         },
@@ -173,11 +180,11 @@ fn create_jellyfin() -> LatticeService {
             id: Some("media-library".to_string()), // Shared volume ID
             class: None,
             metadata: None,
-            params: Some(serde_json::json!({
-                "size": "10Gi",
-                "storageClass": "standard",
-                "accessMode": "ReadWriteOnce"  // RWO forces same-node scheduling
-            })),
+            params: volume_params(&[
+                ("size", "10Gi"),
+                ("storageClass", "standard"),
+                ("accessMode", "ReadWriteOnce"), // RWO forces same-node scheduling
+            ]),
             inbound: None,
             outbound: None,
         },
@@ -267,10 +274,7 @@ fn create_nzbget() -> LatticeService {
             id: None,
             class: None,
             metadata: None,
-            params: Some(serde_json::json!({
-                "size": "1Gi",
-                "storageClass": "standard"
-            })),
+            params: volume_params(&[("size", "1Gi"), ("storageClass", "standard")]),
             inbound: None,
             outbound: None,
         },
@@ -285,11 +289,11 @@ fn create_nzbget() -> LatticeService {
             id: Some("media-downloads".to_string()), // Shared volume ID
             class: None,
             metadata: None,
-            params: Some(serde_json::json!({
-                "size": "50Gi",
-                "storageClass": "standard",
-                "accessMode": "ReadWriteOnce"  // RWO forces same-node scheduling
-            })),
+            params: volume_params(&[
+                ("size", "50Gi"),
+                ("storageClass", "standard"),
+                ("accessMode", "ReadWriteOnce"), // RWO forces same-node scheduling
+            ]),
             inbound: None,
             outbound: None,
         },
@@ -392,10 +396,7 @@ fn create_sonarr() -> LatticeService {
             id: None,
             class: None,
             metadata: None,
-            params: Some(serde_json::json!({
-                "size": "1Gi",
-                "storageClass": "standard"
-            })),
+            params: volume_params(&[("size", "1Gi"), ("storageClass", "standard")]),
             inbound: None,
             outbound: None,
         },
@@ -542,26 +543,21 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::all(client);
 
-    // Deploy OWNERS first - they create the PVCs and write marker files
-    println!("  [Layer 1] Deploying volume OWNERS (jellyfin, nzbget)...");
+    // Deploy ALL services simultaneously - Kubernetes handles ordering via pod affinity
+    // Volume references have requiredDuringSchedulingIgnoredDuringExecution affinity
+    // to volume owners, so consumer pods wait until owner pods are scheduled
+    println!("  Deploying all services (jellyfin, nzbget, sonarr)...");
     api.create(&PostParams::default(), &create_jellyfin())
         .await
         .map_err(|e| format!("Failed to create jellyfin: {}", e))?;
     api.create(&PostParams::default(), &create_nzbget())
         .await
         .map_err(|e| format!("Failed to create nzbget: {}", e))?;
-
-    // Wait for owners to be ready and write their markers
-    println!("  Waiting for owners to write marker files...");
-    sleep(Duration::from_secs(30)).await;
-
-    // Deploy REFERENCE last - it needs affinity to owners' nodes
-    println!("  [Layer 2] Deploying volume REFERENCE (sonarr)...");
     api.create(&PostParams::default(), &create_sonarr())
         .await
         .map_err(|e| format!("Failed to create sonarr: {}", e))?;
 
-    println!("  All services created successfully");
+    println!("  All services created - Kubernetes will schedule based on affinity rules");
     Ok(())
 }
 

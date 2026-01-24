@@ -358,13 +358,15 @@ mod tests {
 
         // Add owned volumes
         for (name, id, size, access_mode) in owned {
-            let mut params = serde_json::json!({ "size": size });
+            let mut params = BTreeMap::new();
+            params.insert("size".to_string(), serde_json::json!(size));
             if let Some(mode) = access_mode {
-                params["accessMode"] = serde_json::json!(match mode {
+                let mode_str = match mode {
                     VolumeAccessMode::ReadWriteOnce => "ReadWriteOnce",
                     VolumeAccessMode::ReadWriteMany => "ReadWriteMany",
                     VolumeAccessMode::ReadOnlyMany => "ReadOnlyMany",
-                });
+                };
+                params.insert("accessMode".to_string(), serde_json::json!(mode_str));
             }
             resources.insert(
                 name.to_string(),
@@ -487,7 +489,7 @@ mod tests {
         // Add storage class to volume config via params
         if let Some(resource) = spec.resources.get_mut("config") {
             if let Some(params) = resource.params.as_mut() {
-                params["storageClass"] = serde_json::json!("local-path");
+                params.insert("storageClass".to_string(), serde_json::json!("local-path"));
             }
         }
 

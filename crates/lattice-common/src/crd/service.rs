@@ -115,7 +115,7 @@ pub struct ResourceSpec {
     /// - volume: size, storageClass, accessMode
     /// - service: (none - uses Lattice extensions)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub params: Option<serde_json::Value>,
+    pub params: Option<BTreeMap<String, serde_json::Value>>,
 
     // =========================================================================
     // Lattice Extensions (additions to Score, not replacements)
@@ -261,7 +261,10 @@ impl ResourceSpec {
             return None;
         }
         match &self.params {
-            Some(params) => serde_json::from_value(params.clone()).ok(),
+            Some(params) => {
+                let value = serde_json::to_value(params).ok()?;
+                serde_json::from_value(value).ok()
+            }
             None => Some(VolumeParams::default()),
         }
     }
@@ -2033,7 +2036,7 @@ containers:
                 id: Some(id.to_string()),
                 class: None,
                 metadata: None,
-                params: Some(serde_json::json!({ "size": size })),
+                params: Some(BTreeMap::from([("size".to_string(), serde_json::json!(size))])),
                 inbound: None,
                 outbound: None,
             },
