@@ -20,10 +20,17 @@
 use std::time::Duration;
 use tokio::time::sleep;
 
-use super::helpers::{run_cmd, run_cmd_allow_fail};
+use super::helpers::{run_cmd, run_cmd_allow_fail, workspace_root};
 
 const NAMESPACE: &str = "media";
-const FIXTURES_PATH: &str = "examples/media-server";
+
+/// Get the media-server fixtures path (relative to workspace root)
+fn fixtures_path() -> String {
+    workspace_root()
+        .join("examples/media-server")
+        .to_string_lossy()
+        .to_string()
+}
 
 // =============================================================================
 // Deployment
@@ -67,7 +74,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
             kubeconfig_path,
             "apply",
             "-k",
-            FIXTURES_PATH,
+            &fixtures_path(),
         ],
     )?;
 
@@ -463,7 +470,7 @@ async fn cleanup(kubeconfig_path: &str) {
             kubeconfig_path,
             "delete",
             "-k",
-            FIXTURES_PATH,
+            &fixtures_path(),
             "--ignore-not-found",
         ],
     );

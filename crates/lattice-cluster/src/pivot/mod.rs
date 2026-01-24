@@ -252,7 +252,6 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
         manifests: &[Vec<u8>],
         cluster_name: &str,
     ) -> Result<usize, PivotError> {
-        use std::io::Write;
         use std::process::Stdio;
 
         if manifests.is_empty() {
@@ -266,7 +265,9 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
             std::process::id()
         ));
 
-        std::fs::create_dir_all(&temp_dir)
+        // Use async I/O to avoid blocking the runtime
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
             .map_err(|e| PivotError::Internal(format!("failed to create temp dir: {}", e)))?;
 
         info!(
@@ -275,14 +276,12 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
             "Saving CAPI manifests to temp directory"
         );
 
-        // Write each manifest to a file
+        // Write each manifest to a file using async I/O
         let mut saved_count = 0;
         for (i, manifest) in manifests.iter().enumerate() {
             let filename = temp_dir.join(format!("manifest-{:04}.yaml", i));
-            let mut file = std::fs::File::create(&filename).map_err(|e| {
-                PivotError::Internal(format!("failed to create manifest file: {}", e))
-            })?;
-            file.write_all(manifest)
+            tokio::fs::write(&filename, manifest)
+                .await
                 .map_err(|e| PivotError::Internal(format!("failed to write manifest: {}", e)))?;
             saved_count += 1;
         }
@@ -308,8 +307,8 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
                 PivotError::ClusterctlFailed(format!("failed to run clusterctl: {}", e))
             })?;
 
-        // Clean up temp directory
-        if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
+        // Clean up temp directory using async I/O
+        if let Err(e) = tokio::fs::remove_dir_all(&temp_dir).await {
             debug!(error = %e, "Failed to clean up temp directory (non-fatal)");
         }
 

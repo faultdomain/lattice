@@ -605,7 +605,7 @@ pub fn fixtures_dir() -> PathBuf {
 pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
     println!("  Building lattice Docker image...");
 
-    let output = Command::new("./scripts/docker-build.sh")
+    let output = Command::new("./scripts/dev/docker-build.sh")
         .args(["-t", image])
         .env("DOCKER_BUILDKIT", "1")
         .current_dir(workspace_root())

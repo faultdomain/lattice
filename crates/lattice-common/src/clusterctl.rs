@@ -215,13 +215,14 @@ pub async fn export_for_pivot(
         let cluster_name = cluster_name.to_string();
 
         async move {
-            // Reset directory for each attempt
-            if let Err(e) = std::fs::remove_dir_all(&export_path) {
+            // Reset directory for each attempt (using async I/O to avoid blocking)
+            if let Err(e) = tokio::fs::remove_dir_all(&export_path).await {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     warn!(path = %export_path.display(), error = %e, "failed to reset export directory");
                 }
             }
-            std::fs::create_dir_all(&export_path)
+            tokio::fs::create_dir_all(&export_path)
+                .await
                 .map_err(|e| format!("failed to create export dir: {}", e))?;
 
             let mut cmd = Command::new("clusterctl");
@@ -242,6 +243,7 @@ pub async fn export_for_pivot(
             .await?;
 
             let manifests = read_yaml_files(&export_path)
+                .await
                 .map_err(|e| format!("failed to read exported manifests: {}", e))?;
 
             info!(
@@ -280,18 +282,20 @@ pub async fn import_from_manifests(
         let manifests = manifests.to_vec();
 
         async move {
-            // Reset directory for each attempt
-            if let Err(e) = std::fs::remove_dir_all(&import_path) {
+            // Reset directory for each attempt (using async I/O to avoid blocking)
+            if let Err(e) = tokio::fs::remove_dir_all(&import_path).await {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     warn!(path = %import_path.display(), error = %e, "failed to reset import directory");
                 }
             }
-            std::fs::create_dir_all(&import_path)
+            tokio::fs::create_dir_all(&import_path)
+                .await
                 .map_err(|e| format!("failed to create import dir: {}", e))?;
 
-            // Write manifests to temporary files
+            // Write manifests to temporary files (using async I/O to avoid blocking)
             for (i, manifest) in manifests.iter().enumerate() {
-                std::fs::write(import_path.join(format!("{}.yaml", i)), manifest)
+                tokio::fs::write(import_path.join(format!("{}.yaml", i)), manifest)
+                    .await
                     .map_err(|e| format!("failed to write manifest {}: {}", i, e))?;
             }
 
@@ -570,15 +574,20 @@ pub async fn teardown_cluster(
     Ok(())
 }
 
-fn read_yaml_files(dir: &Path) -> Result<Vec<Vec<u8>>, ClusterctlError> {
-    let entries = std::fs::read_dir(dir)
+async fn read_yaml_files(dir: &Path) -> Result<Vec<Vec<u8>>, ClusterctlError> {
+    let mut entries = tokio::fs::read_dir(dir)
+        .await
         .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to read dir: {}", e)))?;
 
     let mut manifests = Vec::new();
-    for entry in entries.flatten() {
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to read dir entry: {}", e)))?
+    {
         let path = entry.path();
         if path.extension().map(|e| e == "yaml").unwrap_or(false) {
-            let content = std::fs::read(&path).map_err(|e| {
+            let content = tokio::fs::read(&path).await.map_err(|e| {
                 ClusterctlError::ExecutionFailed(format!(
                     "failed to read {}: {}",
                     path.display(),

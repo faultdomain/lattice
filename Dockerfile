@@ -67,7 +67,7 @@ WORKDIR /app
 # Copy workspace structure
 COPY Cargo.toml Cargo.lock versions.toml ./
 COPY crates ./crates
-COPY scripts ./scripts
+COPY scripts/runtime ./scripts
 
 # Build with FIPS if enabled, otherwise standard build
 # Use BuildKit cache mounts for cargo registry and target directory
@@ -110,8 +110,8 @@ COPY test-charts /charts
 # Copy CAPI providers from source (pre-downloaded)
 COPY test-providers /providers
 
-# Copy scripts for templating
-COPY scripts /scripts
+# Copy runtime scripts for templating (bootstrap-cluster.sh, etc.)
+COPY scripts/runtime /scripts
 
 # Create clusterctl config with local provider repositories (all providers)
 RUN echo "providers:" > /providers/clusterctl.yaml && \

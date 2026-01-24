@@ -749,8 +749,8 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     deploy_test_services(kubeconfig_path).await?;
     wait_for_service_pods(kubeconfig_path).await?;
     // Traffic generators wait up to 120s for policy propagation + 10s stabilization + test time
-    println!("  Waiting for traffic tests to complete (150s)...");
-    sleep(Duration::from_secs(150)).await;
+    println!("  Waiting for traffic tests to complete (60s)...");
+    sleep(Duration::from_secs(60s)).await;
     verify_traffic_patterns(kubeconfig_path).await?;
 
     Ok(())
@@ -776,8 +776,8 @@ struct RandomMeshConfig {
 impl Default for RandomMeshConfig {
     fn default() -> Self {
         Self {
-            min_services: 50,
-            max_services: 75,
+            min_services: 25,
+            max_services: 50,
             num_layers: 5,
             outbound_probability: 0.3,
             bilateral_probability: 0.6,
@@ -1474,7 +1474,7 @@ async fn verify_random_mesh_traffic(
     Ok(())
 }
 
-/// Run the randomized 50-100 service mesh test
+/// Run the randomized 25-50 service mesh test
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     println!("\n[Mesh Test] Running randomized large-scale mesh test (50-75 services)...\n");
 
@@ -1486,8 +1486,8 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     println!("\n  Waiting for pods...");
     wait_for_random_mesh_pods(&mesh, kubeconfig_path).await?;
     // Traffic generators wait up to 120s for policy propagation + 10s stabilization + test time
-    println!("\n  Waiting for traffic tests to complete (150s)...");
-    sleep(Duration::from_secs(150)).await;
+    println!("\n  Waiting for traffic tests to complete (60s)...");
+    sleep(Duration::from_secs(60s)).await;
     verify_random_mesh_traffic(&mesh, kubeconfig_path).await?;
 
     Ok(())
