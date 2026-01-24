@@ -279,9 +279,45 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
+    println!("Waiting for Istio waypoint...");
+
+    let client = client_from_kubeconfig(kubeconfig_path).await?;
+    let api: Api<Deployment> = Api::namespaced(client, NAMESPACE);
+
+    let timeout = Duration::from_secs(120);
+    let poll_interval = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+
+    loop {
+        // Look for waypoint deployment (name pattern: *-waypoint or media-waypoint)
+        let deployments = api.list(&ListParams::default()).await;
+        if let Ok(list) = deployments {
+            if let Some(waypoint) = list.items.iter().find(|d| {
+                d.metadata
+                    .name
+                    .as_ref()
+                    .map(|n| n.contains("waypoint"))
+                    .unwrap_or(false)
+            }) {
+                if deployment_is_available(waypoint) {
+                    let name = waypoint.metadata.name.as_deref().unwrap_or("waypoint");
+                    println!("  {} is ready", name);
+                    return Ok(());
+                }
+            }
+        }
+
+        if start.elapsed() > timeout {
+            return Err("Timeout waiting for Istio waypoint".into());
+        }
+
+        sleep(poll_interval).await;
+    }
+}
+
 async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {
     println!("Verifying bilateral agreements...");
-    sleep(Duration::from_secs(30)).await;
 
     let curl_check = |from: &str, to: &str, port: u16| -> String {
         run_cmd_allow_fail("kubectl", &[
@@ -345,10 +381,7 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     verify_pvcs(kubeconfig_path).await?;
     verify_node_colocation(kubeconfig_path).await?;
     verify_volume_sharing(kubeconfig_path).await?;
-
-    println!("Waiting for Istio waypoint...");
-    sleep(Duration::from_secs(30)).await;
-
+    wait_for_waypoint(kubeconfig_path).await?;
     verify_bilateral_agreements(kubeconfig_path).await?;
 
     println!("\n========================================");
