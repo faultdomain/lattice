@@ -5,33 +5,151 @@ on:
     branches: [main]
     tags: ['v*']
     paths:
-      - 'src/**'
+      - 'crates/**'
       - 'proto/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Dockerfile'
       - 'versions.toml'
       - '.github/workflows/lattice.yaml'
+      - 'scripts/**'
   pull_request:
     branches: [main]
     paths:
-      - 'src/**'
+      - 'crates/**'
       - 'proto/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Dockerfile'
       - 'versions.toml'
+      - 'scripts/**'
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: evan-hines-js/lattice
 
 jobs:
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run error handling checks
+        run: ./scripts/dev/check-error-handling.sh
+
+      - name: Run security pattern checks
+        run: ./scripts/dev/check-security-patterns.sh
+
+      - name: Run async pattern checks
+        run: ./scripts/dev/check-async-patterns.sh
+
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run tests
+        run: cargo test --workspace --lib
+
+  trivy-fs:
+    name: Trivy Filesystem Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner (filesystem)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+
+  trivy-image:
+    name: Trivy Image Scan
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request' && needs.build.outputs.image-ref != ''
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Run Trivy vulnerability scanner (image)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ needs.build.outputs.image-ref }}'
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+
   build:
+    name: Build & Push
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    outputs:
+      image-ref: ${{ steps.image-ref.outputs.ref }}
 
     steps:
       - name: Checkout
@@ -89,6 +207,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push (FIPS)
+        id: build-fips
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -103,6 +222,12 @@ jobs:
             CAPI_VERSION=${{ steps.versions.outputs.capi }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Output image reference for scanning
+        id: image-ref
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-fips.outputs.digest }}" >> $GITHUB_OUTPUT
 
       - name: Build and push (non-FIPS, for testing)
         if: github.event_name != 'pull_request'
