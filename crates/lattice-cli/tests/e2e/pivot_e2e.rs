@@ -14,8 +14,9 @@
 //! 3. Create workload cluster off management cluster
 //! 4. Watch workload cluster provisioning and pivot
 //! 5. Verify workload cluster has CAPI resources + worker scaling
-//! 6. Create workload2 + run mesh tests (in parallel)
-//! 7. Delete workload2 (unpivot to workload)
+//! 6. Create workload2 + start mesh tests (mesh runs in background)
+//! 7. Delete workload2 immediately after verification (unpivot to workload)
+//! 7b. Wait for mesh tests to complete
 //! 8. Delete workload (unpivot to mgmt)
 //! 9. Uninstall management cluster
 //!
@@ -301,61 +302,13 @@ async fn run_provider_e2e() -> Result<(), String> {
     watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 1).await?;
 
     // =========================================================================
-    // Phase 6: Create Workload2 + Run Mesh Tests (in parallel)
+    // Phase 6: Create Workload2 + Start Mesh Tests
     // =========================================================================
-    info!("[Phase 6] Creating workload2 cluster + running mesh tests in parallel...");
+    info!("[Phase 6] Creating workload2 cluster + starting mesh tests...");
 
     let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
 
-    // Spawn workload2 creation
-    let workload2_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD2_CLUSTER_NAME);
-    let workload2_handle = {
-        let workload_client = workload_client.clone();
-        let workload_kubeconfig = workload_kubeconfig_path.clone();
-        let workload2_kubeconfig = workload2_kubeconfig_path.clone();
-        let workload2 = workload2_cluster.clone();
-        let bootstrap = workload2_bootstrap.clone();
-        let provider = workload_provider;
-
-        tokio::spawn(async move {
-            let workload_api: Api<LatticeCluster> = Api::all(workload_client.clone());
-            workload_api
-                .create(&PostParams::default(), &workload2)
-                .await
-                .map_err(|e| format!("Failed to create workload2: {}", e))?;
-
-            info!("[Workload2] LatticeCluster created on workload cluster");
-
-            if provider == InfraProvider::Docker {
-                watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None).await?;
-            } else {
-                watch_cluster_phases_with_kubeconfig(
-                    &workload_kubeconfig,
-                    WORKLOAD2_CLUSTER_NAME,
-                    None,
-                    &workload2_kubeconfig,
-                )
-                .await?;
-            }
-
-            info!("[Workload2] Cluster is Ready!");
-
-            if provider == InfraProvider::Docker {
-                extract_docker_cluster_kubeconfig(
-                    WORKLOAD2_CLUSTER_NAME,
-                    &bootstrap,
-                    &workload2_kubeconfig,
-                )?;
-            }
-
-            verify_cluster_capi_resources(&workload2_kubeconfig, WORKLOAD2_CLUSTER_NAME).await?;
-            info!("[Workload2] Deep hierarchy verified!");
-
-            Ok::<_, String>(())
-        })
-    };
-
-    // Spawn mesh tests if enabled
+    // Start mesh tests in background (runs on workload cluster, doesn't need workload2)
     let mesh_handle = if mesh_test_enabled() {
         let kubeconfig = workload_kubeconfig_path.clone();
         Some(tokio::spawn(async move {
@@ -363,9 +316,8 @@ async fn run_provider_e2e() -> Result<(), String> {
             let kubeconfig2 = kubeconfig.clone();
 
             // Run mesh tests in parallel:
-            // - Fixed 9-service bilateral agreement test
+            // - Fixed 10-service bilateral agreement test (includes wildcard)
             // - Randomized large-scale mesh test
-            // NOTE: Media server test disabled pending investigation
             let (r1, r2) = tokio::join!(
                 run_mesh_test(&kubeconfig),
                 run_random_mesh_test(&kubeconfig2)
@@ -380,24 +332,49 @@ async fn run_provider_e2e() -> Result<(), String> {
         None
     };
 
-    // Wait for both to complete
-    workload2_handle
-        .await
-        .map_err(|e| format!("Workload2 task panicked: {}", e))??;
-
-    if let Some(handle) = mesh_handle {
-        handle
+    // Create and verify workload2 (deep hierarchy test)
+    let workload2_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD2_CLUSTER_NAME);
+    {
+        let workload_api: Api<LatticeCluster> = Api::all(workload_client.clone());
+        workload_api
+            .create(&PostParams::default(), &workload2_cluster)
             .await
-            .map_err(|e| format!("Mesh test task panicked: {}", e))??;
+            .map_err(|e| format!("Failed to create workload2: {}", e))?;
+
+        info!("[Workload2] LatticeCluster created on workload cluster");
+
+        if workload_provider == InfraProvider::Docker {
+            watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None).await?;
+        } else {
+            watch_cluster_phases_with_kubeconfig(
+                &workload_kubeconfig_path,
+                WORKLOAD2_CLUSTER_NAME,
+                None,
+                &workload2_kubeconfig_path,
+            )
+            .await?;
+        }
+
+        info!("[Workload2] Cluster is Ready!");
+
+        if workload_provider == InfraProvider::Docker {
+            extract_docker_cluster_kubeconfig(
+                WORKLOAD2_CLUSTER_NAME,
+                &workload2_bootstrap,
+                &workload2_kubeconfig_path,
+            )?;
+        }
+
+        verify_cluster_capi_resources(&workload2_kubeconfig_path, WORKLOAD2_CLUSTER_NAME).await?;
+        info!("[Workload2] Deep hierarchy verified!");
     }
 
-    info!("SUCCESS: Workload2 + mesh tests complete!");
-
     // =========================================================================
-    // Phase 7: Delete Workload2 (unpivot to workload)
+    // Phase 7: Delete Workload2 immediately (don't wait for mesh tests)
     // =========================================================================
     info!("[Phase 7] Deleting workload2 cluster (unpivot flow)...");
     info!("CAPI resources will move back to workload cluster");
+    info!("(Mesh tests continue running in background)");
 
     delete_cluster_and_wait(
         &workload2_kubeconfig_path,
@@ -408,6 +385,18 @@ async fn run_provider_e2e() -> Result<(), String> {
     .await?;
 
     info!("SUCCESS: Workload2 deleted and unpivoted!");
+
+    // =========================================================================
+    // Phase 7b: Wait for mesh tests to complete
+    // =========================================================================
+    if let Some(handle) = mesh_handle {
+        info!("[Phase 7b] Waiting for mesh tests to complete...");
+        handle
+            .await
+            .map_err(|e| format!("Mesh test task panicked: {}", e))??;
+    }
+
+    info!("SUCCESS: All phase 6-7 tasks complete!");
 
     // =========================================================================
     // Phase 8: Delete Workload (unpivot to mgmt)
