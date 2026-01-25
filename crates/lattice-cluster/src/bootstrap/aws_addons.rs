@@ -89,6 +89,10 @@ mod tests {
         assert!(manifest.contains("kind: DaemonSet"));
         assert!(manifest.contains("kind: CSIDriver"));
         assert!(manifest.contains("ebs.csi.aws.com"));
+        // Must include default StorageClass
+        assert!(manifest.contains("kind: StorageClass"));
+        assert!(manifest.contains("storageclass.kubernetes.io/is-default-class: \"true\""));
+        assert!(manifest.contains("provisioner: ebs.csi.aws.com"));
     }
 
     #[test]
