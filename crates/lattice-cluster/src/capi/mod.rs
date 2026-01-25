@@ -23,82 +23,50 @@ use kube::Client as KubeClient;
 use mockall::automock;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::ProviderType;
-use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::crd::{ProviderType, SecretRef};
+use lattice_common::Error;
 
 use crate::bootstrap::{
-    AwsCredentials, AWS_CREDENTIALS_SECRET, CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE,
-    OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+    AwsCredentials, CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET,
+    PROXMOX_CREDENTIALS_SECRET,
 };
 
-/// Copy provider credentials from lattice-system to the provider namespace.
+/// Copy credentials from CloudProvider's secret reference to the CAPI provider namespace.
 ///
-/// CloudProvider CRDs reference credential secrets in lattice-system. These are
-/// synced to child clusters during pivot. CAPI providers (CAPA, CAPMOX) expect
-/// credentials in their own namespaces. This function copies them to where they're expected.
-///
-/// For AWS: `lattice-system/aws-credentials` → `capa-system/capa-manager-bootstrap-credentials`
-/// For Proxmox: `lattice-system/proxmox-credentials` → `capmox-system/proxmox-credentials`
-pub async fn ensure_provider_credentials(
+/// CAPI providers expect credentials in specific namespaces with specific names:
+/// - AWS: `capa-system/capa-manager-bootstrap-credentials`
+/// - Proxmox: `capmox-system/proxmox-credentials`
+/// - OpenStack: `capo-system/openstack-credentials`
+pub async fn copy_credentials_to_provider_namespace(
     client: &KubeClient,
     provider: ProviderType,
+    secret_ref: &SecretRef,
 ) -> Result<(), Error> {
-    let (source_secret, target_namespace, target_secret) = match provider {
-        ProviderType::Aws => (
-            AWS_CREDENTIALS_SECRET,
-            CAPA_NAMESPACE,
-            "capa-manager-bootstrap-credentials",
-        ),
-        ProviderType::Proxmox => (
-            PROXMOX_CREDENTIALS_SECRET,
-            CAPMOX_NAMESPACE,
-            PROXMOX_CREDENTIALS_SECRET,
-        ),
-        ProviderType::OpenStack => (
-            OPENSTACK_CREDENTIALS_SECRET,
-            CAPO_NAMESPACE,
-            OPENSTACK_CREDENTIALS_SECRET,
-        ),
+    use k8s_openapi::api::core::v1::{Namespace, Secret};
+
+    let (target_namespace, target_name) = match provider {
+        ProviderType::Aws => (CAPA_NAMESPACE, "capa-manager-bootstrap-credentials"),
+        ProviderType::Proxmox => (CAPMOX_NAMESPACE, "proxmox-credentials"),
+        ProviderType::OpenStack => (CAPO_NAMESPACE, "openstack-credentials"),
         // Docker and other providers don't need credentials
         _ => return Ok(()),
     };
 
-    copy_secret(client, source_secret, target_namespace, target_secret).await
-}
-
-/// Copy a secret from lattice-system to a target namespace
-async fn copy_secret(
-    client: &KubeClient,
-    source_name: &str,
-    target_namespace: &str,
-    target_name: &str,
-) -> Result<(), Error> {
-    use k8s_openapi::api::core::v1::{Namespace, Secret};
-
-    let source_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let target_api: Api<Secret> = Api::namespaced(client.clone(), target_namespace);
-    let ns_api: Api<Namespace> = Api::all(client.clone());
-
-    // Read source secret
-    let source = match source_api.get(source_name).await {
+    // Read source secret from CloudProvider's credentials_secret_ref
+    let source_api: Api<Secret> = Api::namespaced(client.clone(), &secret_ref.namespace);
+    let source = match source_api.get(&secret_ref.name).await {
         Ok(s) => s,
         Err(kube::Error::Api(e)) if e.code == 404 => {
-            debug!(
-                secret = source_name,
-                namespace = LATTICE_SYSTEM_NAMESPACE,
-                "Credentials not found, skipping copy"
-            );
-            return Ok(());
-        }
-        Err(e) => {
-            return Err(Error::capi_installation(format!(
-                "Failed to read {}/{}: {}",
-                LATTICE_SYSTEM_NAMESPACE, source_name, e
+            return Err(Error::validation(format!(
+                "Credentials secret '{}/{}' not found",
+                secret_ref.namespace, secret_ref.name
             )));
         }
+        Err(e) => return Err(e.into()),
     };
 
     // Create target namespace if needed
+    let ns_api: Api<Namespace> = Api::all(client.clone());
     let ns = Namespace {
         metadata: kube::core::ObjectMeta {
             name: Some(target_namespace.to_string()),
@@ -109,22 +77,23 @@ async fn copy_secret(
     let _ = ns_api.create(&PostParams::default(), &ns).await;
 
     // Copy secret to target namespace
+    let target_api: Api<Secret> = Api::namespaced(client.clone(), target_namespace);
     let target = Secret {
         metadata: kube::core::ObjectMeta {
             name: Some(target_name.to_string()),
             namespace: Some(target_namespace.to_string()),
             ..Default::default()
         },
-        type_: Some("Opaque".to_string()),
         data: source.data.clone(),
         string_data: source.string_data.clone(),
+        type_: source.type_.clone(),
         ..Default::default()
     };
 
     target_api
         .patch(
             target_name,
-            &PatchParams::apply("lattice-operator").force(),
+            &PatchParams::apply("lattice-controller").force(),
             &Patch::Apply(&target),
         )
         .await
@@ -136,7 +105,7 @@ async fn copy_secret(
         })?;
 
     info!(
-        source = format!("{}/{}", LATTICE_SYSTEM_NAMESPACE, source_name),
+        source = format!("{}/{}", secret_ref.namespace, secret_ref.name),
         target = format!("{}/{}", target_namespace, target_name),
         "Copied provider credentials"
     );

@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::time::sleep;
+use tracing::info;
 
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Pod};
@@ -28,7 +29,7 @@ const NAMESPACE: &str = "media";
 // =============================================================================
 
 async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
-    println!("Deploying media server services...");
+    info!("Deploying media server services...");
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
 
@@ -47,7 +48,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     };
 
     match ns_api.create(&PostParams::default(), &ns).await {
-        Ok(_) => println!("  Created namespace {}", NAMESPACE),
+        Ok(_) => info!("  Created namespace {}", NAMESPACE),
         Err(kube::Error::Api(e)) if e.code == 409 => {
             let patch = serde_json::json!({
                 "metadata": {
@@ -72,7 +73,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     for filename in ["jellyfin.yaml", "nzbget.yaml", "sonarr.yaml"] {
         let service = load_service_config(filename)?;
         let name = service.metadata.name.as_deref().unwrap_or(filename);
-        println!("  Deploying {}...", name);
+        info!("  Deploying {}...", name);
         api.create(&PostParams::default(), &service)
             .await
             .map_err(|e| format!("Failed to create {}: {}", name, e))?;
@@ -90,7 +91,7 @@ fn deployment_is_available(d: &Deployment) -> bool {
 }
 
 async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
-    println!("Waiting for deployments...");
+    info!("Waiting for deployments...");
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<Deployment> = Api::namespaced(client, NAMESPACE);
@@ -99,29 +100,29 @@ async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
     let poll_interval = Duration::from_secs(5);
 
     for name in ["jellyfin", "nzbget", "sonarr"] {
-        println!("  Waiting for {}...", name);
+        info!("  Waiting for {}...", name);
         let start = std::time::Instant::now();
 
         loop {
             match api.get(name).await {
                 Ok(deployment) if deployment_is_available(&deployment) => {
-                    println!("    {} is available", name);
+                    info!("    {} is available", name);
                     break;
                 }
                 Ok(deployment) => {
                     let status = deployment.status.as_ref();
                     let available = status.and_then(|s| s.available_replicas).unwrap_or(0);
                     let desired = status.and_then(|s| s.replicas).unwrap_or(0);
-                    println!(
+                    info!(
                         "    {} not ready yet ({}/{} available), retrying...",
                         name, available, desired
                     );
                 }
                 Err(kube::Error::Api(e)) if e.code == 404 => {
-                    println!("    {} not found yet, retrying...", name);
+                    info!("    {} not found yet, retrying...", name);
                 }
                 Err(e) => {
-                    println!("    Error checking {}: {}, retrying...", name, e);
+                    info!("    Error checking {}: {}, retrying...", name, e);
                 }
             }
 
@@ -133,12 +134,12 @@ async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
         }
     }
 
-    println!("  All deployments available");
+    info!("  All deployments available");
     Ok(())
 }
 
 async fn verify_pvcs(kubeconfig_path: &str) -> Result<(), String> {
-    println!("Verifying PVCs...");
+    info!("Verifying PVCs...");
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<PersistentVolumeClaim> = Api::namespaced(client, NAMESPACE);
@@ -174,12 +175,12 @@ async fn verify_pvcs(kubeconfig_path: &str) -> Result<(), String> {
         return Err(format!("Expected 1 shared volume, found {}", shared_count));
     }
 
-    println!("  PVCs verified");
+    info!("  PVCs verified");
     Ok(())
 }
 
 async fn verify_node_colocation(kubeconfig_path: &str) -> Result<(), String> {
-    println!("Verifying pod co-location...");
+    info!("Verifying pod co-location...");
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<Pod> = Api::namespaced(client, NAMESPACE);
@@ -219,12 +220,12 @@ async fn verify_node_colocation(kubeconfig_path: &str) -> Result<(), String> {
         ));
     }
 
-    println!("  All pods on node: {}", jellyfin_node);
+    info!("  All pods on node: {}", jellyfin_node);
     Ok(())
 }
 
 async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
-    println!("Verifying volume sharing...");
+    info!("Verifying volume sharing...");
     sleep(Duration::from_secs(5)).await;
 
     let exec = |deploy: &str, cmd: &str| -> Result<String, String> {
@@ -278,12 +279,12 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
         return Err("Subpath isolation failed".into());
     }
 
-    println!("  Volume sharing verified");
+    info!("  Volume sharing verified");
     Ok(())
 }
 
 async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
-    println!("Waiting for Istio waypoint...");
+    info!("Waiting for Istio waypoint...");
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<Deployment> = Api::namespaced(client, NAMESPACE);
@@ -305,7 +306,7 @@ async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
             }) {
                 if deployment_is_available(waypoint) {
                     let name = waypoint.metadata.name.as_deref().unwrap_or("waypoint");
-                    println!("  {} is ready", name);
+                    info!("  {} is ready", name);
                     return Ok(());
                 }
             }
@@ -320,7 +321,7 @@ async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
 }
 
 async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {
-    println!("Verifying bilateral agreements...");
+    info!("Verifying bilateral agreements...");
 
     let curl_check = |from: &str, to: &str, port: u16| -> String {
         run_cmd_allow_fail("kubectl", &[
@@ -336,18 +337,18 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     if code == "403" {
         return Err("sonarr->jellyfin blocked unexpectedly".into());
     }
-    println!("  sonarr->jellyfin: {} (allowed)", code);
+    info!("  sonarr->jellyfin: {} (allowed)", code);
 
     // sonarr -> nzbget (allowed)
     let code = curl_check("sonarr", "nzbget", 6789);
     if code == "403" {
         return Err("sonarr->nzbget blocked unexpectedly".into());
     }
-    println!("  sonarr->nzbget: {} (allowed)", code);
+    info!("  sonarr->nzbget: {} (allowed)", code);
 
     // jellyfin -> sonarr (should be blocked)
     let code = curl_check("jellyfin", "sonarr", 8989);
-    println!("  jellyfin->sonarr: {} (expected 403)", code);
+    info!("  jellyfin->sonarr: {} (expected 403)", code);
 
     Ok(())
 }
@@ -375,9 +376,9 @@ async fn cleanup(kubeconfig_path: &str) {
 // =============================================================================
 
 pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> {
-    println!("\n========================================");
-    println!("Media Server E2E Test");
-    println!("========================================\n");
+    info!("\n========================================");
+    info!("Media Server E2E Test");
+    info!("========================================\n");
 
     deploy_media_services(kubeconfig_path).await?;
     wait_for_pods(kubeconfig_path).await?;
@@ -387,9 +388,9 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     wait_for_waypoint(kubeconfig_path).await?;
     verify_bilateral_agreements(kubeconfig_path).await?;
 
-    println!("\n========================================");
-    println!("Media Server E2E Test: PASSED");
-    println!("========================================\n");
+    info!("\n========================================");
+    info!("Media Server E2E Test: PASSED");
+    info!("========================================\n");
 
     Ok(())
 }

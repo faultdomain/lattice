@@ -683,14 +683,10 @@ impl AgentClient {
     /// 2. Installs cert-manager from local helm chart
     /// 3. Runs clusterctl init with air-gapped config (kubeadm + RKE2 providers)
     async fn install_capi() -> Result<String, std::io::Error> {
-        use crate::capi::{
-            ensure_capi_installed, ensure_provider_credentials, CapiProviderConfig,
-            ClusterctlInstaller,
-        };
+        use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
         use kube::api::ListParams;
-        use lattice_common::crd::LatticeCluster;
+        use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
 
-        // Read provider from LatticeCluster CRD - this is the source of truth
         let client = kube::Client::try_default()
             .await
             .map_err(|e| std::io::Error::other(format!("failed to create kube client: {}", e)))?;
@@ -711,12 +707,33 @@ impl AgentClient {
 
         info!(infrastructure = %provider_str, "Installing CAPI providers");
 
-        // Copy credentials from lattice-system to provider namespace
-        ensure_provider_credentials(&client, infrastructure)
-            .await
-            .map_err(|e| {
-                std::io::Error::other(format!("Failed to copy provider credentials: {}", e))
+        // Copy credentials from CloudProvider to CAPI provider namespace
+        if infrastructure != ProviderType::Docker {
+            let cloud_providers: kube::Api<CloudProvider> =
+                kube::Api::namespaced(client.clone(), "lattice-system");
+            let cp = cloud_providers
+                .get(&cluster.spec.provider_ref)
+                .await
+                .map_err(|e| {
+                    std::io::Error::other(format!(
+                        "CloudProvider '{}' not found: {}",
+                        cluster.spec.provider_ref, e
+                    ))
+                })?;
+
+            let secret_ref = cp.spec.credentials_secret_ref.as_ref().ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "CloudProvider '{}' missing credentials_secret_ref",
+                    cluster.spec.provider_ref
+                ))
             })?;
+
+            crate::capi::copy_credentials_to_provider_namespace(&client, infrastructure, secret_ref)
+                .await
+                .map_err(|e| {
+                    std::io::Error::other(format!("Failed to copy provider credentials: {}", e))
+                })?;
+        }
 
         let config = CapiProviderConfig::new(infrastructure)
             .map_err(|e| std::io::Error::other(format!("Failed to create CAPI config: {}", e)))?;

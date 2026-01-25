@@ -30,9 +30,7 @@ use lattice_proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand
 
 use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
-use crate::capi::{
-    ensure_capi_installed, ensure_provider_credentials, CapiInstaller, CapiProviderConfig,
-};
+use crate::capi::{ensure_capi_installed, CapiInstaller, CapiProviderConfig};
 use crate::parent::ParentServers;
 use crate::provider::{
     create_provider, pool_resource_suffix, CAPIManifest, CAPI_CLUSTER_API_VERSION,
@@ -131,6 +129,14 @@ pub trait KubeClient: Send + Sync {
 
     /// List all LatticeCluster resources
     async fn list_clusters(&self) -> Result<Vec<LatticeCluster>, Error>;
+
+    /// Get a CloudProvider by name
+    ///
+    /// CloudProviders are namespaced in lattice-system.
+    async fn get_cloud_provider(
+        &self,
+        name: &str,
+    ) -> Result<Option<lattice_common::crd::CloudProvider>, Error>;
 }
 
 /// Trait abstracting CAPI resource operations
@@ -675,6 +681,21 @@ impl KubeClient for KubeClientImpl {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
         let list = api.list(&Default::default()).await?;
         Ok(list.items)
+    }
+
+    async fn get_cloud_provider(
+        &self,
+        name: &str,
+    ) -> Result<Option<lattice_common::crd::CloudProvider>, Error> {
+        use lattice_common::crd::CloudProvider;
+
+        let api: Api<CloudProvider> =
+            Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        match api.get(name).await {
+            Ok(cp) => Ok(Some(cp)),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -1712,11 +1733,36 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 return try_transition_to_ready(&cluster, &ctx, true).await;
             }
 
-            // Copy provider credentials from lattice-system to provider namespace
-            // This must happen before clusterctl init
+            // Look up the CloudProvider referenced by provider_ref
             let provider_type = cluster.spec.provider.provider_type();
-            if let Some(ref client) = ctx.client {
-                ensure_provider_credentials(client, provider_type).await?;
+            let cloud_provider = ctx
+                .kube
+                .get_cloud_provider(&cluster.spec.provider_ref)
+                .await?
+                .ok_or_else(|| {
+                    Error::validation(format!(
+                        "CloudProvider '{}' not found",
+                        cluster.spec.provider_ref
+                    ))
+                })?;
+
+            // Validate CloudProvider has credentials for non-Docker providers
+            if provider_type != lattice_common::crd::ProviderType::Docker {
+                if cloud_provider.spec.credentials_secret_ref.is_none() {
+                    return Err(Error::validation(format!(
+                        "CloudProvider '{}' requires credentials_secret_ref for {} provider",
+                        cluster.spec.provider_ref, provider_type
+                    )));
+                }
+            }
+
+            // Copy provider credentials from CloudProvider's secret to provider namespace
+            // This must happen before clusterctl init
+            if let (Some(ref client), Some(ref secret_ref)) =
+                (&ctx.client, &cloud_provider.spec.credentials_secret_ref)
+            {
+                crate::capi::copy_credentials_to_provider_namespace(client, provider_type, secret_ref)
+                    .await?;
             }
 
             // Ensure CAPI is installed before provisioning
@@ -2962,6 +3008,8 @@ mod tests {
         /// Creates a context that captures status updates for later verification.
         /// Use this when you need to verify WHAT phase was set, not HOW it was set.
         fn mock_context_with_status_capture() -> (Arc<Context>, StatusCapture) {
+            use lattice_common::crd::{CloudProvider, CloudProviderSpec, CloudProviderType};
+
             let capture = StatusCapture::new();
             let capture_clone = capture.clone();
 
@@ -2973,6 +3021,21 @@ mod tests {
             mock.expect_ensure_namespace().returning(|_| Ok(()));
             // Non-self clusters get a finalizer added on first reconcile
             mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
+            // Return a Docker CloudProvider (no credentials needed)
+            mock.expect_get_cloud_provider().returning(|_| {
+                Ok(Some(CloudProvider::new(
+                    "test-provider",
+                    CloudProviderSpec {
+                        provider_type: CloudProviderType::Docker,
+                        region: None,
+                        credentials_secret_ref: None,
+                        aws: None,
+                        proxmox: None,
+                        openstack: None,
+                        labels: Default::default(),
+                    },
+                )))
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
@@ -2989,6 +3052,8 @@ mod tests {
 
         /// Creates a context for read-only scenarios where no status updates happen.
         fn mock_context_readonly() -> Arc<Context> {
+            use lattice_common::crd::{CloudProvider, CloudProviderSpec, CloudProviderType};
+
             let mut mock = MockKubeClient::new();
             // Default expectations for node operations (Ready phase)
             // Return 2 workers to match sample_cluster spec (so we get 60s requeue)
@@ -2998,6 +3063,21 @@ mod tests {
             mock.expect_taint_control_plane_nodes().returning(|| Ok(()));
             // Non-self clusters get a finalizer added on first reconcile
             mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
+            // Return a Docker CloudProvider (no credentials needed)
+            mock.expect_get_cloud_provider().returning(|_| {
+                Ok(Some(CloudProvider::new(
+                    "test-provider",
+                    CloudProviderSpec {
+                        provider_type: CloudProviderType::Docker,
+                        region: None,
+                        credentials_secret_ref: None,
+                        aws: None,
+                        proxmox: None,
+                        openstack: None,
+                        labels: Default::default(),
+                    },
+                )))
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
@@ -3016,6 +3096,8 @@ mod tests {
 
         /// Creates a context where infrastructure reports ready.
         fn mock_context_infra_ready_with_capture() -> (Arc<Context>, StatusCapture) {
+            use lattice_common::crd::{CloudProvider, CloudProviderSpec, CloudProviderType};
+
             let capture = StatusCapture::new();
             let capture_clone = capture.clone();
 
@@ -3026,6 +3108,21 @@ mod tests {
             });
             // Non-self clusters get a finalizer added on first reconcile
             mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
+            // Return a Docker CloudProvider (no credentials needed)
+            mock.expect_get_cloud_provider().returning(|_| {
+                Ok(Some(CloudProvider::new(
+                    "test-provider",
+                    CloudProviderSpec {
+                        provider_type: CloudProviderType::Docker,
+                        region: None,
+                        credentials_secret_ref: None,
+                        aws: None,
+                        proxmox: None,
+                        openstack: None,
+                        labels: Default::default(),
+                    },
+                )))
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
@@ -3173,12 +3270,28 @@ mod tests {
         /// so the controller can apply exponential backoff.
         #[tokio::test]
         async fn story_kube_api_errors_trigger_retry() {
+            use lattice_common::crd::{CloudProvider, CloudProviderSpec, CloudProviderType};
+
             let cluster = Arc::new(sample_cluster("error-cluster"));
 
             let mut mock = MockKubeClient::new();
             mock.expect_patch_status()
                 .returning(|_, _| Err(Error::provider("connection refused".to_string())));
             mock.expect_ensure_namespace().returning(|_| Ok(()));
+            mock.expect_get_cloud_provider().returning(|_| {
+                Ok(Some(CloudProvider::new(
+                    "test-provider",
+                    CloudProviderSpec {
+                        provider_type: CloudProviderType::Docker,
+                        region: None,
+                        credentials_secret_ref: None,
+                        aws: None,
+                        proxmox: None,
+                        openstack: None,
+                        labels: Default::default(),
+                    },
+                )))
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
@@ -3203,10 +3316,26 @@ mod tests {
         /// error policy can handle retries.
         #[tokio::test]
         async fn story_capi_failures_trigger_retry() {
+            use lattice_common::crd::{CloudProvider, CloudProviderSpec, CloudProviderType};
+
             let cluster = Arc::new(sample_cluster("capi-error-cluster"));
 
             let mut mock = MockKubeClient::new();
             mock.expect_ensure_namespace().returning(|_| Ok(()));
+            mock.expect_get_cloud_provider().returning(|_| {
+                Ok(Some(CloudProvider::new(
+                    "test-provider",
+                    CloudProviderSpec {
+                        provider_type: CloudProviderType::Docker,
+                        region: None,
+                        credentials_secret_ref: None,
+                        aws: None,
+                        proxmox: None,
+                        openstack: None,
+                        labels: Default::default(),
+                    },
+                )))
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
@@ -3670,6 +3799,7 @@ mod tests {
     /// clusterctl init is always called (it's idempotent).
     mod capi_installation_flow {
         use super::*;
+        use crate::crd::{CloudProvider, CloudProviderSpec, CloudProviderType};
 
         use std::sync::{Arc as StdArc, Mutex};
 
@@ -3692,6 +3822,20 @@ mod tests {
                 Ok(())
             });
             mock.expect_ensure_namespace().returning(|_| Ok(()));
+            mock.expect_get_cloud_provider().returning(|_| {
+                Ok(Some(CloudProvider::new(
+                    "docker",
+                    CloudProviderSpec {
+                        provider_type: CloudProviderType::Docker,
+                        region: None,
+                        credentials_secret_ref: None,
+                        aws: None,
+                        proxmox: None,
+                        openstack: None,
+                        labels: Default::default(),
+                    },
+                )))
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
@@ -3720,7 +3864,21 @@ mod tests {
         async fn story_capi_installation_failure_propagates_error() {
             let cluster = Arc::new(sample_cluster("install-fails"));
 
-            let mock = MockKubeClient::new();
+            let mut mock = MockKubeClient::new();
+            mock.expect_get_cloud_provider().returning(|_| {
+                Ok(Some(CloudProvider::new(
+                    "docker",
+                    CloudProviderSpec {
+                        provider_type: CloudProviderType::Docker,
+                        region: None,
+                        credentials_secret_ref: None,
+                        aws: None,
+                        proxmox: None,
+                        openstack: None,
+                        labels: Default::default(),
+                    },
+                )))
+            });
             let capi_mock = MockCAPIClient::new();
 
             let mut installer = MockCapiInstaller::new();

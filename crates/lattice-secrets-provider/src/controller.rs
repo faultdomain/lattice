@@ -251,6 +251,14 @@ async fn update_status(
     phase: SecretsProviderPhase,
     message: Option<String>,
 ) -> Result<(), ReconcileError> {
+    // Check if status already matches - avoid update loop
+    if let Some(ref current_status) = sp.status {
+        if current_status.phase == phase && current_status.message == message {
+            debug!(secrets_provider = %sp.name_any(), "Status unchanged, skipping update");
+            return Ok(());
+        }
+    }
+
     let name = sp.name_any();
     let namespace = sp
         .namespace()

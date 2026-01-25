@@ -27,7 +27,10 @@ use lattice_operator::bootstrap::{
     proxmox_credentials_manifests, AwsCredentials, DefaultManifestGenerator, ManifestConfig,
     ManifestGenerator, ProviderCredentials,
 };
-use lattice_operator::crd::{BootstrapProvider, LatticeCluster, ProviderType};
+use lattice_operator::crd::{
+    BootstrapProvider, CloudProvider, CloudProviderSpec, CloudProviderType, LatticeCluster,
+    ProviderType, SecretRef,
+};
 use lattice_operator::fips;
 
 use crate::{Error, Result};
@@ -276,43 +279,34 @@ impl Installer {
     }
 
     async fn run_bootstrap(&self) -> Result<()> {
-        info!("[Phase 1] Creating kind bootstrap cluster...");
+        info!("[Phase 1/8] Creating kind bootstrap cluster...");
         self.create_kind_cluster().await?;
 
         let bootstrap_client = self.bootstrap_client().await?;
 
-        match self.provider() {
-            ProviderType::Proxmox => {
-                info!("[Phase 1.5] Creating Proxmox credentials...");
-                self.create_proxmox_credentials(&bootstrap_client).await?;
-            }
-            ProviderType::Aws => {
-                info!("[Phase 1.5] Creating AWS credentials...");
-                self.create_aws_credentials(&bootstrap_client).await?;
-            }
-            _ => {}
-        }
-
-        info!("[Phase 2] Deploying Lattice operator...");
+        info!("[Phase 2/8] Deploying Lattice operator...");
         self.deploy_lattice_operator(&bootstrap_client).await?;
 
-        // Note: AWS addons (CCM/CSI) are now included in the main CRS via generate_all_manifests()
+        // CloudProvider must be created AFTER operator deploys CRDs
+        info!("[Phase 3/8] Creating CloudProvider and credentials...");
+        self.create_cloud_provider_with_credentials(&bootstrap_client)
+            .await?;
 
-        info!("[Phase 3] Creating management cluster LatticeCluster CR...");
+        info!("[Phase 4/8] Creating management cluster LatticeCluster CR...");
         self.create_management_cluster_crd(&bootstrap_client)
             .await?;
 
-        info!("[Phase 4] Waiting for management cluster to be provisioned...");
+        info!("[Phase 5/8] Waiting for management cluster to be provisioned...");
         self.wait_for_management_cluster(&bootstrap_client).await?;
 
-        info!("[Phase 5] Applying bootstrap manifests to management cluster...");
+        info!("[Phase 6/8] Applying bootstrap manifests to management cluster...");
         self.apply_bootstrap_to_management(&bootstrap_client)
             .await?;
 
-        info!("[Phase 6] Pivoting CAPI resources to management cluster...");
+        info!("[Phase 7/8] Pivoting CAPI resources to management cluster...");
         self.pivot_capi_resources().await?;
 
-        info!("[Phase 7] Deleting bootstrap cluster...");
+        info!("[Phase 8/8] Deleting bootstrap cluster...");
         self.delete_kind_cluster().await?;
 
         Ok(())
@@ -422,6 +416,7 @@ impl Installer {
             .await;
 
         let provider_str = self.provider().to_string();
+        let provider_ref = &self.cluster.spec.provider_ref;
         let operator_manifests: Vec<String> = all_manifests
             .iter()
             .filter(|m: &&String| m.starts_with("{"))
@@ -429,7 +424,7 @@ impl Installer {
                 if fips::is_deployment(s) {
                     let with_fips = fips::add_fips_relax_env(s);
                     let with_root = fips::add_root_install_env(&with_fips);
-                    add_bootstrap_env(&with_root, &provider_str)
+                    add_bootstrap_env(&with_root, &provider_str, provider_ref)
                 } else {
                     s.to_string()
                 }
@@ -736,6 +731,26 @@ impl Installer {
         .cmd_err()
     }
 
+    /// Create CloudProvider and provider-specific credentials.
+    ///
+    /// Must be called AFTER operator deploys CRDs but BEFORE creating LatticeCluster.
+    /// The operator waits for this CloudProvider to install CAPI providers.
+    async fn create_cloud_provider_with_credentials(&self, client: &Client) -> Result<()> {
+        match self.provider() {
+            ProviderType::Proxmox => self.create_proxmox_credentials(client).await,
+            ProviderType::Aws => self.create_aws_credentials(client).await,
+            ProviderType::Docker => {
+                self.create_cloud_provider(client, CloudProviderType::Docker, "")
+                    .await
+            }
+            ProviderType::OpenStack | ProviderType::Gcp | ProviderType::Azure => {
+                // TODO: Add credential support for these providers
+                info!("Provider {:?} does not require credentials setup", self.provider());
+                Ok(())
+            }
+        }
+    }
+
     fn get_proxmox_credentials() -> Result<(String, String, String)> {
         let url = std::env::var("PROXMOX_URL").map_err(|_| {
             Error::validation("PROXMOX_URL environment variable required for Proxmox provider")
@@ -753,10 +768,15 @@ impl Installer {
         let (url, token, secret) = Self::get_proxmox_credentials()?;
         info!("PROXMOX_URL: {}", url);
 
+        // Create credentials secret
         let manifests = proxmox_credentials_manifests(&url, &token, &secret);
         kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
             .await
-            .cmd_err()
+            .cmd_err()?;
+
+        // Create CloudProvider referencing the credentials
+        self.create_cloud_provider(client, CloudProviderType::Proxmox, "proxmox-credentials")
+            .await
     }
 
     fn get_aws_credentials() -> Result<AwsCredentials> {
@@ -785,10 +805,71 @@ impl Installer {
         let creds = Self::get_aws_credentials()?;
         info!("AWS_REGION: {}", creds.region);
 
+        // Create credentials secret
         let manifests = aws_credentials_manifests(&creds);
         kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
             .await
-            .cmd_err()
+            .cmd_err()?;
+
+        // Create CloudProvider referencing the credentials
+        self.create_cloud_provider(client, CloudProviderType::AWS, "aws-credentials")
+            .await
+    }
+
+    /// Create a CloudProvider CRD referencing credentials
+    async fn create_cloud_provider(
+        &self,
+        client: &Client,
+        provider_type: CloudProviderType,
+        secret_name: &str,
+    ) -> Result<()> {
+        use kube::api::{Api, Patch, PatchParams};
+
+        let provider_ref = &self.cluster.spec.provider_ref;
+        let region = self
+            .cluster
+            .spec
+            .provider
+            .config
+            .aws
+            .as_ref()
+            .map(|aws| aws.region.clone());
+
+        // Only set credentials_secret_ref if a secret name is provided
+        let credentials_secret_ref = if secret_name.is_empty() {
+            None
+        } else {
+            Some(SecretRef {
+                name: secret_name.to_string(),
+                namespace: "lattice-system".to_string(),
+            })
+        };
+
+        let mut cloud_provider = CloudProvider::new(
+            provider_ref,
+            CloudProviderSpec {
+                provider_type,
+                region,
+                credentials_secret_ref,
+                aws: None,
+                proxmox: None,
+                openstack: None,
+                labels: Default::default(),
+            },
+        );
+        cloud_provider.metadata.namespace = Some("lattice-system".to_string());
+
+        let api: Api<CloudProvider> = Api::namespaced(client.clone(), "lattice-system");
+        api.patch(
+            provider_ref,
+            &PatchParams::apply("lattice-cli").force(),
+            &Patch::Apply(&cloud_provider),
+        )
+        .await
+        .map_err(|e| Error::command_failed(format!("Failed to create CloudProvider: {}", e)))?;
+
+        info!("Created CloudProvider '{}'", provider_ref);
+        Ok(())
     }
 
     async fn pivot_capi_resources(&self) -> Result<()> {
@@ -855,19 +936,45 @@ impl Installer {
 
         let mut child = command.spawn()?;
 
-        if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Some(line) = lines.next_line().await? {
-                info!("{}", line);
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        // Spawn tasks to read stdout and stderr concurrently
+        let stdout_task = tokio::spawn(async move {
+            let mut lines_out = Vec::new();
+            if let Some(stdout) = stdout {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    info!("{}", line);
+                    lines_out.push(line);
+                }
             }
-        }
+            lines_out
+        });
+
+        let stderr_task = tokio::spawn(async move {
+            let mut lines_err = Vec::new();
+            if let Some(stderr) = stderr {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    lines_err.push(line);
+                }
+            }
+            lines_err
+        });
 
         let status = child.wait().await?;
+        let _ = stdout_task.await;
+        let stderr_lines = stderr_task.await.unwrap_or_default();
+
         if !status.success() {
+            let stderr_output = stderr_lines.join("\n");
             return Err(Error::command_failed(format!(
-                "clusterctl {} failed",
-                args.join(" ")
+                "clusterctl {} failed: {}",
+                args.join(" "),
+                stderr_output
             )));
         }
 
@@ -909,7 +1016,7 @@ async fn get_latticecluster_phase(client: &Client, name: &str) -> Result<String>
 }
 
 /// Add bootstrap cluster environment variables to a deployment.
-fn add_bootstrap_env(deployment_json: &str, provider: &str) -> String {
+fn add_bootstrap_env(deployment_json: &str, provider: &str, provider_ref: &str) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) else {
         return deployment_json.to_string();
     };
@@ -943,6 +1050,13 @@ fn add_bootstrap_env(deployment_json: &str, provider: &str) -> String {
         {
             env.push(serde_json::json!({"name": "LATTICE_PROVIDER", "value": provider}));
         }
+
+        if !env
+            .iter()
+            .any(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER_REF"))
+        {
+            env.push(serde_json::json!({"name": "LATTICE_PROVIDER_REF", "value": provider_ref}));
+        }
     }
 
     serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
@@ -954,15 +1068,16 @@ pub async fn run(args: InstallArgs) -> Result<()> {
     if args.dry_run {
         info!("Dry run for cluster: {}", installer.cluster_name());
         info!("Provider: {}", installer.provider());
-        info!("Steps:");
-        info!("  1. Create bootstrap kind cluster");
-        info!("  2. Install CAPI controllers and Lattice operator");
-        info!("  3. Apply LatticeCluster: {}", args.config_file.display());
-        info!("  4. Wait for cluster provisioning");
-        info!("  5. Pivot CAPI resources to make cluster self-managing");
-        info!("  6. Delete bootstrap cluster");
+        info!("1. Create bootstrap kind cluster");
+        info!("2. Deploy Lattice operator (installs CRDs, CAPI)");
+        info!("3. Create CloudProvider and credentials");
+        info!("4. Apply LatticeCluster: {}", args.config_file.display());
+        info!("5. Wait for cluster provisioning");
+        info!("6. Apply bootstrap manifests to management cluster");
+        info!("7. Pivot CAPI resources to make cluster self-managing");
+        info!("8. Delete bootstrap cluster");
         if let Some(out) = &args.kubeconfig_out {
-            info!("  7. Write kubeconfig to: {}", out.display());
+            info!("9. Write kubeconfig to: {}", out.display());
         }
         return Ok(());
     }
@@ -1029,7 +1144,7 @@ mod tests {
             }
         }"#;
 
-        let result = add_bootstrap_env(deployment, "proxmox");
+        let result = add_bootstrap_env(deployment, "proxmox", "proxmox");
         let parsed: serde_json::Value =
             serde_json::from_str(&result).expect("result should be valid JSON");
 
@@ -1070,7 +1185,7 @@ mod tests {
             }
         }"#;
 
-        let result = add_bootstrap_env(deployment, "docker");
+        let result = add_bootstrap_env(deployment, "docker", "docker");
         let parsed: serde_json::Value =
             serde_json::from_str(&result).expect("result should be valid JSON");
 
@@ -1096,7 +1211,7 @@ mod tests {
     #[test]
     fn test_add_bootstrap_env_invalid_json() {
         let invalid = "not json";
-        let result = add_bootstrap_env(invalid, "docker");
+        let result = add_bootstrap_env(invalid, "docker", "docker");
         assert_eq!(result, invalid);
     }
 

@@ -8,6 +8,8 @@ use std::process::Command;
 use std::time::Duration;
 #[cfg(feature = "provider-e2e")]
 use tokio::time::sleep;
+#[cfg(feature = "provider-e2e")]
+use tracing::info;
 
 #[cfg(feature = "provider-e2e")]
 use kube::config::{KubeConfigOptions, Kubeconfig};
@@ -62,7 +64,7 @@ pub const DOCKER_KIND_GATEWAY: &str = "172.18.0.1";
 /// This function ensures the network exists with the pinned subnet.
 #[cfg(feature = "provider-e2e")]
 pub fn ensure_docker_network() -> Result<(), String> {
-    println!(
+    info!(
         "  Ensuring Docker 'kind' network has correct subnet ({})...",
         DOCKER_KIND_SUBNET
     );
@@ -82,11 +84,11 @@ pub fn ensure_docker_network() -> Result<(), String> {
         Ok(output) if output.status.success() => {
             let current_subnet = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if current_subnet == DOCKER_KIND_SUBNET {
-                println!("  Docker 'kind' network already has correct subnet");
+                info!("  Docker 'kind' network already has correct subnet");
                 return Ok(());
             }
             // Network exists but with wrong subnet - need to recreate
-            println!(
+            info!(
                 "  Docker 'kind' network has wrong subnet ({}), recreating...",
                 current_subnet
             );
@@ -114,7 +116,7 @@ pub fn ensure_docker_network() -> Result<(), String> {
         }
         _ => {
             // Network doesn't exist
-            println!("  Docker 'kind' network doesn't exist, creating...");
+            info!("  Docker 'kind' network doesn't exist, creating...");
         }
     }
 
@@ -131,7 +133,7 @@ pub fn ensure_docker_network() -> Result<(), String> {
         ],
     )?;
 
-    println!(
+    info!(
         "  Docker 'kind' network created with subnet {}",
         DOCKER_KIND_SUBNET
     );
@@ -224,11 +226,11 @@ pub fn extract_docker_cluster_kubeconfig(
             cluster_name
         ));
     }
-    println!("  Found control plane container: {}", cp_container);
+    info!("  Found control plane container: {}", cp_container);
 
     // Extract kubeconfig from the container (with retries - file may not exist immediately)
     let kubeconfig_container_path = get_kubeconfig_path_for_bootstrap(bootstrap);
-    println!("  Extracting kubeconfig from {}", kubeconfig_container_path);
+    info!("  Extracting kubeconfig from {}", kubeconfig_container_path);
 
     let mut kubeconfig = String::new();
     let max_retries = 60; // 5 minutes with 5s intervals
@@ -248,7 +250,7 @@ pub fn extract_docker_cluster_kubeconfig(
                         max_retries, e
                     ));
                 }
-                println!(
+                info!(
                     "  Waiting for kubeconfig to be available (attempt {}/{})...",
                     attempt, max_retries
                 );
@@ -269,7 +271,7 @@ pub fn extract_docker_cluster_kubeconfig(
         let parts: Vec<&str> = port_output.trim().split(':').collect();
         if parts.len() == 2 {
             let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
-            println!("  Patching kubeconfig server to {}", localhost_endpoint);
+            info!("  Patching kubeconfig server to {}", localhost_endpoint);
             let patched = kubeconfig
                 .lines()
                 .map(|line| {
@@ -285,7 +287,7 @@ pub fn extract_docker_cluster_kubeconfig(
                 .map_err(|e| format!("Failed to write patched kubeconfig: {}", e))?;
         }
     } else {
-        println!(
+        info!(
             "  Warning: Could not find load balancer port mapping for {}",
             lb_container
         );
@@ -335,12 +337,12 @@ pub async fn watch_cluster_phases(
                     .unwrap_or(ClusterPhase::Pending);
 
                 if last_phase.as_ref() != Some(&current_phase) {
-                    println!("Cluster {} phase: {:?}", cluster_name, current_phase);
+                    info!("Cluster {} phase: {:?}", cluster_name, current_phase);
                     last_phase = Some(current_phase.clone());
                 }
 
                 if matches!(current_phase, ClusterPhase::Ready) {
-                    println!("Cluster {} reached Ready state!", cluster_name);
+                    info!("Cluster {} reached Ready state!", cluster_name);
                     return Ok(());
                 }
 
@@ -354,7 +356,7 @@ pub async fn watch_cluster_phases(
                 }
             }
             Err(e) => {
-                println!(
+                info!(
                     "Warning: failed to get cluster {} status: {}",
                     cluster_name, e
                 );
@@ -412,7 +414,7 @@ pub async fn watch_cluster_phases_with_kubeconfig(
                     .unwrap_or(ClusterPhase::Pending);
 
                 if last_phase.as_ref() != Some(&current_phase) {
-                    println!("Cluster {} phase: {:?}", cluster_name, current_phase);
+                    info!("Cluster {} phase: {:?}", cluster_name, current_phase);
                     last_phase = Some(current_phase.clone());
                 }
 
@@ -428,7 +430,7 @@ pub async fn watch_cluster_phases_with_kubeconfig(
                         cluster_name,
                         kubeconfig_output_path,
                     ) {
-                        println!(
+                        info!(
                             "Kubeconfig extracted to {} (before pivot)",
                             kubeconfig_output_path
                         );
@@ -437,7 +439,7 @@ pub async fn watch_cluster_phases_with_kubeconfig(
                 }
 
                 if matches!(current_phase, ClusterPhase::Ready) {
-                    println!("Cluster {} reached Ready state!", cluster_name);
+                    info!("Cluster {} reached Ready state!", cluster_name);
                     if !kubeconfig_extracted {
                         return Err(format!(
                             "Cluster {} is Ready but kubeconfig was not extracted before pivot",
@@ -457,7 +459,7 @@ pub async fn watch_cluster_phases_with_kubeconfig(
                 }
             }
             Err(e) => {
-                println!(
+                info!(
                     "Warning: failed to get cluster {} status: {}",
                     cluster_name, e
                 );
@@ -554,7 +556,7 @@ pub async fn watch_worker_scaling(
         let ready_workers = nodes_output.lines().filter(|line| *line == "True").count() as u32;
 
         if last_count != Some(ready_workers) {
-            println!(
+            info!(
                 "    {} ready workers on {} (target: {})",
                 ready_workers, cluster_name, expected_workers
             );
@@ -562,7 +564,7 @@ pub async fn watch_worker_scaling(
         }
 
         if ready_workers >= expected_workers {
-            println!(
+            info!(
                 "    SUCCESS: {} has {} ready workers!",
                 cluster_name, ready_workers
             );
@@ -610,7 +612,7 @@ pub fn service_fixtures_dir() -> PathBuf {
 /// Build and push the lattice Docker image
 #[cfg(feature = "provider-e2e")]
 pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
-    println!("  Building lattice Docker image...");
+    info!("  Building lattice Docker image...");
 
     let output = Command::new("./scripts/dev/docker-build.sh")
         .args(["-t", image])
@@ -626,8 +628,8 @@ pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
         ));
     }
 
-    println!("  Image built successfully");
-    println!("  Pushing image to registry...");
+    info!("  Image built successfully");
+    info!("  Pushing image to registry...");
 
     let output = Command::new("docker")
         .args(["push", image])
@@ -641,7 +643,7 @@ pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
         ));
     }
 
-    println!("  Image pushed successfully");
+    info!("  Image pushed successfully");
     Ok(())
 }
 
@@ -703,7 +705,7 @@ pub fn load_cluster_config(
     let cluster: LatticeCluster = serde_yaml::from_str(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
 
-    println!("  Loaded cluster config: {}", path.display());
+    info!("  Loaded cluster config: {}", path.display());
     Ok((content, cluster))
 }
 

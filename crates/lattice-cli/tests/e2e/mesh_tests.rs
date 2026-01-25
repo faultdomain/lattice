@@ -15,6 +15,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, PostParams};
 use rand::prelude::*;
 use tokio::time::sleep;
+use tracing::info;
 
 use lattice_operator::crd::{
     ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalService,
@@ -527,7 +528,7 @@ fn create_cache() -> LatticeService {
 }
 
 async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
-    println!("  Creating namespace {}...", TEST_SERVICES_NAMESPACE);
+    info!("  Creating namespace {}...", TEST_SERVICES_NAMESPACE);
     let _ = run_cmd(
         "kubectl",
         &[
@@ -542,43 +543,43 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::namespaced(client, TEST_SERVICES_NAMESPACE);
 
-    println!("  [Layer 3] Deploying backend services...");
+    info!("  [Layer 3] Deploying backend services...");
     for (name, svc) in [
         ("db-users", create_db_users()),
         ("db-orders", create_db_orders()),
         ("cache", create_cache()),
     ] {
-        println!("    Deploying {}...", name);
+        info!("    Deploying {}...", name);
         api.create(&PostParams::default(), &svc)
             .await
             .map_err(|e| format!("Failed to create {}: {}", name, e))?;
     }
 
-    println!("  [Layer 2] Deploying API services...");
+    info!("  [Layer 2] Deploying API services...");
     for (name, svc) in [
         ("api-gateway", create_api_gateway()),
         ("api-users", create_api_users()),
         ("api-orders", create_api_orders()),
     ] {
-        println!("    Deploying {}...", name);
+        info!("    Deploying {}...", name);
         api.create(&PostParams::default(), &svc)
             .await
             .map_err(|e| format!("Failed to create {}: {}", name, e))?;
     }
 
-    println!("  [Layer 1] Deploying frontend services...");
+    info!("  [Layer 1] Deploying frontend services...");
     for (name, svc) in [
         ("frontend-web", create_frontend_web()),
         ("frontend-mobile", create_frontend_mobile()),
         ("frontend-admin", create_frontend_admin()),
     ] {
-        println!("    Deploying {}...", name);
+        info!("    Deploying {}...", name);
         api.create(&PostParams::default(), &svc)
             .await
             .map_err(|e| format!("Failed to create {}: {}", name, e))?;
     }
 
-    println!("  All {} services deployed!", TOTAL_SERVICES);
+    info!("  All {} services deployed!", TOTAL_SERVICES);
     sleep(Duration::from_secs(5)).await;
     Ok(())
 }
@@ -589,7 +590,7 @@ async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
     // +1 for the Istio ambient waypoint proxy pod created per namespace
     let expected_pods = TOTAL_SERVICES + 1;
 
-    println!("  Waiting for {} pods to be ready...", expected_pods);
+    info!("  Waiting for {} pods to be ready...", expected_pods);
 
     loop {
         if start.elapsed() > timeout {
@@ -614,10 +615,10 @@ async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
         );
 
         let running_count = pods_output.lines().filter(|l| *l == "Running").count();
-        println!("    {}/{} pods running", running_count, expected_pods);
+        info!("    {}/{} pods running", running_count, expected_pods);
 
         if running_count >= expected_pods {
-            println!("  All {} pods are running!", expected_pods);
+            info!("  All {} pods are running!", expected_pods);
             return Ok(());
         }
 
@@ -668,7 +669,7 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
         ("frontend-mobile", FRONTEND_MOBILE_EXPECTED),
         ("frontend-admin", FRONTEND_ADMIN_EXPECTED),
     ] {
-        println!("\n  Checking {} logs...", frontend_name);
+        info!("\n  Checking {} logs...", frontend_name);
 
         let logs = run_cmd(
             "kubectl",
@@ -714,7 +715,7 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
             let result_ok = actual_str == expected_str;
             let status = if result_ok { "PASS" } else { "FAIL" };
 
-            println!(
+            info!(
                 "    [{}] {} -> {}: {} (expected: {})",
                 status, frontend_name, target, actual_str, expected_str
             );
@@ -732,21 +733,21 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
     }
 
     let total_tests = total_pass + total_fail;
-    println!("\n  ========================================");
-    println!("  SERVICE MESH VERIFICATION SUMMARY");
-    println!("  ========================================");
-    println!("  Total tests: {}", total_tests);
-    println!(
+    info!("\n  ========================================");
+    info!("  SERVICE MESH VERIFICATION SUMMARY");
+    info!("  ========================================");
+    info!("  Total tests: {}", total_tests);
+    info!(
         "  Passed: {} ({:.1}%)",
         total_pass,
         (total_pass as f64 / total_tests as f64) * 100.0
     );
-    println!("  Failed: {}", total_fail);
+    info!("  Failed: {}", total_fail);
 
     if !failures.is_empty() {
-        println!("\n  Failures:");
+        info!("\n  Failures:");
         for failure in &failures {
-            println!("    - {}", failure);
+            info!("    - {}", failure);
         }
         return Err(format!(
             "Service mesh verification failed: {} of {} tests failed",
@@ -754,7 +755,7 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
         ));
     }
 
-    println!(
+    info!(
         "\n  SUCCESS: All {} bilateral agreement tests passed!",
         total_tests
     );
@@ -837,9 +838,9 @@ async fn check_no_incorrectly_allowed(
     }
 
     if !violations.is_empty() {
-        println!("\n  SECURITY VIOLATIONS DETECTED:");
+        info!("\n  SECURITY VIOLATIONS DETECTED:");
         for v in &violations {
-            println!("    {}", v);
+            info!("    {}", v);
         }
         return Err(format!(
             "Policy gaps detected: {} instances of incorrectly allowed traffic",
@@ -854,12 +855,12 @@ async fn check_no_incorrectly_allowed(
 ///
 /// The test runs traffic generators continuously until `stop_and_verify()` is called.
 pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, String> {
-    println!("\n[Mesh Test] Starting service mesh bilateral agreement test...\n");
+    info!("\n[Mesh Test] Starting service mesh bilateral agreement test...\n");
     deploy_test_services(kubeconfig_path).await?;
     wait_for_service_pods(kubeconfig_path).await?;
 
     // Wait for initial policy propagation
-    println!("  Waiting for initial policy propagation (30s)...");
+    info!("  Waiting for initial policy propagation (30s)...");
     sleep(Duration::from_secs(30)).await;
 
     Ok(MeshTestHandle {
@@ -872,7 +873,7 @@ pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, St
 pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let handle = start_mesh_test(kubeconfig_path).await?;
     // Additional wait for traffic patterns to stabilize
-    println!("  Waiting for traffic tests to complete (120s)...");
+    info!("  Waiting for traffic tests to complete (120s)...");
     sleep(Duration::from_secs(120)).await;
     handle.stop_and_verify().await
 }
@@ -942,7 +943,7 @@ impl RandomMesh {
         };
 
         let num_services = rng.gen_range(config.min_services..=config.max_services);
-        println!(
+        info!(
             "  Generating {} services across {} layers...",
             num_services, config.num_layers
         );
@@ -1184,9 +1185,9 @@ impl RandomMesh {
             .filter(|(_, _, a, _)| !*a)
             .collect();
 
-        println!("\n  === EXPECTED ALLOWED ({}) ===", allowed.len());
+        info!("\n  === EXPECTED ALLOWED ({}) ===", allowed.len());
         for (src, tgt, _, is_ext) in allowed.iter().take(20) {
-            println!(
+            info!(
                 "    {} -> {}{}",
                 src,
                 tgt,
@@ -1194,12 +1195,12 @@ impl RandomMesh {
             );
         }
         if allowed.len() > 20 {
-            println!("    ... and {} more", allowed.len() - 20);
+            info!("    ... and {} more", allowed.len() - 20);
         }
 
-        println!("\n  === EXPECTED BLOCKED ({}) ===", blocked.len());
+        info!("\n  === EXPECTED BLOCKED ({}) ===", blocked.len());
         for (src, tgt, _, is_ext) in blocked.iter().take(20) {
-            println!(
+            info!(
                 "    {} -> {}{}",
                 src,
                 tgt,
@@ -1207,9 +1208,9 @@ impl RandomMesh {
             );
         }
         if blocked.len() > 20 {
-            println!("    ... and {} more", blocked.len() - 20);
+            info!("    ... and {} more", blocked.len() - 20);
         }
-        println!();
+        info!();
     }
 
     fn create_lattice_service(&self, name: &str, namespace: &str) -> LatticeService {
@@ -1383,7 +1384,7 @@ impl RandomMesh {
 const RANDOM_MESH_NAMESPACE: &str = "random-mesh";
 
 async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<(), String> {
-    println!("  Creating namespace {}...", RANDOM_MESH_NAMESPACE);
+    info!("  Creating namespace {}...", RANDOM_MESH_NAMESPACE);
     let _ = run_cmd(
         "kubectl",
         &[
@@ -1398,7 +1399,7 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
     let client = client_from_kubeconfig(kubeconfig_path).await?;
 
     if !mesh.external_services.is_empty() {
-        println!(
+        info!(
             "  Deploying {} external services...",
             mesh.external_services.len()
         );
@@ -1416,7 +1417,7 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
     let api: Api<LatticeService> = Api::namespaced(client, RANDOM_MESH_NAMESPACE);
 
     for (layer_idx, layer) in mesh.layers.iter().enumerate().rev() {
-        println!(
+        info!(
             "  [Layer {}] Deploying {} services...",
             layer_idx,
             layer.len()
@@ -1430,7 +1431,7 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
         sleep(Duration::from_secs(2)).await;
     }
 
-    println!("  All {} services deployed!", mesh.services.len());
+    info!("  All {} services deployed!", mesh.services.len());
     Ok(())
 }
 
@@ -1440,7 +1441,7 @@ async fn wait_for_random_mesh_pods(mesh: &RandomMesh, kubeconfig_path: &str) -> 
     // +1 for the Istio ambient waypoint proxy pod created per namespace
     let expected_pods = mesh.services.len() + 1;
 
-    println!("  Waiting for {} pods to be ready...", expected_pods);
+    info!("  Waiting for {} pods to be ready...", expected_pods);
 
     loop {
         if start.elapsed() > timeout {
@@ -1465,7 +1466,7 @@ async fn wait_for_random_mesh_pods(mesh: &RandomMesh, kubeconfig_path: &str) -> 
         );
 
         let running = output.lines().filter(|l| l.trim() == "Running").count();
-        println!("    {}/{} pods running", running, expected_pods);
+        info!("    {}/{} pods running", running, expected_pods);
 
         if running >= expected_pods {
             return Ok(());
@@ -1491,7 +1492,7 @@ async fn verify_random_mesh_traffic(
         .map(|s| s.name.clone())
         .collect();
 
-    println!(
+    info!(
         "  Checking logs from {} traffic generators...",
         traffic_generators.len()
     );
@@ -1560,10 +1561,10 @@ async fn verify_random_mesh_traffic(
     let total = results.len();
     let passed = total - mismatches.len() - missing.len();
 
-    println!("\n  ========================================");
-    println!("  RANDOMIZED MESH VERIFICATION");
-    println!("  ========================================");
-    println!(
+    info!("\n  ========================================");
+    info!("  RANDOMIZED MESH VERIFICATION");
+    info!("  ========================================");
+    info!(
         "  Total: {}, Passed: {}, Mismatches: {}, Missing: {}",
         total,
         passed,
@@ -1573,21 +1574,21 @@ async fn verify_random_mesh_traffic(
 
     if !mismatches.is_empty() || !missing.is_empty() {
         if !mismatches.is_empty() {
-            println!("\n  MISMATCHES:");
+            info!("\n  MISMATCHES:");
             for m in mismatches.iter().take(20) {
-                println!("    {}", m);
+                info!("    {}", m);
             }
             if mismatches.len() > 20 {
-                println!("    ... and {} more", mismatches.len() - 20);
+                info!("    ... and {} more", mismatches.len() - 20);
             }
         }
         if !missing.is_empty() {
-            println!("\n  MISSING:");
+            info!("\n  MISSING:");
             for m in missing.iter().take(20) {
-                println!("    {}", m);
+                info!("    {}", m);
             }
             if missing.len() > 20 {
-                println!("    ... and {} more", missing.len() - 20);
+                info!("    ... and {} more", missing.len() - 20);
             }
         }
         return Err(format!(
@@ -1597,7 +1598,7 @@ async fn verify_random_mesh_traffic(
         ));
     }
 
-    println!("\n  SUCCESS: All {} tests passed!", total);
+    info!("\n  SUCCESS: All {} tests passed!", total);
     Ok(())
 }
 
@@ -1616,18 +1617,18 @@ impl RandomMeshTestHandle {
 
 /// Start the randomized mesh test and return a handle
 pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshTestHandle, String> {
-    println!("\n[Mesh Test] Starting randomized large-scale mesh test (10-30 services)...\n");
+    info!("\n[Mesh Test] Starting randomized large-scale mesh test (10-30 services)...\n");
 
     let mesh = RandomMesh::generate(&RandomMeshConfig::default());
-    println!("{}", mesh.stats());
+    info!("{}", mesh.stats());
     mesh.print_manifest();
 
     deploy_random_mesh(&mesh, kubeconfig_path).await?;
-    println!("\n  Waiting for pods...");
+    info!("\n  Waiting for pods...");
     wait_for_random_mesh_pods(&mesh, kubeconfig_path).await?;
 
     // Wait for initial policy propagation
-    println!("  Waiting for initial policy propagation (30s)...");
+    info!("  Waiting for initial policy propagation (30s)...");
     sleep(Duration::from_secs(30)).await;
 
     Ok(RandomMeshTestHandle {
@@ -1640,7 +1641,7 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let handle = start_random_mesh_test(kubeconfig_path).await?;
     // Additional wait for traffic patterns to stabilize
-    println!("\n  Waiting for traffic tests to complete (120s)...");
+    info!("\n  Waiting for traffic tests to complete (120s)...");
     sleep(Duration::from_secs(120)).await;
     handle.stop_and_verify().await
 }

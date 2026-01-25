@@ -12,9 +12,7 @@ use kube::{Api, Client, CustomResourceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lattice_operator::agent::client::{AgentClient, AgentClientConfig, AgentCredentials};
-use lattice_operator::capi::{
-    ensure_capi_installed, ensure_provider_credentials, CapiProviderConfig, ClusterctlInstaller,
-};
+use lattice_operator::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
 use lattice_operator::cloud_provider::{
     self as cloud_provider_ctrl, Context as CloudProviderContext,
 };
@@ -324,8 +322,15 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
 /// a LatticeCluster is reconciled (Phase 3).
 ///
 /// Uses LATTICE_PROVIDER env var to determine which infrastructure provider to install.
+/// Reads CloudProvider CRD (created by install command) for credentials.
+///
+/// NOTE: CloudProvider is created by the install command AFTER the operator starts,
+/// so this function waits for it to exist before proceeding.
 async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
+    use lattice_operator::capi::copy_credentials_to_provider_namespace;
+
     let provider_str = std::env::var("LATTICE_PROVIDER").unwrap_or_else(|_| "docker".to_string());
+    let provider_ref = std::env::var("LATTICE_PROVIDER_REF").unwrap_or_else(|_| provider_str.clone());
 
     let infrastructure = match provider_str.to_lowercase().as_str() {
         "docker" => ProviderType::Docker,
@@ -339,10 +344,43 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
 
     tracing::info!(infrastructure = %provider_str, "Installing CAPI providers for bootstrap cluster");
 
-    // Copy provider credentials from lattice-system to provider namespace
-    ensure_provider_credentials(client, infrastructure)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to copy provider credentials: {}", e))?;
+    // Copy credentials from CloudProvider to CAPI provider namespace
+    // For non-Docker providers, wait for CloudProvider to be created by install command
+    if infrastructure != ProviderType::Docker {
+        let cloud_providers: Api<CloudProvider> =
+            Api::namespaced(client.clone(), "lattice-system");
+
+        // Wait for CloudProvider to exist (created by install command after operator starts)
+        tracing::info!(provider_ref = %provider_ref, "Waiting for CloudProvider to be created...");
+        let cp = loop {
+            match cloud_providers.get(&provider_ref).await {
+                Ok(cp) => break cp,
+                Err(kube::Error::Api(e)) if e.code == 404 => {
+                    tracing::debug!(provider_ref = %provider_ref, "CloudProvider not found, waiting...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to get CloudProvider '{}': {}",
+                        provider_ref,
+                        e
+                    ));
+                }
+            }
+        };
+        tracing::info!(provider_ref = %provider_ref, "CloudProvider found");
+
+        if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
+            copy_credentials_to_provider_namespace(client, infrastructure, secret_ref)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to copy provider credentials: {}", e))?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "CloudProvider '{}' missing credentials_secret_ref",
+                provider_ref
+            ));
+        }
+    }
 
     let config = CapiProviderConfig::new(infrastructure)
         .map_err(|e| anyhow::anyhow!("Failed to create CAPI config: {}", e))?;

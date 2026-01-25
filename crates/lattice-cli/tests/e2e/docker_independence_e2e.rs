@@ -31,6 +31,7 @@
 use std::time::Duration;
 
 use kube::api::{Api, PostParams};
+use tracing::info;
 
 use lattice_cli::commands::install::Installer;
 use lattice_operator::crd::LatticeCluster;
@@ -46,7 +47,7 @@ const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
 const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
 fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
-    println!("  Cleaning up all test resources...");
+    info!("  Cleaning up all test resources...");
     let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-install"]);
     force_delete_docker_cluster(mgmt_name);
     force_delete_docker_cluster(workload_name);
@@ -60,10 +61,10 @@ async fn test_docker_independence() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
-    println!("\n################################################################");
-    println!("#  DOCKER INDEPENDENCE E2E TEST");
-    println!("#  Proves workload clusters survive parent deletion");
-    println!("################################################################\n");
+    info!("\n################################################################");
+    info!("#  DOCKER INDEPENDENCE E2E TEST");
+    info!("#  Proves workload clusters survive parent deletion");
+    info!("################################################################\n");
 
     // Load configs to get cluster names for cleanup
     let (_, mgmt_cluster) =
@@ -94,9 +95,9 @@ async fn test_docker_independence() {
 
     match result {
         Ok(Ok(())) => {
-            println!("\n################################################################");
-            println!("#  TEST PASSED - Workload cluster survived parent deletion!");
-            println!("################################################################\n");
+            info!("\n################################################################");
+            info!("#  TEST PASSED - Workload cluster survived parent deletion!");
+            info!("################################################################\n");
         }
         Ok(Err(e)) => {
             panic!("Independence test failed: {}", e);
@@ -121,7 +122,7 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 1: Install Management Cluster
     // =========================================================================
-    println!("\n[Phase 1] Installing management cluster...\n");
+    info!("\n[Phase 1] Installing management cluster...\n");
 
     let installer = Installer::new(
         mgmt_config,
@@ -137,12 +138,12 @@ async fn run_independence_test(
         .await
         .map_err(|e| format!("Install failed: {}", e))?;
 
-    println!("  Management cluster installed!");
+    info!("  Management cluster installed!");
 
     // =========================================================================
     // Phase 2: Create Workload Cluster
     // =========================================================================
-    println!("\n[Phase 2] Creating workload cluster...\n");
+    info!("\n[Phase 2] Creating workload cluster...\n");
 
     let mgmt_kubeconfig = get_docker_kubeconfig(&mgmt_cluster_name)?;
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig).await?;
@@ -152,15 +153,15 @@ async fn run_independence_test(
         .await
         .map_err(|e| format!("Failed to create workload cluster: {}", e))?;
 
-    println!("  Waiting for workload cluster to be ready...");
+    info!("  Waiting for workload cluster to be ready...");
     watch_cluster_phases(&mgmt_client, &workload_cluster_name, None).await?;
 
-    println!("  Workload cluster ready!");
+    info!("  Workload cluster ready!");
 
     // =========================================================================
     // Phase 3: Verify Workload Has CAPI Resources
     // =========================================================================
-    println!("\n[Phase 3] Verifying workload cluster is self-managing...\n");
+    info!("\n[Phase 3] Verifying workload cluster is self-managing...\n");
 
     let workload_kubeconfig = format!("/tmp/{}-kubeconfig", workload_cluster_name);
     extract_docker_cluster_kubeconfig(
@@ -184,15 +185,15 @@ async fn run_independence_test(
         return Err("Workload cluster missing CAPI resources after pivot".to_string());
     }
 
-    println!("  Workload cluster has its own CAPI resources!");
+    info!("  Workload cluster has its own CAPI resources!");
 
     watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 1).await?;
 
     // =========================================================================
     // Phase 4: Delete Management Cluster
     // =========================================================================
-    println!("\n[Phase 4] Deleting management cluster (force delete)...\n");
-    println!("  This simulates parent failure - workload should survive");
+    info!("\n[Phase 4] Deleting management cluster (force delete)...\n");
+    info!("  This simulates parent failure - workload should survive");
 
     force_delete_docker_cluster(&mgmt_cluster_name);
 
@@ -200,13 +201,13 @@ async fn run_independence_test(
         return Err("Failed to delete management cluster containers".to_string());
     }
 
-    println!("  Management cluster deleted!");
+    info!("  Management cluster deleted!");
 
     // =========================================================================
     // Phase 5: Scale Workload Cluster
     // =========================================================================
-    println!("\n[Phase 5] Scaling workload cluster workers 1 -> 2...\n");
-    println!("  If this works, the cluster is truly self-managing");
+    info!("\n[Phase 5] Scaling workload cluster workers 1 -> 2...\n");
+    info!("  If this works, the cluster is truly self-managing");
 
     run_cmd(
         "kubectl",
@@ -222,17 +223,17 @@ async fn run_independence_test(
         ],
     )?;
 
-    println!("  Patch applied, waiting for scale-up...");
+    info!("  Patch applied, waiting for scale-up...");
 
     // =========================================================================
     // Phase 6: Verify Scaling Succeeded
     // =========================================================================
-    println!("\n[Phase 6] Verifying workload cluster scaled to 2 workers...\n");
+    info!("\n[Phase 6] Verifying workload cluster scaled to 2 workers...\n");
 
     watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 2).await?;
 
-    println!("\n  SUCCESS: Workload cluster scaled from 1 to 2 workers");
-    println!("  SUCCESS: Cluster is fully operational without parent!");
+    info!("\n  SUCCESS: Workload cluster scaled from 1 to 2 workers");
+    info!("  SUCCESS: Cluster is fully operational without parent!");
 
     Ok(())
 }
