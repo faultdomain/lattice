@@ -28,13 +28,12 @@ spec:
 |-----|-----|----------|----------|
 | unset | unset | 3 | Static scaling. Operator reconciles to exactly 3. |
 | 1 | 10 | 3 | Autoscaling enabled. Operator hands-off, autoscaler manages. |
-| 1 | 10 | 0 | Autoscaling enabled. Initial replicas = min (avoids 0-replica trap). |
+| 1 | 10 | 0 | Autoscaling enabled. Autoscaler scales to min based on annotations. |
 
 ### Implementation (Complete)
 
 1. **`WorkerPoolSpec`** (`types.rs`)
    - `is_autoscaling_enabled()` - returns true when both min and max are set
-   - `initial_replicas()` - returns min when autoscaling enabled and replicas < min
    - `validate()` - ensures min <= max, min >= 1, both or neither set
 
 2. **Manifest Generation** (`provider/mod.rs`)
@@ -49,80 +48,23 @@ spec:
 
 4. **Status** (`cluster.rs`)
    - `WorkerPoolStatus.autoscaling_enabled` - reflects current autoscaling state
-   - `desired_replicas` always reflects MachineDeployment reality, not spec
+   - `desired_replicas` = spec.replicas (static) or current MD replicas (autoscaling)
+
+5. **Autoscaler Deployment** (`bootstrap/autoscaler.rs`)
+   - ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment
+   - Deployed via `ManifestConfig.autoscaling_enabled` flag
+   - Uses typed `k8s_openapi` structs (same pattern as AWS/Docker addons)
+   - CAPI namespace auto-discovered from cluster name
 
 ### Autoscaler Deployment
 
-Deploy in `lattice-system` namespace:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: cluster-autoscaler
-  namespace: lattice-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: cluster-autoscaler
-  template:
-    spec:
-      serviceAccountName: cluster-autoscaler
-      priorityClassName: system-cluster-critical
-      containers:
-      - name: cluster-autoscaler
-        image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.31.0
-        command:
-        - /cluster-autoscaler
-        - --cloud-provider=clusterapi
-        - --node-group-auto-discovery=clusterapi:namespace=capi-system
-        - --scale-down-delay-after-add=5m
-        - --scale-down-unneeded-time=5m
-        - --skip-nodes-with-local-storage=false
-        resources:
-          requests:
-            cpu: 100m
-            memory: 300Mi
-          limits:
-            memory: 600Mi
-```
+Generated via typed `k8s_openapi` structs in `bootstrap/autoscaler.rs`:
+- **ServiceAccount**: `cluster-autoscaler` in `lattice-system`
+- **ClusterRole**: CAPI resources (machinedeployments, machines), node management, PDB, events, leases
+- **ClusterRoleBinding**: Binds role to service account
+- **Deployment**: Single replica, `system-cluster-critical` priority class, auto-discovery via `--node-group-auto-discovery=clusterapi:namespace=capi-{cluster-name}`
 
 No kubeconfig files needed - uses in-cluster service account for both CAPI and workload APIs.
-
-### RBAC
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: cluster-autoscaler
-rules:
-- apiGroups: [cluster.x-k8s.io]
-  resources: [machinedeployments, machinedeployments/scale, machinesets, machinesets/scale, machinepools, machinepools/scale]
-  verbs: [get, list, watch, patch, update]
-- apiGroups: [cluster.x-k8s.io]
-  resources: [machines]
-  verbs: [get, list, watch, delete]
-- apiGroups: [""]
-  resources: [nodes, pods, services, replicationcontrollers, persistentvolumeclaims, persistentvolumes, namespaces]
-  verbs: [get, list, watch]
-- apiGroups: [""]
-  resources: [nodes]
-  verbs: [delete, patch, update]
-- apiGroups: [apps]
-  resources: [daemonsets, replicasets, statefulsets]
-  verbs: [get, list, watch]
-- apiGroups: [policy]
-  resources: [poddisruptionbudgets]
-  verbs: [get, list, watch]
-- apiGroups: [""]
-  resources: [events]
-  verbs: [create, patch]
-- apiGroups: [coordination.k8s.io]
-  resources: [leases]
-  verbs: [get, create, update]
-```
 
 ## Security
 

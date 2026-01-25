@@ -1971,17 +1971,18 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     .await
                     .unwrap_or(None);
 
-                // For total_desired: use current MD replicas when autoscaling (not spec)
-                let effective_desired = if autoscaling {
+                // For static pools: desired = spec.replicas
+                // For autoscaling: desired = current MD replicas (autoscaler decides)
+                let desired = if autoscaling {
                     current_replicas.unwrap_or(pool_spec.min.unwrap_or(0))
                 } else {
                     pool_spec.replicas
                 };
-                total_desired += effective_desired;
+                total_desired += desired;
 
-                // Build pool status - always reflect reality from MachineDeployment
+                // Build pool status
                 let mut pool_status = WorkerPoolStatus {
-                    desired_replicas: current_replicas.unwrap_or(0),
+                    desired_replicas: desired,
                     current_replicas: current_replicas.unwrap_or(0),
                     ready_replicas: 0, // Populated below after we count ready nodes
                     autoscaling_enabled: autoscaling,
@@ -2211,6 +2212,12 @@ async fn generate_capi_manifests(
             .proxmox
             .as_ref()
             .map(|p| p.ipv4_pool.clone());
+        let autoscaling_enabled = cluster
+            .spec
+            .nodes
+            .worker_pools
+            .values()
+            .any(|p| p.is_autoscaling_enabled());
         let registration = crate::bootstrap::ClusterRegistration {
             cluster_id: cluster_name.to_string(),
             cell_endpoint: cell_endpoint.clone(),
@@ -2221,6 +2228,7 @@ async fn generate_capi_manifests(
             provider: cluster.spec.provider.provider_type(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             k8s_version: cluster.spec.provider.kubernetes.version.clone(),
+            autoscaling_enabled,
         };
         let token = bootstrap_state.register_cluster(registration, false);
 

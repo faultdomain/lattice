@@ -25,11 +25,13 @@
 //! 3. Cell signs CSR with CA and returns certificate
 //! 4. Agent uses cert for mTLS connection to gRPC server
 
+mod autoscaler;
 mod aws_addons;
 mod crs;
 mod docker_addons;
 mod token;
 
+pub use autoscaler::generate_autoscaler_manifests;
 pub use aws_addons::generate_aws_addon_manifests;
 pub use crs::{generate_crs_yaml_manifests, ProviderCredentials};
 pub use docker_addons::generate_docker_addon_manifests;
@@ -181,6 +183,8 @@ pub struct ClusterRegistration {
     pub bootstrap: lattice_common::crd::BootstrapProvider,
     /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons
     pub k8s_version: String,
+    /// Whether any worker pool has autoscaling enabled (min/max set)
+    pub autoscaling_enabled: bool,
 }
 
 /// Bootstrap manifest generator
@@ -232,6 +236,9 @@ pub struct ManifestConfig<'a> {
     /// Whether to relax FIPS mode (add GODEBUG=fips140=on)
     /// Used for bootstrap cluster and kubeadm-based clusters connecting to non-FIPS API servers
     pub relax_fips: bool,
+    /// Whether cluster has autoscaling-enabled pools (min/max set)
+    /// When true, deploys the CAPI cluster-autoscaler
+    pub autoscaling_enabled: bool,
 }
 
 /// Generate all bootstrap manifests including provider-specific addons
@@ -296,6 +303,14 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
                 manifests.push(generate_docker_addon_manifests());
             }
             _ => {} // Other providers don't need special addons yet
+        }
+    }
+
+    // Add cluster-autoscaler when any pool has autoscaling enabled
+    if config.autoscaling_enabled {
+        if let Some(cluster_name) = config.cluster_name {
+            let capi_namespace = format!("capi-{}", cluster_name);
+            manifests.push(generate_autoscaler_manifests(&capi_namespace));
         }
     }
 
@@ -751,6 +766,8 @@ pub struct ClusterBootstrapInfo {
     pub bootstrap: lattice_common::crd::BootstrapProvider,
     /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons like CCM
     pub k8s_version: String,
+    /// Whether any worker pool has autoscaling enabled (min/max set)
+    pub autoscaling_enabled: bool,
 }
 
 /// Bootstrap endpoint state
@@ -837,6 +854,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             provider: registration.provider,
             bootstrap: registration.bootstrap,
             k8s_version: registration.k8s_version,
+            autoscaling_enabled: registration.autoscaling_enabled,
         };
 
         self.clusters.insert(cluster_id, info);
@@ -959,6 +977,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             parent_host: parent_host.as_deref(),
             parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
+            autoscaling_enabled: info.autoscaling_enabled,
         };
         let mut manifests = generate_all_manifests(&self.manifest_generator, &config).await;
 
@@ -1280,6 +1299,7 @@ mod tests {
                 provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::default(),
                 k8s_version: "1.32.0".to_string(),
+                autoscaling_enabled: false,
             },
             false,
         )
@@ -2391,6 +2411,7 @@ mod tests {
                 provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
+                autoscaling_enabled: false,
             },
         );
 
@@ -2446,6 +2467,7 @@ mod tests {
                 provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::Rke2,
                 k8s_version: "1.32.0".to_string(),
+                autoscaling_enabled: false,
             },
         );
 
@@ -2514,6 +2536,7 @@ mod tests {
                 provider: ProviderType::Aws,
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
+                autoscaling_enabled: false,
             },
         );
 
@@ -2576,6 +2599,7 @@ mod tests {
                 provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
+                autoscaling_enabled: false,
             },
         );
 

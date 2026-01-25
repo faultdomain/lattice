@@ -98,7 +98,7 @@ sequenceDiagram
         W1->>W2: Provision via CAPI
     and Mesh Tests
         T->>W1: Run 9-service mesh test
-        T->>W1: Run random mesh test (10-30 services)
+        T->>W1: Run random mesh test (10-20 services)
         T->>W1: Run media server test
     end
 
@@ -169,7 +169,7 @@ flowchart TD
 
         P6A --> P6B[Create workload2 cluster]
         P6A --> P6C[Run mesh_test<br/>9 services]
-        P6A --> P6D[Run random_mesh_test<br/>10-30 services]
+        P6A --> P6D[Run random_mesh_test<br/>10-20 services]
         P6A --> P6E[Run media_server_test<br/>3 services]
 
         P6B --> P6F[Wait all complete]
@@ -404,13 +404,13 @@ sequenceDiagram
 
 ### Randomized Large-Scale Mesh Test
 
-Tests **10-30 services** across 5 layers with randomized connections.
+Tests **10-20 services** across 5 layers with randomized connections.
 
 ```mermaid
 flowchart TD
     subgraph "Test Generation"
         GEN[RandomMesh::generate]
-        GEN --> |"10-30 services"| SVC[Services across 5 layers]
+        GEN --> |"10-20 services"| SVC[Services across 5 layers]
         GEN --> |"30% probability"| OUT[Outbound dependencies]
         GEN --> |"60% probability"| BI[Bilateral agreements]
         GEN --> |"5 external URLs"| EXT[External services]
@@ -782,7 +782,7 @@ LATTICE_UPGRADE_FROM_VERSION=1.30.0 LATTICE_UPGRADE_TO_VERSION=1.31.0 \
 | `pivot_e2e.rs` | 606 | 1 | 9-phase full lifecycle validation |
 | `docker_independence_e2e.rs` | 239 | 1 | Parent deletion resilience |
 | `upgrade_e2e.rs` | 300 | 1 | Upgrade resilience with mesh traffic |
-| `mesh_tests.rs` | 1,550 | 2 | Fixed 9-service + random 10-30 service mesh |
+| `mesh_tests.rs` | 1,550 | 2 | Fixed 9-service + random 10-20 service mesh |
 | `media_server_e2e.rs` | 397 | 1 | Volume sharing + co-location |
 | `helpers.rs` | 813 | - | 30+ utility functions |
 | `providers.rs` | 44 | - | Infrastructure provider enum |

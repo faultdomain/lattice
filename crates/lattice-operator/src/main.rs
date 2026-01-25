@@ -629,6 +629,12 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
             }
         };
 
+        let autoscaling_enabled = cluster
+            .spec
+            .nodes
+            .worker_pools
+            .values()
+            .any(|p| p.is_autoscaling_enabled());
         let registration = lattice_operator::bootstrap::ClusterRegistration {
             cluster_id: name.clone(),
             cell_endpoint,
@@ -645,6 +651,7 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
             provider: cluster.spec.provider.provider_type(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             k8s_version: cluster.spec.provider.kubernetes.version.clone(),
+            autoscaling_enabled,
         };
 
         bootstrap_state.register_cluster(registration, true);

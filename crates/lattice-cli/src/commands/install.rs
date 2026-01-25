@@ -489,6 +489,13 @@ impl Installer {
             .map(|p| &p.ipv4_pool);
 
         let k8s_version = &self.cluster.spec.provider.kubernetes.version;
+        let autoscaling_enabled = self
+            .cluster
+            .spec
+            .nodes
+            .worker_pools
+            .values()
+            .any(|p| p.is_autoscaling_enabled());
         let config = ManifestConfig {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
@@ -506,6 +513,7 @@ impl Installer {
                 .kubernetes
                 .bootstrap
                 .needs_fips_relax(),
+            autoscaling_enabled,
         };
 
         let all_manifests = generate_all_manifests(&generator, &config).await;
