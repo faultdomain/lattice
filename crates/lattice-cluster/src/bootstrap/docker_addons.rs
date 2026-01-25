@@ -1,39 +1,278 @@
 //! Docker-specific addon manifests
 //!
-//! Generates local-path-provisioner for Docker/kind clusters.
-//! These are included in the bootstrap manifests via `generate_all_manifests()`.
+//! Generates local-path-provisioner for Docker/kind clusters
+//! using typed k8s_openapi structs for type safety and maintainability.
 
-use minijinja::{context, Environment};
+use std::collections::BTreeMap;
+
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, ConfigMapVolumeSource, Container, EnvVar, EnvVarSource, Namespace, PodSpec,
+    PodTemplateSpec, ServiceAccount, Volume, VolumeMount,
+};
+use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, PolicyRule, RoleRef, Subject};
+use k8s_openapi::api::storage::v1::StorageClass;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 
 /// Local path provisioner version
 const LOCAL_PATH_PROVISIONER_VERSION: &str = "v0.0.30";
 
-/// Local path provisioner template loaded at compile time
-const LOCAL_PATH_TEMPLATE: &str = include_str!("../../templates/local-path-provisioner.yaml");
+const NAMESPACE: &str = "local-path-storage";
 
-fn render_template(template: &str, version: &str) -> String {
-    let mut env = Environment::new();
-    env.add_template("manifest", template)
-        .expect("Invalid template");
-    env.get_template("manifest")
-        .expect("Template not found")
-        .render(context! { version => version })
-        .expect("Failed to render template")
+fn namespace() -> Namespace {
+    Namespace {
+        metadata: ObjectMeta {
+            name: Some(NAMESPACE.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
-/// Generate local-path-provisioner manifest YAML.
-///
-/// Provides a default StorageClass named "standard" for PVC provisioning.
-fn generate_local_path_manifest() -> String {
-    render_template(LOCAL_PATH_TEMPLATE, LOCAL_PATH_PROVISIONER_VERSION)
+fn service_account() -> ServiceAccount {
+    ServiceAccount {
+        metadata: ObjectMeta {
+            name: Some("local-path-provisioner-service-account".to_string()),
+            namespace: Some(NAMESPACE.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn cluster_role() -> ClusterRole {
+    ClusterRole {
+        metadata: ObjectMeta {
+            name: Some("local-path-provisioner-role".to_string()),
+            ..Default::default()
+        },
+        rules: Some(vec![
+            PolicyRule {
+                api_groups: Some(vec![String::new()]),
+                resources: Some(vec![
+                    "nodes".to_string(),
+                    "persistentvolumeclaims".to_string(),
+                    "configmaps".to_string(),
+                ]),
+                verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
+                ..Default::default()
+            },
+            PolicyRule {
+                api_groups: Some(vec![String::new()]),
+                resources: Some(vec!["pods".to_string(), "pods/log".to_string()]),
+                verbs: vec![
+                    "get".to_string(),
+                    "list".to_string(),
+                    "watch".to_string(),
+                    "create".to_string(),
+                    "delete".to_string(),
+                ],
+                ..Default::default()
+            },
+            PolicyRule {
+                api_groups: Some(vec![String::new()]),
+                resources: Some(vec!["persistentvolumes".to_string()]),
+                verbs: vec![
+                    "get".to_string(),
+                    "list".to_string(),
+                    "watch".to_string(),
+                    "create".to_string(),
+                    "patch".to_string(),
+                    "update".to_string(),
+                    "delete".to_string(),
+                ],
+                ..Default::default()
+            },
+            PolicyRule {
+                api_groups: Some(vec![String::new()]),
+                resources: Some(vec!["events".to_string()]),
+                verbs: vec!["create".to_string(), "patch".to_string()],
+                ..Default::default()
+            },
+            PolicyRule {
+                api_groups: Some(vec!["storage.k8s.io".to_string()]),
+                resources: Some(vec!["storageclasses".to_string()]),
+                verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
+                ..Default::default()
+            },
+        ]),
+        ..Default::default()
+    }
+}
+
+fn cluster_role_binding() -> ClusterRoleBinding {
+    ClusterRoleBinding {
+        metadata: ObjectMeta {
+            name: Some("local-path-provisioner-bind".to_string()),
+            ..Default::default()
+        },
+        role_ref: RoleRef {
+            api_group: "rbac.authorization.k8s.io".to_string(),
+            kind: "ClusterRole".to_string(),
+            name: "local-path-provisioner-role".to_string(),
+        },
+        subjects: Some(vec![Subject {
+            kind: "ServiceAccount".to_string(),
+            name: "local-path-provisioner-service-account".to_string(),
+            namespace: Some(NAMESPACE.to_string()),
+            ..Default::default()
+        }]),
+    }
+}
+
+fn deployment() -> Deployment {
+    let labels = BTreeMap::from([("app".to_string(), "local-path-provisioner".to_string())]);
+
+    Deployment {
+        metadata: ObjectMeta {
+            name: Some("local-path-provisioner".to_string()),
+            namespace: Some(NAMESPACE.to_string()),
+            ..Default::default()
+        },
+        spec: Some(DeploymentSpec {
+            replicas: Some(1),
+            selector: LabelSelector {
+                match_labels: Some(labels.clone()),
+                ..Default::default()
+            },
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(labels),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    service_account_name: Some(
+                        "local-path-provisioner-service-account".to_string(),
+                    ),
+                    containers: vec![Container {
+                        name: "local-path-provisioner".to_string(),
+                        image: Some(format!(
+                            "rancher/local-path-provisioner:{LOCAL_PATH_PROVISIONER_VERSION}"
+                        )),
+                        image_pull_policy: Some("IfNotPresent".to_string()),
+                        command: Some(vec![
+                            "local-path-provisioner".to_string(),
+                            "--debug".to_string(),
+                            "start".to_string(),
+                            "--config".to_string(),
+                            "/etc/config/config.json".to_string(),
+                        ]),
+                        volume_mounts: Some(vec![VolumeMount {
+                            name: "config-volume".to_string(),
+                            mount_path: "/etc/config/".to_string(),
+                            ..Default::default()
+                        }]),
+                        env: Some(vec![EnvVar {
+                            name: "POD_NAMESPACE".to_string(),
+                            value_from: Some(EnvVarSource {
+                                field_ref: Some(k8s_openapi::api::core::v1::ObjectFieldSelector {
+                                    field_path: "metadata.namespace".to_string(),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    }],
+                    volumes: Some(vec![Volume {
+                        name: "config-volume".to_string(),
+                        config_map: Some(ConfigMapVolumeSource {
+                            name: "local-path-config".to_string(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn storage_class() -> StorageClass {
+    StorageClass {
+        metadata: ObjectMeta {
+            name: Some("standard".to_string()),
+            annotations: Some(BTreeMap::from([(
+                "storageclass.kubernetes.io/is-default-class".to_string(),
+                "true".to_string(),
+            )])),
+            ..Default::default()
+        },
+        provisioner: "rancher.io/local-path".to_string(),
+        volume_binding_mode: Some("WaitForFirstConsumer".to_string()),
+        reclaim_policy: Some("Delete".to_string()),
+        ..Default::default()
+    }
+}
+
+fn config_map() -> ConfigMap {
+    let config_json = r#"{
+  "nodePathMap": [
+    {
+      "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+      "paths": ["/opt/local-path-provisioner"]
+    }
+  ]
+}"#;
+
+    let setup_script = r#"#!/bin/sh
+set -eu
+mkdir -m 0777 -p "$VOL_DIR""#;
+
+    let teardown_script = r#"#!/bin/sh
+set -eu
+rm -rf "$VOL_DIR""#;
+
+    let helper_pod = r#"apiVersion: v1
+kind: Pod
+metadata:
+  name: helper-pod
+spec:
+  containers:
+    - name: helper-pod
+      image: busybox:latest
+      imagePullPolicy: IfNotPresent"#;
+
+    ConfigMap {
+        metadata: ObjectMeta {
+            name: Some("local-path-config".to_string()),
+            namespace: Some(NAMESPACE.to_string()),
+            ..Default::default()
+        },
+        data: Some(BTreeMap::from([
+            ("config.json".to_string(), config_json.to_string()),
+            ("setup".to_string(), setup_script.to_string()),
+            ("teardown".to_string(), teardown_script.to_string()),
+            ("helperPod.yaml".to_string(), helper_pod.to_string()),
+        ])),
+        ..Default::default()
+    }
+}
+
+/// Serialize a Kubernetes resource to YAML
+fn to_yaml<T: serde::Serialize>(resource: &T) -> String {
+    serde_yaml::to_string(resource).expect("Failed to serialize resource")
 }
 
 /// Generate all Docker addon manifests (local-path-provisioner) as raw YAML.
 ///
 /// Returns a single YAML string with all resources separated by `---`.
-/// Used by `generate_all_manifests()` to include Docker addons in bootstrap.
 pub fn generate_docker_addon_manifests() -> String {
-    generate_local_path_manifest()
+    let resources: Vec<String> = vec![
+        to_yaml(&namespace()),
+        to_yaml(&service_account()),
+        to_yaml(&cluster_role()),
+        to_yaml(&cluster_role_binding()),
+        to_yaml(&deployment()),
+        to_yaml(&storage_class()),
+        to_yaml(&config_map()),
+    ];
+
+    resources.join("---\n")
 }
 
 #[cfg(test)]
@@ -41,32 +280,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_path_manifest_contains_required_resources() {
-        let manifest = generate_local_path_manifest();
-
-        assert!(manifest.contains("kind: Namespace"));
-        assert!(manifest.contains("kind: ServiceAccount"));
-        assert!(manifest.contains("kind: ClusterRole"));
-        assert!(manifest.contains("kind: ClusterRoleBinding"));
-        assert!(manifest.contains("kind: Deployment"));
-        assert!(manifest.contains("kind: StorageClass"));
-        assert!(manifest.contains("kind: ConfigMap"));
-        assert!(manifest.contains("rancher/local-path-provisioner"));
-        assert!(manifest.contains(LOCAL_PATH_PROVISIONER_VERSION));
+    fn deployment_has_correct_image() {
+        let dep = deployment();
+        let container = &dep
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+        assert_eq!(
+            container.image.as_ref().unwrap(),
+            &format!("rancher/local-path-provisioner:{LOCAL_PATH_PROVISIONER_VERSION}")
+        );
     }
 
     #[test]
     fn storage_class_is_default() {
-        let manifest = generate_local_path_manifest();
-
-        assert!(manifest.contains("name: standard"));
-        assert!(manifest.contains("storageclass.kubernetes.io/is-default-class: \"true\""));
+        let sc = storage_class();
+        let annotations = sc.metadata.annotations.as_ref().unwrap();
+        assert_eq!(
+            annotations.get("storageclass.kubernetes.io/is-default-class"),
+            Some(&"true".to_string())
+        );
     }
 
     #[test]
-    fn provisioner_name_correct() {
-        let manifest = generate_local_path_manifest();
+    fn storage_class_has_correct_provisioner() {
+        let sc = storage_class();
+        assert_eq!(sc.provisioner, "rancher.io/local-path");
+    }
 
-        assert!(manifest.contains("provisioner: rancher.io/local-path"));
+    #[test]
+    fn cluster_role_has_required_permissions() {
+        let role = cluster_role();
+        let rules = role.rules.as_ref().unwrap();
+
+        // Check persistentvolumes permissions
+        let pv_rule = rules
+            .iter()
+            .find(|r| {
+                r.resources
+                    .as_ref()
+                    .map_or(false, |res| res.contains(&"persistentvolumes".to_string()))
+            })
+            .unwrap();
+        assert!(pv_rule.verbs.contains(&"create".to_string()));
+        assert!(pv_rule.verbs.contains(&"delete".to_string()));
+    }
+
+    #[test]
+    fn config_map_has_required_data() {
+        let cm = config_map();
+        let data = cm.data.as_ref().unwrap();
+        assert!(data.contains_key("config.json"));
+        assert!(data.contains_key("setup"));
+        assert!(data.contains_key("teardown"));
+        assert!(data.contains_key("helperPod.yaml"));
+    }
+
+    #[test]
+    fn combined_manifest_contains_all_resources() {
+        let manifest = generate_docker_addon_manifests();
+
+        assert!(manifest.contains("local-path-storage")); // Namespace
+        assert!(manifest.contains("local-path-provisioner-service-account")); // ServiceAccount
+        assert!(manifest.contains("local-path-provisioner-role")); // ClusterRole
+        assert!(manifest.contains("local-path-provisioner-bind")); // ClusterRoleBinding
+        assert!(manifest.contains("rancher/local-path-provisioner")); // Deployment image
+        assert!(manifest.contains("rancher.io/local-path")); // StorageClass provisioner
+        assert!(manifest.contains("local-path-config")); // ConfigMap
     }
 }
