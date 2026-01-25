@@ -61,12 +61,8 @@ async fn test_docker_independence() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
-    info!("\n################################################################");
-    info!("#  DOCKER INDEPENDENCE E2E TEST");
-    info!("#  Proves workload clusters survive parent deletion");
-    info!("################################################################\n");
+    info!("Starting independence test: workload clusters survive parent deletion");
 
-    // Load configs to get cluster names for cleanup
     let (_, mgmt_cluster) =
         load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml").unwrap();
     let (_, workload_cluster) =
@@ -95,9 +91,7 @@ async fn test_docker_independence() {
 
     match result {
         Ok(Ok(())) => {
-            info!("\n################################################################");
-            info!("#  TEST PASSED - Workload cluster survived parent deletion!");
-            info!("################################################################\n");
+            info!("TEST PASSED");
         }
         Ok(Err(e)) => {
             panic!("Independence test failed: {}", e);

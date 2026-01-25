@@ -123,11 +123,8 @@ async fn test_configurable_provider_pivot() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
-    info!("\n################################################################");
-    info!("#  LATTICE E2E TEST - Full Lifecycle");
-    info!("################################################################\n");
+    info!("Starting E2E test: Full Lifecycle");
 
-    // Clean up any leftover bootstrap clusters from previous runs
     cleanup_bootstrap_clusters();
 
     if let Err(e) = build_and_push_lattice_image(LATTICE_IMAGE).await {
@@ -138,21 +135,18 @@ async fn test_configurable_provider_pivot() {
 
     match result {
         Ok(Ok(())) => {
-            info!("\n################################################################");
-            info!("#  TEST PASSED - All resources cleaned up properly");
-            info!("################################################################\n");
+            info!("TEST PASSED");
         }
         Ok(Err(e)) => {
             cleanup_bootstrap_clusters();
-            info!("\n=== TEST FAILED: {} ===", e);
-            info!("=== Manual cleanup may be required for test clusters ===\n");
-            panic!("E2E test failed: {}", e);
+            panic!("E2E test failed: {} (manual cleanup may be required)", e);
         }
         Err(_) => {
             cleanup_bootstrap_clusters();
-            info!("\n=== TEST TIMED OUT ({:?}) ===", E2E_TIMEOUT);
-            info!("=== Manual cleanup required for test clusters ===\n");
-            panic!("E2E test timed out after {:?}", E2E_TIMEOUT);
+            panic!(
+                "E2E test timed out after {:?} (manual cleanup required)",
+                E2E_TIMEOUT
+            );
         }
     }
 }
@@ -458,20 +452,7 @@ async fn run_provider_e2e() -> Result<(), String> {
 
     info!("\n  SUCCESS: Management cluster uninstalled!");
 
-    info!("\n################################################################");
-    info!("#  E2E TEST COMPLETE - Full Lifecycle Verified");
-    info!("#  ");
-    info!("#  Tested:");
-    info!("#  - Management cluster install + self-management");
-    info!("#  - Workload cluster provisioning + pivot");
-    info!("#  - Deep hierarchy (mgmt -> workload -> workload2)");
-    info!("#  - Workload2 deletion + unpivot");
-    info!("#  - Workload deletion + unpivot");
-    info!("#  - Management cluster uninstall");
-    if mesh_test_enabled() {
-        info!("#  - Service mesh bilateral agreements");
-    }
-    info!("################################################################\n");
+    info!("E2E test complete: full lifecycle verified");
 
     Ok(())
 }

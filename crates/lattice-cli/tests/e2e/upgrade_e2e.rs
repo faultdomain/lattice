@@ -101,10 +101,7 @@ async fn test_upgrade_with_mesh_traffic() {
     let from_version = get_upgrade_from_version();
     let to_version = get_upgrade_to_version();
 
-    info!("\n################################################################");
-    info!("#  LATTICE E2E TEST - Upgrade Resilience");
-    info!("#  Kubernetes {} -> {}", from_version, to_version);
-    info!("################################################################\n");
+    info!(from = %from_version, to = %to_version, "Starting upgrade resilience test");
 
     cleanup_bootstrap_clusters();
 
@@ -116,13 +113,10 @@ async fn test_upgrade_with_mesh_traffic() {
 
     match result {
         Ok(Ok(())) => {
-            info!("\n################################################################");
-            info!("#  TEST PASSED - Upgrade completed with no policy gaps");
-            info!("################################################################\n");
+            info!("TEST PASSED");
         }
         Ok(Err(e)) => {
             cleanup_bootstrap_clusters();
-            info!("\n=== TEST FAILED: {} ===", e);
             panic!("Upgrade E2E test failed: {}", e);
         }
         Err(_) => {
@@ -440,14 +434,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
         .await
         .map_err(|e| format!("Uninstall failed: {}", e))?;
 
-    info!("\n################################################################");
-    info!("#  UPGRADE RESILIENCE TEST COMPLETE");
-    info!("#");
-    info!("#  Verified:");
-    info!("#  - Cluster upgraded {} -> {}", from_version, to_version);
-    info!("#  - No policy gaps during upgrade (fail-closed maintained)");
-    info!("#  - Bilateral agreements enforced after upgrade");
-    info!("################################################################\n");
+    info!(from = %from_version, to = %to_version, "Upgrade resilience test complete");
 
     Ok(())
 }
