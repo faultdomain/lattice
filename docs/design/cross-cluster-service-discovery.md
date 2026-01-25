@@ -11,6 +11,279 @@ Services in one cluster can depend on services in other clusters. This design en
 - <100ms cold lookup, <10ms cached
 - Memory: ~5MB for full catalog
 
+## Trust Model
+
+### Single Trust Domain
+
+All clusters in the Lattice hierarchy share a single trust root. This means:
+
+- **Global SPIFFE Identity**: A certificate issued to `web` in Cluster B1 is cryptographically valid in Cluster B2
+- **No Federation Complexity**: No need to exchange trust bundles between clusters
+- **mTLS Just Works**: Cross-cluster connections use `ISTIO_MUTUAL` mode
+
+```
+                    ┌─────────────────┐
+                    │   Root CA       │  ◄── Single trust root for entire hierarchy
+                    │ (lattice.local) │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+         Intermediate   Intermediate   Intermediate
+         CA (B)         CA (C)         CA (...)
+              │              │
+              ▼              ▼
+         Cluster B      Cluster C
+         workload       workload
+         certs          certs
+```
+
+### Identity Format
+
+SPIFFE IDs use the cluster name as the namespace identifier:
+
+```
+spiffe://lattice.local/ns/<cluster>/sa/<service>
+
+Examples:
+  spiffe://lattice.local/ns/cluster-b1/sa/web
+  spiffe://lattice.local/ns/cluster-b2/sa/api
+```
+
+### Bilateral Validation
+
+For v1 (gateway-level identity), `allowed_requesters` specifies which **clusters** can call, not individual services:
+
+```rust
+pub struct ServiceInfo {
+    // ...
+    // Clusters allowed to call this service
+    pub allowed_requesters: Vec<String>,  // e.g., ["cluster-b1", "cluster-c1"]
+}
+
+// Validation checks cluster-level access
+fn validate_bilateral(info: &ServiceInfo, query: &ServiceQuery) -> bool {
+    info.allowed_requesters.contains(&query.requester_cluster)
+}
+```
+
+For v2 (with JWT identity), this can be extended to per-service granularity:
+
+```rust
+// v2: Full SPIFFE identity format
+pub allowed_requesters: Vec<String>,  // e.g., ["lattice.local/ns/cluster-b1/sa/web"]
+```
+
+### Cross-Cluster Identity Options
+
+Istio Ambient doesn't support multi-cluster, so workload SPIFFE IDs don't automatically work across clusters. Three approaches:
+
+#### Option A: Gateway-Level Identity (Recommended)
+
+Each cluster's Gateway has a certificate from the shared Lattice CA. Cross-cluster mTLS happens at gateway level:
+
+```
+Cluster B1                              Cluster B2
+┌──────────┐    ┌──────────────┐       ┌──────────────┐    ┌──────────┐
+│   web    │───►│ Gateway      │──────►│ Gateway      │───►│   api    │
+│          │    │ (presents    │ mTLS  │ (validates   │    │          │
+│          │    │  cluster-b1  │       │  cluster-b1) │    │          │
+│          │    │  identity)   │       │              │    │          │
+└──────────┘    └──────────────┘       └──────────────┘    └──────────┘
+                     │                        │
+                     ▼                        ▼
+              spiffe://lattice.local   Checks: is cluster-b1
+              /ns/cluster-b1/sa/gateway  allowed to call api?
+```
+
+**Pros**: Simple, works with Ambient, no per-service cert management
+**Cons**: Coarse-grained (cluster-level, not service-level identity)
+
+The Gateway presents identity `spiffe://lattice.local/ns/<cluster>/sa/gateway`. AuthorizationPolicy validates at cluster granularity:
+
+```rust
+fn generate_cross_cluster_auth_policy(notification: &RouteNotification) -> AuthorizationPolicy {
+    // Gateway-level identity - cluster granularity
+    let caller_identity = format!(
+        "spiffe://lattice.local/ns/{}/sa/gateway",
+        notification.caller_cluster
+    );
+    // ... policy using caller_identity
+}
+```
+
+#### Option B: JWT Forwarding
+
+Workloads get JWTs from a central issuer (the agent). The JWT contains the full identity:
+
+```
+web pod → local agent → JWT signed by Lattice CA
+                        {
+                          "sub": "lattice.local/ns/cluster-b1/sa/web",
+                          "aud": "lattice.local/ns/cluster-b2/sa/api"
+                        }
+```
+
+The target Gateway validates the JWT before routing:
+
+**Pros**: Per-service identity, fine-grained
+**Cons**: More complex, need JWT infrastructure
+
+#### Option C: Request Headers
+
+The calling Gateway injects identity headers that the target trusts (because mTLS validated the gateway):
+
+```
+X-Lattice-Caller-Cluster: cluster-b1
+X-Lattice-Caller-Service: web
+X-Lattice-Caller-Namespace: default
+```
+
+**Pros**: Simple, works with any backend
+**Cons**: Headers could be spoofed if not careful about trust boundaries
+
+### Recommended: Option A for v1
+
+Start with gateway-level identity. The bilateral agreement still enforces policy:
+
+- **allowed_requesters** specifies which clusters can call: `["cluster-b1", "cluster-b3"]`
+- Gateway mTLS validates the cluster identity
+- Fine-grained per-service identity can be added later via Option B
+
+### Security Considerations
+
+| Risk | Mitigation |
+|------|------------|
+| Root CA compromise | All 50-100 clusters compromised. Use HSM-backed root, short-lived intermediates |
+| Cluster ejection | Revoke intermediate CA. Push CRL to all clusters via agent stream |
+| Service name collision | Full cluster identity validation prevents spoofing |
+| Stale trust data | Periodic CRL refresh, intermediate CA rotation |
+| Gateway compromise | Only affects one cluster; revoke that cluster's intermediate |
+
+## Network Connectivity
+
+Cross-cluster traffic uses **Gateway API + External DNS**. Istio Ambient doesn't support multicluster, so we handle routing at the Gateway API layer.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Cluster B1 (caller)                           │
+│  ┌─────────┐                                      ┌─────────────────┐  │
+│  │   web   │─────────────────────────────────────►│ Gateway         │  │
+│  │  (pod)  │  calls api.cluster-b2.lattice.local  │ (egress)        │  │
+│  └─────────┘                                      └────────┬────────┘  │
+└───────────────────────────────────────────────────────────│───────────┘
+                                                             │ mTLS
+                                                             │ (DNS resolves via External DNS)
+                                                             ▼
+┌───────────────────────────────────────────────────────────│───────────┐
+│                           Cluster B2 (target)              │           │
+│  ┌─────────────────┐                                       │           │
+│  │ Gateway         │◄──────────────────────────────────────┘           │
+│  │ (ingress)       │                                                   │
+│  │ + HTTPRoute     │────────────────────────────────────►┌─────────┐  │
+│  └─────────────────┘                                     │   api   │  │
+│                                                          │  (pod)  │  │
+│                                                          └─────────┘  │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+### DNS-Based Discovery
+
+Each cluster runs External DNS, which publishes Gateway addresses:
+
+```
+api.cluster-b2.lattice.local  →  <Gateway LB IP of cluster-b2>
+web.cluster-b1.lattice.local  →  <Gateway LB IP of cluster-b1>
+```
+
+### Gateway Endpoint Announcement
+
+The `endpoints` field contains the DNS hostname for the service's gateway:
+
+```rust
+let announcement = ServiceAnnouncement {
+    cluster: "cluster-b2".to_string(),
+    namespace: "default".to_string(),
+    name: "api".to_string(),
+    endpoints: vec!["api.cluster-b2.lattice.local".to_string()],
+    allowed_requesters: vec!["cluster-b1".to_string(), "cluster-c1".to_string()], // v1: cluster names
+    deleted: false,
+};
+```
+
+### Caller Side: ExternalName Service
+
+The caller cluster creates an ExternalName Service pointing to the remote DNS:
+
+```rust
+fn generate_external_service(dep: &Dependency, remote: &ServiceQueryResponse) -> Service {
+    Service {
+        metadata: ObjectMeta {
+            name: Some(format!("{}-remote", dep.name)),
+            namespace: Some(dep.namespace.clone()),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            type_: Some("ExternalName".to_string()),
+            external_name: Some(remote.endpoints[0].clone()), // api.cluster-b2.lattice.local
+            ports: Some(vec![ServicePort {
+                port: 443,
+                target_port: Some(IntOrString::Int(443)),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+    }
+}
+```
+
+### Target Side: Gateway + HTTPRoute
+
+When the target cluster receives a RouteNotification, it creates:
+
+```rust
+fn generate_gateway_route(notification: &RouteNotification) -> HTTPRoute {
+    HTTPRoute {
+        metadata: ObjectMeta {
+            name: Some(format!(
+                "{}-cross-cluster",
+                notification.target_service
+            )),
+            namespace: Some(notification.target_namespace.clone()),
+            annotations: Some(btreemap! {
+                // External DNS picks this up
+                "external-dns.alpha.kubernetes.io/hostname".to_string() =>
+                    format!("{}.{}.lattice.local",
+                        notification.target_service,
+                        notification.target_namespace)
+            }),
+            ..Default::default()
+        },
+        spec: HTTPRouteSpec {
+            parent_refs: vec![ParentReference {
+                name: "lattice-gateway".to_string(),
+                namespace: Some("lattice-system".to_string()),
+                ..Default::default()
+            }],
+            hostnames: vec![format!(
+                "{}.{}.lattice.local",
+                notification.target_service,
+                notification.target_namespace
+            )],
+            rules: vec![HTTPRouteRule {
+                backend_refs: vec![BackendRef {
+                    name: notification.target_service.clone(),
+                    port: Some(80),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        },
+    }
+}
+```
+
 ## Architecture
 
 ```
@@ -118,8 +391,8 @@ message ServiceAnnouncement {
   string cluster = 1;           // originating cluster
   string namespace = 2;
   string name = 3;
-  repeated string endpoints = 4; // ip:port list
-  repeated string allowed_requesters = 5; // services allowed to call this
+  repeated string endpoints = 4; // DNS hostnames (api.cluster-b2.lattice.local)
+  repeated string allowed_requesters = 5; // v1: cluster names (cluster-b1), v2: full SPIFFE IDs
   bool deleted = 6;             // true = remove from catalog
 }
 
@@ -234,13 +507,19 @@ impl ServiceCatalog {
     pub fn query(&self, query: &ServiceQuery) -> Option<ServiceQueryResponse> {
         let key = (query.namespace.clone(), query.name.clone());
         self.services.get(&key).map(|info| {
-            let access_allowed = info.allowed_requesters.contains(&query.requester_service);
+            // v1: Check cluster-level access
+            let access_allowed = info.allowed_requesters.contains(&query.requester_cluster);
+
             ServiceQueryResponse {
                 found: true,
                 access_allowed,
                 owner_cluster: info.cluster.clone(),
                 endpoints: info.endpoints.clone(),
-                error: String::new(),
+                error: if !access_allowed {
+                    format!("cluster {} not in allowed_requesters", query.requester_cluster)
+                } else {
+                    String::new()
+                },
             }
         })
     }
@@ -444,6 +723,13 @@ fn generate_gateway_route(notification: &RouteNotification) -> HTTPRoute {
 }
 
 fn generate_cross_cluster_auth_policy(notification: &RouteNotification) -> AuthorizationPolicy {
+    // v1: Gateway-level identity (cluster granularity)
+    // The gateway presents: spiffe://lattice.local/ns/<cluster>/sa/gateway
+    let caller_gateway_identity = format!(
+        "spiffe://lattice.local/ns/{}/sa/gateway",
+        notification.caller_cluster
+    );
+
     AuthorizationPolicy {
         metadata: ObjectMeta {
             name: Some(format!(
@@ -462,12 +748,8 @@ fn generate_cross_cluster_auth_policy(notification: &RouteNotification) -> Autho
             },
             rules: vec![AuthRule {
                 from: vec![Source {
-                    // Trust the caller's SPIFFE identity from remote cluster
-                    principals: vec![format!(
-                        "cluster.local/ns/{}/sa/{}",
-                        notification.caller_cluster,
-                        notification.caller_service
-                    )],
+                    // Gateway identity - validated via mTLS at gateway level
+                    principals: vec![caller_gateway_identity],
                 }],
                 ..Default::default()
             }],

@@ -340,6 +340,7 @@ use crate::graph::{ActiveEdge, ServiceGraph, ServiceNode, ServiceType};
 pub struct PolicyCompiler<'a> {
     graph: &'a ServiceGraph,
     trust_domain: String,
+    cluster_name: String,
 }
 
 impl<'a> PolicyCompiler<'a> {
@@ -350,11 +351,17 @@ impl<'a> PolicyCompiler<'a> {
     ///
     /// # Arguments
     /// * `graph` - The service graph for bilateral agreement checks
-    /// * `trust_domain` - SPIFFE trust domain (e.g., "prod.lattice.local")
-    pub fn new(graph: &'a ServiceGraph, trust_domain: impl Into<String>) -> Self {
+    /// * `trust_domain` - SPIFFE trust domain (e.g., "lattice.local")
+    /// * `cluster_name` - Cluster name for SPIFFE identity path (e.g., "prod-cluster")
+    pub fn new(
+        graph: &'a ServiceGraph,
+        trust_domain: impl Into<String>,
+        cluster_name: impl Into<String>,
+    ) -> Self {
         Self {
             graph,
             trust_domain: trust_domain.into(),
+            cluster_name: cluster_name.into(),
         }
     }
 
@@ -459,16 +466,22 @@ impl<'a> PolicyCompiler<'a> {
     }
 
     /// Generate SPIFFE principal for AuthorizationPolicy
+    ///
+    /// Format: "{trust_domain}/cluster/{cluster}/ns/{namespace}/sa/{service_account}"
+    ///
     /// Note: The principals field should NOT include "spiffe://" prefix.
-    /// Istio expects format: "{trust_domain}/ns/{namespace}/sa/{service_account}"
+    /// Istio adds it internally.
     fn spiffe_principal(&self, namespace: &str, service_name: &str) -> String {
-        format!("{}/ns/{}/sa/{}", self.trust_domain, namespace, service_name)
+        format!(
+            "{}/cluster/{}/ns/{}/sa/{}",
+            self.trust_domain, self.cluster_name, namespace, service_name
+        )
     }
 
     fn waypoint_principal(&self, namespace: &str) -> String {
         format!(
-            "{}/ns/{}/sa/{}-waypoint",
-            self.trust_domain, namespace, namespace
+            "{}/cluster/{}/ns/{}/sa/{}-waypoint",
+            self.trust_domain, self.cluster_name, namespace, namespace
         )
     }
 
@@ -850,8 +863,8 @@ impl<'a> PolicyCompiler<'a> {
         // The gateway proxy pods use the envoy-{gateway-name} service account pattern
         // Note: principals field should NOT include "spiffe://" prefix
         let gateway_principal = format!(
-            "{}/ns/envoy-gateway-system/sa/envoy-default",
-            self.trust_domain
+            "{}/cluster/{}/ns/envoy-gateway-system/sa/envoy-default",
+            self.trust_domain, self.cluster_name
         );
 
         let port_strings: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
@@ -1139,7 +1152,7 @@ mod tests {
         graph.put_service(ns, "gateway", &gateway_spec);
 
         // Compile policies for api (the callee)
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         // Should have auth policy allowing gateway
@@ -1166,7 +1179,7 @@ mod tests {
         let gateway_spec = make_service_spec(vec![], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         // No auth policy (no bilateral agreement)
@@ -1181,7 +1194,7 @@ mod tests {
     fn story_no_policies_when_not_in_graph() {
         let graph = ServiceGraph::new();
 
-        let compiler = PolicyCompiler::new(&graph, "test.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "test-cluster");
         let output = compiler.compile("nonexistent", "default");
 
         assert!(output.is_empty());
@@ -1202,15 +1215,15 @@ mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "my-cluster.example.com");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "my-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         let principals = &output.authorization_policies[0].spec.rules[0].from[0]
             .source
             .principals;
-        // Principal format should be "{trust_domain}/ns/{namespace}/sa/{service_account}"
+        // Principal format should be "{trust_domain}/cluster/{cluster}/ns/{namespace}/sa/{service_account}"
         // without the "spiffe://" prefix (Istio adds it internally)
-        assert!(principals[0].starts_with("my-cluster.example.com/"));
+        assert!(principals[0].starts_with("lattice.local/cluster/my-cluster/"));
         assert!(principals[0].contains("/ns/prod-ns/sa/gateway"));
     }
 
@@ -1226,7 +1239,7 @@ mod tests {
         let spec = make_service_spec(vec![], vec![]);
         graph.put_service(ns, "my-app", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "test-cluster");
         let output = compiler.compile("my-app", ns);
 
         assert_eq!(output.cilium_policies.len(), 1);
@@ -1273,7 +1286,7 @@ mod tests {
         // stripe-api is external (allows api)
         graph.put_external_service(ns, "stripe-api", &make_external_spec(vec!["api"]));
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         assert_eq!(output.service_entries.len(), 1);
@@ -1303,7 +1316,7 @@ mod tests {
         };
         graph.put_external_service(ns, "stripe-api", &ext_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         assert_eq!(output.service_entries.len(), 1);
@@ -1328,7 +1341,7 @@ mod tests {
         };
         graph.put_external_service(ns, "cloudflare", &ext_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         assert_eq!(output.service_entries.len(), 1);
@@ -1356,7 +1369,7 @@ mod tests {
 
         graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
 
         // Compile for api (has stripe dependency)
         let api_output = compiler.compile("api", "prod-ns");
@@ -1389,7 +1402,7 @@ mod tests {
         assert_eq!(allow.spec.target_refs[0].kind, "ServiceEntry");
         assert_eq!(
             allow.spec.rules[0].from[0].source.principals[0],
-            "prod.lattice.local/ns/prod-ns/sa/api"
+            "lattice.local/cluster/prod-cluster/ns/prod-ns/sa/api"
         );
 
         // Compile for frontend (no stripe dependency)
@@ -1438,7 +1451,7 @@ mod tests {
 
         graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         // 2 auth policies (allow + waypoint) for inbound
@@ -1458,7 +1471,7 @@ mod tests {
         // by creating a service and then checking Unknown handling
         // The graph doesn't have a direct way to create Unknown, but we test
         // by verifying a service that doesn't exist returns empty
-        let compiler = PolicyCompiler::new(&graph, "test.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "test-cluster");
 
         // Non-existent service returns empty (similar path to Unknown)
         let output = compiler.compile("unknown-service", "default");
@@ -1482,7 +1495,7 @@ mod tests {
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
         graph.put_service(ns, "api", &api_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("gateway", "prod-ns");
 
         // Should have Cilium policy with egress rule to api
@@ -1524,7 +1537,7 @@ mod tests {
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
         graph.put_service(ns, "api", &api_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("gateway", "prod-ns");
 
         let cnp = &output.cilium_policies[0];
@@ -1609,7 +1622,7 @@ mod tests {
             BTreeMap::from([("default".to_string(), "https://1.1.1.1".to_string())]);
         graph.put_external_service(ns, "cloudflare", &ext_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         // Find the Cilium policy
@@ -1649,7 +1662,7 @@ mod tests {
         // stripe is external with domain name endpoint
         graph.put_external_service(ns, "stripe-api", &make_external_spec(vec!["api"]));
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         let cnp = &output.cilium_policies[0];
@@ -1695,7 +1708,7 @@ mod tests {
         ]);
         graph.put_external_service(ns, "mixed-external", &ext_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
         let cnp = &output.cilium_policies[0];
@@ -1766,7 +1779,7 @@ mod tests {
     #[test]
     fn story_gateway_allow_policy_generated() {
         let graph = ServiceGraph::new();
-        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
 
         let policy = compiler.compile_gateway_allow_policy("api", "prod-ns", &[8080, 8443]);
 
@@ -1797,7 +1810,7 @@ mod tests {
     #[test]
     fn story_gateway_allow_policy_no_ports() {
         let graph = ServiceGraph::new();
-        let compiler = PolicyCompiler::new(&graph, "test.local");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "test-cluster");
 
         let policy = compiler.compile_gateway_allow_policy("svc", "ns", &[]);
 
@@ -1807,16 +1820,17 @@ mod tests {
     }
 
     #[test]
-    fn story_gateway_allow_policy_uses_trust_domain() {
+    fn story_gateway_allow_policy_uses_trust_domain_and_cluster() {
         let graph = ServiceGraph::new();
-        let compiler = PolicyCompiler::new(&graph, "custom.trust.domain");
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "custom-cluster");
 
         let policy = compiler.compile_gateway_allow_policy("api", "prod", &[80]);
 
         let principals = &policy.spec.rules[0].from[0].source.principals;
-        // Principal format should NOT include "spiffe://" prefix
+        // Principal format: {trust_domain}/cluster/{cluster}/ns/{namespace}/sa/{service}
+        // Should NOT include "spiffe://" prefix
         assert!(principals
             .iter()
-            .any(|p| p.starts_with("custom.trust.domain/")));
+            .any(|p| p.starts_with("lattice.local/cluster/custom-cluster/")));
     }
 }

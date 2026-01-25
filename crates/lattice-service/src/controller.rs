@@ -488,8 +488,10 @@ pub struct ServiceContext {
     pub kube: Arc<dyn ServiceKubeClient>,
     /// Service dependency graph (shared across all reconciliations)
     pub graph: Arc<ServiceGraph>,
-    /// SPIFFE trust domain for policy generation
+    /// SPIFFE trust domain for policy generation (e.g., "lattice.local")
     pub trust_domain: String,
+    /// Cluster name for SPIFFE identity path (e.g., "prod-cluster")
+    pub cluster_name: String,
     /// Provider type for topology-aware scheduling (zone for cloud, hostname for on-prem)
     pub provider_type: ProviderType,
 }
@@ -500,12 +502,14 @@ impl ServiceContext {
         kube: Arc<dyn ServiceKubeClient>,
         graph: Arc<ServiceGraph>,
         trust_domain: impl Into<String>,
+        cluster_name: impl Into<String>,
         provider_type: ProviderType,
     ) -> Self {
         Self {
             kube,
             graph,
             trust_domain: trust_domain.into(),
+            cluster_name: cluster_name.into(),
             provider_type,
         }
     }
@@ -517,12 +521,14 @@ impl ServiceContext {
     pub fn from_client(
         client: Client,
         trust_domain: impl Into<String>,
+        cluster_name: impl Into<String>,
         provider_type: ProviderType,
     ) -> Self {
         Self {
             kube: Arc::new(ServiceKubeClientImpl::new(client)),
             graph: Arc::new(ServiceGraph::new()),
             trust_domain: trust_domain.into(),
+            cluster_name: cluster_name.into(),
             provider_type,
         }
     }
@@ -533,7 +539,8 @@ impl ServiceContext {
         Self {
             kube,
             graph: Arc::new(ServiceGraph::new()),
-            trust_domain: "test.local".to_string(),
+            trust_domain: "lattice.local".to_string(),
+            cluster_name: "test-cluster".to_string(),
             provider_type: ProviderType::Docker,
         }
     }
@@ -623,7 +630,7 @@ pub async fn reconcile(
             );
 
             // Compile workloads and policies
-            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain, ctx.provider_type);
+            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain, &ctx.cluster_name, ctx.provider_type);
             let compiled = compiler.compile(&service)?;
 
             // Apply compiled resources to the cluster
@@ -663,7 +670,7 @@ pub async fn reconcile(
             // This is necessary because when a new service is added that depends on us,
             // or when a service we depend on changes its allowed callers, we need to
             // update our ingress/egress policies to reflect the new bilateral agreements.
-            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain, ctx.provider_type);
+            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain, &ctx.cluster_name, ctx.provider_type);
             let compiled = compiler.compile(&service)?;
 
             debug!(

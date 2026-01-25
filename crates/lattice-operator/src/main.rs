@@ -948,9 +948,12 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     };
 
     // Create service context for service controllers
+    // Use lattice.local as the trust domain, with cluster name in the SPIFFE identity path
+    let cluster_name_for_service = self_cluster_name.clone().unwrap_or_else(|| "default".to_string());
     let service_ctx = Arc::new(ServiceContext::from_client(
         client.clone(),
-        "cluster.local",
+        "lattice.local",
+        cluster_name_for_service,
         provider_type,
     ));
 
