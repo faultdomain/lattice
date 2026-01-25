@@ -37,7 +37,9 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// - creationTimestamp: When the source resource was created
 /// - managedFields: Server-side apply ownership tracking
 /// - generation: Controller-managed generation counter
-pub fn strip_export_metadata(meta: &mut k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta) {
+pub fn strip_export_metadata(
+    meta: &mut k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta,
+) {
     meta.uid = None;
     meta.resource_version = None;
     meta.creation_timestamp = None;

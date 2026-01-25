@@ -169,7 +169,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 1: Install Management Cluster
     // =========================================================================
-    info!("\n[Phase 1] Installing management cluster...\n");
+    info!("[Phase 1] Installing management cluster...\n");
 
     let registry_credentials = load_registry_credentials();
     let installer = Installer::new(
@@ -192,7 +192,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     // Phase 2: Create Workload Cluster at v{from_version}
     // =========================================================================
     info!(
-        "\n[Phase 2] Creating workload cluster at v{}...\n",
+        "[Phase 2] Creating workload cluster at v{}...\n",
         from_version
     );
 
@@ -235,7 +235,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 3: Deploy Mesh and Start Traffic
     // =========================================================================
-    info!("\n[Phase 3] Deploying mesh services and starting traffic...\n");
+    info!("[Phase 3] Deploying mesh services and starting traffic...\n");
 
     let mesh_handle = start_mesh_test(&workload_kubeconfig_path).await?;
 
@@ -249,7 +249,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     // Phase 4: Trigger Kubernetes Upgrade
     // =========================================================================
     info!(
-        "\n[Phase 4] Triggering upgrade from v{} to v{}...\n",
+        "[Phase 4] Triggering upgrade from v{} to v{}...\n",
         from_version, to_version
     );
 
@@ -281,7 +281,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 5: Monitor for Policy Gaps During Upgrade
     // =========================================================================
-    info!("\n[Phase 5] Monitoring for policy gaps during upgrade...\n");
+    info!("[Phase 5] Monitoring for policy gaps during upgrade...\n");
     info!("  Security invariant: traffic that should be BLOCKED must NEVER be ALLOWED");
     info!("  (Dropped/failed allowed traffic is acceptable during node disruption)\n");
 
@@ -352,7 +352,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 6: Final Verification
     // =========================================================================
-    info!("\n[Phase 6] Final policy verification after upgrade...\n");
+    info!("[Phase 6] Final policy verification after upgrade...\n");
 
     // Wait for mesh to stabilize after upgrade
     info!("  Waiting for mesh to stabilize (120)...");

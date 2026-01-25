@@ -192,7 +192,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // Phase 1: Install Management Cluster
     // =========================================================================
     info!(
-        "\n[Phase 1] Installing management cluster ({} + {:?})...\n",
+        "[Phase 1] Installing management cluster ({} + {:?})...\n",
         mgmt_provider, mgmt_bootstrap
     );
 
@@ -219,7 +219,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 2: Verify Management Cluster is Self-Managing
     // =========================================================================
-    info!("\n[Phase 2] Verifying management cluster is self-managing...\n");
+    info!("[Phase 2] Verifying management cluster is self-managing...\n");
 
     let mgmt_kubeconfig_path = get_kubeconfig(MGMT_CLUSTER_NAME, mgmt_provider)?;
     info!("  Using kubeconfig: {}", mgmt_kubeconfig_path);
@@ -254,7 +254,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // Phase 3: Create Workload Cluster
     // =========================================================================
     info!(
-        "\n[Phase 3] Creating workload cluster ({} + {:?})...\n",
+        "[Phase 3] Creating workload cluster ({} + {:?})...\n",
         workload_provider, workload_bootstrap
     );
 
@@ -268,7 +268,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 4: Watch Workload Cluster Provisioning
     // =========================================================================
-    info!("\n[Phase 4] Watching workload cluster provisioning...\n");
+    info!("[Phase 4] Watching workload cluster provisioning...\n");
 
     let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
 
@@ -289,7 +289,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 5: Verify Workload Cluster
     // =========================================================================
-    info!("\n[Phase 5] Verifying workload cluster...\n");
+    info!("[Phase 5] Verifying workload cluster...\n");
 
     if workload_provider == InfraProvider::Docker {
         info!("  Extracting workload cluster kubeconfig...");
@@ -306,7 +306,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 6: Create Workload2 + Run Mesh Tests (in parallel)
     // =========================================================================
-    info!("\n[Phase 6] Creating workload2 cluster + running mesh tests in parallel...\n");
+    info!("[Phase 6] Creating workload2 cluster + running mesh tests in parallel...\n");
 
     let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
 
@@ -399,7 +399,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 7: Delete Workload2 (unpivot to workload)
     // =========================================================================
-    info!("\n[Phase 7] Deleting workload2 cluster (unpivot flow)...\n");
+    info!("[Phase 7] Deleting workload2 cluster (unpivot flow)...\n");
     info!("  CAPI resources will move back to workload cluster");
 
     delete_cluster_and_wait(
@@ -415,7 +415,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 8: Delete Workload (unpivot to mgmt)
     // =========================================================================
-    info!("\n[Phase 8] Deleting workload cluster (unpivot flow)...\n");
+    info!("[Phase 8] Deleting workload cluster (unpivot flow)...\n");
     info!("  CAPI resources will move back to management cluster");
 
     delete_cluster_and_wait(
@@ -431,7 +431,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 9: Uninstall Management Cluster
     // =========================================================================
-    info!("\n[Phase 9] Uninstalling management cluster...\n");
+    info!("[Phase 9] Uninstalling management cluster...\n");
     info!("  This uses the proper uninstall flow (reverse pivot to temporary kind cluster)");
 
     let uninstall_args = UninstallArgs {

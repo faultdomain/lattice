@@ -330,7 +330,8 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
     use lattice_operator::capi::copy_credentials_to_provider_namespace;
 
     let provider_str = std::env::var("LATTICE_PROVIDER").unwrap_or_else(|_| "docker".to_string());
-    let provider_ref = std::env::var("LATTICE_PROVIDER_REF").unwrap_or_else(|_| provider_str.clone());
+    let provider_ref =
+        std::env::var("LATTICE_PROVIDER_REF").unwrap_or_else(|_| provider_str.clone());
 
     let infrastructure = match provider_str.to_lowercase().as_str() {
         "docker" => ProviderType::Docker,
@@ -344,42 +345,32 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
 
     tracing::info!(infrastructure = %provider_str, "Installing CAPI providers for bootstrap cluster");
 
-    // Copy credentials from CloudProvider to CAPI provider namespace
-    // For non-Docker providers, wait for CloudProvider to be created by install command
-    if infrastructure != ProviderType::Docker {
-        let cloud_providers: Api<CloudProvider> =
-            Api::namespaced(client.clone(), "lattice-system");
-
-        // Wait for CloudProvider to exist (created by install command after operator starts)
-        tracing::info!(provider_ref = %provider_ref, "Waiting for CloudProvider to be created...");
-        let cp = loop {
-            match cloud_providers.get(&provider_ref).await {
-                Ok(cp) => break cp,
-                Err(kube::Error::Api(e)) if e.code == 404 => {
-                    tracing::debug!(provider_ref = %provider_ref, "CloudProvider not found, waiting...");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Failed to get CloudProvider '{}': {}",
-                        provider_ref,
-                        e
-                    ));
-                }
+    // Wait for CloudProvider to be created by install command
+    let cloud_providers: Api<CloudProvider> = Api::namespaced(client.clone(), "lattice-system");
+    tracing::info!(provider_ref = %provider_ref, "Waiting for CloudProvider...");
+    let cp = loop {
+        match cloud_providers.get(&provider_ref).await {
+            Ok(cp) => break cp,
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                tracing::debug!(provider_ref = %provider_ref, "CloudProvider not found, waiting...");
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
-        };
-        tracing::info!(provider_ref = %provider_ref, "CloudProvider found");
-
-        if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
-            copy_credentials_to_provider_namespace(client, infrastructure, secret_ref)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to copy provider credentials: {}", e))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "CloudProvider '{}' missing credentials_secret_ref",
-                provider_ref
-            ));
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to get CloudProvider '{}': {}",
+                    provider_ref,
+                    e
+                ));
+            }
         }
+    };
+    tracing::info!(provider_ref = %provider_ref, "CloudProvider found");
+
+    // Copy credentials to CAPI provider namespace if present
+    if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
+        copy_credentials_to_provider_namespace(client, infrastructure, secret_ref)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to copy provider credentials: {}", e))?;
     }
 
     let config = CapiProviderConfig::new(infrastructure)

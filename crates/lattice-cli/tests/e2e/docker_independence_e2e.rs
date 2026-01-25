@@ -116,7 +116,7 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 1: Install Management Cluster
     // =========================================================================
-    info!("\n[Phase 1] Installing management cluster...\n");
+    info!("[Phase 1] Installing management cluster...\n");
 
     let installer = Installer::new(
         mgmt_config,
@@ -137,7 +137,7 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 2: Create Workload Cluster
     // =========================================================================
-    info!("\n[Phase 2] Creating workload cluster...\n");
+    info!("[Phase 2] Creating workload cluster...\n");
 
     let mgmt_kubeconfig = get_docker_kubeconfig(&mgmt_cluster_name)?;
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig).await?;
@@ -155,7 +155,7 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 3: Verify Workload Has CAPI Resources
     // =========================================================================
-    info!("\n[Phase 3] Verifying workload cluster is self-managing...\n");
+    info!("[Phase 3] Verifying workload cluster is self-managing...\n");
 
     let workload_kubeconfig = format!("/tmp/{}-kubeconfig", workload_cluster_name);
     extract_docker_cluster_kubeconfig(
@@ -186,7 +186,7 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 4: Delete Management Cluster
     // =========================================================================
-    info!("\n[Phase 4] Deleting management cluster (force delete)...\n");
+    info!("[Phase 4] Deleting management cluster (force delete)...\n");
     info!("  This simulates parent failure - workload should survive");
 
     force_delete_docker_cluster(&mgmt_cluster_name);
@@ -200,7 +200,7 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 5: Scale Workload Cluster
     // =========================================================================
-    info!("\n[Phase 5] Scaling workload cluster workers 1 -> 2...\n");
+    info!("[Phase 5] Scaling workload cluster workers 1 -> 2...\n");
     info!("  If this works, the cluster is truly self-managing");
 
     run_cmd(
@@ -222,7 +222,7 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 6: Verify Scaling Succeeded
     // =========================================================================
-    info!("\n[Phase 6] Verifying workload cluster scaled to 2 workers...\n");
+    info!("[Phase 6] Verifying workload cluster scaled to 2 workers...\n");
 
     watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 2).await?;
 

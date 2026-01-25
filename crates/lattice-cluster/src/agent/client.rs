@@ -728,11 +728,15 @@ impl AgentClient {
                 ))
             })?;
 
-            crate::capi::copy_credentials_to_provider_namespace(&client, infrastructure, secret_ref)
-                .await
-                .map_err(|e| {
-                    std::io::Error::other(format!("Failed to copy provider credentials: {}", e))
-                })?;
+            crate::capi::copy_credentials_to_provider_namespace(
+                &client,
+                infrastructure,
+                secret_ref,
+            )
+            .await
+            .map_err(|e| {
+                std::io::Error::other(format!("Failed to copy provider credentials: {}", e))
+            })?;
         }
 
         let config = CapiProviderConfig::new(infrastructure)
@@ -876,12 +880,15 @@ impl AgentClient {
                             if !resources.is_empty() {
                                 match kube::Client::try_default().await {
                                     Ok(client) => {
-                                        if let Err(e) = apply_distributed_resources(&client, &resources).await {
+                                        if let Err(e) =
+                                            apply_distributed_resources(&client, &resources).await
+                                        {
                                             warn!(error = %e, "Failed to apply distributed resources (non-fatal)");
                                         } else {
                                             info!(
                                                 cloud_providers = resources.cloud_providers.len(),
-                                                secrets_providers = resources.secrets_providers.len(),
+                                                secrets_providers =
+                                                    resources.secrets_providers.len(),
                                                 secrets = resources.secrets.len(),
                                                 "Applied distributed resources"
                                             );

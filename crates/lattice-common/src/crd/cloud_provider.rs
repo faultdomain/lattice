@@ -234,4 +234,3 @@ spec:
         assert_eq!(provider.spec.provider_type, CloudProviderType::Proxmox);
     }
 }
-

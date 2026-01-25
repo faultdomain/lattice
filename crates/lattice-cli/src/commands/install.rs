@@ -288,9 +288,13 @@ impl Installer {
         self.deploy_lattice_operator(&bootstrap_client).await?;
 
         // CloudProvider must be created AFTER operator deploys CRDs
+        // Operator waits for CloudProvider before installing CAPI
         info!("[Phase 3/8] Creating CloudProvider and credentials...");
         self.create_cloud_provider_with_credentials(&bootstrap_client)
             .await?;
+
+        info!("Waiting for CAPI to be installed...");
+        self.wait_for_capi_crds(&bootstrap_client).await?;
 
         info!("[Phase 4/8] Creating management cluster LatticeCluster CR...");
         self.create_management_cluster_crd(&bootstrap_client)
@@ -447,8 +451,8 @@ impl Installer {
         .await
         .cmd_err()?;
 
-        info!("Waiting for CAPI to be installed...");
-        self.wait_for_capi_crds(client).await?;
+        // Note: For non-Docker providers, operator waits for CloudProvider before installing CAPI.
+        // CAPI CRDs are waited for after CloudProvider creation in run_bootstrap().
 
         Ok(())
     }
@@ -782,7 +786,10 @@ impl Installer {
             }
             ProviderType::OpenStack | ProviderType::Gcp | ProviderType::Azure => {
                 // TODO: Add credential support for these providers
-                info!("Provider {:?} does not require credentials setup", self.provider());
+                info!(
+                    "Provider {:?} does not require credentials setup",
+                    self.provider()
+                );
                 Ok(())
             }
         }

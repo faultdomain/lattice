@@ -1761,8 +1761,12 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             if let (Some(ref client), Some(ref secret_ref)) =
                 (&ctx.client, &cloud_provider.spec.credentials_secret_ref)
             {
-                crate::capi::copy_credentials_to_provider_namespace(client, provider_type, secret_ref)
-                    .await?;
+                crate::capi::copy_credentials_to_provider_namespace(
+                    client,
+                    provider_type,
+                    secret_ref,
+                )
+                .await?;
             }
 
             // Ensure CAPI is installed before provisioning
