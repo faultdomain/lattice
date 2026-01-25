@@ -1,0 +1,16 @@
+# Proxmox CloudProvider for E2E testing
+# Credentials are loaded from PROXMOX_* environment variables
+apiVersion: lattice.dev/v1alpha1
+kind: CloudProvider
+metadata:
+  name: proxmox
+spec:
+  providerType: proxmox
+  credentialsSecretRef:
+    name: proxmox-credentials
+    namespace: capmox-system
+  proxmox:
+    endpoint: "${PROXMOX_URL}"
+    allowInsecure: true
+  labels:
+    environment: e2e

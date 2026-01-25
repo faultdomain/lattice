@@ -32,6 +32,12 @@ use super::types::{
 )]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeClusterSpec {
+    /// Reference to a CloudProvider for credentials and account-level config
+    ///
+    /// The cluster uses the referenced CloudProvider's credentials.
+    /// The provider field still contains cluster-specific config (k8s version, instance types).
+    pub provider_ref: String,
+
     /// Infrastructure provider configuration
     pub provider: ProviderSpec,
 
@@ -70,6 +76,11 @@ impl LatticeClusterSpec {
 
     /// Validate the cluster specification
     pub fn validate(&self) -> Result<(), crate::Error> {
+        // provider_ref must not be empty
+        if self.provider_ref.is_empty() {
+            return Err(crate::Error::validation("provider_ref cannot be empty"));
+        }
+
         // Validate node spec
         self.nodes.validate()?;
 
@@ -279,6 +290,7 @@ mod tests {
     #[test]
     fn story_cluster_with_parent_config_can_have_children() {
         let spec = LatticeClusterSpec {
+            provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
@@ -298,6 +310,7 @@ mod tests {
     #[test]
     fn story_cluster_without_parent_is_leaf() {
         let spec = LatticeClusterSpec {
+            provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
@@ -322,6 +335,7 @@ mod tests {
     #[test]
     fn story_valid_parent_passes_validation() {
         let spec = LatticeClusterSpec {
+            provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
@@ -343,6 +357,7 @@ mod tests {
     #[test]
     fn story_valid_workload_cluster_passes_validation() {
         let spec = LatticeClusterSpec {
+            provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
@@ -364,6 +379,7 @@ mod tests {
     #[test]
     fn story_zero_control_plane_nodes_fails_validation() {
         let spec = LatticeClusterSpec {
+            provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: NodeSpec {
                 control_plane: 0,
@@ -385,6 +401,28 @@ mod tests {
         assert!(
             spec.validate().is_err(),
             "Zero control plane nodes should fail"
+        );
+    }
+
+    /// Story: Empty provider_ref fails validation
+    ///
+    /// Every cluster must reference a CloudProvider for credentials.
+    #[test]
+    fn story_empty_provider_ref_fails_validation() {
+        let spec = LatticeClusterSpec {
+            provider_ref: "".to_string(),
+            provider: sample_provider_spec(),
+            nodes: sample_node_spec(),
+            networking: None,
+            parent_config: None,
+            environment: None,
+            region: None,
+            workload: None,
+        };
+
+        assert!(
+            spec.validate().is_err(),
+            "Empty provider_ref should fail validation"
         );
     }
 
@@ -474,6 +512,7 @@ mod tests {
     #[test]
     fn story_yaml_manifest_defines_management_cluster() {
         let yaml = r#"
+providerRef: aws-prod
 provider:
   kubernetes:
     version: "1.35.0"
@@ -518,6 +557,7 @@ parentConfig:
     #[test]
     fn story_yaml_manifest_defines_production_workload_cluster() {
         let yaml = r#"
+providerRef: aws-prod
 environment: prod
 region: us-west
 provider:
@@ -558,6 +598,7 @@ workload:
     #[test]
     fn story_spec_survives_yaml_roundtrip() {
         let spec = LatticeClusterSpec {
+            provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,

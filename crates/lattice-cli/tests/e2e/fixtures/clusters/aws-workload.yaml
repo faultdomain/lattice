@@ -5,6 +5,7 @@ kind: LatticeCluster
 metadata:
   name: e2e-workload
 spec:
+  providerRef: aws
   provider:
     kubernetes:
       version: "1.32.0"

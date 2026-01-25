@@ -820,8 +820,9 @@ impl AgentClient {
             Some(Command::PivotManifests(cmd)) => {
                 info!(
                     manifests = cmd.manifests.len(),
+                    cloud_providers = cmd.cloud_providers.len(),
+                    secrets_providers = cmd.secrets_providers.len(),
                     secrets = cmd.secrets.len(),
-                    configmaps = cmd.configmaps.len(),
                     namespace = %cmd.target_namespace,
                     "pivot started"
                 );
@@ -831,8 +832,9 @@ impl AgentClient {
                 let target_namespace = cmd.target_namespace.clone();
                 let manifests = cmd.manifests.clone();
                 let resources = DistributableResources {
+                    cloud_providers: cmd.cloud_providers.clone(),
+                    secrets_providers: cmd.secrets_providers.clone(),
                     secrets: cmd.secrets.clone(),
-                    configmaps: cmd.configmaps.clone(),
                 };
                 let pivot_cluster_name = cmd.cluster_name.clone();
                 let agent_state_clone = agent_state.clone();
@@ -859,8 +861,9 @@ impl AgentClient {
                                     warn!(error = %e, "Failed to apply distributed resources (non-fatal)");
                                 } else {
                                     info!(
+                                        cloud_providers = resources.cloud_providers.len(),
+                                        secrets_providers = resources.secrets_providers.len(),
                                         secrets = resources.secrets.len(),
-                                        configmaps = resources.configmaps.len(),
                                         "Applied distributed resources"
                                     );
                                 }
@@ -948,16 +951,18 @@ impl AgentClient {
             }
             Some(Command::SyncResources(cmd)) => {
                 info!(
+                    cloud_providers = cmd.cloud_providers.len(),
+                    secrets_providers = cmd.secrets_providers.len(),
                     secrets = cmd.secrets.len(),
-                    configmaps = cmd.configmaps.len(),
                     full_sync = cmd.full_sync,
                     "Received sync resources command"
                 );
 
                 // Apply resources in background to not block command processing
                 let resources = DistributableResources {
+                    cloud_providers: cmd.cloud_providers.clone(),
+                    secrets_providers: cmd.secrets_providers.clone(),
                     secrets: cmd.secrets.clone(),
-                    configmaps: cmd.configmaps.clone(),
                 };
                 let full_sync = cmd.full_sync;
 
@@ -966,14 +971,15 @@ impl AgentClient {
                         warn!(error = %e, "Failed to apply synced resources");
                     } else {
                         info!(
+                            cloud_providers = resources.cloud_providers.len(),
+                            secrets_providers = resources.secrets_providers.len(),
                             secrets = resources.secrets.len(),
-                            configmaps = resources.configmaps.len(),
                             full_sync,
                             "Synced resources applied"
                         );
                     }
 
-                    // TODO: If full_sync, delete resources with lattice.io/distribute=true
+                    // TODO: If full_sync, delete CloudProviders/SecretsProviders/secrets
                     // that are not in the provided list
                     if full_sync {
                         debug!("Full sync requested - cleanup of removed resources not yet implemented");

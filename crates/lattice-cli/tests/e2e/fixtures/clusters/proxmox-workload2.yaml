@@ -5,6 +5,7 @@ kind: LatticeCluster
 metadata:
   name: e2e-workload2
 spec:
+  providerRef: proxmox
   provider:
     kubernetes:
       version: "1.32.0"

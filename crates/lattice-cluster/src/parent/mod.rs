@@ -29,7 +29,8 @@ use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
 };
 use crate::pivot::{fetch_distributable_resources, DistributableResources};
-use lattice_common::{DISTRIBUTE_LABEL_SELECTOR, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::crd::{CloudProvider, SecretsProvider};
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
 use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
 
@@ -124,8 +125,9 @@ async fn push_resources_to_agents(
         command_id: uuid::Uuid::new_v4().to_string(),
         command: Some(cell_command::Command::SyncResources(
             SyncDistributedResourcesCommand {
+                cloud_providers: resources.cloud_providers.clone(),
+                secrets_providers: resources.secrets_providers.clone(),
                 secrets: resources.secrets.clone(),
-                configmaps: resources.configmaps.clone(),
                 full_sync,
             },
         )),
@@ -137,8 +139,9 @@ async fn push_resources_to_agents(
         } else {
             debug!(
                 agent = %agent_name,
+                cloud_providers = resources.cloud_providers.len(),
+                secrets_providers = resources.secrets_providers.len(),
                 secrets = resources.secrets.len(),
-                configmaps = resources.configmaps.len(),
                 "Pushed resources to agent"
             );
         }
@@ -147,22 +150,20 @@ async fn push_resources_to_agents(
 
 /// Run the resource sync service
 ///
-/// Watches for changes to secrets/configmaps with the distribute label and:
+/// Watches for changes to CloudProvider and SecretsProvider CRDs and:
 /// 1. Immediately pushes changes to all connected agents (watch-triggered)
 /// 2. Periodically does a full sync as a safety net
 async fn run_resource_sync(client: Client, registry: SharedAgentRegistry) {
-    use k8s_openapi::api::core::v1::ConfigMap;
+    let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    // Create watchers for provider CRDs
+    let watcher_config = watcher::Config::default();
+    let cp_watcher = watcher::watcher(cp_api, watcher_config.clone());
+    let sp_watcher = watcher::watcher(sp_api, watcher_config);
 
-    // Create watchers for distributable resources
-    let watcher_config = watcher::Config::default().labels(DISTRIBUTE_LABEL_SELECTOR);
-    let secret_watcher = watcher::watcher(secret_api, watcher_config.clone());
-    let cm_watcher = watcher::watcher(cm_api, watcher_config);
-
-    let mut secret_watcher = std::pin::pin!(secret_watcher);
-    let mut cm_watcher = std::pin::pin!(cm_watcher);
+    let mut cp_watcher = std::pin::pin!(cp_watcher);
+    let mut sp_watcher = std::pin::pin!(sp_watcher);
 
     // Periodic sync timer
     let mut sync_interval = tokio::time::interval(SECRET_SYNC_INTERVAL);
@@ -172,13 +173,13 @@ async fn run_resource_sync(client: Client, registry: SharedAgentRegistry) {
 
     loop {
         tokio::select! {
-            // Watch for secret changes
-            Some(event) = secret_watcher.next() => {
-                handle_resource_event(&client, &registry, event, "secret").await;
+            // Watch for CloudProvider changes
+            Some(event) = cp_watcher.next() => {
+                handle_resource_event(&client, &registry, event, "CloudProvider").await;
             }
-            // Watch for configmap changes
-            Some(event) = cm_watcher.next() => {
-                handle_resource_event(&client, &registry, event, "configmap").await;
+            // Watch for SecretsProvider changes
+            Some(event) = sp_watcher.next() => {
+                handle_resource_event(&client, &registry, event, "SecretsProvider").await;
             }
             // Periodic full sync
             _ = sync_interval.tick() => {
@@ -202,11 +203,11 @@ async fn handle_resource_event<T>(
     event: Result<Event<T>, watcher::Error>,
     resource_type: &str,
 ) where
-    T: k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>,
+    T: kube::ResourceExt,
 {
     match event {
         Ok(Event::Apply(resource)) | Ok(Event::InitApply(resource)) => {
-            let name = resource.metadata().name.as_deref().unwrap_or("unknown");
+            let name = resource.name_any();
             info!(%resource_type, %name, "Distributable resource changed, pushing to agents");
             match fetch_distributable_resources(client).await {
                 Ok(resources) => push_resources_to_agents(registry, resources, false).await,
@@ -214,7 +215,7 @@ async fn handle_resource_event<T>(
             }
         }
         Ok(Event::Delete(resource)) => {
-            let name = resource.metadata().name.as_deref().unwrap_or("unknown");
+            let name = resource.name_any();
             info!(%resource_type, %name, "Distributable resource deleted, triggering full sync");
             match fetch_distributable_resources(client).await {
                 Ok(resources) => push_resources_to_agents(registry, resources, true).await,

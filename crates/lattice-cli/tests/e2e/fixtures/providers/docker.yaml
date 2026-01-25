@@ -1,0 +1,10 @@
+# Docker CloudProvider for E2E testing
+# Docker provider doesn't need credentials - uses local Docker socket
+apiVersion: lattice.dev/v1alpha1
+kind: CloudProvider
+metadata:
+  name: docker
+spec:
+  providerType: docker
+  labels:
+    environment: e2e

@@ -187,22 +187,26 @@ message PivotManifestsCommand {
   string target_namespace = 2;
   // Cluster name
   string cluster_name = 3;
-  // Secrets to distribute (labeled lattice.io/distribute: "true")
-  repeated bytes secrets = 4;
-  // ConfigMaps to distribute (labeled lattice.io/distribute: "true")
-  repeated bytes configmaps = 5;
+  // CloudProvider CRDs (YAML)
+  repeated bytes cloud_providers = 4;
+  // SecretsProvider CRDs (YAML)
+  repeated bytes secrets_providers = 5;
+  // Secrets referenced by providers (YAML)
+  repeated bytes secrets = 6;
 }
 
-// Sync distributable resources (secrets + configmaps) to child cluster
+// Sync distributable resources to child cluster
 // Used for both watch-triggered updates and periodic reconciliation
 message SyncDistributedResourcesCommand {
-  // Secrets to apply (YAML, labeled lattice.io/distribute: "true")
-  repeated bytes secrets = 1;
-  // ConfigMaps to apply (YAML, labeled lattice.io/distribute: "true")
-  repeated bytes configmaps = 2;
+  // CloudProvider CRDs (YAML)
+  repeated bytes cloud_providers = 1;
+  // SecretsProvider CRDs (YAML)
+  repeated bytes secrets_providers = 2;
+  // Secrets referenced by providers (YAML)
+  repeated bytes secrets = 3;
   // If true, delete resources not in this list (full sync)
   // If false, only add/update (incremental)
-  bool full_sync = 3;
+  bool full_sync = 4;
 }
 
 // Request current cluster status

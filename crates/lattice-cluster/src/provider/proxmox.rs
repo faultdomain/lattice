@@ -427,6 +427,7 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeClusterSpec {
+                provider_ref: "proxmox".to_string(),
                 provider: ProviderSpec {
                     kubernetes: KubernetesSpec {
                         version: "1.32.0".to_string(),

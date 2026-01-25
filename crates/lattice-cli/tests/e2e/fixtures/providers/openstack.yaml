@@ -1,0 +1,16 @@
+# OpenStack CloudProvider for E2E testing
+# Credentials are loaded from OS_* environment variables
+apiVersion: lattice.dev/v1alpha1
+kind: CloudProvider
+metadata:
+  name: openstack
+spec:
+  providerType: openstack
+  credentialsSecretRef:
+    name: openstack-credentials
+    namespace: capo-system
+  openstack:
+    authUrl: "${OS_AUTH_URL}"
+    region: "${OS_REGION_NAME}"
+  labels:
+    environment: e2e

@@ -5,6 +5,7 @@ kind: LatticeCluster
 metadata:
   name: e2e-mgmt
 spec:
+  providerRef: openstack
   provider:
     kubernetes:
       version: "1.32.0"

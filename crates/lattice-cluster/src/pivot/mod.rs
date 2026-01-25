@@ -29,7 +29,8 @@ use tracing::{debug, info};
 
 // Re-export retry utilities for convenience
 pub use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::{DISTRIBUTE_LABEL_SELECTOR, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::crd::{CloudProvider, SecretsProvider};
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 /// Default CAPI namespace for pivot handlers
 const DEFAULT_CAPI_NAMESPACE: &str = "default";
@@ -481,83 +482,116 @@ async fn apply_kubeconfig_patch(
     Ok(())
 }
 
-/// Resources labeled for distribution to child clusters
+/// Resources to distribute to child clusters
+///
+/// Distribution is based on CloudProvider and SecretsProvider CRDs.
+/// Their referenced secrets are automatically included.
 #[derive(Debug, Default, Clone)]
 pub struct DistributableResources {
-    /// Secrets (credentials, tokens, keys)
+    /// CloudProvider CRDs
+    pub cloud_providers: Vec<Vec<u8>>,
+    /// SecretsProvider CRDs (Vault connections)
+    pub secrets_providers: Vec<Vec<u8>>,
+    /// Secrets referenced by providers (credentials)
     pub secrets: Vec<Vec<u8>>,
-    /// ConfigMaps (configuration, feature flags)
-    pub configmaps: Vec<Vec<u8>>,
 }
 
 impl DistributableResources {
     /// Check if there are any resources to distribute
     pub fn is_empty(&self) -> bool {
-        self.secrets.is_empty() && self.configmaps.is_empty()
+        self.cloud_providers.is_empty()
+            && self.secrets_providers.is_empty()
+            && self.secrets.is_empty()
     }
 }
 
-/// Fetch all resources labeled for distribution from lattice-system namespace.
+/// Fetch all resources to distribute to child clusters.
 ///
-/// Resources with label `lattice.io/distribute: "true"` are sent to child clusters
-/// during pivot and via periodic sync. Use cases:
-/// - Secrets: provider credentials, ESO vault creds, registry pull secrets
-/// - ConfigMaps: feature flags, environment config, operator settings
+/// Distribution is based on CloudProvider and SecretsProvider CRDs.
+/// Their referenced credential secrets are automatically included.
 pub async fn fetch_distributable_resources(
     client: &Client,
 ) -> Result<DistributableResources, PivotError> {
-    use k8s_openapi::api::core::v1::ConfigMap;
     use kube::api::ListParams;
+    use std::collections::HashSet;
 
-    let lp = ListParams::default().labels(DISTRIBUTE_LABEL_SELECTOR);
+    let lp = ListParams::default();
+    let mut secret_names: HashSet<String> = HashSet::new();
 
-    // Fetch secrets
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let secrets_list = secret_api
+    // Fetch CloudProvider CRDs
+    let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let cp_list = cp_api
         .list(&lp)
         .await
-        .map_err(|e| PivotError::Internal(format!("failed to list secrets: {}", e)))?;
+        .map_err(|e| PivotError::Internal(format!("failed to list CloudProviders: {}", e)))?;
 
-    let mut secrets = Vec::new();
-    for secret in secrets_list.items {
-        let yaml = serialize_for_distribution(&secret)?;
-        secrets.push(yaml);
+    let mut cloud_providers = Vec::new();
+    for cp in &cp_list.items {
+        let yaml = serialize_for_distribution(cp)?;
+        cloud_providers.push(yaml);
+        // Track referenced secret (if any)
+        if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
+            secret_names.insert(secret_ref.name.clone());
+        }
     }
 
-    // Fetch configmaps
-    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let cms_list = cm_api
+    // Fetch SecretsProvider CRDs
+    let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let sp_list = sp_api
         .list(&lp)
         .await
-        .map_err(|e| PivotError::Internal(format!("failed to list configmaps: {}", e)))?;
+        .map_err(|e| PivotError::Internal(format!("failed to list SecretsProviders: {}", e)))?;
 
-    let mut configmaps = Vec::new();
-    for cm in cms_list.items {
-        let yaml = serialize_for_distribution(&cm)?;
-        configmaps.push(yaml);
+    let mut secrets_providers = Vec::new();
+    for sp in &sp_list.items {
+        let yaml = serialize_for_distribution(sp)?;
+        secrets_providers.push(yaml);
+        // Track referenced secret (if any)
+        if let Some(ref secret_ref) = sp.spec.credentials_secret_ref {
+            secret_names.insert(secret_ref.name.clone());
+        }
+    }
+
+    // Fetch referenced secrets
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let mut secrets = Vec::new();
+    for name in &secret_names {
+        match secret_api.get(name).await {
+            Ok(secret) => {
+                let yaml = serialize_for_distribution(&secret)?;
+                secrets.push(yaml);
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                debug!(secret = %name, "Referenced secret not found, skipping");
+            }
+            Err(e) => {
+                return Err(PivotError::Internal(format!(
+                    "failed to get secret {}: {}",
+                    name, e
+                )));
+            }
+        }
     }
 
     debug!(
+        cloud_providers = cloud_providers.len(),
+        secrets_providers = secrets_providers.len(),
         secrets = secrets.len(),
-        configmaps = configmaps.len(),
         "fetched distributable resources"
     );
     Ok(DistributableResources {
+        cloud_providers,
+        secrets_providers,
         secrets,
-        configmaps,
     })
 }
 
 /// Serialize a Kubernetes resource for distribution, stripping cluster-specific metadata
-fn serialize_for_distribution<
-    T: serde::Serialize
-        + Clone
-        + k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>,
->(
+fn serialize_for_distribution<T: serde::Serialize + Clone + kube::ResourceExt>(
     resource: &T,
 ) -> Result<Vec<u8>, PivotError> {
     let mut clean = resource.clone();
-    let meta = clean.metadata_mut();
+    let meta = clean.meta_mut();
     meta.uid = None;
     meta.resource_version = None;
     meta.creation_timestamp = None;
@@ -570,12 +604,11 @@ fn serialize_for_distribution<
 
 /// Apply distributed resources to the lattice-system namespace.
 ///
-/// During pivot and periodic sync, parent clusters send resources labeled
-/// `lattice.io/distribute: "true"` to child clusters.
+/// During pivot and periodic sync, parent clusters send CloudProvider,
+/// SecretsProvider CRDs and their referenced secrets to child clusters.
 pub async fn apply_distributed_resources(
     resources: &DistributableResources,
 ) -> Result<(), PivotError> {
-    use k8s_openapi::api::core::v1::ConfigMap;
     use kube::api::{Patch, PatchParams};
 
     if resources.is_empty() {
@@ -588,7 +621,7 @@ pub async fn apply_distributed_resources(
 
     let params = PatchParams::apply("lattice-pivot").force();
 
-    // Apply secrets
+    // Apply secrets first (credentials needed by providers)
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for secret_bytes in &resources.secrets {
         let yaml_str = String::from_utf8_lossy(secret_bytes);
@@ -609,27 +642,50 @@ pub async fn apply_distributed_resources(
         info!(secret = %name, "Applied distributed secret");
     }
 
-    // Apply configmaps
-    let cm_api: Api<ConfigMap> = Api::namespaced(client, LATTICE_SYSTEM_NAMESPACE);
-    for cm_bytes in &resources.configmaps {
-        let yaml_str = String::from_utf8_lossy(cm_bytes);
-        let cm: ConfigMap = serde_yaml::from_str(&yaml_str)
-            .map_err(|e| PivotError::Internal(format!("failed to parse configmap YAML: {}", e)))?;
+    // Apply CloudProviders
+    let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    for cp_bytes in &resources.cloud_providers {
+        let yaml_str = String::from_utf8_lossy(cp_bytes);
+        let cp: CloudProvider = serde_yaml::from_str(&yaml_str)
+            .map_err(|e| PivotError::Internal(format!("failed to parse CloudProvider YAML: {}", e)))?;
 
-        let name = cm
+        let name = cp
             .metadata
             .name
             .as_ref()
-            .ok_or_else(|| PivotError::Internal("configmap has no name".to_string()))?;
+            .ok_or_else(|| PivotError::Internal("CloudProvider has no name".to_string()))?;
 
-        cm_api
-            .patch(name, &params, &Patch::Apply(&cm))
+        cp_api
+            .patch(name, &params, &Patch::Apply(&cp))
             .await
             .map_err(|e| {
-                PivotError::Internal(format!("failed to apply configmap {}: {}", name, e))
+                PivotError::Internal(format!("failed to apply CloudProvider {}: {}", name, e))
             })?;
 
-        info!(configmap = %name, "Applied distributed configmap");
+        info!(cloud_provider = %name, "Applied distributed CloudProvider");
+    }
+
+    // Apply SecretsProviders
+    let sp_api: Api<SecretsProvider> = Api::namespaced(client, LATTICE_SYSTEM_NAMESPACE);
+    for sp_bytes in &resources.secrets_providers {
+        let yaml_str = String::from_utf8_lossy(sp_bytes);
+        let sp: SecretsProvider = serde_yaml::from_str(&yaml_str)
+            .map_err(|e| PivotError::Internal(format!("failed to parse SecretsProvider YAML: {}", e)))?;
+
+        let name = sp
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| PivotError::Internal("SecretsProvider has no name".to_string()))?;
+
+        sp_api
+            .patch(name, &params, &Patch::Apply(&sp))
+            .await
+            .map_err(|e| {
+                PivotError::Internal(format!("failed to apply SecretsProvider {}: {}", name, e))
+            })?;
+
+        info!(secrets_provider = %name, "Applied distributed SecretsProvider");
     }
 
     Ok(())
@@ -811,8 +867,9 @@ mod tests {
         // This test runs even without a K8s cluster because parsing happens before API calls
         let invalid_yaml = b"not: valid: yaml: [unclosed".to_vec();
         let resources = DistributableResources {
+            cloud_providers: vec![],
+            secrets_providers: vec![],
             secrets: vec![invalid_yaml],
-            configmaps: vec![],
         };
         let result = apply_distributed_resources(&resources).await;
 
@@ -839,8 +896,9 @@ data:
   key: dmFsdWU=
 "#;
         let resources = DistributableResources {
+            cloud_providers: vec![],
+            secrets_providers: vec![],
             secrets: vec![nameless_secret.as_bytes().to_vec()],
-            configmaps: vec![],
         };
         let result = apply_distributed_resources(&resources).await;
         assert!(result.is_err());
@@ -861,8 +919,6 @@ kind: Secret
 metadata:
   name: test-secret
   namespace: lattice-system
-  labels:
-    lattice.io/distribute: "true"
 data:
   key: dmFsdWU=
 "#;
@@ -878,15 +934,24 @@ data:
         assert!(empty.is_empty());
 
         let with_secrets = DistributableResources {
+            cloud_providers: vec![],
+            secrets_providers: vec![],
             secrets: vec![vec![1, 2, 3]],
-            configmaps: vec![],
         };
         assert!(!with_secrets.is_empty());
 
-        let with_configmaps = DistributableResources {
+        let with_cloud_providers = DistributableResources {
+            cloud_providers: vec![vec![1, 2, 3]],
+            secrets_providers: vec![],
             secrets: vec![],
-            configmaps: vec![vec![1, 2, 3]],
         };
-        assert!(!with_configmaps.is_empty());
+        assert!(!with_cloud_providers.is_empty());
+
+        let with_secrets_providers = DistributableResources {
+            cloud_providers: vec![],
+            secrets_providers: vec![vec![1, 2, 3]],
+            secrets: vec![],
+        };
+        assert!(!with_secrets_providers.is_empty());
     }
 }

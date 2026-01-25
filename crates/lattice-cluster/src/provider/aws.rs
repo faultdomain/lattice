@@ -350,6 +350,7 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeClusterSpec {
+                provider_ref: "aws".to_string(),
                 provider: ProviderSpec {
                     kubernetes: KubernetesSpec {
                         version: "1.32.0".to_string(),

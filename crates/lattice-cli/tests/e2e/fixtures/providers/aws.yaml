@@ -1,0 +1,16 @@
+# AWS CloudProvider for E2E testing
+# Credentials are loaded from AWS_* environment variables
+apiVersion: lattice.dev/v1alpha1
+kind: CloudProvider
+metadata:
+  name: aws
+spec:
+  providerType: aws
+  region: us-east-1
+  credentialsSecretRef:
+    name: aws-credentials
+    namespace: capa-system
+  aws:
+    sshKeyName: lattice-e2e
+  labels:
+    environment: e2e

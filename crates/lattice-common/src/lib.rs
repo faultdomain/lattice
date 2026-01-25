@@ -24,9 +24,3 @@ pub const DEFAULT_GRPC_PORT: u16 = 50051;
 
 /// Namespace for Lattice system resources (CA, credentials, operator)
 pub const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";
-
-/// Label key for resources that should be distributed to child clusters
-pub const DISTRIBUTE_LABEL_KEY: &str = "lattice.io/distribute";
-
-/// Label selector for distributable resources (for Kubernetes API queries)
-pub const DISTRIBUTE_LABEL_SELECTOR: &str = "lattice.io/distribute=true";

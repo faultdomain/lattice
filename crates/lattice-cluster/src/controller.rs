@@ -2363,15 +2363,16 @@ impl PivotOperations for PivotOperationsImpl {
             .map_err(|e| Error::pivot(format!("clusterctl move --to-directory failed: {}", e)))?;
         let manifest_count = manifests.len();
 
-        // Fetch resources labeled for distribution
+        // Fetch resources for distribution (CloudProviders, SecretsProviders, and their secrets)
         let resources = crate::pivot::fetch_distributable_resources(&self.client)
             .await
             .unwrap_or_else(|e| {
                 warn!(error = %e, "failed to fetch distributable resources, continuing without");
                 crate::pivot::DistributableResources::default()
             });
+        let cp_count = resources.cloud_providers.len();
+        let sp_count = resources.secrets_providers.len();
         let secret_count = resources.secrets.len();
-        let configmap_count = resources.configmaps.len();
 
         // Send PivotManifestsCommand to agent
         let pivot_manifests_cmd = CellCommand {
@@ -2381,8 +2382,9 @@ impl PivotOperations for PivotOperationsImpl {
                     manifests,
                     target_namespace: target_namespace.to_string(),
                     cluster_name: cluster_name.to_string(),
+                    cloud_providers: resources.cloud_providers,
+                    secrets_providers: resources.secrets_providers,
                     secrets: resources.secrets,
-                    configmaps: resources.configmaps,
                 },
             )),
         };
@@ -2392,7 +2394,7 @@ impl PivotOperations for PivotOperationsImpl {
             .await
             .map_err(|e| Error::pivot(format!("failed to send PivotManifestsCommand: {}", e)))?;
 
-        info!(cluster = %cluster_name, manifests = manifest_count, secrets = secret_count, configmaps = configmap_count, "pivot triggered");
+        info!(cluster = %cluster_name, manifests = manifest_count, cloud_providers = cp_count, secrets_providers = sp_count, secrets = secret_count, "pivot triggered");
         Ok(())
     }
 
@@ -2781,6 +2783,7 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeClusterSpec {
+                provider_ref: "test-provider".to_string(),
                 provider: ProviderSpec {
                     kubernetes: KubernetesSpec {
                         version: "1.32.0".to_string(),
@@ -3368,6 +3371,7 @@ mod tests {
                     ..Default::default()
                 },
                 spec: LatticeClusterSpec {
+                    provider_ref: "test-provider".to_string(),
                     provider: ProviderSpec {
                         kubernetes: KubernetesSpec {
                             version: "1.32.0".to_string(),

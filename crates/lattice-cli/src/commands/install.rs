@@ -27,7 +27,10 @@ use lattice_operator::bootstrap::{
     proxmox_credentials_manifests, AwsCredentials, DefaultManifestGenerator, ManifestConfig,
     ManifestGenerator, ProviderCredentials,
 };
-use lattice_operator::crd::{BootstrapProvider, LatticeCluster, ProviderType};
+use lattice_operator::crd::{
+    BootstrapProvider, CloudProvider, CloudProviderSpec, CloudProviderType, LatticeCluster,
+    ProviderType, SecretRef,
+};
 use lattice_operator::fips;
 
 use crate::{Error, Result};
@@ -555,11 +558,76 @@ impl Installer {
     }
 
     async fn create_management_cluster_crd(&self, client: &Client) -> Result<()> {
+        // Create CloudProvider first
+        let cloud_provider_yaml = self.generate_cloud_provider_yaml()?;
+        info!("Creating CloudProvider: {}", self.cluster.spec.provider_ref);
+        kube_utils::apply_manifest_with_retry(client, &cloud_provider_yaml, Duration::from_secs(30))
+            .await
+            .cmd_err()?;
+
+        // Then create the LatticeCluster
         kube_utils::apply_manifest_with_retry(client, &self.cluster_yaml, Duration::from_secs(120))
             .await
             .cmd_err()?;
         self.create_bootstrap_crs(client).await?;
         Ok(())
+    }
+
+    fn generate_cloud_provider_yaml(&self) -> Result<String> {
+        let provider_type = match self.provider() {
+            ProviderType::Docker => CloudProviderType::Docker,
+            ProviderType::Aws => CloudProviderType::AWS,
+            ProviderType::Proxmox => CloudProviderType::Proxmox,
+            ProviderType::OpenStack => CloudProviderType::OpenStack,
+            ProviderType::Gcp | ProviderType::Azure => {
+                return Err(Error::validation(format!(
+                    "Provider {:?} not yet supported",
+                    self.provider()
+                )));
+            }
+        };
+
+        let credentials_secret_ref = match self.provider() {
+            ProviderType::Docker => None,
+            ProviderType::Aws => Some(SecretRef {
+                name: "aws-credentials".to_string(),
+                namespace: "capa-system".to_string(),
+            }),
+            ProviderType::Proxmox => Some(SecretRef {
+                name: "proxmox-credentials".to_string(),
+                namespace: "capmox-system".to_string(),
+            }),
+            ProviderType::OpenStack => Some(SecretRef {
+                name: "openstack-credentials".to_string(),
+                namespace: "capo-system".to_string(),
+            }),
+            _ => None,
+        };
+
+        // Get region from AWS config if available
+        let region = self
+            .cluster
+            .spec
+            .provider
+            .config
+            .aws
+            .as_ref()
+            .map(|aws| aws.region.clone());
+
+        let cloud_provider = CloudProvider::new(
+            &self.cluster.spec.provider_ref,
+            CloudProviderSpec {
+                provider_type,
+                region,
+                credentials_secret_ref,
+                aws: None,
+                proxmox: None,
+                openstack: None,
+                labels: Default::default(),
+            },
+        );
+
+        serde_yaml::to_string(&cloud_provider).map_err(|e| Error::command_failed(e.to_string()))
     }
 
     async fn wait_for_management_cluster(&self, client: &Client) -> Result<()> {

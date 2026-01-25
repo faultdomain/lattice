@@ -60,7 +60,7 @@ use tracing::{debug, info, warn};
 use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
 use lattice_common::crd::{LatticeCluster, ProviderType};
-use lattice_common::{DISTRIBUTE_LABEL_KEY, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_infra::pki::{CertificateAuthorityBundle, PkiError};
 #[cfg(test)]
 use lattice_infra::pki::CertificateAuthority;
@@ -321,9 +321,9 @@ pub const CAPO_NAMESPACE: &str = "capo-system";
 
 /// Generate Proxmox credentials manifest
 ///
-/// Creates a secret in lattice-system with the distribute label so it syncs to children.
+/// Creates a secret in lattice-system. The secret is referenced by a CloudProvider CRD
+/// and distributed to children when the CloudProvider is distributed.
 /// The controller copies this to capmox-system when running clusterctl.
-/// Includes namespace creation to ensure it exists before the secret is created.
 pub fn proxmox_credentials_manifests(url: &str, token: &str, secret: &str) -> String {
     format!(
         r#"apiVersion: v1
@@ -337,7 +337,6 @@ metadata:
   name: {PROXMOX_CREDENTIALS_SECRET}
   namespace: {LATTICE_SYSTEM_NAMESPACE}
   labels:
-    {DISTRIBUTE_LABEL_KEY}: "true"
     {PROVIDER_LABEL}: proxmox
 type: Opaque
 stringData:
@@ -400,9 +399,9 @@ impl AwsCredentials {
 
 /// Generate AWS credentials manifest
 ///
-/// Creates a secret in lattice-system with the distribute label so it syncs to children.
+/// Creates a secret in lattice-system. The secret is referenced by a CloudProvider CRD
+/// and distributed to children when the CloudProvider is distributed.
 /// The controller copies this to capa-system when running clusterctl.
-/// Includes namespace creation to ensure it exists before the secret is created.
 pub fn aws_credentials_manifests(creds: &AwsCredentials) -> String {
     let session_token_line = creds
         .session_token
@@ -422,7 +421,6 @@ metadata:
   name: {AWS_CREDENTIALS_SECRET}
   namespace: {LATTICE_SYSTEM_NAMESPACE}
   labels:
-    {DISTRIBUTE_LABEL_KEY}: "true"
     {PROVIDER_LABEL}: aws
 type: Opaque
 stringData:
@@ -769,10 +767,8 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
     token_ttl: Duration,
     /// Certificate authority bundle for signing CSRs (supports rotation)
     ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
-    /// Kubernetes client for updating CRD status and fetching distributed secrets (None in tests)
+    /// Kubernetes client for updating CRD status and fetching distributed resources (None in tests)
     kube_client: Option<Client>,
-    // Note: Provider credentials (AWS, Proxmox) are fetched at bootstrap time from
-    // lattice-system secrets with lattice.io/distribute=true label.
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
@@ -1011,9 +1007,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             BootstrapError::Internal(format!("failed to serialize parent config Secret: {}", e))
         })?);
 
-        // Note: Provider credentials (with lattice.io/distribute=true label) are added by the
-        // bootstrap_manifests_handler after calling this method. This ensures credentials are
-        // available when the operator starts, before the gRPC connection is established.
+        // Note: CloudProvider and SecretsProvider resources (with their referenced secrets)
+        // are added by the bootstrap_manifests_handler after calling this method. This ensures
+        // credentials are available when the operator starts, before the gRPC connection is established.
 
         Ok(BootstrapResponse {
             cluster_id: info.cluster_id.clone(),
@@ -1117,7 +1113,7 @@ pub async fn csr_handler<G: ManifestGenerator>(
 /// one-time token and returns the manifests as concatenated YAML that can
 /// be piped directly to `kubectl apply -f -`.
 ///
-/// Includes distributed secrets (credentials with `lattice.io/distribute=true` label)
+/// Includes CloudProvider, SecretsProvider CRDs and their referenced secrets
 /// from the parent cluster so they're available immediately when the operator starts.
 pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     State(state): State<Arc<BootstrapState<G>>>,
@@ -1140,32 +1136,41 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     // Collect all manifests
     let mut all_manifests = response.manifests;
 
-    // Include distributed secrets from parent (credentials with lattice.io/distribute=true)
+    // Include CloudProvider, SecretsProvider and their referenced secrets
     // This ensures credentials are available when the operator starts, before the gRPC connection
     if let Some(ref client) = state.kube_client {
         match fetch_distributable_resources(client).await {
             Ok(resources) => {
+                let cp_count = resources.cloud_providers.len();
+                let sp_count = resources.secrets_providers.len();
                 let secret_count = resources.secrets.len();
-                let configmap_count = resources.configmaps.len();
 
-                // Convert secret bytes to strings and add to manifests
+                // Add secrets first (credentials needed by providers)
                 for secret_bytes in resources.secrets {
                     if let Ok(yaml) = String::from_utf8(secret_bytes) {
                         all_manifests.push(yaml);
                     }
                 }
 
-                // Convert configmap bytes to strings and add to manifests
-                for cm_bytes in resources.configmaps {
-                    if let Ok(yaml) = String::from_utf8(cm_bytes) {
+                // Add CloudProviders
+                for cp_bytes in resources.cloud_providers {
+                    if let Ok(yaml) = String::from_utf8(cp_bytes) {
+                        all_manifests.push(yaml);
+                    }
+                }
+
+                // Add SecretsProviders
+                for sp_bytes in resources.secrets_providers {
+                    if let Ok(yaml) = String::from_utf8(sp_bytes) {
                         all_manifests.push(yaml);
                     }
                 }
 
                 info!(
                     cluster_id = %cluster_id,
+                    cloud_providers = cp_count,
+                    secrets_providers = sp_count,
                     secrets = secret_count,
-                    configmaps = configmap_count,
                     "included distributed resources in bootstrap"
                 );
             }
