@@ -128,6 +128,9 @@ pub trait KubeClient: Send + Sync {
 
     /// Check if the cell LoadBalancer Service exists
     async fn cell_service_exists(&self) -> Result<bool, Error>;
+
+    /// List all LatticeCluster resources
+    async fn list_clusters(&self) -> Result<Vec<LatticeCluster>, Error>;
 }
 
 /// Trait abstracting CAPI resource operations
@@ -666,6 +669,12 @@ impl KubeClient for KubeClientImpl {
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn list_clusters(&self) -> Result<Vec<LatticeCluster>, Error> {
+        let api: Api<LatticeCluster> = Api::all(self.client.clone());
+        let list = api.list(&Default::default()).await?;
+        Ok(list.items)
     }
 }
 
@@ -2090,7 +2099,7 @@ async fn generate_capi_manifests(
             Error::bootstrap("parent_servers running but bootstrap_state not available")
         })?;
 
-        let ca_cert = bootstrap_state.ca_cert_pem().to_string();
+        let ca_cert = bootstrap_state.ca_trust_bundle_pem().await;
 
         // Get the cell host from the LoadBalancer Service (source of truth for both
         // cloud providers and on-prem with Cilium L2).
@@ -2535,18 +2544,15 @@ async fn wait_for_cell_service_deleted(ctx: &Context) -> bool {
 
 /// Handle cluster deletion with unpivot logic
 ///
-/// When a self-managed cluster's LatticeCluster is deleted:
-/// 1. Export CAPI resources using clusterctl move --to-directory
-/// 2. Send manifests to parent via gRPC stream
-/// 3. Wait for parent to apply manifests
-/// 4. Remove finalizer to allow deletion
+/// For cell clusters (has parent_config): blocks deletion if child clusters exist.
+/// This prevents orphaning clusters. Remove finalizer manually for break-glass.
+///
+/// For self clusters with a parent: unpivot CAPI resources back to parent.
+///
+/// For root clusters (no parent): just remove the finalizer.
 ///
 /// For non-self clusters (child clusters being deleted from parent):
-/// 1. Delete CAPI Cluster to trigger infrastructure cleanup
-/// 2. Wait for CAPI Cluster deletion
-/// 3. Remove finalizer to allow deletion
-///
-/// For root clusters (no parent), we just remove the finalizer.
+/// delete CAPI Cluster to trigger infrastructure cleanup.
 async fn handle_deletion(
     cluster: &LatticeCluster,
     ctx: &Context,
@@ -2585,6 +2591,29 @@ async fn handle_deletion(
         info!(cluster = %name, "Infrastructure cleanup complete, removing finalizer");
         remove_finalizer(cluster, ctx).await?;
         return Ok(Action::await_change());
+    }
+
+    // If this cluster is a cell (has parent_config), block deletion if children exist
+    if cluster.spec.parent_config.is_some() {
+        let child_names: Vec<String> = ctx
+            .kube
+            .list_clusters()
+            .await?
+            .into_iter()
+            .filter(|c| c.name_any() != name)
+            .map(|c| c.name_any())
+            .collect();
+
+        if !child_names.is_empty() {
+            warn!(cluster = %name, ?child_names, "Cannot delete cell with active children");
+            let status = cluster.status.clone().unwrap_or_default().message(format!(
+                "Deletion blocked: {} child cluster(s) exist: {}. Delete children first or remove finalizer for break-glass.",
+                child_names.len(),
+                child_names.join(", ")
+            ));
+            ctx.kube.patch_status(&name, &status).await?;
+            return Ok(Action::requeue(Duration::from_secs(30)));
+        }
     }
 
     // For self clusters, check if we have a parent to unpivot to

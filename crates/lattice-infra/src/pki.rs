@@ -10,6 +10,15 @@
 //! - Agents send only CSRs (no private keys)
 //! - Cell signs CSRs and returns certificates
 //! - All agent-cell communication uses mTLS with signed certificates
+//!
+//! # Certificate Rotation
+//!
+//! Certificates are rotated at 80% of their TTL:
+//! - Leaf certs (1 year): rotate at ~292 days (~2.4 months before expiry)
+//! - CA certs (10 years): rotate at 8 years (2 years before expiry)
+//!
+//! During CA rotation, both old and new CA are trusted for verification.
+//! This allows time for all leaf certs to be re-issued with the new CA.
 
 use rcgen::{
     string::Ia5String, BasicConstraints, CertificateParams, CertificateSigningRequestParams,
@@ -21,8 +30,12 @@ use x509_parser::prelude::*;
 /// Default validity period for CA certificates (10 years)
 pub const CA_VALIDITY_YEARS: i64 = 10;
 
-/// Default validity period for server/agent certificates (5 years)
-pub const CERT_VALIDITY_YEARS: i64 = 5;
+/// Default validity period for server/agent certificates (1 year)
+pub const CERT_VALIDITY_YEARS: i64 = 1;
+
+/// Rotation threshold as a fraction of TTL (80%)
+/// Certificates should be rotated when this fraction of their lifetime has passed.
+pub const ROTATION_THRESHOLD: f64 = 0.80;
 
 /// Compute certificate validity period from now
 ///
@@ -33,6 +46,90 @@ fn compute_validity(years: i64) -> (::time::OffsetDateTime, ::time::OffsetDateTi
     let now = ::time::OffsetDateTime::now_utc();
     let not_after = now + ::time::Duration::days(years * 365);
     (now, not_after)
+}
+
+/// Information about a certificate's validity and rotation status
+#[derive(Debug, Clone)]
+pub struct CertificateInfo {
+    /// When the certificate becomes valid (Unix timestamp)
+    pub not_before: i64,
+    /// When the certificate expires (Unix timestamp)
+    pub not_after: i64,
+    /// Subject common name
+    pub common_name: String,
+}
+
+impl CertificateInfo {
+    /// Parse certificate info from PEM-encoded certificate
+    pub fn from_pem(pem_data: &str) -> Result<Self> {
+        let der = parse_pem(pem_data)?;
+        Self::from_der(&der)
+    }
+
+    /// Parse certificate info from DER-encoded certificate
+    pub fn from_der(der: &[u8]) -> Result<Self> {
+        let (_, cert) = X509Certificate::from_der(der)
+            .map_err(|e| PkiError::ParseError(format!("failed to parse certificate: {}", e)))?;
+
+        let not_before = cert.validity().not_before.timestamp();
+        let not_after = cert.validity().not_after.timestamp();
+
+        let common_name = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(Self {
+            not_before,
+            not_after,
+            common_name,
+        })
+    }
+
+    /// Total lifetime of the certificate in seconds
+    pub fn lifetime_secs(&self) -> i64 {
+        self.not_after - self.not_before
+    }
+
+    /// Seconds elapsed since certificate was issued
+    pub fn age_secs(&self) -> i64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after 1970")
+            .as_secs() as i64;
+        now - self.not_before
+    }
+
+    /// Seconds remaining until certificate expires
+    pub fn remaining_secs(&self) -> i64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after 1970")
+            .as_secs() as i64;
+        self.not_after - now
+    }
+
+    /// Check if certificate has expired
+    pub fn is_expired(&self) -> bool {
+        self.remaining_secs() <= 0
+    }
+
+    /// Check if certificate needs rotation (past 80% of TTL)
+    pub fn needs_rotation(&self) -> bool {
+        let lifetime = self.lifetime_secs() as f64;
+        let age = self.age_secs() as f64;
+        age / lifetime >= ROTATION_THRESHOLD
+    }
+
+    /// Fraction of lifetime elapsed (0.0 to 1.0+)
+    pub fn lifetime_fraction(&self) -> f64 {
+        let lifetime = self.lifetime_secs() as f64;
+        let age = self.age_secs() as f64;
+        age / lifetime
+    }
 }
 
 /// PKI errors
@@ -74,6 +171,7 @@ pub fn parse_pem(pem_data: &str) -> std::result::Result<Vec<u8>, PkiError> {
 }
 
 /// Certificate Authority for signing agent CSRs
+#[derive(Clone)]
 pub struct CertificateAuthority {
     /// CA key pair serialized as PEM (we need to deserialize each time since KeyPair isn't Clone)
     ca_key_pem: String,
@@ -155,6 +253,16 @@ impl CertificateAuthority {
         &self.ca_key_pem
     }
 
+    /// Get certificate info (validity period, etc.)
+    pub fn cert_info(&self) -> Result<CertificateInfo> {
+        CertificateInfo::from_pem(&self.ca_cert_pem)
+    }
+
+    /// Check if this CA needs rotation (past 80% of TTL)
+    pub fn needs_rotation(&self) -> Result<bool> {
+        Ok(self.cert_info()?.needs_rotation())
+    }
+
     /// Load the key pair from stored PEM
     fn load_key_pair(&self) -> Result<KeyPair> {
         KeyPair::from_pem(&self.ca_key_pem)
@@ -190,7 +298,7 @@ impl CertificateAuthority {
         // Extended key usage for TLS server
         params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
 
-        // 5 year validity from current time
+        // Set validity from current time
         let (not_before, not_after) = compute_validity(CERT_VALIDITY_YEARS);
         params.not_before = not_before;
         params.not_after = not_after;
@@ -273,7 +381,7 @@ impl CertificateAuthority {
             rcgen::ExtendedKeyUsagePurpose::ServerAuth,
         ];
 
-        // 5 year validity from current time
+        // Set validity from current time
         let (not_before, not_after) = compute_validity(CERT_VALIDITY_YEARS);
         csr_params.params.not_before = not_before;
         csr_params.params.not_after = not_after;
@@ -321,6 +429,115 @@ impl CertificateAuthority {
         })?;
 
         Ok(signed_cert.pem())
+    }
+}
+
+/// Bundle of CA certificates for verification during CA rotation.
+///
+/// During CA rotation, we need to trust certificates signed by both the old
+/// and new CA. This bundle holds multiple CAs and verifies against any of them.
+///
+/// The "active" CA (index 0) is used for signing new certificates.
+/// All CAs in the bundle are trusted for verification.
+#[derive(Clone)]
+pub struct CertificateAuthorityBundle {
+    /// CAs in the bundle (newest/active first)
+    cas: Vec<CertificateAuthority>,
+}
+
+impl CertificateAuthorityBundle {
+    /// Create a new bundle with a single CA
+    pub fn new(ca: CertificateAuthority) -> Self {
+        Self { cas: vec![ca] }
+    }
+
+    /// Create a bundle from multiple CAs (first is the active/signing CA)
+    pub fn from_cas(cas: Vec<CertificateAuthority>) -> Result<Self> {
+        if cas.is_empty() {
+            return Err(PkiError::CaNotInitialized);
+        }
+        Ok(Self { cas })
+    }
+
+    /// Get the active CA (used for signing new certificates)
+    pub fn active(&self) -> &CertificateAuthority {
+        &self.cas[0]
+    }
+
+    /// Get all CA certificates as a combined PEM bundle (for trust verification)
+    pub fn trust_bundle_pem(&self) -> String {
+        self.cas
+            .iter()
+            .map(|ca| ca.ca_cert_pem())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Check if the active CA needs rotation
+    pub fn needs_rotation(&self) -> Result<bool> {
+        self.active().needs_rotation()
+    }
+
+    /// Rotate the CA by generating a new one and adding it to the bundle.
+    /// The new CA becomes the active (signing) CA.
+    /// Old CAs are kept for verification until they expire.
+    pub fn rotate(&mut self, new_ca_name: &str) -> Result<()> {
+        let new_ca = CertificateAuthority::new(new_ca_name)?;
+        self.cas.insert(0, new_ca);
+        Ok(())
+    }
+
+    /// Remove expired CAs from the bundle (keeps at least the active CA)
+    pub fn prune_expired(&mut self) {
+        if self.cas.len() <= 1 {
+            return;
+        }
+        self.cas.retain(|ca| {
+            ca.cert_info()
+                .map(|info| !info.is_expired())
+                .unwrap_or(true)
+        });
+        // Ensure we always have at least one CA
+        if self.cas.is_empty() {
+            // This shouldn't happen, but be safe
+            tracing::error!("all CAs expired during prune, this is a critical error");
+        }
+    }
+
+    /// Number of CAs in the bundle
+    pub fn len(&self) -> usize {
+        self.cas.len()
+    }
+
+    /// Check if bundle is empty
+    pub fn is_empty(&self) -> bool {
+        self.cas.is_empty()
+    }
+
+    /// Generate a server certificate signed by the active CA
+    pub fn generate_server_cert(&self, sans: &[&str]) -> Result<(String, String)> {
+        self.active().generate_server_cert(sans)
+    }
+
+    /// Sign a CSR with the active CA
+    pub fn sign_csr(&self, csr_pem: &str, cluster_id: &str) -> Result<String> {
+        self.active().sign_csr(csr_pem, cluster_id)
+    }
+
+    /// Verify a certificate was signed by any CA in the bundle
+    pub fn verify_client_cert(&self, cert_der: &[u8]) -> Result<VerificationResult> {
+        for ca in &self.cas {
+            match verify_client_cert(cert_der, ca.ca_cert_pem()) {
+                Ok(result) if result.valid => return Ok(result),
+                _ => continue,
+            }
+        }
+        // None of the CAs verified the cert
+        Ok(VerificationResult {
+            cluster_id: String::new(),
+            valid: false,
+            reason: Some("certificate not signed by any trusted CA".to_string()),
+        })
     }
 }
 
@@ -1045,6 +1262,137 @@ mod tests {
             "CA cert should have {} year validity, got {} days",
             CA_VALIDITY_YEARS,
             validity_days
+        );
+    }
+
+    /// Test CertificateInfo parsing and lifetime calculations
+    #[test]
+    fn test_certificate_info() {
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+        let info = CertificateInfo::from_pem(ca.ca_cert_pem())
+            .expect("CertificateInfo parsing should succeed");
+
+        // Should have the right common name
+        assert_eq!(info.common_name, "Test CA");
+
+        // Lifetime should be approximately CA_VALIDITY_YEARS
+        let lifetime_days = info.lifetime_secs() / (24 * 60 * 60);
+        let expected_days = CA_VALIDITY_YEARS * 365;
+        assert!(
+            (lifetime_days - expected_days).abs() <= 1,
+            "lifetime should be {} days, got {}",
+            expected_days,
+            lifetime_days
+        );
+
+        // Age should be very small (just created)
+        assert!(info.age_secs() < 10, "age should be < 10 seconds");
+
+        // Remaining should be close to lifetime
+        let remaining_days = info.remaining_secs() / (24 * 60 * 60);
+        assert!(
+            (remaining_days - expected_days).abs() <= 1,
+            "remaining should be {} days, got {}",
+            expected_days,
+            remaining_days
+        );
+
+        // Should not be expired
+        assert!(!info.is_expired());
+
+        // Fresh cert should not need rotation (< 80% TTL)
+        assert!(!info.needs_rotation());
+
+        // Lifetime fraction should be near 0
+        assert!(info.lifetime_fraction() < 0.01);
+    }
+
+    /// Test CertificateAuthorityBundle with single CA
+    #[test]
+    fn test_ca_bundle_single() {
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+        let bundle = CertificateAuthorityBundle::new(ca);
+
+        assert_eq!(bundle.len(), 1);
+        assert!(!bundle.is_empty());
+
+        // Trust bundle should contain the CA cert
+        assert!(bundle.trust_bundle_pem().contains("BEGIN CERTIFICATE"));
+
+        // Should be able to sign CSRs
+        let agent = AgentCertRequest::new("test-cluster").expect("agent CSR should succeed");
+        let cert = bundle
+            .sign_csr(agent.csr_pem(), "test-cluster")
+            .expect("signing should succeed");
+        assert!(cert.contains("BEGIN CERTIFICATE"));
+    }
+
+    /// Test CertificateAuthorityBundle rotation
+    #[test]
+    fn test_ca_bundle_rotation() {
+        let ca1 = CertificateAuthority::new("CA Gen 1").expect("CA creation should succeed");
+        let mut bundle = CertificateAuthorityBundle::new(ca1);
+
+        // Sign a cert with the original CA
+        let agent1 = AgentCertRequest::new("cluster-1").expect("agent CSR should succeed");
+        let cert1 = bundle
+            .sign_csr(agent1.csr_pem(), "cluster-1")
+            .expect("signing should succeed");
+        let cert1_der = parse_pem(&cert1).expect("cert parsing should succeed");
+
+        // Rotate to a new CA
+        bundle.rotate("CA Gen 2").expect("rotation should succeed");
+        assert_eq!(bundle.len(), 2);
+
+        // Old cert should still verify (bundle trusts both CAs)
+        let result = bundle
+            .verify_client_cert(&cert1_der)
+            .expect("verification should succeed");
+        assert!(result.valid, "old cert should still be valid after rotation");
+
+        // New certs are signed by the new CA
+        let agent2 = AgentCertRequest::new("cluster-2").expect("agent CSR should succeed");
+        let cert2 = bundle
+            .sign_csr(agent2.csr_pem(), "cluster-2")
+            .expect("signing should succeed");
+        let cert2_der = parse_pem(&cert2).expect("cert parsing should succeed");
+
+        let result = bundle
+            .verify_client_cert(&cert2_der)
+            .expect("verification should succeed");
+        assert!(result.valid, "new cert should be valid");
+    }
+
+    /// Test CertificateAuthorityBundle rejects certs from unknown CA
+    #[test]
+    fn test_ca_bundle_rejects_unknown() {
+        let ca1 = CertificateAuthority::new("CA 1").expect("CA creation should succeed");
+        let ca2 = CertificateAuthority::new("CA 2").expect("CA creation should succeed");
+
+        let bundle = CertificateAuthorityBundle::new(ca1);
+
+        // Sign with a different CA not in the bundle
+        let agent = AgentCertRequest::new("test-cluster").expect("agent CSR should succeed");
+        let cert = ca2
+            .sign_csr(agent.csr_pem(), "test-cluster")
+            .expect("signing should succeed");
+        let cert_der = parse_pem(&cert).expect("cert parsing should succeed");
+
+        // Verification should fail
+        let result = bundle
+            .verify_client_cert(&cert_der)
+            .expect("verification should not error");
+        assert!(!result.valid);
+        assert!(result.reason.unwrap().contains("not signed by any trusted CA"));
+    }
+
+    /// Test CA needs_rotation returns false for fresh CA
+    #[test]
+    fn test_ca_needs_rotation_fresh() {
+        let ca = CertificateAuthority::new("Fresh CA").expect("CA creation should succeed");
+        assert!(
+            !ca.needs_rotation().expect("needs_rotation should succeed"),
+            "fresh CA should not need rotation"
         );
     }
 }

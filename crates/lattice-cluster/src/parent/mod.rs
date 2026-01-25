@@ -30,7 +30,7 @@ use crate::bootstrap::{
 };
 use crate::pivot::{fetch_distributable_resources, DistributableResources};
 use lattice_common::{DISTRIBUTE_LABEL_SELECTOR, LATTICE_SYSTEM_NAMESPACE};
-use lattice_infra::pki::CertificateAuthority;
+use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
 use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
 
 /// Configuration for cell servers
@@ -87,8 +87,10 @@ pub struct ParentServers<G: ManifestGenerator + Send + Sync + 'static = DefaultM
     running: AtomicBool,
     /// Configuration
     config: ParentConfig,
-    /// Certificate Authority for signing agent certificates
-    ca: Arc<CertificateAuthority>,
+    /// Certificate Authority bundle for signing and verification (supports rotation)
+    ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
+    /// Kubernetes client for CA persistence
+    kube_client: Client,
     /// Bootstrap state for cluster registration
     bootstrap_state: Arc<RwLock<Option<Arc<BootstrapState<G>>>>>,
     /// Agent registry for connected agents
@@ -255,17 +257,24 @@ pub enum CellServerError {
     AlreadyRunning,
 }
 
-/// Load CA from Secret or create a new one and persist it
+/// Load CA bundle from Secret or create a new one and persist it
 ///
 /// This ensures the CA survives operator restarts. The CA is stored in a Secret
 /// named `lattice-ca` in the `lattice-system` namespace.
+///
+/// The secret format supports CA rotation:
+/// - `ca.crt` - PEM bundle of all trusted CA certificates (newest first)
+/// - `ca.key` - Private key for the active (newest) CA only
+/// - `ca-trust.crt` - (optional) Additional CA certs for verification only (rotated out CAs)
 ///
 /// # Arguments
 /// * `client` - Kubernetes client for accessing the Secret
 ///
 /// # Returns
-/// The CA, either loaded from the Secret or newly created
-pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, CellServerError> {
+/// The CA bundle, either loaded from the Secret or newly created
+pub async fn load_or_create_ca(
+    client: &Client,
+) -> Result<CertificateAuthorityBundle, CellServerError> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     // Try to load existing CA from Secret
@@ -298,14 +307,54 @@ pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, 
                     })
                 })?;
 
-            let ca = CertificateAuthority::from_pem(&cert_pem, &key_pem)
+            // Load the active CA (has the private key)
+            let active_ca = CertificateAuthority::from_pem(&cert_pem, &key_pem)
                 .map_err(|e| CellServerError::CaPersistence(format!("Failed to load CA: {}", e)))?;
 
+            let mut cas = vec![active_ca];
+
+            // Load additional trust CAs if present (for rotation transition)
+            if let Some(trust_pem) = data.get("ca-trust.crt") {
+                if let Ok(trust_str) = String::from_utf8(trust_pem.0.clone()) {
+                    // Parse multiple PEM certificates from the trust bundle
+                    for pem in pem::parse_many(trust_str.as_bytes())
+                        .map_err(|e| {
+                            CellServerError::CaPersistence(format!(
+                                "Failed to parse trust bundle: {}",
+                                e
+                            ))
+                        })?
+                        .iter()
+                    {
+                        // Create a trust-only CA (we use the active key as placeholder since
+                        // we only need the cert for verification). In practice, this CA is
+                        // only used for verify_client_cert which only needs the cert.
+                        if let Ok(trust_ca) =
+                            CertificateAuthority::from_pem(&pem::encode(pem), &key_pem)
+                        {
+                            cas.push(trust_ca);
+                        }
+                    }
+                }
+            }
+
+            let bundle = CertificateAuthorityBundle::from_cas(cas).map_err(|e| {
+                CellServerError::CaPersistence(format!("Failed to create CA bundle: {}", e))
+            })?;
+
+            let info = bundle.active().cert_info().map_err(|e| {
+                CellServerError::CaPersistence(format!("Failed to read CA info: {}", e))
+            })?;
+
             info!(
-                "Loaded existing CA from Secret {}/{}",
-                LATTICE_SYSTEM_NAMESPACE, CA_SECRET_NAME
+                ca_count = bundle.len(),
+                lifetime_fraction = format!("{:.1}%", info.lifetime_fraction() * 100.0),
+                needs_rotation = bundle.needs_rotation().unwrap_or(false),
+                "Loaded CA bundle from Secret {}/{}",
+                LATTICE_SYSTEM_NAMESPACE,
+                CA_SECRET_NAME
             );
-            Ok(ca)
+            Ok(bundle)
         }
         Err(kube::Error::Api(e)) if e.code == 404 => {
             // CA Secret doesn't exist, create a new CA and persist it
@@ -346,7 +395,7 @@ pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, 
                 "Created and persisted new CA to Secret {}/{}",
                 LATTICE_SYSTEM_NAMESPACE, CA_SECRET_NAME
             );
-            Ok(ca)
+            Ok(CertificateAuthorityBundle::new(ca))
         }
         Err(e) => Err(CellServerError::CaPersistence(format!(
             "Failed to get CA secret: {}",
@@ -355,18 +404,73 @@ pub async fn load_or_create_ca(client: &Client) -> Result<CertificateAuthority, 
     }
 }
 
+/// Persist CA bundle to Secret
+async fn persist_ca_bundle(
+    client: &Client,
+    bundle: &CertificateAuthorityBundle,
+) -> Result<(), CellServerError> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    let active = bundle.active();
+
+    // Build data map
+    let mut data = BTreeMap::new();
+    data.insert(
+        "ca.crt".to_string(),
+        ByteString(active.ca_cert_pem().as_bytes().to_vec()),
+    );
+    data.insert(
+        "ca.key".to_string(),
+        ByteString(active.ca_key_pem().as_bytes().to_vec()),
+    );
+
+    // If there are additional CAs in the bundle, store them in ca-trust.crt
+    if bundle.len() > 1 {
+        // The trust bundle contains all CA certs for verification
+        data.insert(
+            "ca-trust.crt".to_string(),
+            ByteString(bundle.trust_bundle_pem().as_bytes().to_vec()),
+        );
+    }
+
+    let secret = Secret {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(CA_SECRET_NAME.to_string()),
+            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+            ..Default::default()
+        },
+        type_: Some("Opaque".to_string()),
+        data: Some(data),
+        ..Default::default()
+    };
+
+    // Use patch to update (or create if missing)
+    secrets
+        .patch(
+            CA_SECRET_NAME,
+            &kube::api::PatchParams::apply("lattice-operator"),
+            &kube::api::Patch::Apply(&secret),
+        )
+        .await
+        .map_err(|e| CellServerError::CaPersistence(format!("Failed to update CA secret: {}", e)))?;
+
+    info!("Persisted CA bundle to Secret");
+    Ok(())
+}
+
 impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// Create a new ParentServers instance with persisted CA
     ///
     /// Loads CA from Secret if it exists, otherwise creates and persists a new one.
     /// This ensures the CA survives operator restarts.
     pub async fn new(config: ParentConfig, client: &Client) -> Result<Self, CellServerError> {
-        let ca = Arc::new(load_or_create_ca(client).await?);
+        let ca_bundle = Arc::new(RwLock::new(load_or_create_ca(client).await?));
 
         Ok(Self {
             running: AtomicBool::new(false),
             config,
-            ca,
+            ca_bundle,
+            kube_client: client.clone(),
             bootstrap_state: Arc::new(RwLock::new(None)),
             agent_registry: Arc::new(AgentRegistry::new()),
             handles: RwLock::new(None),
@@ -375,11 +479,12 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
     /// Create with an existing CA (for testing)
     #[cfg(test)]
-    pub fn with_ca(config: ParentConfig, ca: Arc<CertificateAuthority>) -> Self {
+    pub fn with_ca(config: ParentConfig, ca: CertificateAuthority, client: Client) -> Self {
         Self {
             running: AtomicBool::new(false),
             config,
-            ca,
+            ca_bundle: Arc::new(RwLock::new(CertificateAuthorityBundle::new(ca))),
+            kube_client: client,
             bootstrap_state: Arc::new(RwLock::new(None)),
             agent_registry: Arc::new(AgentRegistry::new()),
             handles: RwLock::new(None),
@@ -396,9 +501,14 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         self.agent_registry.clone()
     }
 
-    /// Get the CA
-    pub fn ca(&self) -> &Arc<CertificateAuthority> {
-        &self.ca
+    /// Get the CA bundle
+    pub fn ca_bundle(&self) -> &Arc<RwLock<CertificateAuthorityBundle>> {
+        &self.ca_bundle
+    }
+
+    /// Get the CA trust bundle PEM (contains all trusted CA certificates)
+    pub async fn ca_trust_bundle_pem(&self) -> String {
+        self.ca_bundle.read().await.trust_bundle_pem()
     }
 
     /// Get the bootstrap state (if servers are running)
@@ -414,6 +524,53 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// Get registry credentials from config
     pub fn registry_credentials(&self) -> Option<&str> {
         self.config.registry_credentials.as_deref()
+    }
+
+    /// Check if CA needs rotation (at 80% TTL)
+    pub async fn ca_needs_rotation(&self) -> Result<bool, CellServerError> {
+        self.ca_bundle
+            .read()
+            .await
+            .needs_rotation()
+            .map_err(|e| CellServerError::CaCreation(format!("Failed to check CA rotation: {}", e)))
+    }
+
+    /// Rotate the CA if needed
+    ///
+    /// Creates a new CA and adds it to the bundle. The new CA becomes the active
+    /// signing CA, while old CAs remain trusted for verification during the
+    /// transition period.
+    ///
+    /// Returns Ok(true) if rotation was performed, Ok(false) if not needed.
+    pub async fn rotate_ca_if_needed(&self) -> Result<bool, CellServerError> {
+        let needs_rotation = self.ca_needs_rotation().await?;
+        if !needs_rotation {
+            return Ok(false);
+        }
+
+        info!("CA needs rotation, generating new CA...");
+
+        {
+            let mut bundle = self.ca_bundle.write().await;
+            bundle
+                .rotate("Lattice CA")
+                .map_err(|e| CellServerError::CaCreation(format!("Failed to rotate CA: {}", e)))?;
+
+            // Prune any expired CAs from the bundle
+            bundle.prune_expired();
+
+            info!(
+                ca_count = bundle.len(),
+                "CA rotated successfully, bundle now has {} CA(s)",
+                bundle.len()
+            );
+        }
+
+        // Persist the updated bundle
+        let bundle = self.ca_bundle.read().await;
+        persist_ca_bundle(&self.kube_client, &bundle).await?;
+
+        Ok(true)
     }
 
     /// Start the cell servers if not already running
@@ -444,13 +601,16 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!("Starting cell servers...");
 
+        // Get CA bundle for certificate generation
+        let ca_bundle = self.ca_bundle.read().await;
+
         // Create bootstrap state
         // Note: Provider credentials are synced via the distribute mechanism
         // (secrets with lattice.io/distribute=true label in lattice-system)
         let bootstrap_state = Arc::new(BootstrapState::new(
             manifest_generator,
             self.config.token_ttl,
-            self.ca.clone(),
+            self.ca_bundle.clone(),
             self.config.image.clone(),
             self.config.registry_credentials.clone(),
             Some(kube_client.clone()),
@@ -465,8 +625,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             all_sans.push(san.as_str());
         }
         let sans = all_sans;
-        let (server_cert_pem, server_key_pem) = self
-            .ca
+        let (server_cert_pem, server_key_pem) = ca_bundle
             .generate_server_cert(&sans)
             .map_err(|e| CellServerError::CertGeneration(e.to_string()))?;
 
@@ -498,16 +657,19 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         });
 
         // Start gRPC server
-        let (grpc_cert_pem, grpc_key_pem) = self
-            .ca
+        let (grpc_cert_pem, grpc_key_pem) = ca_bundle
             .generate_server_cert(&sans)
             .map_err(|e| CellServerError::CertGeneration(e.to_string()))?;
 
+        // Use trust bundle for verification (includes all CAs during rotation)
         let mtls_config = ServerMtlsConfig::new(
             grpc_cert_pem,
             grpc_key_pem,
-            self.ca.ca_cert_pem().to_string(),
+            ca_bundle.trust_bundle_pem(),
         );
+
+        // Drop the read lock before spawning tasks
+        drop(ca_bundle);
 
         let grpc_addr = self.config.grpc_addr;
         let registry = self.agent_registry.clone();
@@ -583,24 +745,24 @@ mod tests {
         }
     }
 
-    fn test_parent_servers() -> ParentServers<MockManifestGenerator> {
+    /// Try to get a Kubernetes client for testing
+    /// Returns None if no kubeconfig is available (e.g., in CI without a cluster)
+    async fn try_test_client() -> Option<Client> {
+        Client::try_default().await.ok()
+    }
+
+    async fn test_parent_servers() -> Option<ParentServers<MockManifestGenerator>> {
         // Install crypto provider (ok if already installed)
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+        let client = try_test_client().await?;
         let config = ParentConfig {
             bootstrap_addr: "127.0.0.1:0".parse().expect("valid address"),
             grpc_addr: "127.0.0.1:0".parse().expect("valid address"),
             ..Default::default()
         };
-        let ca =
-            Arc::new(CertificateAuthority::new("Test CA").expect("CA creation should succeed"));
-        ParentServers::with_ca(config, ca)
-    }
-
-    /// Try to get a Kubernetes client for testing
-    /// Returns None if no kubeconfig is available (e.g., in CI without a cluster)
-    async fn try_test_client() -> Option<Client> {
-        Client::try_default().await.ok()
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+        Some(ParentServers::with_ca(config, ca, client))
     }
 
     #[test]
@@ -622,19 +784,23 @@ mod tests {
         assert!(!config.server_sans.is_empty());
     }
 
-    #[test]
-    fn test_parent_servers_creation() {
+    #[tokio::test]
+    async fn test_parent_servers_creation() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let Some(client) = try_test_client().await else {
+            return; // Skip if no kubeconfig available
+        };
         let config = ParentConfig::default();
-        let ca =
-            Arc::new(CertificateAuthority::new("Test CA").expect("CA creation should succeed"));
-        let servers: ParentServers<MockManifestGenerator> = ParentServers::with_ca(config, ca);
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+        let servers: ParentServers<MockManifestGenerator> = ParentServers::with_ca(config, ca, client);
         assert!(!servers.is_running());
     }
 
-    #[test]
-    fn test_parent_servers_not_running_initially() {
-        let servers = test_parent_servers();
+    #[tokio::test]
+    async fn test_parent_servers_not_running_initially() {
+        let Some(servers) = test_parent_servers().await else {
+            return; // Skip if no kubeconfig available
+        };
         assert!(!servers.is_running());
     }
 
@@ -648,7 +814,9 @@ mod tests {
             return;
         };
 
-        let servers = test_parent_servers();
+        let Some(servers) = test_parent_servers().await else {
+            return; // Skip if no kubeconfig available
+        };
 
         // Start servers
         let result = servers
@@ -672,7 +840,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_idempotent() {
-        let servers = test_parent_servers();
+        let Some(servers) = test_parent_servers().await else {
+            return; // Skip if no kubeconfig available
+        };
 
         // Shutdown without starting should be safe
         servers.shutdown().await;
@@ -698,12 +868,13 @@ mod tests {
         // Install crypto provider before creating kube client (which uses TLS)
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-        let Some(client) = try_test_client().await else {
-            // Skip test if no kubeconfig available
-            return;
+        let Some(servers) = test_parent_servers().await else {
+            return; // Skip if no kubeconfig available
         };
 
-        let servers = test_parent_servers();
+        let Some(client) = try_test_client().await else {
+            return; // Skip if no kubeconfig available
+        };
 
         // Before start, bootstrap state should be None
         assert!(servers.bootstrap_state().await.is_none());

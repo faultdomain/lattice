@@ -37,6 +37,7 @@ pub use docker_addons::generate_docker_addon_manifests;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -60,7 +61,9 @@ use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
 use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::{DISTRIBUTE_LABEL_KEY, LATTICE_SYSTEM_NAMESPACE};
-use lattice_infra::pki::{CertificateAuthority, PkiError};
+use lattice_infra::pki::{CertificateAuthorityBundle, PkiError};
+#[cfg(test)]
+use lattice_infra::pki::CertificateAuthority;
 
 use crate::pivot::fetch_distributable_resources;
 
@@ -764,8 +767,8 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
     registry_credentials: Option<String>,
     /// Token TTL
     token_ttl: Duration,
-    /// Certificate authority for signing CSRs
-    ca: Arc<CertificateAuthority>,
+    /// Certificate authority bundle for signing CSRs (supports rotation)
+    ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
     /// Kubernetes client for updating CRD status and fetching distributed secrets (None in tests)
     kube_client: Option<Client>,
     // Note: Provider credentials (AWS, Proxmox) are fetched at bootstrap time from
@@ -773,11 +776,11 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
-    /// Create a new bootstrap state with a CA
+    /// Create a new bootstrap state with a CA bundle
     pub fn new(
         generator: G,
         token_ttl: Duration,
-        ca: Arc<CertificateAuthority>,
+        ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
         image: String,
         registry_credentials: Option<String>,
         kube_client: Option<Client>,
@@ -788,14 +791,17 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             image,
             registry_credentials,
             token_ttl,
-            ca,
+            ca_bundle,
             kube_client,
         }
     }
 
-    /// Get the CA certificate PEM for distribution
-    pub fn ca_cert_pem(&self) -> &str {
-        self.ca.ca_cert_pem()
+    /// Get the CA trust bundle PEM for distribution to agents
+    ///
+    /// During CA rotation, this returns all trusted CA certs so agents
+    /// can verify certificates signed by any CA in the rotation chain.
+    pub async fn ca_trust_bundle_pem(&self) -> String {
+        self.ca_bundle.read().await.trust_bundle_pem()
     }
 
     /// Get the operator image
@@ -1021,7 +1027,11 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     ///
     /// The cluster must be registered and have completed bootstrap (token used).
     /// This ensures only legitimate agents can get certificates.
-    pub fn sign_csr(&self, cluster_id: &str, csr_pem: &str) -> Result<CsrResponse, BootstrapError> {
+    pub async fn sign_csr(
+        &self,
+        cluster_id: &str,
+        csr_pem: &str,
+    ) -> Result<CsrResponse, BootstrapError> {
         // Check cluster exists
         let entry = self
             .clusters
@@ -1035,12 +1045,13 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             ));
         }
 
-        // Sign the CSR
-        let certificate_pem = self.ca.sign_csr(csr_pem, cluster_id)?;
+        // Sign the CSR with the active CA
+        let bundle = self.ca_bundle.read().await;
+        let certificate_pem = bundle.sign_csr(csr_pem, cluster_id)?;
 
         Ok(CsrResponse {
             certificate_pem,
-            ca_certificate_pem: self.ca.ca_cert_pem().to_string(),
+            ca_certificate_pem: bundle.trust_bundle_pem(),
         })
     }
 
@@ -1093,7 +1104,7 @@ pub async fn csr_handler<G: ManifestGenerator>(
     debug!(cluster_id = %cluster_id, "CSR signing request received");
 
     // Sign the CSR
-    let response = state.sign_csr(&cluster_id, &request.csr_pem)?;
+    let response = state.sign_csr(&cluster_id, &request.csr_pem).await?;
 
     info!(cluster_id = %cluster_id, "CSR signed successfully");
 
@@ -1217,15 +1228,16 @@ mod tests {
         }
     }
 
-    fn test_ca() -> Arc<CertificateAuthority> {
-        Arc::new(CertificateAuthority::new("Test CA").expect("test CA creation should succeed"))
+    fn test_ca_bundle() -> Arc<RwLock<CertificateAuthorityBundle>> {
+        let ca = CertificateAuthority::new("Test CA").expect("test CA creation should succeed");
+        Arc::new(RwLock::new(CertificateAuthorityBundle::new(ca)))
     }
 
     fn test_state() -> BootstrapState<TestManifestGenerator> {
         BootstrapState::new(
             TestManifestGenerator,
             Duration::from_secs(3600),
-            test_ca(),
+            test_ca_bundle(),
             "test:latest".to_string(),
             None,
             None, // No kube client for tests
@@ -1236,7 +1248,7 @@ mod tests {
         BootstrapState::new(
             TestManifestGenerator,
             ttl,
-            test_ca(),
+            test_ca_bundle(),
             "test:latest".to_string(),
             None,
             None, // No kube client for tests
@@ -1403,8 +1415,8 @@ mod tests {
 
     // CSR signing tests
 
-    #[test]
-    fn csr_requires_bootstrapped_cluster() {
+    #[tokio::test]
+    async fn csr_requires_bootstrapped_cluster() {
         let state = test_state();
 
         // Register but don't bootstrap
@@ -1417,7 +1429,7 @@ mod tests {
 
         let agent_req = AgentCertRequest::new("not-bootstrapped")
             .expect("agent cert request creation should succeed");
-        let result = state.sign_csr("not-bootstrapped", agent_req.csr_pem());
+        let result = state.sign_csr("not-bootstrapped", agent_req.csr_pem()).await;
 
         assert!(matches!(
             result,
@@ -1425,13 +1437,13 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn csr_rejected_for_unknown_cluster() {
+    #[tokio::test]
+    async fn csr_rejected_for_unknown_cluster() {
         let state = test_state();
 
         let agent_req =
             AgentCertRequest::new("unknown").expect("agent cert request creation should succeed");
-        let result = state.sign_csr("unknown", agent_req.csr_pem());
+        let result = state.sign_csr("unknown", agent_req.csr_pem()).await;
 
         assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
     }
@@ -1439,13 +1451,14 @@ mod tests {
     #[tokio::test]
     async fn csr_signed_after_bootstrap() {
         let state = test_state();
+        let ca_cert = state.ca_trust_bundle_pem().await;
 
         // Register and bootstrap
         let token = register_test_cluster(
             &state,
             "csr-test".to_string(),
             "cell:8443:50051".to_string(),
-            state.ca_cert_pem().to_string(),
+            ca_cert,
         );
         state
             .validate_and_consume("csr-test", token.as_str())
@@ -1455,7 +1468,7 @@ mod tests {
         // Now CSR signing should work
         let agent_req =
             AgentCertRequest::new("csr-test").expect("agent cert request creation should succeed");
-        let result = state.sign_csr("csr-test", agent_req.csr_pem());
+        let result = state.sign_csr("csr-test", agent_req.csr_pem()).await;
 
         assert!(result.is_ok());
         let response = result.expect("CSR signing should succeed");
@@ -1466,13 +1479,14 @@ mod tests {
     #[tokio::test]
     async fn signed_cert_contains_cluster_id() {
         let state = test_state();
+        let ca_cert = state.ca_trust_bundle_pem().await;
 
         // Register and bootstrap
         let token = register_test_cluster(
             &state,
             "cluster-xyz".to_string(),
             "cell:8443:50051".to_string(),
-            state.ca_cert_pem().to_string(),
+            ca_cert,
         );
         state
             .validate_and_consume("cluster-xyz", token.as_str())
@@ -1484,6 +1498,7 @@ mod tests {
             .expect("agent cert request creation should succeed");
         let response = state
             .sign_csr("cluster-xyz", agent_req.csr_pem())
+            .await
             .expect("CSR signing should succeed");
 
         // Verify the cert contains cluster ID in CN
@@ -1617,11 +1632,12 @@ mod tests {
         // ---------------------------------------------------------
         // When CAPI creates a cluster, the cell registers it with a bootstrap token.
         // This token will be embedded in kubeadm postKubeadmCommands.
+        let ca_cert = state.ca_trust_bundle_pem().await;
         let token = register_test_cluster(
             &state,
             "prod-us-west-001".to_string(),
             "cell.lattice.example.com:8443:50051".to_string(),
-            state.ca_cert_pem().to_string(),
+            ca_cert,
         );
         assert!(state.is_cluster_registered("prod-us-west-001"));
 
@@ -1660,6 +1676,7 @@ mod tests {
         // ------------------------------
         let csr_response = state
             .sign_csr("prod-us-west-001", agent_request.csr_pem())
+            .await
             .expect("CSR signing should succeed");
         assert!(csr_response.certificate_pem.contains("BEGIN CERTIFICATE"));
         assert!(csr_response
@@ -1747,8 +1764,8 @@ mod tests {
     ///
     /// An agent can only get its CSR signed after completing the bootstrap
     /// flow. This prevents rogue agents from getting valid certificates.
-    #[test]
-    fn story_csr_requires_bootstrap_completion() {
+    #[tokio::test]
+    async fn story_csr_requires_bootstrap_completion() {
         let state = test_state();
 
         // Register cluster but DON'T complete bootstrap
@@ -1762,7 +1779,9 @@ mod tests {
         // Try to get CSR signed without completing bootstrap
         let agent_request = AgentCertRequest::new("premature-cluster")
             .expect("agent cert request creation should succeed");
-        let result = state.sign_csr("premature-cluster", agent_request.csr_pem());
+        let result = state
+            .sign_csr("premature-cluster", agent_request.csr_pem())
+            .await;
 
         // Blocked! Must complete bootstrap first
         assert!(matches!(
@@ -1788,7 +1807,9 @@ mod tests {
         // Unknown cluster can't get CSR signed either
         let agent_request = AgentCertRequest::new("hacker-cluster")
             .expect("agent cert request creation should succeed");
-        let csr_result = state.sign_csr("hacker-cluster", agent_request.csr_pem());
+        let csr_result = state
+            .sign_csr("hacker-cluster", agent_request.csr_pem())
+            .await;
         assert!(matches!(
             csr_result,
             Err(BootstrapError::ClusterNotFound(_))
@@ -1959,7 +1980,7 @@ mod tests {
             &state,
             "malformed-csr-test".to_string(),
             "cell:8443:50051".to_string(),
-            state.ca_cert_pem().to_string(),
+            state.ca_trust_bundle_pem().await,
         );
         state
             .validate_and_consume("malformed-csr-test", token.as_str())
@@ -1967,7 +1988,7 @@ mod tests {
             .expect("token validation should succeed");
 
         // Try to sign a malformed CSR
-        let result = state.sign_csr("malformed-csr-test", "not a valid CSR");
+        let result = state.sign_csr("malformed-csr-test", "not a valid CSR").await;
 
         // Should fail with CsrSigningFailed
         assert!(matches!(result, Err(BootstrapError::CsrSigningFailed(_))));
@@ -1979,7 +2000,7 @@ mod tests {
         let state = test_state();
 
         // Cell provides CA cert for agents to verify mTLS
-        let ca_cert = state.ca_cert_pem();
+        let ca_cert = state.ca_trust_bundle_pem().await;
         assert!(ca_cert.contains("BEGIN CERTIFICATE"));
 
         // This CA cert is included in bootstrap response
@@ -1987,7 +2008,7 @@ mod tests {
             &state,
             "ca-test".to_string(),
             "cell:8443:50051".to_string(),
-            ca_cert.to_string(),
+            ca_cert.clone(),
         );
         let info = state
             .validate_and_consume("ca-test", token.as_str())
@@ -2139,7 +2160,7 @@ mod tests {
             &state,
             "csr-http-test".to_string(),
             "cell:8443:50051".to_string(),
-            state.ca_cert_pem().to_string(),
+            state.ca_trust_bundle_pem().await,
         );
         state
             .validate_and_consume("csr-http-test", token.as_str())
@@ -2253,7 +2274,7 @@ mod tests {
     #[tokio::test]
     async fn integration_full_http_bootstrap_flow() {
         let state = Arc::new(test_state());
-        let ca_cert = state.ca_cert_pem().to_string();
+        let ca_cert = state.ca_trust_bundle_pem().await;
 
         // Step 1: Register cluster
         let token = register_test_cluster(
@@ -2338,7 +2359,7 @@ mod tests {
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
             Duration::from_secs(3600),
-            test_ca(),
+            test_ca_bundle(),
             "test:latest".to_string(),
             None,
             None, // No kube client for tests
@@ -2393,7 +2414,7 @@ mod tests {
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
             Duration::from_secs(3600),
-            test_ca(),
+            test_ca_bundle(),
             "test:latest".to_string(),
             None,
             None, // No kube client for tests
@@ -2461,7 +2482,7 @@ mod tests {
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
             Duration::from_secs(3600),
-            test_ca(),
+            test_ca_bundle(),
             "test:latest".to_string(),
             None,
             None, // No kube client for tests
@@ -2523,7 +2544,7 @@ mod tests {
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
             Duration::from_secs(3600),
-            test_ca(),
+            test_ca_bundle(),
             "test:latest".to_string(),
             None,
             None, // No kube client for tests

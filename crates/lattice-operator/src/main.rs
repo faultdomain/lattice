@@ -547,7 +547,7 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
             }
         };
 
-        let ca_cert = parent_servers.ca().ca_cert_pem().to_string();
+        let ca_cert = parent_servers.ca_trust_bundle_pem().await;
 
         // Get the cell host from the LoadBalancer Service
         let cell_host = match discover_cell_host(client).await {
