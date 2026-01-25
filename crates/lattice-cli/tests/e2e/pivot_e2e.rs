@@ -187,7 +187,7 @@ async fn run_provider_e2e() -> Result<(), String> {
         "  Workload2:   {} + {:?}",
         workload_provider, workload2_bootstrap
     );
-    info!();
+    info!("");
 
     // Setup Docker network if needed
     if mgmt_provider == InfraProvider::Docker {

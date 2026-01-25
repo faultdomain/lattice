@@ -610,6 +610,10 @@ impl Installer {
         self.install_capi_on_management(&kubeconfig_path).await?;
         self.wait_for_management_controllers(&mgmt_client).await?;
 
+        // Copy CloudProvider and credentials from bootstrap to management cluster
+        self.copy_cloud_provider_to_management(bootstrap_client, &mgmt_client)
+            .await?;
+
         // Apply self-referential LatticeCluster CR
         kube_utils::apply_manifest_with_retry(
             &mgmt_client,
@@ -618,6 +622,39 @@ impl Installer {
         )
         .await
         .cmd_err()?;
+
+        Ok(())
+    }
+
+    /// Copy CloudProvider and its credentials secret from bootstrap to management cluster
+    async fn copy_cloud_provider_to_management(
+        &self,
+        bootstrap_client: &Client,
+        mgmt_client: &Client,
+    ) -> Result<()> {
+        use lattice_cluster::pivot::{apply_distributed_resources, fetch_distributable_resources};
+
+        // Fetch all distributable resources (CloudProviders, SecretsProviders, secrets)
+        let resources = fetch_distributable_resources(bootstrap_client)
+            .await
+            .map_err(|e| Error::command_failed(format!("Failed to fetch resources: {}", e)))?;
+
+        if resources.is_empty() {
+            info!("No CloudProviders or SecretsProviders to copy");
+            return Ok(());
+        }
+
+        info!(
+            "Copying {} CloudProvider(s), {} SecretsProvider(s), {} secret(s) to management cluster",
+            resources.cloud_providers.len(),
+            resources.secrets_providers.len(),
+            resources.secrets.len()
+        );
+
+        // Apply to management cluster
+        apply_distributed_resources(mgmt_client, &resources)
+            .await
+            .map_err(|e| Error::command_failed(format!("Failed to apply resources: {}", e)))?;
 
         Ok(())
     }

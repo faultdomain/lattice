@@ -1210,7 +1210,7 @@ impl RandomMesh {
         if blocked.len() > 20 {
             info!("    ... and {} more", blocked.len() - 20);
         }
-        info!();
+        info!("");
     }
 
     fn create_lattice_service(&self, name: &str, namespace: &str) -> LatticeService {

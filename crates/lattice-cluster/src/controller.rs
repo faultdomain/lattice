@@ -1747,13 +1747,13 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 })?;
 
             // Validate CloudProvider has credentials for non-Docker providers
-            if provider_type != lattice_common::crd::ProviderType::Docker {
-                if cloud_provider.spec.credentials_secret_ref.is_none() {
-                    return Err(Error::validation(format!(
-                        "CloudProvider '{}' requires credentials_secret_ref for {} provider",
-                        cluster.spec.provider_ref, provider_type
-                    )));
-                }
+            if provider_type != lattice_common::crd::ProviderType::Docker
+                && cloud_provider.spec.credentials_secret_ref.is_none()
+            {
+                return Err(Error::validation(format!(
+                    "CloudProvider '{}' requires credentials_secret_ref for {} provider",
+                    cluster.spec.provider_ref, provider_type
+                )));
             }
 
             // Copy provider credentials from CloudProvider's secret to provider namespace

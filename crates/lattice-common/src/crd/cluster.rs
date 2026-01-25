@@ -215,13 +215,8 @@ impl LatticeCluster {
     /// controller, not inherited from the source.
     pub fn for_export(&self) -> Self {
         let mut exported = self.clone();
-        exported.metadata.managed_fields = None;
-        exported.metadata.resource_version = None;
-        exported.metadata.uid = None;
-        exported.metadata.creation_timestamp = None;
-        exported.metadata.generation = None;
+        crate::kube_utils::strip_export_metadata(&mut exported.metadata);
         // Remove status entirely - the target cluster's controller will manage status.
-        // This prevents server-side apply from overwriting status set by the controller.
         exported.status = None;
         exported
     }

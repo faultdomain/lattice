@@ -1900,6 +1900,7 @@ dependencies = [
  "clap",
  "k8s-openapi",
  "kube",
+ "lattice-cluster",
  "lattice-common",
  "lattice-operator",
  "rand 0.8.5",

@@ -29,6 +29,22 @@ pub const STATUS_TRUE: &str = "True";
 /// Default polling interval for wait operations
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Strip cluster-specific metadata from a resource for export/distribution.
+///
+/// Removes fields that would cause server-side apply to fail on a target cluster:
+/// - uid: Unique identifier in the source cluster
+/// - resourceVersion: Optimistic concurrency version
+/// - creationTimestamp: When the source resource was created
+/// - managedFields: Server-side apply ownership tracking
+/// - generation: Controller-managed generation counter
+pub fn strip_export_metadata(meta: &mut k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta) {
+    meta.uid = None;
+    meta.resource_version = None;
+    meta.creation_timestamp = None;
+    meta.managed_fields = None;
+    meta.generation = None;
+}
+
 /// Check if a Kubernetes condition of the given type has status "True"
 ///
 /// This is a helper for checking conditions on nodes, deployments, and other

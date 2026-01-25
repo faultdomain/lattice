@@ -874,15 +874,22 @@ impl AgentClient {
 
                             // Apply distributed resources to lattice-system namespace
                             if !resources.is_empty() {
-                                if let Err(e) = apply_distributed_resources(&resources).await {
-                                    warn!(error = %e, "Failed to apply distributed resources (non-fatal)");
-                                } else {
-                                    info!(
-                                        cloud_providers = resources.cloud_providers.len(),
-                                        secrets_providers = resources.secrets_providers.len(),
-                                        secrets = resources.secrets.len(),
-                                        "Applied distributed resources"
-                                    );
+                                match kube::Client::try_default().await {
+                                    Ok(client) => {
+                                        if let Err(e) = apply_distributed_resources(&client, &resources).await {
+                                            warn!(error = %e, "Failed to apply distributed resources (non-fatal)");
+                                        } else {
+                                            info!(
+                                                cloud_providers = resources.cloud_providers.len(),
+                                                secrets_providers = resources.secrets_providers.len(),
+                                                secrets = resources.secrets.len(),
+                                                "Applied distributed resources"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "Failed to create k8s client for distributed resources");
+                                    }
                                 }
                             }
 
@@ -984,7 +991,14 @@ impl AgentClient {
                 let full_sync = cmd.full_sync;
 
                 tokio::spawn(async move {
-                    if let Err(e) = apply_distributed_resources(&resources).await {
+                    let client = match kube::Client::try_default().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(error = %e, "Failed to create k8s client for synced resources");
+                            return;
+                        }
+                    };
+                    if let Err(e) = apply_distributed_resources(&client, &resources).await {
                         warn!(error = %e, "Failed to apply synced resources");
                     } else {
                         info!(

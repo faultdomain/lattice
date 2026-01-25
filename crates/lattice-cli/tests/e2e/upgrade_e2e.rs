@@ -166,7 +166,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
         workload_cluster_name, workload_provider, workload_bootstrap, from_version
     );
     info!("  Upgrade to:  v{}", to_version);
-    info!();
+    info!("");
 
     if mgmt_provider == InfraProvider::Docker {
         ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;

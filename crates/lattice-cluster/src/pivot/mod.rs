@@ -244,92 +244,31 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
     /// This is the new pivot flow using --to-directory:
     /// 1. Cell exports manifests via `clusterctl move --to-directory`
     /// 2. Cell sends manifests to agent via gRPC PivotManifestsCommand
-    /// 3. Agent saves manifests to temp directory
-    /// 4. Agent imports via `clusterctl move --from-directory`
+    /// 3. Agent imports via `clusterctl move --from-directory`
     ///
     /// This approach keeps paused resources on the parent, simplifying unpivot.
     pub async fn import_capi_manifests(
         &self,
         manifests: &[Vec<u8>],
-        cluster_name: &str,
+        _cluster_name: &str,
     ) -> Result<usize, PivotError> {
-        use std::process::Stdio;
-
         if manifests.is_empty() {
             return Err(PivotError::Internal("no manifests to import".to_string()));
         }
 
-        // Create temp directory for manifests
-        let temp_dir = std::env::temp_dir().join(format!(
-            "lattice-pivot-{}-{}",
-            cluster_name,
-            std::process::id()
-        ));
+        let manifest_count = manifests.len();
 
-        // Use async I/O to avoid blocking the runtime
-        tokio::fs::create_dir_all(&temp_dir)
+        // Use shared clusterctl import function (None = in-cluster kubeconfig)
+        lattice_common::clusterctl::import_from_manifests(None, &self.capi_namespace, manifests)
             .await
-            .map_err(|e| PivotError::Internal(format!("failed to create temp dir: {}", e)))?;
-
-        info!(
-            manifest_count = manifests.len(),
-            temp_dir = %temp_dir.display(),
-            "Saving CAPI manifests to temp directory"
-        );
-
-        // Write each manifest to a file using async I/O
-        let mut saved_count = 0;
-        for (i, manifest) in manifests.iter().enumerate() {
-            let filename = temp_dir.join(format!("manifest-{:04}.yaml", i));
-            tokio::fs::write(&filename, manifest)
-                .await
-                .map_err(|e| PivotError::Internal(format!("failed to write manifest: {}", e)))?;
-            saved_count += 1;
-        }
-
-        info!(
-            saved_count = saved_count,
-            "Manifests saved, running clusterctl move --from-directory"
-        );
-
-        // Run clusterctl move --from-directory to import resources
-        // The agent is running in-cluster, so clusterctl uses the default in-cluster config
-        let output = tokio::process::Command::new("clusterctl")
-            .arg("move")
-            .arg("--from-directory")
-            .arg(&temp_dir)
-            .arg("--namespace")
-            .arg(&self.capi_namespace)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| {
-                PivotError::ClusterctlFailed(format!("failed to run clusterctl: {}", e))
-            })?;
-
-        // Clean up temp directory using async I/O
-        if let Err(e) = tokio::fs::remove_dir_all(&temp_dir).await {
-            debug!(error = %e, "Failed to clean up temp directory (non-fatal)");
-        }
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(PivotError::ClusterctlFailed(format!(
-                "clusterctl move failed: {}",
-                stderr
-            )));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        info!(output = %stdout.trim(), "clusterctl move completed successfully");
+            .map_err(|e| PivotError::ClusterctlFailed(e.to_string()))?;
 
         // Wait briefly for resources to appear, then count them
         tokio::time::sleep(POST_MOVE_STABILIZATION_DELAY).await;
         let count = self
             .count_capi_resources()
             .await
-            .unwrap_or(saved_count as u32);
+            .unwrap_or(manifest_count as u32);
 
         Ok(count as usize)
     }
@@ -591,11 +530,7 @@ fn serialize_for_distribution<T: serde::Serialize + Clone + kube::ResourceExt>(
     resource: &T,
 ) -> Result<Vec<u8>, PivotError> {
     let mut clean = resource.clone();
-    let meta = clean.meta_mut();
-    meta.uid = None;
-    meta.resource_version = None;
-    meta.creation_timestamp = None;
-    meta.managed_fields = None;
+    lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
 
     serde_yaml::to_string(&clean)
         .map(|s| s.into_bytes())
@@ -607,6 +542,7 @@ fn serialize_for_distribution<T: serde::Serialize + Clone + kube::ResourceExt>(
 /// During pivot and periodic sync, parent clusters send CloudProvider,
 /// SecretsProvider CRDs and their referenced secrets to child clusters.
 pub async fn apply_distributed_resources(
+    client: &Client,
     resources: &DistributableResources,
 ) -> Result<(), PivotError> {
     use kube::api::{Patch, PatchParams};
@@ -614,10 +550,6 @@ pub async fn apply_distributed_resources(
     if resources.is_empty() {
         return Ok(());
     }
-
-    let client = kube::Client::try_default()
-        .await
-        .map_err(|e| PivotError::Internal(format!("failed to create k8s client: {}", e)))?;
 
     let params = PatchParams::apply("lattice-pivot").force();
 
@@ -667,7 +599,7 @@ pub async fn apply_distributed_resources(
     }
 
     // Apply SecretsProviders (ClusterSecretStore created by secrets-provider controller)
-    let sp_api: Api<SecretsProvider> = Api::namespaced(client, LATTICE_SYSTEM_NAMESPACE);
+    let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for sp_bytes in &resources.secrets_providers {
         let yaml_str = String::from_utf8_lossy(sp_bytes);
         let sp: SecretsProvider = serde_yaml::from_str(&yaml_str).map_err(|e| {
@@ -855,40 +787,42 @@ mod tests {
     // apply_distributed_resources Tests
     // ==========================================================================
 
-    /// Story: Empty resources should succeed immediately
+    /// Story: Empty resources should succeed immediately (no client calls made)
     #[tokio::test]
     async fn apply_distributed_resources_empty_succeeds() {
+        let Ok(client) = kube::Client::try_default().await else {
+            eprintln!("Skipping test: no K8s cluster available");
+            return;
+        };
         let resources = DistributableResources::default();
-        let result = apply_distributed_resources(&resources).await;
+        let result = apply_distributed_resources(&client, &resources).await;
         assert!(result.is_ok());
     }
 
     /// Story: Invalid YAML should return an error
     #[tokio::test]
     async fn apply_distributed_resources_invalid_yaml_fails() {
-        // This test runs even without a K8s cluster because parsing happens before API calls
+        let Ok(client) = kube::Client::try_default().await else {
+            eprintln!("Skipping test: no K8s cluster available");
+            return;
+        };
         let invalid_yaml = b"not: valid: yaml: [unclosed".to_vec();
         let resources = DistributableResources {
             cloud_providers: vec![],
             secrets_providers: vec![],
             secrets: vec![invalid_yaml],
         };
-        let result = apply_distributed_resources(&resources).await;
-
-        // Without a K8s cluster, it will fail on client creation first
-        // With a K8s cluster, it will fail on YAML parsing
+        let result = apply_distributed_resources(&client, &resources).await;
         assert!(result.is_err());
     }
 
     /// Story: Secret without a name should return an error
     #[tokio::test]
     async fn apply_distributed_resources_missing_name_fails() {
-        // Skip if no K8s cluster (parsing happens after client creation)
-        if kube::Client::try_default().await.is_err() {
+        let Ok(client) = kube::Client::try_default().await else {
             eprintln!("Skipping test: no K8s cluster available");
             return;
-        }
-
+        };
         let nameless_secret = r#"
 apiVersion: v1
 kind: Secret
@@ -902,7 +836,7 @@ data:
             secrets_providers: vec![],
             secrets: vec![nameless_secret.as_bytes().to_vec()],
         };
-        let result = apply_distributed_resources(&resources).await;
+        let result = apply_distributed_resources(&client, &resources).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
