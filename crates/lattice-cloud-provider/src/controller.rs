@@ -119,6 +119,14 @@ async fn update_status(
     phase: CloudProviderPhase,
     message: Option<String>,
 ) -> Result<(), ReconcileError> {
+    // Check if status already matches - avoid update loop
+    if let Some(ref current_status) = cp.status {
+        if current_status.phase == phase && current_status.message == message {
+            debug!(cloud_provider = %cp.name_any(), "Status unchanged, skipping update");
+            return Ok(());
+        }
+    }
+
     let name = cp.name_any();
     let namespace = cp
         .namespace()
