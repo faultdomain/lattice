@@ -1,93 +1,66 @@
+//! Build script for lattice-operator
+//!
+//! Downloads Helm charts and CAPI providers based on versions.toml.
+//! All version information is centralized in versions.toml.
+
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
-/// Versions loaded from versions.toml - single source of truth
+/// Root structure of versions.toml
+#[derive(Debug, Deserialize)]
 struct Versions {
-    capi: String,
-    rke2: String,
-    capmox: String,
-    capa: String,
-    capo: String,
-    ipam_in_cluster: String,
-    gateway_api: String,
-    cilium: String,
-    istio: String,
-    cert_manager: String,
-    envoy_gateway: String,
+    charts: HashMap<String, Chart>,
+    resources: HashMap<String, Resource>,
+    providers: HashMap<String, Provider>,
 }
 
-/// Load versions from versions.toml in workspace root
-fn load_versions() -> Versions {
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set by cargo");
-    // Go up two levels: crates/lattice-operator -> workspace root
-    let workspace_root = Path::new(&manifest_dir)
-        .parent()
-        .expect("lattice-operator crate should have a parent directory")
-        .parent()
-        .expect("crates directory should have a parent (workspace root)");
-    let versions_path = workspace_root.join("versions.toml");
-    let content = std::fs::read_to_string(&versions_path).expect("Failed to read versions.toml");
+#[derive(Debug, Clone, Deserialize)]
+struct Chart {
+    version: String,
+    repo: String,
+    chart: String,
+    filename: String,
+    #[serde(default)]
+    oci: bool,
+    #[serde(default)]
+    version_prefix: String,
+}
 
-    let mut versions = Versions {
-        capi: String::new(),
-        rke2: String::new(),
-        capmox: String::new(),
-        capa: String::new(),
-        capo: String::new(),
-        ipam_in_cluster: String::new(),
-        gateway_api: String::new(),
-        cilium: String::new(),
-        istio: String::new(),
-        cert_manager: String::new(),
-        envoy_gateway: String::new(),
-    };
-    let mut section = "";
+#[derive(Debug, Deserialize)]
+struct Resource {
+    version: String,
+    url: String,
+    filename: String,
+}
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('[') && line.ends_with(']') {
-            section = line.trim_matches(|c| c == '[' || c == ']');
-        } else if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim().trim_matches('"');
-            match (section, key) {
-                ("capi", "version") => versions.capi = value.to_string(),
-                ("rke2", "version") => versions.rke2 = value.to_string(),
-                ("capmox", "version") => versions.capmox = value.to_string(),
-                ("capa", "version") => versions.capa = value.to_string(),
-                ("capo", "version") => versions.capo = value.to_string(),
-                ("ipam-in-cluster", "version") => versions.ipam_in_cluster = value.to_string(),
-                ("gateway-api", "version") => versions.gateway_api = value.to_string(),
-                ("charts", "cilium") => versions.cilium = value.to_string(),
-                ("charts", "istio") => versions.istio = value.to_string(),
-                ("charts", "cert-manager") => versions.cert_manager = value.to_string(),
-                ("charts", "envoy-gateway") => versions.envoy_gateway = value.to_string(),
-                _ => {}
-            }
-        }
-    }
-
-    println!("cargo:rerun-if-changed={}", versions_path.display());
-
-    versions
+#[derive(Debug, Deserialize)]
+struct Provider {
+    version: String,
+    repo: String,
+    components: Vec<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
     let workspace_root = Path::new(&manifest_dir)
         .parent()
-        .expect("lattice-operator crate should have a parent directory")
+        .expect("crate should have parent")
         .parent()
-        .expect("crates directory should have a parent (workspace root)");
+        .expect("crates dir should have parent");
 
-    let versions = load_versions();
+    let versions_path = workspace_root.join("versions.toml");
+    println!("cargo:rerun-if-changed={}", versions_path.display());
 
-    // Set env vars pointing to workspace root directories
+    let content = std::fs::read_to_string(&versions_path)?;
+    let versions: Versions = toml::from_str(&content)?;
+
     let charts_dir = workspace_root.join("test-charts");
     let providers_dir = workspace_root.join("test-providers");
     let scripts_dir = workspace_root.join("scripts/runtime");
 
+    // Set environment variables for runtime
     println!(
         "cargo:rustc-env=LATTICE_CHARTS_DIR={}",
         charts_dir.display()
@@ -96,83 +69,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cargo:rustc-env=LATTICE_SCRIPTS_DIR={}",
         scripts_dir.display()
     );
-    println!("cargo:rustc-env=CILIUM_VERSION={}", versions.cilium);
-    println!("cargo:rustc-env=ISTIO_VERSION={}", versions.istio);
-    println!("cargo:rustc-env=CAPI_VERSION={}", versions.capi);
-    println!("cargo:rustc-env=RKE2_VERSION={}", versions.rke2);
-    println!("cargo:rustc-env=CAPMOX_VERSION={}", versions.capmox);
-    println!("cargo:rustc-env=CAPA_VERSION={}", versions.capa);
-    println!("cargo:rustc-env=CAPO_VERSION={}", versions.capo);
-    println!(
-        "cargo:rustc-env=IPAM_IN_CLUSTER_VERSION={}",
-        versions.ipam_in_cluster
-    );
-    println!(
-        "cargo:rustc-env=GATEWAY_API_VERSION={}",
-        versions.gateway_api
-    );
-    println!(
-        "cargo:rustc-env=ENVOY_GATEWAY_VERSION={}",
-        versions.envoy_gateway
-    );
-
-    let config_path = providers_dir.join("clusterctl.yaml");
     println!(
         "cargo:rustc-env=CLUSTERCTL_CONFIG={}",
-        config_path.display()
+        providers_dir.join("clusterctl.yaml").display()
     );
 
-    // Download charts and providers if needed
-    download_helm_charts(&versions, &charts_dir)?;
-    download_capi_providers(&versions, &providers_dir)?;
+    // Export specific env vars that code expects
+    // Charts
+    println!(
+        "cargo:rustc-env=CILIUM_VERSION={}",
+        versions.charts["cilium"].version
+    );
+    println!(
+        "cargo:rustc-env=ISTIO_VERSION={}",
+        versions.charts["istio-base"].version
+    );
+    println!(
+        "cargo:rustc-env=CERT_MANAGER_VERSION={}",
+        versions.charts["cert-manager"].version
+    );
+    println!(
+        "cargo:rustc-env=EXTERNAL_SECRETS_VERSION={}",
+        versions.charts["external-secrets"].version
+    );
+
+    // Resources
+    println!(
+        "cargo:rustc-env=GATEWAY_API_VERSION={}",
+        versions.resources["gateway-api"].version
+    );
+
+    // Providers
+    println!(
+        "cargo:rustc-env=CAPI_VERSION={}",
+        versions.providers["cluster-api"].version
+    );
+    println!(
+        "cargo:rustc-env=CAPA_VERSION={}",
+        versions.providers["infrastructure-aws"].version
+    );
+    println!(
+        "cargo:rustc-env=CAPO_VERSION={}",
+        versions.providers["infrastructure-openstack"].version
+    );
+    println!(
+        "cargo:rustc-env=CAPMOX_VERSION={}",
+        versions.providers["infrastructure-proxmox"].version
+    );
+
+    // Download artifacts
+    download_charts(&versions, &charts_dir)?;
+    download_resources(&versions, &charts_dir)?;
+    download_providers(&versions, &providers_dir)?;
 
     Ok(())
 }
 
-fn download_helm_charts(
+fn download_charts(
     versions: &Versions,
     charts_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let cilium_chart = charts_dir.join(format!("cilium-{}.tgz", versions.cilium));
-    let base_chart = charts_dir.join(format!("base-{}.tgz", versions.istio));
-    let istiod_chart = charts_dir.join(format!("istiod-{}.tgz", versions.istio));
-    let cni_chart = charts_dir.join(format!("cni-{}.tgz", versions.istio));
-    let ztunnel_chart = charts_dir.join(format!("ztunnel-{}.tgz", versions.istio));
-    let cert_manager_chart =
-        charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
-    // Envoy Gateway (OCI chart from docker.io/envoyproxy/gateway-helm)
-    let envoy_gateway_chart =
-        charts_dir.join(format!("gateway-helm-v{}.tgz", versions.envoy_gateway));
-    // Gateway API CRDs (not a helm chart, just a YAML file)
-    let gateway_api_crds =
-        charts_dir.join(format!("gateway-api-crds-v{}.yaml", versions.gateway_api));
-
-    // Tell cargo to re-run if any chart is missing or changes
-    for chart in [
-        &cilium_chart,
-        &base_chart,
-        &istiod_chart,
-        &cni_chart,
-        &ztunnel_chart,
-        &cert_manager_chart,
-        &envoy_gateway_chart,
-        &gateway_api_crds,
-    ] {
-        println!("cargo:rerun-if-changed={}", chart.display());
+    // Check if all charts exist
+    let mut missing = Vec::new();
+    for (name, chart) in &versions.charts {
+        let filename = chart.filename.replace("{version}", &chart.version);
+        let path = charts_dir.join(&filename);
+        println!("cargo:rerun-if-changed={}", path.display());
+        if !path.exists() {
+            missing.push((name.clone(), chart.clone(), path));
+        }
     }
 
-    let all_charts = [
-        &cilium_chart,
-        &base_chart,
-        &istiod_chart,
-        &cni_chart,
-        &ztunnel_chart,
-        &cert_manager_chart,
-        &envoy_gateway_chart,
-        &gateway_api_crds,
-    ];
-
-    if all_charts.iter().all(|c| c.exists()) {
+    if missing.is_empty() {
         return Ok(());
     }
 
@@ -183,336 +151,236 @@ fn download_helm_charts(
 
     std::fs::create_dir_all(charts_dir)?;
 
-    // Add helm repos
-    let repos = [
-        ("cilium", "https://helm.cilium.io/"),
-        (
-            "istio",
-            "https://istio-release.storage.googleapis.com/charts",
-        ),
-        ("jetstack", "https://charts.jetstack.io"),
-    ];
-    for (name, url) in repos {
+    // Collect unique repos (skip OCI repos)
+    let mut repos: HashMap<String, String> = HashMap::new();
+    for chart in versions.charts.values() {
+        if !chart.oci && !repos.contains_key(&chart.repo) {
+            // Extract repo name from chart name (e.g., "cilium/cilium" -> "cilium")
+            if let Some(repo_name) = chart.chart.split('/').next() {
+                repos.insert(chart.repo.clone(), repo_name.to_string());
+            }
+        }
+    }
+
+    // Add repos
+    for (url, name) in &repos {
         let _ = Command::new("helm")
             .args(["repo", "add", name, url])
             .output();
     }
     let _ = Command::new("helm").args(["repo", "update"]).output();
 
-    // Download charts
-    let charts = [
-        (&cilium_chart, "cilium/cilium", &versions.cilium, "Cilium"),
-        (&base_chart, "istio/base", &versions.istio, "Istio base"),
-        (
-            &istiod_chart,
-            "istio/istiod",
-            &versions.istio,
-            "Istio istiod",
-        ),
-        (&cni_chart, "istio/cni", &versions.istio, "Istio CNI"),
-        (
-            &ztunnel_chart,
-            "istio/ztunnel",
-            &versions.istio,
-            "Istio ztunnel",
-        ),
-        (
-            &cert_manager_chart,
-            "jetstack/cert-manager",
-            &versions.cert_manager,
-            "cert-manager",
-        ),
-    ];
+    // Download missing charts
+    for (name, chart, _path) in &missing {
+        let version = if chart.version_prefix.is_empty() {
+            chart.version.clone()
+        } else {
+            format!("{}{}", chart.version_prefix, chart.version)
+        };
 
-    for (path, chart, version, name) in charts {
-        if !path.exists() {
-            eprintln!("Downloading {} chart v{}...", name, version);
+        eprintln!("Downloading {} chart v{}...", name, chart.version);
+
+        if chart.oci {
             let _ = Command::new("helm")
-                .args(["pull", chart, "--version", version, "--destination"])
+                .args(["pull", &chart.chart, "--version", &version, "--destination"])
+                .arg(charts_dir)
+                .status();
+        } else {
+            let _ = Command::new("helm")
+                .args([
+                    "pull",
+                    &chart.chart,
+                    "--version",
+                    &chart.version,
+                    "--destination",
+                ])
                 .arg(charts_dir)
                 .status();
         }
     }
 
-    // Download Envoy Gateway (OCI chart)
-    if !envoy_gateway_chart.exists() {
-        eprintln!(
-            "Downloading Envoy Gateway chart v{}...",
-            versions.envoy_gateway
-        );
-        let _ = Command::new("helm")
-            .args([
-                "pull",
-                "oci://docker.io/envoyproxy/gateway-helm",
-                "--version",
-                &format!("v{}", versions.envoy_gateway),
-                "--destination",
-            ])
-            .arg(charts_dir)
-            .status();
-    }
+    Ok(())
+}
 
-    // Download Gateway API CRDs (standard channel)
-    if !gateway_api_crds.exists() {
-        eprintln!("Downloading Gateway API CRDs v{}...", versions.gateway_api);
-        download_file(
-            &format!(
-                "https://github.com/kubernetes-sigs/gateway-api/releases/download/v{}/standard-install.yaml",
-                versions.gateway_api
-            ),
-            &gateway_api_crds,
-        );
+fn download_resources(
+    versions: &Versions,
+    charts_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (name, resource) in &versions.resources {
+        let filename = resource.filename.replace("{version}", &resource.version);
+        let path = charts_dir.join(&filename);
+        println!("cargo:rerun-if-changed={}", path.display());
+
+        if path.exists() {
+            continue;
+        }
+
+        let url = resource.url.replace("{version}", &resource.version);
+        eprintln!("Downloading {} v{}...", name, resource.version);
+        download_file(&url, &path);
     }
 
     Ok(())
 }
 
-fn download_capi_providers(
+fn download_providers(
     versions: &Versions,
     providers_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = providers_dir.join("clusterctl.yaml");
-
-    let core_dir = providers_dir
-        .join("cluster-api")
-        .join(format!("v{}", versions.capi));
-    let bootstrap_kubeadm_dir = providers_dir
-        .join("bootstrap-kubeadm")
-        .join(format!("v{}", versions.capi));
-    let controlplane_kubeadm_dir = providers_dir
-        .join("control-plane-kubeadm")
-        .join(format!("v{}", versions.capi));
-    let docker_dir = providers_dir
-        .join("infrastructure-docker")
-        .join(format!("v{}", versions.capi));
-    let bootstrap_rke2_dir = providers_dir
-        .join("bootstrap-rke2")
-        .join(format!("v{}", versions.rke2));
-    let controlplane_rke2_dir = providers_dir
-        .join("control-plane-rke2")
-        .join(format!("v{}", versions.rke2));
-    let proxmox_dir = providers_dir
-        .join("infrastructure-proxmox")
-        .join(format!("v{}", versions.capmox));
-    let aws_dir = providers_dir
-        .join("infrastructure-aws")
-        .join(format!("v{}", versions.capa));
-    let openstack_dir = providers_dir
-        .join("infrastructure-openstack")
-        .join(format!("v{}", versions.capo));
-    let ipam_dir = providers_dir
-        .join("ipam-in-cluster")
-        .join(format!("v{}", versions.ipam_in_cluster));
-
-    let core = core_dir.join("core-components.yaml");
-    let bootstrap_rke2 = bootstrap_rke2_dir.join("bootstrap-components.yaml");
-    let proxmox = proxmox_dir.join("infrastructure-components.yaml");
-    let aws = aws_dir.join("infrastructure-components.yaml");
-    let openstack = openstack_dir.join("infrastructure-components.yaml");
-    let ipam = ipam_dir.join("ipam-components.yaml");
-
-    // Tell cargo to re-run if providers are missing or change
-    println!("cargo:rerun-if-changed={}", core.display());
-    println!("cargo:rerun-if-changed={}", bootstrap_rke2.display());
-    println!("cargo:rerun-if-changed={}", proxmox.display());
-    println!("cargo:rerun-if-changed={}", aws.display());
-    println!("cargo:rerun-if-changed={}", openstack.display());
-    println!("cargo:rerun-if-changed={}", ipam.display());
     println!("cargo:rerun-if-changed={}", config_path.display());
 
-    if core.exists()
-        && bootstrap_rke2.exists()
-        && proxmox.exists()
-        && aws.exists()
-        && openstack.exists()
-        && ipam.exists()
-        && config_path.exists()
-    {
+    // Check if all providers exist
+    let mut all_exist = config_path.exists();
+    for (name, provider) in &versions.providers {
+        let provider_dir = providers_dir
+            .join(name)
+            .join(format!("v{}", provider.version));
+        for component in &provider.components {
+            let path = provider_dir.join(component);
+            println!("cargo:rerun-if-changed={}", path.display());
+            if !path.exists() {
+                all_exist = false;
+            }
+        }
+    }
+
+    if all_exist {
         return Ok(());
     }
 
     if Command::new("curl").arg("--version").output().is_err() {
-        eprintln!("curl not found, skipping CAPI provider download");
+        eprintln!("curl not found, skipping provider download");
         return Ok(());
     }
 
-    eprintln!("Downloading CAPI providers v{}...", versions.capi);
+    eprintln!("Downloading CAPI providers...");
 
-    std::fs::create_dir_all(&core_dir)?;
-    std::fs::create_dir_all(&bootstrap_kubeadm_dir)?;
-    std::fs::create_dir_all(&controlplane_kubeadm_dir)?;
-    std::fs::create_dir_all(&docker_dir)?;
-    std::fs::create_dir_all(&bootstrap_rke2_dir)?;
-    std::fs::create_dir_all(&controlplane_rke2_dir)?;
-    std::fs::create_dir_all(&proxmox_dir)?;
-    std::fs::create_dir_all(&aws_dir)?;
-    std::fs::create_dir_all(&openstack_dir)?;
-    std::fs::create_dir_all(&ipam_dir)?;
+    // Download each provider
+    for (name, provider) in &versions.providers {
+        let provider_dir = providers_dir
+            .join(name)
+            .join(format!("v{}", provider.version));
+        std::fs::create_dir_all(&provider_dir)?;
 
-    let capi_base_url = format!(
-        "https://github.com/kubernetes-sigs/cluster-api/releases/download/v{}",
-        versions.capi
-    );
-    download_file(
-        &format!("{}/core-components.yaml", capi_base_url),
-        &core_dir.join("core-components.yaml"),
-    );
-    download_file(
-        &format!("{}/metadata.yaml", capi_base_url),
-        &core_dir.join("metadata.yaml"),
-    );
-    download_file(
-        &format!("{}/bootstrap-components.yaml", capi_base_url),
-        &bootstrap_kubeadm_dir.join("bootstrap-components.yaml"),
-    );
-    std::fs::copy(
-        core_dir.join("metadata.yaml"),
-        bootstrap_kubeadm_dir.join("metadata.yaml"),
-    )
-    .ok();
-    download_file(
-        &format!("{}/control-plane-components.yaml", capi_base_url),
-        &controlplane_kubeadm_dir.join("control-plane-components.yaml"),
-    );
-    std::fs::copy(
-        core_dir.join("metadata.yaml"),
-        controlplane_kubeadm_dir.join("metadata.yaml"),
-    )
-    .ok();
-    download_file(
-        &format!(
-            "{}/infrastructure-components-development.yaml",
-            capi_base_url
+        let base_url = format!(
+            "https://github.com/{}/releases/download/v{}",
+            provider.repo, provider.version
+        );
+
+        for component in &provider.components {
+            let path = provider_dir.join(component);
+            if !path.exists() {
+                let url = format!("{}/{}", base_url, component);
+                eprintln!("  Downloading {}/{}...", name, component);
+                download_file(&url, &path);
+            }
+        }
+    }
+
+    // Copy metadata.yaml for providers that share it
+    copy_metadata(providers_dir, &versions.providers)?;
+
+    // Generate clusterctl.yaml
+    generate_clusterctl_config(providers_dir, &versions.providers)?;
+
+    Ok(())
+}
+
+fn copy_metadata(
+    providers_dir: &Path,
+    providers: &HashMap<String, Provider>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Providers that need metadata copied from their parent
+    let copies = [
+        ("bootstrap-kubeadm", "cluster-api"),
+        ("control-plane-kubeadm", "cluster-api"),
+        ("infrastructure-docker", "cluster-api"),
+        ("control-plane-rke2", "bootstrap-rke2"),
+    ];
+
+    for (target, source) in copies {
+        if let (Some(target_provider), Some(source_provider)) =
+            (providers.get(target), providers.get(source))
+        {
+            let source_path = providers_dir
+                .join(source)
+                .join(format!("v{}", source_provider.version))
+                .join("metadata.yaml");
+            let target_path = providers_dir
+                .join(target)
+                .join(format!("v{}", target_provider.version))
+                .join("metadata.yaml");
+
+            if source_path.exists() && !target_path.exists() {
+                std::fs::copy(&source_path, &target_path).ok();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn generate_clusterctl_config(
+    providers_dir: &Path,
+    providers: &HashMap<String, Provider>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = providers_dir.join("clusterctl.yaml");
+
+    // Map provider names to clusterctl types
+    let type_map: HashMap<&str, (&str, &str)> = [
+        ("cluster-api", ("cluster-api", "CoreProvider")),
+        ("bootstrap-kubeadm", ("kubeadm", "BootstrapProvider")),
+        ("control-plane-kubeadm", ("kubeadm", "ControlPlaneProvider")),
+        ("bootstrap-rke2", ("rke2", "BootstrapProvider")),
+        ("control-plane-rke2", ("rke2", "ControlPlaneProvider")),
+        (
+            "infrastructure-docker",
+            ("docker", "InfrastructureProvider"),
         ),
-        &docker_dir.join("infrastructure-components-development.yaml"),
-    );
-    std::fs::copy(
-        core_dir.join("metadata.yaml"),
-        docker_dir.join("metadata.yaml"),
-    )
-    .ok();
+        (
+            "infrastructure-proxmox",
+            ("proxmox", "InfrastructureProvider"),
+        ),
+        ("infrastructure-aws", ("aws", "InfrastructureProvider")),
+        (
+            "infrastructure-openstack",
+            ("openstack", "InfrastructureProvider"),
+        ),
+        ("ipam-in-cluster", ("in-cluster", "IPAMProvider")),
+    ]
+    .into_iter()
+    .collect();
 
-    let rke2_base_url = format!(
-        "https://github.com/rancher/cluster-api-provider-rke2/releases/download/v{}",
-        versions.rke2
-    );
-    download_file(
-        &format!("{}/bootstrap-components.yaml", rke2_base_url),
-        &bootstrap_rke2_dir.join("bootstrap-components.yaml"),
-    );
-    download_file(
-        &format!("{}/metadata.yaml", rke2_base_url),
-        &bootstrap_rke2_dir.join("metadata.yaml"),
-    );
-    download_file(
-        &format!("{}/control-plane-components.yaml", rke2_base_url),
-        &controlplane_rke2_dir.join("control-plane-components.yaml"),
-    );
-    std::fs::copy(
-        bootstrap_rke2_dir.join("metadata.yaml"),
-        controlplane_rke2_dir.join("metadata.yaml"),
-    )
-    .ok();
+    let mut config = String::from("providers:\n");
 
-    // Download CAPMOX (Proxmox) infrastructure provider
-    let capmox_base_url = format!(
-        "https://github.com/ionos-cloud/cluster-api-provider-proxmox/releases/download/v{}",
-        versions.capmox
-    );
-    download_file(
-        &format!("{}/infrastructure-components.yaml", capmox_base_url),
-        &proxmox_dir.join("infrastructure-components.yaml"),
-    );
-    download_file(
-        &format!("{}/metadata.yaml", capmox_base_url),
-        &proxmox_dir.join("metadata.yaml"),
-    );
+    for (name, provider) in providers {
+        if let Some((clusterctl_name, provider_type)) = type_map.get(name.as_str()) {
+            // Find the main component file
+            let component = provider
+                .components
+                .iter()
+                .find(|c| {
+                    c.ends_with("-components.yaml") || c.ends_with("-components-development.yaml")
+                })
+                .unwrap_or(&provider.components[0]);
 
-    // Download CAPA (AWS) infrastructure provider
-    let capa_base_url = format!(
-        "https://github.com/kubernetes-sigs/cluster-api-provider-aws/releases/download/v{}",
-        versions.capa
-    );
-    download_file(
-        &format!("{}/infrastructure-components.yaml", capa_base_url),
-        &aws_dir.join("infrastructure-components.yaml"),
-    );
-    download_file(
-        &format!("{}/metadata.yaml", capa_base_url),
-        &aws_dir.join("metadata.yaml"),
-    );
+            let url = format!(
+                "file://{}/{}/v{}/{}",
+                providers_dir.display(),
+                name,
+                provider.version,
+                component
+            );
 
-    // Download CAPO (OpenStack) infrastructure provider
-    let capo_base_url = format!(
-        "https://github.com/kubernetes-sigs/cluster-api-provider-openstack/releases/download/v{}",
-        versions.capo
-    );
-    download_file(
-        &format!("{}/infrastructure-components.yaml", capo_base_url),
-        &openstack_dir.join("infrastructure-components.yaml"),
-    );
-    download_file(
-        &format!("{}/metadata.yaml", capo_base_url),
-        &openstack_dir.join("metadata.yaml"),
-    );
+            config.push_str(&format!(
+                "  - name: \"{}\"\n    url: \"{}\"\n    type: \"{}\"\n",
+                clusterctl_name, url, provider_type
+            ));
+        }
+    }
 
-    // Download IPAM in-cluster provider (required by CAPMOX)
-    let ipam_base_url = format!(
-        "https://github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster/releases/download/v{}",
-        versions.ipam_in_cluster
-    );
-    download_file(
-        &format!("{}/ipam-components.yaml", ipam_base_url),
-        &ipam_dir.join("ipam-components.yaml"),
-    );
-    download_file(
-        &format!("{}/metadata.yaml", ipam_base_url),
-        &ipam_dir.join("metadata.yaml"),
-    );
-
-    let config_content = format!(
-        r#"providers:
-  - name: "cluster-api"
-    url: "file://{providers_dir}/cluster-api/v{capi_version}/core-components.yaml"
-    type: "CoreProvider"
-  - name: "kubeadm"
-    url: "file://{providers_dir}/bootstrap-kubeadm/v{capi_version}/bootstrap-components.yaml"
-    type: "BootstrapProvider"
-  - name: "kubeadm"
-    url: "file://{providers_dir}/control-plane-kubeadm/v{capi_version}/control-plane-components.yaml"
-    type: "ControlPlaneProvider"
-  - name: "rke2"
-    url: "file://{providers_dir}/bootstrap-rke2/v{rke2_version}/bootstrap-components.yaml"
-    type: "BootstrapProvider"
-  - name: "rke2"
-    url: "file://{providers_dir}/control-plane-rke2/v{rke2_version}/control-plane-components.yaml"
-    type: "ControlPlaneProvider"
-  - name: "docker"
-    url: "file://{providers_dir}/infrastructure-docker/v{capi_version}/infrastructure-components-development.yaml"
-    type: "InfrastructureProvider"
-  - name: "proxmox"
-    url: "file://{providers_dir}/infrastructure-proxmox/v{capmox_version}/infrastructure-components.yaml"
-    type: "InfrastructureProvider"
-  - name: "aws"
-    url: "file://{providers_dir}/infrastructure-aws/v{capa_version}/infrastructure-components.yaml"
-    type: "InfrastructureProvider"
-  - name: "openstack"
-    url: "file://{providers_dir}/infrastructure-openstack/v{capo_version}/infrastructure-components.yaml"
-    type: "InfrastructureProvider"
-  - name: "in-cluster"
-    url: "file://{providers_dir}/ipam-in-cluster/v{ipam_version}/ipam-components.yaml"
-    type: "IPAMProvider"
-"#,
-        providers_dir = providers_dir.display(),
-        capi_version = versions.capi,
-        rke2_version = versions.rke2,
-        capmox_version = versions.capmox,
-        capa_version = versions.capa,
-        capo_version = versions.capo,
-        ipam_version = versions.ipam_in_cluster,
-    );
-    std::fs::write(&config_path, config_content)?;
-
+    std::fs::write(&config_path, config)?;
     Ok(())
 }
 
@@ -520,12 +388,6 @@ fn download_file(url: &str, dest: &Path) {
     if dest.exists() {
         return;
     }
-    eprintln!(
-        "  Downloading {}...",
-        dest.file_name()
-            .expect("destination path should have a file name")
-            .to_string_lossy()
-    );
     let _ = Command::new("curl")
         .args(["-fsSL", "-o"])
         .arg(dest)

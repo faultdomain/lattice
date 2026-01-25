@@ -453,7 +453,9 @@ async fn persist_ca_bundle(
             &kube::api::Patch::Apply(&secret),
         )
         .await
-        .map_err(|e| CellServerError::CaPersistence(format!("Failed to update CA secret: {}", e)))?;
+        .map_err(|e| {
+            CellServerError::CaPersistence(format!("Failed to update CA secret: {}", e))
+        })?;
 
     info!("Persisted CA bundle to Secret");
     Ok(())
@@ -606,8 +608,8 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         let ca_bundle = self.ca_bundle.read().await;
 
         // Create bootstrap state
-        // Note: Provider credentials are synced via the distribute mechanism
-        // (secrets with lattice.io/distribute=true label in lattice-system)
+        // CloudProvider/SecretsProvider CRDs and their referenced secrets
+        // are automatically synced to child clusters during pivot
         let bootstrap_state = Arc::new(BootstrapState::new(
             manifest_generator,
             self.config.token_ttl,
@@ -663,11 +665,8 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             .map_err(|e| CellServerError::CertGeneration(e.to_string()))?;
 
         // Use trust bundle for verification (includes all CAs during rotation)
-        let mtls_config = ServerMtlsConfig::new(
-            grpc_cert_pem,
-            grpc_key_pem,
-            ca_bundle.trust_bundle_pem(),
-        );
+        let mtls_config =
+            ServerMtlsConfig::new(grpc_cert_pem, grpc_key_pem, ca_bundle.trust_bundle_pem());
 
         // Drop the read lock before spawning tasks
         drop(ca_bundle);
@@ -793,7 +792,8 @@ mod tests {
         };
         let config = ParentConfig::default();
         let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
-        let servers: ParentServers<MockManifestGenerator> = ParentServers::with_ca(config, ca, client);
+        let servers: ParentServers<MockManifestGenerator> =
+            ParentServers::with_ca(config, ca, client);
         assert!(!servers.is_running());
     }
 

@@ -17,6 +17,10 @@ pub use lattice_service::ingress;
 pub use lattice_service::policy;
 pub use lattice_service::workload;
 
+// Re-export provider controllers
+pub use lattice_cloud_provider as cloud_provider;
+pub use lattice_secrets_provider as secrets_provider;
+
 // Re-export controllers - these need to stay local as they orchestrate everything
 pub mod controller;
 

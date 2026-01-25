@@ -61,9 +61,9 @@ use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
 use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
-use lattice_infra::pki::{CertificateAuthorityBundle, PkiError};
 #[cfg(test)]
 use lattice_infra::pki::CertificateAuthority;
+use lattice_infra::pki::{CertificateAuthorityBundle, PkiError};
 
 use crate::pivot::fetch_distributable_resources;
 
@@ -1434,7 +1434,9 @@ mod tests {
 
         let agent_req = AgentCertRequest::new("not-bootstrapped")
             .expect("agent cert request creation should succeed");
-        let result = state.sign_csr("not-bootstrapped", agent_req.csr_pem()).await;
+        let result = state
+            .sign_csr("not-bootstrapped", agent_req.csr_pem())
+            .await;
 
         assert!(matches!(
             result,
@@ -1993,7 +1995,9 @@ mod tests {
             .expect("token validation should succeed");
 
         // Try to sign a malformed CSR
-        let result = state.sign_csr("malformed-csr-test", "not a valid CSR").await;
+        let result = state
+            .sign_csr("malformed-csr-test", "not a valid CSR")
+            .await;
 
         // Should fail with CsrSigningFailed
         assert!(matches!(result, Err(BootstrapError::CsrSigningFailed(_))));

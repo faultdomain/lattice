@@ -6,6 +6,8 @@ members = [
     "crates/lattice-infra",
     "crates/lattice-cluster",
     "crates/lattice-service",
+    "crates/lattice-cloud-provider",
+    "crates/lattice-secrets-provider",
     "crates/lattice-operator",
     "crates/lattice-cli",
 ]
@@ -22,6 +24,8 @@ lattice-proto = { path = "crates/lattice-proto" }
 lattice-infra = { path = "crates/lattice-infra" }
 lattice-cluster = { path = "crates/lattice-cluster" }
 lattice-service = { path = "crates/lattice-service" }
+lattice-cloud-provider = { path = "crates/lattice-cloud-provider" }
+lattice-secrets-provider = { path = "crates/lattice-secrets-provider" }
 
 # Kubernetes
 kube = { version = "0.98", features = ["runtime", "derive", "client", "rustls-tls", "admission"] }
@@ -41,6 +45,7 @@ parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+toml = "0.8"
 
 # Templating
 minijinja = { version = "2", features = ["custom_syntax"] }

@@ -6,29 +6,38 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VERSIONS_FILE="$PROJECT_ROOT/versions.toml"
 
-# Parse versions.toml
+# Parse versions.toml - handles both [section.subsection] and key = "value" formats
 get_version() {
     local section=$1
-    local key=$2
-    awk -v section="[$section]" -v key="$key" '
-        $0 == section { in_section=1; next }
-        /^\[/ { in_section=0 }
-        in_section && $1 == key { gsub(/[" ]/, "", $3); print $3 }
+    local subsection=$2
+    local key=${3:-version}
+
+    awk -v section="$section" -v subsection="$subsection" -v key="$key" '
+        /^\[/ {
+            # Extract section name, handling dots
+            gsub(/[\[\]]/, "", $0)
+            current_section = $0
+        }
+        current_section == section"."subsection && $1 == key {
+            gsub(/[" ]/, "", $3)
+            print $3
+        }
     ' "$VERSIONS_FILE"
 }
 
-KUBECTL_VERSION=$(get_version "kubernetes" "version")
-HELM_VERSION=$(get_version "helm" "version")
-CLUSTERCTL_VERSION=$(get_version "clusterctl" "version")
-CAPI_VERSION=$(get_version "capi" "version")
-RKE2_VERSION=$(get_version "rke2" "version")
-CAPMOX_VERSION=$(get_version "capmox" "version")
-CAPA_VERSION=$(get_version "capa" "version")
-CAPO_VERSION=$(get_version "capo" "version")
-IPAM_VERSION=$(get_version "ipam-in-cluster" "version")
+# Get tool versions
+HELM_VERSION=$(get_version "tools" "helm")
+CLUSTERCTL_VERSION=$(get_version "tools" "clusterctl")
+
+# Get provider versions
+CAPI_VERSION=$(get_version "providers" "cluster-api")
+RKE2_VERSION=$(get_version "providers" "bootstrap-rke2")
+CAPMOX_VERSION=$(get_version "providers" "infrastructure-proxmox")
+CAPA_VERSION=$(get_version "providers" "infrastructure-aws")
+CAPO_VERSION=$(get_version "providers" "infrastructure-openstack")
+IPAM_VERSION=$(get_version "providers" "ipam-in-cluster")
 
 echo "Building with versions from versions.toml:"
-echo "  kubectl: $KUBECTL_VERSION"
 echo "  helm: $HELM_VERSION"
 echo "  clusterctl: $CLUSTERCTL_VERSION"
 echo "  capi: $CAPI_VERSION"
@@ -39,7 +48,6 @@ echo "  capo: $CAPO_VERSION"
 echo "  ipam-in-cluster: $IPAM_VERSION"
 
 docker build \
-    --build-arg KUBECTL_VERSION="$KUBECTL_VERSION" \
     --build-arg HELM_VERSION="$HELM_VERSION" \
     --build-arg CLUSTERCTL_VERSION="$CLUSTERCTL_VERSION" \
     --build-arg CAPI_VERSION="$CAPI_VERSION" \

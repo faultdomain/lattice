@@ -22,15 +22,14 @@ use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use k8s_openapi::api::core::v1::Secret;
-use kube::api::{Api, DynamicObject, Patch, PatchParams};
-use kube::{Client, ResourceExt};
-use kube::discovery::ApiResource;
+use kube::api::{Api, Patch, PatchParams};
+use kube::Client;
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // Re-export retry utilities for convenience
+use lattice_common::crd::{CloudProvider, SecretsProvider};
 pub use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::crd::{CloudProvider, SecretsProvider, VaultAuthMethod};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 /// Default CAPI namespace for pivot handlers
@@ -647,8 +646,9 @@ pub async fn apply_distributed_resources(
     let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for cp_bytes in &resources.cloud_providers {
         let yaml_str = String::from_utf8_lossy(cp_bytes);
-        let cp: CloudProvider = serde_yaml::from_str(&yaml_str)
-            .map_err(|e| PivotError::Internal(format!("failed to parse CloudProvider YAML: {}", e)))?;
+        let cp: CloudProvider = serde_yaml::from_str(&yaml_str).map_err(|e| {
+            PivotError::Internal(format!("failed to parse CloudProvider YAML: {}", e))
+        })?;
 
         let name = cp
             .metadata
@@ -666,12 +666,13 @@ pub async fn apply_distributed_resources(
         info!(cloud_provider = %name, "Applied distributed CloudProvider");
     }
 
-    // Apply SecretsProviders and create ESO ClusterSecretStore
-    let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    // Apply SecretsProviders (ClusterSecretStore created by secrets-provider controller)
+    let sp_api: Api<SecretsProvider> = Api::namespaced(client, LATTICE_SYSTEM_NAMESPACE);
     for sp_bytes in &resources.secrets_providers {
         let yaml_str = String::from_utf8_lossy(sp_bytes);
-        let sp: SecretsProvider = serde_yaml::from_str(&yaml_str)
-            .map_err(|e| PivotError::Internal(format!("failed to parse SecretsProvider YAML: {}", e)))?;
+        let sp: SecretsProvider = serde_yaml::from_str(&yaml_str).map_err(|e| {
+            PivotError::Internal(format!("failed to parse SecretsProvider YAML: {}", e))
+        })?;
 
         let name = sp
             .metadata
@@ -679,7 +680,6 @@ pub async fn apply_distributed_resources(
             .as_ref()
             .ok_or_else(|| PivotError::Internal("SecretsProvider has no name".to_string()))?;
 
-        // Apply the SecretsProvider CRD
         sp_api
             .patch(name, &params, &Patch::Apply(&sp))
             .await
@@ -688,131 +688,7 @@ pub async fn apply_distributed_resources(
             })?;
 
         info!(secrets_provider = %name, "Applied distributed SecretsProvider");
-
-        // Create ESO ClusterSecretStore from SecretsProvider
-        if let Err(e) = create_cluster_secret_store(&client, &sp).await {
-            warn!(
-                secrets_provider = %name,
-                error = %e,
-                "Failed to create ClusterSecretStore (ESO may not be installed)"
-            );
-        } else {
-            info!(secrets_provider = %name, "Created ESO ClusterSecretStore");
-        }
     }
-
-    Ok(())
-}
-
-/// Create an ESO ClusterSecretStore from a SecretsProvider
-async fn create_cluster_secret_store(
-    client: &Client,
-    sp: &SecretsProvider,
-) -> Result<(), PivotError> {
-    let name = sp.name_any();
-
-    // Build the ClusterSecretStore spec based on auth method
-    let provider_spec = match sp.spec.auth_method {
-        VaultAuthMethod::Token => {
-            let secret_ref = sp.spec.credentials_secret_ref.as_ref()
-                .ok_or_else(|| PivotError::Internal(
-                    "Token auth requires credentialsSecretRef".to_string()
-                ))?;
-            serde_json::json!({
-                "vault": {
-                    "server": sp.spec.server,
-                    "path": sp.spec.path.as_deref().unwrap_or("secret"),
-                    "version": "v2",
-                    "namespace": sp.spec.namespace,
-                    "caBundle": sp.spec.ca_bundle,
-                    "auth": {
-                        "tokenSecretRef": {
-                            "name": secret_ref.name,
-                            "namespace": &secret_ref.namespace,
-                            "key": "token"
-                        }
-                    }
-                }
-            })
-        }
-        VaultAuthMethod::Kubernetes => {
-            let mount_path = sp.spec.kubernetes_mount_path.as_deref().unwrap_or("kubernetes");
-            let role = sp.spec.kubernetes_role.as_deref().unwrap_or("external-secrets");
-            serde_json::json!({
-                "vault": {
-                    "server": sp.spec.server,
-                    "path": sp.spec.path.as_deref().unwrap_or("secret"),
-                    "version": "v2",
-                    "namespace": sp.spec.namespace,
-                    "caBundle": sp.spec.ca_bundle,
-                    "auth": {
-                        "kubernetes": {
-                            "mountPath": mount_path,
-                            "role": role,
-                            "serviceAccountRef": {
-                                "name": "external-secrets",
-                                "namespace": "external-secrets"
-                            }
-                        }
-                    }
-                }
-            })
-        }
-        VaultAuthMethod::AppRole => {
-            let secret_ref = sp.spec.credentials_secret_ref.as_ref()
-                .ok_or_else(|| PivotError::Internal(
-                    "AppRole auth requires credentialsSecretRef".to_string()
-                ))?;
-            serde_json::json!({
-                "vault": {
-                    "server": sp.spec.server,
-                    "path": sp.spec.path.as_deref().unwrap_or("secret"),
-                    "version": "v2",
-                    "namespace": sp.spec.namespace,
-                    "caBundle": sp.spec.ca_bundle,
-                    "auth": {
-                        "appRole": {
-                            "path": "approle",
-                            "roleId": secret_ref.name.clone(),
-                            "secretRef": {
-                                "name": secret_ref.name,
-                                "namespace": &secret_ref.namespace,
-                                "key": "secret_id"
-                            }
-                        }
-                    }
-                }
-            })
-        }
-    };
-
-    let cluster_secret_store = serde_json::json!({
-        "apiVersion": "external-secrets.io/v1beta1",
-        "kind": "ClusterSecretStore",
-        "metadata": {
-            "name": name
-        },
-        "spec": {
-            "provider": provider_spec
-        }
-    });
-
-    // Use dynamic API to apply ClusterSecretStore
-    let api_resource = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-        group: "external-secrets.io".to_string(),
-        version: "v1beta1".to_string(),
-        kind: "ClusterSecretStore".to_string(),
-    });
-
-    let css_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
-    let css: DynamicObject = serde_json::from_value(cluster_secret_store)
-        .map_err(|e| PivotError::Internal(format!("failed to build ClusterSecretStore: {}", e)))?;
-
-    let params = PatchParams::apply("lattice-pivot").force();
-    css_api
-        .patch(&name, &params, &Patch::Apply(&css))
-        .await
-        .map_err(|e| PivotError::Internal(format!("failed to apply ClusterSecretStore: {}", e)))?;
 
     Ok(())
 }

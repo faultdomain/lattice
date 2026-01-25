@@ -1,0 +1,11 @@
+//! SecretsProvider controller for Lattice
+//!
+//! This controller watches SecretsProvider CRDs and ensures the corresponding
+//! ESO ClusterSecretStore exists. It continuously reconciles to handle cases
+//! where ESO is installed after the SecretsProvider is created.
+
+#![deny(missing_docs)]
+
+mod controller;
+
+pub use controller::{error_policy, reconcile, Context};

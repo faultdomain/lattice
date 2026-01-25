@@ -156,8 +156,13 @@ impl<'a> ServiceCompiler<'a> {
         let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec);
 
         // Delegate to specialized compilers
-        let mut workloads =
-            WorkloadCompiler::compile(name, service, namespace, &compiled_volumes, self.provider_type);
+        let mut workloads = WorkloadCompiler::compile(
+            name,
+            service,
+            namespace,
+            &compiled_volumes,
+            self.provider_type,
+        );
 
         // Add PVCs to workloads
         workloads.pvcs = compiled_volumes.pvcs;

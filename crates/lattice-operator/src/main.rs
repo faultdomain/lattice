@@ -15,12 +15,21 @@ use lattice_operator::agent::client::{AgentClient, AgentClientConfig, AgentCrede
 use lattice_operator::capi::{
     ensure_capi_installed, ensure_provider_credentials, CapiProviderConfig, ClusterctlInstaller,
 };
+use lattice_operator::cloud_provider::{
+    self as cloud_provider_ctrl, Context as CloudProviderContext,
+};
 use lattice_operator::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
     service_reconcile, Context, ServiceContext,
 };
-use lattice_operator::crd::{LatticeCluster, LatticeExternalService, LatticeService, ProviderType};
+use lattice_operator::crd::{
+    CloudProvider, LatticeCluster, LatticeExternalService, LatticeService, ProviderType,
+    SecretsProvider,
+};
 use lattice_operator::parent::{ParentConfig, ParentServers};
+use lattice_operator::secrets_provider::{
+    self as secrets_provider_ctrl, Context as SecretsProviderContext,
+};
 
 /// Lattice - CRD-driven Kubernetes operator for multi-cluster lifecycle management
 #[derive(Parser, Debug)]
@@ -215,6 +224,26 @@ async fn ensure_crds_installed(client: &Client) -> anyhow::Result<()> {
     )
     .await
     .map_err(|e| anyhow::anyhow!("Failed to install LatticeExternalService CRD: {}", e))?;
+
+    // Install CloudProvider CRD
+    tracing::info!("Installing CloudProvider CRD...");
+    crds.patch(
+        "cloudproviders.lattice.dev",
+        &params,
+        &Patch::Apply(&CloudProvider::crd()),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to install CloudProvider CRD: {}", e))?;
+
+    // Install SecretsProvider CRD
+    tracing::info!("Installing SecretsProvider CRD...");
+    crds.patch(
+        "secretsproviders.lattice.dev",
+        &params,
+        &Patch::Apply(&SecretsProvider::crd()),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to install SecretsProvider CRD: {}", e))?;
 
     tracing::info!("All Lattice CRDs installed/updated");
     Ok(())
@@ -873,6 +902,8 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     let clusters: Api<LatticeCluster> = Api::all(client.clone());
     let services: Api<LatticeService> = Api::all(client.clone());
     let external_services: Api<LatticeExternalService> = Api::all(client.clone());
+    let cloud_providers: Api<CloudProvider> = Api::all(client.clone());
+    let secrets_providers: Api<SecretsProvider> = Api::all(client.clone());
 
     // Read provider type from LatticeCluster for topology-aware scheduling
     let provider_type = match clusters.list(&kube::api::ListParams::default()).await {
@@ -889,7 +920,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 
     // Create service context for service controllers
     let service_ctx = Arc::new(ServiceContext::from_client(
-        client,
+        client.clone(),
         "cluster.local",
         provider_type,
     ));
@@ -1010,32 +1041,78 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         (None, None)
     };
 
-    // Run selected controllers concurrently
-    match (
-        cluster_controller,
-        service_controller,
-        external_service_controller,
-    ) {
-        (Some(cluster), Some(service), Some(external)) => {
-            tokio::select! {
-                _ = cluster => tracing::info!("Cluster controller completed"),
-                _ = service => tracing::info!("Service controller completed"),
-                _ = external => tracing::info!("External service controller completed"),
+    // Create provider controllers (always run)
+    let cloud_provider_ctx = Arc::new(CloudProviderContext::new(client.clone()));
+    let secrets_provider_ctx = Arc::new(SecretsProviderContext::new(client.clone()));
+
+    let cloud_provider_controller = Controller::new(cloud_providers, WatcherConfig::default())
+        .shutdown_on_signal()
+        .run(
+            cloud_provider_ctrl::reconcile,
+            cloud_provider_ctrl::error_policy,
+            cloud_provider_ctx,
+        )
+        .for_each(|result| async move {
+            match result {
+                Ok(action) => {
+                    tracing::debug!(?action, "CloudProvider reconciliation completed");
+                }
+                Err(e) => {
+                    tracing::error!(error = ?e, "CloudProvider reconciliation error");
+                }
             }
-        }
-        (Some(cluster), None, None) => {
-            cluster.await;
-            tracing::info!("Cluster controller completed");
-        }
-        (None, Some(service), Some(external)) => {
-            tokio::select! {
-                _ = service => tracing::info!("Service controller completed"),
-                _ = external => tracing::info!("External service controller completed"),
+        });
+
+    let secrets_provider_controller = Controller::new(secrets_providers, WatcherConfig::default())
+        .shutdown_on_signal()
+        .run(
+            secrets_provider_ctrl::reconcile,
+            secrets_provider_ctrl::error_policy,
+            secrets_provider_ctx,
+        )
+        .for_each(|result| async move {
+            match result {
+                Ok(action) => {
+                    tracing::debug!(?action, "SecretsProvider reconciliation completed");
+                }
+                Err(e) => {
+                    tracing::error!(error = ?e, "SecretsProvider reconciliation error");
+                }
             }
-        }
-        _ => {
-            tracing::warn!("No controllers to run");
-        }
+        });
+
+    tracing::info!("  - CloudProvider controller");
+    tracing::info!("  - SecretsProvider controller");
+
+    // Run all controllers concurrently
+    // Provider controllers always run; cluster/service controllers depend on mode
+    tokio::select! {
+        _ = cloud_provider_controller => tracing::info!("CloudProvider controller completed"),
+        _ = secrets_provider_controller => tracing::info!("SecretsProvider controller completed"),
+        _ = async {
+            if let Some(ctrl) = cluster_controller {
+                ctrl.await;
+                tracing::info!("Cluster controller completed");
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {},
+        _ = async {
+            if let Some(ctrl) = service_controller {
+                ctrl.await;
+                tracing::info!("Service controller completed");
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {},
+        _ = async {
+            if let Some(ctrl) = external_service_controller {
+                ctrl.await;
+                tracing::info!("External service controller completed");
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {},
     }
 
     // Cancel agent background task and shutdown cell servers

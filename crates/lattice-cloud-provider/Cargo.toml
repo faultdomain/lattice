@@ -1,0 +1,33 @@
+[package]
+name = "lattice-cloud-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CloudProvider controller for Lattice - manages cloud account validation and resources"
+
+[dependencies]
+lattice-common = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

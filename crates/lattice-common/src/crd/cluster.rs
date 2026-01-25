@@ -204,7 +204,6 @@ impl LatticeClusterStatus {
         self.conditions.push(condition);
         self
     }
-
 }
 
 impl LatticeCluster {

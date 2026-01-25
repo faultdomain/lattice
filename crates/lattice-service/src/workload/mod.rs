@@ -1279,7 +1279,10 @@ impl WorkloadCompiler {
                             label_selector: LabelSelector {
                                 match_labels: {
                                     let mut labels = BTreeMap::new();
-                                    labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
+                                    labels.insert(
+                                        "app.kubernetes.io/name".to_string(),
+                                        name.to_string(),
+                                    );
                                     labels
                                 },
                             },
@@ -1516,13 +1519,24 @@ mod tests {
 
         // Deployment has topology spread constraints for HA
         // Tests use Docker provider which spreads by hostname
-        assert_eq!(deployment.spec.template.spec.topology_spread_constraints.len(), 1);
+        assert_eq!(
+            deployment
+                .spec
+                .template
+                .spec
+                .topology_spread_constraints
+                .len(),
+            1
+        );
         let constraint = &deployment.spec.template.spec.topology_spread_constraints[0];
         assert_eq!(constraint.max_skew, 1);
         assert_eq!(constraint.topology_key, "kubernetes.io/hostname");
         assert_eq!(constraint.when_unsatisfiable, "ScheduleAnyway");
         assert_eq!(
-            constraint.label_selector.match_labels.get("app.kubernetes.io/name"),
+            constraint
+                .label_selector
+                .match_labels
+                .get("app.kubernetes.io/name"),
             Some(&"my-app".to_string())
         );
     }

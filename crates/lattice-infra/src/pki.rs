@@ -1348,7 +1348,10 @@ mod tests {
         let result = bundle
             .verify_client_cert(&cert1_der)
             .expect("verification should succeed");
-        assert!(result.valid, "old cert should still be valid after rotation");
+        assert!(
+            result.valid,
+            "old cert should still be valid after rotation"
+        );
 
         // New certs are signed by the new CA
         let agent2 = AgentCertRequest::new("cluster-2").expect("agent CSR should succeed");
@@ -1383,7 +1386,10 @@ mod tests {
             .verify_client_cert(&cert_der)
             .expect("verification should not error");
         assert!(!result.valid);
-        assert!(result.reason.unwrap().contains("not signed by any trusted CA"));
+        assert!(result
+            .reason
+            .unwrap()
+            .contains("not signed by any trusted CA"));
     }
 
     /// Test CA needs_rotation returns false for fresh CA

@@ -1,55 +1,57 @@
+//! Build script for lattice-infra
+//!
+//! Sets compile-time environment variables for chart versions and paths.
+
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
+
+#[derive(Debug, Deserialize)]
+struct Versions {
+    charts: HashMap<String, Chart>,
+    resources: HashMap<String, Resource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Chart {
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Resource {
+    version: String,
+}
 
 fn main() {
     let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set by cargo");
-    // Go up two levels: crates/lattice-infra -> workspace root
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
     let workspace_root = Path::new(&manifest_dir)
         .parent()
-        .expect("lattice-infra crate should have a parent directory")
+        .expect("crate should have parent")
         .parent()
-        .expect("crates directory should have a parent (workspace root)");
+        .expect("crates dir should have parent");
 
     let versions_path = workspace_root.join("versions.toml");
     println!("cargo:rerun-if-changed={}", versions_path.display());
 
-    let content = match std::fs::read_to_string(&versions_path) {
-        Ok(c) => c,
-        Err(_) => {
-            // Use defaults if versions.toml not found
-            println!("cargo:rustc-env=CILIUM_VERSION=1.16.0");
-            println!("cargo:rustc-env=ISTIO_VERSION=1.24.0");
-            println!("cargo:rustc-env=GATEWAY_API_VERSION=1.2.1");
-            return;
-        }
-    };
+    let content = std::fs::read_to_string(&versions_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", versions_path.display(), e));
 
-    let mut cilium = String::new();
-    let mut istio = String::new();
-    let mut gateway_api = String::new();
-    let mut section = "";
+    let versions: Versions = toml::from_str(&content).expect("versions.toml should be valid TOML");
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('[') && line.ends_with(']') {
-            section = line.trim_matches(|c| c == '[' || c == ']');
-        } else if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim().trim_matches('"');
-            match (section, key) {
-                ("charts", "cilium") => cilium = value.to_string(),
-                ("charts", "istio") => istio = value.to_string(),
-                ("gateway-api", "version") => gateway_api = value.to_string(),
-                _ => {}
-            }
-        }
-    }
+    println!(
+        "cargo:rustc-env=CILIUM_VERSION={}",
+        versions.charts["cilium"].version
+    );
+    println!(
+        "cargo:rustc-env=ISTIO_VERSION={}",
+        versions.charts["istio-base"].version
+    );
+    println!(
+        "cargo:rustc-env=GATEWAY_API_VERSION={}",
+        versions.resources["gateway-api"].version
+    );
 
-    println!("cargo:rustc-env=CILIUM_VERSION={}", cilium);
-    println!("cargo:rustc-env=ISTIO_VERSION={}", istio);
-    println!("cargo:rustc-env=GATEWAY_API_VERSION={}", gateway_api);
-
-    // Set charts directory for local development
     let charts_dir = workspace_root.join("test-charts");
     println!(
         "cargo:rustc-env=LATTICE_CHARTS_DIR={}",

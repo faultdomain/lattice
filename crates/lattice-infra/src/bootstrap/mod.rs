@@ -7,6 +7,7 @@
 //! Server-side apply handles idempotency - no need to check if installed.
 
 pub mod cilium;
+pub mod eso;
 pub mod istio;
 
 use tokio::process::Command;
@@ -212,7 +213,7 @@ pub fn charts_dir() -> String {
     })
 }
 
-fn find_chart(dir: &str, name: &str) -> Result<String, String> {
+pub(crate) fn find_chart(dir: &str, name: &str) -> Result<String, String> {
     let exact = format!("{}/{}", dir, name);
     if std::path::Path::new(&exact).exists() {
         return Ok(exact);
@@ -231,7 +232,7 @@ fn find_chart(dir: &str, name: &str) -> Result<String, String> {
     Err(format!("chart {} not found in {}", name, dir))
 }
 
-fn namespace_yaml(name: &str) -> String {
+pub(crate) fn namespace_yaml(name: &str) -> String {
     format!(
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}",
         name
@@ -257,7 +258,7 @@ pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
 }
 
 /// Inject namespace into a manifest if it doesn't have one and is a namespaced resource
-fn inject_namespace(manifest: &str, namespace: &str) -> String {
+pub(crate) fn inject_namespace(manifest: &str, namespace: &str) -> String {
     if is_cluster_scoped(manifest) {
         return manifest.to_string();
     }

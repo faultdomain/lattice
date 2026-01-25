@@ -33,9 +33,9 @@ use crate::bootstrap::{
 
 /// Copy provider credentials from lattice-system to the provider namespace.
 ///
-/// Credentials are stored in `lattice-system` with the distribute label so they sync
-/// to child clusters. CAPI providers (CAPA, CAPMOX) expect credentials in their own
-/// namespaces. This function copies the credentials to where they're expected.
+/// CloudProvider CRDs reference credential secrets in lattice-system. These are
+/// synced to child clusters during pivot. CAPI providers (CAPA, CAPMOX) expect
+/// credentials in their own namespaces. This function copies them to where they're expected.
 ///
 /// For AWS: `lattice-system/aws-credentials` → `capa-system/capa-manager-bootstrap-credentials`
 /// For Proxmox: `lattice-system/proxmox-credentials` → `capmox-system/proxmox-credentials`
@@ -108,7 +108,7 @@ async fn copy_secret(
     };
     let _ = ns_api.create(&PostParams::default(), &ns).await;
 
-    // Copy secret to target namespace (without distribute label)
+    // Copy secret to target namespace
     let target = Secret {
         metadata: kube::core::ObjectMeta {
             name: Some(target_name.to_string()),

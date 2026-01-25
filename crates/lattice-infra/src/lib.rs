@@ -18,6 +18,7 @@ pub use bootstrap::cilium::{
     cilium_version, generate_cilium_manifests, generate_default_deny,
     generate_operator_network_policy, generate_waypoint_egress_policy, generate_ztunnel_allowlist,
 };
+pub use bootstrap::eso::generate_eso;
 pub use bootstrap::{
     generate_all, generate_capi, generate_certmanager, generate_core, generate_gateway_api_crds,
     generate_istio, split_yaml_documents, InfrastructureConfig, IstioConfig, IstioReconciler,

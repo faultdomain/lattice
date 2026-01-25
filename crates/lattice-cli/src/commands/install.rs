@@ -561,9 +561,13 @@ impl Installer {
         // Create CloudProvider first
         let cloud_provider_yaml = self.generate_cloud_provider_yaml()?;
         info!("Creating CloudProvider: {}", self.cluster.spec.provider_ref);
-        kube_utils::apply_manifest_with_retry(client, &cloud_provider_yaml, Duration::from_secs(30))
-            .await
-            .cmd_err()?;
+        kube_utils::apply_manifest_with_retry(
+            client,
+            &cloud_provider_yaml,
+            Duration::from_secs(30),
+        )
+        .await
+        .cmd_err()?;
 
         // Then create the LatticeCluster
         kube_utils::apply_manifest_with_retry(client, &self.cluster_yaml, Duration::from_secs(120))

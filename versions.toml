@@ -2,45 +2,146 @@
 # Single source of truth for all dependency versions
 # Used by: Dockerfile, build.rs, runtime code
 
-[kubernetes]
+# =============================================================================
+# Build Tools
+# =============================================================================
+
+[tools.kubernetes]
 version = "1.35.0"
 
-[helm]
+[tools.helm]
 version = "4.0.4"
 
-[clusterctl]
+[tools.clusterctl]
 version = "1.12.1"
 
-[capi]
-version = "1.12.1"
+# =============================================================================
+# Helm Charts
+# Each chart specifies: version, repo URL, chart name, and output filename pattern
+# =============================================================================
 
-[rke2]
-# RKE2 CAPI provider from https://github.com/rancher/cluster-api-provider-rke2
-version = "0.21.1"
+[charts.cilium]
+version = "1.18.5"
+repo = "https://helm.cilium.io/"
+chart = "cilium/cilium"
+filename = "cilium-{version}.tgz"
 
-[capmox]
-# Proxmox CAPI provider from https://github.com/ionos-cloud/cluster-api-provider-proxmox
-version = "0.7.5"
+[charts.istio-base]
+version = "1.28.2"
+repo = "https://istio-release.storage.googleapis.com/charts"
+chart = "istio/base"
+filename = "base-{version}.tgz"
 
-[capa]
-# AWS CAPI provider from https://github.com/kubernetes-sigs/cluster-api-provider-aws
-version = "2.10.0"
+[charts.istiod]
+version = "1.28.2"
+repo = "https://istio-release.storage.googleapis.com/charts"
+chart = "istio/istiod"
+filename = "istiod-{version}.tgz"
 
-[capo]
-# OpenStack CAPI provider from https://github.com/kubernetes-sigs/cluster-api-provider-openstack
-version = "0.14.0"
+[charts.istio-cni]
+version = "1.28.2"
+repo = "https://istio-release.storage.googleapis.com/charts"
+chart = "istio/cni"
+filename = "cni-{version}.tgz"
 
-[ipam-in-cluster]
-# IPAM in-cluster provider from https://github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster
-# Required by CAPMOX (Proxmox provider)
-version = "1.0.3"
+[charts.ztunnel]
+version = "1.28.2"
+repo = "https://istio-release.storage.googleapis.com/charts"
+chart = "istio/ztunnel"
+filename = "ztunnel-{version}.tgz"
 
-[gateway-api]
-# Gateway API CRDs from https://github.com/kubernetes-sigs/gateway-api
+[charts.cert-manager]
+version = "1.19.2"
+repo = "https://charts.jetstack.io"
+chart = "jetstack/cert-manager"
+filename = "cert-manager-v{version}.tgz"
+
+[charts.envoy-gateway]
+version = "1.6.2"
+# OCI chart - uses oci:// protocol
+repo = "oci://docker.io/envoyproxy/gateway-helm"
+chart = "oci://docker.io/envoyproxy/gateway-helm"
+filename = "gateway-helm-v{version}.tgz"
+oci = true
+version_prefix = "v"
+
+[charts.external-secrets]
 version = "1.2.1"
+repo = "https://charts.external-secrets.io"
+chart = "external-secrets/external-secrets"
+filename = "external-secrets-{version}.tgz"
 
-[charts]
-cilium = "1.18.5"
-istio = "1.28.2"
-cert-manager = "1.19.2"
-envoy-gateway = "1.6.2"
+# =============================================================================
+# Gateway API CRDs (YAML download, not a Helm chart)
+# =============================================================================
+
+[resources.gateway-api]
+version = "1.2.1"
+url = "https://github.com/kubernetes-sigs/gateway-api/releases/download/v{version}/standard-install.yaml"
+filename = "gateway-api-crds-v{version}.yaml"
+
+# =============================================================================
+# CAPI Providers
+# Each provider specifies: version, GitHub org/repo, and component files
+# =============================================================================
+
+[providers.cluster-api]
+# Core CAPI provider
+version = "1.12.1"
+repo = "kubernetes-sigs/cluster-api"
+components = ["core-components.yaml", "metadata.yaml"]
+
+[providers.bootstrap-kubeadm]
+# Kubeadm bootstrap provider (uses CAPI version)
+version = "1.12.1"
+repo = "kubernetes-sigs/cluster-api"
+components = ["bootstrap-components.yaml"]
+# metadata.yaml copied from cluster-api
+
+[providers.control-plane-kubeadm]
+# Kubeadm control plane provider (uses CAPI version)
+version = "1.12.1"
+repo = "kubernetes-sigs/cluster-api"
+components = ["control-plane-components.yaml"]
+
+[providers.infrastructure-docker]
+# Docker infrastructure provider (uses CAPI version)
+version = "1.12.1"
+repo = "kubernetes-sigs/cluster-api"
+components = ["infrastructure-components-development.yaml"]
+
+[providers.bootstrap-rke2]
+# RKE2 bootstrap provider
+version = "0.21.1"
+repo = "rancher/cluster-api-provider-rke2"
+components = ["bootstrap-components.yaml", "metadata.yaml"]
+
+[providers.control-plane-rke2]
+# RKE2 control plane provider
+version = "0.21.1"
+repo = "rancher/cluster-api-provider-rke2"
+components = ["control-plane-components.yaml"]
+
+[providers.infrastructure-proxmox]
+# Proxmox infrastructure provider (CAPMOX)
+version = "0.7.5"
+repo = "ionos-cloud/cluster-api-provider-proxmox"
+components = ["infrastructure-components.yaml", "metadata.yaml"]
+
+[providers.infrastructure-aws]
+# AWS infrastructure provider (CAPA)
+version = "2.10.0"
+repo = "kubernetes-sigs/cluster-api-provider-aws"
+components = ["infrastructure-components.yaml", "metadata.yaml"]
+
+[providers.infrastructure-openstack]
+# OpenStack infrastructure provider (CAPO)
+version = "0.14.0"
+repo = "kubernetes-sigs/cluster-api-provider-openstack"
+components = ["infrastructure-components.yaml", "metadata.yaml"]
+
+[providers.ipam-in-cluster]
+# IPAM in-cluster provider (required by CAPMOX)
+version = "1.0.3"
+repo = "kubernetes-sigs/cluster-api-ipam-provider-in-cluster"
+components = ["ipam-components.yaml", "metadata.yaml"]

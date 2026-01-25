@@ -17,6 +17,9 @@ pub struct IstioConfig {
 }
 
 impl Default for IstioConfig {
+    /// Creates config with version from compile-time environment variable.
+    /// Cannot use #[derive(Default)] because &'static str defaults to "" not env!().
+    #[allow(clippy::derivable_impls)]
     fn default() -> Self {
         Self {
             version: env!("ISTIO_VERSION"),
