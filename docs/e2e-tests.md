@@ -24,6 +24,7 @@ graph TB
         subgraph "Core Tests"
             PIVOT[pivot_e2e.rs<br/>9-Phase Lifecycle Test]
             INDEP[docker_independence_e2e.rs<br/>Parent Deletion Test]
+            UPGRADE[upgrade_e2e.rs<br/>Upgrade Resilience Test]
         end
 
         subgraph "Service Mesh Tests"
@@ -44,15 +45,19 @@ graph TB
 
     MOD --> PIVOT
     MOD --> INDEP
+    MOD --> UPGRADE
     PIVOT --> MESH
     PIVOT --> MEDIA
+    UPGRADE --> MESH
     PIVOT --> HELP
     INDEP --> HELP
+    UPGRADE --> HELP
     MESH --> HELP
     MEDIA --> HELP
     HELP --> PROV
     PIVOT --> CLUST
     INDEP --> CLUST
+    UPGRADE --> CLUST
     MEDIA --> SVC
 ```
 
@@ -93,7 +98,7 @@ sequenceDiagram
         W1->>W2: Provision via CAPI
     and Mesh Tests
         T->>W1: Run 9-service mesh test
-        T->>W1: Run random mesh test (25-50 services)
+        T->>W1: Run random mesh test (10-30 services)
         T->>W1: Run media server test
     end
 
@@ -164,7 +169,7 @@ flowchart TD
 
         P6A --> P6B[Create workload2 cluster]
         P6A --> P6C[Run mesh_test<br/>9 services]
-        P6A --> P6D[Run random_mesh_test<br/>25-50 services]
+        P6A --> P6D[Run random_mesh_test<br/>10-30 services]
         P6A --> P6E[Run media_server_test<br/>3 services]
 
         P6B --> P6F[Wait all complete]
@@ -399,13 +404,13 @@ sequenceDiagram
 
 ### Randomized Large-Scale Mesh Test
 
-Tests **25-50 services** across 5 layers with randomized connections.
+Tests **10-30 services** across 5 layers with randomized connections.
 
 ```mermaid
 flowchart TD
     subgraph "Test Generation"
         GEN[RandomMesh::generate]
-        GEN --> |"25-50 services"| SVC[Services across 5 layers]
+        GEN --> |"10-30 services"| SVC[Services across 5 layers]
         GEN --> |"30% probability"| OUT[Outbound dependencies]
         GEN --> |"60% probability"| BI[Bilateral agreements]
         GEN --> |"5 external URLs"| EXT[External services]
@@ -463,11 +468,11 @@ graph TB
         S[sonarr<br/>TV Automation<br/>Port 8989]
     end
 
-    subgraph "Shared Volume: vol-media-storage (1Ti)"
-        M1[/media<br/>jellyfin OWNER]
-        M2[/downloads<br/>nzbget REFERENCE]
-        M3["/tv (subpath: library)"<br/>sonarr REFERENCE]
-        M4["/downloads (subpath)"<br/>sonarr REFERENCE]
+    subgraph "Shared Volume: vol-media-storage 1Ti"
+        M1["media/ - jellyfin OWNER"]
+        M2["downloads/ - nzbget REFERENCE"]
+        M3["tv/ subpath:library - sonarr"]
+        M4["downloads/ subpath - sonarr"]
     end
 
     subgraph "Private Volumes"
@@ -702,17 +707,86 @@ graph TB
 
 ---
 
+## Test 5: Upgrade Resilience Test (`upgrade_e2e.rs`)
+
+This test validates that service mesh policies remain enforced during a full Kubernetes cluster upgrade.
+
+### Security Invariant
+
+```
+During upgrade chaos (nodes draining, pods rescheduling, waypoints restarting):
+- Dropped/failed traffic: ACCEPTABLE
+- Incorrectly allowed traffic: NEVER ACCEPTABLE (security violation)
+```
+
+The mesh must **fail closed** - never degrade to "allow all" even under disruption.
+
+### Test Flow
+
+```mermaid
+sequenceDiagram
+    participant T as Test
+    participant M as Management Cluster
+    participant W as Workload Cluster
+    participant Mesh as Mesh Services
+
+    T->>M: Install management cluster
+    T->>M: Create workload at v1.31
+    M->>W: Provision and pivot
+
+    T->>W: Deploy mesh services
+    W->>Mesh: Start traffic generators
+    T->>Mesh: Initial policy verification
+
+    T->>W: Patch version to v1.32
+    W->>W: CAPI initiates rolling upgrade
+
+    loop During Upgrade
+        T->>Mesh: Check for policy gaps
+        Note over T,Mesh: FAIL if blocked traffic was allowed
+        T->>W: Check upgrade progress
+    end
+
+    W->>W: All nodes upgraded and Ready
+    T->>Mesh: Final verification
+    T->>Mesh: Full bilateral agreement check
+
+    T->>T: Cleanup clusters
+```
+
+### Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `LATTICE_UPGRADE_FROM_VERSION` | `1.31.0` | Starting K8s version |
+| `LATTICE_UPGRADE_TO_VERSION` | `1.32.0` | Target K8s version |
+| `LATTICE_UPGRADE_MGMT_CONFIG` | `docker-mgmt.yaml` | Management cluster config |
+| `LATTICE_UPGRADE_WORKLOAD_CONFIG` | `docker-workload.yaml` | Workload cluster config |
+
+### Running
+
+```bash
+cargo test --features provider-e2e --test e2e upgrade_e2e -- --nocapture
+
+# Custom versions
+LATTICE_UPGRADE_FROM_VERSION=1.30.0 LATTICE_UPGRADE_TO_VERSION=1.31.0 \
+  cargo test --features provider-e2e --test e2e upgrade_e2e -- --nocapture
+```
+
+---
+
 ## Test File Summary
 
 | File | Lines | Tests | Purpose |
 |------|-------|-------|---------|
 | `pivot_e2e.rs` | 606 | 1 | 9-phase full lifecycle validation |
 | `docker_independence_e2e.rs` | 239 | 1 | Parent deletion resilience |
-| `mesh_tests.rs` | 1,495 | 2 | Fixed 9-service + random 25-50 service mesh |
+| `upgrade_e2e.rs` | 300 | 1 | Upgrade resilience with mesh traffic |
+| `mesh_tests.rs` | 1,550 | 2 | Fixed 9-service + random 10-30 service mesh |
 | `media_server_e2e.rs` | 397 | 1 | Volume sharing + co-location |
 | `helpers.rs` | 813 | - | 30+ utility functions |
 | `providers.rs` | 44 | - | Infrastructure provider enum |
-| **Total** | **~3,600** | **5** | Complete Lattice validation |
+| **Total** | **~3,950** | **6** | Complete Lattice validation |
 
 ---
 
@@ -723,9 +797,10 @@ A successful E2E test run validates:
 1. **Self-Management** - Every cluster owns its CAPI resources after pivot
 2. **Independence** - Workload clusters operate without parent
 3. **Security** - Bilateral agreements enforce traffic policies correctly
-4. **Storage** - Shared volumes work across pods with correct isolation
-5. **Co-location** - Pods requiring shared storage run on same node
-6. **Lifecycle** - Install, provision, scale, delete, and uninstall all work
-7. **Multi-level Hierarchy** - management → workload → workload2 chain functions
+4. **Upgrade Resilience** - Policies remain enforced during K8s upgrades
+5. **Storage** - Shared volumes work across pods with correct isolation
+6. **Co-location** - Pods requiring shared storage run on same node
+7. **Lifecycle** - Install, provision, scale, delete, and uninstall all work
+8. **Multi-level Hierarchy** - management → workload → workload2 chain functions
 
 The test proves that Lattice delivers on its core promise: **fully self-managing Kubernetes clusters that operate independently once provisioned**.

@@ -1933,7 +1933,7 @@ pub fn compile_cross_cluster_route(
 |-------|-----|----------|
 | Fresh | < 5 min | Normal operation |
 | Stale | 5-25 min | Log debug, prioritize for refresh |
-| VeryStale | 25-50 min | Log warning, emit metric |
+| VeryStale | 10-30 min | Log warning, emit metric |
 | Ancient | > 50 min | Log error, emit alert metric |
 
 All levels return cached data successfully. Staleness only affects logging and metrics.

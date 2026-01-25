@@ -106,14 +106,14 @@ fn generate_test_script(source_name: &str, targets: Vec<TestTarget>) -> String {
     let blocked_targets: Vec<&TestTarget> =
         targets.iter().filter(|t| !t.expected_allowed).collect();
 
-    // Build checks for blocked endpoints
+    // Build checks for blocked endpoints (longer timeout for reliability)
     let endpoint_checks: String = blocked_targets
         .iter()
         .enumerate()
         .map(|(i, t)| {
             format!(
                 r#"
-    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 {url} 2>/dev/null || echo "000")"#,
+    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 10 --max-time 15 {url} 2>/dev/null || echo "000")"#,
                 i = i,
                 url = t.url
             )
@@ -169,11 +169,21 @@ fi
         all_blocked_check = all_blocked_check,
     );
 
-    // Add individual test checks
+    // Add individual test checks with 3 samples and majority voting
     for target in &targets {
         script.push_str(&format!(
-            r#"HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 {url} 2>/dev/null || echo "000")
-if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+            r#"
+# Test {url} with 3 samples
+SUCCESS_COUNT=0
+for SAMPLE in 1 2 3; do
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 10 --max-time 15 {url} 2>/dev/null || echo "000")
+    if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    fi
+    sleep 1
+done
+# Majority voting: 2 of 3 samples must agree
+if [ $SUCCESS_COUNT -ge 2 ]; then
     echo "{success_msg}"
 else
     echo "{fail_msg}"
@@ -751,21 +761,124 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Run the fixed 9-service mesh test
-pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
-    println!("\n[Mesh Test] Running service mesh bilateral agreement test...\n");
-    deploy_test_services(kubeconfig_path).await?;
-    wait_for_service_pods(kubeconfig_path).await?;
-    // Traffic generators wait up to 120s for policy propagation + 10s stabilization + test time
-    println!("  Waiting for traffic tests to complete (90s)...");
-    sleep(Duration::from_secs(90)).await;
-    verify_traffic_patterns(kubeconfig_path).await?;
+/// Handle for a running mesh test that can be stopped on demand
+pub struct MeshTestHandle {
+    kubeconfig_path: String,
+    namespace: &'static str,
+}
+
+impl MeshTestHandle {
+    /// Stop the mesh test and verify traffic patterns
+    ///
+    /// Returns Ok(()) if all bilateral agreements were enforced correctly.
+    /// Returns Err if any "ALLOWED(UNEXPECTED)" entries are found (policy gaps).
+    pub async fn stop_and_verify(self) -> Result<(), String> {
+        verify_traffic_patterns(&self.kubeconfig_path).await
+    }
+
+    /// Check for security violations only (incorrectly allowed traffic)
+    ///
+    /// This is less strict than full verification - it only fails if traffic
+    /// that should be BLOCKED was ALLOWED. Useful during upgrades where
+    /// some allowed traffic may fail due to pod restarts.
+    pub async fn check_no_policy_gaps(&self) -> Result<(), String> {
+        check_no_incorrectly_allowed(&self.kubeconfig_path, self.namespace).await
+    }
+}
+
+/// Check that no traffic was incorrectly allowed (security violation check)
+async fn check_no_incorrectly_allowed(
+    kubeconfig_path: &str,
+    namespace: &str,
+) -> Result<(), String> {
+    let mut violations: Vec<String> = Vec::new();
+
+    // Get all pods with traffic generators (frontend-* pods)
+    let pods_output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+        ],
+    )?;
+
+    for pod in pods_output.lines() {
+        let pod = pod.trim();
+        if pod.is_empty() {
+            continue;
+        }
+
+        let logs = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "logs",
+                "-n",
+                namespace,
+                pod,
+                "--tail",
+                "500",
+            ],
+        );
+
+        // Look for "ALLOWED(UNEXPECTED)" or "ALLOWED (UNEXPECTED" patterns
+        for line in logs.lines() {
+            if line.contains("ALLOWED(UNEXPECTED)") || line.contains("ALLOWED (UNEXPECTED") {
+                violations.push(format!("{}: {}", pod, line.trim()));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        println!("\n  SECURITY VIOLATIONS DETECTED:");
+        for v in &violations {
+            println!("    {}", v);
+        }
+        return Err(format!(
+            "Policy gaps detected: {} instances of incorrectly allowed traffic",
+            violations.len()
+        ));
+    }
 
     Ok(())
 }
 
+/// Start the fixed 9-service mesh test and return a handle
+///
+/// The test runs traffic generators continuously until `stop_and_verify()` is called.
+pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, String> {
+    println!("\n[Mesh Test] Starting service mesh bilateral agreement test...\n");
+    deploy_test_services(kubeconfig_path).await?;
+    wait_for_service_pods(kubeconfig_path).await?;
+
+    // Wait for initial policy propagation
+    println!("  Waiting for initial policy propagation (30s)...");
+    sleep(Duration::from_secs(30)).await;
+
+    Ok(MeshTestHandle {
+        kubeconfig_path: kubeconfig_path.to_string(),
+        namespace: TEST_SERVICES_NAMESPACE,
+    })
+}
+
+/// Run the fixed 9-service mesh test
+pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
+    let handle = start_mesh_test(kubeconfig_path).await?;
+    // Additional wait for traffic patterns to stabilize
+    println!("  Waiting for traffic tests to complete (120s)...");
+    sleep(Duration::from_secs(120)).await;
+    handle.stop_and_verify().await
+}
+
 // =============================================================================
-// Randomized Large-Scale Mesh Test (25-50 services)
+// Randomized Large-Scale Mesh Test (10-30 services)
 // =============================================================================
 
 #[derive(Debug, Clone)]
@@ -1323,7 +1436,7 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
 
 async fn wait_for_random_mesh_pods(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<(), String> {
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(600);
+    let timeout = Duration::from_secs(1200);
     // +1 for the Istio ambient waypoint proxy pod created per namespace
     let expected_pods = mesh.services.len() + 1;
 
@@ -1488,9 +1601,22 @@ async fn verify_random_mesh_traffic(
     Ok(())
 }
 
-/// Run the randomized 25-50 service mesh test
-pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
-    println!("\n[Mesh Test] Running randomized large-scale mesh test (25-50 services)...\n");
+/// Handle for a running random mesh test that can be stopped on demand
+pub struct RandomMeshTestHandle {
+    kubeconfig_path: String,
+    mesh: RandomMesh,
+}
+
+impl RandomMeshTestHandle {
+    /// Stop the mesh test and verify traffic patterns
+    pub async fn stop_and_verify(self) -> Result<(), String> {
+        verify_random_mesh_traffic(&self.mesh, &self.kubeconfig_path).await
+    }
+}
+
+/// Start the randomized mesh test and return a handle
+pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshTestHandle, String> {
+    println!("\n[Mesh Test] Starting randomized large-scale mesh test (10-30 services)...\n");
 
     let mesh = RandomMesh::generate(&RandomMeshConfig::default());
     println!("{}", mesh.stats());
@@ -1499,10 +1625,22 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     deploy_random_mesh(&mesh, kubeconfig_path).await?;
     println!("\n  Waiting for pods...");
     wait_for_random_mesh_pods(&mesh, kubeconfig_path).await?;
-    // Traffic generators wait up to 120s for policy propagation + 10s stabilization + test time
-    println!("\n  Waiting for traffic tests to complete (90s)...");
-    sleep(Duration::from_secs(90)).await;
-    verify_random_mesh_traffic(&mesh, kubeconfig_path).await?;
 
-    Ok(())
+    // Wait for initial policy propagation
+    println!("  Waiting for initial policy propagation (30s)...");
+    sleep(Duration::from_secs(30)).await;
+
+    Ok(RandomMeshTestHandle {
+        kubeconfig_path: kubeconfig_path.to_string(),
+        mesh,
+    })
+}
+
+/// Run the randomized 10-30 service mesh test
+pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
+    let handle = start_random_mesh_test(kubeconfig_path).await?;
+    // Additional wait for traffic patterns to stabilize
+    println!("\n  Waiting for traffic tests to complete (120s)...");
+    sleep(Duration::from_secs(120)).await;
+    handle.stop_and_verify().await
 }

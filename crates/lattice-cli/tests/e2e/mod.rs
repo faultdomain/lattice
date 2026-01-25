@@ -7,3 +7,4 @@ mod providers;
 
 mod docker_independence_e2e;
 mod pivot_e2e;
+mod upgrade_e2e;
