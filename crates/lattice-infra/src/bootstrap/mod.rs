@@ -281,7 +281,7 @@ pub(crate) fn inject_namespace(manifest: &str, namespace: &str) -> String {
 
         if !injected && line.trim() == "metadata:" {
             injected = true;
-            result.push_str(&format!("  namespace: {}\n", namespace));
+            result.push_str(&format!("namespace: {}\n", namespace));
         }
     }
 

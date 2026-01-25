@@ -103,7 +103,7 @@ fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String,
 /// Clean up kind bootstrap clusters only (lattice-install, lattice-uninstall)
 /// These are temporary clusters used during install/uninstall and safe to force-delete
 fn cleanup_bootstrap_clusters() {
-    info!("  Cleaning up kind bootstrap clusters...");
+    info!("Cleaning up kind bootstrap clusters...");
     let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-install"]);
     let _ = run_cmd_allow_fail(
         "kind",
@@ -155,7 +155,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Load all cluster configs upfront (fail early if missing)
     // =========================================================================
-    info!("Loading cluster configurations...\n");
+    info!("Loading cluster configurations...");
 
     let (mgmt_config_content, mgmt_cluster) =
         load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
@@ -172,13 +172,13 @@ async fn run_provider_e2e() -> Result<(), String> {
     let workload2_bootstrap = workload2_cluster.spec.provider.kubernetes.bootstrap.clone();
 
     info!("Configuration:");
-    info!("  Management:  {} + {:?}", mgmt_provider, mgmt_bootstrap);
+    info!("Management:  {} + {:?}", mgmt_provider, mgmt_bootstrap);
     info!(
-        "  Workload:    {} + {:?}",
+        "Workload:    {} + {:?}",
         workload_provider, workload_bootstrap
     );
     info!(
-        "  Workload2:   {} + {:?}",
+        "Workload2:   {} + {:?}",
         workload_provider, workload2_bootstrap
     );
     info!("");
@@ -198,7 +198,7 @@ async fn run_provider_e2e() -> Result<(), String> {
 
     let registry_credentials = load_registry_credentials();
     if registry_credentials.is_some() {
-        info!("  Registry credentials loaded");
+        info!("Registry credentials loaded");
     }
 
     let installer = Installer::new(
@@ -219,14 +219,14 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 2: Verify Management Cluster is Self-Managing
     // =========================================================================
-    info!("[Phase 2] Verifying management cluster is self-managing...\n");
+    info!("[Phase 2] Verifying management cluster is self-managing...");
 
     let mgmt_kubeconfig_path = get_kubeconfig(MGMT_CLUSTER_NAME, mgmt_provider)?;
-    info!("  Using kubeconfig: {}", mgmt_kubeconfig_path);
+    info!("Using kubeconfig: {}", mgmt_kubeconfig_path);
 
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig_path).await?;
 
-    info!("  Checking for CAPI Cluster resource...");
+    info!("Checking for CAPI Cluster resource...");
     let capi_check = run_cmd(
         "kubectl",
         &[
@@ -239,13 +239,13 @@ async fn run_provider_e2e() -> Result<(), String> {
             "wide",
         ],
     )?;
-    info!("  CAPI clusters:\n{}", capi_check);
+    info!("CAPI clusters:\n{}", capi_check);
 
     if !capi_check.contains(MGMT_CLUSTER_NAME) {
         return Err("Management cluster should have its own CAPI Cluster resource".to_string());
     }
 
-    info!("  Waiting for management cluster's LatticeCluster to be Ready...");
+    info!("Waiting for management cluster's LatticeCluster to be Ready...");
     watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
 
     info!("\n  SUCCESS: Management cluster is self-managing!");
@@ -263,12 +263,12 @@ async fn run_provider_e2e() -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to create workload LatticeCluster: {}", e))?;
 
-    info!("  Workload LatticeCluster created");
+    info!("Workload LatticeCluster created");
 
     // =========================================================================
     // Phase 4: Watch Workload Cluster Provisioning
     // =========================================================================
-    info!("[Phase 4] Watching workload cluster provisioning...\n");
+    info!("[Phase 4] Watching workload cluster provisioning...");
 
     let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
 
@@ -289,10 +289,10 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 5: Verify Workload Cluster
     // =========================================================================
-    info!("[Phase 5] Verifying workload cluster...\n");
+    info!("[Phase 5] Verifying workload cluster...");
 
     if workload_provider == InfraProvider::Docker {
-        info!("  Extracting workload cluster kubeconfig...");
+        info!("Extracting workload cluster kubeconfig...");
         extract_docker_cluster_kubeconfig(
             WORKLOAD_CLUSTER_NAME,
             &workload_bootstrap,
@@ -306,7 +306,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 6: Create Workload2 + Run Mesh Tests (in parallel)
     // =========================================================================
-    info!("[Phase 6] Creating workload2 cluster + running mesh tests in parallel...\n");
+    info!("[Phase 6] Creating workload2 cluster + running mesh tests in parallel...");
 
     let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
 
@@ -327,7 +327,7 @@ async fn run_provider_e2e() -> Result<(), String> {
                 .await
                 .map_err(|e| format!("Failed to create workload2: {}", e))?;
 
-            info!("  [Workload2] LatticeCluster created on workload cluster");
+            info!("[Workload2] LatticeCluster created on workload cluster");
 
             if provider == InfraProvider::Docker {
                 watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None).await?;
@@ -341,7 +341,7 @@ async fn run_provider_e2e() -> Result<(), String> {
                 .await?;
             }
 
-            info!("  [Workload2] Cluster is Ready!");
+            info!("[Workload2] Cluster is Ready!");
 
             if provider == InfraProvider::Docker {
                 extract_docker_cluster_kubeconfig(
@@ -352,7 +352,7 @@ async fn run_provider_e2e() -> Result<(), String> {
             }
 
             verify_cluster_capi_resources(&workload2_kubeconfig, WORKLOAD2_CLUSTER_NAME).await?;
-            info!("  [Workload2] Deep hierarchy verified!");
+            info!("[Workload2] Deep hierarchy verified!");
 
             Ok::<_, String>(())
         })
@@ -362,7 +362,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     let mesh_handle = if mesh_test_enabled() {
         let kubeconfig = workload_kubeconfig_path.clone();
         Some(tokio::spawn(async move {
-            info!("  [Mesh] Running service mesh tests...");
+            info!("[Mesh] Running service mesh tests...");
             let kubeconfig2 = kubeconfig.clone();
 
             // Run mesh tests in parallel:
@@ -376,7 +376,7 @@ async fn run_provider_e2e() -> Result<(), String> {
 
             r1?;
             r2?;
-            info!("  [Mesh] All tests complete!");
+            info!("[Mesh] All tests complete!");
             Ok::<_, String>(())
         }))
     } else {
@@ -399,8 +399,8 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 7: Delete Workload2 (unpivot to workload)
     // =========================================================================
-    info!("[Phase 7] Deleting workload2 cluster (unpivot flow)...\n");
-    info!("  CAPI resources will move back to workload cluster");
+    info!("[Phase 7] Deleting workload2 cluster (unpivot flow)...");
+    info!("CAPI resources will move back to workload cluster");
 
     delete_cluster_and_wait(
         &workload2_kubeconfig_path,
@@ -415,8 +415,8 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 8: Delete Workload (unpivot to mgmt)
     // =========================================================================
-    info!("[Phase 8] Deleting workload cluster (unpivot flow)...\n");
-    info!("  CAPI resources will move back to management cluster");
+    info!("[Phase 8] Deleting workload cluster (unpivot flow)...");
+    info!("CAPI resources will move back to management cluster");
 
     delete_cluster_and_wait(
         &workload_kubeconfig_path,
@@ -431,8 +431,8 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 9: Uninstall Management Cluster
     // =========================================================================
-    info!("[Phase 9] Uninstalling management cluster...\n");
-    info!("  This uses the proper uninstall flow (reverse pivot to temporary kind cluster)");
+    info!("[Phase 9] Uninstalling management cluster...");
+    info!("This uses the proper uninstall flow (reverse pivot to temporary kind cluster)");
 
     let uninstall_args = UninstallArgs {
         kubeconfig: PathBuf::from(&mgmt_kubeconfig_path),
@@ -463,14 +463,14 @@ async fn verify_cluster_capi_resources(kubeconfig: &str, cluster_name: &str) -> 
         "kubectl",
         &["--kubeconfig", kubeconfig, "get", "nodes", "-o", "wide"],
     )?;
-    info!("  Cluster nodes:\n{}", nodes_output);
+    info!("Cluster nodes:\n{}", nodes_output);
 
-    info!("  Checking for CAPI resources...");
+    info!("Checking for CAPI resources...");
     let capi_output = run_cmd(
         "kubectl",
         &["--kubeconfig", kubeconfig, "get", "clusters", "-A"],
     )?;
-    info!("  CAPI clusters:\n{}", capi_output);
+    info!("CAPI clusters:\n{}", capi_output);
 
     if !capi_output.contains(cluster_name) {
         return Err(format!(
@@ -501,10 +501,10 @@ async fn delete_cluster_and_wait(
             "--timeout=300s",
         ],
     )?;
-    info!("  LatticeCluster deletion initiated");
+    info!("LatticeCluster deletion initiated");
 
     // Wait for the LatticeCluster to be fully deleted from parent
-    info!("  Waiting for LatticeCluster to be deleted from parent...");
+    info!("Waiting for LatticeCluster to be deleted from parent...");
     for attempt in 1..=60 {
         tokio::time::sleep(Duration::from_secs(10)).await;
 
@@ -522,7 +522,7 @@ async fn delete_cluster_and_wait(
         );
 
         if check.trim().is_empty() || check.contains("not found") {
-            info!("  LatticeCluster deleted from parent");
+            info!("LatticeCluster deleted from parent");
             break;
         }
 
@@ -533,12 +533,12 @@ async fn delete_cluster_and_wait(
             ));
         }
 
-        info!("    Still waiting... (attempt {}/60)", attempt);
+        info!("Still waiting... (attempt {}/60)", attempt);
     }
 
     // For Docker, verify containers are cleaned up
     if provider == InfraProvider::Docker {
-        info!("  Waiting for Docker containers to be cleaned up...");
+        info!("Waiting for Docker containers to be cleaned up...");
         for attempt in 1..=30 {
             tokio::time::sleep(Duration::from_secs(5)).await;
 
@@ -554,7 +554,7 @@ async fn delete_cluster_and_wait(
             );
 
             if containers.trim().is_empty() {
-                info!("  Docker containers cleaned up by CAPI");
+                info!("Docker containers cleaned up by CAPI");
                 break;
             }
 
@@ -567,7 +567,7 @@ async fn delete_cluster_and_wait(
             }
 
             info!(
-                "    Still waiting for container cleanup... (attempt {}/30)",
+                "  Still waiting for container cleanup... (attempt {}/30)",
                 attempt
             );
         }

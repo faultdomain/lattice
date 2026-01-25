@@ -11,7 +11,7 @@ Export your AWS credentials:
 ```bash
 export AWS_ACCESS_KEY_ID="your-access-key"
 export AWS_SECRET_ACCESS_KEY="your-secret-key"
-export AWS_REGION="us-west-2"  # or your preferred region
+export AWS_REGION="us-west-2"# or your preferred region
 
 # Optional: for temporary credentials
 export AWS_SESSION_TOKEN="your-session-token"

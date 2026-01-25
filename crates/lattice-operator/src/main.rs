@@ -957,11 +957,11 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     tracing::info!("Starting Lattice controllers...");
 
     if run_cluster {
-        tracing::info!("  - LatticeCluster controller");
+        tracing::info!("- LatticeCluster controller");
     }
     if run_service {
-        tracing::info!("  - LatticeService controller");
-        tracing::info!("  - LatticeExternalService controller");
+        tracing::info!("- LatticeService controller");
+        tracing::info!("- LatticeExternalService controller");
     }
 
     // Create cluster controller if needed
@@ -1110,8 +1110,8 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
             }
         });
 
-    tracing::info!("  - CloudProvider controller");
-    tracing::info!("  - SecretsProvider controller");
+    tracing::info!("- CloudProvider controller");
+    tracing::info!("- SecretsProvider controller");
 
     // Run all controllers concurrently
     // Provider controllers always run; cluster/service controllers depend on mode

@@ -115,36 +115,36 @@ COPY scripts/runtime /scripts
 
 # Create clusterctl config with local provider repositories (all providers)
 RUN echo "providers:" > /providers/clusterctl.yaml && \
-    echo "  - name: \"cluster-api\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/cluster-api/v${CAPI_VERSION}/core-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"CoreProvider\"" >> /providers/clusterctl.yaml && \
-    echo "  - name: \"kubeadm\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/bootstrap-kubeadm/v${CAPI_VERSION}/bootstrap-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"BootstrapProvider\"" >> /providers/clusterctl.yaml && \
-    echo "  - name: \"kubeadm\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/control-plane-kubeadm/v${CAPI_VERSION}/control-plane-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"ControlPlaneProvider\"" >> /providers/clusterctl.yaml && \
-    echo "  - name: \"rke2\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/bootstrap-rke2/v${RKE2_VERSION}/bootstrap-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"BootstrapProvider\"" >> /providers/clusterctl.yaml && \
-    echo "  - name: \"rke2\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/control-plane-rke2/v${RKE2_VERSION}/control-plane-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"ControlPlaneProvider\"" >> /providers/clusterctl.yaml && \
-    echo "  - name: \"docker\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/infrastructure-docker/v${CAPI_VERSION}/infrastructure-components-development.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
-    echo "  - name: \"proxmox\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/infrastructure-proxmox/v${CAPMOX_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
-    echo "  - name: \"aws\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/infrastructure-aws/v${CAPA_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
-    echo "  - name: \"openstack\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/infrastructure-openstack/v${CAPO_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
-    echo "  - name: \"in-cluster\"" >> /providers/clusterctl.yaml && \
-    echo "    url: \"file:///providers/ipam-in-cluster/v${IPAM_VERSION}/ipam-components.yaml\"" >> /providers/clusterctl.yaml && \
-    echo "    type: \"IPAMProvider\"" >> /providers/clusterctl.yaml
+    echo "- name: \"cluster-api\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/cluster-api/v${CAPI_VERSION}/core-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"CoreProvider\"" >> /providers/clusterctl.yaml && \
+    echo "- name: \"kubeadm\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/bootstrap-kubeadm/v${CAPI_VERSION}/bootstrap-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"BootstrapProvider\"" >> /providers/clusterctl.yaml && \
+    echo "- name: \"kubeadm\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/control-plane-kubeadm/v${CAPI_VERSION}/control-plane-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"ControlPlaneProvider\"" >> /providers/clusterctl.yaml && \
+    echo "- name: \"rke2\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/bootstrap-rke2/v${RKE2_VERSION}/bootstrap-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"BootstrapProvider\"" >> /providers/clusterctl.yaml && \
+    echo "- name: \"rke2\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/control-plane-rke2/v${RKE2_VERSION}/control-plane-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"ControlPlaneProvider\"" >> /providers/clusterctl.yaml && \
+    echo "- name: \"docker\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/infrastructure-docker/v${CAPI_VERSION}/infrastructure-components-development.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
+    echo "- name: \"proxmox\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/infrastructure-proxmox/v${CAPMOX_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
+    echo "- name: \"aws\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/infrastructure-aws/v${CAPA_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
+    echo "- name: \"openstack\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/infrastructure-openstack/v${CAPO_VERSION}/infrastructure-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml && \
+    echo "- name: \"in-cluster\"" >> /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/ipam-in-cluster/v${IPAM_VERSION}/ipam-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  type: \"IPAMProvider\"" >> /providers/clusterctl.yaml
 
 # Set environment variables for air-gapped clusterctl operation
 ENV GOPROXY=off

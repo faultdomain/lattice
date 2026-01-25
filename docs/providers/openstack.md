@@ -105,8 +105,8 @@ spec:
       openstack:
         # Required
         externalNetworkId: "your-external-network-id"
-        cpFlavor: "b2-30"           # 8 vCPU, 30GB RAM
-        workerFlavor: "b2-15"       # 4 vCPU, 15GB RAM
+        cpFlavor: "b2-30"         # 8 vCPU, 30GB RAM
+        workerFlavor: "b2-15"     # 4 vCPU, 15GB RAM
         imageName: "Ubuntu 22.04"
         sshKeyName: "lattice-key"
 

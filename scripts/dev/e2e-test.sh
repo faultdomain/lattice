@@ -7,7 +7,7 @@ set -euo pipefail
 # Configuration
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-lattice-e2e}"
 CAPI_VERSION="${CAPI_VERSION:-v1.9.2}"
-CAPD_VERSION="${CAPD_VERSION:-v1.9.2}"  # Docker provider
+CAPD_VERSION="${CAPD_VERSION:-v1.9.2}"# Docker provider
 TIMEOUT="${TIMEOUT:-300}"
 NAMESPACE="${NAMESPACE:-lattice-system}"
 

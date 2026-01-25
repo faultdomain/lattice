@@ -48,7 +48,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     };
 
     match ns_api.create(&PostParams::default(), &ns).await {
-        Ok(_) => info!("  Created namespace {}", NAMESPACE),
+        Ok(_) => info!("Created namespace {}", NAMESPACE),
         Err(kube::Error::Api(e)) if e.code == 409 => {
             let patch = serde_json::json!({
                 "metadata": {
@@ -73,7 +73,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     for filename in ["jellyfin.yaml", "nzbget.yaml", "sonarr.yaml"] {
         let service = load_service_config(filename)?;
         let name = service.metadata.name.as_deref().unwrap_or(filename);
-        info!("  Deploying {}...", name);
+        info!("Deploying {}...", name);
         api.create(&PostParams::default(), &service)
             .await
             .map_err(|e| format!("Failed to create {}: {}", name, e))?;
@@ -100,13 +100,13 @@ async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
     let poll_interval = Duration::from_secs(5);
 
     for name in ["jellyfin", "nzbget", "sonarr"] {
-        info!("  Waiting for {}...", name);
+        info!("Waiting for {}...", name);
         let start = std::time::Instant::now();
 
         loop {
             match api.get(name).await {
                 Ok(deployment) if deployment_is_available(&deployment) => {
-                    info!("    {} is available", name);
+                    info!("{} is available", name);
                     break;
                 }
                 Ok(deployment) => {
@@ -114,15 +114,15 @@ async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
                     let available = status.and_then(|s| s.available_replicas).unwrap_or(0);
                     let desired = status.and_then(|s| s.replicas).unwrap_or(0);
                     info!(
-                        "    {} not ready yet ({}/{} available), retrying...",
+                        "  {} not ready yet ({}/{} available), retrying...",
                         name, available, desired
                     );
                 }
                 Err(kube::Error::Api(e)) if e.code == 404 => {
-                    info!("    {} not found yet, retrying...", name);
+                    info!("{} not found yet, retrying...", name);
                 }
                 Err(e) => {
-                    info!("    Error checking {}: {}, retrying...", name, e);
+                    info!("Error checking {}: {}, retrying...", name, e);
                 }
             }
 
@@ -134,7 +134,7 @@ async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
         }
     }
 
-    info!("  All deployments available");
+    info!("All deployments available");
     Ok(())
 }
 
@@ -175,7 +175,7 @@ async fn verify_pvcs(kubeconfig_path: &str) -> Result<(), String> {
         return Err(format!("Expected 1 shared volume, found {}", shared_count));
     }
 
-    info!("  PVCs verified");
+    info!("PVCs verified");
     Ok(())
 }
 
@@ -220,7 +220,7 @@ async fn verify_node_colocation(kubeconfig_path: &str) -> Result<(), String> {
         ));
     }
 
-    info!("  All pods on node: {}", jellyfin_node);
+    info!("All pods on node: {}", jellyfin_node);
     Ok(())
 }
 
@@ -279,7 +279,7 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
         return Err("Subpath isolation failed".into());
     }
 
-    info!("  Volume sharing verified");
+    info!("Volume sharing verified");
     Ok(())
 }
 
@@ -306,7 +306,7 @@ async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
             }) {
                 if deployment_is_available(waypoint) {
                     let name = waypoint.metadata.name.as_deref().unwrap_or("waypoint");
-                    info!("  {} is ready", name);
+                    info!("{} is ready", name);
                     return Ok(());
                 }
             }
@@ -337,18 +337,18 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     if code == "403" {
         return Err("sonarr->jellyfin blocked unexpectedly".into());
     }
-    info!("  sonarr->jellyfin: {} (allowed)", code);
+    info!("sonarr->jellyfin: {} (allowed)", code);
 
     // sonarr -> nzbget (allowed)
     let code = curl_check("sonarr", "nzbget", 6789);
     if code == "403" {
         return Err("sonarr->nzbget blocked unexpectedly".into());
     }
-    info!("  sonarr->nzbget: {} (allowed)", code);
+    info!("sonarr->nzbget: {} (allowed)", code);
 
     // jellyfin -> sonarr (should be blocked)
     let code = curl_check("jellyfin", "sonarr", 8989);
-    info!("  jellyfin->sonarr: {} (expected 403)", code);
+    info!("jellyfin->sonarr: {} (expected 403)", code);
 
     Ok(())
 }

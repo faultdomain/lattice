@@ -78,7 +78,7 @@ fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String,
 // =============================================================================
 
 fn cleanup_bootstrap_clusters() {
-    info!("  Cleaning up kind bootstrap clusters...");
+    info!("Cleaning up kind bootstrap clusters...");
     let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-install"]);
     let _ = run_cmd_allow_fail(
         "kind",
@@ -133,7 +133,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     // =========================================================================
     // Load cluster configs
     // =========================================================================
-    info!("Loading cluster configurations...\n");
+    info!("Loading cluster configurations...");
 
     let (mgmt_config_content, mgmt_cluster) =
         load_cluster_config("LATTICE_UPGRADE_MGMT_CONFIG", "docker-mgmt.yaml")?;
@@ -152,14 +152,14 @@ async fn run_upgrade_e2e() -> Result<(), String> {
 
     info!("Configuration:");
     info!(
-        "  Management:  {} ({} + {:?})",
+        "Management:  {} ({} + {:?})",
         mgmt_cluster_name, mgmt_provider, mgmt_bootstrap
     );
     info!(
-        "  Workload:    {} ({} + {:?}, starting at v{})",
+        "Workload:    {} ({} + {:?}, starting at v{})",
         workload_cluster_name, workload_provider, workload_bootstrap, from_version
     );
-    info!("  Upgrade to:  v{}", to_version);
+    info!("Upgrade to:  v{}", to_version);
     info!("");
 
     if mgmt_provider == InfraProvider::Docker {
@@ -169,7 +169,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 1: Install Management Cluster
     // =========================================================================
-    info!("[Phase 1] Installing management cluster...\n");
+    info!("[Phase 1] Installing management cluster...");
 
     let registry_credentials = load_registry_credentials();
     let installer = Installer::new(
@@ -204,7 +204,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to create workload LatticeCluster: {}", e))?;
 
-    info!("  Workload LatticeCluster created");
+    info!("Workload LatticeCluster created");
 
     watch_cluster_phases(&mgmt_client, &workload_cluster_name, None).await?;
     info!("\n  Workload cluster Ready at v{}!", from_version);
@@ -230,20 +230,20 @@ async fn run_upgrade_e2e() -> Result<(), String> {
             "json",
         ],
     )?;
-    info!("  Cluster version info:\n{}", version_output);
+    info!("Cluster version info:\n{}", version_output);
 
     // =========================================================================
     // Phase 3: Deploy Mesh and Start Traffic
     // =========================================================================
-    info!("[Phase 3] Deploying mesh services and starting traffic...\n");
+    info!("[Phase 3] Deploying mesh services and starting traffic...");
 
     let mesh_handle = start_mesh_test(&workload_kubeconfig_path).await?;
 
     // Initial verification before upgrade
-    info!("  Running initial policy verification...");
+    info!("Running initial policy verification...");
     tokio::time::sleep(Duration::from_secs(60)).await;
     mesh_handle.check_no_policy_gaps().await?;
-    info!("  Initial verification passed - policies are enforced");
+    info!("Initial verification passed - policies are enforced");
 
     // =========================================================================
     // Phase 4: Trigger Kubernetes Upgrade
@@ -276,14 +276,14 @@ async fn run_upgrade_e2e() -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to patch cluster version: {}", e))?;
 
-    info!("  Upgrade initiated!");
+    info!("Upgrade initiated!");
 
     // =========================================================================
     // Phase 5: Monitor for Policy Gaps During Upgrade
     // =========================================================================
-    info!("[Phase 5] Monitoring for policy gaps during upgrade...\n");
-    info!("  Security invariant: traffic that should be BLOCKED must NEVER be ALLOWED");
-    info!("  (Dropped/failed allowed traffic is acceptable during node disruption)\n");
+    info!("[Phase 5] Monitoring for policy gaps during upgrade...");
+    info!("Security invariant: traffic that should be BLOCKED must NEVER be ALLOWED");
+    info!("(Dropped/failed allowed traffic is acceptable during node disruption)\n");
 
     let upgrade_start = std::time::Instant::now();
     let upgrade_timeout = Duration::from_secs(1800); // 30 minutes for upgrade
@@ -334,7 +334,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
 
         let elapsed = upgrade_start.elapsed().as_secs();
         info!(
-            "  [{:3}s] Nodes: {}, All upgraded: {}, All ready: {}",
+            "[{:3}s] Nodes: {}, All upgraded: {}, All ready: {}",
             elapsed, node_count, all_upgraded, all_ready
         );
 
@@ -352,18 +352,18 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 6: Final Verification
     // =========================================================================
-    info!("[Phase 6] Final policy verification after upgrade...\n");
+    info!("[Phase 6] Final policy verification after upgrade...");
 
     // Wait for mesh to stabilize after upgrade
-    info!("  Waiting for mesh to stabilize (120)...");
+    info!("Waiting for mesh to stabilize (120)...");
     tokio::time::sleep(Duration::from_secs(120)).await;
 
     // Final policy gap check
     mesh_handle.check_no_policy_gaps().await?;
-    info!("  No policy gaps detected!");
+    info!("No policy gaps detected!");
 
     // Full verification
-    info!("  Running full bilateral agreement verification...");
+    info!("Running full bilateral agreement verification...");
     mesh_handle.stop_and_verify().await?;
 
     // Verify final version
@@ -377,12 +377,12 @@ async fn run_upgrade_e2e() -> Result<(), String> {
             "json",
         ],
     )?;
-    info!("  Final cluster version:\n{}", version_output);
+    info!("Final cluster version:\n{}", version_output);
 
     // =========================================================================
     // Cleanup
     // =========================================================================
-    info!("\n[Cleanup] Deleting test clusters...\n");
+    info!("\n[Cleanup] Deleting test clusters...");
 
     // Delete workload cluster
     run_cmd(

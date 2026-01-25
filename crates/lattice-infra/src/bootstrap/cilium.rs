@@ -252,7 +252,7 @@ spec:
 pub fn generate_operator_network_policy(parent_host: Option<&str>, parent_port: u16) -> String {
     let mut egress_rules = vec![
         // DNS to kube-dns
-        r#"    - toEndpoints:
+        r#"  - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: kube-system
             k8s:k8s-app: kube-dns
@@ -264,7 +264,7 @@ pub fn generate_operator_network_policy(parent_host: Option<&str>, parent_port: 
               protocol: TCP"#
             .to_string(),
         // K8s API server
-        r#"    - toEntities:
+        r#"  - toEntities:
         - kube-apiserver"#
             .to_string(),
     ];
@@ -277,7 +277,7 @@ pub fn generate_operator_network_policy(parent_host: Option<&str>, parent_port: 
         if is_ip {
             // Use toCIDR for IP addresses
             egress_rules.push(format!(
-                r#"    - toCIDR:
+                r#"  - toCIDR:
         - {}/32
       toPorts:
         - ports:
@@ -290,7 +290,7 @@ pub fn generate_operator_network_policy(parent_host: Option<&str>, parent_port: 
         } else {
             // Use toFQDNs for hostnames
             egress_rules.push(format!(
-                r#"    - toFQDNs:
+                r#"  - toFQDNs:
         - matchName: {}
       toPorts:
         - ports:

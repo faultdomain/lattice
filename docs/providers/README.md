@@ -50,7 +50,7 @@ All providers share these configuration options:
 spec:
   provider:
     kubernetes:
-      version: "1.32.0"      # Kubernetes version
+      version: "1.32.0"    # Kubernetes version
       bootstrap: kubeadm     # or rke2
       certSANs:              # Additional SANs for API server cert
         - "api.example.com"
@@ -62,7 +62,7 @@ spec:
       default:
         replicas: 5          # Number of worker nodes in this pool
   endpoints:
-    host: "..."              # Optional: auto-discovered for cloud providers
+    host: "..."            # Optional: auto-discovered for cloud providers
     grpcPort: 50051
     bootstrapPort: 8443
 ```

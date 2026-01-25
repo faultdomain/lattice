@@ -272,7 +272,7 @@ fn download_providers(
             let path = provider_dir.join(component);
             if !path.exists() {
                 let url = format!("{}/{}", base_url, component);
-                eprintln!("  Downloading {}/{}...", name, component);
+                eprintln!("Downloading {}/{}...", name, component);
                 download_file(&url, &path);
             }
         }
@@ -374,7 +374,7 @@ fn generate_clusterctl_config(
             );
 
             config.push_str(&format!(
-                "  - name: \"{}\"\n    url: \"{}\"\n    type: \"{}\"\n",
+                "- name: \"{}\"\n    url: \"{}\"\n    type: \"{}\"\n",
                 clusterctl_name, url, provider_type
             ));
         }

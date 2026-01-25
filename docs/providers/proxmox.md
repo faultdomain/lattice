@@ -78,7 +78,7 @@ spec:
     config:
       proxmox:
         # Template configuration
-        sourceNode: "pve"           # Proxmox node name
+        sourceNode: "pve"         # Proxmox node name
         templateId: 9000            # VM template ID
 
         # Network configuration
@@ -107,7 +107,7 @@ spec:
         workerDiskSizeGb: 50
 
         # Storage
-        storage: "local-lvm"        # or "ceph-pool"
+        storage: "local-lvm"      # or "ceph-pool"
 
         # Optional: placement
         # allowedNodes:
@@ -119,7 +119,7 @@ spec:
       default:
         replicas: 5
   endpoints:
-    host: "10.0.0.99"  # kube-vip VIP address
+    host: "10.0.0.99"# kube-vip VIP address
     grpcPort: 50051
     bootstrapPort: 8443
     service:

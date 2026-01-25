@@ -38,14 +38,14 @@ CAPO_VERSION=$(get_version "providers" "infrastructure-openstack")
 IPAM_VERSION=$(get_version "providers" "ipam-in-cluster")
 
 echo "Building with versions from versions.toml:"
-echo "  helm: $HELM_VERSION"
-echo "  clusterctl: $CLUSTERCTL_VERSION"
-echo "  capi: $CAPI_VERSION"
-echo "  rke2: $RKE2_VERSION"
-echo "  capmox: $CAPMOX_VERSION"
-echo "  capa: $CAPA_VERSION"
-echo "  capo: $CAPO_VERSION"
-echo "  ipam-in-cluster: $IPAM_VERSION"
+echo "helm: $HELM_VERSION"
+echo "clusterctl: $CLUSTERCTL_VERSION"
+echo "capi: $CAPI_VERSION"
+echo "rke2: $RKE2_VERSION"
+echo "capmox: $CAPMOX_VERSION"
+echo "capa: $CAPA_VERSION"
+echo "capo: $CAPO_VERSION"
+echo "ipam-in-cluster: $IPAM_VERSION"
 
 docker build \
     --build-arg HELM_VERSION="$HELM_VERSION" \

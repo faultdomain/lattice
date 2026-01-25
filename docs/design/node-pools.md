@@ -139,7 +139,7 @@ nodes:
   controlPlane: 3
   workerPools:
     general:                              # ID (immutable)
-      displayName: "General Purpose"      # Human-readable (mutable)
+      displayName: "General Purpose"    # Human-readable (mutable)
       replicas: 3
       nodeClass: medium
       labels:
@@ -722,7 +722,7 @@ Pool keys are immutable IDs used for CAPI resource naming. Display names are mut
 ```yaml
 workerPools:
   general:                    # ID (immutable, lowercase, used in MachineDeployment name)
-    displayName: "General Purpose Workers"  # Mutable, for UI/dashboards
+    displayName: "General Purpose Workers"# Mutable, for UI/dashboards
     replicas: 5
 
   gpu-a100:                   # ID

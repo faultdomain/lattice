@@ -28,7 +28,7 @@ pvs 2>/dev/null | grep -E "$DISK|PV" || echo "No PVs found on $DISK"
 echo ""
 
 echo "WARNING: This will PERMANENTLY DESTROY all data on $DISK"
-echo "         including LVM volumes, partitions, and filesystems!"
+echo "       including LVM volumes, partitions, and filesystems!"
 echo ""
 read -p "Type 'YES' to continue: " confirm
 [[ "$confirm" != "YES" ]] && { echo "Aborted."; exit 1; }
@@ -38,7 +38,7 @@ echo ""
 echo "=== Deactivating logical volumes ==="
 for vg in $(pvs --noheadings -o vg_name "$DISK"* 2>/dev/null | sort -u | tr -d ' '); do
     if [[ -n "$vg" ]]; then
-        echo "  Deactivating LVs in VG: $vg"
+        echo "Deactivating LVs in VG: $vg"
         lvchange -an "$vg" 2>/dev/null || true
     fi
 done
@@ -49,7 +49,7 @@ echo "=== Removing logical volumes ==="
 for vg in $(pvs --noheadings -o vg_name "$DISK"* 2>/dev/null | sort -u | tr -d ' '); do
     if [[ -n "$vg" ]]; then
         for lv in $(lvs --noheadings -o lv_name "$vg" 2>/dev/null | tr -d ' '); do
-            echo "  Removing LV: $vg/$lv"
+            echo "Removing LV: $vg/$lv"
             lvremove -f "$vg/$lv" 2>/dev/null || true
         done
     fi
@@ -60,7 +60,7 @@ echo ""
 echo "=== Removing volume groups ==="
 for vg in $(pvs --noheadings -o vg_name "$DISK"* 2>/dev/null | sort -u | tr -d ' '); do
     if [[ -n "$vg" ]]; then
-        echo "  Removing VG: $vg"
+        echo "Removing VG: $vg"
         vgremove -f "$vg" 2>/dev/null || true
     fi
 done
@@ -69,7 +69,7 @@ done
 echo ""
 echo "=== Removing physical volumes ==="
 for pv in $(pvs --noheadings -o pv_name 2>/dev/null | grep "$DISK" | tr -d ' '); do
-    echo "  Removing PV: $pv"
+    echo "Removing PV: $pv"
     pvremove -f "$pv" 2>/dev/null || true
 done
 
@@ -78,7 +78,7 @@ echo ""
 echo "=== Wiping filesystem signatures ==="
 for part in "$DISK"*; do
     if [[ -b "$part" ]]; then
-        echo "  Wiping: $part"
+        echo "Wiping: $part"
         wipefs -a "$part" 2>/dev/null || true
     fi
 done

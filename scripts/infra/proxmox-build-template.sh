@@ -69,7 +69,7 @@ echo "Patching boot command for IPv4-only networks..."
 UBUNTU_JSON="packer/proxmox/ubuntu-2204.json"
 if ! grep -q "ipv6.disable=1" "$UBUNTU_JSON"; then
     sed -i.bak 's|--- autoinstall|--- ipv6.disable=1 autoinstall|' "$UBUNTU_JSON"
-    echo "  Added ipv6.disable=1 to kernel command"
+    echo "Added ipv6.disable=1 to kernel command"
 fi
 
 echo ""
@@ -86,7 +86,7 @@ export PROXMOX_BRIDGE="$BRIDGE"
 export PROXMOX_STORAGE_POOL="$STORAGE"
 
 # Build packer flags
-K8S_SERIES="v${K8S_VERSION%.*}"  # e.g., v1.31.0 -> v1.31
+K8S_SERIES="v${K8S_VERSION%.*}"# e.g., v1.31.0 -> v1.31
 K8S_DEB_VERSION="${K8S_VERSION}-1.1"
 PACKER_FLAGS="--var 'kubernetes_semver=v${K8S_VERSION}'"
 PACKER_FLAGS+=" --var 'kubernetes_series=${K8S_SERIES}'"

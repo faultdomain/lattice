@@ -65,7 +65,7 @@ pub const DOCKER_KIND_GATEWAY: &str = "172.18.0.1";
 #[cfg(feature = "provider-e2e")]
 pub fn ensure_docker_network() -> Result<(), String> {
     info!(
-        "  Ensuring Docker 'kind' network has correct subnet ({})...",
+        "Ensuring Docker 'kind' network has correct subnet ({})...",
         DOCKER_KIND_SUBNET
     );
 
@@ -84,12 +84,12 @@ pub fn ensure_docker_network() -> Result<(), String> {
         Ok(output) if output.status.success() => {
             let current_subnet = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if current_subnet == DOCKER_KIND_SUBNET {
-                info!("  Docker 'kind' network already has correct subnet");
+                info!("Docker 'kind' network already has correct subnet");
                 return Ok(());
             }
             // Network exists but with wrong subnet - need to recreate
             info!(
-                "  Docker 'kind' network has wrong subnet ({}), recreating...",
+                "Docker 'kind' network has wrong subnet ({}), recreating...",
                 current_subnet
             );
 
@@ -116,7 +116,7 @@ pub fn ensure_docker_network() -> Result<(), String> {
         }
         _ => {
             // Network doesn't exist
-            info!("  Docker 'kind' network doesn't exist, creating...");
+            info!("Docker 'kind' network doesn't exist, creating...");
         }
     }
 
@@ -134,7 +134,7 @@ pub fn ensure_docker_network() -> Result<(), String> {
     )?;
 
     info!(
-        "  Docker 'kind' network created with subnet {}",
+        "Docker 'kind' network created with subnet {}",
         DOCKER_KIND_SUBNET
     );
     Ok(())
@@ -226,11 +226,11 @@ pub fn extract_docker_cluster_kubeconfig(
             cluster_name
         ));
     }
-    info!("  Found control plane container: {}", cp_container);
+    info!("Found control plane container: {}", cp_container);
 
     // Extract kubeconfig from the container (with retries - file may not exist immediately)
     let kubeconfig_container_path = get_kubeconfig_path_for_bootstrap(bootstrap);
-    info!("  Extracting kubeconfig from {}", kubeconfig_container_path);
+    info!("Extracting kubeconfig from {}", kubeconfig_container_path);
 
     let mut kubeconfig = String::new();
     let max_retries = 60; // 5 minutes with 5s intervals
@@ -251,7 +251,7 @@ pub fn extract_docker_cluster_kubeconfig(
                     ));
                 }
                 info!(
-                    "  Waiting for kubeconfig to be available (attempt {}/{})...",
+                    "Waiting for kubeconfig to be available (attempt {}/{})...",
                     attempt, max_retries
                 );
                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -271,12 +271,12 @@ pub fn extract_docker_cluster_kubeconfig(
         let parts: Vec<&str> = port_output.trim().split(':').collect();
         if parts.len() == 2 {
             let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
-            info!("  Patching kubeconfig server to {}", localhost_endpoint);
+            info!("Patching kubeconfig server to {}", localhost_endpoint);
             let patched = kubeconfig
                 .lines()
                 .map(|line| {
                     if line.trim().starts_with("server:") {
-                        format!("    server: {}", localhost_endpoint)
+                        format!("  server: {}", localhost_endpoint)
                     } else {
                         line.to_string()
                     }
@@ -288,7 +288,7 @@ pub fn extract_docker_cluster_kubeconfig(
         }
     } else {
         info!(
-            "  Warning: Could not find load balancer port mapping for {}",
+            "Warning: Could not find load balancer port mapping for {}",
             lb_container
         );
     }
@@ -557,7 +557,7 @@ pub async fn watch_worker_scaling(
 
         if last_count != Some(ready_workers) {
             info!(
-                "    {} ready workers on {} (target: {})",
+                "  {} ready workers on {} (target: {})",
                 ready_workers, cluster_name, expected_workers
             );
             last_count = Some(ready_workers);
@@ -565,7 +565,7 @@ pub async fn watch_worker_scaling(
 
         if ready_workers >= expected_workers {
             info!(
-                "    SUCCESS: {} has {} ready workers!",
+                "  SUCCESS: {} has {} ready workers!",
                 cluster_name, ready_workers
             );
             return Ok(());
@@ -612,7 +612,7 @@ pub fn service_fixtures_dir() -> PathBuf {
 /// Build and push the lattice Docker image
 #[cfg(feature = "provider-e2e")]
 pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
-    info!("  Building lattice Docker image...");
+    info!("Building lattice Docker image...");
 
     let output = Command::new("./scripts/dev/docker-build.sh")
         .args(["-t", image])
@@ -628,8 +628,8 @@ pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
         ));
     }
 
-    info!("  Image built successfully");
-    info!("  Pushing image to registry...");
+    info!("Image built successfully");
+    info!("Pushing image to registry...");
 
     let output = Command::new("docker")
         .args(["push", image])
@@ -643,7 +643,7 @@ pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
         ));
     }
 
-    info!("  Image pushed successfully");
+    info!("Image pushed successfully");
     Ok(())
 }
 
@@ -705,7 +705,7 @@ pub fn load_cluster_config(
     let cluster: LatticeCluster = serde_yaml::from_str(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
 
-    info!("  Loaded cluster config: {}", path.display());
+    info!("Loaded cluster config: {}", path.display());
     Ok((content, cluster))
 }
 
@@ -754,7 +754,7 @@ pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
         .lines()
         .map(|line| {
             if line.trim().starts_with("server:") {
-                format!("    server: {}", localhost_endpoint)
+                format!("  server: {}", localhost_endpoint)
             } else {
                 line.to_string()
             }
