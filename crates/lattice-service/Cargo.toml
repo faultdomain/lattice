@@ -58,4 +58,3 @@ schemars = { workspace = true }
 tokio-test = { workspace = true }
 mockall = { workspace = true }
 rstest = { workspace = true }
-proptest = { workspace = true }

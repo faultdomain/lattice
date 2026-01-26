@@ -30,7 +30,6 @@ dashmap.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
-proptest.workspace = true
 criterion.workspace = true
 
 [[bench]]

@@ -2241,7 +2241,7 @@ async fn generate_capi_manifests(
             k8s_version: cluster.spec.provider.kubernetes.version.clone(),
             autoscaling_enabled,
         };
-        let token = bootstrap_state.register_cluster(registration, false).await;
+        let token = bootstrap_state.register_cluster(registration).await;
 
         BootstrapInfo::new(bootstrap_endpoint, token.as_str().to_string(), ca_cert)
     } else {

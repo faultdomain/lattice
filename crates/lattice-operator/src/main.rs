@@ -662,7 +662,7 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
             autoscaling_enabled,
         };
 
-        bootstrap_state.register_cluster(registration, true).await;
+        bootstrap_state.register_cluster(registration).await;
         tracing::info!(cluster = %name, "re-registered cluster after operator restart");
     }
 }
@@ -931,9 +931,9 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         )
         .await;
 
-        // Load pending bootstrap registrations from Secrets (crash recovery)
-        if let Err(e) = bootstrap_state.load_pending_registrations().await {
-            tracing::warn!(error = %e, "Failed to load pending bootstrap registrations");
+        // Clean up stale bootstrap Secrets (for clusters that completed or were deleted)
+        if let Err(e) = bootstrap_state.cleanup_stale_bootstrap_secrets().await {
+            tracing::warn!(error = %e, "Failed to clean up stale bootstrap Secrets");
         }
     }
 
