@@ -1003,10 +1003,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     ///
     /// # Returns
     /// The bootstrap token to embed in CAPI manifests
-    pub async fn register_cluster(
-        &self,
-        registration: ClusterRegistration,
-    ) -> BootstrapToken {
+    pub async fn register_cluster(&self, registration: ClusterRegistration) -> BootstrapToken {
         let cluster_id = registration.cluster_id.clone();
 
         // Fast path: check in-memory cache first
@@ -1350,7 +1347,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         };
 
         if !is_bootstrapped {
-            return Err(BootstrapError::ClusterNotBootstrapped(cluster_id.to_string()));
+            return Err(BootstrapError::ClusterNotBootstrapped(
+                cluster_id.to_string(),
+            ));
         }
 
         // Sign the CSR with the active CA

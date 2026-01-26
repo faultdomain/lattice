@@ -24,7 +24,7 @@ use mockall::automock;
 use lattice_common::clusterctl::unpause_capi_cluster;
 use lattice_common::crd::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, LatticeCluster,
-    LatticeClusterStatus, UnpivotPhase, WorkerPoolStatus,
+    LatticeClusterStatus, UnpivotPhase, WorkerPoolSpec, WorkerPoolStatus,
 };
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
@@ -1286,6 +1286,99 @@ pub fn determine_pivot_action(
     }
 }
 
+/// Action to take for pool scaling
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScalingAction {
+    /// No action needed - replicas match desired or autoscaler manages the pool
+    NoOp {
+        /// Desired replicas (for status reporting)
+        desired: u32,
+        /// Whether autoscaling is enabled
+        autoscaling: bool,
+    },
+    /// Scale the pool to the specified replica count
+    Scale {
+        /// Current replica count
+        current: u32,
+        /// Target replica count
+        target: u32,
+    },
+    /// MachineDeployment not found - wait for it to be created
+    WaitForMachineDeployment,
+}
+
+impl ScalingAction {
+    /// Returns the desired replica count for status reporting
+    pub fn desired_replicas(&self) -> u32 {
+        match self {
+            ScalingAction::NoOp { desired, .. } => *desired,
+            ScalingAction::Scale { target, .. } => *target,
+            ScalingAction::WaitForMachineDeployment => 0,
+        }
+    }
+
+    /// Returns whether autoscaling is enabled
+    pub fn is_autoscaling(&self) -> bool {
+        matches!(
+            self,
+            ScalingAction::NoOp {
+                autoscaling: true,
+                ..
+            }
+        )
+    }
+}
+
+/// Determine what scaling action to take for a worker pool.
+///
+/// This encapsulates the scaling decision logic in a pure function.
+/// Uses `WorkerPoolSpec::is_autoscaling_enabled()` to check autoscaling status.
+pub fn determine_scaling_action(
+    pool_spec: &WorkerPoolSpec,
+    current_replicas: Option<u32>,
+) -> ScalingAction {
+    if pool_spec.is_autoscaling_enabled() {
+        // Autoscaling: use current replicas or fall back to min
+        let desired = current_replicas.unwrap_or_else(|| pool_spec.min.unwrap_or(0));
+        return ScalingAction::NoOp {
+            desired,
+            autoscaling: true,
+        };
+    }
+
+    // Static scaling
+    match current_replicas {
+        Some(current) if current == pool_spec.replicas => ScalingAction::NoOp {
+            desired: pool_spec.replicas,
+            autoscaling: false,
+        },
+        Some(current) => ScalingAction::Scale {
+            current,
+            target: pool_spec.replicas,
+        },
+        None if pool_spec.replicas > 0 => ScalingAction::WaitForMachineDeployment,
+        None => ScalingAction::NoOp {
+            desired: 0,
+            autoscaling: false,
+        },
+    }
+}
+
+/// Generate a warning message if spec.replicas is outside autoscaling bounds.
+///
+/// Returns None if autoscaling is disabled or replicas is within bounds.
+pub fn autoscaling_warning(pool_spec: &WorkerPoolSpec) -> Option<String> {
+    match (pool_spec.min, pool_spec.max) {
+        (Some(min), Some(max)) if pool_spec.replicas < min || pool_spec.replicas > max => {
+            Some(format!(
+                "replicas ({}) ignored, autoscaler manages within [{}, {}]",
+                pool_spec.replicas, min, max
+            ))
+        }
+        _ => None,
+    }
+}
+
 // =============================================================================
 // End Pure Functions
 // =============================================================================
@@ -1985,67 +2078,54 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     .await
                     .unwrap_or(None);
 
-                // Determine desired replicas, autoscaling status, and warning message
-                let (desired, autoscaling, message) = match (pool_spec.min, pool_spec.max) {
-                    (Some(min), Some(max)) => {
-                        // Autoscaling: use current replicas or min as fallback
-                        let desired = current_replicas.unwrap_or(min);
-                        let message = if pool_spec.replicas < min || pool_spec.replicas > max {
-                            let msg = format!(
-                                "replicas ({}) ignored, autoscaler manages within [{}, {}]",
-                                pool_spec.replicas, min, max
-                            );
-                            warn!(pool = %pool_id, "{}", msg);
-                            Some(msg)
-                        } else {
-                            None
-                        };
-                        (desired, true, message)
-                    }
-                    _ => (pool_spec.replicas, false, None),
-                };
-                total_desired += desired;
+                // Determine scaling action
+                let action = determine_scaling_action(pool_spec, current_replicas);
+
+                // Log warning if spec.replicas is outside autoscaling bounds
+                if let Some(msg) = autoscaling_warning(pool_spec) {
+                    warn!(pool = %pool_id, "{}", msg);
+                }
+
+                total_desired += action.desired_replicas();
 
                 let pool_status = WorkerPoolStatus {
-                    desired_replicas: desired,
+                    desired_replicas: action.desired_replicas(),
                     current_replicas: current_replicas.unwrap_or(0),
                     ready_replicas: 0, // Populated below after we count ready nodes
-                    autoscaling_enabled: autoscaling,
-                    message,
+                    autoscaling_enabled: action.is_autoscaling(),
+                    message: autoscaling_warning(pool_spec),
                 };
 
                 pool_statuses.insert(pool_id.clone(), pool_status);
 
-                // If autoscaling is enabled, hands-off - trust the autoscaler
-                if autoscaling {
-                    continue;
-                }
-
-                // Static scaling: reconcile replicas to match spec
-                if let Some(replicas) = current_replicas {
-                    if replicas != pool_spec.replicas {
+                // Execute scaling action
+                match action {
+                    ScalingAction::NoOp { .. } => {
+                        // No action needed (either replicas match or autoscaler manages)
+                    }
+                    ScalingAction::Scale { current, target } => {
                         info!(
                             pool = %pool_id,
-                            current = replicas,
-                            desired = pool_spec.replicas,
+                            current = current,
+                            desired = target,
                             "Scaling pool MachineDeployment to match spec"
                         );
                         if let Err(e) = ctx
                             .capi
-                            .scale_pool(&name, pool_id, &capi_namespace, pool_spec.replicas)
+                            .scale_pool(&name, pool_id, &capi_namespace, target)
                             .await
                         {
                             warn!(pool = %pool_id, error = %e, "Failed to scale pool, will retry");
                             return Ok(Action::requeue(Duration::from_secs(10)));
                         }
                     }
-                } else if pool_spec.replicas > 0 {
-                    // MachineDeployment not found but pool has replicas - will be created on next apply
-                    warn!(
-                        pool = %pool_id,
-                        "MachineDeployment not found for pool, will retry"
-                    );
-                    return Ok(Action::requeue(Duration::from_secs(10)));
+                    ScalingAction::WaitForMachineDeployment => {
+                        warn!(
+                            pool = %pool_id,
+                            "MachineDeployment not found for pool, will retry"
+                        );
+                        return Ok(Action::requeue(Duration::from_secs(10)));
+                    }
                 }
             }
 
@@ -4502,6 +4582,133 @@ mod tests {
 
             assert!(has_etcd_taint(&tainted));
             assert!(!has_etcd_taint(&untainted));
+        }
+
+        // --- determine_scaling_action tests ---
+
+        fn pool_spec(replicas: u32, min: Option<u32>, max: Option<u32>) -> WorkerPoolSpec {
+            WorkerPoolSpec {
+                replicas,
+                min,
+                max,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn scaling_action_static_uses_spec_replicas() {
+            let spec = pool_spec(3, None, None);
+            let action = determine_scaling_action(&spec, Some(2));
+
+            assert_eq!(action.desired_replicas(), 3);
+            assert!(!action.is_autoscaling());
+            assert!(matches!(action, ScalingAction::Scale { target: 3, .. }));
+        }
+
+        #[test]
+        fn scaling_action_noop_when_replicas_match() {
+            let spec = pool_spec(3, None, None);
+            let action = determine_scaling_action(&spec, Some(3));
+
+            assert_eq!(action.desired_replicas(), 3);
+            assert!(!action.is_autoscaling());
+            assert!(matches!(action, ScalingAction::NoOp { .. }));
+        }
+
+        #[test]
+        fn scaling_action_autoscaling_uses_current_when_available() {
+            let spec = pool_spec(3, Some(1), Some(10));
+            let action = determine_scaling_action(&spec, Some(7));
+
+            assert_eq!(action.desired_replicas(), 7); // Uses current
+            assert!(action.is_autoscaling());
+            assert!(matches!(action, ScalingAction::NoOp { .. }));
+        }
+
+        #[test]
+        fn scaling_action_autoscaling_falls_back_to_min() {
+            let spec = pool_spec(3, Some(2), Some(10));
+            let action = determine_scaling_action(&spec, None);
+
+            assert_eq!(action.desired_replicas(), 2); // Falls back to min
+            assert!(action.is_autoscaling());
+        }
+
+        #[test]
+        fn scaling_action_scales_up() {
+            let spec = pool_spec(5, None, None);
+            let action = determine_scaling_action(&spec, Some(2));
+
+            assert_eq!(
+                action,
+                ScalingAction::Scale {
+                    current: 2,
+                    target: 5
+                }
+            );
+        }
+
+        #[test]
+        fn scaling_action_scales_down() {
+            let spec = pool_spec(3, None, None);
+            let action = determine_scaling_action(&spec, Some(10));
+
+            assert_eq!(
+                action,
+                ScalingAction::Scale {
+                    current: 10,
+                    target: 3
+                }
+            );
+        }
+
+        #[test]
+        fn scaling_action_waits_when_deployment_missing_and_replicas_wanted() {
+            let spec = pool_spec(3, None, None);
+            let action = determine_scaling_action(&spec, None);
+
+            assert_eq!(action, ScalingAction::WaitForMachineDeployment);
+        }
+
+        #[test]
+        fn scaling_action_noop_when_deployment_missing_and_zero_replicas() {
+            let spec = pool_spec(0, None, None);
+            let action = determine_scaling_action(&spec, None);
+
+            assert!(matches!(action, ScalingAction::NoOp { .. }));
+            assert_eq!(action.desired_replicas(), 0);
+        }
+
+        // --- autoscaling_warning tests ---
+
+        #[test]
+        fn autoscaling_warning_none_for_static_scaling() {
+            let spec = pool_spec(5, None, None);
+            assert!(autoscaling_warning(&spec).is_none());
+        }
+
+        #[test]
+        fn autoscaling_warning_none_when_spec_in_bounds() {
+            let spec = pool_spec(5, Some(1), Some(10));
+            assert!(autoscaling_warning(&spec).is_none());
+        }
+
+        #[test]
+        fn autoscaling_warning_when_spec_below_min() {
+            let spec = pool_spec(1, Some(3), Some(10));
+            let warning = autoscaling_warning(&spec);
+
+            assert!(warning.is_some());
+            assert!(warning.unwrap().contains("replicas (1) ignored"));
+        }
+
+        #[test]
+        fn autoscaling_warning_when_spec_above_max() {
+            let spec = pool_spec(15, Some(1), Some(10));
+            let warning = autoscaling_warning(&spec);
+
+            assert!(warning.is_some());
+            assert!(warning.unwrap().contains("replicas (15) ignored"));
         }
     }
 }
