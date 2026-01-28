@@ -1,7 +1,7 @@
 //! Kubernetes upgrade resilience E2E test
 //!
-//! This test validates that service mesh policies remain enforced during
-//! a full Kubernetes cluster upgrade (control plane + workers).
+//! Validates that service mesh policies remain enforced during a full
+//! Kubernetes cluster upgrade (control plane + workers).
 //!
 //! # Security Invariant
 //!
@@ -9,98 +9,76 @@
 //! - Dropped/failed traffic: ACCEPTABLE (expected during disruption)
 //! - Incorrectly allowed traffic: NEVER ACCEPTABLE (security violation)
 //!
-//! The mesh should never degrade to "allow all" even when components restart.
-//!
 //! # Test Flow
 //!
 //! 1. Install management cluster
-//! 2. Create workload cluster at Kubernetes v1.31
+//! 2. Create workload cluster at starting version
 //! 3. Deploy mesh services and start traffic generators
-//! 4. Trigger upgrade to Kubernetes v1.32
-//! 5. Periodically check for policy gaps during upgrade
-//! 6. Wait for upgrade to complete (all nodes Ready)
-//! 7. Final verification - no incorrectly allowed traffic
+//! 4. Enable chaos monkey
+//! 5. Trigger upgrade to target version
+//! 6. Monitor for policy gaps during upgrade
+//! 7. Final verification
 //!
-//! # Environment Variables
+//! # Running
 //!
-//! - LATTICE_UPGRADE_FROM_VERSION: Starting K8s version (default: 1.31.0)
-//! - LATTICE_UPGRADE_TO_VERSION: Target K8s version (default: 1.32.0)
-//! - LATTICE_UPGRADE_MGMT_CONFIG: Management cluster config (default: docker-mgmt.yaml)
-//! - LATTICE_UPGRADE_WORKLOAD_CONFIG: Workload cluster config (default: docker-workload.yaml)
+//! ```bash
+//! cargo test --features provider-e2e --test e2e upgrade_e2e -- --nocapture
+//! ```
 
 #![cfg(feature = "provider-e2e")]
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use kube::api::{Api, Patch, PatchParams, PostParams};
-use kube::ResourceExt;
+use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use serde_json::json;
-use tracing::info;
+use tracing::{error, info};
 
 use lattice_cli::commands::install::Installer;
-use lattice_cli::commands::uninstall::{UninstallArgs, Uninstaller};
-use lattice_operator::crd::LatticeCluster;
+use lattice_operator::crd::{ClusterPhase, LatticeCluster};
 
+use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, load_cluster_config,
-    load_registry_credentials, run_cmd, run_cmd_allow_fail, watch_cluster_phases,
+    load_registry_credentials, run_cmd_allow_fail,
 };
 use super::mesh_tests::start_mesh_test;
 use super::providers::InfraProvider;
 
-// =============================================================================
-// Test Configuration
-// =============================================================================
-
-const E2E_TIMEOUT: Duration = Duration::from_secs(5400); // 90 minutes for upgrade
+const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
+const WORKLOAD_CLUSTER_NAME: &str = "e2e-upgrade";
 const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
+const TEST_TIMEOUT: Duration = Duration::from_secs(90 * 60); // 90 minutes
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(30 * 60); // 30 minutes for upgrade
 
-fn get_upgrade_from_version() -> String {
-    std::env::var("LATTICE_UPGRADE_FROM_VERSION").unwrap_or_else(|_| "1.31.0".to_string())
+fn get_upgrade_versions() -> (String, String) {
+    let from = std::env::var("LATTICE_UPGRADE_FROM_VERSION").unwrap_or_else(|_| "1.31.0".to_string());
+    let to = std::env::var("LATTICE_UPGRADE_TO_VERSION").unwrap_or_else(|_| "1.32.0".to_string());
+    (from, to)
 }
-
-fn get_upgrade_to_version() -> String {
-    std::env::var("LATTICE_UPGRADE_TO_VERSION").unwrap_or_else(|_| "1.32.0".to_string())
-}
-
-fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String, String> {
-    if provider == InfraProvider::Docker {
-        get_docker_kubeconfig(cluster_name)
-    } else {
-        Ok(format!("/tmp/{}-kubeconfig", cluster_name))
-    }
-}
-
-// =============================================================================
-// Cleanup
-// =============================================================================
 
 fn cleanup_bootstrap_clusters() {
     info!("Cleaning up kind bootstrap cluster...");
-    let _ = run_cmd_allow_fail(
-        "kind",
-        &["delete", "cluster", "--name", "lattice-bootstrap"],
-    );
+    let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-bootstrap"]);
 }
-
-// =============================================================================
-// Main Test
-// =============================================================================
 
 #[tokio::test]
 async fn test_upgrade_with_mesh_traffic() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .try_init();
 
-    let from_version = get_upgrade_from_version();
-    let to_version = get_upgrade_to_version();
+    let (from_version, to_version) = get_upgrade_versions();
 
-    info!(from = %from_version, to = %to_version, "Starting upgrade resilience test");
+    info!("=========================================================");
+    info!("UPGRADE RESILIENCE TEST: v{} -> v{}", from_version, to_version);
+    info!("=========================================================");
 
     cleanup_bootstrap_clusters();
 
@@ -108,68 +86,52 @@ async fn test_upgrade_with_mesh_traffic() {
         panic!("Failed to build Lattice image: {}", e);
     }
 
-    let result = tokio::time::timeout(E2E_TIMEOUT, run_upgrade_e2e()).await;
-
-    match result {
+    match tokio::time::timeout(TEST_TIMEOUT, run_upgrade_test()).await {
         Ok(Ok(())) => {
-            info!("TEST PASSED");
+            info!("=========================================================");
+            info!("UPGRADE TEST PASSED");
+            info!("=========================================================");
         }
         Ok(Err(e)) => {
+            error!("=========================================================");
+            error!("UPGRADE TEST FAILED: {}", e);
+            error!("=========================================================");
             cleanup_bootstrap_clusters();
-            panic!("Upgrade E2E test failed: {}", e);
+            panic!("Upgrade test failed: {}", e);
         }
         Err(_) => {
+            error!("=========================================================");
+            error!("UPGRADE TEST TIMED OUT");
+            error!("=========================================================");
             cleanup_bootstrap_clusters();
-            panic!("Upgrade E2E test timed out after {:?}", E2E_TIMEOUT);
+            panic!("Upgrade test timed out after {:?}", TEST_TIMEOUT);
         }
     }
 }
 
-async fn run_upgrade_e2e() -> Result<(), String> {
-    let from_version = get_upgrade_from_version();
-    let to_version = get_upgrade_to_version();
+async fn run_upgrade_test() -> Result<(), String> {
+    let (from_version, to_version) = get_upgrade_versions();
 
-    // =========================================================================
-    // Load cluster configs
-    // =========================================================================
-    info!("Loading cluster configurations...");
-
-    let (mgmt_config_content, mgmt_cluster) =
-        load_cluster_config("LATTICE_UPGRADE_MGMT_CONFIG", "docker-mgmt.yaml")?;
-    let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
-    let mgmt_bootstrap = mgmt_cluster.spec.provider.kubernetes.bootstrap.clone();
-    let mgmt_cluster_name = mgmt_cluster.name_any();
+    // Load configurations
+    let (mgmt_config_content, _) =
+        load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
 
     let (_, mut workload_cluster) =
-        load_cluster_config("LATTICE_UPGRADE_WORKLOAD_CONFIG", "docker-workload.yaml")?;
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
+
     let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
-    let workload_cluster_name = workload_cluster.name_any();
 
-    // Override workload cluster version to start at from_version
+    // Override to start at from_version
     workload_cluster.spec.provider.kubernetes.version = from_version.clone();
+    workload_cluster.metadata.name = Some(WORKLOAD_CLUSTER_NAME.to_string());
 
-    info!("Configuration:");
-    info!(
-        "Management:  {} ({} + {:?})",
-        mgmt_cluster_name, mgmt_provider, mgmt_bootstrap
-    );
-    info!(
-        "Workload:    {} ({} + {:?}, starting at v{})",
-        workload_cluster_name, workload_provider, workload_bootstrap, from_version
-    );
-    info!("Upgrade to:  v{}", to_version);
+    ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
 
-    if mgmt_provider == InfraProvider::Docker {
-        ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
-    }
-
-    // =========================================================================
-    // Phase 1: Install Management Cluster
-    // =========================================================================
+    // Install management cluster
     info!("[Phase 1] Installing management cluster...");
-
     let registry_credentials = load_registry_credentials();
+
     let installer = Installer::new(
         mgmt_config_content,
         LATTICE_IMAGE.to_string(),
@@ -184,74 +146,54 @@ async fn run_upgrade_e2e() -> Result<(), String> {
         .await
         .map_err(|e| format!("Installer failed: {}", e))?;
 
-    info!("Management cluster installation complete!");
+    let mgmt_kubeconfig = get_docker_kubeconfig(MGMT_CLUSTER_NAME)?;
+    let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig).await?;
 
-    // =========================================================================
-    // Phase 2: Create Workload Cluster at v{from_version}
-    // =========================================================================
-    info!(
-        "[Phase 2] Creating workload cluster at v{}...\n",
-        from_version
-    );
-
-    let mgmt_kubeconfig_path = get_kubeconfig(&mgmt_cluster_name, mgmt_provider)?;
-    let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig_path).await?;
+    // Create workload cluster at from_version
+    info!("[Phase 2] Creating workload cluster at v{}...", from_version);
 
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
     api.create(&PostParams::default(), &workload_cluster)
         .await
-        .map_err(|e| format!("Failed to create workload LatticeCluster: {}", e))?;
+        .map_err(|e| format!("Failed to create workload cluster: {}", e))?;
 
-    info!("Workload LatticeCluster created");
-
-    watch_cluster_phases(&mgmt_client, &workload_cluster_name, None).await?;
-    info!("Workload cluster Ready at v{}!", from_version);
+    // Wait for cluster to be ready
+    wait_for_cluster_ready(&mgmt_client, WORKLOAD_CLUSTER_NAME).await?;
+    info!("Workload cluster ready at v{}!", from_version);
 
     // Extract kubeconfig
-    let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", workload_cluster_name);
+    let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
     if workload_provider == InfraProvider::Docker {
         extract_docker_cluster_kubeconfig(
-            &workload_cluster_name,
+            WORKLOAD_CLUSTER_NAME,
             &workload_bootstrap,
             &workload_kubeconfig_path,
         )?;
     }
 
-    // Verify starting version
-    let version_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            &workload_kubeconfig_path,
-            "version",
-            "-o",
-            "json",
-        ],
-    )?;
-    info!("Cluster version info:\n{}", version_output);
-
-    // =========================================================================
-    // Phase 3: Deploy Mesh and Start Traffic
-    // =========================================================================
-    info!("[Phase 3] Deploying mesh services and starting traffic...");
-
+    // Deploy mesh services
+    info!("[Phase 3] Deploying mesh services...");
     let mesh_handle = start_mesh_test(&workload_kubeconfig_path).await?;
 
-    // Initial verification before upgrade
-    info!("Running initial policy verification...");
+    // Initial verification
     tokio::time::sleep(Duration::from_secs(60)).await;
     mesh_handle.check_no_policy_gaps().await?;
-    info!("Initial verification passed - policies are enforced");
+    info!("Initial policy verification passed");
 
-    // =========================================================================
-    // Phase 4: Trigger Kubernetes Upgrade
-    // =========================================================================
-    info!(
-        "[Phase 4] Triggering upgrade from v{} to v{}...\n",
-        from_version, to_version
-    );
+    // Start chaos
+    info!("[Phase 4] Starting chaos monkey...");
+    let chaos_targets = Arc::new(ChaosTargets::new());
+    chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig);
+    chaos_targets.add(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path);
 
-    // Patch the LatticeCluster to trigger upgrade
+    let _chaos = ChaosMonkey::start_with_config(chaos_targets, ChaosConfig::aggressive());
+
+    // Trigger upgrade
+    info!("[Phase 5] Triggering upgrade to v{}...", to_version);
+
+    let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
+    let workload_api: Api<LatticeCluster> = Api::all(workload_client.clone());
+
     let patch = json!({
         "spec": {
             "provider": {
@@ -262,34 +204,87 @@ async fn run_upgrade_e2e() -> Result<(), String> {
         }
     });
 
-    let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
-    let workload_api: Api<LatticeCluster> = Api::all(workload_client.clone());
-
     workload_api
         .patch(
-            &workload_cluster_name,
-            &PatchParams::apply("lattice-e2e-test"),
+            WORKLOAD_CLUSTER_NAME,
+            &PatchParams::apply("lattice-e2e"),
             &Patch::Merge(&patch),
         )
         .await
-        .map_err(|e| format!("Failed to patch cluster version: {}", e))?;
+        .map_err(|e| format!("Failed to trigger upgrade: {}", e))?;
 
-    info!("Upgrade initiated!");
+    // Monitor upgrade with policy checks
+    info!("[Phase 6] Monitoring upgrade (chaos active)...");
+    monitor_upgrade(&workload_kubeconfig_path, &to_version, &mesh_handle).await?;
 
-    // =========================================================================
-    // Phase 5: Monitor for Policy Gaps During Upgrade
-    // =========================================================================
-    info!("[Phase 5] Monitoring for policy gaps during upgrade...");
-    info!("Security invariant: traffic that should be BLOCKED must NEVER be ALLOWED");
-    info!("(Dropped/failed allowed traffic is acceptable during node disruption)\n");
+    // Final verification
+    info!("[Phase 7] Final verification...");
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    mesh_handle.check_no_policy_gaps().await?;
+    mesh_handle.stop_and_verify().await?;
 
-    let upgrade_start = std::time::Instant::now();
-    let upgrade_timeout = Duration::from_secs(1800); // 30 minutes for upgrade
-    let check_interval = Duration::from_secs(30);
+    // Cleanup
+    info!("[Cleanup] Deleting workload cluster...");
+    let _ = workload_api.delete(WORKLOAD_CLUSTER_NAME, &DeleteParams::default()).await;
+    wait_for_cluster_deleted(&mgmt_client, WORKLOAD_CLUSTER_NAME).await?;
+
+    // Force cleanup Docker containers
+    let _ = run_cmd_allow_fail("docker", &["rm", "-f", &format!("{}-control-plane", WORKLOAD_CLUSTER_NAME)]);
+    let _ = run_cmd_allow_fail("docker", &["rm", "-f", &format!("{}-worker", WORKLOAD_CLUSTER_NAME)]);
+
+    info!("Upgrade test complete: v{} -> v{}", from_version, to_version);
+    Ok(())
+}
+
+async fn wait_for_cluster_ready(client: &kube::Client, name: &str) -> Result<(), String> {
+    let api: Api<LatticeCluster> = Api::all(client.clone());
+    let start = Instant::now();
+    let timeout = Duration::from_secs(600);
 
     loop {
-        if upgrade_start.elapsed() > upgrade_timeout {
-            return Err("Upgrade timed out after 30 minutes".to_string());
+        if start.elapsed() > timeout {
+            return Err(format!("Timeout waiting for cluster {} to be ready", name));
+        }
+
+        match api.get(name).await {
+            Ok(cluster) => {
+                if let Some(status) = &cluster.status {
+                    if status.phase == ClusterPhase::Ready {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!("Failed to get cluster {}: {}", name, e));
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+async fn wait_for_cluster_deleted(client: &kube::Client, name: &str) -> Result<(), String> {
+    let api: Api<LatticeCluster> = Api::all(client.clone());
+
+    loop {
+        match api.get(name).await {
+            Ok(_) => tokio::time::sleep(Duration::from_secs(5)).await,
+            Err(kube::Error::Api(ref e)) if e.code == 404 => return Ok(()),
+            Err(e) => return Err(format!("Error checking cluster deletion: {}", e)),
+        }
+    }
+}
+
+async fn monitor_upgrade(
+    kubeconfig_path: &str,
+    target_version: &str,
+    mesh_handle: &super::mesh_tests::MeshTestHandle,
+) -> Result<(), String> {
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed() > UPGRADE_TIMEOUT {
+            return Err("Upgrade timed out".to_string());
         }
 
         // Check for policy gaps
@@ -297,16 +292,13 @@ async fn run_upgrade_e2e() -> Result<(), String> {
             return Err(format!("SECURITY VIOLATION during upgrade: {}", e));
         }
 
-        // Check upgrade progress
-        let nodes_output = run_cmd_allow_fail(
+        // Check node versions
+        let output = run_cmd_allow_fail(
             "kubectl",
             &[
-                "--kubeconfig",
-                &workload_kubeconfig_path,
-                "get",
-                "nodes",
-                "-o",
-                "jsonpath={range .items[*]}{.status.nodeInfo.kubeletVersion} {.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
+                "--kubeconfig", kubeconfig_path,
+                "get", "nodes",
+                "-o", "jsonpath={range .items[*]}{.status.nodeInfo.kubeletVersion} {.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
             ],
         );
 
@@ -314,125 +306,27 @@ async fn run_upgrade_e2e() -> Result<(), String> {
         let mut all_ready = true;
         let mut node_count = 0;
 
-        for line in nodes_output.lines() {
+        for line in output.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
                 node_count += 1;
-                let version = parts[0];
-                let ready = parts[1];
-
-                if !version.contains(&to_version) {
+                if !parts[0].contains(target_version) {
                     all_upgraded = false;
                 }
-                if ready != "True" {
+                if parts[1] != "True" {
                     all_ready = false;
                 }
             }
         }
 
-        let elapsed = upgrade_start.elapsed().as_secs();
-        info!(
-            "[{:3}s] Nodes: {}, All upgraded: {}, All ready: {}",
-            elapsed, node_count, all_upgraded, all_ready
-        );
+        let elapsed = start.elapsed().as_secs();
+        info!("[{:3}s] Nodes: {}, upgraded: {}, ready: {}", elapsed, node_count, all_upgraded, all_ready);
 
         if all_upgraded && all_ready && node_count > 0 {
-            info!(
-                "\n  Upgrade complete! All nodes at v{} and Ready",
-                to_version
-            );
-            break;
+            info!("Upgrade complete - all nodes at v{}", target_version);
+            return Ok(());
         }
 
-        tokio::time::sleep(check_interval).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
     }
-
-    // =========================================================================
-    // Phase 6: Final Verification
-    // =========================================================================
-    info!("[Phase 6] Final policy verification after upgrade...");
-
-    // Wait for mesh to stabilize after upgrade
-    info!("Waiting for mesh to stabilize (120)...");
-    tokio::time::sleep(Duration::from_secs(120)).await;
-
-    // Final policy gap check
-    mesh_handle.check_no_policy_gaps().await?;
-    info!("No policy gaps detected!");
-
-    // Full verification
-    info!("Running full bilateral agreement verification...");
-    mesh_handle.stop_and_verify().await?;
-
-    // Verify final version
-    let version_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            &workload_kubeconfig_path,
-            "version",
-            "-o",
-            "json",
-        ],
-    )?;
-    info!("Final cluster version:\n{}", version_output);
-
-    // =========================================================================
-    // Cleanup
-    // =========================================================================
-    info!("\n[Cleanup] Deleting test clusters...");
-
-    // Delete workload cluster
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            &workload_kubeconfig_path,
-            "delete",
-            "latticecluster",
-            &workload_cluster_name,
-            "--timeout=300s",
-        ],
-    )?;
-
-    // Wait for deletion
-    for _ in 1..=60 {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        let check = run_cmd_allow_fail(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                &mgmt_kubeconfig_path,
-                "get",
-                "latticecluster",
-                &workload_cluster_name,
-                "-o",
-                "name",
-            ],
-        );
-        if check.trim().is_empty() || check.contains("not found") {
-            break;
-        }
-    }
-
-    // Uninstall management cluster
-    let uninstall_args = UninstallArgs {
-        kubeconfig: PathBuf::from(&mgmt_kubeconfig_path),
-        name: Some(mgmt_cluster_name.clone()),
-        yes: true,
-        keep_bootstrap_on_failure: false,
-    };
-
-    let uninstaller = Uninstaller::new(&uninstall_args)
-        .await
-        .map_err(|e| format!("Failed to create uninstaller: {}", e))?;
-
-    uninstaller
-        .run()
-        .await
-        .map_err(|e| format!("Uninstall failed: {}", e))?;
-
-    info!(from = %from_version, to = %to_version, "Upgrade resilience test complete");
-
-    Ok(())
 }

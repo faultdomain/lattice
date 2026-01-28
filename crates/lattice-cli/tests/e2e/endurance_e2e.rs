@@ -2,16 +2,16 @@
 //!
 //! # Design
 //!
-//! Simple batch lifecycle:
-//! 1. Create 2-4 clusters simultaneously on mgmt cluster
-//! 2. Wait for all to reach Running state
-//! 3. Wait 20 seconds
-//! 4. Delete all clusters
-//! 5. Repeat forever until 10 minute timeout
+//! Runs forever until failure. Each batch:
+//! 1. Create 4 clusters simultaneously
+//! 2. Wait for all to reach Running
+//! 3. Wait 20 seconds (chaos active)
+//! 4. Delete all clusters (chaos active during unpivot)
+//! 5. Repeat
 //!
 //! # Failure Conditions
 //!
-//! - Total test duration exceeds 10 minutes = FAILURE
+//! - Any batch exceeds 10 minute timeout = FAILURE
 //! - Any cluster failing to provision = FAILURE
 //! - Any cluster failing to delete = FAILURE
 //!
@@ -43,7 +43,7 @@ use super::helpers::{
 
 const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
 const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
-const TEST_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes
+const BATCH_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes per batch
 const SETTLE_DELAY: Duration = Duration::from_secs(20);
 
 fn cleanup_bootstrap_clusters() {
@@ -66,7 +66,7 @@ async fn test_endurance_loop() {
         .try_init();
 
     info!("=========================================================");
-    info!("ENDURANCE TEST - RUNS FOREVER UNTIL 10 MINUTE TIMEOUT");
+    info!("ENDURANCE TEST - RUNS FOREVER (10 min timeout per batch)");
     info!("=========================================================");
 
     cleanup_bootstrap_clusters();
@@ -75,27 +75,17 @@ async fn test_endurance_loop() {
         panic!("Failed to build Lattice image: {}", e);
     }
 
-    match run_endurance_test().await {
-        Ok(iterations) => {
-            info!("=========================================================");
-            info!("ENDURANCE TEST PASSED - {} iterations in 10 minutes", iterations);
-            info!("=========================================================");
-        }
-        Err(e) => {
-            error!("=========================================================");
-            error!("ENDURANCE TEST FAILED");
-            error!("=========================================================");
-            error!("Error: {}", e);
-            error!("=========================================================");
-            cleanup_bootstrap_clusters();
-            panic!("Endurance test failed: {}", e);
-        }
+    // This runs forever until failure
+    if let Err(e) = run_endurance_test().await {
+        error!("=========================================================");
+        error!("ENDURANCE TEST FAILED: {}", e);
+        error!("=========================================================");
+        cleanup_bootstrap_clusters();
+        panic!("Endurance test failed: {}", e);
     }
 }
 
-async fn run_endurance_test() -> Result<u64, String> {
-    let test_start = Instant::now();
-
+async fn run_endurance_test() -> Result<(), String> {
     // Load configurations
     let (mgmt_config_content, _) =
         load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
@@ -139,20 +129,17 @@ async fn run_endurance_test() -> Result<u64, String> {
     let _chaos = ChaosMonkey::start_with_config(chaos_targets.clone(), ChaosConfig::aggressive());
 
     let mut iteration = 0u64;
+    let test_start = Instant::now();
 
-    // Loop forever until timeout
+    info!("Starting batch iterations (runs forever, 10 min timeout per batch)...");
+
+    // Loop forever until failure
     loop {
-        // Check timeout
-        if test_start.elapsed() >= TEST_TIMEOUT {
-            info!("Test timeout reached after {} iterations", iteration);
-            return Ok(iteration);
-        }
-
         iteration += 1;
-        let remaining = TEST_TIMEOUT.saturating_sub(test_start.elapsed());
+        let batch_start = Instant::now();
         info!(
-            "[ITERATION {}] Starting batch (time remaining: {:?})",
-            iteration, remaining
+            "[ITERATION {}] Starting batch (total runtime: {:?})",
+            iteration, test_start.elapsed()
         );
 
         // Create cluster configs with unique names for this iteration
@@ -169,51 +156,67 @@ async fn run_endurance_test() -> Result<u64, String> {
             })
             .collect();
 
-        // Create all clusters in parallel
-        info!("[ITERATION {}] Creating {} clusters...", iteration, clusters.len());
-        create_clusters_parallel(&mgmt_client, &clusters).await?;
+        // Run batch with timeout
+        let batch_result = tokio::time::timeout(BATCH_TIMEOUT, async {
+            // Create all clusters in parallel
+            info!("[ITERATION {}] Creating {} clusters...", iteration, clusters.len());
+            create_clusters_parallel(&mgmt_client, &clusters).await?;
 
-        // Wait for all to reach Running
-        info!("[ITERATION {}] Waiting for all clusters to reach Running...", iteration);
-        wait_all_running(&mgmt_client, &cluster_names).await?;
-        info!("[ITERATION {}] All clusters running!", iteration);
+            // Wait for all to reach Running
+            info!("[ITERATION {}] Waiting for all clusters to reach Running...", iteration);
+            wait_all_running(&mgmt_client, &cluster_names).await?;
+            info!("[ITERATION {}] All clusters running!", iteration);
 
-        // Add workload clusters to chaos targets
-        for name in &cluster_names {
-            let kubeconfig_path = format!("/tmp/{}-kubeconfig", name);
-            // Try to get kubeconfig - if it fails, skip adding to chaos (cluster may not be fully ready)
-            if let Ok(kc) = get_docker_kubeconfig(name) {
-                if std::fs::write(&kubeconfig_path, &kc).is_ok() {
-                    chaos_targets.add(name, &kubeconfig_path);
+            // Add workload clusters to chaos targets
+            for name in &cluster_names {
+                let kubeconfig_path = format!("/tmp/{}-kubeconfig", name);
+                if let Ok(kc) = get_docker_kubeconfig(name) {
+                    if std::fs::write(&kubeconfig_path, &kc).is_ok() {
+                        chaos_targets.add(name, &kubeconfig_path);
+                    }
                 }
             }
-        }
 
-        // Wait 20 seconds with chaos running against all clusters
-        info!("[ITERATION {}] Waiting {} seconds (chaos active)...", iteration, SETTLE_DELAY.as_secs());
-        tokio::time::sleep(SETTLE_DELAY).await;
+            // Wait 20 seconds with chaos running against all clusters
+            info!("[ITERATION {}] Waiting {} seconds (chaos active)...", iteration, SETTLE_DELAY.as_secs());
+            tokio::time::sleep(SETTLE_DELAY).await;
 
-        // Delete all clusters in parallel (chaos continues during unpivot)
-        info!("[ITERATION {}] Deleting all clusters...", iteration);
-        delete_clusters_parallel(&mgmt_client, &cluster_names).await?;
+            // Delete all clusters in parallel (chaos continues during unpivot)
+            info!("[ITERATION {}] Deleting all clusters...", iteration);
+            delete_clusters_parallel(&mgmt_client, &cluster_names).await?;
 
-        // Wait for all to be fully deleted
-        info!("[ITERATION {}] Waiting for deletion to complete...", iteration);
-        wait_all_deleted(&mgmt_client, &cluster_names).await?;
-        info!("[ITERATION {}] All clusters deleted!", iteration);
+            // Wait for all to be fully deleted
+            info!("[ITERATION {}] Waiting for deletion to complete...", iteration);
+            wait_all_deleted(&mgmt_client, &cluster_names).await?;
+            info!("[ITERATION {}] All clusters deleted!", iteration);
 
-        // Remove deleted clusters from chaos targets
+            Ok::<(), String>(())
+        })
+        .await;
+
+        // Remove clusters from chaos targets (whether success or failure)
         for name in &cluster_names {
             chaos_targets.remove(name);
         }
 
-        // Force cleanup any Docker containers (belt and suspenders)
+        // Force cleanup Docker containers
         for name in &cluster_names {
             let _ = run_cmd_allow_fail("docker", &["rm", "-f", &format!("{}-control-plane", name)]);
             let _ = run_cmd_allow_fail("docker", &["rm", "-f", &format!("{}-worker", name)]);
         }
 
-        info!("[ITERATION {}] Complete!", iteration);
+        // Check batch result
+        match batch_result {
+            Ok(Ok(())) => {
+                info!("[ITERATION {}] Complete in {:?}!", iteration, batch_start.elapsed());
+            }
+            Ok(Err(e)) => {
+                return Err(format!("Batch {} failed: {}", iteration, e));
+            }
+            Err(_) => {
+                return Err(format!("Batch {} timed out after {:?}", iteration, BATCH_TIMEOUT));
+            }
+        }
     }
 }
 
