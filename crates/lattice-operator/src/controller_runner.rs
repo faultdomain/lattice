@@ -11,7 +11,9 @@ use kube::runtime::Controller;
 use kube::{Api, Client};
 
 use lattice_operator::bootstrap::DefaultManifestGenerator;
-use lattice_operator::cloud_provider::{self as cloud_provider_ctrl, Context as CloudProviderContext};
+use lattice_operator::cloud_provider::{
+    self as cloud_provider_ctrl, Context as CloudProviderContext,
+};
 use lattice_operator::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
     service_reconcile, Context, ServiceContext,
@@ -21,7 +23,9 @@ use lattice_operator::crd::{
     SecretsProvider,
 };
 use lattice_operator::parent::ParentServers;
-use lattice_operator::secrets_provider::{self as secrets_provider_ctrl, Context as SecretsProviderContext};
+use lattice_operator::secrets_provider::{
+    self as secrets_provider_ctrl, Context as SecretsProviderContext,
+};
 
 use crate::ControllerMode;
 
@@ -147,33 +151,37 @@ fn create_service_controllers(
     let services_for_watch = services.clone();
 
     let svc_ctrl = Controller::new(services, WatcherConfig::default())
-        .watches(services_for_watch, WatcherConfig::default(), move |service| {
-            let graph = graph_for_watch.clone();
-            let namespace = match service.metadata.namespace.as_deref() {
-                Some(ns) => ns,
-                None => return vec![],
-            };
-            let name = service.metadata.name.as_deref().unwrap_or_default();
+        .watches(
+            services_for_watch,
+            WatcherConfig::default(),
+            move |service| {
+                let graph = graph_for_watch.clone();
+                let namespace = match service.metadata.namespace.as_deref() {
+                    Some(ns) => ns,
+                    None => return vec![],
+                };
+                let name = service.metadata.name.as_deref().unwrap_or_default();
 
-            // Get affected services (dependencies + dependents)
-            let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
-            affected.extend(graph.get_dependents(namespace, name));
-            affected.sort();
-            affected.dedup();
+                // Get affected services (dependencies + dependents)
+                let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
+                affected.extend(graph.get_dependents(namespace, name));
+                affected.sort();
+                affected.dedup();
 
-            tracing::debug!(
-                service = %name,
-                namespace = %namespace,
-                affected_count = affected.len(),
-                "Triggering re-reconciliation of affected services"
-            );
+                tracing::debug!(
+                    service = %name,
+                    namespace = %namespace,
+                    affected_count = affected.len(),
+                    "Triggering re-reconciliation of affected services"
+                );
 
-            let ns = namespace.to_string();
-            affected
-                .into_iter()
-                .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
-                .collect()
-        })
+                let ns = namespace.to_string();
+                affected
+                    .into_iter()
+                    .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
+                    .collect()
+            },
+        )
         .shutdown_on_signal()
         .run(service_reconcile, service_error_policy, ctx.clone())
         .for_each(|result| async move {

@@ -1020,6 +1020,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            authorization: None,
         }
     }
 

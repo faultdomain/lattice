@@ -1,19 +1,21 @@
-//! LatticeService controller for Cedar policy management
+//! LatticeService and LatticeServicePolicy controllers for Cedar policy management
 //!
-//! Watches LatticeService CRDs and updates the policy store when
-//! services with authorization configuration are created/updated/deleted.
+//! Watches LatticeService and LatticeServicePolicy CRDs and updates the policy store
+//! when services with authorization configuration are created/updated/deleted.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use kube::api::ListParams;
 use kube::runtime::controller::Action;
 use kube::runtime::watcher::Config as WatcherConfig;
 use kube::runtime::Controller;
 use kube::{Api, Client, ResourceExt};
 use tracing::{debug, error, info, warn};
 
-use lattice_common::crd::LatticeService;
+use lattice_common::crd::{LatticeService, LatticeServicePolicy};
 
 use crate::error::{CedarError, Result};
 use crate::jwt::{JwksCache, JwtValidator};
@@ -102,6 +104,10 @@ impl Context {
     }
 }
 
+// =============================================================================
+// LatticeService Reconciler
+// =============================================================================
+
 /// Reconcile a LatticeService for Cedar authorization
 pub async fn reconcile(
     service: Arc<LatticeService>,
@@ -185,6 +191,9 @@ pub async fn reconcile(
         }
     }
 
+    // Update policy matches for this service based on LatticeServicePolicies
+    update_service_policy_matches(&service, ctx.clone()).await?;
+
     // Requeue after 5 minutes to catch any changes
     Ok(Action::requeue(Duration::from_secs(300)))
 }
@@ -209,12 +218,230 @@ pub fn error_policy(
     Action::requeue(Duration::from_secs(30))
 }
 
-/// Start the Cedar policy controller
+/// Update the policy matches for a service based on all LatticeServicePolicies
+async fn update_service_policy_matches(service: &LatticeService, ctx: Arc<Context>) -> Result<()> {
+    let service_namespace = service.namespace().unwrap_or_default();
+    let service_name = service.name_any();
+    let service_labels = service.labels().clone();
+
+    // List all LatticeServicePolicies
+    let policies: Api<LatticeServicePolicy> = Api::all(ctx.client());
+    let policy_list = policies.list(&ListParams::default()).await?;
+
+    // Get namespace labels (for namespace selector matching)
+    let ns_api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(ctx.client());
+    let namespace_labels = ns_api
+        .get(&service_namespace)
+        .await
+        .map(|ns| ns.labels().clone())
+        .unwrap_or_default();
+
+    // Find all matching policies
+    let mut matching_policies = Vec::new();
+
+    for policy in policy_list {
+        let policy_namespace = policy.namespace().unwrap_or_default();
+        let policy_name = policy.name_any();
+        let policy_key = format!("{}/{}", policy_namespace, policy_name);
+
+        let selector = &policy.spec.selector;
+        if selector.matches(
+            &service_labels,
+            &namespace_labels,
+            &policy_namespace,
+            &service_namespace,
+        ) {
+            matching_policies.push(policy_key);
+        }
+    }
+
+    // Update the policy store with the matching policies
+    ctx.policy_store()
+        .set_matches(&service_namespace, &service_name, matching_policies);
+
+    Ok(())
+}
+
+// =============================================================================
+// LatticeServicePolicy Reconciler
+// =============================================================================
+
+/// Reconcile a LatticeServicePolicy
+pub async fn reconcile_policy(
+    policy: Arc<LatticeServicePolicy>,
+    ctx: Arc<Context>,
+) -> std::result::Result<Action, CedarError> {
+    let namespace = policy.namespace().unwrap_or_default();
+    let name = policy.name_any();
+    let policy_key = format!("{}/{}", namespace, name);
+    let resource_version = policy.resource_version().unwrap_or_default();
+
+    debug!(
+        policy = %policy_key,
+        "Reconciling LatticeServicePolicy for Cedar"
+    );
+
+    // Extract Cedar policy if configured
+    let cedar_policy = policy
+        .spec
+        .authorization
+        .as_ref()
+        .and_then(|a| a.cedar.as_ref())
+        .map(|c| c.policies.clone());
+
+    let priority = policy.spec.priority;
+
+    match cedar_policy {
+        Some(policy_text) => {
+            // Update the inherited policy store
+            ctx.policy_store().upsert_inherited(
+                &policy_key,
+                &policy_text,
+                &resource_version,
+                priority,
+            )?;
+
+            // Extract OIDC config if present (for inherited policies)
+            if let Some(oidc_crd) = policy
+                .spec
+                .authorization
+                .as_ref()
+                .and_then(|a| a.oidc.as_ref())
+            {
+                let jwks_uri = oidc_crd.jwks_uri.clone().unwrap_or_else(|| {
+                    format!(
+                        "{}/.well-known/jwks.json",
+                        oidc_crd.issuer.trim_end_matches('/')
+                    )
+                });
+
+                // Preload JWKS
+                ctx.jwks_cache().preload(jwks_uri);
+            }
+
+            info!(
+                policy = %policy_key,
+                priority = priority,
+                "Inherited Cedar policy updated"
+            );
+        }
+        None => {
+            // No policy text - remove from store if exists
+            if ctx.policy_store().remove_inherited(&policy_key) {
+                info!(policy = %policy_key, "Inherited Cedar policy removed");
+            }
+        }
+    }
+
+    // Update matches for all services that might be affected by this policy
+    update_all_service_matches(&policy, ctx.clone()).await?;
+
+    // Requeue after 5 minutes
+    Ok(Action::requeue(Duration::from_secs(300)))
+}
+
+/// Error policy for LatticeServicePolicy controller
+pub fn policy_error_policy(
+    policy: Arc<LatticeServicePolicy>,
+    error: &CedarError,
+    _ctx: Arc<Context>,
+) -> Action {
+    let namespace = policy.namespace().unwrap_or_default();
+    let name = policy.name_any();
+
+    warn!(
+        namespace = %namespace,
+        policy = %name,
+        error = %error,
+        "LatticeServicePolicy reconciliation error, will retry"
+    );
+
+    Action::requeue(Duration::from_secs(30))
+}
+
+/// Update policy matches for all services that might be affected by this policy
+async fn update_all_service_matches(
+    policy: &LatticeServicePolicy,
+    ctx: Arc<Context>,
+) -> Result<()> {
+    let policy_namespace = policy.namespace().unwrap_or_default();
+    let policy_name = policy.name_any();
+    let policy_key = format!("{}/{}", policy_namespace, policy_name);
+    let selector = &policy.spec.selector;
+
+    // List all LatticeServices
+    let services: Api<LatticeService> = Api::all(ctx.client());
+    let service_list = services.list(&ListParams::default()).await?;
+
+    // Get namespace labels cache
+    let ns_api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(ctx.client());
+    let ns_list = ns_api.list(&ListParams::default()).await?;
+
+    let namespace_labels: BTreeMap<String, BTreeMap<String, String>> = ns_list
+        .into_iter()
+        .map(|ns| (ns.name_any(), ns.labels().clone()))
+        .collect();
+
+    let mut matched_count = 0u32;
+
+    for service in service_list {
+        let service_namespace = service.namespace().unwrap_or_default();
+        let service_name = service.name_any();
+        let service_labels = service.labels().clone();
+
+        let ns_labels = namespace_labels
+            .get(&service_namespace)
+            .cloned()
+            .unwrap_or_default();
+
+        // Check if this policy matches this service
+        let matches = selector.matches(
+            &service_labels,
+            &ns_labels,
+            &policy_namespace,
+            &service_namespace,
+        );
+
+        // Get current matches for this service
+        let mut current_matches = ctx
+            .policy_store()
+            .get_matches(&service_namespace, &service_name);
+
+        if matches {
+            matched_count += 1;
+            // Add this policy if not already present
+            if !current_matches.contains(&policy_key) {
+                current_matches.push(policy_key.clone());
+            }
+        } else {
+            // Remove this policy if present
+            current_matches.retain(|p| p != &policy_key);
+        }
+
+        // Update the matches
+        ctx.policy_store()
+            .set_matches(&service_namespace, &service_name, current_matches);
+    }
+
+    debug!(
+        policy = %policy_key,
+        matched_services = matched_count,
+        "Updated service matches for policy"
+    );
+
+    Ok(())
+}
+
+// =============================================================================
+// Controller Runners
+// =============================================================================
+
+/// Start the Cedar policy controller for LatticeService
 pub async fn run_controller(ctx: Arc<Context>) -> Result<()> {
     let client = ctx.client();
     let services: Api<LatticeService> = Api::all(client);
 
-    info!("Starting Cedar policy controller");
+    info!("Starting Cedar policy controller for LatticeService");
 
     Controller::new(services, WatcherConfig::default())
         .shutdown_on_signal()
@@ -230,6 +457,45 @@ pub async fn run_controller(ctx: Arc<Context>) -> Result<()> {
             }
         })
         .await;
+
+    Ok(())
+}
+
+/// Start the Cedar policy controller for LatticeServicePolicy
+pub async fn run_policy_controller(ctx: Arc<Context>) -> Result<()> {
+    let client = ctx.client();
+    let policies: Api<LatticeServicePolicy> = Api::all(client);
+
+    info!("Starting Cedar policy controller for LatticeServicePolicy");
+
+    Controller::new(policies, WatcherConfig::default())
+        .shutdown_on_signal()
+        .run(reconcile_policy, policy_error_policy, ctx)
+        .for_each(|result| async move {
+            match result {
+                Ok(action) => {
+                    debug!(?action, "LatticeServicePolicy reconciliation completed");
+                }
+                Err(e) => {
+                    error!(error = ?e, "LatticeServicePolicy reconciliation error");
+                }
+            }
+        })
+        .await;
+
+    Ok(())
+}
+
+/// Start both Cedar policy controllers concurrently
+pub async fn run_all_controllers(ctx: Arc<Context>) -> Result<()> {
+    info!("Starting Cedar policy controllers");
+
+    let ctx1 = ctx.clone();
+    let ctx2 = ctx;
+
+    tokio::try_join!(async move { run_controller(ctx1).await }, async move {
+        run_policy_controller(ctx2).await
+    },)?;
 
     Ok(())
 }

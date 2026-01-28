@@ -8,7 +8,8 @@ use kube::Client;
 pub fn start_cedar_server(client: Client, port: u16) {
     tokio::spawn(async move {
         tracing::info!(port, "Starting Cedar ExtAuth gRPC server");
-        let addr: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse().expect("valid address");
+        let addr: std::net::SocketAddr =
+            format!("0.0.0.0:{}", port).parse().expect("valid address");
         let ctx = Arc::new(lattice_cedar::Context::new(client.clone()));
 
         tokio::select! {

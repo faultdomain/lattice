@@ -1027,6 +1027,16 @@ impl AgentClient {
                 // like LatticeCluster CRD and resource.
             }
             Some(Command::PivotManifests(cmd)) => {
+                // Guard: Skip if already pivoting to prevent concurrent clusterctl processes
+                let current_state = *agent_state.read().await;
+                if current_state == AgentState::Pivoting {
+                    debug!(
+                        namespace = %cmd.target_namespace,
+                        "Ignoring pivot command - already pivoting"
+                    );
+                    return;
+                }
+
                 info!(
                     manifests = cmd.manifests.len(),
                     cloud_providers = cmd.cloud_providers.len(),

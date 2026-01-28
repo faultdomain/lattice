@@ -105,12 +105,13 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             .cloned()
             .unwrap_or_default();
 
-        let needs_registration = matches!(phase, ClusterPhase::Provisioning | ClusterPhase::Pivoting)
-            || cluster
-                .status
-                .as_ref()
-                .map(|s| s.bootstrap_complete)
-                .unwrap_or(false);
+        let needs_registration =
+            matches!(phase, ClusterPhase::Provisioning | ClusterPhase::Pivoting)
+                || cluster
+                    .status
+                    .as_ref()
+                    .map(|s| s.bootstrap_complete)
+                    .unwrap_or(false);
 
         if !needs_registration {
             tracing::debug!(cluster = %name, phase = ?phase, "Skipping re-registration (not in Provisioning/Pivoting)");

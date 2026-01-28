@@ -7,9 +7,7 @@ use crate::bootstrap::ManifestGenerator;
 use crate::parent::ParentServers;
 
 /// Start background CA rotation task (checks daily)
-pub fn start_ca_rotation<G: ManifestGenerator + 'static>(
-    parent_servers: Arc<ParentServers<G>>,
-) {
+pub fn start_ca_rotation<G: ManifestGenerator + 'static>(parent_servers: Arc<ParentServers<G>>) {
     tokio::spawn(async move {
         // Check immediately on startup
         if let Err(e) = parent_servers.rotate_ca_if_needed().await {

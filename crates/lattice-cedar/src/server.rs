@@ -17,6 +17,7 @@ use crate::entity::{Action, EntityBuilder, Resource};
 use crate::error::{CedarError, Result};
 use crate::jwt::{ValidatedToken, ValidationConfig};
 use crate::metrics::{CedarMetrics, Timer};
+use crate::policy::PolicyDecision;
 
 /// Cedar ExtAuth gRPC server
 pub struct CedarAuthzServer {
@@ -185,7 +186,13 @@ impl CedarAuthzService {
         CheckResponse::with_status(Status::unauthenticated(message))
     }
 
-    /// Perform authorization check
+    /// Perform authorization check using the two-tier policy model
+    ///
+    /// Evaluation order:
+    /// 1. All matching LatticeServicePolicy `forbid` rules -> if ANY matches, DENY
+    /// 2. LatticeService embedded Cedar policy -> if permit matches, ALLOW
+    /// 3. All matching LatticeServicePolicy `permit` rules -> if ANY matches, ALLOW
+    /// 4. Default: DENY (or ALLOW if no policies configured)
     async fn do_check(&self, request: CheckRequest) -> Result<CheckResponse> {
         let timer = Timer::start();
 
@@ -200,29 +207,24 @@ impl CedarAuthzService {
             "Processing authorization request"
         );
 
-        // Check if service has authorization configured
-        let (policy_set, oidc_config) = {
-            let policies = self.ctx.policy_store();
+        let policies = self.ctx.policy_store();
 
-            match policies.get(&namespace, &service) {
-                Some(ps) => {
-                    self.metrics.record_cache_hit();
-                    // Get OIDC config from service
-                    let oidc = self.ctx.get_oidc_config(&namespace, &service);
-                    (ps, oidc)
-                }
-                None => {
-                    // No policy configured - allow by default
-                    self.metrics.record_cache_miss();
-                    debug!(
-                        namespace = %namespace,
-                        service = %service,
-                        "No policy configured, allowing request"
-                    );
-                    return Ok(self.allow_response());
-                }
-            }
-        };
+        // Check if service has any policies (embedded or inherited)
+        if !policies.has_any_policy(&namespace, &service) {
+            // No policy configured - allow by default
+            self.metrics.record_cache_miss();
+            debug!(
+                namespace = %namespace,
+                service = %service,
+                "No policy configured, allowing request"
+            );
+            return Ok(self.allow_response());
+        }
+
+        self.metrics.record_cache_hit();
+
+        // Get OIDC config from service
+        let oidc_config = self.ctx.get_oidc_config(&namespace, &service);
 
         // Validate JWT if OIDC is configured
         let validated_token: Option<ValidatedToken> = if let Some(oidc) = oidc_config {
@@ -267,14 +269,14 @@ impl CedarAuthzService {
             self.entity_builder
                 .build_request(validated_token.as_ref(), action, &resource)?;
 
-        // Evaluate policy
-        let authorizer = cedar_policy::Authorizer::new();
-        let response = authorizer.is_authorized(&cedar_request, &policy_set, &entities);
+        // Evaluate using the two-tier policy model
+        let decision =
+            policies.evaluate_with_inherited(&namespace, &service, &cedar_request, &entities);
 
         let elapsed = timer.elapsed();
 
-        match response.decision() {
-            cedar_policy::Decision::Allow => {
+        match decision {
+            PolicyDecision::Allow => {
                 self.metrics.record_allowed(elapsed);
                 debug!(
                     namespace = %namespace,
@@ -285,22 +287,29 @@ impl CedarAuthzService {
                 );
                 Ok(self.allow_response())
             }
-            cedar_policy::Decision::Deny => {
+            PolicyDecision::Deny => {
                 self.metrics.record_denied(elapsed);
-                let reasons: Vec<String> = response
-                    .diagnostics()
-                    .reason()
-                    .map(|p| p.to_string())
-                    .collect();
                 debug!(
                     namespace = %namespace,
                     service = %service,
                     decision = "deny",
-                    reasons = ?reasons,
                     elapsed_us = elapsed.as_micros(),
                     "Authorization decision"
                 );
                 Ok(self.deny_response("access denied by policy"))
+            }
+            PolicyDecision::NoMatch => {
+                // No policies matched - this shouldn't happen if has_any_policy returned true
+                // But if it does, allow by default (same as no policy configured)
+                self.metrics.record_allowed(elapsed);
+                debug!(
+                    namespace = %namespace,
+                    service = %service,
+                    decision = "allow (no match)",
+                    elapsed_us = elapsed.as_micros(),
+                    "Authorization decision"
+                );
+                Ok(self.allow_response())
             }
         }
     }

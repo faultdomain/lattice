@@ -8,6 +8,7 @@ mod external_service;
 mod providers;
 mod secrets_provider;
 mod service;
+mod service_policy;
 mod types;
 
 pub use cloud_provider::{
@@ -34,6 +35,11 @@ pub use service::{
     ResourceRequirements, ResourceSpec, ResourceType, RetryConfig, SecurityContext, ServicePhase,
     ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode, VolumeAccessMode, VolumeMount,
     VolumeParams,
+};
+pub use service_policy::{
+    LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,
+    LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,
+    ServiceSelector,
 };
 pub use types::{
     AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,

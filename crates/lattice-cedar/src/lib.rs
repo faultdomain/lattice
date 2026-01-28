@@ -52,11 +52,14 @@ pub mod server;
 
 mod error;
 
-pub use controller::{error_policy, reconcile, Context};
+pub use controller::{
+    error_policy, policy_error_policy, reconcile, reconcile_policy, run_all_controllers,
+    run_controller, run_policy_controller, Context,
+};
 pub use entity::{Action, EntityBuilder, Principal, Resource};
 pub use error::{CedarError, Result};
 pub use jwt::{JwksCache, JwtValidator};
-pub use policy::{PolicyCompiler, PolicyStore};
+pub use policy::{InheritedPolicyEntry, PolicyCompiler, PolicyDecision, PolicyEntry, PolicyStore};
 pub use server::CedarAuthzServer;
 
 /// Default port for the Cedar ExtAuth gRPC server
