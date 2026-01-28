@@ -28,7 +28,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use lattice_proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentState, CellCommand,
-    PivotPhase, SyncDistributedResourcesCommand, UnpivotAckCommand, UnpivotPhase,
+    PivotPhase, SyncDistributedResourcesCommand,
 };
 
 use crate::{AgentConnection, AgentRegistry, SharedAgentRegistry};
@@ -82,20 +82,10 @@ async fn handle_agent_message_impl(
                 push_resources_for_recovery(kube_client.clone(), command_tx.clone()).await;
             }
 
-            // If agent crashed waiting for unpivot ACK, resend it
-            if ready.unpivot_phase() == UnpivotPhase::WaitingForAck {
-                info!(cluster = %cluster_name, "Agent waiting for unpivot ACK (crash recovery), resending");
-                let ack = CellCommand {
-                    command_id: format!("unpivot-ack-recovery-{}", cluster_name),
-                    command: Some(Command::UnpivotAck(UnpivotAckCommand {
-                        success: true,
-                        error_message: String::new(),
-                    })),
-                };
-                if let Err(e) = command_tx.send(ack).await {
-                    error!(cluster = %cluster_name, error = %e, "Failed to resend UnpivotAck");
-                }
-            }
+            // NOTE: No ACK recovery needed for unpivot. Once the parent has imported
+            // and unpaused CAPI resources, it owns the child's infrastructure and will
+            // delete it via CAPI. The child cluster goes away at the infrastructure level,
+            // so the child's finalizer becomes irrelevant.
         }
         Some(Payload::BootstrapComplete(bc)) => {
             info!(
@@ -349,18 +339,16 @@ async fn handle_agent_message_impl(
             }
 
             // Now delete the LatticeCluster - finalizer ensures cleanup completes
-            let delete_result = match api.delete(cluster_name, &Default::default()).await {
+            match api.delete(cluster_name, &Default::default()).await {
                 Ok(_) => {
                     info!(
                         cluster = %cluster_name,
                         "LatticeCluster deletion initiated (finalizer will ensure cleanup)"
                     );
-                    Ok(())
                 }
                 Err(kube::Error::Api(ae)) if ae.code == 404 => {
                     // Already deleted or doesn't exist
                     debug!(cluster = %cluster_name, "LatticeCluster already deleted");
-                    Ok(())
                 }
                 Err(e) => {
                     error!(
@@ -368,27 +356,18 @@ async fn handle_agent_message_impl(
                         error = %e,
                         "Failed to delete LatticeCluster"
                     );
-                    Err(e.to_string())
                 }
             };
 
-            // Send ACK back to child so it can remove its finalizer
-            let ack = CellCommand {
-                command_id: format!("unpivot-ack-{}", cluster_name),
-                command: Some(Command::UnpivotAck(UnpivotAckCommand {
-                    success: delete_result.is_ok(),
-                    error_message: delete_result.err().unwrap_or_default(),
-                })),
-            };
-            if let Err(e) = command_tx.send(ack).await {
-                error!(
-                    cluster = %cluster_name,
-                    error = %e,
-                    "Failed to send UnpivotAck to child"
-                );
-            } else {
-                info!(cluster = %cluster_name, "UnpivotAck sent to child");
-            }
+            // The agent handles unpivot by continuously sending ClusterDeleting until
+            // the controller successfully imports and unpauses the CAPI resources.
+            // Sending ACK prematurely causes the child to remove its finalizer
+            // before the parent has actually taken ownership of the CAPI resources.
+            // If the parent crashes between ACK and unpause, the child's
+            // LatticeCluster gets deleted and the cluster becomes orphaned.
+            //
+            // The controller will send the ACK after unpause_capi_cluster succeeds.
+            info!(cluster = %cluster_name, "Unpivot manifests stored, waiting for controller to import and unpause before ACK");
         }
         Some(Payload::KubernetesResponse(resp)) => {
             debug!(
@@ -730,7 +709,6 @@ mod tests {
                 state: AgentState::Provisioning.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
 
@@ -761,7 +739,6 @@ mod tests {
                 state: AgentState::Provisioning.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg1, &tx).await;
@@ -775,7 +752,6 @@ mod tests {
                 state: AgentState::Ready.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg2, &tx).await;
@@ -819,7 +795,6 @@ mod tests {
                 state: AgentState::Pivoting.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -857,7 +832,6 @@ mod tests {
                 state: AgentState::Pivoting.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -895,7 +869,6 @@ mod tests {
                 state: AgentState::Ready.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -989,7 +962,6 @@ mod tests {
                 state: AgentState::Ready.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.cluster1:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg1, &tx).await;
@@ -1003,7 +975,6 @@ mod tests {
                 state: AgentState::Provisioning.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.cluster2:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg2, &tx).await;
@@ -1037,7 +1008,6 @@ mod tests {
                 state: AgentState::Provisioning.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg, &tx).await;
@@ -1115,7 +1085,6 @@ mod tests {
                 state: AgentState::Pivoting.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -1184,7 +1153,6 @@ mod tests {
                 state: AgentState::Pivoting.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -1228,7 +1196,6 @@ mod tests {
                 state: AgentState::Pivoting.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -1292,7 +1259,6 @@ mod tests {
                 state: AgentState::Pivoting.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -1353,7 +1319,6 @@ mod tests {
                 state: AgentState::Pivoting.into(),
                 pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
-                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;

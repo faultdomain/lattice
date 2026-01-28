@@ -331,6 +331,79 @@ pub async fn import_from_manifests(
     // TempDir is dropped here, ensuring cleanup
 }
 
+/// Move CAPI resources directly between clusters using --to-kubeconfig
+///
+/// This is the preferred method when you have access to both kubeconfigs.
+/// Unlike the two-step export/import, this:
+/// 1. Moves resources in one command
+/// 2. Automatically deletes source resources after successful import
+/// 3. Handles pause/unpause correctly
+pub async fn move_to_kubeconfig(
+    source_kubeconfig: &Path,
+    target_kubeconfig: &Path,
+    namespace: &str,
+    cluster_name: &str,
+) -> Result<(), ClusterctlError> {
+    let config = RetryConfig {
+        operation: "move",
+        context_name: cluster_name,
+        on_retry: Some(Box::new({
+            let kc = source_kubeconfig.to_path_buf();
+            let ns = namespace.to_string();
+            let cn = cluster_name.to_string();
+            move || {
+                let kc = kc.clone();
+                let ns = ns.clone();
+                let cn = cn.clone();
+                Box::pin(async move {
+                    // Unpause before retry to recover from partial move state
+                    if let Err(e) = unpause_capi_cluster(Some(&kc), &ns, &cn).await {
+                        warn!(
+                            cluster = %cn,
+                            error = %e,
+                            "failed to unpause CAPI cluster before retry"
+                        );
+                    }
+                })
+            }
+        })),
+        retry_delay: RETRY_DELAY,
+    };
+
+    with_retry(config, |_attempt| {
+        let source_kc = source_kubeconfig.to_path_buf();
+        let target_kc = target_kubeconfig.to_path_buf();
+        let namespace = namespace.to_string();
+        let cluster_name = cluster_name.to_string();
+
+        async move {
+            let mut cmd = Command::new("clusterctl");
+            cmd.arg("move")
+                .arg("--kubeconfig")
+                .arg(&source_kc)
+                .arg("--to-kubeconfig")
+                .arg(&target_kc)
+                .arg("--namespace")
+                .arg(&namespace);
+
+            run_command(
+                &mut cmd,
+                &format!("clusterctl move --to-kubeconfig (cluster={})", cluster_name),
+            )
+            .await?;
+
+            info!(
+                cluster = %cluster_name,
+                namespace = %namespace,
+                "CAPI move complete (source resources deleted)"
+            );
+
+            Ok(())
+        }
+    })
+    .await
+}
+
 /// Pause a CAPI cluster (call after export to keep cluster dormant until deletion)
 ///
 /// This is needed because `clusterctl move --to-directory` unpauses the cluster
@@ -350,7 +423,10 @@ pub async fn pause_capi_cluster(
     api.patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
         .await
         .map_err(|e| {
-            ClusterctlError::ExecutionFailed(format!("failed to pause cluster {}: {}", cluster_name, e))
+            ClusterctlError::ExecutionFailed(format!(
+                "failed to pause cluster {}: {}",
+                cluster_name, e
+            ))
         })?;
 
     info!(cluster = %cluster_name, "CAPI cluster paused");
@@ -792,7 +868,12 @@ async fn delete_resource_for_move(
 
     // Step 2: Remove finalizers to prevent CAPI from deleting infrastructure
     // (The child cluster now owns the infrastructure)
-    if !obj.metadata.finalizers.as_ref().is_none_or(|f| f.is_empty()) {
+    if !obj
+        .metadata
+        .finalizers
+        .as_ref()
+        .is_none_or(|f| f.is_empty())
+    {
         let finalizer_patch = serde_json::json!({
             "metadata": {
                 "finalizers": null
@@ -880,7 +961,11 @@ pub async fn delete_pivoted_capi_resources(
         }
     }
 
-    info!(deleted, total = identities.len(), "CAPI resource deletion complete");
+    info!(
+        deleted,
+        total = identities.len(),
+        "CAPI resource deletion complete"
+    );
     Ok(deleted)
 }
 

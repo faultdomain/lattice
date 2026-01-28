@@ -30,6 +30,9 @@ pub use lattice_service::workload;
 pub use lattice_cloud_provider as cloud_provider;
 pub use lattice_secrets_provider as secrets_provider;
 
+// Re-export Cedar authorization
+pub use lattice_cedar as cedar;
+
 // Re-export controllers - these need to stay local as they orchestrate everything
 pub mod controller;
 

@@ -526,8 +526,7 @@ mod tests {
 
     #[test]
     fn test_parse_api_path_lattice_cluster() {
-        let (resource, ns) =
-            parse_api_path("/apis/lattice.dev/v1alpha1/latticeclusters").unwrap();
+        let (resource, ns) = parse_api_path("/apis/lattice.dev/v1alpha1/latticeclusters").unwrap();
         assert_eq!(resource, "latticeclusters");
         assert!(ns.is_none());
     }
@@ -596,7 +595,10 @@ mod tests {
     fn test_parse_watch_query_field_selector() {
         let params = parse_watch_query("fieldSelector=status.phase%3DRunning");
         assert_eq!(params.label_selector, None);
-        assert_eq!(params.field_selector, Some("status.phase%3DRunning".to_string()));
+        assert_eq!(
+            params.field_selector,
+            Some("status.phase%3DRunning".to_string())
+        );
         assert_eq!(params.resource_version, None);
     }
 
@@ -616,10 +618,13 @@ mod tests {
     #[test]
     fn test_parse_watch_query_all_params() {
         let params = parse_watch_query(
-            "labelSelector=app%3Dtest&fieldSelector=status.phase%3DRunning&resourceVersion=999"
+            "labelSelector=app%3Dtest&fieldSelector=status.phase%3DRunning&resourceVersion=999",
         );
         assert_eq!(params.label_selector, Some("app%3Dtest".to_string()));
-        assert_eq!(params.field_selector, Some("status.phase%3DRunning".to_string()));
+        assert_eq!(
+            params.field_selector,
+            Some("status.phase%3DRunning".to_string())
+        );
         assert_eq!(params.resource_version, Some("999".to_string()));
     }
 

@@ -319,5 +319,4 @@ mod tests {
         let result = validate_credentials(&cp).await;
         assert!(result.is_ok());
     }
-
 }

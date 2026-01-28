@@ -67,6 +67,14 @@ enum Commands {
         /// Which controllers to run
         #[arg(long, short, value_enum, default_value = "all")]
         mode: ControllerMode,
+
+        /// Enable Cedar authorization server (ext_authz gRPC service)
+        #[arg(long, env = "LATTICE_ENABLE_CEDAR_AUTHZ")]
+        enable_cedar_authz: bool,
+
+        /// Cedar authorization server port
+        #[arg(long, default_value = "50052", env = "LATTICE_CEDAR_PORT")]
+        cedar_port: u16,
     },
 }
 
@@ -124,8 +132,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Controller { mode }) => run_controller(mode).await,
-        None => run_controller(ControllerMode::All).await,
+        Some(Commands::Controller {
+            mode,
+            enable_cedar_authz,
+            cedar_port,
+        }) => run_controller(mode, enable_cedar_authz, cedar_port).await,
+        None => run_controller(ControllerMode::All, false, 50052).await,
     }
 }
 
@@ -861,8 +873,16 @@ async fn get_cell_server_sans(
 ///
 /// If this cluster has a cellRef (parent), the controller also connects as an agent
 /// to the parent cell for pivot coordination and health reporting.
-async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
-    tracing::info!(mode = ?mode, "Lattice controller starting...");
+async fn run_controller(
+    mode: ControllerMode,
+    enable_cedar_authz: bool,
+    cedar_port: u16,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        mode = ?mode,
+        cedar_authz = enable_cedar_authz,
+        "Lattice controller starting..."
+    );
 
     // Create Kubernetes client
     let client = Client::try_default()
@@ -892,10 +912,8 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
-    // Create unpivot channel for controller -> agent communication
-    let (unpivot_tx, unpivot_rx) = tokio::sync::mpsc::channel(10);
-
     // Start agent (outbound to parent) before cell servers (inbound from children)
+    // The agent handles unpivot automatically by detecting deletion_timestamp on connect
     let agent_cancel_token = tokio_util::sync::CancellationToken::new();
     if let Some(ref cluster_name) = self_cluster_name {
         let client_clone = client.clone();
@@ -906,7 +924,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
                 _ = token.cancelled() => {
                     tracing::info!("Agent connection cancelled");
                 }
-                _ = start_agent_with_retry(&client_clone, &cluster_name_clone, unpivot_rx) => {}
+                _ = start_agent_with_retry(&client_clone, &cluster_name_clone) => {}
             }
         });
     }
@@ -925,6 +943,37 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to start cell servers: {}", e))?;
 
     tracing::info!("Cell servers started");
+
+    // Start Cedar authorization server if enabled
+    if enable_cedar_authz {
+        let cedar_client = client.clone();
+        let cedar_addr: std::net::SocketAddr = format!("0.0.0.0:{}", cedar_port)
+            .parse()
+            .expect("valid socket address");
+
+        tokio::spawn(async move {
+            tracing::info!(port = cedar_port, "Starting Cedar ExtAuth gRPC server");
+
+            let cedar_ctx = std::sync::Arc::new(lattice_cedar::Context::new(cedar_client.clone()));
+
+            // Run controller and server concurrently
+            tokio::select! {
+                result = lattice_cedar::controller::run_controller(cedar_ctx.clone()) => {
+                    if let Err(e) = result {
+                        tracing::error!(error = %e, "Cedar policy controller error");
+                    }
+                }
+                result = async {
+                    let server = lattice_cedar::CedarAuthzServer::new(cedar_ctx, cedar_addr);
+                    server.run().await
+                } => {
+                    if let Err(e) = result {
+                        tracing::error!(error = %e, "Cedar ExtAuth server error");
+                    }
+                }
+            }
+        });
+    }
 
     // Start background CA rotation task (checks daily)
     {
@@ -974,9 +1023,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     }
 
     // Create controller context
-    let mut ctx_builder = Context::builder(client.clone())
-        .parent_servers(parent_servers.clone())
-        .unpivot_channel(unpivot_tx);
+    let mut ctx_builder = Context::builder(client.clone()).parent_servers(parent_servers.clone());
     if let Some(ref name) = self_cluster_name {
         tracing::info!(cluster = %name, "Running as self-managed cluster");
         ctx_builder = ctx_builder.self_cluster_name(name.clone());
@@ -1214,13 +1261,8 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 
 /// Supervise agent connection with automatic reconnection.
 /// If a parent cell is configured, maintains connection indefinitely with retries.
-/// Also handles unpivot requests from the controller.
-/// Runs in background - does not block.
-async fn start_agent_with_retry(
-    client: &Client,
-    cluster_name: &str,
-    mut unpivot_rx: tokio::sync::mpsc::Receiver<lattice_operator::controller::UnpivotRequest>,
-) {
+/// The agent handles unpivot automatically by detecting deletion_timestamp on connect.
+async fn start_agent_with_retry(client: &Client, cluster_name: &str) {
     let mut retry_delay = Duration::from_secs(1);
     let max_retry_delay = Duration::from_secs(30);
 
@@ -1228,131 +1270,30 @@ async fn start_agent_with_retry(
         match start_agent_if_needed(client, cluster_name).await {
             Ok(Some(agent)) => {
                 tracing::info!("Agent connection to parent cell established");
-                // Reset retry delay on successful connection
                 retry_delay = Duration::from_secs(1);
 
-                // Monitor connection and handle unpivot requests
+                // Monitor connection health
                 loop {
-                    tokio::select! {
-                        // Check for unpivot requests
-                        Some(request) = unpivot_rx.recv() => {
-                            tracing::info!(
-                                cluster = %request.cluster_name,
-                                namespace = %request.namespace,
-                                "Received unpivot request"
-                            );
-                            // Handle unpivot - updates status, doesn't block
-                            handle_unpivot_request(&agent, &request).await;
-                        }
-                        // Periodic connection check
-                        _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                            let state = agent.state().await;
-                            if state == ClientState::Disconnected
-                                || state == ClientState::Failed
-                            {
-                                tracing::warn!(
-                                    state = ?state,
-                                    "Agent disconnected from parent cell, will reconnect..."
-                                );
-                                break;
-                            }
-                        }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let state = agent.state().await;
+                    if state == ClientState::Disconnected || state == ClientState::Failed {
+                        tracing::warn!(state = ?state, "Agent disconnected, will reconnect...");
+                        break;
                     }
                 }
-                // Fall through to retry connection
             }
             Ok(None) => {
                 tracing::debug!("No parent cell configured, running as standalone");
-                // Drain any unpivot requests - they'll fail since no parent
-                while let Some(request) = unpivot_rx.recv().await {
-                    tracing::warn!(
-                        cluster = %request.cluster_name,
-                        "Unpivot request received but no parent cell configured"
-                    );
-                }
                 return;
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    retry_in = ?retry_delay,
-                    "Failed to connect to parent cell, retrying..."
-                );
+                tracing::warn!(error = %e, retry_in = ?retry_delay, "Failed to connect to parent cell, retrying...");
             }
         }
 
         tokio::time::sleep(retry_delay).await;
         retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
     }
-}
-
-/// Handle an unpivot request by exporting CAPI and sending to parent
-///
-/// This function:
-/// 1. Exports CAPI manifests via send_cluster_deleting
-/// 2. Updates unpivot_phase to WaitingForAck
-///
-/// The agent command handler will set unpivot_phase to Complete when
-/// the parent sends UnpivotAck.
-async fn handle_unpivot_request(
-    agent: &AgentClient,
-    request: &lattice_operator::controller::UnpivotRequest,
-) {
-    use kube::api::{Api, Patch, PatchParams};
-    use lattice_common::crd::{LatticeCluster, UnpivotPhase};
-
-    tracing::info!(
-        cluster = %request.cluster_name,
-        namespace = %request.namespace,
-        "Exporting CAPI and notifying parent of cluster deletion"
-    );
-
-    // Export and send to parent
-    if let Err(e) = agent.send_cluster_deleting(&request.namespace).await {
-        tracing::error!(
-            cluster = %request.cluster_name,
-            error = %e,
-            "Failed to send cluster deleting to parent"
-        );
-        return;
-    }
-
-    // Update status to WaitingForAck
-    let client = match kube::Client::try_default().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create k8s client for status update");
-            return;
-        }
-    };
-
-    let api: Api<LatticeCluster> = Api::all(client);
-    let patch = serde_json::json!({
-        "status": {
-            "unpivotPhase": UnpivotPhase::WaitingForAck
-        }
-    });
-
-    if let Err(e) = api
-        .patch_status(
-            &request.cluster_name,
-            &PatchParams::apply("lattice-agent"),
-            &Patch::Merge(&patch),
-        )
-        .await
-    {
-        tracing::error!(
-            cluster = %request.cluster_name,
-            error = %e,
-            "Failed to update unpivot_phase to WaitingForAck"
-        );
-        return;
-    }
-
-    tracing::info!(
-        cluster = %request.cluster_name,
-        "Unpivot manifests sent to parent, waiting for ACK"
-    );
 }
 
 async fn start_agent_if_needed(

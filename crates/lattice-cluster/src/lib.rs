@@ -12,7 +12,7 @@ pub mod controller;
 // Re-export controller types
 pub use controller::{
     error_policy, reconcile, Context, ContextBuilder, KubeClient, KubeClientImpl, PivotOperations,
-    PivotOperationsImpl, UnpivotChannel, UnpivotRequest,
+    PivotOperationsImpl,
 };
 
 // Re-export CAPI types from lattice-capi

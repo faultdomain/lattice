@@ -34,7 +34,6 @@ use lattice_capi::{
 };
 use lattice_common::crd::{
     CloudProvider, LatticeCluster, PivotPhase as CrdPivotPhase, ProviderType,
-    UnpivotPhase as CrdUnpivotPhase,
 };
 use lattice_common::{CsrRequest, CsrResponse, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::pki::AgentCertRequest;
@@ -173,24 +172,20 @@ impl AgentClient {
             .unwrap_or_default()
     }
 
-    /// Get current pivot and unpivot phases from LatticeCluster status
+    /// Get current pivot phase from LatticeCluster status
     ///
-    /// Used to report phases to parent on reconnect, enabling crash recovery.
-    /// - If parent sees ApplyingResources, it will push distributed resources.
-    /// - If parent sees WaitingForAck, it will resend the UnpivotAck.
-    async fn get_phases(&self) -> (CrdPivotPhase, CrdUnpivotPhase) {
+    /// Used to report phase to parent on reconnect, enabling crash recovery.
+    /// If parent sees ApplyingResources, it will push distributed resources.
+    async fn get_pivot_phase(&self) -> CrdPivotPhase {
         let client = match Client::try_default().await {
             Ok(c) => c,
-            Err(_) => return (CrdPivotPhase::None, CrdUnpivotPhase::None),
+            Err(_) => return CrdPivotPhase::None,
         };
 
         let api: Api<LatticeCluster> = Api::all(client);
         match api.get(&self.config.cluster_name).await {
-            Ok(cluster) => {
-                let status = cluster.status.unwrap_or_default();
-                (status.pivot_phase, status.unpivot_phase)
-            }
-            Err(_) => (CrdPivotPhase::None, CrdUnpivotPhase::None),
+            Ok(cluster) => cluster.status.map(|s| s.pivot_phase).unwrap_or_default(),
+            Err(_) => CrdPivotPhase::None,
         }
     }
 
@@ -328,7 +323,7 @@ impl AgentClient {
             .map_err(|e| ClientError::ConnectionFailed(format!("k8s client: {}", e)))?;
 
         // Get current pivot phase
-        let (pivot_phase, _) = self.get_phases().await;
+        let pivot_phase = self.get_pivot_phase().await;
 
         match pivot_phase {
             CrdPivotPhase::None | CrdPivotPhase::Complete => {
@@ -503,6 +498,21 @@ impl AgentClient {
         self.send_bootstrap_complete(capi_ready, installed_providers)
             .await?;
 
+        // Check if cluster is being deleted (crash recovery for unpivot)
+        // If so, spawn a task that keeps sending ClusterDeleting until CAPI deletes us
+        if let Some((namespace, cluster_name)) = Self::check_cluster_deleting().await {
+            info!(
+                cluster = %cluster_name,
+                namespace = %namespace,
+                "Cluster is being deleted - starting unpivot retry loop"
+            );
+            let unpivot_tx = message_tx.clone();
+            let unpivot_cluster_name = cluster_name.clone();
+            tokio::spawn(async move {
+                Self::run_unpivot_loop(unpivot_tx, &unpivot_cluster_name, &namespace).await;
+            });
+        }
+
         // Clone for spawned tasks
         let config = self.config.clone();
         let state = self.state.clone();
@@ -590,8 +600,8 @@ impl AgentClient {
             Err(_) => "unknown".to_string(),
         };
 
-        // Get current phases from cluster status (for crash recovery signaling)
-        let (pivot_phase, unpivot_phase) = self.get_phases().await;
+        // Get current pivot phase for crash recovery signaling
+        let pivot_phase = self.get_pivot_phase().await;
 
         let msg = AgentMessage {
             cluster_name: self.config.cluster_name.clone(),
@@ -601,7 +611,6 @@ impl AgentClient {
                 state: (*self.agent_state.read().await).into(),
                 api_server_endpoint: Self::get_api_server_endpoint(),
                 pivot_phase: crd_to_proto_pivot_phase(&pivot_phase).into(),
-                unpivot_phase: crd_to_proto_unpivot_phase(&unpivot_phase).into(),
             })),
         };
 
@@ -693,6 +702,78 @@ impl AgentClient {
         };
 
         self.send_message(msg).await
+    }
+
+    /// Check if the local LatticeCluster is being deleted
+    ///
+    /// Returns Some((namespace, cluster_name)) if the cluster has a deletion timestamp,
+    /// indicating we should start the unpivot retry loop.
+    async fn check_cluster_deleting() -> Option<(String, String)> {
+        let client = kube::Client::try_default().await.ok()?;
+        let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
+        let list = clusters
+            .list(&kube::api::ListParams::default())
+            .await
+            .ok()?;
+
+        let cluster = list.items.first()?;
+        if cluster.metadata.deletion_timestamp.is_some() {
+            let name = cluster.metadata.name.clone()?;
+            let namespace = format!("capi-{}", name);
+            Some((namespace, name))
+        } else {
+            None
+        }
+    }
+
+    /// Run the unpivot retry loop
+    ///
+    /// Keeps exporting CAPI resources and sending ClusterDeleting to parent every 5s.
+    /// This continues until the parent imports/unpauses and CAPI deletes the cluster.
+    /// No ACK is needed - the cluster will simply be deleted at the infrastructure level.
+    async fn run_unpivot_loop(
+        message_tx: mpsc::Sender<AgentMessage>,
+        cluster_name: &str,
+        namespace: &str,
+    ) {
+        let retry_interval = std::time::Duration::from_secs(5);
+
+        loop {
+            // Export CAPI resources
+            match lattice_common::clusterctl::export_for_pivot(None, namespace, cluster_name).await
+            {
+                Ok(capi_manifests) => {
+                    info!(
+                        cluster = %cluster_name,
+                        namespace = %namespace,
+                        manifest_count = capi_manifests.len(),
+                        "Sending ClusterDeleting to parent (unpivot retry)"
+                    );
+
+                    let msg = AgentMessage {
+                        cluster_name: cluster_name.to_string(),
+                        payload: Some(Payload::ClusterDeleting(ClusterDeleting {
+                            namespace: namespace.to_string(),
+                            capi_manifests,
+                        })),
+                    };
+
+                    if message_tx.send(msg).await.is_err() {
+                        warn!("Unpivot message channel closed, stopping retry loop");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        cluster = %cluster_name,
+                        error = %e,
+                        "Failed to export CAPI for unpivot, will retry"
+                    );
+                }
+            }
+
+            tokio::time::sleep(retry_interval).await;
+        }
     }
 
     /// Extract kind and name from a YAML manifest for logging
@@ -1032,23 +1113,6 @@ impl AgentClient {
                     }
                 });
             }
-            Some(Command::UnpivotAck(ack)) => {
-                if ack.success {
-                    info!("Received UnpivotAck from parent - setting unpivot_phase to Complete");
-                } else {
-                    warn!(error = %ack.error_message, "Parent reported unpivot error");
-                }
-
-                // Update unpivot_phase to Complete so controller can remove finalizer
-                let cluster_name = cluster_name.to_string();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        update_unpivot_phase(&cluster_name, CrdUnpivotPhase::Complete).await
-                    {
-                        error!(error = %e, "Failed to update unpivot_phase to Complete");
-                    }
-                });
-            }
             Some(Command::KubernetesRequest(req)) => {
                 debug!(
                     request_id = %req.request_id,
@@ -1353,30 +1417,6 @@ async fn update_pivot_phase(
 }
 
 /// Update unpivot phase in LatticeCluster status
-async fn update_unpivot_phase(cluster_name: &str, phase: CrdUnpivotPhase) -> Result<(), String> {
-    let client = Client::try_default()
-        .await
-        .map_err(|e| format!("Failed to create k8s client: {}", e))?;
-
-    let api: Api<LatticeCluster> = Api::all(client);
-    let patch = serde_json::json!({
-        "status": {
-            "unpivotPhase": phase
-        }
-    });
-
-    api.patch_status(
-        cluster_name,
-        &PatchParams::apply("lattice-agent"),
-        &Patch::Merge(&patch),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    info!(cluster = %cluster_name, phase = ?phase, "Updated unpivot phase");
-    Ok(())
-}
-
 /// Convert CRD PivotPhase to proto PivotPhase
 fn crd_to_proto_pivot_phase(crd: &CrdPivotPhase) -> PivotPhase {
     match crd {
@@ -1385,17 +1425,6 @@ fn crd_to_proto_pivot_phase(crd: &CrdPivotPhase) -> PivotPhase {
         CrdPivotPhase::PatchingKubeconfig => PivotPhase::PatchingKubeconfig,
         CrdPivotPhase::ApplyingResources => PivotPhase::ApplyingResources,
         CrdPivotPhase::Complete => PivotPhase::Complete,
-    }
-}
-
-/// Convert CRD UnpivotPhase to proto UnpivotPhase
-fn crd_to_proto_unpivot_phase(crd: &CrdUnpivotPhase) -> lattice_proto::UnpivotPhase {
-    match crd {
-        CrdUnpivotPhase::None => lattice_proto::UnpivotPhase::None,
-        CrdUnpivotPhase::Exporting => lattice_proto::UnpivotPhase::Exporting,
-        CrdUnpivotPhase::Sending => lattice_proto::UnpivotPhase::Sending,
-        CrdUnpivotPhase::WaitingForAck => lattice_proto::UnpivotPhase::WaitingForAck,
-        CrdUnpivotPhase::Complete => lattice_proto::UnpivotPhase::Complete,
     }
 }
 
@@ -2801,7 +2830,6 @@ mod tests {
                 state: AgentState::Provisioning.into(),
                 api_server_endpoint: String::new(),
                 pivot_phase: PivotPhase::None.into(),
-                unpivot_phase: lattice_proto::UnpivotPhase::None.into(),
             })),
         };
 
@@ -2836,7 +2864,6 @@ mod tests {
                     state: state.into(),
                     api_server_endpoint: "https://127.0.0.1:6443".to_string(),
                     pivot_phase: PivotPhase::None.into(),
-                    unpivot_phase: lattice_proto::UnpivotPhase::None.into(),
                 })),
             };
 

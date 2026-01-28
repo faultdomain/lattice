@@ -184,16 +184,6 @@ pub struct LatticeClusterStatus {
     /// - Complete: All pivot steps finished
     #[serde(default, skip_serializing_if = "PivotPhase::is_none")]
     pub pivot_phase: PivotPhase,
-
-    /// Current sub-phase of the unpivot process (for crash recovery)
-    ///
-    /// Tracks progress through unpivot steps so controller can resume after crash:
-    /// - Exporting: Exporting CAPI resources via clusterctl move --to-directory
-    /// - Sending: Sending manifests to parent
-    /// - WaitingForAck: Waiting for parent to ACK receipt
-    /// - Complete: Parent ACKed, safe to remove finalizer
-    #[serde(default, skip_serializing_if = "UnpivotPhase::is_none")]
-    pub unpivot_phase: UnpivotPhase,
 }
 
 /// Sub-phase of the pivot process for crash recovery
@@ -221,34 +211,6 @@ impl PivotPhase {
     /// Returns true if phase is None (for serde skip_serializing_if)
     pub fn is_none(&self) -> bool {
         matches!(self, PivotPhase::None)
-    }
-}
-
-/// Sub-phase of the unpivot process for crash recovery
-///
-/// When a child cluster initiates deletion (unpivot), it progresses through
-/// these phases. On crash/restart, the controller checks this field to resume
-/// from the correct step. The finalizer is only removed after parent ACKs.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub enum UnpivotPhase {
-    /// Not currently unpivoting
-    #[default]
-    None,
-    /// Exporting CAPI resources via clusterctl move --to-directory
-    Exporting,
-    /// CAPI exported, sending manifests to parent
-    Sending,
-    /// Manifests sent, waiting for parent to ACK receipt
-    WaitingForAck,
-    /// Parent ACKed, safe to remove finalizer
-    Complete,
-}
-
-impl UnpivotPhase {
-    /// Returns true if phase is None (for serde skip_serializing_if)
-    pub fn is_none(&self) -> bool {
-        matches!(self, UnpivotPhase::None)
     }
 }
 
@@ -288,12 +250,6 @@ impl LatticeClusterStatus {
     /// Set the pivot phase and return self for chaining
     pub fn pivot_phase(mut self, pivot_phase: PivotPhase) -> Self {
         self.pivot_phase = pivot_phase;
-        self
-    }
-
-    /// Set the unpivot phase and return self for chaining
-    pub fn unpivot_phase(mut self, unpivot_phase: UnpivotPhase) -> Self {
-        self.unpivot_phase = unpivot_phase;
         self
     }
 }
@@ -713,46 +669,13 @@ workload:
     }
 
     #[test]
-    fn status_builder_unpivot_phase() {
-        let status = LatticeClusterStatus::default().unpivot_phase(UnpivotPhase::WaitingForAck);
-        assert_eq!(status.unpivot_phase, UnpivotPhase::WaitingForAck);
-    }
-
-    #[test]
     fn status_builder_chaining() {
         let status = LatticeClusterStatus::default()
             .phase(ClusterPhase::Ready)
-            .pivot_phase(PivotPhase::Complete)
-            .unpivot_phase(UnpivotPhase::None);
+            .pivot_phase(PivotPhase::Complete);
 
         assert_eq!(status.phase, ClusterPhase::Ready);
         assert_eq!(status.pivot_phase, PivotPhase::Complete);
-        assert_eq!(status.unpivot_phase, UnpivotPhase::None);
-    }
-
-    // =========================================================================
-    // UnpivotPhase Tests
-    // =========================================================================
-
-    #[test]
-    fn unpivot_phase_default_is_none() {
-        assert_eq!(UnpivotPhase::default(), UnpivotPhase::None);
-    }
-
-    #[test]
-    fn unpivot_phase_serialization_roundtrip() {
-        for phase in [
-            UnpivotPhase::None,
-            UnpivotPhase::Exporting,
-            UnpivotPhase::Sending,
-            UnpivotPhase::WaitingForAck,
-            UnpivotPhase::Complete,
-        ] {
-            let json = serde_json::to_string(&phase).expect("serialization should succeed");
-            let parsed: UnpivotPhase =
-                serde_json::from_str(&json).expect("deserialization should succeed");
-            assert_eq!(phase, parsed);
-        }
     }
 
     // =========================================================================

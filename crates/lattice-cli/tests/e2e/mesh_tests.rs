@@ -374,6 +374,7 @@ fn create_service_with_options(
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            authorization: None,
         },
         status: None,
     }
@@ -1479,6 +1480,7 @@ impl RandomMesh {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
+                authorization: None,
             },
             status: None,
         }

@@ -15,8 +15,7 @@ pub use cloud_provider::{
     CloudProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
 };
 pub use cluster::{
-    LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, PivotPhase, UnpivotPhase,
-    WorkerPoolStatus,
+    LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, PivotPhase, WorkerPoolStatus,
 };
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,
@@ -27,13 +26,14 @@ pub use secrets_provider::{
     VaultAuthMethod,
 };
 pub use service::{
-    CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec, DeployStrategy, ExecProbe,
-    FileMount, HttpGetProbe, HttpHeader, InboundPolicy, IngressPath, IngressSpec, IngressTls,
-    LatticeService, LatticeServiceSpec, LatticeServiceStatus, OutboundPolicy, PathMatchType,
-    PortSpec, Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata,
-    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RetryConfig,
-    SecurityContext, ServicePhase, ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode,
-    VolumeAccessMode, VolumeMount, VolumeParams,
+    AuthorizationConfig, CedarConfig, CertIssuerRef, ClaimMappings, ContainerSpec,
+    DependencyDirection, DeploySpec, DeployStrategy, ExecProbe, FileMount, HttpGetProbe,
+    HttpHeader, InboundPolicy, IngressPath, IngressSpec, IngressTls, LatticeService,
+    LatticeServiceSpec, LatticeServiceStatus, OidcConfig, OutboundPolicy, PathMatchType, PortSpec,
+    Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata, ResourceQuantity,
+    ResourceRequirements, ResourceSpec, ResourceType, RetryConfig, SecurityContext, ServicePhase,
+    ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode, VolumeAccessMode, VolumeMount,
+    VolumeParams,
 };
 pub use types::{
     AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,

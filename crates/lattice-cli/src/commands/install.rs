@@ -20,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::info;
 
-use lattice_common::clusterctl::{export_for_pivot, import_from_manifests};
+use lattice_common::clusterctl::move_to_kubeconfig;
 use lattice_common::kube_utils;
 use lattice_common::AwsCredentials;
 use lattice_operator::bootstrap::{
@@ -949,17 +949,16 @@ impl Installer {
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
 
-        // Export and import via clusterctl
-        info!("Exporting CAPI resources from bootstrap cluster...");
-        let manifests =
-            export_for_pivot(Some(&bootstrap_kubeconfig), &namespace, self.cluster_name())
-                .await
-                .cmd_err()?;
-
-        info!("Importing CAPI resources into management cluster...");
-        import_from_manifests(Some(&mgmt_kubeconfig), &namespace, &manifests)
-            .await
-            .cmd_err()
+        // Move CAPI resources from bootstrap to management cluster
+        info!("Moving CAPI resources from bootstrap to management cluster...");
+        move_to_kubeconfig(
+            &bootstrap_kubeconfig,
+            &mgmt_kubeconfig,
+            &namespace,
+            self.cluster_name(),
+        )
+        .await
+        .cmd_err()
     }
 
     async fn run_clusterctl(&self, args: &[&str], kubeconfig: &Path) -> Result<()> {

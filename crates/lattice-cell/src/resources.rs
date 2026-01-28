@@ -135,11 +135,12 @@ mod tests {
         cp.metadata.namespace = Some("lattice-system".to_string());
         cp.metadata.uid = Some("test-uid-12345".to_string());
         cp.metadata.resource_version = Some("123456".to_string());
-        cp.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-            chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-                .unwrap()
-                .into(),
-        ));
+        cp.metadata.creation_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                    .unwrap()
+                    .into(),
+            ));
         cp
     }
 

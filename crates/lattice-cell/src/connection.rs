@@ -529,7 +529,9 @@ mod tests {
         let registry = AgentRegistry::new();
 
         let manifests = PostPivotManifests {
-            network_policy_yaml: Some("apiVersion: cilium.io/v2\nkind: CiliumNetworkPolicy".to_string()),
+            network_policy_yaml: Some(
+                "apiVersion: cilium.io/v2\nkind: CiliumNetworkPolicy".to_string(),
+            ),
         };
 
         registry.set_post_pivot_manifests("test", manifests);
@@ -563,12 +565,16 @@ mod tests {
 
         registry.set_pivot_source_manifests("test-cluster", manifests);
 
-        let retrieved = registry.take_pivot_source_manifests("test-cluster").unwrap();
+        let retrieved = registry
+            .take_pivot_source_manifests("test-cluster")
+            .unwrap();
         assert_eq!(retrieved.capi_manifests.len(), 2);
         assert_eq!(retrieved.namespace, "default");
 
         // Should be gone after take
-        assert!(registry.take_pivot_source_manifests("test-cluster").is_none());
+        assert!(registry
+            .take_pivot_source_manifests("test-cluster")
+            .is_none());
     }
 
     // =========================================================================

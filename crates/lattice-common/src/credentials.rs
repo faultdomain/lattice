@@ -122,7 +122,10 @@ mod tests {
         secret.insert("AWS_REGION".to_string(), "us-west-2".to_string());
 
         let err = AwsCredentials::from_secret(&secret).unwrap_err();
-        assert!(matches!(err, CredentialError::MissingField("AWS_ACCESS_KEY_ID")));
+        assert!(matches!(
+            err,
+            CredentialError::MissingField("AWS_ACCESS_KEY_ID")
+        ));
         assert!(err.to_string().contains("AWS_ACCESS_KEY_ID"));
     }
 
@@ -133,7 +136,10 @@ mod tests {
         secret.insert("AWS_REGION".to_string(), "us-west-2".to_string());
 
         let err = AwsCredentials::from_secret(&secret).unwrap_err();
-        assert!(matches!(err, CredentialError::MissingField("AWS_SECRET_ACCESS_KEY")));
+        assert!(matches!(
+            err,
+            CredentialError::MissingField("AWS_SECRET_ACCESS_KEY")
+        ));
         assert!(err.to_string().contains("AWS_SECRET_ACCESS_KEY"));
     }
 

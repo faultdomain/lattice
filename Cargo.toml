@@ -11,6 +11,7 @@ members = [
     "crates/lattice-service",
     "crates/lattice-cloud-provider",
     "crates/lattice-secrets-provider",
+    "crates/lattice-cedar",
     "crates/lattice-operator",
     "crates/lattice-cli",
 ]
@@ -32,6 +33,7 @@ lattice-cloud-provider = { path = "crates/lattice-cloud-provider" }
 lattice-capi = { path = "crates/lattice-capi" }
 lattice-cell = { path = "crates/lattice-cell" }
 lattice-secrets-provider = { path = "crates/lattice-secrets-provider" }
+lattice-cedar = { path = "crates/lattice-cedar" }
 
 # Kubernetes
 kube = { version = "0.98", features = ["runtime", "derive", "client", "rustls-tls", "admission"] }

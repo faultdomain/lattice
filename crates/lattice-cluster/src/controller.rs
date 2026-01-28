@@ -21,7 +21,7 @@ use mockall::automock;
 use lattice_common::clusterctl::unpause_capi_cluster;
 use lattice_common::crd::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, LatticeCluster,
-    LatticeClusterStatus, UnpivotPhase, WorkerPoolSpec, WorkerPoolStatus,
+    LatticeClusterStatus, WorkerPoolSpec, WorkerPoolStatus,
 };
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
@@ -878,21 +878,6 @@ pub trait PivotOperations: Send + Sync {
     fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<UnpivotManifests>;
 }
 
-/// Request to trigger unpivot operation
-///
-/// The agent will export CAPI, send to parent, and update `unpivot_phase` in status.
-/// Controller watches the status to know when unpivot completes.
-#[derive(Debug)]
-pub struct UnpivotRequest {
-    /// Cluster name being unpivoted
-    pub cluster_name: String,
-    /// Namespace containing CAPI resources
-    pub namespace: String,
-}
-
-/// Shared channel for sending unpivot requests to the agent
-pub type UnpivotChannel = tokio::sync::mpsc::Sender<UnpivotRequest>;
-
 /// Shared context for the LatticeCluster controller
 ///
 /// The context is shared across all reconciliation calls and holds
@@ -923,8 +908,6 @@ pub struct Context {
     /// Name of the cluster this controller is running on (from LATTICE_CLUSTER_NAME env var)
     /// When reconciling this cluster, we skip provisioning since we ARE this cluster
     pub self_cluster_name: Option<String>,
-    /// Channel for sending unpivot requests to the agent task
-    pub unpivot_tx: Option<UnpivotChannel>,
 }
 
 impl Context {
@@ -968,7 +951,6 @@ impl Context {
             capi_installer,
             parent_servers: None,
             self_cluster_name: None,
-            unpivot_tx: None,
         }
     }
 }
@@ -1003,7 +985,6 @@ pub struct ContextBuilder {
     capi_installer: Option<Arc<dyn CapiInstaller>>,
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     self_cluster_name: Option<String>,
-    unpivot_tx: Option<UnpivotChannel>,
 }
 
 impl ContextBuilder {
@@ -1016,7 +997,6 @@ impl ContextBuilder {
             capi_installer: None,
             parent_servers: None,
             self_cluster_name: None,
-            unpivot_tx: None,
         }
     }
 
@@ -1050,12 +1030,6 @@ impl ContextBuilder {
         self
     }
 
-    /// Set unpivot channel for sending unpivot requests to the agent
-    pub fn unpivot_channel(mut self, tx: UnpivotChannel) -> Self {
-        self.unpivot_tx = Some(tx);
-        self
-    }
-
     /// Build the Context
     pub fn build(self) -> Context {
         use lattice_capi::ClusterctlInstaller;
@@ -1073,7 +1047,6 @@ impl ContextBuilder {
                 .unwrap_or_else(|| Arc::new(ClusterctlInstaller::new())),
             parent_servers: self.parent_servers,
             self_cluster_name: self.self_cluster_name,
-            unpivot_tx: self.unpivot_tx,
         }
     }
 }
@@ -1921,7 +1894,6 @@ async fn update_cluster_status(
         unpivot_pending: current_status.unpivot_pending,
         observed_generation: current_status.observed_generation,
         pivot_phase: current_status.pivot_phase,
-        unpivot_phase: current_status.unpivot_phase,
     };
 
     // Set pivot_complete if requested (persists pivot completion across restarts)
@@ -1964,7 +1936,9 @@ impl PivotOperations for PivotOperationsImpl {
         source_namespace: &str,
         target_namespace: &str,
     ) -> Result<(), Error> {
-        use lattice_common::clusterctl::{export_for_pivot, is_capi_cluster_ready, pause_capi_cluster};
+        use lattice_common::clusterctl::{
+            export_for_pivot, is_capi_cluster_ready, pause_capi_cluster,
+        };
 
         // Check if agent is connected
         if self.agent_registry.get(cluster_name).is_none() {
@@ -2000,7 +1974,9 @@ impl PivotOperations for PivotOperationsImpl {
         // (clusterctl move --to-directory unpauses it, but we want it dormant until deletion)
         pause_capi_cluster(None, source_namespace, cluster_name)
             .await
-            .map_err(|e| Error::pivot(format!("failed to pause CAPI cluster after export: {}", e)))?;
+            .map_err(|e| {
+                Error::pivot(format!("failed to pause CAPI cluster after export: {}", e))
+            })?;
 
         // Store manifests for deletion after PivotComplete
         self.agent_registry.set_pivot_source_manifests(
@@ -2352,100 +2328,40 @@ async fn handle_deletion(
         return Ok(Action::await_change());
     }
 
-    // Self cluster with parent - handle unpivot via state machine
-    // The unpivot_phase tracks progress and enables crash recovery
-    let current_unpivot_phase = cluster
+    // Self cluster with parent - agent handles unpivot automatically
+    // The agent detects deletion_timestamp on connect and starts an unpivot retry loop
+    // that keeps sending ClusterDeleting to parent until parent's CAPI deletes us.
+    // We just need to:
+    // 1. Delete cell service (free up the LoadBalancer IP)
+    // 2. Set phase to Unpivoting
+    // 3. Wait - finalizer keeps the resource around until CAPI deletes the infrastructure
+
+    let current_phase = cluster
         .status
         .as_ref()
-        .map(|s| s.unpivot_phase.clone())
-        .unwrap_or_default();
+        .map(|s| s.phase.clone())
+        .unwrap_or(ClusterPhase::Pending);
 
-    match current_unpivot_phase {
-        UnpivotPhase::Complete => {
-            // Parent has ACKed - safe to remove finalizer
-            info!(cluster = %name, "Unpivot complete, removing finalizer");
-            let status = cluster
-                .status
-                .clone()
-                .unwrap_or_default()
-                .condition(Condition::new(
-                    "UnpivotComplete",
-                    ConditionStatus::True,
-                    "Success",
-                    "CAPI resources exported to parent",
-                ));
-            ctx.kube.patch_status(&name, &status).await?;
-            remove_finalizer(cluster, ctx).await?;
-            Ok(Action::await_change())
-        }
-        UnpivotPhase::WaitingForAck => {
-            // Agent sent manifests, waiting for parent ACK
-            debug!(cluster = %name, "Waiting for parent to ACK unpivot");
-            Ok(Action::requeue(Duration::from_secs(5)))
-        }
-        UnpivotPhase::Exporting | UnpivotPhase::Sending => {
-            // Agent is working on export/send
-            debug!(cluster = %name, phase = ?current_unpivot_phase, "Unpivot in progress");
-            Ok(Action::requeue(Duration::from_secs(5)))
-        }
-        UnpivotPhase::None => {
-            // Start unpivot process
-            info!(cluster = %name, "Starting unpivot process for cluster deletion");
+    if current_phase != ClusterPhase::Unpivoting {
+        info!(cluster = %name, "Starting unpivot - agent will send manifests to parent");
 
-            // Set phase to Unpivoting
-            let status = cluster
-                .status
-                .clone()
-                .unwrap_or_default()
-                .phase(ClusterPhase::Unpivoting)
-                .message("Cleaning up LoadBalancer services");
-            ctx.kube.patch_status(&name, &status).await?;
+        // Delete the lattice-cell LoadBalancer service to free the IP
+        ctx.kube.delete_cell_service().await?;
 
-            // Delete the lattice-cell LoadBalancer service first
-            info!(cluster = %name, "Deleting lattice-cell LoadBalancer service before unpivot");
-            ctx.kube.delete_cell_service().await?;
-
-            // Wait for the service to be fully deleted
-            let deleted = wait_for_cell_service_deleted(ctx).await;
-            if !deleted {
-                warn!(cluster = %name, "Timeout waiting for cell service deletion, proceeding with unpivot anyway");
-            }
-
-            // Check if we have an unpivot channel (agent is running)
-            let unpivot_tx = match &ctx.unpivot_tx {
-                Some(tx) => tx.clone(),
-                None => {
-                    warn!(cluster = %name, "No unpivot channel available - agent may not be running");
-                    return Ok(Action::requeue(Duration::from_secs(10)));
-                }
-            };
-
-            // Send unpivot request to agent
-            // Agent will export CAPI, send to parent, and update unpivot_phase
-            let namespace = format!("capi-{}", name);
-            let request = UnpivotRequest {
-                cluster_name: name.clone(),
-                namespace,
-            };
-
-            if let Err(e) = unpivot_tx.send(request).await {
-                error!(cluster = %name, error = %e, "Failed to send unpivot request");
-                return Ok(Action::requeue(Duration::from_secs(10)));
-            }
-
-            // Update status to show we're exporting
-            let status = cluster
-                .status
-                .clone()
-                .unwrap_or_default()
-                .phase(ClusterPhase::Unpivoting)
-                .unpivot_phase(UnpivotPhase::Exporting)
-                .message("Exporting CAPI resources to parent");
-            ctx.kube.patch_status(&name, &status).await?;
-
-            Ok(Action::requeue(Duration::from_secs(5)))
-        }
+        // Set phase to Unpivoting
+        let status = cluster
+            .status
+            .clone()
+            .unwrap_or_default()
+            .phase(ClusterPhase::Unpivoting)
+            .message("Agent sending CAPI resources to parent");
+        ctx.kube.patch_status(&name, &status).await?;
     }
+
+    // Keep waiting - agent is sending manifests, parent will delete us via CAPI
+    // Finalizer never explicitly removed; CAPI deletes the entire infrastructure
+    debug!(cluster = %name, "Unpivoting - waiting for parent to delete via CAPI");
+    Ok(Action::requeue(Duration::from_secs(30)))
 }
 
 #[cfg(test)]

@@ -907,6 +907,72 @@ impl std::fmt::Display for ServicePhase {
     }
 }
 
+/// OIDC configuration for JWT validation
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcConfig {
+    /// OIDC issuer URL (e.g., https://auth.example.com)
+    pub issuer: String,
+
+    /// Expected audience claim value
+    pub audience: String,
+
+    /// JWKS URI for key retrieval (defaults to {issuer}/.well-known/jwks.json)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+
+    /// Claim mappings for extracting roles/groups
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_mappings: Option<ClaimMappings>,
+}
+
+/// Claim mappings for OIDC token extraction
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimMappings {
+    /// JSON path to roles claim (default: "roles")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<String>,
+
+    /// JSON path to groups claim (default: "groups")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<String>,
+
+    /// JSON path to subject claim (default: "sub")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+/// Cedar policy configuration
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CedarConfig {
+    /// Inline Cedar policy text
+    ///
+    /// Example:
+    /// ```cedar
+    /// permit(principal, action, resource)
+    /// when { principal.roles.contains("admin") };
+    /// ```
+    pub policies: String,
+}
+
+/// Authorization configuration for a service
+///
+/// Enables Cedar policy evaluation via Envoy ext_authz. When configured,
+/// requests are authorized against Cedar policies after JWT validation.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizationConfig {
+    /// OIDC configuration for JWT validation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcConfig>,
+
+    /// Cedar policy configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cedar: Option<CedarConfig>,
+}
+
 /// Specification for a LatticeService
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
@@ -961,6 +1027,13 @@ pub struct LatticeServiceSpec {
     /// Share PID namespace between containers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_process_namespace: Option<bool>,
+
+    /// Cedar authorization configuration
+    ///
+    /// When configured, enables Cedar policy evaluation for user-to-resource
+    /// authorization. Requires OIDC configuration for JWT validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<AuthorizationConfig>,
 }
 
 impl LatticeServiceSpec {
@@ -1414,6 +1487,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            authorization: None,
         }
     }
 
@@ -1630,6 +1704,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            authorization: None,
         };
 
         let result = spec.validate();
@@ -1821,6 +1896,7 @@ deploy:
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            authorization: None,
         };
 
         assert_eq!(spec.primary_image(), Some("nginx:latest"));
@@ -2253,7 +2329,10 @@ resources:
         // Verify config volume
         let config = spec.resources.get("config").expect("config should exist");
         assert!(config.is_volume_owner());
-        let config_params = config.volume_params().expect("config volume params").expect("should have params");
+        let config_params = config
+            .volume_params()
+            .expect("config volume params")
+            .expect("should have params");
         assert_eq!(config_params.size, Some("10Gi".to_string()));
         assert_eq!(config_params.storage_class, Some("local-path".to_string()));
 
@@ -2261,7 +2340,10 @@ resources:
         let media = spec.resources.get("media").expect("media should exist");
         assert!(media.is_volume_owner());
         assert_eq!(media.id, Some("media-library".to_string()));
-        let media_params = media.volume_params().expect("media volume params").expect("should have params");
+        let media_params = media
+            .volume_params()
+            .expect("media volume params")
+            .expect("should have params");
         assert_eq!(media_params.size, Some("1Ti".to_string()));
         assert_eq!(
             media_params.access_mode,

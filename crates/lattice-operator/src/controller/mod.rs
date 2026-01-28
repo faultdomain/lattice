@@ -3,10 +3,10 @@
 //! Re-exports controllers from lattice-cluster and lattice-service.
 //! lattice-operator starts and manages these controllers.
 
-// Re-export cluster controller (CAPIClient/CAPIClientImpl now from lattice_capi via lattice_cluster lib.rs)
+// Re-export cluster controller
 pub use lattice_cluster::controller::{
     error_policy, reconcile, Context, ContextBuilder, KubeClient, KubeClientImpl, PivotOperations,
-    PivotOperationsImpl, UnpivotChannel, UnpivotRequest,
+    PivotOperationsImpl,
 };
 pub use lattice_cluster::{CAPIClient, CAPIClientImpl};
 

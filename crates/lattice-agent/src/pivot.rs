@@ -668,9 +668,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_count_capi_resources_error_propagates() {
-        let runner = MockCommandRunner::new().with_list(|_, _| {
-            Err(PivotError::Internal("test error".to_string()))
-        });
+        let runner = MockCommandRunner::new()
+            .with_list(|_, _| Err(PivotError::Internal("test error".to_string())));
 
         let handler = AgentPivotHandler::with_runner(runner);
         let result = handler.count_capi_resources().await;
@@ -805,5 +804,4 @@ mod tests {
         let updated = update_cluster_entry(&mut entry, "Y2EtZGF0YQ==", "test");
         assert!(!updated);
     }
-
 }

@@ -60,10 +60,8 @@ fn cleanup_all_clusters() {
 
     // Clean up any endurance-* clusters (pattern matches all iterations)
     // Get all containers with endurance- prefix
-    let containers = run_cmd_allow_fail(
-        "docker",
-        &["ps", "-a", "--filter", "name=endurance-", "-q"],
-    );
+    let containers =
+        run_cmd_allow_fail("docker", &["ps", "-a", "--filter", "name=endurance-", "-q"]);
     for id in containers.lines() {
         if !id.trim().is_empty() {
             let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
@@ -169,7 +167,8 @@ async fn run_endurance_test() -> Result<(), String> {
         let batch_start = Instant::now();
         info!(
             "[ITERATION {}] Starting batch (total runtime: {:?})",
-            iteration, test_start.elapsed()
+            iteration,
+            test_start.elapsed()
         );
 
         // Create cluster configs with unique names and IPs for this iteration
@@ -196,11 +195,8 @@ async fn run_endurance_test() -> Result<(), String> {
                 }
 
                 // Update cert SANs
-                cluster.spec.provider.kubernetes.cert_sans = Some(vec![
-                    "127.0.0.1".to_string(),
-                    "localhost".to_string(),
-                    ip,
-                ]);
+                cluster.spec.provider.kubernetes.cert_sans =
+                    Some(vec!["127.0.0.1".to_string(), "localhost".to_string(), ip]);
 
                 cluster
             })
@@ -214,11 +210,18 @@ async fn run_endurance_test() -> Result<(), String> {
         // Run batch with timeout
         let batch_result = tokio::time::timeout(BATCH_TIMEOUT, async {
             // Create all clusters in parallel
-            info!("[ITERATION {}] Creating {} clusters...", iteration, clusters.len());
+            info!(
+                "[ITERATION {}] Creating {} clusters...",
+                iteration,
+                clusters.len()
+            );
             create_clusters_parallel(&mgmt_client, &clusters).await?;
 
             // Wait for all to reach Running
-            info!("[ITERATION {}] Waiting for all clusters to reach Running...", iteration);
+            info!(
+                "[ITERATION {}] Waiting for all clusters to reach Running...",
+                iteration
+            );
             wait_all_running(&mgmt_client, &cluster_names).await?;
             info!("[ITERATION {}] All clusters running!", iteration);
 
@@ -233,7 +236,11 @@ async fn run_endurance_test() -> Result<(), String> {
             }
 
             // Wait 20 seconds with chaos running against all clusters
-            info!("[ITERATION {}] Waiting {} seconds (chaos active)...", iteration, SETTLE_DELAY.as_secs());
+            info!(
+                "[ITERATION {}] Waiting {} seconds (chaos active)...",
+                iteration,
+                SETTLE_DELAY.as_secs()
+            );
             tokio::time::sleep(SETTLE_DELAY).await;
 
             // Delete all clusters in parallel (chaos continues during unpivot)
@@ -241,7 +248,10 @@ async fn run_endurance_test() -> Result<(), String> {
             delete_clusters_parallel(&mgmt_client, &cluster_names).await?;
 
             // Wait for all to be fully deleted
-            info!("[ITERATION {}] Waiting for deletion to complete...", iteration);
+            info!(
+                "[ITERATION {}] Waiting for deletion to complete...",
+                iteration
+            );
             wait_all_deleted(&mgmt_client, &cluster_names).await?;
             info!("[ITERATION {}] All clusters deleted!", iteration);
 
@@ -257,19 +267,29 @@ async fn run_endurance_test() -> Result<(), String> {
         // Check batch result
         match batch_result {
             Ok(Ok(())) => {
-                info!("[ITERATION {}] Complete in {:?}!", iteration, batch_start.elapsed());
+                info!(
+                    "[ITERATION {}] Complete in {:?}!",
+                    iteration,
+                    batch_start.elapsed()
+                );
             }
             Ok(Err(e)) => {
                 return Err(format!("Batch {} failed: {}", iteration, e));
             }
             Err(_) => {
-                return Err(format!("Batch {} timed out after {:?}", iteration, BATCH_TIMEOUT));
+                return Err(format!(
+                    "Batch {} timed out after {:?}",
+                    iteration, BATCH_TIMEOUT
+                ));
             }
         }
     }
 }
 
-async fn create_clusters_parallel(client: &Client, clusters: &[LatticeCluster]) -> Result<(), String> {
+async fn create_clusters_parallel(
+    client: &Client,
+    clusters: &[LatticeCluster],
+) -> Result<(), String> {
     let api: Api<LatticeCluster> = Api::all(client.clone());
 
     let futures: Vec<_> = clusters
@@ -280,7 +300,13 @@ async fn create_clusters_parallel(client: &Client, clusters: &[LatticeCluster]) 
             async move {
                 api.create(&PostParams::default(), &cluster)
                     .await
-                    .map_err(|e| format!("Failed to create {}: {}", cluster.metadata.name.as_deref().unwrap_or("unknown"), e))
+                    .map_err(|e| {
+                        format!(
+                            "Failed to create {}: {}",
+                            cluster.metadata.name.as_deref().unwrap_or("unknown"),
+                            e
+                        )
+                    })
             }
         })
         .collect();
@@ -295,9 +321,7 @@ async fn wait_all_running(client: &Client, cluster_names: &[String]) -> Result<(
         .map(|name| {
             let client = client.clone();
             let name = name.clone();
-            async move {
-                watch_cluster_phases(&client, &name, Some(600)).await
-            }
+            async move { watch_cluster_phases(&client, &name, Some(600)).await }
         })
         .collect();
 

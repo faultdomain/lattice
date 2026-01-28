@@ -568,6 +568,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            authorization: None,
         }
     }
 
@@ -659,6 +660,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            authorization: None,
         };
 
         graph.put_service("frontend", "web", &frontend_spec);
@@ -885,6 +887,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            authorization: None,
         };
 
         graph.put_service("frontend", "web", &frontend_spec);

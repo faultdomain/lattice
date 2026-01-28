@@ -53,14 +53,18 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(90 * 60); // 90 minutes
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(30 * 60); // 30 minutes for upgrade
 
 fn get_upgrade_versions() -> (String, String) {
-    let from = std::env::var("LATTICE_UPGRADE_FROM_VERSION").unwrap_or_else(|_| "1.31.0".to_string());
+    let from =
+        std::env::var("LATTICE_UPGRADE_FROM_VERSION").unwrap_or_else(|_| "1.31.0".to_string());
     let to = std::env::var("LATTICE_UPGRADE_TO_VERSION").unwrap_or_else(|_| "1.32.0".to_string());
     (from, to)
 }
 
 fn cleanup_bootstrap_clusters() {
     info!("Cleaning up kind bootstrap cluster...");
-    let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-bootstrap"]);
+    let _ = run_cmd_allow_fail(
+        "kind",
+        &["delete", "cluster", "--name", "lattice-bootstrap"],
+    );
 }
 
 #[tokio::test]
@@ -77,7 +81,10 @@ async fn test_upgrade_with_mesh_traffic() {
     let (from_version, to_version) = get_upgrade_versions();
 
     info!("=========================================================");
-    info!("UPGRADE RESILIENCE TEST: v{} -> v{}", from_version, to_version);
+    info!(
+        "UPGRADE RESILIENCE TEST: v{} -> v{}",
+        from_version, to_version
+    );
     info!("=========================================================");
 
     cleanup_bootstrap_clusters();
@@ -150,7 +157,10 @@ async fn run_upgrade_test() -> Result<(), String> {
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig).await?;
 
     // Create workload cluster at from_version
-    info!("[Phase 2] Creating workload cluster at v{}...", from_version);
+    info!(
+        "[Phase 2] Creating workload cluster at v{}...",
+        from_version
+    );
 
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
     api.create(&PostParams::default(), &workload_cluster)
@@ -225,14 +235,29 @@ async fn run_upgrade_test() -> Result<(), String> {
 
     // Cleanup
     info!("[Cleanup] Deleting workload cluster...");
-    let _ = workload_api.delete(WORKLOAD_CLUSTER_NAME, &DeleteParams::default()).await;
+    let _ = workload_api
+        .delete(WORKLOAD_CLUSTER_NAME, &DeleteParams::default())
+        .await;
     wait_for_cluster_deleted(&mgmt_client, WORKLOAD_CLUSTER_NAME).await?;
 
     // Force cleanup Docker containers
-    let _ = run_cmd_allow_fail("docker", &["rm", "-f", &format!("{}-control-plane", WORKLOAD_CLUSTER_NAME)]);
-    let _ = run_cmd_allow_fail("docker", &["rm", "-f", &format!("{}-worker", WORKLOAD_CLUSTER_NAME)]);
+    let _ = run_cmd_allow_fail(
+        "docker",
+        &[
+            "rm",
+            "-f",
+            &format!("{}-control-plane", WORKLOAD_CLUSTER_NAME),
+        ],
+    );
+    let _ = run_cmd_allow_fail(
+        "docker",
+        &["rm", "-f", &format!("{}-worker", WORKLOAD_CLUSTER_NAME)],
+    );
 
-    info!("Upgrade test complete: v{} -> v{}", from_version, to_version);
+    info!(
+        "Upgrade test complete: v{} -> v{}",
+        from_version, to_version
+    );
     Ok(())
 }
 
@@ -320,7 +345,10 @@ async fn monitor_upgrade(
         }
 
         let elapsed = start.elapsed().as_secs();
-        info!("[{:3}s] Nodes: {}, upgraded: {}, ready: {}", elapsed, node_count, all_upgraded, all_ready);
+        info!(
+            "[{:3}s] Nodes: {}, upgraded: {}, ready: {}",
+            elapsed, node_count, all_upgraded, all_ready
+        );
 
         if all_upgraded && all_ready && node_count > 0 {
             info!("Upgrade complete - all nodes at v{}", target_version);
