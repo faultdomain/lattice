@@ -2,16 +2,17 @@
 //!
 //! All command executions have timeouts and retry logic to handle transient failures.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, Patch, PatchParams};
 use kube::core::DynamicObject;
 use kube::discovery::ApiResource;
 use thiserror::Error;
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::kube_utils;
 
@@ -330,6 +331,32 @@ pub async fn import_from_manifests(
     // TempDir is dropped here, ensuring cleanup
 }
 
+/// Pause a CAPI cluster (call after export to keep cluster dormant until deletion)
+///
+/// This is needed because `clusterctl move --to-directory` unpauses the cluster
+/// after export. For distributed pivot, we want the parent's CAPI resources to
+/// remain paused until the child confirms successful import.
+pub async fn pause_capi_cluster(
+    kubeconfig: Option<&Path>,
+    namespace: &str,
+    cluster_name: &str,
+) -> Result<(), ClusterctlError> {
+    let client = kube_utils::create_client(kubeconfig)
+        .await
+        .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &cluster_api_resource());
+    let patch = serde_json::json!({"spec": {"paused": true}});
+
+    api.patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .map_err(|e| {
+            ClusterctlError::ExecutionFailed(format!("failed to pause cluster {}: {}", cluster_name, e))
+        })?;
+
+    info!(cluster = %cluster_name, "CAPI cluster paused");
+    Ok(())
+}
+
 /// Unpause a CAPI cluster (call before retrying after failed move)
 pub async fn unpause_capi_cluster(
     kubeconfig: Option<&Path>,
@@ -574,6 +601,289 @@ pub async fn teardown_cluster(
     Ok(())
 }
 
+/// Annotation added before deletion (matches clusterctl behavior)
+const DELETE_FOR_MOVE_ANNOTATION: &str = "clusterctl.cluster.x-k8s.io/delete-for-move";
+
+/// Resource identity extracted from manifests
+#[derive(Debug, Clone)]
+struct ResourceIdentity {
+    api_version: String,
+    kind: String,
+    namespace: String,
+    name: String,
+}
+
+/// Delete order for CAPI resources (children before parents)
+/// Lower number = delete first
+fn deletion_priority(kind: &str) -> u32 {
+    match kind {
+        // Delete leaf resources first
+        "Machine" => 0,
+        "MachineSet" => 1,
+        "MachineDeployment" => 2,
+        "KubeadmConfig" | "KubeadmConfigTemplate" => 3,
+        "MachineHealthCheck" => 4,
+        // Infrastructure resources
+        "DockerMachine" | "DockerMachineTemplate" => 5,
+        "AWSMachine" | "AWSMachineTemplate" => 5,
+        "AzureMachine" | "AzureMachineTemplate" => 5,
+        "GCPMachine" | "GCPMachineTemplate" => 5,
+        "VSphereVM" | "VSphereMachine" | "VSphereMachineTemplate" => 5,
+        // Control plane
+        "KubeadmControlPlane" | "KubeadmControlPlaneTemplate" => 6,
+        // Infrastructure cluster resources
+        "DockerCluster" | "DockerClusterTemplate" => 7,
+        "AWSCluster" | "AWSClusterTemplate" => 7,
+        "AzureCluster" | "AzureClusterTemplate" => 7,
+        "GCPCluster" | "GCPClusterTemplate" => 7,
+        "VSphereCluster" | "VSphereClusterTemplate" => 7,
+        // Cluster is deleted last
+        "Cluster" => 10,
+        "ClusterClass" => 11,
+        // Secrets and ConfigMaps somewhere in between
+        "Secret" | "ConfigMap" => 8,
+        // Unknown resources - delete before Cluster but after known children
+        _ => 9,
+    }
+}
+
+/// Parse manifests to extract resource identities
+fn parse_manifest_identities(manifests: &[Vec<u8>]) -> Vec<ResourceIdentity> {
+    use serde::Deserialize;
+
+    let mut identities = Vec::new();
+
+    for manifest in manifests {
+        // Parse as YAML - each manifest file may contain multiple documents
+        let docs: Result<Vec<serde_yaml::Value>, _> =
+            serde_yaml::Deserializer::from_slice(manifest)
+                .map(serde_yaml::Value::deserialize)
+                .collect();
+
+        let docs = match docs {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(error = %e, "Failed to parse manifest YAML");
+                continue;
+            }
+        };
+
+        for doc in docs {
+            let api_version = doc.get("apiVersion").and_then(|v| v.as_str());
+            let kind = doc.get("kind").and_then(|v| v.as_str());
+            let metadata = doc.get("metadata");
+
+            if let (Some(api_version), Some(kind), Some(metadata)) = (api_version, kind, metadata) {
+                let name = metadata
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let namespace = metadata
+                    .get("namespace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+
+                if !name.is_empty() {
+                    identities.push(ResourceIdentity {
+                        api_version: api_version.to_string(),
+                        kind: kind.to_string(),
+                        namespace: namespace.to_string(),
+                        name: name.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    identities
+}
+
+/// Build ApiResource from apiVersion and kind
+fn api_resource_from_identity(identity: &ResourceIdentity) -> ApiResource {
+    let (group, version) = match identity.api_version.split_once('/') {
+        Some((g, v)) => (g.to_string(), v.to_string()),
+        None => (String::new(), identity.api_version.clone()), // core API group
+    };
+
+    // Pluralize kind (simple heuristic - works for CAPI resources)
+    let plural = pluralize_kind(&identity.kind);
+
+    ApiResource {
+        group,
+        version: version.clone(),
+        kind: identity.kind.clone(),
+        api_version: identity.api_version.clone(),
+        plural,
+    }
+}
+
+/// Simple pluralization for Kubernetes kinds
+fn pluralize_kind(kind: &str) -> String {
+    let lower = kind.to_lowercase();
+    if lower.ends_with("ss") {
+        // e.g., "ClusterClass" -> "clusterclasses"
+        format!("{}es", lower)
+    } else if lower.ends_with('s') {
+        lower
+    } else {
+        format!("{}s", lower)
+    }
+}
+
+/// Delete a single resource with finalizer removal (force delete)
+///
+/// Follows clusterctl's approach:
+/// 1. Add delete-for-move annotation
+/// 2. Remove finalizers to prevent infrastructure deletion
+/// 3. Delete the resource
+async fn delete_resource_for_move(
+    client: &kube::Client,
+    identity: &ResourceIdentity,
+) -> Result<(), ClusterctlError> {
+    let api_resource = api_resource_from_identity(identity);
+    let api: Api<DynamicObject> = if identity.namespace.is_empty() {
+        Api::all_with(client.clone(), &api_resource)
+    } else {
+        Api::namespaced_with(client.clone(), &identity.namespace, &api_resource)
+    };
+
+    // Check if resource exists
+    let obj = match api.get(&identity.name).await {
+        Ok(o) => o,
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            debug!(
+                kind = %identity.kind,
+                name = %identity.name,
+                "Resource already deleted"
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(ClusterctlError::ExecutionFailed(format!(
+                "failed to get {} {}: {}",
+                identity.kind, identity.name, e
+            )));
+        }
+    };
+
+    // Step 1: Add delete-for-move annotation
+    let annotation_patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                DELETE_FOR_MOVE_ANNOTATION: ""
+            }
+        }
+    });
+    if let Err(e) = api
+        .patch(
+            &identity.name,
+            &PatchParams::default(),
+            &Patch::Merge(&annotation_patch),
+        )
+        .await
+    {
+        warn!(
+            kind = %identity.kind,
+            name = %identity.name,
+            error = %e,
+            "Failed to add delete-for-move annotation"
+        );
+    }
+
+    // Step 2: Remove finalizers to prevent CAPI from deleting infrastructure
+    // (The child cluster now owns the infrastructure)
+    if !obj.metadata.finalizers.as_ref().is_none_or(|f| f.is_empty()) {
+        let finalizer_patch = serde_json::json!({
+            "metadata": {
+                "finalizers": null
+            }
+        });
+        if let Err(e) = api
+            .patch(
+                &identity.name,
+                &PatchParams::default(),
+                &Patch::Merge(&finalizer_patch),
+            )
+            .await
+        {
+            warn!(
+                kind = %identity.kind,
+                name = %identity.name,
+                error = %e,
+                "Failed to remove finalizers"
+            );
+        }
+    }
+
+    // Step 3: Delete the resource
+    match api.delete(&identity.name, &DeleteParams::default()).await {
+        Ok(_) => {
+            debug!(
+                kind = %identity.kind,
+                name = %identity.name,
+                "Resource deleted"
+            );
+            Ok(())
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(()), // Already gone
+        Err(e) => Err(ClusterctlError::ExecutionFailed(format!(
+            "failed to delete {} {}: {}",
+            identity.kind, identity.name, e
+        ))),
+    }
+}
+
+/// Delete CAPI resources from source cluster after successful pivot
+///
+/// This is called after the child cluster confirms successful import of CAPI resources.
+/// We delete the source resources with finalizer removal to prevent CAPI from
+/// attempting to delete the infrastructure (which is now managed by the child).
+///
+/// Resources are deleted in reverse dependency order: children before parents.
+pub async fn delete_pivoted_capi_resources(
+    client: &kube::Client,
+    manifests: &[Vec<u8>],
+) -> Result<usize, ClusterctlError> {
+    // Parse manifests to get resource identities
+    let mut identities = parse_manifest_identities(manifests);
+
+    if identities.is_empty() {
+        return Ok(0);
+    }
+
+    // Sort by deletion priority (children before parents)
+    identities.sort_by_key(|id| deletion_priority(&id.kind));
+
+    // Group by priority for logging
+    let mut by_kind: HashMap<String, usize> = HashMap::new();
+    for id in &identities {
+        *by_kind.entry(id.kind.clone()).or_default() += 1;
+    }
+    info!(
+        resources = ?by_kind,
+        total = identities.len(),
+        "Deleting pivoted CAPI resources from source cluster"
+    );
+
+    // Delete each resource
+    let mut deleted = 0;
+    for identity in &identities {
+        if let Err(e) = delete_resource_for_move(client, identity).await {
+            warn!(
+                kind = %identity.kind,
+                name = %identity.name,
+                error = %e,
+                "Failed to delete resource, continuing with remaining"
+            );
+        } else {
+            deleted += 1;
+        }
+    }
+
+    info!(deleted, total = identities.len(), "CAPI resource deletion complete");
+    Ok(deleted)
+}
+
 async fn read_yaml_files(dir: &Path) -> Result<Vec<Vec<u8>>, ClusterctlError> {
     let mut entries = tokio::fs::read_dir(dir)
         .await
@@ -773,5 +1083,215 @@ mod tests {
 
         // on_retry should be called twice (after attempt 1 and 2, not after success on 3)
         assert_eq!(retry_count.load(Ordering::SeqCst), 2);
+    }
+
+    // ==========================================================================
+    // CAPI Resource Deletion Tests (Pure Functions)
+    // ==========================================================================
+
+    #[test]
+    fn test_deletion_priority_children_before_parents() {
+        // Children should have lower priority (deleted first)
+        assert!(deletion_priority("Machine") < deletion_priority("MachineSet"));
+        assert!(deletion_priority("MachineSet") < deletion_priority("MachineDeployment"));
+        assert!(deletion_priority("MachineDeployment") < deletion_priority("KubeadmControlPlane"));
+        assert!(deletion_priority("KubeadmControlPlane") < deletion_priority("DockerCluster"));
+        assert!(deletion_priority("DockerCluster") < deletion_priority("Cluster"));
+        assert!(deletion_priority("Cluster") < deletion_priority("ClusterClass"));
+    }
+
+    #[test]
+    fn test_deletion_priority_infrastructure_resources() {
+        // Infrastructure machine resources have same priority
+        assert_eq!(
+            deletion_priority("DockerMachine"),
+            deletion_priority("AWSMachine")
+        );
+        assert_eq!(
+            deletion_priority("AWSMachine"),
+            deletion_priority("GCPMachine")
+        );
+
+        // Infrastructure cluster resources have same priority
+        assert_eq!(
+            deletion_priority("DockerCluster"),
+            deletion_priority("AWSCluster")
+        );
+    }
+
+    #[test]
+    fn test_deletion_priority_unknown_resources() {
+        // Unknown resources should be deleted after known children but before Cluster
+        let unknown_priority = deletion_priority("SomeUnknownResource");
+        assert!(unknown_priority < deletion_priority("Cluster"));
+        assert!(unknown_priority > deletion_priority("Secret"));
+    }
+
+    #[test]
+    fn test_pluralize_kind_standard() {
+        assert_eq!(pluralize_kind("Cluster"), "clusters");
+        assert_eq!(pluralize_kind("Machine"), "machines");
+        assert_eq!(pluralize_kind("MachineDeployment"), "machinedeployments");
+    }
+
+    #[test]
+    fn test_pluralize_kind_ss_suffix() {
+        // Kinds ending in "ss" should get "es" suffix
+        assert_eq!(pluralize_kind("ClusterClass"), "clusterclasses");
+    }
+
+    #[test]
+    fn test_parse_manifest_identities_single_doc() {
+        let manifest = br#"
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: test-cluster
+  namespace: capi-test
+spec:
+  controlPlaneRef:
+    kind: KubeadmControlPlane
+"#
+        .to_vec();
+
+        let identities = parse_manifest_identities(&[manifest]);
+
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].api_version, "cluster.x-k8s.io/v1beta1");
+        assert_eq!(identities[0].kind, "Cluster");
+        assert_eq!(identities[0].name, "test-cluster");
+        assert_eq!(identities[0].namespace, "capi-test");
+    }
+
+    #[test]
+    fn test_parse_manifest_identities_multi_doc() {
+        let manifest = br#"
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: test-cluster
+  namespace: capi-test
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+kind: KubeadmControlPlane
+metadata:
+  name: test-control-plane
+  namespace: capi-test
+"#
+        .to_vec();
+
+        let identities = parse_manifest_identities(&[manifest]);
+
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0].kind, "Cluster");
+        assert_eq!(identities[1].kind, "KubeadmControlPlane");
+    }
+
+    #[test]
+    fn test_parse_manifest_identities_skips_invalid() {
+        let valid = br#"
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: test-cluster
+  namespace: capi-test
+"#
+        .to_vec();
+
+        let invalid = b"not: valid: yaml: ::: ".to_vec();
+
+        let identities = parse_manifest_identities(&[invalid, valid]);
+
+        // Should parse the valid manifest and skip the invalid one
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].kind, "Cluster");
+    }
+
+    #[test]
+    fn test_parse_manifest_identities_skips_nameless() {
+        let manifest = br#"
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  namespace: capi-test
+"#
+        .to_vec();
+
+        let identities = parse_manifest_identities(&[manifest]);
+
+        // Should skip resources without names
+        assert!(identities.is_empty());
+    }
+
+    #[test]
+    fn test_api_resource_from_identity_with_group() {
+        let identity = ResourceIdentity {
+            api_version: "cluster.x-k8s.io/v1beta1".to_string(),
+            kind: "Cluster".to_string(),
+            namespace: "default".to_string(),
+            name: "test".to_string(),
+        };
+
+        let api_resource = api_resource_from_identity(&identity);
+
+        assert_eq!(api_resource.group, "cluster.x-k8s.io");
+        assert_eq!(api_resource.version, "v1beta1");
+        assert_eq!(api_resource.kind, "Cluster");
+        assert_eq!(api_resource.plural, "clusters");
+    }
+
+    #[test]
+    fn test_api_resource_from_identity_core_api() {
+        let identity = ResourceIdentity {
+            api_version: "v1".to_string(),
+            kind: "Secret".to_string(),
+            namespace: "default".to_string(),
+            name: "test".to_string(),
+        };
+
+        let api_resource = api_resource_from_identity(&identity);
+
+        assert_eq!(api_resource.group, ""); // Core API has empty group
+        assert_eq!(api_resource.version, "v1");
+        assert_eq!(api_resource.kind, "Secret");
+        assert_eq!(api_resource.plural, "secrets");
+    }
+
+    #[test]
+    fn test_resources_sorted_by_deletion_priority() {
+        let manifests = vec![
+            br#"
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: test-cluster
+  namespace: capi-test
+"#
+            .to_vec(),
+            br#"
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Machine
+metadata:
+  name: test-machine
+  namespace: capi-test
+"#
+            .to_vec(),
+            br#"
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineDeployment
+metadata:
+  name: test-md
+  namespace: capi-test
+"#
+            .to_vec(),
+        ];
+
+        let mut identities = parse_manifest_identities(&manifests);
+        identities.sort_by_key(|id| deletion_priority(&id.kind));
+
+        // Should be sorted: Machine -> MachineDeployment -> Cluster
+        assert_eq!(identities[0].kind, "Machine");
+        assert_eq!(identities[1].kind, "MachineDeployment");
+        assert_eq!(identities[2].kind, "Cluster");
     }
 }

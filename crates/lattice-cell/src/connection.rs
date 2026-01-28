@@ -108,6 +108,15 @@ pub struct UnpivotManifests {
     pub namespace: String,
 }
 
+/// CAPI manifests exported during pivot (to be deleted after PivotComplete)
+#[derive(Clone, Debug, Default)]
+pub struct PivotSourceManifests {
+    /// CAPI manifests exported via clusterctl move --to-directory
+    pub capi_manifests: Vec<Vec<u8>>,
+    /// Source namespace where resources live
+    pub namespace: String,
+}
+
 /// Registry of connected agents
 ///
 /// Thread-safe registry using DashMap for concurrent access.
@@ -116,6 +125,8 @@ pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
     post_pivot_manifests: DashMap<String, PostPivotManifests>,
     unpivot_manifests: DashMap<String, UnpivotManifests>,
+    /// CAPI manifests exported during pivot (deleted after PivotComplete)
+    pivot_source_manifests: DashMap<String, PivotSourceManifests>,
 }
 
 impl AgentRegistry {
@@ -254,6 +265,25 @@ impl AgentRegistry {
     pub fn has_unpivot_manifests(&self, cluster_name: &str) -> bool {
         self.unpivot_manifests.contains_key(cluster_name)
     }
+
+    /// Store CAPI manifests exported during pivot (to delete after PivotComplete)
+    pub fn set_pivot_source_manifests(&self, cluster_name: &str, manifests: PivotSourceManifests) {
+        info!(
+            cluster = %cluster_name,
+            manifest_count = manifests.capi_manifests.len(),
+            namespace = %manifests.namespace,
+            "Stored pivot source manifests for deletion"
+        );
+        self.pivot_source_manifests
+            .insert(cluster_name.to_string(), manifests);
+    }
+
+    /// Get and remove pivot source manifests for a cluster
+    pub fn take_pivot_source_manifests(&self, cluster_name: &str) -> Option<PivotSourceManifests> {
+        self.pivot_source_manifests
+            .remove(cluster_name)
+            .map(|(_, m)| m)
+    }
 }
 
 /// Wrap registry in Arc for sharing across tasks
@@ -369,5 +399,229 @@ mod tests {
         assert_eq!(retrieved.capi_manifests.len(), 1);
 
         assert!(!registry.has_unpivot_manifests("test"));
+    }
+
+    // =========================================================================
+    // Connection State Tests
+    // =========================================================================
+
+    #[test]
+    fn test_connection_set_state() {
+        let (mut conn, _rx) = create_test_connection("test");
+        assert_eq!(conn.state, AgentState::Provisioning);
+
+        conn.set_state(AgentState::Ready);
+        assert_eq!(conn.state, AgentState::Ready);
+    }
+
+    #[test]
+    fn test_connection_set_capi_ready() {
+        let (mut conn, _rx) = create_test_connection("test");
+        assert!(!conn.capi_ready);
+
+        conn.set_capi_ready(true);
+        assert!(conn.capi_ready);
+
+        conn.set_capi_ready(false);
+        assert!(!conn.capi_ready);
+    }
+
+    #[test]
+    fn test_connection_set_pivot_complete() {
+        let (mut conn, _rx) = create_test_connection("test");
+        assert!(!conn.pivot_complete);
+
+        conn.set_pivot_complete(true);
+        assert!(conn.pivot_complete);
+    }
+
+    // =========================================================================
+    // Registry Update Tests
+    // =========================================================================
+
+    #[test]
+    fn test_registry_update_state() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("test-cluster");
+
+        registry.register(conn);
+        registry.update_state("test-cluster", AgentState::Ready);
+
+        let agent = registry.get("test-cluster").unwrap();
+        assert_eq!(agent.state, AgentState::Ready);
+    }
+
+    #[test]
+    fn test_registry_update_state_unknown_agent() {
+        let registry = AgentRegistry::new();
+        // Should not panic
+        registry.update_state("unknown", AgentState::Ready);
+    }
+
+    #[test]
+    fn test_registry_set_capi_ready() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("test-cluster");
+
+        registry.register(conn);
+        registry.set_capi_ready("test-cluster", true);
+
+        let agent = registry.get("test-cluster").unwrap();
+        assert!(agent.capi_ready);
+    }
+
+    #[test]
+    fn test_registry_set_capi_ready_unknown_agent() {
+        let registry = AgentRegistry::new();
+        // Should not panic
+        registry.set_capi_ready("unknown", true);
+    }
+
+    #[test]
+    fn test_registry_set_pivot_complete() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("test-cluster");
+
+        registry.register(conn);
+        registry.set_pivot_complete("test-cluster", true);
+
+        let agent = registry.get("test-cluster").unwrap();
+        assert!(agent.pivot_complete);
+    }
+
+    #[test]
+    fn test_registry_list_clusters() {
+        let registry = AgentRegistry::new();
+        let (conn1, _rx1) = create_test_connection("cluster-a");
+        let (conn2, _rx2) = create_test_connection("cluster-b");
+
+        registry.register(conn1);
+        registry.register(conn2);
+
+        let clusters = registry.list_clusters();
+        assert_eq!(clusters.len(), 2);
+        assert!(clusters.contains(&"cluster-a".to_string()));
+        assert!(clusters.contains(&"cluster-b".to_string()));
+    }
+
+    #[test]
+    fn test_registry_get_mut() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("test-cluster");
+
+        registry.register(conn);
+
+        {
+            let mut agent = registry.get_mut("test-cluster").unwrap();
+            agent.set_state(AgentState::Degraded);
+        }
+
+        let agent = registry.get("test-cluster").unwrap();
+        assert_eq!(agent.state, AgentState::Degraded);
+    }
+
+    // =========================================================================
+    // Post-Pivot Manifests Tests
+    // =========================================================================
+
+    #[test]
+    fn test_post_pivot_manifests() {
+        let registry = AgentRegistry::new();
+
+        let manifests = PostPivotManifests {
+            network_policy_yaml: Some("apiVersion: cilium.io/v2\nkind: CiliumNetworkPolicy".to_string()),
+        };
+
+        registry.set_post_pivot_manifests("test", manifests);
+        assert!(registry.has_post_pivot_manifests("test"));
+
+        let retrieved = registry.take_post_pivot_manifests("test").unwrap();
+        assert!(retrieved.network_policy_yaml.is_some());
+
+        assert!(!registry.has_post_pivot_manifests("test"));
+    }
+
+    #[test]
+    fn test_post_pivot_manifests_empty() {
+        let registry = AgentRegistry::new();
+        assert!(!registry.has_post_pivot_manifests("nonexistent"));
+        assert!(registry.take_post_pivot_manifests("nonexistent").is_none());
+    }
+
+    // =========================================================================
+    // Pivot Source Manifests Tests
+    // =========================================================================
+
+    #[test]
+    fn test_pivot_source_manifests() {
+        let registry = AgentRegistry::new();
+
+        let manifests = PivotSourceManifests {
+            capi_manifests: vec![b"cluster-1.yaml".to_vec(), b"machine-1.yaml".to_vec()],
+            namespace: "default".to_string(),
+        };
+
+        registry.set_pivot_source_manifests("test-cluster", manifests);
+
+        let retrieved = registry.take_pivot_source_manifests("test-cluster").unwrap();
+        assert_eq!(retrieved.capi_manifests.len(), 2);
+        assert_eq!(retrieved.namespace, "default");
+
+        // Should be gone after take
+        assert!(registry.take_pivot_source_manifests("test-cluster").is_none());
+    }
+
+    // =========================================================================
+    // Struct Default Tests
+    // =========================================================================
+
+    #[test]
+    fn test_post_pivot_manifests_default() {
+        let m = PostPivotManifests::default();
+        assert!(m.network_policy_yaml.is_none());
+    }
+
+    #[test]
+    fn test_unpivot_manifests_default() {
+        let m = UnpivotManifests::default();
+        assert!(m.capi_manifests.is_empty());
+        assert!(m.namespace.is_empty());
+    }
+
+    #[test]
+    fn test_pivot_source_manifests_default() {
+        let m = PivotSourceManifests::default();
+        assert!(m.capi_manifests.is_empty());
+        assert!(m.namespace.is_empty());
+    }
+
+    // =========================================================================
+    // Is Ready For Pivot Edge Cases
+    // =========================================================================
+
+    #[test]
+    fn test_is_ready_for_pivot_all_states() {
+        let (mut conn, _rx) = create_test_connection("test");
+        conn.capi_ready = true;
+
+        // Valid states for pivot
+        conn.state = AgentState::Provisioning;
+        assert!(conn.is_ready_for_pivot());
+
+        conn.state = AgentState::Ready;
+        assert!(conn.is_ready_for_pivot());
+
+        conn.state = AgentState::Degraded;
+        assert!(conn.is_ready_for_pivot());
+
+        conn.state = AgentState::Failed;
+        assert!(conn.is_ready_for_pivot());
+
+        // Invalid states for pivot
+        conn.state = AgentState::Pivoting;
+        assert!(!conn.is_ready_for_pivot());
+
+        conn.state = AgentState::Unknown;
+        assert!(!conn.is_ready_for_pivot());
     }
 }

@@ -379,4 +379,156 @@ mod tests {
             .to_string()
             .contains("credentialsSecretRef"));
     }
+
+    // =========================================================================
+    // AppRole Auth Tests
+    // =========================================================================
+
+    fn sample_approle_provider() -> SecretsProvider {
+        SecretsProvider::new(
+            "vault-approle",
+            SecretsProviderSpec {
+                server: "https://vault.example.com".to_string(),
+                path: Some("secret/data/myapp".to_string()),
+                auth_method: VaultAuthMethod::AppRole,
+                credentials_secret_ref: Some(SecretRef {
+                    name: "vault-approle".to_string(),
+                    namespace: "lattice-system".to_string(),
+                }),
+                kubernetes_mount_path: None,
+                kubernetes_role: None,
+                namespace: Some("my-vault-namespace".to_string()),
+                ca_bundle: Some("LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t".to_string()),
+            },
+        )
+    }
+
+    #[test]
+    fn approle_auth_builds_correct_spec() {
+        let sp = sample_approle_provider();
+        let spec = build_vault_provider_spec(&sp).expect("should build spec");
+
+        let vault = spec.get("vault").expect("should have vault");
+        assert_eq!(vault.get("server").unwrap(), "https://vault.example.com");
+        assert_eq!(vault.get("namespace").unwrap(), "my-vault-namespace");
+        assert_eq!(
+            vault.get("caBundle").unwrap(),
+            "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t"
+        );
+
+        let auth = vault.get("auth").expect("should have auth");
+        let approle = auth.get("appRole").expect("should have appRole");
+        assert_eq!(approle.get("path").unwrap(), "approle");
+
+        let role_ref = approle.get("roleRef").expect("should have roleRef");
+        assert_eq!(role_ref.get("name").unwrap(), "vault-approle");
+        assert_eq!(role_ref.get("key").unwrap(), "role_id");
+
+        let secret_ref = approle.get("secretRef").expect("should have secretRef");
+        assert_eq!(secret_ref.get("name").unwrap(), "vault-approle");
+        assert_eq!(secret_ref.get("key").unwrap(), "secret_id");
+    }
+
+    #[test]
+    fn approle_auth_requires_credentials_ref() {
+        let mut sp = sample_approle_provider();
+        sp.spec.credentials_secret_ref = None;
+
+        let result = build_vault_provider_spec(&sp);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("credentialsSecretRef"));
+    }
+
+    // =========================================================================
+    // Kubernetes Auth Default Tests
+    // =========================================================================
+
+    #[test]
+    fn kubernetes_auth_uses_defaults() {
+        let sp = SecretsProvider::new(
+            "vault-k8s-default",
+            SecretsProviderSpec {
+                server: "https://vault.example.com".to_string(),
+                path: None, // Should default to "secret"
+                auth_method: VaultAuthMethod::Kubernetes,
+                credentials_secret_ref: None,
+                kubernetes_mount_path: None, // Should default to "kubernetes"
+                kubernetes_role: None,       // Should default to "external-secrets"
+                namespace: None,
+                ca_bundle: None,
+            },
+        );
+        let spec = build_vault_provider_spec(&sp).expect("should build spec");
+
+        let vault = spec.get("vault").expect("should have vault");
+        assert_eq!(vault.get("path").unwrap(), "secret");
+
+        let auth = vault.get("auth").expect("should have auth");
+        let k8s = auth.get("kubernetes").expect("should have kubernetes auth");
+        assert_eq!(k8s.get("mountPath").unwrap(), "kubernetes");
+        assert_eq!(k8s.get("role").unwrap(), "external-secrets");
+    }
+
+    // =========================================================================
+    // Error Detection Tests
+    // =========================================================================
+
+    #[test]
+    fn is_crd_not_found_detects_404() {
+        let err = ReconcileError::Kube("404 Not Found".to_string());
+        assert!(is_crd_not_found(&err));
+    }
+
+    #[test]
+    fn is_crd_not_found_detects_not_found() {
+        let err = ReconcileError::Kube("resource not found".to_string());
+        assert!(is_crd_not_found(&err));
+    }
+
+    #[test]
+    fn is_crd_not_found_detects_server_message() {
+        let err =
+            ReconcileError::Kube("the server could not find the requested resource".to_string());
+        assert!(is_crd_not_found(&err));
+    }
+
+    #[test]
+    fn is_crd_not_found_returns_false_for_other_errors() {
+        let err = ReconcileError::Kube("connection refused".to_string());
+        assert!(!is_crd_not_found(&err));
+
+        let err = ReconcileError::Validation("invalid spec".to_string());
+        assert!(!is_crd_not_found(&err));
+    }
+
+    // =========================================================================
+    // Spec Building Edge Cases
+    // =========================================================================
+
+    #[test]
+    fn token_auth_uses_default_path() {
+        let sp = SecretsProvider::new(
+            "vault-token-default",
+            SecretsProviderSpec {
+                server: "https://vault.example.com".to_string(),
+                path: None, // Should default to "secret"
+                auth_method: VaultAuthMethod::Token,
+                credentials_secret_ref: Some(SecretRef {
+                    name: "token".to_string(),
+                    namespace: "default".to_string(),
+                }),
+                kubernetes_mount_path: None,
+                kubernetes_role: None,
+                namespace: None,
+                ca_bundle: None,
+            },
+        );
+        let spec = build_vault_provider_spec(&sp).expect("should build spec");
+
+        let vault = spec.get("vault").expect("should have vault");
+        assert_eq!(vault.get("path").unwrap(), "secret");
+    }
 }

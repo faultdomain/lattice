@@ -112,6 +112,126 @@ fn serialize_for_distribution<T: serde::Serialize + Clone + kube::ResourceExt>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_common::crd::{CloudProviderSpec, CloudProviderType, SecretRef};
+
+    // =========================================================================
+    // serialize_for_distribution Tests
+    // =========================================================================
+
+    fn sample_cloud_provider() -> CloudProvider {
+        let mut cp = CloudProvider::new(
+            "test-provider",
+            CloudProviderSpec {
+                provider_type: CloudProviderType::Docker,
+                region: None,
+                credentials_secret_ref: None,
+                aws: None,
+                proxmox: None,
+                openstack: None,
+                labels: Default::default(),
+            },
+        );
+        // Add metadata that should be stripped
+        cp.metadata.namespace = Some("lattice-system".to_string());
+        cp.metadata.uid = Some("test-uid-12345".to_string());
+        cp.metadata.resource_version = Some("123456".to_string());
+        cp.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        ));
+        cp
+    }
+
+    #[test]
+    fn test_serialize_for_distribution_produces_yaml() {
+        let cp = sample_cloud_provider();
+        let result = serialize_for_distribution(&cp);
+        assert!(result.is_ok());
+
+        let yaml = String::from_utf8(result.unwrap()).unwrap();
+        assert!(yaml.contains("test-provider"));
+        // CloudProviderType uses rename_all = "lowercase", so Docker -> docker
+        assert!(yaml.contains("docker"));
+    }
+
+    #[test]
+    fn test_serialize_for_distribution_strips_uid() {
+        let cp = sample_cloud_provider();
+        let result = serialize_for_distribution(&cp).unwrap();
+        let yaml = String::from_utf8(result).unwrap();
+
+        // UID should be stripped
+        assert!(!yaml.contains("test-uid-12345"));
+    }
+
+    #[test]
+    fn test_serialize_for_distribution_strips_resource_version() {
+        let cp = sample_cloud_provider();
+        let result = serialize_for_distribution(&cp).unwrap();
+        let yaml = String::from_utf8(result).unwrap();
+
+        // resourceVersion should be stripped
+        assert!(!yaml.contains("resourceVersion"));
+    }
+
+    #[test]
+    fn test_serialize_for_distribution_with_credentials_ref() {
+        let mut cp = sample_cloud_provider();
+        cp.spec.credentials_secret_ref = Some(SecretRef {
+            name: "my-secret".to_string(),
+            namespace: "capa-system".to_string(),
+        });
+
+        let result = serialize_for_distribution(&cp).unwrap();
+        let yaml = String::from_utf8(result).unwrap();
+
+        // Credentials ref should be preserved
+        assert!(yaml.contains("my-secret"));
+        assert!(yaml.contains("capa-system"));
+    }
+
+    #[test]
+    fn test_serialize_for_distribution_with_secret() {
+        use k8s_openapi::api::core::v1::Secret;
+        use std::collections::BTreeMap;
+
+        let mut secret = Secret::default();
+        secret.metadata.name = Some("test-secret".to_string());
+        secret.metadata.namespace = Some("lattice-system".to_string());
+        secret.metadata.uid = Some("secret-uid".to_string());
+        secret.metadata.resource_version = Some("999".to_string());
+
+        let mut data = BTreeMap::new();
+        data.insert(
+            "key".to_string(),
+            k8s_openapi::ByteString("value".as_bytes().to_vec()),
+        );
+        secret.data = Some(data);
+
+        let result = serialize_for_distribution(&secret).unwrap();
+        let yaml = String::from_utf8(result).unwrap();
+
+        // Name should be preserved
+        assert!(yaml.contains("test-secret"));
+        // UID and resourceVersion should be stripped
+        assert!(!yaml.contains("secret-uid"));
+    }
+
+    // =========================================================================
+    // ResourceError Tests
+    // =========================================================================
+
+    #[test]
+    fn test_resource_error_internal() {
+        let err = ResourceError::Internal("test error".to_string());
+        assert!(err.to_string().contains("internal error"));
+        assert!(err.to_string().contains("test error"));
+    }
+
+    // =========================================================================
+    // DistributableResources Tests (re-exports from lattice_common)
+    // =========================================================================
 
     #[test]
     fn test_distributable_resources_is_empty() {
@@ -123,5 +243,25 @@ mod tests {
             ..Default::default()
         };
         assert!(!with_cp.is_empty());
+    }
+
+    #[test]
+    fn test_distributable_resources_with_secrets_providers() {
+        let resources = DistributableResources {
+            cloud_providers: vec![],
+            secrets_providers: vec![vec![1]],
+            secrets: vec![],
+        };
+        assert!(!resources.is_empty());
+    }
+
+    #[test]
+    fn test_distributable_resources_with_secrets() {
+        let resources = DistributableResources {
+            cloud_providers: vec![],
+            secrets_providers: vec![],
+            secrets: vec![vec![1]],
+        };
+        assert!(!resources.is_empty());
     }
 }

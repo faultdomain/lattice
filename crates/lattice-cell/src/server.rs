@@ -142,6 +142,39 @@ async fn handle_agent_message_impl(
                     info!(cluster = %cluster_name, "Pivot complete persisted to cluster status");
                 }
 
+                // Delete source CAPI resources now that child has successfully imported them
+                // This prevents race conditions and ensures only one cluster owns the resources
+                if let Some(source_manifests) = registry.take_pivot_source_manifests(cluster_name) {
+                    info!(
+                        cluster = %cluster_name,
+                        manifest_count = source_manifests.capi_manifests.len(),
+                        "Deleting source CAPI resources after successful pivot"
+                    );
+                    match lattice_common::clusterctl::delete_pivoted_capi_resources(
+                        kube_client,
+                        &source_manifests.capi_manifests,
+                    )
+                    .await
+                    {
+                        Ok(deleted) => {
+                            info!(
+                                cluster = %cluster_name,
+                                deleted,
+                                "Source CAPI resources deleted"
+                            );
+                        }
+                        Err(e) => {
+                            // Log error but don't fail - child already owns the resources
+                            // Manual cleanup may be needed
+                            error!(
+                                cluster = %cluster_name,
+                                error = %e,
+                                "Failed to delete source CAPI resources (manual cleanup may be needed)"
+                            );
+                        }
+                    }
+                }
+
                 // Send post-pivot manifests (CiliumNetworkPolicy)
                 // Note: LatticeCluster CRD/instance already delivered via bootstrap webhook
                 if let Some(manifests) = registry.take_post_pivot_manifests(cluster_name) {
@@ -364,11 +397,10 @@ async fn handle_agent_message_impl(
                 status_code = resp.status_code,
                 streaming = resp.streaming,
                 stream_end = resp.stream_end,
-                "K8s API proxy response received"
+                "K8s API response received (not processed - future RPC support)"
             );
-            // Response dispatching is handled by the RequestMultiplexer
-            // which is integrated at the HTTP proxy layer, not here.
-            // This log is for observability.
+            // K8s API proxy functionality not yet implemented.
+            // All interactions should use RPC commands, not HTTP proxying.
         }
         None => {
             warn!(cluster = %cluster_name, "Received message with no payload");

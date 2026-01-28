@@ -957,4 +957,132 @@ metadata:
         assert_eq!(CONDITION_AVAILABLE, "Available");
         assert_eq!(STATUS_TRUE, "True");
     }
+
+    // =========================================================================
+    // strip_export_metadata Tests
+    // =========================================================================
+
+    #[test]
+    fn test_strip_export_metadata_removes_uid() {
+        let mut meta = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("test".to_string()),
+            uid: Some("abc-123".to_string()),
+            ..Default::default()
+        };
+
+        strip_export_metadata(&mut meta);
+
+        assert_eq!(meta.name, Some("test".to_string())); // preserved
+        assert!(meta.uid.is_none()); // stripped
+    }
+
+    #[test]
+    fn test_strip_export_metadata_removes_resource_version() {
+        let mut meta = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("test".to_string()),
+            resource_version: Some("12345".to_string()),
+            ..Default::default()
+        };
+
+        strip_export_metadata(&mut meta);
+
+        assert!(meta.resource_version.is_none());
+    }
+
+    #[test]
+    fn test_strip_export_metadata_removes_creation_timestamp() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+
+        let mut meta = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("test".to_string()),
+            creation_timestamp: Some(Time(chrono::Utc::now())),
+            ..Default::default()
+        };
+
+        strip_export_metadata(&mut meta);
+
+        assert!(meta.creation_timestamp.is_none());
+    }
+
+    #[test]
+    fn test_strip_export_metadata_removes_managed_fields() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ManagedFieldsEntry;
+
+        let mut meta = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("test".to_string()),
+            managed_fields: Some(vec![ManagedFieldsEntry {
+                manager: Some("kubectl".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        strip_export_metadata(&mut meta);
+
+        assert!(meta.managed_fields.is_none());
+    }
+
+    #[test]
+    fn test_strip_export_metadata_removes_generation() {
+        let mut meta = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("test".to_string()),
+            generation: Some(5),
+            ..Default::default()
+        };
+
+        strip_export_metadata(&mut meta);
+
+        assert!(meta.generation.is_none());
+    }
+
+    #[test]
+    fn test_strip_export_metadata_preserves_labels() {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("app".to_string(), "test".to_string());
+
+        let mut meta = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("test".to_string()),
+            labels: Some(labels.clone()),
+            uid: Some("to-be-stripped".to_string()),
+            ..Default::default()
+        };
+
+        strip_export_metadata(&mut meta);
+
+        assert_eq!(meta.labels, Some(labels));
+        assert!(meta.uid.is_none());
+    }
+
+    #[test]
+    fn test_strip_export_metadata_preserves_annotations() {
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert("note".to_string(), "important".to_string());
+
+        let mut meta = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("test".to_string()),
+            annotations: Some(annotations.clone()),
+            resource_version: Some("to-be-stripped".to_string()),
+            ..Default::default()
+        };
+
+        strip_export_metadata(&mut meta);
+
+        assert_eq!(meta.annotations, Some(annotations));
+        assert!(meta.resource_version.is_none());
+    }
+
+    #[test]
+    fn test_strip_export_metadata_preserves_namespace() {
+        let mut meta = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some("test".to_string()),
+            namespace: Some("custom-ns".to_string()),
+            uid: Some("strip-me".to_string()),
+            ..Default::default()
+        };
+
+        strip_export_metadata(&mut meta);
+
+        assert_eq!(meta.namespace, Some("custom-ns".to_string()));
+        assert!(meta.uid.is_none());
+    }
 }

@@ -1964,7 +1964,7 @@ impl PivotOperations for PivotOperationsImpl {
         source_namespace: &str,
         target_namespace: &str,
     ) -> Result<(), Error> {
-        use lattice_common::clusterctl::{export_for_pivot, is_capi_cluster_ready};
+        use lattice_common::clusterctl::{export_for_pivot, is_capi_cluster_ready, pause_capi_cluster};
 
         // Check if agent is connected
         if self.agent_registry.get(cluster_name).is_none() {
@@ -1995,6 +1995,21 @@ impl PivotOperations for PivotOperationsImpl {
             .await
             .map_err(|e| Error::pivot(format!("clusterctl move --to-directory failed: {}", e)))?;
         let manifest_count = manifests.len();
+
+        // Re-pause the CAPI cluster after export
+        // (clusterctl move --to-directory unpauses it, but we want it dormant until deletion)
+        pause_capi_cluster(None, source_namespace, cluster_name)
+            .await
+            .map_err(|e| Error::pivot(format!("failed to pause CAPI cluster after export: {}", e)))?;
+
+        // Store manifests for deletion after PivotComplete
+        self.agent_registry.set_pivot_source_manifests(
+            cluster_name,
+            lattice_cell::PivotSourceManifests {
+                capi_manifests: manifests.clone(),
+                namespace: source_namespace.to_string(),
+            },
+        );
 
         // Fetch resources for distribution (CloudProviders, SecretsProviders, and their secrets)
         let resources = fetch_distributable_resources(&self.client)

@@ -235,4 +235,89 @@ mod tests {
         let result = validate_credentials(&cp).await;
         assert!(result.is_ok());
     }
+
+    // =========================================================================
+    // Proxmox Provider Tests
+    // =========================================================================
+
+    fn sample_proxmox_provider() -> CloudProvider {
+        CloudProvider::new(
+            "proxmox-homelab",
+            CloudProviderSpec {
+                provider_type: CloudProviderType::Proxmox,
+                region: None,
+                credentials_secret_ref: Some(SecretRef {
+                    name: "proxmox-creds".to_string(),
+                    namespace: "capmox-system".to_string(),
+                }),
+                aws: None,
+                proxmox: None,
+                openstack: None,
+                labels: Default::default(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn proxmox_provider_requires_credentials() {
+        let mut cp = sample_proxmox_provider();
+        cp.spec.credentials_secret_ref = None;
+
+        let result = validate_credentials(&cp).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("credentialsSecretRef"));
+    }
+
+    #[tokio::test]
+    async fn proxmox_provider_validates_with_credentials() {
+        let cp = sample_proxmox_provider();
+        let result = validate_credentials(&cp).await;
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // OpenStack Provider Tests
+    // =========================================================================
+
+    fn sample_openstack_provider() -> CloudProvider {
+        CloudProvider::new(
+            "openstack-prod",
+            CloudProviderSpec {
+                provider_type: CloudProviderType::OpenStack,
+                region: Some("RegionOne".to_string()),
+                credentials_secret_ref: Some(SecretRef {
+                    name: "openstack-creds".to_string(),
+                    namespace: "capo-system".to_string(),
+                }),
+                aws: None,
+                proxmox: None,
+                openstack: None,
+                labels: Default::default(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn openstack_provider_requires_credentials() {
+        let mut cp = sample_openstack_provider();
+        cp.spec.credentials_secret_ref = None;
+
+        let result = validate_credentials(&cp).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("credentialsSecretRef"));
+    }
+
+    #[tokio::test]
+    async fn openstack_provider_validates_with_credentials() {
+        let cp = sample_openstack_provider();
+        let result = validate_credentials(&cp).await;
+        assert!(result.is_ok());
+    }
+
 }

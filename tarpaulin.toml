@@ -7,18 +7,12 @@ exclude-files = [
     # === lattice-agent exclusions ===
     # Agent gRPC client - requires real network connections
     "crates/lattice-agent/src/client.rs",
-    # Pivot execution - requires real k8s clusters, clusterctl binary
-    "crates/lattice-agent/src/pivot.rs",
 
     # === lattice-cell exclusions ===
-    # gRPC server - requires real network binding, mTLS
-    "crates/lattice-cell/src/server.rs",
     # Parent servers - requires gRPC server, TLS, network binding
     "crates/lattice-cell/src/parent/*",
     # Bootstrap HTTP server - requires network binding
     "crates/lattice-cell/src/bootstrap/*",
-    # Proxy - requires real agent connections
-    "crates/lattice-cell/src/proxy.rs",
 
     # === lattice-capi exclusions ===
     # CAPI - requires clusterctl binary
@@ -44,8 +38,4 @@ exclude-files = [
     "crates/lattice-cluster/tests/*",
     # CLI - requires file I/O, git operations, and k8s clusters (tested by E2E)
     "crates/lattice-cli/src/*",
-    # clusterctl wrapper - requires clusterctl binary
-    "crates/lattice-common/src/clusterctl.rs",
-    # kube utilities - async K8s API calls tested by E2E
-    "crates/lattice-common/src/kube_utils.rs",
 ]

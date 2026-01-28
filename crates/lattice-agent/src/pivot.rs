@@ -608,4 +608,202 @@ mod tests {
         };
         assert!(!with_cp.is_empty());
     }
+
+    // =========================================================================
+    // AgentPivotHandler Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_pivot_handler_with_namespace() {
+        let runner = MockCommandRunner::new();
+        let handler = AgentPivotHandler::with_runner(runner).with_capi_namespace("custom-ns");
+
+        assert_eq!(handler.namespace(), "custom-ns");
+    }
+
+    #[tokio::test]
+    async fn test_pivot_handler_default_namespace() {
+        let runner = MockCommandRunner::new();
+        let handler = AgentPivotHandler::with_runner(runner);
+
+        assert_eq!(handler.namespace(), DEFAULT_CAPI_NAMESPACE);
+    }
+
+    #[tokio::test]
+    async fn test_count_capi_resources_empty() {
+        let runner = MockCommandRunner::new().with_list(|_, _| {
+            Ok(CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        });
+
+        let handler = AgentPivotHandler::with_runner(runner);
+        let count = handler.count_capi_resources().await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_count_capi_resources_with_resources() {
+        let runner = MockCommandRunner::new().with_list(|resource_type, _| {
+            // Return different counts for different resource types
+            let stdout = match resource_type {
+                "clusters.cluster.x-k8s.io" => "cluster-1\ncluster-2",
+                "machines.cluster.x-k8s.io" => "machine-1\nmachine-2\nmachine-3",
+                _ => "",
+            };
+            Ok(CommandOutput {
+                success: true,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+            })
+        });
+
+        let handler = AgentPivotHandler::with_runner(runner);
+        let count = handler.count_capi_resources().await.unwrap();
+        // 2 clusters + 3 machines = 5 (other types return 0)
+        assert_eq!(count, 5);
+    }
+
+    #[tokio::test]
+    async fn test_count_capi_resources_error_propagates() {
+        let runner = MockCommandRunner::new().with_list(|_, _| {
+            Err(PivotError::Internal("test error".to_string()))
+        });
+
+        let handler = AgentPivotHandler::with_runner(runner);
+        let result = handler.count_capi_resources().await;
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Parse CAPI Resource Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_capi_resource_type_machines() {
+        let (group, version, kind, plural) =
+            parse_capi_resource_type("machines.cluster.x-k8s.io").unwrap();
+        assert_eq!(group, "cluster.x-k8s.io");
+        assert_eq!(version, "v1beta1");
+        assert_eq!(kind, "Machine");
+        assert_eq!(plural, "machines");
+    }
+
+    #[test]
+    fn test_parse_capi_resource_type_machinedeployments() {
+        let (group, version, kind, plural) =
+            parse_capi_resource_type("machinedeployments.cluster.x-k8s.io").unwrap();
+        assert_eq!(group, "cluster.x-k8s.io");
+        assert_eq!(version, "v1beta1");
+        assert_eq!(kind, "Machinedeployment");
+        assert_eq!(plural, "machinedeployments");
+    }
+
+    #[test]
+    fn test_parse_capi_resource_type_kubeadmcontrolplanes() {
+        let (group, version, kind, plural) =
+            parse_capi_resource_type("kubeadmcontrolplanes.controlplane.cluster.x-k8s.io").unwrap();
+        assert_eq!(group, "controlplane.cluster.x-k8s.io");
+        assert_eq!(version, "v1beta1");
+        assert_eq!(kind, "Kubeadmcontrolplane");
+        assert_eq!(plural, "kubeadmcontrolplanes");
+    }
+
+    #[test]
+    fn test_parse_capi_resource_type_policies() {
+        // Test -ies -> -y conversion
+        let (group, version, kind, plural) =
+            parse_capi_resource_type("policies.policy.x-k8s.io").unwrap();
+        assert_eq!(kind, "Policy");
+        assert_eq!(plural, "policies");
+    }
+
+    // =========================================================================
+    // Update All Cluster Entries Tests
+    // =========================================================================
+
+    #[test]
+    fn test_update_all_cluster_entries_multiple() {
+        let mut kubeconfig = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+            clusters:
+              - name: cluster-1
+                cluster:
+                  server: https://172.18.0.2:6443
+                  certificate-authority: /path/to/ca
+              - name: cluster-2
+                cluster:
+                  server: https://172.18.0.3:6443
+            "#,
+        )
+        .unwrap();
+
+        let count = update_all_cluster_entries(&mut kubeconfig, "Y2EtZGF0YQ==", "test");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_update_all_cluster_entries_mixed() {
+        let mut kubeconfig = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+            clusters:
+              - name: external
+                cluster:
+                  server: https://172.18.0.2:6443
+              - name: internal
+                cluster:
+                  server: https://kubernetes.default.svc:443
+            "#,
+        )
+        .unwrap();
+
+        let count = update_all_cluster_entries(&mut kubeconfig, "Y2EtZGF0YQ==", "test");
+        // Only the external one should be updated
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_update_all_cluster_entries_no_clusters() {
+        let mut kubeconfig = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+            apiVersion: v1
+            kind: Config
+            "#,
+        )
+        .unwrap();
+
+        let count = update_all_cluster_entries(&mut kubeconfig, "Y2EtZGF0YQ==", "test");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_update_cluster_entry_missing_cluster_key() {
+        let mut entry = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+            name: test-cluster
+            "#,
+        )
+        .unwrap();
+
+        let updated = update_cluster_entry(&mut entry, "Y2EtZGF0YQ==", "test");
+        assert!(!updated);
+    }
+
+    #[test]
+    fn test_update_cluster_entry_missing_server() {
+        let mut entry = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+            name: test-cluster
+            cluster:
+              certificate-authority: /path/to/ca
+            "#,
+        )
+        .unwrap();
+
+        let updated = update_cluster_entry(&mut entry, "Y2EtZGF0YQ==", "test");
+        assert!(!updated);
+    }
+
 }
