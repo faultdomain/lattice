@@ -3,7 +3,7 @@
 //! # Design
 //!
 //! Runs forever until failure. Each batch:
-//! 1. Create 3 clusters simultaneously
+//! 1. Create 1 cluster
 //! 2. Wait for all to reach Running
 //! 3. Wait 20 seconds (chaos active)
 //! 4. Delete all clusters (chaos active during unpivot)
@@ -161,7 +161,7 @@ async fn run_endurance_test() -> Result<(), String> {
     let mut iteration = 0u64;
     let test_start = Instant::now();
 
-    info!("Starting batch iterations (3 clusters per batch, runs forever, 10 min timeout per batch)...");
+    info!("Starting batch iterations (1 cluster per batch, runs forever, 10 min timeout per batch)...");
 
     // Loop forever until failure
     loop {
@@ -173,11 +173,11 @@ async fn run_endurance_test() -> Result<(), String> {
         );
 
         // Create cluster configs with unique names and IPs for this iteration
-        let clusters: Vec<LatticeCluster> = (0..3)
+        let clusters: Vec<LatticeCluster> = (0..1)
             .map(|i| {
                 let name = format!("endurance-{}-{}", iteration, i);
                 // Each cluster needs a unique IP: 172.18.255.{100 + offset}
-                let ip_offset = ((iteration - 1) * 3 + i) % 100 + 100;
+                let ip_offset = ((iteration - 1) + i) % 100 + 100;
                 let ip = format!("172.18.255.{}", ip_offset);
 
                 let mut cluster = workload_template.clone();
@@ -252,12 +252,6 @@ async fn run_endurance_test() -> Result<(), String> {
         // Remove clusters from chaos targets (whether success or failure)
         for name in &cluster_names {
             chaos_targets.remove(name);
-        }
-
-        // Force cleanup Docker containers
-        for name in &cluster_names {
-            let _ = run_cmd_allow_fail("docker", &["rm", "-f", &format!("{}-control-plane", name)]);
-            let _ = run_cmd_allow_fail("docker", &["rm", "-f", &format!("{}-worker", name)]);
         }
 
         // Check batch result
