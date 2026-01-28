@@ -276,12 +276,13 @@ impl AgentClient {
         info!(endpoint = %self.config.cell_grpc_endpoint, "Connecting to cell with mTLS");
 
         // Build mTLS config
+        let domain = extract_domain(&self.config.cell_grpc_endpoint)
+            .map_err(ClientError::InvalidEndpoint)?;
         let mtls_config = ClientMtlsConfig::new(
             credentials.cert_pem.clone(),
             credentials.key_pem.clone(),
             credentials.ca_cert_pem.clone(),
-            // Extract domain from endpoint for TLS verification
-            extract_domain(&self.config.cell_grpc_endpoint).unwrap_or("localhost".to_string()),
+            domain,
         );
 
         let tls_config = mtls_config
@@ -339,10 +340,14 @@ impl AgentClient {
 
                 // Load persisted state
                 let state = match load_pivot_state(&client, &self.config.cluster_name).await {
-                    Some(s) => s,
-                    None => {
+                    Ok(Some(s)) => s,
+                    Ok(None) => {
                         warn!("No pivot state Secret found, cannot recover");
                         return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to load pivot state, will retry on reconnect");
+                        return Err(ClientError::K8sApiError(e));
                     }
                 };
 
@@ -1144,6 +1149,8 @@ pub enum ClientError {
     ChannelClosed,
     /// CAPI installation failed
     CapiInstallFailed(String),
+    /// Kubernetes API error
+    K8sApiError(String),
 }
 
 impl std::fmt::Display for ClientError {
@@ -1156,6 +1163,7 @@ impl std::fmt::Display for ClientError {
             ClientError::NotConnected => write!(f, "not connected"),
             ClientError::ChannelClosed => write!(f, "channel closed"),
             ClientError::CapiInstallFailed(e) => write!(f, "CAPI installation failed: {}", e),
+            ClientError::K8sApiError(e) => write!(f, "Kubernetes API error: {}", e),
         }
     }
 }
@@ -1175,8 +1183,12 @@ impl Drop for AgentClient {
 }
 
 /// Extract domain name from a URL for TLS verification
-fn extract_domain(url: &str) -> Option<String> {
-    // Remove protocol prefix
+fn extract_domain(url: &str) -> Result<String, String> {
+    if url.is_empty() {
+        return Err("URL is empty".to_string());
+    }
+
+    // Remove protocol prefix if present
     let without_protocol = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
@@ -1187,9 +1199,10 @@ fn extract_domain(url: &str) -> Option<String> {
         .split(':')
         .next()
         .and_then(|s| s.split('/').next())
-        .map(|s| s.to_string());
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("URL has no domain: {}", url))?;
 
-    domain.filter(|d| !d.is_empty())
+    Ok(domain.to_string())
 }
 
 // =============================================================================
@@ -1264,32 +1277,39 @@ async fn persist_pivot_state(
 }
 
 /// Load pivot state from Secret (for crash recovery)
-async fn load_pivot_state(client: &Client, cluster_name: &str) -> Option<PivotState> {
+///
+/// Returns:
+/// - `Ok(Some(state))` - State loaded successfully
+/// - `Ok(None)` - Secret doesn't exist (no state to recover)
+/// - `Err(msg)` - API error or parse error (should retry or investigate)
+async fn load_pivot_state(
+    client: &Client,
+    cluster_name: &str,
+) -> Result<Option<PivotState>, String> {
     let secret_name = format!("{}{}", PIVOT_STATE_SECRET_PREFIX, cluster_name);
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     let secret = match secret_api.get(&secret_name).await {
         Ok(s) => s,
-        Err(kube::Error::Api(ae)) if ae.code == 404 => return None,
+        Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(None),
         Err(e) => {
-            warn!(cluster = %cluster_name, error = %e, "Failed to load pivot state Secret");
-            return None;
+            return Err(format!("failed to load pivot state Secret: {}", e));
         }
     };
 
-    let data = secret.data?;
-    let state_bytes = &data.get("state")?.0;
+    let data = secret
+        .data
+        .ok_or_else(|| "pivot state Secret has no data".to_string())?;
+    let state_bytes = &data
+        .get("state")
+        .ok_or_else(|| "pivot state Secret missing 'state' key".to_string())?
+        .0;
 
-    match serde_json::from_slice(state_bytes) {
-        Ok(state) => {
-            info!(cluster = %cluster_name, "Loaded pivot state from Secret");
-            Some(state)
-        }
-        Err(e) => {
-            warn!(cluster = %cluster_name, error = %e, "Failed to parse pivot state");
-            None
-        }
-    }
+    let state: PivotState = serde_json::from_slice(state_bytes)
+        .map_err(|e| format!("failed to parse pivot state: {}", e))?;
+
+    info!(cluster = %cluster_name, "Loaded pivot state from Secret");
+    Ok(Some(state))
 }
 
 /// Delete pivot state Secret after successful pivot
@@ -1719,7 +1739,7 @@ mod tests {
     fn test_extract_domain_https() {
         assert_eq!(
             extract_domain("https://cell.example.com:443"),
-            Some("cell.example.com".to_string())
+            Ok("cell.example.com".to_string())
         );
     }
 
@@ -1727,7 +1747,7 @@ mod tests {
     fn test_extract_domain_http() {
         assert_eq!(
             extract_domain("http://localhost:8080"),
-            Some("localhost".to_string())
+            Ok("localhost".to_string())
         );
     }
 
@@ -1735,7 +1755,7 @@ mod tests {
     fn test_extract_domain_no_port() {
         assert_eq!(
             extract_domain("https://cell.example.com"),
-            Some("cell.example.com".to_string())
+            Ok("cell.example.com".to_string())
         );
     }
 
@@ -1743,7 +1763,7 @@ mod tests {
     fn test_extract_domain_with_path() {
         assert_eq!(
             extract_domain("https://cell.example.com:443/api/v1"),
-            Some("cell.example.com".to_string())
+            Ok("cell.example.com".to_string())
         );
     }
 
@@ -1751,7 +1771,7 @@ mod tests {
     fn test_extract_domain_no_protocol() {
         assert_eq!(
             extract_domain("cell.example.com:443"),
-            Some("cell.example.com".to_string())
+            Ok("cell.example.com".to_string())
         );
     }
 
@@ -1759,18 +1779,18 @@ mod tests {
     fn test_extract_domain_ip_address() {
         assert_eq!(
             extract_domain("https://192.168.1.1:8080"),
-            Some("192.168.1.1".to_string())
+            Ok("192.168.1.1".to_string())
         );
     }
 
     #[test]
     fn test_extract_domain_empty_string() {
-        assert_eq!(extract_domain(""), None);
+        assert!(extract_domain("").is_err());
     }
 
     #[test]
     fn test_extract_domain_protocol_only() {
-        assert_eq!(extract_domain("https://"), None);
+        assert!(extract_domain("https://").is_err());
     }
 
     #[test]
@@ -2534,42 +2554,42 @@ mod tests {
         // Standard HTTPS with port
         assert_eq!(
             extract_domain("https://cell.example.com:443"),
-            Some("cell.example.com".to_string())
+            Ok("cell.example.com".to_string())
         );
 
         // HTTP for bootstrap endpoint
         assert_eq!(
             extract_domain("http://cell.example.com:8080"),
-            Some("cell.example.com".to_string())
+            Ok("cell.example.com".to_string())
         );
 
         // Without port
         assert_eq!(
             extract_domain("https://cell.example.com"),
-            Some("cell.example.com".to_string())
+            Ok("cell.example.com".to_string())
         );
 
         // With path (shouldn't happen but handle gracefully)
         assert_eq!(
             extract_domain("https://cell.example.com:443/api/v1"),
-            Some("cell.example.com".to_string())
+            Ok("cell.example.com".to_string())
         );
 
         // IP address
         assert_eq!(
             extract_domain("https://172.18.255.1:443"),
-            Some("172.18.255.1".to_string())
+            Ok("172.18.255.1".to_string())
         );
 
         // Raw host:port (no protocol)
         assert_eq!(
             extract_domain("cell.example.com:443"),
-            Some("cell.example.com".to_string())
+            Ok("cell.example.com".to_string())
         );
 
-        // Edge cases
-        assert_eq!(extract_domain(""), None);
-        assert_eq!(extract_domain("https://"), None);
+        // Edge cases - errors preserve context
+        assert!(extract_domain("").is_err());
+        assert!(extract_domain("https://").is_err());
     }
 
     // ==========================================================================

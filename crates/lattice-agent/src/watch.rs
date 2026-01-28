@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use kube::api::{DynamicObject, ListParams};
+use kube::api::DynamicObject;
 use kube::discovery::{ApiCapabilities, ApiResource, Scope};
 use kube::{Api, Client, Discovery};
 use tokio::sync::mpsc;
@@ -210,19 +210,13 @@ pub async fn execute_watch(
 
     // Parse query params for watch options (pure logic)
     let query_params = parse_watch_query(&req.query);
-    let mut lp = ListParams::default();
-    if let Some(labels) = &query_params.label_selector {
-        lp = lp.labels(labels);
-    }
-    if let Some(fields) = &query_params.field_selector {
-        lp = lp.fields(fields);
-    }
-    // Resource version is handled by kube-rs internally
 
     debug!(
         request_id = %request_id,
         resource = %api_resource,
         namespace = ?namespace,
+        label_selector = ?query_params.label_selector,
+        field_selector = ?query_params.field_selector,
         "Starting watch"
     );
 
@@ -230,7 +224,16 @@ pub async fn execute_watch(
     use futures::StreamExt;
     use kube::runtime::{watcher, WatchStreamExt};
 
-    let watcher = watcher(api, watcher::Config::default().any_semantic())
+    // Build watcher config with selectors
+    let mut watcher_config = watcher::Config::default().any_semantic();
+    if let Some(labels) = &query_params.label_selector {
+        watcher_config = watcher_config.labels(labels);
+    }
+    if let Some(fields) = &query_params.field_selector {
+        watcher_config = watcher_config.fields(fields);
+    }
+
+    let watcher = watcher(api, watcher_config)
         .default_backoff()
         .applied_objects();
 

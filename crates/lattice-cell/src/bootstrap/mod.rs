@@ -35,6 +35,7 @@ pub use autoscaler::generate_autoscaler_manifests;
 pub use aws_addons::generate_aws_addon_manifests;
 pub use crs::{generate_crs_yaml_manifests, ProviderCredentials};
 pub use docker_addons::generate_docker_addon_manifests;
+pub use lattice_common::AwsCredentials;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -359,57 +360,6 @@ stringData:
   token: "{token}"
   secret: "{secret}""#
     )
-}
-
-/// AWS credentials for CAPA provider
-pub struct AwsCredentials {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub region: String,
-    pub session_token: Option<String>,
-}
-
-impl AwsCredentials {
-    /// Load credentials from environment variables
-    pub fn from_env() -> Option<Self> {
-        Some(Self {
-            access_key_id: std::env::var("AWS_ACCESS_KEY_ID").ok()?,
-            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").ok()?,
-            region: std::env::var("AWS_REGION")
-                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-                .ok()?,
-            session_token: std::env::var("AWS_SESSION_TOKEN").ok(),
-        })
-    }
-
-    /// Load credentials from a K8s secret's string data
-    pub fn from_secret(secret: &std::collections::HashMap<String, String>) -> Option<Self> {
-        Some(Self {
-            access_key_id: secret.get("AWS_ACCESS_KEY_ID")?.clone(),
-            secret_access_key: secret.get("AWS_SECRET_ACCESS_KEY")?.clone(),
-            region: secret.get("AWS_REGION")?.clone(),
-            session_token: secret.get("AWS_SESSION_TOKEN").cloned(),
-        })
-    }
-
-    /// Generate AWS_B64ENCODED_CREDENTIALS for clusterctl
-    ///
-    /// clusterctl requires credentials in a base64-encoded INI profile format.
-    pub fn to_b64_encoded(&self) -> String {
-        use base64::engine::general_purpose::STANDARD;
-        use base64::Engine;
-
-        let mut profile = format!(
-            "[default]\naws_access_key_id = {}\naws_secret_access_key = {}\nregion = {}",
-            self.access_key_id, self.secret_access_key, self.region
-        );
-
-        if let Some(ref token) = self.session_token {
-            profile.push_str(&format!("\naws_session_token = {}", token));
-        }
-
-        STANDARD.encode(profile)
-    }
 }
 
 /// Generate AWS credentials manifest

@@ -13,7 +13,7 @@ pub mod protocol;
 pub mod retry;
 pub mod template;
 
-pub use credentials::AwsCredentials;
+pub use credentials::{AwsCredentials, CredentialError};
 pub use error::Error;
 pub use protocol::{CsrRequest, CsrResponse, DistributableResources};
 

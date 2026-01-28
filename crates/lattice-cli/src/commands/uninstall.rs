@@ -23,8 +23,8 @@ use tracing::{debug, info};
 
 use lattice_common::clusterctl::{export_for_pivot, teardown_cluster, TeardownConfig};
 use lattice_common::kube_utils;
+use lattice_common::AwsCredentials;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
-use lattice_operator::bootstrap::AwsCredentials;
 use lattice_operator::crd::{LatticeCluster, ProviderType};
 
 use crate::{Error, Result};
@@ -352,7 +352,7 @@ impl Uninstaller {
 
         // Pass through provider credentials from environment
         if self.provider == ProviderType::Aws {
-            if let Some(creds) = AwsCredentials::from_env() {
+            if let Ok(creds) = AwsCredentials::from_env() {
                 cmd.env("AWS_B64ENCODED_CREDENTIALS", creds.to_b64_encoded());
             }
         }

@@ -617,9 +617,13 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
 
         // Get the cell host from the LoadBalancer Service
         let cell_host = match discover_cell_host(client).await {
-            Some(h) => h,
-            None => {
-                tracing::warn!(cluster = %name, "Cell host not available from Service, cannot re-register");
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                tracing::warn!(cluster = %name, "Cell host not yet assigned by cloud provider, cannot re-register");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(cluster = %name, error = %e, "Failed to discover cell host, cannot re-register");
                 continue;
             }
         };
@@ -747,18 +751,34 @@ async fn ensure_cell_service_exists(
 
 /// Discover the cell service host from the LoadBalancer Service.
 ///
-/// Returns the host (hostname or IP) from the Service's LoadBalancer status,
-/// or None if not yet assigned by the cloud provider.
-async fn discover_cell_host(client: &Client) -> Option<String> {
+/// Returns:
+/// - `Ok(Some(host))` - LoadBalancer has an assigned address
+/// - `Ok(None)` - Service exists but no address yet (waiting for cloud provider)
+/// - `Err(msg)` - API error (transient, should retry)
+async fn discover_cell_host(client: &Client) -> Result<Option<String>, String> {
     use k8s_openapi::api::core::v1::Service;
 
     let services: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
-    let svc = services.get("lattice-cell").await.ok()?;
-    let ingress = svc.status?.load_balancer?.ingress?;
-    let first = ingress.first()?;
+    let svc = services
+        .get("lattice-cell")
+        .await
+        .map_err(|e| format!("failed to get lattice-cell Service: {}", e))?;
+
+    let Some(status) = svc.status else {
+        return Ok(None);
+    };
+    let Some(lb) = status.load_balancer else {
+        return Ok(None);
+    };
+    let Some(ingress) = lb.ingress else {
+        return Ok(None);
+    };
+    let Some(first) = ingress.first() else {
+        return Ok(None);
+    };
 
     // Prefer hostname (AWS NLB) over IP
-    first.hostname.clone().or_else(|| first.ip.clone())
+    Ok(first.hostname.clone().or_else(|| first.ip.clone()))
 }
 
 /// Get extra SANs for cell server TLS certificate.
@@ -818,9 +838,17 @@ async fn get_cell_server_sans(
     // Wait for LoadBalancer to get external address
     tracing::info!("Waiting for cell LoadBalancer address...");
     loop {
-        if let Some(host) = discover_cell_host(client).await {
-            tracing::info!(host = %host, "Cell host discovered, adding to TLS SANs");
-            return vec![host];
+        match discover_cell_host(client).await {
+            Ok(Some(host)) => {
+                tracing::info!(host = %host, "Cell host discovered, adding to TLS SANs");
+                return vec![host];
+            }
+            Ok(None) => {
+                // Not yet assigned, keep waiting
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to discover cell host, retrying...");
+            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }

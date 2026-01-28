@@ -469,14 +469,23 @@ impl ClusterctlInstaller {
             .map(|(namespace, name, provider_type)| {
                 let client = client.clone();
                 async move {
-                    Self::get_provider_version(&client, namespace)
-                        .await
-                        .map(|version| InstalledProvider {
+                    match Self::get_provider_version(&client, namespace).await {
+                        Ok(Some(version)) => Some(InstalledProvider {
                             name: name.to_string(),
                             provider_type,
                             version,
                             namespace: namespace.to_string(),
-                        })
+                        }),
+                        Ok(None) => None, // Namespace doesn't exist, provider not installed
+                        Err(e) => {
+                            tracing::warn!(
+                                namespace = %namespace,
+                                error = %e,
+                                "Failed to check provider version"
+                            );
+                            None
+                        }
+                    }
                 }
             })
             .collect();
@@ -486,37 +495,54 @@ impl ClusterctlInstaller {
     }
 
     /// Get provider version from deployment labels using kube-rs
-    async fn get_provider_version(client: &KubeClient, namespace: &str) -> Option<String> {
+    ///
+    /// Returns:
+    /// - `Ok(Some(version))` - Found version label
+    /// - `Ok(None)` - Namespace doesn't exist (provider not installed)
+    /// - `Err(msg)` - API error (transient, should retry)
+    async fn get_provider_version(
+        client: &KubeClient,
+        namespace: &str,
+    ) -> Result<Option<String>, String> {
         // Check if namespace exists
         let namespaces: Api<Namespace> = Api::all(client.clone());
-        if namespaces.get(namespace).await.is_err() {
-            return None;
+        match namespaces.get(namespace).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(None),
+            Err(e) => return Err(format!("failed to check namespace {}: {}", namespace, e)),
         }
 
         // Get deployments in the namespace
         let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-        let list = deployments.list(&ListParams::default()).await.ok()?;
+        let list = deployments
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| format!("failed to list deployments in {}: {}", namespace, e))?;
 
         // Get first deployment and check labels
-        let deployment = list.items.first()?;
-        let labels = deployment.metadata.labels.as_ref()?;
+        let Some(deployment) = list.items.first() else {
+            return Ok(Some("unknown".to_string()));
+        };
+        let Some(labels) = deployment.metadata.labels.as_ref() else {
+            return Ok(Some("unknown".to_string()));
+        };
 
         // Check app.kubernetes.io/version label (CAPI convention)
         if let Some(version) = labels.get("app.kubernetes.io/version") {
             if !version.is_empty() {
-                return Some(version.clone());
+                return Ok(Some(version.clone()));
             }
         }
 
         // Fallback: check cluster-api.cattle.io/version label (RKE2 providers)
         if let Some(version) = labels.get("cluster-api.cattle.io/version") {
             if !version.is_empty() {
-                return Some(version.clone());
+                return Ok(Some(version.clone()));
             }
         }
 
         // Namespace exists but can't get version
-        Some("unknown".to_string())
+        Ok(Some("unknown".to_string()))
     }
 
     /// Compute what actions are needed for each provider
@@ -775,16 +801,26 @@ impl ClusterctlInstaller {
             if let Ok(secret) = Self::read_secret(client, namespace, secret_name).await {
                 // AWS requires special handling: generate AWS_B64ENCODED_CREDENTIALS
                 if config.infrastructure == ProviderType::Aws {
-                    if let Some(creds) = AwsCredentials::from_secret(&secret) {
-                        env_vars.push((
-                            "AWS_B64ENCODED_CREDENTIALS".to_string(),
-                            creds.to_b64_encoded(),
-                        ));
-                        info!(
-                            provider = "aws",
-                            secret = format!("{}/{}", namespace, secret_name),
-                            "Generated AWS_B64ENCODED_CREDENTIALS for clusterctl"
-                        );
+                    match AwsCredentials::from_secret(&secret) {
+                        Ok(creds) => {
+                            env_vars.push((
+                                "AWS_B64ENCODED_CREDENTIALS".to_string(),
+                                creds.to_b64_encoded(),
+                            ));
+                            info!(
+                                provider = "aws",
+                                secret = format!("{}/{}", namespace, secret_name),
+                                "Generated AWS_B64ENCODED_CREDENTIALS for clusterctl"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                provider = "aws",
+                                secret = format!("{}/{}", namespace, secret_name),
+                                error = %e,
+                                "Failed to load AWS credentials from secret"
+                            );
+                        }
                     }
                 } else {
                     // Other providers: direct mapping from secret keys to env vars

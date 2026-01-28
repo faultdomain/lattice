@@ -22,10 +22,11 @@ use tracing::info;
 
 use lattice_common::clusterctl::{export_for_pivot, import_from_manifests};
 use lattice_common::kube_utils;
+use lattice_common::AwsCredentials;
 use lattice_operator::bootstrap::{
     aws_credentials_manifests, generate_all_manifests, generate_crs_yaml_manifests,
-    proxmox_credentials_manifests, AwsCredentials, DefaultManifestGenerator, ManifestConfig,
-    ManifestGenerator, ProviderCredentials,
+    proxmox_credentials_manifests, DefaultManifestGenerator, ManifestConfig, ManifestGenerator,
+    ProviderCredentials,
 };
 use lattice_operator::crd::{
     BootstrapProvider, CloudProvider, CloudProviderSpec, CloudProviderType, LatticeCluster,
@@ -833,25 +834,7 @@ impl Installer {
     }
 
     fn get_aws_credentials() -> Result<AwsCredentials> {
-        let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
-            Error::validation("AWS_ACCESS_KEY_ID environment variable required for AWS provider")
-        })?;
-        let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
-            Error::validation(
-                "AWS_SECRET_ACCESS_KEY environment variable required for AWS provider",
-            )
-        })?;
-        let region = std::env::var("AWS_REGION").map_err(|_| {
-            Error::validation("AWS_REGION environment variable required for AWS provider")
-        })?;
-        let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
-
-        Ok(AwsCredentials {
-            access_key_id,
-            secret_access_key,
-            region,
-            session_token,
-        })
+        AwsCredentials::from_env().map_err(|e| Error::validation(e.to_string()))
     }
 
     async fn create_aws_credentials(&self, client: &Client) -> Result<()> {
