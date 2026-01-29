@@ -122,8 +122,7 @@ impl NamespaceSelector {
 
     /// Check if this selector is empty (matches everything)
     pub fn is_empty(&self) -> bool {
-        self.match_labels.as_ref().is_none_or(|m| m.is_empty())
-            && self.match_expressions.is_empty()
+        self.match_labels.as_ref().is_none_or(|m| m.is_empty()) && self.match_expressions.is_empty()
     }
 }
 

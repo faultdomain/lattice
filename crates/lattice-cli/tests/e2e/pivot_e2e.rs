@@ -79,7 +79,9 @@ use super::helpers::{
 // Media server test disabled pending investigation
 #[allow(unused_imports)]
 use super::media_server_e2e::{cleanup_media_server_test, run_media_server_test};
-use super::mesh_tests::{cleanup_all_mesh_tests, run_mesh_test, run_random_mesh_test};
+use super::mesh_tests::{
+    cleanup_all_mesh_tests, run_cedar_authz_test, run_mesh_test, run_random_mesh_test,
+};
 use super::providers::InfraProvider;
 
 // =============================================================================
@@ -333,17 +335,21 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
         Some(tokio::spawn(async move {
             info!("[Mesh] Running service mesh tests...");
             let kubeconfig2 = kubeconfig.clone();
+            let kubeconfig3 = kubeconfig.clone();
 
-            // Run mesh tests in parallel:
+            // Run all mesh tests in parallel:
             // - Fixed 10-service bilateral agreement test (includes wildcard)
             // - Randomized large-scale mesh test
-            let (r1, r2) = tokio::join!(
+            // - Cedar ExtAuth authorization test (header-based policies)
+            let (r1, r2, r3) = tokio::join!(
                 run_mesh_test(&kubeconfig),
-                run_random_mesh_test(&kubeconfig2)
+                run_random_mesh_test(&kubeconfig2),
+                run_cedar_authz_test(&kubeconfig3)
             );
 
             r1?;
             r2?;
+            r3?;
             info!("[Mesh] All tests complete!");
             Ok::<_, String>(())
         }))

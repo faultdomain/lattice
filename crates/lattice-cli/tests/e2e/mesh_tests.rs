@@ -18,9 +18,9 @@ use tokio::time::sleep;
 use tracing::info;
 
 use lattice_operator::crd::{
-    ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalService,
-    LatticeExternalServiceSpec, LatticeService, LatticeServiceSpec, PortSpec, ReplicaSpec,
-    Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
+    AuthorizationConfig, CedarConfig, ContainerSpec, DependencyDirection, DeploySpec,
+    LatticeExternalService, LatticeExternalServiceSpec, LatticeService, LatticeServiceSpec,
+    PortSpec, ReplicaSpec, Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
 };
 
 use super::helpers::{client_from_kubeconfig, run_cmd, run_cmd_allow_fail};
@@ -34,6 +34,8 @@ struct TestTarget {
     expected_allowed: bool,
     success_msg: String,
     fail_msg: String,
+    /// Optional headers to send with the request (for Cedar policy testing)
+    headers: Vec<(String, String)>,
 }
 
 impl TestTarget {
@@ -55,6 +57,49 @@ impl TestTarget {
             expected_allowed: expected,
             success_msg,
             fail_msg,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Create a test target with headers (for Cedar policy testing)
+    fn with_headers(
+        name: &str,
+        namespace: &str,
+        expected: bool,
+        reason: &str,
+        headers: Vec<(&str, &str)>,
+    ) -> Self {
+        let header_desc = headers
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (success_msg, fail_msg) = if expected {
+            (
+                format!("{}[{}]: ALLOWED ({})", name, header_desc, reason),
+                format!(
+                    "{}[{}]: BLOCKED (UNEXPECTED - {})",
+                    name, header_desc, reason
+                ),
+            )
+        } else {
+            (
+                format!(
+                    "{}[{}]: ALLOWED (UNEXPECTED - {})",
+                    name, header_desc, reason
+                ),
+                format!("{}[{}]: BLOCKED ({})", name, header_desc, reason),
+            )
+        };
+        Self {
+            url: format!("http://{}.{}.svc.cluster.local/", name, namespace),
+            expected_allowed: expected,
+            success_msg,
+            fail_msg,
+            headers: headers
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         }
     }
 
@@ -76,6 +121,7 @@ impl TestTarget {
             expected_allowed: expected,
             success_msg,
             fail_msg,
+            headers: Vec::new(),
         }
     }
 
@@ -97,8 +143,18 @@ impl TestTarget {
             expected_allowed: expected,
             success_msg,
             fail_msg,
+            headers: Vec::new(),
         }
     }
+}
+
+/// Generate curl header flags from a list of headers
+fn generate_header_flags(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .map(|(k, v)| format!("-H \"{}: {}\"", k, v))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Generate a traffic test script that waits for policies and tests connections
@@ -112,11 +168,18 @@ fn generate_test_script(source_name: &str, targets: Vec<TestTarget>) -> String {
         .iter()
         .enumerate()
         .map(|(i, t)| {
+            let header_flags = generate_header_flags(&t.headers);
+            let header_part = if header_flags.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", header_flags)
+            };
             format!(
                 r#"
-    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5 {url} 2>/dev/null || echo "000")"#,
+    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5{header_part} {url} 2>/dev/null || echo "000")"#,
                 i = i,
-                url = t.url
+                url = t.url,
+                header_part = header_part
             )
         })
         .collect();
@@ -172,6 +235,12 @@ fi
 
     // Add individual test checks with retries that distinguish policy blocks from transient failures
     for target in &targets {
+        let header_flags = generate_header_flags(&target.headers);
+        let header_part = if header_flags.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", header_flags)
+        };
         script.push_str(&format!(
             r#"
 # Test {url} - retry transient failures, accept 403 as definitive block
@@ -179,7 +248,7 @@ MAX_ATTEMPTS=5
 ATTEMPT=0
 RESULT="UNKNOWN"
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 --max-time 10 {url} 2>/dev/null || echo "000")
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 --max-time 10{header_part} {url} 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
         RESULT="ALLOWED"
         break
@@ -205,6 +274,7 @@ else
 fi
 "#,
             url = target.url,
+            header_part = header_part,
             success_msg = target.success_msg,
             fail_msg = target.fail_msg,
         ));
@@ -1836,4 +1906,449 @@ pub fn cleanup_random_mesh_test(kubeconfig_path: &str) {
 pub fn cleanup_all_mesh_tests(kubeconfig_path: &str) {
     cleanup_mesh_test(kubeconfig_path);
     cleanup_random_mesh_test(kubeconfig_path);
+    cleanup_cedar_authz_test(kubeconfig_path);
+}
+
+// =============================================================================
+// Cedar ExtAuth Tests
+// =============================================================================
+//
+// Tests Cedar policy authorization via Istio ExtAuth integration.
+// Uses header-based policies (no JWT required) to validate authorization decisions.
+//
+// Cedar context normalizes headers: "x-test-role" -> "xTestRole"
+//
+// Test scenarios:
+// - x-test-role: admin -> 200 (permit matches)
+// - x-test-role: reader -> 403 (no permit for reader)
+// - (no headers) -> 403 (default deny)
+// - x-blocked: true -> 403 (explicit forbid)
+// - x-test-role: admin + x-blocked: true -> 403 (forbid wins)
+
+const CEDAR_TEST_NAMESPACE: &str = "cedar-authz-test";
+
+/// Cedar policy that permits admin role and forbids blocked requests
+const CEDAR_TEST_POLICY: &str = r#"
+// Permit requests with admin role header
+permit(principal, action, resource)
+when { context.xTestRole == "admin" };
+
+// Forbid requests with blocked header
+forbid(principal, action, resource)
+when { context.xBlocked == "true" };
+"#;
+
+/// Create a Cedar-protected service for authorization testing
+fn create_cedar_protected_service(
+    name: &str,
+    namespace: &str,
+    generator_name: &str,
+) -> LatticeService {
+    let mut containers = BTreeMap::new();
+    containers.insert("main".to_string(), nginx_container());
+
+    // Allow inbound from the generator (bilateral agreement)
+    let mut resources = BTreeMap::new();
+    resources.insert(
+        generator_name.to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Inbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        },
+    );
+
+    let mut labels = BTreeMap::new();
+    labels.insert("lattice.dev/environment".to_string(), namespace.to_string());
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            containers,
+            resources,
+            service: Some(http_port()),
+            replicas: ReplicaSpec { min: 1, max: None },
+            deploy: DeploySpec::default(),
+            ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
+            authorization: Some(AuthorizationConfig {
+                oidc: None,
+                cedar: Some(CedarConfig {
+                    policies: CEDAR_TEST_POLICY.to_string(),
+                }),
+            }),
+        },
+        status: None,
+    }
+}
+
+/// Create a traffic generator for Cedar authorization tests
+fn create_cedar_test_generator(name: &str, target_name: &str, namespace: &str) -> LatticeService {
+    let targets = vec![
+        // Test 1: Admin role header -> should be ALLOWED
+        TestTarget::with_headers(
+            target_name,
+            namespace,
+            true,
+            "admin role permits",
+            vec![("x-test-role", "admin")],
+        ),
+        // Test 2: Reader role header -> should be BLOCKED (no permit)
+        TestTarget::with_headers(
+            target_name,
+            namespace,
+            false,
+            "no permit for reader",
+            vec![("x-test-role", "reader")],
+        ),
+        // Test 3: No headers -> should be BLOCKED (default deny)
+        TestTarget::with_headers(
+            target_name,
+            namespace,
+            false,
+            "default deny no headers",
+            vec![],
+        ),
+        // Test 4: Blocked header -> should be BLOCKED (explicit forbid)
+        TestTarget::with_headers(
+            target_name,
+            namespace,
+            false,
+            "explicit forbid",
+            vec![("x-blocked", "true")],
+        ),
+        // Test 5: Admin + blocked -> should be BLOCKED (forbid wins over permit)
+        TestTarget::with_headers(
+            target_name,
+            namespace,
+            false,
+            "forbid wins over permit",
+            vec![("x-test-role", "admin"), ("x-blocked", "true")],
+        ),
+    ];
+
+    let script = generate_test_script(name, targets);
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: "curlimages/curl:latest".to_string(),
+            command: Some(vec!["/bin/sh".to_string()]),
+            args: Some(vec!["-c".to_string(), script]),
+            variables: BTreeMap::new(),
+            files: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+            startup_probe: None,
+            security: None,
+        },
+    );
+
+    // Generator needs outbound to the protected service
+    let mut resources = BTreeMap::new();
+    resources.insert(
+        target_name.to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        },
+    );
+
+    let mut labels = BTreeMap::new();
+    labels.insert("lattice.dev/environment".to_string(), namespace.to_string());
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            containers,
+            resources,
+            service: None,
+            replicas: ReplicaSpec { min: 1, max: None },
+            deploy: DeploySpec::default(),
+            ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
+            authorization: None,
+        },
+        status: None,
+    }
+}
+
+/// Expected results for Cedar authorization tests
+const CEDAR_EXPECTED_RESULTS: &[(&str, bool)] = &[
+    ("x-test-role=admin", true),                 // Admin permitted
+    ("x-test-role=reader", false),               // No permit for reader
+    ("", false),                                 // Default deny (no headers)
+    ("x-blocked=true", false),                   // Explicit forbid
+    ("x-test-role=admin,x-blocked=true", false), // Forbid wins
+];
+
+async fn deploy_cedar_test_services(kubeconfig_path: &str) -> Result<(), String> {
+    info!("Creating namespace {}...", CEDAR_TEST_NAMESPACE);
+    let _ = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "create",
+            "namespace",
+            CEDAR_TEST_NAMESPACE,
+        ],
+    );
+
+    let client = client_from_kubeconfig(kubeconfig_path).await?;
+    let api: Api<LatticeService> = Api::namespaced(client, CEDAR_TEST_NAMESPACE);
+
+    // Deploy Cedar-protected service first
+    let protected_svc =
+        create_cedar_protected_service("cedar-protected", CEDAR_TEST_NAMESPACE, "cedar-generator");
+    info!("Deploying cedar-protected service...");
+    api.create(&PostParams::default(), &protected_svc)
+        .await
+        .map_err(|e| format!("Failed to create cedar-protected: {}", e))?;
+
+    // Deploy traffic generator
+    let generator =
+        create_cedar_test_generator("cedar-generator", "cedar-protected", CEDAR_TEST_NAMESPACE);
+    info!("Deploying cedar-generator...");
+    api.create(&PostParams::default(), &generator)
+        .await
+        .map_err(|e| format!("Failed to create cedar-generator: {}", e))?;
+
+    info!("Cedar test services deployed!");
+    sleep(Duration::from_secs(5)).await;
+    Ok(())
+}
+
+async fn wait_for_cedar_test_pods(kubeconfig_path: &str) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(300);
+    // 2 services + 1 waypoint proxy
+    let expected_pods = 3;
+
+    info!(
+        "Waiting for {} Cedar test pods to be ready...",
+        expected_pods
+    );
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for Cedar test pods (expected {})",
+                expected_pods
+            ));
+        }
+
+        let pods_output = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "pods",
+                "-n",
+                CEDAR_TEST_NAMESPACE,
+                "-o",
+                "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}",
+            ],
+        );
+
+        let running_count = pods_output.lines().filter(|l| *l == "Running").count();
+        info!(
+            "{}/{} Cedar test pods running",
+            running_count, expected_pods
+        );
+
+        if running_count >= expected_pods {
+            info!("All {} Cedar test pods are running!", expected_pods);
+            return Ok(());
+        }
+
+        sleep(Duration::from_secs(10)).await;
+    }
+}
+
+async fn verify_cedar_authz_patterns(kubeconfig_path: &str) -> Result<(), String> {
+    info!("Checking cedar-generator logs...");
+
+    let logs = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "logs",
+            "-n",
+            CEDAR_TEST_NAMESPACE,
+            "-l",
+            "app.kubernetes.io/name=cedar-generator",
+            "--tail",
+            "200",
+        ],
+    )?;
+
+    let mut total_pass = 0;
+    let mut total_fail = 0;
+    let mut failures: Vec<String> = Vec::new();
+
+    for (header_desc, expected_allowed) in CEDAR_EXPECTED_RESULTS.iter() {
+        let expected_str = if *expected_allowed {
+            "ALLOWED"
+        } else {
+            "BLOCKED"
+        };
+
+        // Build pattern to match - the generator uses format: "name[headers]: ALLOWED/BLOCKED"
+        let pattern_base = if header_desc.is_empty() {
+            "cedar-protected[]".to_string()
+        } else {
+            format!("cedar-protected[{}]", header_desc)
+        };
+        let allowed_pattern = format!("{}: ALLOWED", pattern_base);
+        let blocked_pattern = format!("{}: BLOCKED", pattern_base);
+
+        let has_allowed = logs.contains(&allowed_pattern);
+        let has_blocked = logs.contains(&blocked_pattern);
+
+        let actual_str = match (has_allowed, has_blocked) {
+            (true, true) => {
+                let last_allowed = logs.rfind(&allowed_pattern).unwrap();
+                let last_blocked = logs.rfind(&blocked_pattern).unwrap();
+                if last_allowed > last_blocked {
+                    "ALLOWED"
+                } else {
+                    "BLOCKED"
+                }
+            }
+            (true, false) => "ALLOWED",
+            (false, true) => "BLOCKED",
+            (false, false) => "UNKNOWN",
+        };
+
+        let result_ok = actual_str == expected_str;
+        let status = if result_ok { "PASS" } else { "FAIL" };
+
+        let header_display = if header_desc.is_empty() {
+            "(no headers)"
+        } else {
+            header_desc
+        };
+        info!(
+            "  [{}] {}: {} (expected: {})",
+            status, header_display, actual_str, expected_str
+        );
+
+        if result_ok {
+            total_pass += 1;
+        } else {
+            total_fail += 1;
+            failures.push(format!(
+                "{}: got {}, expected {}",
+                header_display, actual_str, expected_str
+            ));
+        }
+    }
+
+    let total_tests = total_pass + total_fail;
+    info!("========================================");
+    info!("CEDAR AUTHORIZATION VERIFICATION SUMMARY");
+    info!("========================================");
+    info!("Total tests: {}", total_tests);
+    info!(
+        "Passed: {} ({:.1}%)",
+        total_pass,
+        if total_tests > 0 {
+            (total_pass as f64 / total_tests as f64) * 100.0
+        } else {
+            0.0
+        }
+    );
+    info!("Failed: {}", total_fail);
+
+    if !failures.is_empty() {
+        info!("Failures:");
+        for failure in &failures {
+            info!("- {}", failure);
+        }
+        return Err(format!(
+            "Cedar authorization verification failed: {} of {} tests failed",
+            total_fail, total_tests
+        ));
+    }
+
+    info!(
+        "\n  SUCCESS: All {} Cedar authorization tests passed!",
+        total_tests
+    );
+    Ok(())
+}
+
+/// Clean up Cedar authorization test namespace
+pub fn cleanup_cedar_authz_test(kubeconfig_path: &str) {
+    info!(
+        "[Cedar Cleanup] Deleting namespace {}...",
+        CEDAR_TEST_NAMESPACE
+    );
+    let _ = run_cmd_allow_fail(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "delete",
+            "namespace",
+            CEDAR_TEST_NAMESPACE,
+            "--wait=false",
+        ],
+    );
+}
+
+/// Run Cedar authorization E2E test
+///
+/// Tests Cedar policy enforcement via Istio ExtAuth using header-based policies.
+/// No JWT/OIDC required - policies check normalized request headers.
+pub async fn run_cedar_authz_test(kubeconfig_path: &str) -> Result<(), String> {
+    info!("\n[Cedar AuthZ] Starting Cedar authorization E2E test...");
+
+    deploy_cedar_test_services(kubeconfig_path).await?;
+    wait_for_cedar_test_pods(kubeconfig_path).await?;
+
+    // Wait for ExtAuth configuration to propagate
+    info!("Waiting for Cedar ExtAuth policies to propagate (60s)...");
+    sleep(Duration::from_secs(60)).await;
+
+    // Wait for traffic tests to generate results
+    info!("Waiting for authorization tests to complete (90s)...");
+    sleep(Duration::from_secs(90)).await;
+
+    verify_cedar_authz_patterns(kubeconfig_path).await
 }

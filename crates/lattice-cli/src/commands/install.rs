@@ -1052,6 +1052,21 @@ async fn get_latticecluster_phase(client: &Client, name: &str) -> Result<String>
 
 /// Add bootstrap cluster environment variables to a deployment.
 fn add_bootstrap_env(deployment_json: &str, provider: &str, provider_ref: &str) -> String {
+    add_deployment_env(
+        deployment_json,
+        &[
+            ("LATTICE_BOOTSTRAP_CLUSTER", "true"),
+            ("LATTICE_PROVIDER", provider),
+            ("LATTICE_PROVIDER_REF", provider_ref),
+            // Enable Cedar ExtAuth on bootstrap cluster so child clusters get it too
+            ("LATTICE_ENABLE_CEDAR_AUTHZ", "true"),
+        ],
+    )
+}
+
+/// Add environment variables to a deployment JSON.
+/// Only adds variables that don't already exist.
+fn add_deployment_env(deployment_json: &str, vars: &[(&str, &str)]) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) else {
         return deployment_json.to_string();
     };
@@ -1072,25 +1087,13 @@ fn add_bootstrap_env(deployment_json: &str, provider: &str, provider_ref: &str) 
             continue;
         };
 
-        if !env
-            .iter()
-            .any(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_BOOTSTRAP_CLUSTER"))
-        {
-            env.push(serde_json::json!({"name": "LATTICE_BOOTSTRAP_CLUSTER", "value": "true"}));
-        }
-
-        if !env
-            .iter()
-            .any(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER"))
-        {
-            env.push(serde_json::json!({"name": "LATTICE_PROVIDER", "value": provider}));
-        }
-
-        if !env
-            .iter()
-            .any(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER_REF"))
-        {
-            env.push(serde_json::json!({"name": "LATTICE_PROVIDER_REF", "value": provider_ref}));
+        for (name, value_str) in vars {
+            if !env
+                .iter()
+                .any(|e| e.get("name").and_then(|n| n.as_str()) == Some(*name))
+            {
+                env.push(serde_json::json!({"name": *name, "value": *value_str}));
+            }
         }
     }
 
@@ -1163,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_bootstrap_env_adds_both_env_vars() {
+    fn test_add_bootstrap_env_adds_all_env_vars() {
         let deployment = r#"{
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -1198,6 +1201,16 @@ mod tests {
             e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER")
                 && e.get("value").and_then(|v| v.as_str()) == Some("proxmox")
         }));
+
+        assert!(env.iter().any(|e| {
+            e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER_REF")
+                && e.get("value").and_then(|v| v.as_str()) == Some("proxmox")
+        }));
+
+        assert!(env.iter().any(|e| {
+            e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_ENABLE_CEDAR_AUTHZ")
+                && e.get("value").and_then(|v| v.as_str()) == Some("true")
+        }));
     }
 
     #[test]
@@ -1212,7 +1225,8 @@ mod tests {
                             "name": "lattice",
                             "env": [
                                 {"name": "LATTICE_BOOTSTRAP_CLUSTER", "value": "true"},
-                                {"name": "LATTICE_PROVIDER", "value": "docker"}
+                                {"name": "LATTICE_PROVIDER", "value": "docker"},
+                                {"name": "LATTICE_ENABLE_CEDAR_AUTHZ", "value": "true"}
                             ]
                         }]
                     }
@@ -1241,12 +1255,20 @@ mod tests {
             .filter(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER"))
             .count();
         assert_eq!(provider_count, 1);
+
+        let cedar_count = env
+            .iter()
+            .filter(|e| {
+                e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_ENABLE_CEDAR_AUTHZ")
+            })
+            .count();
+        assert_eq!(cedar_count, 1);
     }
 
     #[test]
-    fn test_add_bootstrap_env_invalid_json() {
+    fn test_add_deployment_env_invalid_json() {
         let invalid = "not json";
-        let result = add_bootstrap_env(invalid, "docker", "docker");
+        let result = add_deployment_env(invalid, &[("TEST", "value")]);
         assert_eq!(result, invalid);
     }
 
