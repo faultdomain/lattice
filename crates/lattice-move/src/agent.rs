@@ -349,15 +349,32 @@ impl AgentMover {
         let api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), &self.namespace, &api_resource);
 
-        // Try to create, handling already exists
-        let created = match api.create(&PostParams::default(), &dyn_obj).await {
-            Ok(created) => created,
-            Err(kube::Error::Api(e)) if e.code == 409 => {
-                // Already exists - get it to retrieve UID
-                debug!(kind = %kind, name = %name, "Object already exists, getting existing UID");
-                api.get(&name).await.map_err(MoveError::Kube)?
+        // Try to create with retry for transient errors (webhooks not ready, etc.)
+        let mut retries = 0;
+        let max_retries = 5;
+        let created = loop {
+            match api.create(&PostParams::default(), &dyn_obj).await {
+                Ok(created) => break created,
+                Err(kube::Error::Api(e)) if e.code == 409 => {
+                    // Already exists - get it to retrieve UID
+                    debug!(kind = %kind, name = %name, "Object already exists, getting existing UID");
+                    break api.get(&name).await.map_err(MoveError::Kube)?;
+                }
+                Err(kube::Error::Api(e)) if e.code >= 500 && retries < max_retries => {
+                    // 5xx error (webhook not ready, etc.) - retry
+                    retries += 1;
+                    warn!(
+                        kind = %kind,
+                        name = %name,
+                        error = %e.message,
+                        retry = retries,
+                        "Transient error, retrying"
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500 * retries as u64)).await;
+                    continue;
+                }
+                Err(e) => return Err(MoveError::Kube(e)),
             }
-            Err(e) => return Err(MoveError::Kube(e)),
         };
 
         let target_uid = created
