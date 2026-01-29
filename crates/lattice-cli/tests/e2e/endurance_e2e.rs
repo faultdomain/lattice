@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::try_join_all;
-use kube::api::{Api, DeleteParams, PostParams};
+use kube::api::{Api, PostParams};
 use kube::Client;
 use tracing::{error, info};
 
@@ -36,10 +36,11 @@ use lattice_operator::crd::LatticeCluster;
 
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::helpers::{
-    build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
-    force_delete_docker_cluster, get_docker_kubeconfig, load_cluster_config,
-    load_registry_credentials, run_cmd_allow_fail, watch_cluster_phases,
+    build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
+    ensure_docker_network, force_delete_docker_cluster, get_docker_kubeconfig,
+    load_cluster_config, load_registry_credentials, run_cmd_allow_fail, watch_cluster_phases,
 };
+use super::providers::InfraProvider;
 
 const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
 const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
@@ -143,7 +144,10 @@ async fn run_endurance_test() -> Result<(), String> {
         .await
         .map_err(|e| format!("Installer failed: {}", e))?;
 
+    let mgmt_kubeconfig_path = format!("/tmp/{}-kubeconfig", MGMT_CLUSTER_NAME);
     let mgmt_kubeconfig = get_docker_kubeconfig(MGMT_CLUSTER_NAME)?;
+    std::fs::write(&mgmt_kubeconfig_path, &mgmt_kubeconfig)
+        .map_err(|e| format!("Failed to write mgmt kubeconfig: {}", e))?;
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig).await?;
 
     // Verify management cluster
@@ -152,7 +156,7 @@ async fn run_endurance_test() -> Result<(), String> {
 
     // Start aggressive chaos monkey on mgmt cluster
     let chaos_targets = Arc::new(ChaosTargets::new());
-    chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig);
+    chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path);
 
     info!("[CHAOS] Starting aggressive chaos monkey...");
     let _chaos = ChaosMonkey::start_with_config(chaos_targets.clone(), ChaosConfig::aggressive());
@@ -244,17 +248,19 @@ async fn run_endurance_test() -> Result<(), String> {
             );
             tokio::time::sleep(SETTLE_DELAY).await;
 
-            // Delete all clusters in parallel (chaos continues during unpivot)
+            // Delete all clusters (must delete from child cluster to trigger unpivot)
             info!("[ITERATION {}] Deleting all clusters...", iteration);
-            delete_clusters_parallel(&mgmt_client, &cluster_names).await?;
-
-            // Wait for all to be fully deleted
-            info!(
-                "[ITERATION {}] Waiting for deletion to complete...",
-                iteration
-            );
-            wait_all_deleted(&mgmt_client, &cluster_names).await?;
-            info!("[ITERATION {}] All clusters deleted!", iteration);
+            for name in &cluster_names {
+                let cluster_kubeconfig_path = format!("/tmp/{}-kubeconfig", name);
+                delete_cluster_and_wait(
+                    &cluster_kubeconfig_path,
+                    &mgmt_kubeconfig_path,
+                    name,
+                    InfraProvider::Docker,
+                )
+                .await?;
+                info!("[ITERATION {}] Cluster {} deleted!", iteration, name);
+            }
 
             Ok::<(), String>(())
         })
@@ -330,49 +336,3 @@ async fn wait_all_running(client: &Client, cluster_names: &[String]) -> Result<(
     Ok(())
 }
 
-async fn delete_clusters_parallel(client: &Client, cluster_names: &[String]) -> Result<(), String> {
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-
-    let futures: Vec<_> = cluster_names
-        .iter()
-        .map(|name| {
-            let api = api.clone();
-            let name = name.clone();
-            async move {
-                // Delete the LatticeCluster - this triggers CAPI cleanup
-                match api.delete(&name, &DeleteParams::default()).await {
-                    Ok(_) => Ok(()),
-                    Err(kube::Error::Api(ref e)) if e.code == 404 => Ok(()), // Already gone
-                    Err(e) => Err(format!("Failed to delete {}: {}", name, e)),
-                }
-            }
-        })
-        .collect();
-
-    try_join_all(futures).await?;
-    Ok(())
-}
-
-async fn wait_all_deleted(client: &Client, cluster_names: &[String]) -> Result<(), String> {
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-
-    for name in cluster_names {
-        // Poll until the resource is gone
-        loop {
-            match api.get(name).await {
-                Ok(_) => {
-                    // Still exists, wait and retry
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-                Err(kube::Error::Api(ref e)) if e.code == 404 => {
-                    // Gone, move to next
-                    break;
-                }
-                Err(e) => {
-                    return Err(format!("Error checking deletion of {}: {}", name, e));
-                }
-            }
-        }
-    }
-    Ok(())
-}

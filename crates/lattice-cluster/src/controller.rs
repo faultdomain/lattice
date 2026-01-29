@@ -1953,6 +1953,10 @@ impl PivotOperations for PivotOperationsImpl {
             .await
             .map_err(|e| Error::pivot(format!("failed to send PivotManifestsCommand: {}", e)))?;
 
+        // Mark pivot in progress to prevent duplicate triggers
+        self.agent_registry
+            .update_state(cluster_name, AgentState::Pivoting);
+
         info!(cluster = %cluster_name, manifests = manifest_count, cloud_providers = cp_count, secrets_providers = sp_count, secrets = secret_count, "pivot triggered");
         Ok(())
     }
