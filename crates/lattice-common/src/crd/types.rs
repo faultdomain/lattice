@@ -657,7 +657,9 @@ pub enum ClusterPhase {
     Pivoting,
     /// Cluster is fully operational and self-managing
     Ready,
-    /// Cluster is being deleted and unpivoting CAPI resources to parent
+    /// Cluster is being deleted (infrastructure teardown in progress)
+    Deleting,
+    /// Cluster is being deleted and unpivoting CAPI resources to parent (self cluster only)
     Unpivoting,
     /// Cluster has encountered an error
     Failed,
@@ -670,6 +672,7 @@ impl std::fmt::Display for ClusterPhase {
             Self::Provisioning => write!(f, "Provisioning"),
             Self::Pivoting => write!(f, "Pivoting"),
             Self::Ready => write!(f, "Ready"),
+            Self::Deleting => write!(f, "Deleting"),
             Self::Unpivoting => write!(f, "Unpivoting"),
             Self::Failed => write!(f, "Failed"),
         }

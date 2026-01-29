@@ -1545,6 +1545,11 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             debug!("cluster is Unpivoting, waiting for completion");
             Ok(Action::requeue(Duration::from_secs(5)))
         }
+        ClusterPhase::Deleting => {
+            // Deleting is handled by handle_deletion, just wait
+            debug!("cluster is Deleting, waiting for completion");
+            Ok(Action::requeue(Duration::from_secs(5)))
+        }
         ClusterPhase::Failed => {
             // Failed state requires manual intervention
             warn!("cluster is in Failed state, awaiting spec change");
@@ -1779,6 +1784,12 @@ async fn update_cluster_status(
             ConditionStatus::True,
             "StartingPivot",
             "Pivoting cluster to self-managed",
+        ),
+        ClusterPhase::Deleting => (
+            "Deleting",
+            ConditionStatus::True,
+            "DeletingCluster",
+            "Deleting cluster infrastructure",
         ),
         ClusterPhase::Unpivoting => (
             "Unpivoting",
@@ -2026,6 +2037,17 @@ async fn handle_deletion(
     // For non-self clusters (we're the parent), delete CAPI infrastructure
     if !is_self {
         let capi_namespace = format!("capi-{}", name);
+
+        // Set phase to Deleting if not already
+        let current_phase = cluster.status.as_ref().map(|s| &s.phase);
+        if current_phase != Some(&ClusterPhase::Deleting) {
+            let status = cluster
+                .status
+                .clone()
+                .unwrap_or_default()
+                .phase(ClusterPhase::Deleting);
+            ctx.kube.patch_status(&name, &status).await?;
+        }
 
         // Check if CAPI Cluster still exists
         let capi_exists = ctx
