@@ -83,6 +83,10 @@ pub struct InstallArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Enable Cedar ExtAuth for authorization
+    #[arg(long)]
+    pub enable_cedar_authz: bool,
+
     /// Write kubeconfig to this path after installation
     #[arg(long)]
     pub kubeconfig_out: Option<PathBuf>,
@@ -107,6 +111,7 @@ pub struct Installer {
     image: String,
     keep_bootstrap_on_failure: bool,
     registry_credentials: Option<String>,
+    enable_cedar_authz: bool,
 }
 
 /// Fixed bootstrap cluster name - concurrent installs are not supported
@@ -120,6 +125,7 @@ impl Installer {
         keep_bootstrap_on_failure: bool,
         registry_credentials: Option<String>,
         bootstrap_override: Option<BootstrapProvider>,
+        enable_cedar_authz: bool,
     ) -> Result<Self> {
         let mut cluster: LatticeCluster = serde_yaml::from_str(&cluster_yaml)?;
 
@@ -140,6 +146,7 @@ impl Installer {
             image,
             keep_bootstrap_on_failure,
             registry_credentials,
+            enable_cedar_authz,
         })
     }
 
@@ -157,6 +164,7 @@ impl Installer {
             args.keep_bootstrap_on_failure,
             registry_credentials,
             args.bootstrap.clone(),
+            args.enable_cedar_authz,
         )
     }
 
@@ -340,6 +348,7 @@ impl Installer {
                 self.registry_credentials.as_deref(),
                 Some("lattice-installer"),
                 None,
+                self.enable_cedar_authz,
             )
             .await;
 
@@ -438,6 +447,7 @@ impl Installer {
                 .bootstrap
                 .needs_fips_relax(),
             autoscaling_enabled,
+            cedar_enabled: self.enable_cedar_authz,
         };
 
         let all_manifests = generate_all_manifests(&generator, &config).await;
@@ -981,8 +991,6 @@ fn add_bootstrap_env(deployment_json: &str, provider: &str, provider_ref: &str) 
             ("LATTICE_BOOTSTRAP_CLUSTER", "true"),
             ("LATTICE_PROVIDER", provider),
             ("LATTICE_PROVIDER_REF", provider_ref),
-            // Enable Cedar ExtAuth on bootstrap cluster so child clusters get it too
-            ("LATTICE_ENABLE_CEDAR_AUTHZ", "true"),
         ],
     )
 }
@@ -1129,11 +1137,6 @@ mod tests {
             e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER_REF")
                 && e.get("value").and_then(|v| v.as_str()) == Some("proxmox")
         }));
-
-        assert!(env.iter().any(|e| {
-            e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_ENABLE_CEDAR_AUTHZ")
-                && e.get("value").and_then(|v| v.as_str()) == Some("true")
-        }));
     }
 
     #[test]
@@ -1148,8 +1151,7 @@ mod tests {
                             "name": "lattice",
                             "env": [
                                 {"name": "LATTICE_BOOTSTRAP_CLUSTER", "value": "true"},
-                                {"name": "LATTICE_PROVIDER", "value": "docker"},
-                                {"name": "LATTICE_ENABLE_CEDAR_AUTHZ", "value": "true"}
+                                {"name": "LATTICE_PROVIDER", "value": "docker"}
                             ]
                         }]
                     }
@@ -1178,14 +1180,6 @@ mod tests {
             .filter(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER"))
             .count();
         assert_eq!(provider_count, 1);
-
-        let cedar_count = env
-            .iter()
-            .filter(|e| {
-                e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_ENABLE_CEDAR_AUTHZ")
-            })
-            .count();
-        assert_eq!(cedar_count, 1);
     }
 
     #[test]

@@ -134,6 +134,7 @@ async fn run_endurance_test() -> Result<(), String> {
         true,
         registry_credentials,
         None,
+        false, // enable_cedar_authz
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;
 

@@ -220,6 +220,7 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
         true, // keep_bootstrap_on_failure
         registry_credentials,
         None, // bootstrap_override
+        true, // enable_cedar_authz
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;
     installer

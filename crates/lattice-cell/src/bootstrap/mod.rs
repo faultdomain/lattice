@@ -207,6 +207,7 @@ pub trait ManifestGenerator: Send + Sync {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
+        cedar_enabled: bool,
     ) -> Vec<String>;
 }
 
@@ -240,6 +241,8 @@ pub struct ManifestConfig<'a> {
     /// Whether cluster has autoscaling-enabled pools (min/max set)
     /// When true, deploys the CAPI cluster-autoscaler
     pub autoscaling_enabled: bool,
+    /// Enable Cedar ExtAuth for authorization
+    pub cedar_enabled: bool,
 }
 
 /// Generate all bootstrap manifests including provider-specific addons
@@ -265,6 +268,7 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
             config.registry_credentials,
             config.cluster_name,
             config.provider,
+            config.cedar_enabled,
         )
         .await;
 
@@ -420,12 +424,14 @@ impl DefaultManifestGenerator {
     /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on
     /// - LATTICE_PROVIDER: So agent knows which infrastructure provider to install
     /// - LATTICE_BOOTSTRAP: So agent knows which bootstrap provider to use
+    /// - LATTICE_ENABLE_CEDAR_AUTHZ: Enable Cedar ExtAuth for authorization
     fn generate_operator_manifests(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
+        cedar_enabled: bool,
     ) -> Result<Vec<String>, serde_json::Error> {
         let registry_creds = registry_credentials.map(|s| s.to_string());
 
@@ -561,6 +567,13 @@ impl DefaultManifestGenerator {
                                         ..Default::default()
                                     });
                                 }
+                                if cedar_enabled {
+                                    envs.push(EnvVar {
+                                        name: "LATTICE_ENABLE_CEDAR_AUTHZ".to_string(),
+                                        value: Some("true".to_string()),
+                                        ..Default::default()
+                                    });
+                                }
                                 envs
                             }),
                             // Mount registry credentials if available
@@ -641,9 +654,16 @@ impl ManifestGenerator for DefaultManifestGenerator {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
+        cedar_enabled: bool,
     ) -> Vec<String> {
         match self
-            .try_generate(image, registry_credentials, cluster_name, provider)
+            .try_generate(
+                image,
+                registry_credentials,
+                cluster_name,
+                provider,
+                cedar_enabled,
+            )
             .await
         {
             Ok(manifests) => manifests,
@@ -665,6 +685,7 @@ impl DefaultManifestGenerator {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
+        cedar_enabled: bool,
     ) -> Result<Vec<String>, ManifestError> {
         let mut manifests = Vec::new();
 
@@ -678,7 +699,13 @@ impl DefaultManifestGenerator {
 
         // Then operator manifests
         let operator_manifests = self
-            .generate_operator_manifests(image, registry_credentials, cluster_name, provider)
+            .generate_operator_manifests(
+                image,
+                registry_credentials,
+                cluster_name,
+                provider,
+                cedar_enabled,
+            )
             .map_err(|e| ManifestError::Serialization {
                 resource: "operator manifests".to_string(),
                 message: e.to_string(),
@@ -1208,6 +1235,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
             autoscaling_enabled: info.autoscaling_enabled,
+            cedar_enabled: self.cedar_enabled,
         };
         let mut manifests = generate_all_manifests(&self.manifest_generator, &config).await;
 
@@ -1835,7 +1863,9 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None, false)
+            .await;
 
         // Operator manifests are JSON, check for JSON format
         let has_namespace = manifests
@@ -1847,7 +1877,9 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_operator_deployment() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None, false)
+            .await;
 
         // Operator manifests are JSON, check for JSON format
         let has_deployment = manifests.iter().any(|m: &String| {
@@ -1859,7 +1891,9 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_service_account() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None, false)
+            .await;
 
         // Should have ServiceAccount for operator
         let has_sa = manifests.iter().any(|m: &String| {
@@ -1871,7 +1905,9 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None, false)
+            .await;
 
         // Should include Cilium DaemonSet (rendered from helm template)
         let has_cilium_daemonset = manifests
@@ -2170,7 +2206,9 @@ mod tests {
     #[tokio::test]
     async fn story_manifest_generation() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None, false)
+            .await;
 
         // CRD must be first so it's applied before any CR instances
         let has_crd = manifests.iter().any(|m: &String| {
