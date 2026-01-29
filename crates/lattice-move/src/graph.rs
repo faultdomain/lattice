@@ -93,7 +93,12 @@ impl GraphNode {
             .unwrap_or_default();
 
         // Serialize the object to JSON for transmission
-        let object = serde_json::to_value(obj).ok()?;
+        // DynamicObject doesn't include apiVersion/kind in serialization, so we add them
+        let mut object = serde_json::to_value(obj).ok()?;
+        if let Some(obj_map) = object.as_object_mut() {
+            obj_map.insert("apiVersion".to_string(), serde_json::Value::String(api_version.to_string()));
+            obj_map.insert("kind".to_string(), serde_json::Value::String(kind.to_string()));
+        }
 
         Some(Self {
             identity,

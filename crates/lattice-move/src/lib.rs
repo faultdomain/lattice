@@ -65,7 +65,8 @@ pub use sequence::{extract_nodes_for_group, MoveGroup, MoveSequence};
 pub const DELETE_FOR_MOVE_ANNOTATION: &str = "clusterctl.cluster.x-k8s.io/delete-for-move";
 
 /// Label indicating a CRD should be included in move operations
-pub const MOVE_LABEL: &str = "clusterctl.cluster.x-k8s.io/move";
+/// CAPI uses the label key with empty value: `clusterctl.cluster.x-k8s.io: ""`
+pub const MOVE_LABEL: &str = "clusterctl.cluster.x-k8s.io";
 
 /// Label indicating a CRD's hierarchy should be included in move operations
 pub const MOVE_HIERARCHY_LABEL: &str = "clusterctl.cluster.x-k8s.io/move-hierarchy";
@@ -80,7 +81,7 @@ mod tests {
             DELETE_FOR_MOVE_ANNOTATION,
             "clusterctl.cluster.x-k8s.io/delete-for-move"
         );
-        assert_eq!(MOVE_LABEL, "clusterctl.cluster.x-k8s.io/move");
+        assert_eq!(MOVE_LABEL, "clusterctl.cluster.x-k8s.io");
         assert_eq!(
             MOVE_HIERARCHY_LABEL,
             "clusterctl.cluster.x-k8s.io/move-hierarchy"
