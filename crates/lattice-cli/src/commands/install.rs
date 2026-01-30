@@ -420,31 +420,36 @@ impl Installer {
         let namespace = self.capi_namespace();
         let secret_name = self.kubeconfig_secret_name();
 
-        // Wait for Ready/Pivoting phase
+        // Wait for kubeconfig secret to exist. We don't wait for Ready phase because
+        // the cluster needs CNI to reach Ready, and CNI is applied after this phase.
         loop {
             if start.elapsed() > timeout {
                 return Err(Error::command_failed("Timeout waiting for cluster"));
             }
 
+            // Check for failure first
             let phase = get_latticecluster_phase(client, self.cluster_name()).await?;
+            if phase == "Failed" {
+                return Err(Error::command_failed("Cluster provisioning failed"));
+            }
+
+            // Log progress
             info!(
                 "Cluster phase: {}",
                 if phase.is_empty() { "Pending" } else { &phase }
             );
 
-            match phase.as_str() {
-                "Ready" | "Pivoting" => break,
-                "Failed" => return Err(Error::command_failed("Cluster provisioning failed")),
-                _ => tokio::time::sleep(Duration::from_secs(10)).await,
+            // Check if kubeconfig is ready
+            if kube_utils::secret_exists(client, &secret_name, &namespace)
+                .await
+                .unwrap_or(false)
+            {
+                info!("Kubeconfig secret is ready");
+                return Ok(());
             }
+
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
-
-        // Wait for kubeconfig secret
-        kube_utils::wait_for_secret(client, &secret_name, &namespace, timeout)
-            .await
-            .cmd_err()?;
-
-        Ok(())
     }
 
     async fn apply_bootstrap_to_management(&self, bootstrap_client: &Client) -> Result<()> {
@@ -477,12 +482,13 @@ impl Installer {
             .cmd_err()?;
         }
 
-        info!("Waiting for nodes to be ready...");
-        kube_utils::wait_for_nodes_ready(&mgmt_client, Duration::from_secs(300))
-            .await
-            .cmd_err()?;
+        info!("Waiting for control plane nodes to be ready...");
+        wait_for_control_plane_ready(&mgmt_client, Duration::from_secs(300)).await?;
 
+        info!("Installing CAPI on management cluster...");
         self.install_capi_on_management(&kubeconfig_path).await?;
+
+        info!("Waiting for CAPI controllers to be ready...");
         self.wait_for_management_controllers(&mgmt_client).await?;
         self.copy_cloud_provider_to_management(bootstrap_client, &mgmt_client)
             .await?;
@@ -974,6 +980,67 @@ async fn get_latticecluster_phase(client: &Client, name: &str) -> Result<String>
             "Failed to get LatticeCluster {}: {}",
             name, e
         ))),
+    }
+}
+
+/// Wait for control plane nodes to be ready (ignores worker nodes).
+async fn wait_for_control_plane_ready(client: &Client, timeout: Duration) -> Result<()> {
+    use k8s_openapi::api::core::v1::Node;
+    use kube::api::{Api, ListParams};
+    use lattice_common::kube_utils::{has_condition, CONDITION_READY};
+
+    let start = Instant::now();
+    let nodes: Api<Node> = Api::all(client.clone());
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(Error::command_failed(
+                "Timeout waiting for control plane nodes to be ready",
+            ));
+        }
+
+        let node_list = nodes
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| Error::command_failed(format!("Failed to list nodes: {}", e)))?;
+
+        // Filter for control plane nodes
+        let cp_nodes: Vec<_> = node_list
+            .items
+            .iter()
+            .filter(|n| {
+                n.metadata
+                    .labels
+                    .as_ref()
+                    .is_some_and(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
+            })
+            .collect();
+
+        if cp_nodes.is_empty() {
+            info!("No control plane nodes found yet...");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        let ready_count = cp_nodes
+            .iter()
+            .filter(|n| {
+                let conditions = n.status.as_ref().and_then(|s| s.conditions.as_ref());
+                has_condition(conditions.map(|c| c.as_slice()), CONDITION_READY)
+            })
+            .count();
+
+        if ready_count == cp_nodes.len() {
+            info!("{} control plane node(s) ready", cp_nodes.len());
+            return Ok(());
+        }
+
+        info!(
+            "Waiting for control plane nodes: {}/{} ready",
+            ready_count,
+            cp_nodes.len()
+        );
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 

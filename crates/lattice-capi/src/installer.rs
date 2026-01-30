@@ -498,8 +498,9 @@ impl ClusterctlInstaller {
             .map_err(|e| format!("failed to list deployments in {}: {}", namespace, e))?;
 
         // Get first deployment and check labels
+        // If namespace exists but has no deployments, provider is not installed
         let Some(deployment) = list.items.first() else {
-            return Ok(Some("unknown".to_string()));
+            return Ok(None);
         };
         let Some(labels) = deployment.metadata.labels.as_ref() else {
             return Ok(Some("unknown".to_string()));
