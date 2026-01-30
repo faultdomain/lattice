@@ -27,13 +27,11 @@
 
 mod autoscaler;
 mod aws_addons;
-mod crs;
 mod docker_addons;
 mod token;
 
 pub use autoscaler::generate_autoscaler_manifests;
 pub use aws_addons::generate_aws_addon_manifests;
-pub use crs::{generate_crs_yaml_manifests, ProviderCredentials};
 pub use docker_addons::generate_docker_addon_manifests;
 pub use lattice_common::AwsCredentials;
 
@@ -316,6 +314,96 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
     }
 
     manifests
+}
+
+/// Configuration for generating a complete bootstrap bundle
+#[derive(Debug, Clone)]
+pub struct BootstrapBundleConfig<'a> {
+    /// Container image for the operator
+    pub image: &'a str,
+    /// Optional registry credentials (image pull secret)
+    pub registry_credentials: Option<&'a str>,
+    /// Optional networking configuration (for LB-IPAM)
+    pub networking: Option<&'a lattice_common::crd::NetworkingSpec>,
+    /// Optional Proxmox ipv4_pool config (for auto-deriving LB-IPAM when networking is None)
+    pub proxmox_ipv4_pool: Option<&'a lattice_common::crd::Ipv4PoolConfig>,
+    /// Cluster name
+    pub cluster_name: &'a str,
+    /// Provider type
+    pub provider: ProviderType,
+    /// Bootstrap mechanism (kubeadm or rke2)
+    pub bootstrap: lattice_common::crd::BootstrapProvider,
+    /// Kubernetes version (e.g., "1.32.0")
+    pub k8s_version: &'a str,
+    /// Parent host (None for root/management clusters)
+    pub parent_host: Option<&'a str>,
+    /// Parent gRPC port
+    pub parent_grpc_port: u16,
+    /// Whether to relax FIPS mode
+    pub relax_fips: bool,
+    /// Whether cluster has autoscaling-enabled pools
+    pub autoscaling_enabled: bool,
+    /// The LatticeCluster manifest (JSON or YAML) to include
+    pub cluster_manifest: &'a str,
+}
+
+/// Generate a complete bootstrap bundle for a cluster
+///
+/// This is the single source of truth for bootstrap manifests. Both the install command
+/// (management cluster) and bootstrap webhook (child clusters) MUST call this function.
+///
+/// Includes:
+/// - Operator manifests (CNI, operator deployment)
+/// - Infrastructure manifests (cert-manager, CAPI, Istio, Cilium)
+/// - LatticeCluster CRD definition
+/// - LatticeCluster instance
+///
+/// Does NOT include parent connection config - that's webhook-specific.
+pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
+    generator: &G,
+    config: &BootstrapBundleConfig<'_>,
+) -> Result<Vec<String>, BootstrapError> {
+    // Generate operator + CNI manifests
+    let manifest_config = ManifestConfig {
+        image: config.image,
+        registry_credentials: config.registry_credentials,
+        networking: config.networking,
+        proxmox_ipv4_pool: config.proxmox_ipv4_pool,
+        cluster_name: Some(config.cluster_name),
+        provider: Some(config.provider),
+        k8s_version: Some(config.k8s_version),
+        parent_host: config.parent_host,
+        parent_grpc_port: config.parent_grpc_port,
+        relax_fips: config.relax_fips,
+        autoscaling_enabled: config.autoscaling_enabled,
+    };
+    let mut manifests = generate_all_manifests(generator, &manifest_config).await;
+
+    // Generate infrastructure manifests (cert-manager, CAPI, Istio, Cilium)
+    let infra_config = lattice_infra::InfrastructureConfig {
+        provider: config.provider,
+        bootstrap: config.bootstrap.clone(),
+        cluster_name: config.cluster_name.to_string(),
+        skip_cilium_policies: false,
+    };
+    let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config)
+        .await
+        .map_err(|e| BootstrapError::Internal(format!("failed to generate infrastructure: {}", e)))?;
+    info!(
+        count = infra_manifests.len(),
+        "generated infrastructure manifests"
+    );
+    manifests.extend(infra_manifests);
+
+    // Add LatticeCluster CRD definition
+    let crd_definition = serde_yaml::to_string(&LatticeCluster::crd())
+        .map_err(|e| BootstrapError::Internal(format!("failed to serialize LatticeCluster CRD: {}", e)))?;
+    manifests.push(crd_definition);
+
+    // Add LatticeCluster instance
+    manifests.push(config.cluster_manifest.to_string());
+
+    Ok(manifests)
 }
 
 /// Label key for identifying the provider type
@@ -1191,51 +1279,25 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // Parse parent endpoint for network policy
         let (parent_host, grpc_port) = parse_parent_endpoint(&info.cell_endpoint);
 
-        // Generate operator + CNI + provider-specific addon manifests
-        let config = ManifestConfig {
+        // Generate the complete bootstrap bundle (operator, infra, LatticeCluster)
+        let bundle_config = BootstrapBundleConfig {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
             networking: info.networking.as_ref(),
             proxmox_ipv4_pool: info.proxmox_ipv4_pool.as_ref(),
-            cluster_name: Some(&info.cluster_id),
-            provider: Some(info.provider),
-            k8s_version: Some(&info.k8s_version),
+            cluster_name: &info.cluster_id,
+            provider: info.provider,
+            bootstrap: info.bootstrap.clone(),
+            k8s_version: &info.k8s_version,
             parent_host: parent_host.as_deref(),
             parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
             autoscaling_enabled: info.autoscaling_enabled,
+            cluster_manifest: &info.cluster_manifest,
         };
-        let mut manifests = generate_all_manifests(&self.manifest_generator, &config).await;
+        let mut manifests = generate_bootstrap_bundle(&self.manifest_generator, &bundle_config).await?;
 
-        // Add ALL infrastructure manifests (cert-manager, CAPI, Istio, Envoy Gateway)
-        // These install in parallel with the operator, massively speeding up cluster creation
-        let infra_config = lattice_infra::InfrastructureConfig {
-            provider: info.provider,
-            bootstrap: info.bootstrap.clone(),
-            cluster_name: info.cluster_id.clone(),
-            skip_cilium_policies: false,
-        };
-        let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config).await;
-        info!(
-            count = infra_manifests.len(),
-            "adding infrastructure manifests to bootstrap"
-        );
-        manifests.extend(infra_manifests);
-
-        // Add the LatticeCluster CRD definition (CustomResourceDefinition)
-        // The CRD is needed so the LatticeCluster instance can be applied
-        let crd_definition = serde_yaml::to_string(&LatticeCluster::crd()).map_err(|e| {
-            BootstrapError::Internal(format!("failed to serialize LatticeCluster CRD: {}", e))
-        })?;
-        manifests.push(crd_definition);
-
-        // Include the LatticeCluster instance in bootstrap manifests.
-        // This allows the operator to read endpoints for server certificate SANs
-        // from first boot, enabling hierarchical cluster provisioning (parent → child → grandchild).
-        // The controller will skip reconciliation until pivotComplete is set to true.
-        manifests.push(info.cluster_manifest.clone());
-
-        // Add parent connection config Secret for agent to use
+        // Add parent connection config Secret (webhook-specific, not needed for installer)
         let parent_config = Secret {
             metadata: ObjectMeta {
                 name: Some("lattice-parent-config".to_string()),
@@ -1254,8 +1316,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         })?);
 
         // Note: CloudProvider and SecretsProvider resources (with their referenced secrets)
-        // are added by the bootstrap_manifests_handler after calling this method. This ensures
-        // credentials are available when the operator starts, before the gRPC connection is established.
+        // are added by the bootstrap_manifests_handler after calling this method.
 
         Ok(BootstrapResponse {
             cluster_id: info.cluster_id.clone(),

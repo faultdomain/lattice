@@ -20,8 +20,8 @@ pub mod server;
 
 pub use bootstrap::{
     bootstrap_router, generate_autoscaler_manifests, generate_aws_addon_manifests,
-    generate_crs_yaml_manifests, generate_docker_addon_manifests, BootstrapState,
-    ClusterRegistration, DefaultManifestGenerator, ManifestGenerator, ProviderCredentials,
+    generate_bootstrap_bundle, generate_docker_addon_manifests, BootstrapBundleConfig,
+    BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
 };
 pub use connection::{
     AgentConnection, AgentRegistry, PivotSourceManifests, PostPivotManifests, SendError,

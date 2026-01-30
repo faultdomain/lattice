@@ -26,9 +26,8 @@ use lattice_common::clusterctl::move_to_kubeconfig;
 use lattice_common::kube_utils;
 use lattice_common::AwsCredentials;
 use lattice_operator::bootstrap::{
-    aws_credentials_manifests, generate_all_manifests, generate_crs_yaml_manifests,
-    proxmox_credentials_manifests, DefaultManifestGenerator, ManifestConfig, ManifestGenerator,
-    ProviderCredentials,
+    aws_credentials_manifests, generate_bootstrap_bundle, proxmox_credentials_manifests,
+    BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
 };
 use lattice_operator::crd::{
     BootstrapProvider, CloudProvider, CloudProviderSpec, CloudProviderType, LatticeCluster,
@@ -397,99 +396,10 @@ impl Installer {
         Ok(())
     }
 
-    async fn create_bootstrap_crs(&self, client: &Client) -> Result<()> {
-        let generator = DefaultManifestGenerator::new();
-        let cluster_name = self.cluster_name();
-        let provider = self.cluster.spec.provider.provider_type();
-        let namespace = self.capi_namespace();
-
-        let proxmox_ipv4_pool = self
-            .cluster
-            .spec
-            .provider
-            .config
-            .proxmox
-            .as_ref()
-            .map(|p| &p.ipv4_pool);
-
-        let k8s_version = &self.cluster.spec.provider.kubernetes.version;
-        let autoscaling_enabled = self
-            .cluster
-            .spec
-            .nodes
-            .worker_pools
-            .values()
-            .any(|p| p.is_autoscaling_enabled());
-        let config = ManifestConfig {
-            image: &self.image,
-            registry_credentials: self.registry_credentials.as_deref(),
-            networking: self.cluster.spec.networking.as_ref(),
-            proxmox_ipv4_pool,
-            cluster_name: Some(cluster_name),
-            provider: Some(provider),
-            k8s_version: Some(k8s_version),
-            parent_host: None,
-            parent_grpc_port: lattice_operator::DEFAULT_GRPC_PORT,
-            relax_fips: self
-                .cluster
-                .spec
-                .provider
-                .kubernetes
-                .bootstrap
-                .needs_fips_relax(),
-            autoscaling_enabled,
-        };
-
-        let all_manifests = generate_all_manifests(&generator, &config).await;
-
-        // Get provider credentials for the CRS (applied to management cluster)
-        let credentials = match self.provider() {
-            ProviderType::Proxmox => {
-                let (url, token, secret) = Self::get_proxmox_credentials()?;
-                Some(ProviderCredentials {
-                    secret_name: "provider-credentials".to_string(),
-                    key_name: "credentials.yaml".to_string(),
-                    manifest: proxmox_credentials_manifests(&url, &token, &secret),
-                })
-            }
-            ProviderType::Aws => {
-                let creds = Self::get_aws_credentials()?;
-                Some(ProviderCredentials {
-                    secret_name: "provider-credentials".to_string(),
-                    key_name: "credentials.yaml".to_string(),
-                    manifest: aws_credentials_manifests(&creds),
-                })
-            }
-            _ => None,
-        };
-
-        let crs_manifests =
-            generate_crs_yaml_manifests(cluster_name, &namespace, &all_manifests, credentials);
-
-        kube_utils::create_namespace(client, &namespace)
-            .await
-            .cmd_err()?;
-
-        for (i, manifest) in crs_manifests.iter().enumerate() {
-            if i == crs_manifests.len() - 1 {
-                kube_utils::apply_manifest_with_retry(client, manifest, Duration::from_secs(120))
-                    .await
-                    .cmd_err()?;
-            } else {
-                kube_utils::apply_manifest(client, manifest)
-                    .await
-                    .cmd_err()?;
-            }
-        }
-
-        Ok(())
-    }
-
     async fn create_management_cluster_crd(&self, client: &Client) -> Result<()> {
         kube_utils::apply_manifest_with_retry(client, &self.cluster_yaml, Duration::from_secs(120))
             .await
             .cmd_err()?;
-        self.create_bootstrap_crs(client).await?;
         Ok(())
     }
 
@@ -542,24 +452,82 @@ impl Installer {
             .await
             .cmd_err()?;
 
-        // Install CAPI and Lattice on management cluster
+        // Generate all bootstrap manifests (operator + infrastructure + LatticeCluster)
+        let manifests = self.generate_bootstrap_manifests().await?;
+        info!(
+            "Applying {} bootstrap manifests to management cluster",
+            manifests.len()
+        );
+
+        // Apply manifests with retry - CRDs must be ready before CRs can be applied
+        // Use infinite retry since CRD ordering may cause transient failures
+        let retry_config = lattice_common::retry::RetryConfig::infinite();
+        for manifest in &manifests {
+            let client = mgmt_client.clone();
+            let m = manifest.clone();
+            lattice_common::retry::retry_with_backoff(&retry_config, "apply_manifest", || {
+                let c = client.clone();
+                let manifest = m.clone();
+                async move { kube_utils::apply_manifest(&c, &manifest).await }
+            })
+            .await
+            .cmd_err()?;
+        }
+
+        // Install CAPI via clusterctl
         self.install_capi_on_management(&kubeconfig_path).await?;
+
+        // Wait for controllers to be ready
         self.wait_for_management_controllers(&mgmt_client).await?;
 
         // Copy CloudProvider and credentials from bootstrap to management cluster
         self.copy_cloud_provider_to_management(bootstrap_client, &mgmt_client)
             .await?;
 
-        // Apply self-referential LatticeCluster CR
-        kube_utils::apply_manifest_with_retry(
-            &mgmt_client,
-            &self.cluster_yaml,
-            Duration::from_secs(120),
-        )
-        .await
-        .cmd_err()?;
-
         Ok(())
+    }
+
+    /// Generate all bootstrap manifests for the management cluster.
+    ///
+    /// Uses the same shared code as the bootstrap webhook to ensure consistency.
+    async fn generate_bootstrap_manifests(&self) -> Result<Vec<String>> {
+        info!("Generating bootstrap manifests...");
+        let generator = DefaultManifestGenerator::new();
+
+        let proxmox_ipv4_pool = self
+            .cluster
+            .spec
+            .provider
+            .config
+            .proxmox
+            .as_ref()
+            .map(|p| &p.ipv4_pool);
+
+        let config = BootstrapBundleConfig {
+            image: &self.image,
+            registry_credentials: self.registry_credentials.as_deref(),
+            networking: self.cluster.spec.networking.as_ref(),
+            proxmox_ipv4_pool,
+            cluster_name: self.cluster_name(),
+            provider: self.provider(),
+            bootstrap: self.cluster.spec.provider.kubernetes.bootstrap.clone(),
+            k8s_version: &self.cluster.spec.provider.kubernetes.version,
+            parent_host: None, // Management cluster has no parent
+            parent_grpc_port: lattice_operator::DEFAULT_GRPC_PORT,
+            relax_fips: self.cluster.spec.provider.kubernetes.bootstrap.needs_fips_relax(),
+            autoscaling_enabled: self
+                .cluster
+                .spec
+                .nodes
+                .worker_pools
+                .values()
+                .any(|p| p.is_autoscaling_enabled()),
+            cluster_manifest: &self.cluster_yaml,
+        };
+
+        generate_bootstrap_bundle(&generator, &config)
+            .await
+            .map_err(|e| Error::command_failed(e.to_string()))
     }
 
     /// Copy CloudProvider and its credentials secret from bootstrap to management cluster
@@ -622,20 +590,38 @@ impl Installer {
     /// Uses YAML parsing for safe manipulation instead of string replacement.
     async fn rewrite_docker_kubeconfig(&self, kubeconfig: &str) -> Result<String> {
         let lb_container = format!("{}-lb", self.cluster_name());
-        let port_output = Command::new("docker")
-            .args(["port", &lb_container, "6443"])
-            .output()
-            .await?;
 
-        if !port_output.status.success() {
-            // If we can't get the port, return the original kubeconfig
-            return Ok(kubeconfig.to_string());
-        }
+        // Retry getting the docker port - LB container may not be ready immediately
+        let retry_config = lattice_common::retry::RetryConfig::infinite();
+        let container = lb_container.clone();
+        let port: String = lattice_common::retry::retry_with_backoff(
+            &retry_config,
+            "docker_port_lookup",
+            || {
+                let c = container.clone();
+                async move {
+                    let output = Command::new("docker")
+                        .args(["port", &c, "6443"])
+                        .output()
+                        .await
+                        .map_err(|e| format!("docker command failed: {}", e))?;
 
-        let port_str = String::from_utf8_lossy(&port_output.stdout);
-        let Some(port) = port_str.trim().split(':').next_back() else {
-            return Ok(kubeconfig.to_string());
-        };
+                    if !output.status.success() {
+                        return Err("LB container port not ready".to_string());
+                    }
+
+                    let port_str = String::from_utf8_lossy(&output.stdout);
+                    port_str
+                        .trim()
+                        .split(':')
+                        .next_back()
+                        .map(|p| p.to_string())
+                        .ok_or_else(|| "failed to parse port".to_string())
+                }
+            },
+        )
+        .await
+        .map_err(|e| Error::command_failed(format!("Failed to get Docker LB port: {}", e)))?;
 
         let localhost_url = format!("https://127.0.0.1:{}", port);
 

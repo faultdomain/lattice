@@ -8,7 +8,7 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 
 use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
-use crate::crd::{BootstrapProvider, CloudProvider, LatticeCluster, ProviderType};
+use crate::crd::{CloudProvider, LatticeCluster, ProviderType};
 use crate::infra::bootstrap::{self, InfrastructureConfig};
 
 use super::manifests::apply_manifests;
@@ -36,7 +36,9 @@ pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
         // Bootstrap cluster (KIND): Use generate_core() + clusterctl init
         // This is a temporary cluster that doesn't need full self-management infra
         // Use "bootstrap" as the cluster name for the trust domain
-        let manifests = bootstrap::generate_core("bootstrap", true).await;
+        let manifests = bootstrap::generate_core("bootstrap", true)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to generate core infrastructure: {}", e))?;
         tracing::info!(count = manifests.len(), "applying core infrastructure");
         apply_manifests(client, &manifests).await?;
 
@@ -48,25 +50,22 @@ pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
         let clusters: Api<LatticeCluster> = Api::all(client.clone());
         let list = clusters.list(&ListParams::default()).await?;
 
-        let (provider, bootstrap, cluster_name) = if let Some(cluster) = list.items.first() {
-            let p = cluster.spec.provider.provider_type();
-            let b = cluster.spec.provider.kubernetes.bootstrap.clone();
-            let name = cluster
-                .metadata
-                .name
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            tracing::info!(provider = ?p, bootstrap = ?b, cluster = %name, "read config from LatticeCluster CRD");
-            (p, b, name)
-        } else {
-            // No LatticeCluster yet - use defaults (shouldn't happen on real clusters)
-            tracing::warn!("no LatticeCluster found, using defaults");
-            (
-                ProviderType::Docker,
-                BootstrapProvider::Kubeadm,
-                "default".to_string(),
+        let cluster = list.items.first().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no LatticeCluster found - workload clusters must have a LatticeCluster CRD \
+                 (pivoted from parent). This indicates a failed or incomplete pivot."
             )
-        };
+        })?;
+
+        let provider = cluster.spec.provider.provider_type();
+        let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
+        let cluster_name = cluster
+            .metadata
+            .name
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("LatticeCluster missing metadata.name"))?;
+
+        tracing::info!(provider = ?provider, bootstrap = ?bootstrap, cluster = %cluster_name, "read config from LatticeCluster CRD");
 
         let config = InfrastructureConfig {
             provider,
@@ -75,7 +74,9 @@ pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
             skip_cilium_policies: false,
         };
 
-        let manifests = bootstrap::generate_all(&config).await;
+        let manifests = bootstrap::generate_all(&config)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to generate infrastructure manifests: {}", e))?;
         tracing::info!(
             count = manifests.len(),
             "applying all infrastructure (same as bootstrap webhook)"
@@ -104,15 +105,9 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
     let provider_ref =
         std::env::var("LATTICE_PROVIDER_REF").unwrap_or_else(|_| provider_str.clone());
 
-    let infrastructure = match provider_str.to_lowercase().as_str() {
-        "docker" => ProviderType::Docker,
-        "proxmox" => ProviderType::Proxmox,
-        "openstack" => ProviderType::OpenStack,
-        "aws" => ProviderType::Aws,
-        "gcp" => ProviderType::Gcp,
-        "azure" => ProviderType::Azure,
-        other => return Err(anyhow::anyhow!("unknown LATTICE_PROVIDER: {}", other)),
-    };
+    let infrastructure: ProviderType = provider_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid LATTICE_PROVIDER '{}': {}", provider_str, e))?;
 
     tracing::info!(infrastructure = %provider_str, "Installing CAPI providers for bootstrap cluster");
 

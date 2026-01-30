@@ -11,7 +11,7 @@ pub mod eso;
 pub mod istio;
 
 use tokio::process::Command;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use lattice_common::crd::{BootstrapProvider, ProviderType};
 
@@ -44,21 +44,18 @@ pub struct InfrastructureConfig {
 /// # Arguments
 /// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
 /// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
-pub async fn generate_core(cluster_name: &str, skip_cilium_policies: bool) -> Vec<String> {
+pub async fn generate_core(cluster_name: &str, skip_cilium_policies: bool) -> Result<Vec<String>, String> {
     let mut manifests = Vec::new();
 
     // Istio ambient
-    manifests.extend(generate_istio(cluster_name, skip_cilium_policies).await);
+    manifests.extend(generate_istio(cluster_name, skip_cilium_policies).await?);
 
     // Gateway API CRDs (required for Istio Gateway and waypoints)
-    if let Ok(gw_api) = generate_gateway_api_crds() {
-        debug!(count = gw_api.len(), "generated Gateway API CRDs");
-        manifests.extend(gw_api);
-    } else {
-        warn!("failed to generate Gateway API CRDs");
-    }
+    let gw_api = generate_gateway_api_crds()?;
+    debug!(count = gw_api.len(), "generated Gateway API CRDs");
+    manifests.extend(gw_api);
 
-    manifests
+    Ok(manifests)
 }
 
 /// Generate ALL infrastructure manifests for a self-managing cluster
@@ -66,33 +63,29 @@ pub async fn generate_core(cluster_name: &str, skip_cilium_policies: bool) -> Ve
 /// Includes: cert-manager, CAPI, plus core infrastructure (Istio, Gateway API)
 /// This is an async function to avoid blocking the tokio runtime during
 /// helm and clusterctl execution.
-pub async fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
+///
+/// Returns an error if any critical component (cert-manager, CAPI) fails to generate.
+pub async fn generate_all(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     let mut manifests = Vec::new();
 
     // cert-manager (CAPI prerequisite)
-    if let Ok(cm) = generate_certmanager().await {
-        debug!(count = cm.len(), "generated cert-manager manifests");
-        manifests.extend(cm);
-    } else {
-        warn!("failed to generate cert-manager manifests");
-    }
+    let cm = generate_certmanager().await?;
+    debug!(count = cm.len(), "generated cert-manager manifests");
+    manifests.extend(cm);
 
     // CAPI providers
-    if let Ok(capi) = generate_capi(config.provider).await {
-        debug!(count = capi.len(), "generated CAPI manifests");
-        manifests.extend(capi);
-    } else {
-        warn!("failed to generate CAPI manifests");
-    }
+    let capi = generate_capi(config.provider).await?;
+    debug!(count = capi.len(), "generated CAPI manifests");
+    manifests.extend(capi);
 
     // Core infrastructure (Istio, Gateway API)
-    manifests.extend(generate_core(&config.cluster_name, config.skip_cilium_policies).await);
+    manifests.extend(generate_core(&config.cluster_name, config.skip_cilium_policies).await?);
 
     info!(
         total = manifests.len(),
         "generated infrastructure manifests"
     );
-    manifests
+    Ok(manifests)
 }
 
 /// Generate cert-manager manifests
@@ -176,13 +169,12 @@ pub async fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String
 /// # Arguments
 /// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
 /// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
-pub async fn generate_istio(cluster_name: &str, skip_cilium_policies: bool) -> Vec<String> {
+pub async fn generate_istio(cluster_name: &str, skip_cilium_policies: bool) -> Result<Vec<String>, String> {
     let mut manifests = vec![namespace_yaml("istio-system")];
 
     let reconciler = IstioReconciler::new(cluster_name);
-    if let Ok(istio) = reconciler.manifests().await {
-        manifests.extend(istio.iter().cloned());
-    }
+    let istio = reconciler.manifests().await?;
+    manifests.extend(istio.iter().cloned());
 
     // Istio policies
     manifests.push(IstioReconciler::generate_peer_authentication());
@@ -197,7 +189,7 @@ pub async fn generate_istio(cluster_name: &str, skip_cilium_policies: bool) -> V
         manifests.push(cilium::generate_waypoint_egress_policy());
     }
 
-    manifests
+    Ok(manifests)
 }
 
 /// Generate Gateway API CRDs

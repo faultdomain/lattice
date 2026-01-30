@@ -212,14 +212,9 @@ async fn handle_agent_message_impl(
                     );
                 }
 
-                // Step 2: Unpause CAPI so it can reconcile
-                info!(cluster = %cluster, "Unpausing CAPI cluster");
-                if let Err(e) = lattice_move::unpause_cluster(&client, &namespace).await {
-                    warn!(cluster = %cluster, error = %e, "Failed to unpause CAPI (may already be unpaused)");
-                    // Continue anyway - might already be unpaused
-                }
-
-                // Step 3: Delete LatticeCluster (adds deletionTimestamp)
+                // Step 2: Delete LatticeCluster (adds deletionTimestamp)
+                // Keep CAPI paused - controller will delete CAPI Cluster which triggers cleanup.
+                // CAPI can delete paused resources; unpausing would cause it to reconcile/scale.
                 // The finalizer keeps it around while controller handles CAPI cleanup
                 info!(cluster = %cluster, "Initiating LatticeCluster deletion");
                 let api: Api<LatticeCluster> = Api::all(client.clone());
