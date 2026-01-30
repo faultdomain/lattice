@@ -73,8 +73,8 @@ COPY scripts/runtime ./scripts
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --release -p lattice-operator && \
-    cp /app/target/release/lattice-operator /usr/local/bin/lattice-operator
+    cargo build -p lattice-operator && \
+    cp /app/target/debug/lattice-operator /usr/local/bin/lattice-operator
 
 # -----------------------------------------------------------------------------
 # Stage 3: Runtime image (minimal)

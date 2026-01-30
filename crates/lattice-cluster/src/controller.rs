@@ -1831,7 +1831,7 @@ async fn patch_kubeconfig_for_proxy(
     }
 
     // Parse the existing kubeconfig and modify only server + CA, preserving credentials
-    let mut config: serde_yaml::Value = serde_yaml::from_str(&kubeconfig_str)
+    let mut config = lattice_common::yaml::parse_yaml(&kubeconfig_str)
         .map_err(|e| Error::internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
 
     // Build the new server URL with cluster path
@@ -1839,22 +1839,22 @@ async fn patch_kubeconfig_for_proxy(
     let ca_b64 = STANDARD.encode(ca_cert_pem.as_bytes());
 
     // Update only the cluster server and CA, preserving everything else
-    if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+    if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {
         for cluster in clusters {
             if let Some(cluster_data) = cluster.get_mut("cluster") {
                 // Update server URL
                 if let Some(server) = cluster_data.get_mut("server") {
-                    *server = serde_yaml::Value::String(new_server.clone());
+                    *server = serde_json::Value::String(new_server.clone());
                 }
                 // Update CA certificate
                 if let Some(ca) = cluster_data.get_mut("certificate-authority-data") {
-                    *ca = serde_yaml::Value::String(ca_b64.clone());
+                    *ca = serde_json::Value::String(ca_b64.clone());
                 } else {
                     // Add CA if not present
-                    if let Some(map) = cluster_data.as_mapping_mut() {
-                        map.insert(
-                            serde_yaml::Value::String("certificate-authority-data".to_string()),
-                            serde_yaml::Value::String(ca_b64.clone()),
+                    if let Some(obj) = cluster_data.as_object_mut() {
+                        obj.insert(
+                            "certificate-authority-data".to_string(),
+                            serde_json::Value::String(ca_b64.clone()),
                         );
                     }
                 }
@@ -1862,8 +1862,8 @@ async fn patch_kubeconfig_for_proxy(
         }
     }
 
-    // Serialize the modified kubeconfig
-    let patched_kubeconfig = serde_yaml::to_string(&config)
+    // Serialize the modified kubeconfig as JSON (Kubernetes accepts both)
+    let patched_kubeconfig = serde_json::to_string(&config)
         .map_err(|e| Error::internal(format!("failed to serialize kubeconfig: {}", e)))?;
 
     // Encode and patch

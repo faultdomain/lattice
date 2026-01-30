@@ -233,10 +233,10 @@ fn deployment(capi_namespace: &str) -> Deployment {
 /// since post-pivot clusters are self-managing.
 pub fn generate_autoscaler_manifests(capi_namespace: &str) -> String {
     let resources: Vec<String> = vec![
-        serde_yaml::to_string(&service_account()).expect("ServiceAccount serialization"),
-        serde_yaml::to_string(&cluster_role()).expect("ClusterRole serialization"),
-        serde_yaml::to_string(&cluster_role_binding()).expect("ClusterRoleBinding serialization"),
-        serde_yaml::to_string(&deployment(capi_namespace)).expect("Deployment serialization"),
+        serde_json::to_string(&service_account()).expect("ServiceAccount serialization"),
+        serde_json::to_string(&cluster_role()).expect("ClusterRole serialization"),
+        serde_json::to_string(&cluster_role_binding()).expect("ClusterRoleBinding serialization"),
+        serde_json::to_string(&deployment(capi_namespace)).expect("Deployment serialization"),
     ];
     resources.join("---\n")
 }

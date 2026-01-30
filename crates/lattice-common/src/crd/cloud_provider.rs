@@ -209,7 +209,8 @@ spec:
       - subnet-a
       - subnet-b
 "#;
-        let provider: CloudProvider = serde_yaml::from_str(yaml).expect("parse");
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: CloudProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type, CloudProviderType::AWS);
         assert_eq!(provider.spec.region, Some("us-east-1".to_string()));
     }
@@ -230,7 +231,8 @@ spec:
     node: pve1
     storage: local-lvm
 "#;
-        let provider: CloudProvider = serde_yaml::from_str(yaml).expect("parse");
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: CloudProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type, CloudProviderType::Proxmox);
     }
 }

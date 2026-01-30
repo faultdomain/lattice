@@ -733,43 +733,49 @@ impl ClusterctlInstaller {
 
     /// Apply a single YAML manifest using kube-rs server-side apply
     async fn apply_yaml_manifest(client: &KubeClient, yaml: &str) -> Result<(), String> {
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(yaml).map_err(|e| format!("Invalid YAML: {}", e))?;
+        let value =
+            lattice_common::yaml::parse_yaml(yaml).map_err(|e| format!("Invalid YAML: {}", e))?;
 
-        let api_version = value["apiVersion"].as_str().ok_or("Missing apiVersion")?;
-        let kind = value["kind"].as_str().ok_or("Missing kind")?;
+        // Extract metadata as owned strings before consuming value
+        let api_version = value["apiVersion"]
+            .as_str()
+            .ok_or("Missing apiVersion")?
+            .to_string();
+        let kind = value["kind"].as_str().ok_or("Missing kind")?.to_string();
         let name = value["metadata"]["name"]
             .as_str()
-            .ok_or("Missing metadata.name")?;
-        let namespace = value["metadata"]["namespace"].as_str();
+            .ok_or("Missing metadata.name")?
+            .to_string();
+        let namespace = value["metadata"]["namespace"]
+            .as_str()
+            .map(|s| s.to_string());
 
-        let (group, version) = if api_version.contains('/') {
-            let parts: Vec<&str> = api_version.splitn(2, '/').collect();
-            (parts[0].to_string(), parts[1].to_string())
+        let (group, version) = if let Some((g, v)) = api_version.split_once('/') {
+            (g.to_string(), v.to_string())
         } else {
-            (String::new(), api_version.to_string())
+            (String::new(), api_version.clone())
         };
 
         let plural = format!("{}s", kind.to_lowercase());
         let ar = ApiResource {
             group,
             version: version.clone(),
-            kind: kind.to_string(),
-            api_version: api_version.to_string(),
+            kind: kind.clone(),
+            api_version,
             plural,
         };
 
         let obj: DynamicObject =
-            serde_yaml::from_str(yaml).map_err(|e| format!("Failed to parse: {}", e))?;
+            serde_json::from_value(value).map_err(|e| format!("Failed to parse: {}", e))?;
 
-        let api: Api<DynamicObject> = if let Some(ns) = namespace {
+        let api: Api<DynamicObject> = if let Some(ns) = &namespace {
             Api::namespaced_with(client.clone(), ns, &ar)
         } else {
             Api::all_with(client.clone(), &ar)
         };
 
         api.patch(
-            name,
+            &name,
             &PatchParams::apply("lattice-operator").force(),
             &Patch::Apply(&obj),
         )

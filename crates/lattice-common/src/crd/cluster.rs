@@ -533,8 +533,9 @@ parentConfig:
   service:
     type: LoadBalancer
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("should parse YAML");
         let spec: LatticeClusterSpec =
-            serde_yaml::from_str(yaml).expect("parent cluster YAML should parse successfully");
+            serde_json::from_value(value).expect("parent cluster YAML should parse successfully");
 
         assert!(spec.is_parent(), "Should be a parent cluster");
         assert_eq!(spec.nodes.control_plane, 1);
@@ -576,8 +577,9 @@ workload:
     - name: curl-tester
     - name: simple-nginx
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("should parse YAML");
         let spec: LatticeClusterSpec =
-            serde_yaml::from_str(yaml).expect("workload cluster YAML should parse successfully");
+            serde_json::from_value(value).expect("workload cluster YAML should parse successfully");
 
         assert!(!spec.is_parent(), "Should be workload cluster");
         assert_eq!(spec.environment.as_deref(), Some("prod"));
@@ -595,7 +597,7 @@ workload:
     /// When specs are serialized and deserialized (e.g., stored in etcd),
     /// all data must be preserved.
     #[test]
-    fn story_spec_survives_yaml_roundtrip() {
+    fn story_spec_survives_json_roundtrip() {
         let spec = LatticeClusterSpec {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
@@ -607,10 +609,10 @@ workload:
             workload: None,
         };
 
-        let yaml =
-            serde_yaml::to_string(&spec).expect("LatticeClusterSpec serialization should succeed");
+        let json =
+            serde_json::to_string(&spec).expect("LatticeClusterSpec serialization should succeed");
         let parsed: LatticeClusterSpec =
-            serde_yaml::from_str(&yaml).expect("LatticeClusterSpec deserialization should succeed");
+            serde_json::from_str(&json).expect("LatticeClusterSpec deserialization should succeed");
 
         assert_eq!(spec, parsed, "Spec should survive roundtrip");
     }

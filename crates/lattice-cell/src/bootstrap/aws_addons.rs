@@ -1278,58 +1278,56 @@ fn ebs_storage_class() -> StorageClass {
 // Public API
 // =============================================================================
 
-/// Serialize a Kubernetes resource to YAML
-fn to_yaml<T: serde::Serialize>(resource: &T) -> String {
-    serde_yaml::to_string(resource).expect("Failed to serialize resource")
+/// Serialize a Kubernetes resource to JSON
+fn to_json<T: serde::Serialize>(resource: &T) -> String {
+    serde_json::to_string(resource).expect("Failed to serialize resource")
 }
 
-/// Generate all AWS addon manifests (CCM + EBS CSI + StorageClass) as raw YAML.
+/// Generate all AWS addon manifests (CCM + EBS CSI + StorageClass).
 ///
-/// Returns a single YAML string with all resources separated by `---`.
-pub fn generate_aws_addon_manifests(k8s_version: &str) -> String {
+/// Returns a Vec of JSON strings, one per resource.
+pub fn generate_aws_addon_manifests(k8s_version: &str) -> Vec<String> {
     let ccm_version = ccm_version_from_k8s(k8s_version);
 
-    let resources: Vec<String> = vec![
+    vec![
         // CCM resources
-        to_yaml(&ccm_daemonset(&ccm_version)),
-        to_yaml(&ccm_service_account()),
-        to_yaml(&ccm_role_binding()),
-        to_yaml(&ccm_cluster_role()),
-        to_yaml(&ccm_cluster_role_binding()),
+        to_json(&ccm_daemonset(&ccm_version)),
+        to_json(&ccm_service_account()),
+        to_json(&ccm_role_binding()),
+        to_json(&ccm_cluster_role()),
+        to_json(&ccm_cluster_role_binding()),
         // EBS CSI resources
-        to_yaml(&ebs_csi_secret()),
-        to_yaml(&ebs_csi_controller_service_account()),
-        to_yaml(&ebs_csi_node_service_account()),
-        to_yaml(&ebs_csi_attacher_role()),
-        to_yaml(&ebs_csi_node_role()),
-        to_yaml(&ebs_csi_provisioner_role()),
-        to_yaml(&ebs_csi_resizer_role()),
-        to_yaml(&ebs_csi_snapshotter_role()),
-        to_yaml(&ebs_csi_cluster_role_binding(
+        to_json(&ebs_csi_secret()),
+        to_json(&ebs_csi_controller_service_account()),
+        to_json(&ebs_csi_node_service_account()),
+        to_json(&ebs_csi_attacher_role()),
+        to_json(&ebs_csi_node_role()),
+        to_json(&ebs_csi_provisioner_role()),
+        to_json(&ebs_csi_resizer_role()),
+        to_json(&ebs_csi_snapshotter_role()),
+        to_json(&ebs_csi_cluster_role_binding(
             "ebs-csi-attacher-binding",
             "ebs-external-attacher-role",
         )),
-        to_yaml(&ebs_csi_cluster_role_binding(
+        to_json(&ebs_csi_cluster_role_binding(
             "ebs-csi-provisioner-binding",
             "ebs-external-provisioner-role",
         )),
-        to_yaml(&ebs_csi_cluster_role_binding(
+        to_json(&ebs_csi_cluster_role_binding(
             "ebs-csi-resizer-binding",
             "ebs-external-resizer-role",
         )),
-        to_yaml(&ebs_csi_cluster_role_binding(
+        to_json(&ebs_csi_cluster_role_binding(
             "ebs-csi-snapshotter-binding",
             "ebs-external-snapshotter-role",
         )),
-        to_yaml(&ebs_csi_node_cluster_role_binding()),
-        to_yaml(&ebs_csi_controller_deployment(AWS_EBS_CSI_VERSION)),
-        to_yaml(&ebs_csi_controller_pdb()),
-        to_yaml(&ebs_csi_node_daemonset(AWS_EBS_CSI_VERSION)),
-        to_yaml(&ebs_csi_driver()),
-        to_yaml(&ebs_storage_class()),
-    ];
-
-    resources.join("---\n")
+        to_json(&ebs_csi_node_cluster_role_binding()),
+        to_json(&ebs_csi_controller_deployment(AWS_EBS_CSI_VERSION)),
+        to_json(&ebs_csi_controller_pdb()),
+        to_json(&ebs_csi_node_daemonset(AWS_EBS_CSI_VERSION)),
+        to_json(&ebs_csi_driver()),
+        to_json(&ebs_storage_class()),
+    ]
 }
 
 #[cfg(test)]
@@ -1440,26 +1438,23 @@ mod tests {
     }
 
     #[test]
-    fn combined_manifest_contains_all_resources() {
-        let manifest = generate_aws_addon_manifests("1.32.0");
+    fn manifests_contain_all_resources() {
+        let manifests = generate_aws_addon_manifests("1.32.0");
+        let combined = manifests.join("\n");
+
+        assert_eq!(manifests.len(), 22); // 22 resources
 
         // CCM resources
-        assert!(manifest.contains("cloud-controller-manager"));
-        assert!(manifest.contains("v1.32.0"));
+        assert!(combined.contains("cloud-controller-manager"));
+        assert!(combined.contains("v1.32.0"));
 
         // EBS CSI resources
-        assert!(manifest.contains("ebs.csi.aws.com"));
-        assert!(manifest.contains("ebs-csi-controller"));
-        assert!(manifest.contains("ebs-csi-node"));
+        assert!(combined.contains("ebs.csi.aws.com"));
+        assert!(combined.contains("ebs-csi-controller"));
+        assert!(combined.contains("ebs-csi-node"));
 
         // StorageClass
-        assert!(manifest.contains("gp3"));
-        assert!(manifest.contains("WaitForFirstConsumer"));
-    }
-
-    #[test]
-    fn manifest_has_document_separators() {
-        let manifest = generate_aws_addon_manifests("1.32.0");
-        assert!(manifest.contains("---"));
+        assert!(combined.contains("gp3"));
+        assert!(combined.contains("WaitForFirstConsumer"));
     }
 }

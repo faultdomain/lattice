@@ -268,20 +268,20 @@ pub fn extract_docker_cluster_kubeconfig(
             info!("Patching kubeconfig server to {}", localhost_endpoint);
 
             // Use proper YAML parsing to preserve structure
-            let mut config: serde_yaml::Value = serde_yaml::from_str(&kubeconfig)
+            let mut config: serde_json::Value = lattice_common::yaml::parse_yaml(&kubeconfig)
                 .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
 
-            if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+            if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {
                 for cluster in clusters {
                     if let Some(cluster_data) = cluster.get_mut("cluster") {
                         if let Some(server) = cluster_data.get_mut("server") {
-                            *server = serde_yaml::Value::String(localhost_endpoint.clone());
+                            *server = serde_json::Value::String(localhost_endpoint.clone());
                         }
                     }
                 }
             }
 
-            serde_yaml::to_string(&config)
+            serde_json::to_string(&config)
                 .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?
         } else {
             kubeconfig
@@ -706,8 +706,10 @@ pub fn load_cluster_config(
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let cluster: LatticeCluster = serde_yaml::from_str(&content)
+    let value = lattice_common::yaml::parse_yaml(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
+    let cluster: LatticeCluster = serde_json::from_value(value)
+        .map_err(|e| format!("Invalid cluster config in {}: {}", path.display(), e))?;
 
     info!("Loaded cluster config: {}", path.display());
     Ok((content, cluster))
@@ -728,8 +730,10 @@ pub fn load_service_config(
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let service: lattice_operator::crd::LatticeService = serde_yaml::from_str(&content)
+    let value = lattice_common::yaml::parse_yaml(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
+    let service: lattice_operator::crd::LatticeService = serde_json::from_value(value)
+        .map_err(|e| format!("Invalid service config in {}: {}", path.display(), e))?;
 
     Ok(service)
 }
@@ -756,20 +760,20 @@ pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
     let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
 
     // Use proper YAML parsing to preserve structure
-    let mut config: serde_yaml::Value = serde_yaml::from_str(&kubeconfig)
+    let mut config: serde_json::Value = lattice_common::yaml::parse_yaml(&kubeconfig)
         .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
 
-    if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+    if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {
         for cluster in clusters {
             if let Some(cluster_data) = cluster.get_mut("cluster") {
                 if let Some(server) = cluster_data.get_mut("server") {
-                    *server = serde_yaml::Value::String(localhost_endpoint.clone());
+                    *server = serde_json::Value::String(localhost_endpoint.clone());
                 }
             }
         }
     }
 
-    let patched = serde_yaml::to_string(&config)
+    let patched = serde_json::to_string(&config)
         .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?;
 
     let patched_path = format!("/tmp/{}-kubeconfig-local", cluster_name);

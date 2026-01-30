@@ -93,9 +93,9 @@ impl CAPIManifest {
         self
     }
 
-    /// Serialize the manifest to YAML
-    pub fn to_yaml(&self) -> Result<String> {
-        serde_yaml::to_string(self).map_err(|e| Error::serialization(e.to_string()))
+    /// Serialize the manifest to JSON
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string(self).map_err(|e| Error::serialization(e.to_string()))
     }
 }
 
@@ -335,7 +335,7 @@ fn generate_kube_vip_manifest(
         ..Default::default()
     };
 
-    serde_yaml::to_string(&pod).expect("kube-vip pod serialization")
+    serde_json::to_string(&pod).expect("kube-vip pod serialization")
 }
 
 /// Configuration for a worker pool
@@ -1258,7 +1258,7 @@ mod tests {
                 }
             }));
 
-            let yaml = manifest.to_yaml().expect("should serialize to YAML");
+            let yaml = manifest.to_json().expect("should serialize to YAML");
             assert!(yaml.contains("apiVersion: cluster.x-k8s.io/v1beta1"));
             assert!(yaml.contains("kind: Cluster"));
             assert!(yaml.contains("name: test-cluster"));
@@ -1281,8 +1281,8 @@ mod tests {
                 }
             }));
 
-            let yaml = manifest.to_yaml().expect("should serialize");
-            let parsed: CAPIManifest = serde_yaml::from_str(&yaml).expect("should deserialize");
+            let json = manifest.to_json().expect("should serialize");
+            let parsed: CAPIManifest = serde_json::from_str(&json).expect("should deserialize");
 
             assert_eq!(manifest, parsed);
         }

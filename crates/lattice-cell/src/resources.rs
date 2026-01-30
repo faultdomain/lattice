@@ -104,7 +104,7 @@ fn serialize_for_distribution<T: serde::Serialize + Clone + kube::ResourceExt>(
     let mut clean = resource.clone();
     lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
 
-    serde_yaml::to_string(&clean)
+    serde_json::to_string(&clean)
         .map(|s| s.into_bytes())
         .map_err(|e| ResourceError::Internal(format!("failed to serialize resource: {}", e)))
 }
@@ -145,35 +145,35 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_for_distribution_produces_yaml() {
+    fn test_serialize_for_distribution_produces_json() {
         let cp = sample_cloud_provider();
         let result = serialize_for_distribution(&cp);
         assert!(result.is_ok());
 
-        let yaml = String::from_utf8(result.unwrap()).unwrap();
-        assert!(yaml.contains("test-provider"));
+        let json = String::from_utf8(result.unwrap()).unwrap();
+        assert!(json.contains("test-provider"));
         // CloudProviderType uses rename_all = "lowercase", so Docker -> docker
-        assert!(yaml.contains("docker"));
+        assert!(json.contains("docker"));
     }
 
     #[test]
     fn test_serialize_for_distribution_strips_uid() {
         let cp = sample_cloud_provider();
         let result = serialize_for_distribution(&cp).unwrap();
-        let yaml = String::from_utf8(result).unwrap();
+        let json = String::from_utf8(result).unwrap();
 
         // UID should be stripped
-        assert!(!yaml.contains("test-uid-12345"));
+        assert!(!json.contains("test-uid-12345"));
     }
 
     #[test]
     fn test_serialize_for_distribution_strips_resource_version() {
         let cp = sample_cloud_provider();
         let result = serialize_for_distribution(&cp).unwrap();
-        let yaml = String::from_utf8(result).unwrap();
+        let json = String::from_utf8(result).unwrap();
 
         // resourceVersion should be stripped
-        assert!(!yaml.contains("resourceVersion"));
+        assert!(!json.contains("resourceVersion"));
     }
 
     #[test]
@@ -185,11 +185,11 @@ mod tests {
         });
 
         let result = serialize_for_distribution(&cp).unwrap();
-        let yaml = String::from_utf8(result).unwrap();
+        let json = String::from_utf8(result).unwrap();
 
         // Credentials ref should be preserved
-        assert!(yaml.contains("my-secret"));
-        assert!(yaml.contains("capa-system"));
+        assert!(json.contains("my-secret"));
+        assert!(json.contains("capa-system"));
     }
 
     #[test]
@@ -211,12 +211,12 @@ mod tests {
         secret.data = Some(data);
 
         let result = serialize_for_distribution(&secret).unwrap();
-        let yaml = String::from_utf8(result).unwrap();
+        let json = String::from_utf8(result).unwrap();
 
         // Name should be preserved
-        assert!(yaml.contains("test-secret"));
+        assert!(json.contains("test-secret"));
         // UID and resourceVersion should be stripped
-        assert!(!yaml.contains("secret-uid"));
+        assert!(!json.contains("secret-uid"));
     }
 
     // =========================================================================

@@ -490,6 +490,7 @@ mod tests {
             host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
+            proxy_port: 8081,
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
@@ -868,12 +869,12 @@ mod tests {
                 .expect("manifest generation should succeed");
 
             for manifest in &manifests {
-                let yaml = manifest.to_yaml().expect("should serialize to YAML");
-                assert!(!yaml.is_empty(), "YAML should not be empty");
+                let json = manifest.to_json().expect("should serialize");
+                assert!(!json.is_empty(), "JSON should not be empty");
 
                 // Verify it can be parsed back
                 let parsed: CAPIManifest =
-                    serde_yaml::from_str(&yaml).expect("should parse back from YAML");
+                    serde_json::from_str(&json).expect("should parse back");
                 assert_eq!(parsed.kind, manifest.kind);
                 assert_eq!(parsed.metadata.name, manifest.metadata.name);
             }
@@ -1105,7 +1106,7 @@ mod tests {
             for manifest in &manifests {
                 yaml_docs.push(
                     manifest
-                        .to_yaml()
+                        .to_json()
                         .expect("manifest should serialize to YAML"),
                 );
             }

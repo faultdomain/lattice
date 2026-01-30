@@ -1673,8 +1673,9 @@ replicas:
   min: 1
   max: 3
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("simple service YAML should parse successfully");
+            serde_json::from_value(value).expect("simple service YAML should parse successfully");
 
         assert_eq!(spec.containers.len(), 1);
         assert_eq!(spec.containers["main"].image, "nginx:latest");
@@ -1709,7 +1710,8 @@ service:
     http:
       port: 8080
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml)
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec = serde_json::from_value(value)
             .expect("service with dependencies YAML should parse successfully");
 
         // Check dependencies
@@ -1747,8 +1749,9 @@ deploy:
     maxWeight: 50
     stepWeight: 10
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("canary deployment YAML should parse successfully");
+            serde_json::from_value(value).expect("canary deployment YAML should parse successfully");
 
         assert_eq!(spec.deploy.strategy, DeployStrategy::Canary);
         let canary = spec.deploy.canary.expect("canary config should be present");
@@ -1763,9 +1766,10 @@ deploy:
     fn story_spec_survives_yaml_roundtrip() {
         let spec = sample_service_spec();
         let yaml =
-            serde_yaml::to_string(&spec).expect("LatticeServiceSpec serialization should succeed");
+            serde_json::to_string(&spec).expect("LatticeServiceSpec serialization should succeed");
+        let value = crate::yaml::parse_yaml(&yaml).expect("parse yaml");
         let parsed: LatticeServiceSpec =
-            serde_yaml::from_str(&yaml).expect("LatticeServiceSpec deserialization should succeed");
+            serde_json::from_value(value).expect("LatticeServiceSpec deserialization should succeed");
         assert_eq!(spec, parsed);
     }
 
@@ -2001,8 +2005,9 @@ containers:
       DB_PORT: "${resources.postgres.port}"
       STATIC: "plain-value"
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("template variables YAML should parse successfully");
+            serde_json::from_value(value).expect("template variables YAML should parse successfully");
         let vars = &spec.containers["main"].variables;
 
         assert!(vars["DB_HOST"].has_placeholders());
@@ -2024,8 +2029,9 @@ containers:
             host: ${resources.db.host}
             port: ${resources.db.port}
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("file content YAML should parse successfully");
+            serde_json::from_value(value).expect("file content YAML should parse successfully");
         let file = &spec.containers["main"].files["/etc/config.yaml"];
 
         assert!(file
@@ -2046,8 +2052,9 @@ containers:
       /data:
         source: "${resources.volume.name}"
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("volume source YAML should parse successfully");
+            serde_json::from_value(value).expect("volume source YAML should parse successfully");
         let volume = &spec.containers["main"].volumes["/data"];
 
         assert!(volume.source.has_placeholders());
@@ -2070,8 +2077,9 @@ containers:
         path: /healthz
         port: 8080
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("probe YAML should parse successfully");
+            serde_json::from_value(value).expect("probe YAML should parse successfully");
         let probe = spec.containers["main"]
             .liveness_probe
             .as_ref()
@@ -2102,8 +2110,9 @@ containers:
           - name: X-Custom-Header
             value: test-value
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("probe YAML should parse successfully");
+            serde_json::from_value(value).expect("probe YAML should parse successfully");
         let probe = spec.containers["main"]
             .readiness_probe
             .as_ref()
@@ -2133,8 +2142,9 @@ containers:
           - cat
           - /tmp/healthy
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("exec probe YAML should parse successfully");
+            serde_json::from_value(value).expect("exec probe YAML should parse successfully");
         let probe = spec.containers["main"]
             .liveness_probe
             .as_ref()
@@ -2155,7 +2165,8 @@ containers:
   main:
     image: "."
 "#;
-        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml)
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec = serde_json::from_value(value)
             .expect("image dot placeholder YAML should parse successfully");
         assert_eq!(spec.containers["main"].image, ".");
         assert!(spec.validate().is_ok());
@@ -2247,8 +2258,9 @@ resources:
       storageClass: local-path
       accessMode: ReadWriteOnce
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Score-compatible YAML should parse");
+            serde_json::from_value(value).expect("Score-compatible YAML should parse");
 
         // Verify config volume
         let config = spec.resources.get("config").expect("config should exist");
@@ -2287,8 +2299,9 @@ resources:
     type: volume
     id: media-library
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Volume reference YAML should parse");
+            serde_json::from_value(value).expect("Volume reference YAML should parse");
 
         let media = spec.resources.get("media").expect("media should exist");
         assert!(!media.is_volume_owner()); // No params means not an owner
@@ -2324,8 +2337,9 @@ resources:
       timeout:
         request: 30s
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Bilateral agreement YAML should parse");
+            serde_json::from_value(value).expect("Bilateral agreement YAML should parse");
 
         // Verify inbound policy
         let sonarr = spec.resources.get("sonarr").expect("sonarr should exist");
@@ -2417,8 +2431,9 @@ ingress:
 replicas:
   min: 1
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Media server YAML should parse");
+            serde_json::from_value(value).expect("Media server YAML should parse");
 
         // Verify containers
         assert_eq!(spec.containers.len(), 1);
@@ -2562,8 +2577,9 @@ resources:
       size: 10Gi
       version: "15"
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Custom resource type in YAML should parse");
+            serde_json::from_value(value).expect("Custom resource type in YAML should parse");
 
         let resource = spec
             .resources
@@ -2593,8 +2609,9 @@ containers:
       runAsGroup: 1000
       allowPrivilegeEscalation: false
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Security context YAML should parse");
+            serde_json::from_value(value).expect("Security context YAML should parse");
 
         let security = spec.containers["main"]
             .security
@@ -2620,8 +2637,9 @@ containers:
     security:
       capabilities: [NET_BIND_SERVICE]
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Minimal security context should parse");
+            serde_json::from_value(value).expect("Minimal security context should parse");
 
         let security = spec.containers["main"]
             .security
@@ -2657,8 +2675,9 @@ sidecars:
     security:
       capabilities: [NET_ADMIN]
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Sidecar YAML should parse");
+            serde_json::from_value(value).expect("Sidecar YAML should parse");
 
         assert_eq!(spec.sidecars.len(), 2);
 
@@ -2702,8 +2721,9 @@ sidecars:
         path: /health
         port: 2020
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Full sidecar spec should parse");
+            serde_json::from_value(value).expect("Full sidecar spec should parse");
 
         let logging = spec.sidecars.get("logging").expect("logging should exist");
         assert_eq!(logging.image, "fluent-bit:latest");
@@ -2731,8 +2751,9 @@ sysctls:
 hostNetwork: true
 shareProcessNamespace: true
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Pod-level settings should parse");
+            serde_json::from_value(value).expect("Pod-level settings should parse");
 
         assert_eq!(spec.sysctls.len(), 2);
         assert_eq!(
@@ -2768,8 +2789,9 @@ service:
     http:
       port: 6789
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("VPN killswitch example should parse");
+            serde_json::from_value(value).expect("VPN killswitch example should parse");
 
         // Verify main container
         assert!(spec.containers.contains_key("main"));
@@ -2798,8 +2820,9 @@ containers:
   main:
     image: myapp:latest
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("Spec without sidecars should parse");
+            serde_json::from_value(value).expect("Spec without sidecars should parse");
 
         assert!(spec.sidecars.is_empty());
         assert!(spec.sysctls.is_empty());

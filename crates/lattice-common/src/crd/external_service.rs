@@ -649,8 +649,9 @@ allowedRequesters:
 resolution: dns
 description: Stripe payment API
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeExternalServiceSpec =
-            serde_yaml::from_str(yaml).expect("external service YAML should parse successfully");
+            serde_json::from_value(value).expect("external service YAML should parse successfully");
 
         assert_eq!(spec.endpoints.len(), 2);
         assert_eq!(spec.allowed_requesters.len(), 2);
@@ -668,8 +669,9 @@ endpoints:
 allowedRequesters:
   - "*"
 "#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeExternalServiceSpec =
-            serde_yaml::from_str(yaml).expect("wildcard access YAML should parse successfully");
+            serde_json::from_value(value).expect("wildcard access YAML should parse successfully");
 
         assert!(spec.allows("any-service"));
     }
@@ -683,9 +685,10 @@ allowedRequesters:
             description: Some("Test service".to_string()),
         };
 
-        let yaml = serde_yaml::to_string(&spec)
+        let yaml = serde_json::to_string(&spec)
             .expect("LatticeExternalServiceSpec serialization should succeed");
-        let parsed: LatticeExternalServiceSpec = serde_yaml::from_str(&yaml)
+        let value = crate::yaml::parse_yaml(&yaml).expect("parse yaml");
+        let parsed: LatticeExternalServiceSpec = serde_json::from_value(value)
             .expect("LatticeExternalServiceSpec deserialization should succeed");
         assert_eq!(spec, parsed);
     }

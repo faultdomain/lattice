@@ -113,29 +113,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serde_yaml_roundtrip() {
-        let config = OpenStackConfig {
-            external_network_id: "ext-net-123".to_string(),
-            cp_flavor: "b2-30".to_string(),
-            worker_flavor: "b2-15".to_string(),
-            image_name: "Ubuntu 22.04".to_string(),
-            ssh_key_name: "my-key".to_string(),
-            cloud_name: Some("ovh".to_string()),
-            dns_nameservers: Some(vec!["8.8.8.8".to_string()]),
-            ..Default::default()
-        };
-
-        let yaml =
-            serde_yaml::to_string(&config).expect("OpenStackConfig serialization should succeed");
-        assert!(yaml.contains("externalNetworkId: ext-net-123"));
-        assert!(yaml.contains("cpFlavor: b2-30"));
-
-        let parsed: OpenStackConfig =
-            serde_yaml::from_str(&yaml).expect("OpenStackConfig deserialization should succeed");
-        assert_eq!(parsed, config);
-    }
-
-    #[test]
     fn minimal_config() {
         let yaml = r#"
 externalNetworkId: ext-net
@@ -144,7 +121,8 @@ workerFlavor: m1.medium
 imageName: ubuntu-22.04
 sshKeyName: default
 "#;
-        let config: OpenStackConfig = serde_yaml::from_str(yaml)
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let config: OpenStackConfig = serde_json::from_value(value)
             .expect("minimal OpenStackConfig deserialization should succeed");
         assert_eq!(config.external_network_id, "ext-net");
         assert_eq!(config.cp_flavor, "m1.large");
@@ -169,7 +147,8 @@ cpRootVolumeType: high-speed
 workerRootVolumeSizeGb: 100
 cpAvailabilityZone: nova
 "#;
-        let config: OpenStackConfig = serde_yaml::from_str(yaml)
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let config: OpenStackConfig = serde_json::from_value(value)
             .expect("full OpenStackConfig deserialization should succeed");
         assert_eq!(config.cp_root_volume_size_gb, Some(50));
         assert_eq!(config.cp_availability_zone, Some("nova".to_string()));

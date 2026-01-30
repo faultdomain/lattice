@@ -86,24 +86,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serde_yaml_roundtrip() {
-        let config = AwsConfig {
-            region: "us-west-2".to_string(),
-            cp_instance_type: "m5.xlarge".to_string(),
-            worker_instance_type: "m5.large".to_string(),
-            ssh_key_name: "my-key".to_string(),
-            ..Default::default()
-        };
-
-        let yaml = serde_yaml::to_string(&config).expect("serialization");
-        assert!(yaml.contains("region: us-west-2"));
-        assert!(yaml.contains("cpInstanceType: m5.xlarge"));
-
-        let parsed: AwsConfig = serde_yaml::from_str(&yaml).expect("deserialization");
-        assert_eq!(parsed, config);
-    }
-
-    #[test]
     fn minimal_config() {
         let yaml = r#"
 region: us-east-1
@@ -111,7 +93,8 @@ cpInstanceType: m5.xlarge
 workerInstanceType: m5.large
 sshKeyName: default
 "#;
-        let config: AwsConfig = serde_yaml::from_str(yaml).expect("deserialization");
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let config: AwsConfig = serde_json::from_value(value).expect("deserialization");
         assert_eq!(config.region, "us-east-1");
         assert!(!config.is_byoi());
     }
@@ -128,7 +111,8 @@ subnetIds:
   - subnet-0261219d564bb0dc5
   - subnet-0fdcccba78668e013
 "#;
-        let config: AwsConfig = serde_yaml::from_str(yaml).expect("deserialization");
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let config: AwsConfig = serde_json::from_value(value).expect("deserialization");
         assert!(config.is_byoi());
         assert_eq!(config.vpc_id, Some("vpc-0425c335226437144".to_string()));
         assert_eq!(config.subnet_ids.as_ref().unwrap().len(), 2);
@@ -146,7 +130,8 @@ cpRootVolumeSizeGb: 100
 cpRootVolumeType: gp3
 workerRootVolumeSizeGb: 200
 "#;
-        let config: AwsConfig = serde_yaml::from_str(yaml).expect("deserialization");
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let config: AwsConfig = serde_json::from_value(value).expect("deserialization");
         assert!(!config.is_byoi());
         assert_eq!(config.cp_root_volume_size_gb, Some(100));
         assert_eq!(config.load_balancer_type, Some("nlb".to_string()));

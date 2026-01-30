@@ -41,7 +41,6 @@ http = "1.0"
 
 # Encoding
 base64 = { workspace = true }
-serde_yaml = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

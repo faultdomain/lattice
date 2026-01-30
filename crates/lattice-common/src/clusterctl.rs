@@ -565,18 +565,13 @@ fn deletion_priority(kind: &str) -> u32 {
 
 /// Parse manifests to extract resource identities
 fn parse_manifest_identities(manifests: &[Vec<u8>]) -> Vec<ResourceIdentity> {
-    use serde::Deserialize;
-
     let mut identities = Vec::new();
 
     for manifest in manifests {
-        // Parse as YAML - each manifest file may contain multiple documents
-        let docs: Result<Vec<serde_yaml::Value>, _> =
-            serde_yaml::Deserializer::from_slice(manifest)
-                .map(serde_yaml::Value::deserialize)
-                .collect();
+        let manifest_str = String::from_utf8_lossy(manifest);
 
-        let docs = match docs {
+        // Parse as YAML - each manifest file may contain multiple documents
+        let docs = match crate::yaml::parse_yaml_multi(&manifest_str) {
             Ok(d) => d,
             Err(e) => {
                 warn!(error = %e, "Failed to parse manifest YAML");

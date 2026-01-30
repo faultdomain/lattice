@@ -408,7 +408,7 @@ pub struct ManifestMetadata {
 /// Parse a manifest and extract its metadata
 pub fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> {
     // Convert YAML octal literals to decimal before parsing
-    // serde_yaml treats 0NNN as strings, but Kubernetes expects integers
+    // yaml-rust2 treats 0NNN as strings, but Kubernetes expects integers
     let manifest = convert_yaml_octal_to_decimal(manifest);
 
     // Parse the manifest - try JSON first, then YAML
@@ -420,7 +420,7 @@ pub fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> {
             )
         })?
     } else {
-        serde_yaml::from_str(&manifest).map_err(|e| {
+        crate::yaml::parse_yaml(&manifest).map_err(|e| {
             Error::internal_with_context(
                 "parse_manifest",
                 format!("Failed to parse manifest as YAML: {}", e),

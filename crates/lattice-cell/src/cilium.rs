@@ -85,7 +85,7 @@ fn generate_ip_pool(name: &str, cidr: &str) -> String {
         },
     };
 
-    serde_yaml::to_string(&pool).expect("CiliumLoadBalancerIPPool serialization")
+    serde_json::to_string(&pool).expect("CiliumLoadBalancerIPPool serialization")
 }
 
 /// Generate CiliumL2AnnouncementPolicy resource
@@ -103,7 +103,7 @@ fn generate_l2_policy() -> String {
         },
     };
 
-    serde_yaml::to_string(&policy).expect("CiliumL2AnnouncementPolicy serialization")
+    serde_json::to_string(&policy).expect("CiliumL2AnnouncementPolicy serialization")
 }
 
 fn managed_by_labels() -> std::collections::BTreeMap<String, String> {

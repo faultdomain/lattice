@@ -94,8 +94,8 @@ async fn apply_single_manifest(
 ) -> anyhow::Result<()> {
     use kube::api::{Api, DynamicObject, Patch};
 
-    let obj: serde_json::Value =
-        serde_yaml::from_str(manifest).map_err(|e| anyhow::anyhow!("Invalid YAML: {}", e))?;
+    let obj: serde_json::Value = lattice_common::yaml::parse_yaml(manifest)
+        .map_err(|e| anyhow::anyhow!("Invalid YAML: {}", e))?;
 
     let kind = obj
         .get("kind")

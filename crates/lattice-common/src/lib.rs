@@ -12,6 +12,7 @@ pub mod kube_utils;
 pub mod protocol;
 pub mod retry;
 pub mod template;
+pub mod yaml;
 
 pub use credentials::{AwsCredentials, CredentialError};
 pub use error::Error;

@@ -368,20 +368,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn serde_yaml_roundtrip() {
-        let pool = Ipv4PoolConfig {
-            range: "10.0.0.101-102/24".to_string(),
-            gateway: "10.0.0.1".to_string(),
-        };
-
-        let yaml =
-            serde_yaml::to_string(&pool).expect("Ipv4PoolConfig serialization should succeed");
-        assert!(yaml.contains("range: 10.0.0.101-102/24"));
-        assert!(yaml.contains("gateway: 10.0.0.1"));
-
-        let parsed: Ipv4PoolConfig =
-            serde_yaml::from_str(&yaml).expect("Ipv4PoolConfig deserialization should succeed");
-        assert_eq!(parsed, pool);
-    }
 }

@@ -294,12 +294,12 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
         match provider {
             ProviderType::Aws => {
                 if let Some(k8s_version) = config.k8s_version {
-                    manifests.push(generate_aws_addon_manifests(k8s_version));
+                    manifests.extend(generate_aws_addon_manifests(k8s_version));
                 }
             }
             ProviderType::Docker => {
                 // Docker/kind clusters need local-path-provisioner for PVC support
-                manifests.push(generate_docker_addon_manifests());
+                manifests.extend(generate_docker_addon_manifests());
             }
             _ => {} // Other providers don't need special addons yet
         }
@@ -398,7 +398,7 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     manifests.extend(infra_manifests);
 
     // Add LatticeCluster CRD definition
-    let crd_definition = serde_yaml::to_string(&LatticeCluster::crd()).map_err(|e| {
+    let crd_definition = serde_json::to_string(&LatticeCluster::crd()).map_err(|e| {
         BootstrapError::Internal(format!("failed to serialize LatticeCluster CRD: {}", e))
     })?;
     manifests.push(crd_definition);

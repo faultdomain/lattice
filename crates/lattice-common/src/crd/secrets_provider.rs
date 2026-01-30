@@ -148,7 +148,8 @@ spec:
   credentialsSecretRef:
     name: vault-token
 "#;
-        let provider: SecretsProvider = serde_yaml::from_str(yaml).expect("parse");
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.server, "https://vault.example.com");
         assert_eq!(provider.spec.auth_method, VaultAuthMethod::Token);
     }
@@ -166,7 +167,8 @@ spec:
   kubernetesRole: lattice
   kubernetesMountPath: kubernetes
 "#;
-        let provider: SecretsProvider = serde_yaml::from_str(yaml).expect("parse");
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.auth_method, VaultAuthMethod::Kubernetes);
         assert_eq!(provider.spec.kubernetes_role, Some("lattice".to_string()));
     }

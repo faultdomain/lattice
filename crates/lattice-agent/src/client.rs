@@ -701,8 +701,7 @@ impl AgentClient {
 
     /// Extract kind and name from a YAML manifest for logging
     fn extract_manifest_info(yaml: &str) -> (String, String) {
-        let value: Result<serde_yaml::Value, _> = serde_yaml::from_str(yaml);
-        match value {
+        match lattice_common::yaml::parse_yaml(yaml) {
             Ok(v) => {
                 let kind = v["kind"].as_str().unwrap_or("unknown").to_string();
                 let name = v["metadata"]["name"]
@@ -725,34 +724,39 @@ impl AgentClient {
         use kube::discovery::ApiResource;
 
         // Parse YAML to extract metadata first for better logging
-        let value: serde_yaml::Value = serde_yaml::from_str(yaml)
+        let value = lattice_common::yaml::parse_yaml(yaml)
             .map_err(|e| std::io::Error::other(format!("Invalid YAML: {}", e)))?;
 
+        // Extract metadata as owned strings before consuming value
         let api_version = value["apiVersion"]
             .as_str()
-            .ok_or_else(|| std::io::Error::other("Missing apiVersion"))?;
+            .ok_or_else(|| std::io::Error::other("Missing apiVersion"))?
+            .to_string();
         let kind = value["kind"]
             .as_str()
-            .ok_or_else(|| std::io::Error::other("Missing kind"))?;
+            .ok_or_else(|| std::io::Error::other("Missing kind"))?
+            .to_string();
         let name = value["metadata"]["name"]
             .as_str()
-            .ok_or_else(|| std::io::Error::other("Missing metadata.name"))?;
-        let namespace = value["metadata"]["namespace"].as_str();
+            .ok_or_else(|| std::io::Error::other("Missing metadata.name"))?
+            .to_string();
+        let namespace = value["metadata"]["namespace"]
+            .as_str()
+            .map(|s| s.to_string());
 
         debug!(
-            api_version = api_version,
-            kind = kind,
-            name = name,
-            namespace = namespace,
+            api_version = %api_version,
+            kind = %kind,
+            name = %name,
+            namespace = ?namespace,
             "Applying manifest via kube-rs"
         );
 
         // Parse group and version from apiVersion
-        let (group, version) = if api_version.contains('/') {
-            let parts: Vec<&str> = api_version.splitn(2, '/').collect();
-            (parts[0].to_string(), parts[1].to_string())
+        let (group, version) = if let Some((g, v)) = api_version.split_once('/') {
+            (g.to_string(), v.to_string())
         } else {
-            (String::new(), api_version.to_string())
+            (String::new(), api_version.clone())
         };
 
         // Create ApiResource for dynamic access
@@ -760,13 +764,13 @@ impl AgentClient {
         let ar = ApiResource {
             group,
             version: version.clone(),
-            kind: kind.to_string(),
-            api_version: api_version.to_string(),
+            kind: kind.clone(),
+            api_version,
             plural,
         };
 
-        // Parse into DynamicObject
-        let obj: DynamicObject = serde_yaml::from_str(yaml)
+        // Parse into DynamicObject from the already-parsed JSON value
+        let obj: DynamicObject = serde_json::from_value(value)
             .map_err(|e| std::io::Error::other(format!("Failed to parse manifest: {}", e)))?;
 
         let client = kube::Client::try_default()
@@ -774,21 +778,21 @@ impl AgentClient {
             .map_err(|e| std::io::Error::other(format!("Failed to create client: {}", e)))?;
 
         // Use server-side apply
-        let api: Api<DynamicObject> = if let Some(ns) = namespace {
+        let api: Api<DynamicObject> = if let Some(ns) = &namespace {
             Api::namespaced_with(client, ns, &ar)
         } else {
             Api::all_with(client, &ar)
         };
 
         api.patch(
-            name,
+            &name,
             &PatchParams::apply("lattice-agent").force(),
             &Patch::Apply(&obj),
         )
         .await
         .map_err(|e| std::io::Error::other(format!("Server-side apply failed: {}", e)))?;
 
-        debug!(name = name, kind = kind, "Manifest applied successfully");
+        debug!(name = %name, kind = %kind, "Manifest applied successfully");
         Ok(())
     }
 

@@ -253,26 +253,24 @@ spec:
     }
 }
 
-/// Serialize a Kubernetes resource to YAML
-fn to_yaml<T: serde::Serialize>(resource: &T) -> String {
-    serde_yaml::to_string(resource).expect("Failed to serialize resource")
+/// Serialize a Kubernetes resource to JSON
+fn to_json<T: serde::Serialize>(resource: &T) -> String {
+    serde_json::to_string(resource).expect("Failed to serialize resource")
 }
 
-/// Generate all Docker addon manifests (local-path-provisioner) as raw YAML.
+/// Generate all Docker addon manifests (local-path-provisioner).
 ///
-/// Returns a single YAML string with all resources separated by `---`.
-pub fn generate_docker_addon_manifests() -> String {
-    let resources: Vec<String> = vec![
-        to_yaml(&namespace()),
-        to_yaml(&service_account()),
-        to_yaml(&cluster_role()),
-        to_yaml(&cluster_role_binding()),
-        to_yaml(&deployment()),
-        to_yaml(&storage_class()),
-        to_yaml(&config_map()),
-    ];
-
-    resources.join("---\n")
+/// Returns a Vec of JSON strings, one per resource.
+pub fn generate_docker_addon_manifests() -> Vec<String> {
+    vec![
+        to_json(&namespace()),
+        to_json(&service_account()),
+        to_json(&cluster_role()),
+        to_json(&cluster_role_binding()),
+        to_json(&deployment()),
+        to_json(&storage_class()),
+        to_json(&config_map()),
+    ]
 }
 
 #[cfg(test)]
@@ -342,15 +340,17 @@ mod tests {
     }
 
     #[test]
-    fn combined_manifest_contains_all_resources() {
-        let manifest = generate_docker_addon_manifests();
+    fn manifests_contain_all_resources() {
+        let manifests = generate_docker_addon_manifests();
+        let combined = manifests.join("\n");
 
-        assert!(manifest.contains("local-path-storage")); // Namespace
-        assert!(manifest.contains("local-path-provisioner-service-account")); // ServiceAccount
-        assert!(manifest.contains("local-path-provisioner-role")); // ClusterRole
-        assert!(manifest.contains("local-path-provisioner-bind")); // ClusterRoleBinding
-        assert!(manifest.contains("rancher/local-path-provisioner")); // Deployment image
-        assert!(manifest.contains("rancher.io/local-path")); // StorageClass provisioner
-        assert!(manifest.contains("local-path-config")); // ConfigMap
+        assert_eq!(manifests.len(), 7); // 7 resources
+        assert!(combined.contains("local-path-storage")); // Namespace
+        assert!(combined.contains("local-path-provisioner-service-account")); // ServiceAccount
+        assert!(combined.contains("local-path-provisioner-role")); // ClusterRole
+        assert!(combined.contains("local-path-provisioner-bind")); // ClusterRoleBinding
+        assert!(combined.contains("rancher/local-path-provisioner")); // Deployment image
+        assert!(combined.contains("rancher.io/local-path")); // StorageClass provisioner
+        assert!(combined.contains("local-path-config")); // ConfigMap
     }
 }

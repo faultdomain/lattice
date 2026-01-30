@@ -37,7 +37,7 @@ pub enum PivotError {
 async fn fetch_kubeconfig_from_secret(
     secrets: &Api<Secret>,
     secret_name: &str,
-) -> Result<serde_yaml::Value, PivotError> {
+) -> Result<serde_json::Value, PivotError> {
     let secret = secrets.get(secret_name).await.map_err(|e| {
         PivotError::Internal(format!(
             "failed to get kubeconfig secret '{}': {}",
@@ -56,14 +56,14 @@ async fn fetch_kubeconfig_from_secret(
     let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
         .map_err(|e| PivotError::Internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
 
-    serde_yaml::from_str(&kubeconfig_str)
+    lattice_common::yaml::parse_yaml(&kubeconfig_str)
         .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))
 }
 
 /// Path to the cluster CA certificate (available in all pods via service account)
 const CLUSTER_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 
-fn update_cluster_entry(cluster_entry: &mut serde_yaml::Value, cluster_name: &str) -> bool {
+fn update_cluster_entry(cluster_entry: &mut serde_json::Value, cluster_name: &str) -> bool {
     let Some(cluster_config) = cluster_entry.get_mut("cluster") else {
         return false;
     };
@@ -77,11 +77,11 @@ fn update_cluster_entry(cluster_entry: &mut serde_yaml::Value, cluster_name: &st
         return false;
     }
 
-    *server = serde_yaml::Value::String(INTERNAL_K8S_ENDPOINT.to_string());
+    *server = serde_json::Value::String(INTERNAL_K8S_ENDPOINT.to_string());
 
     // Remove certificate-authority file path if present (won't work inside pod)
-    if let Some(m) = cluster_config.as_mapping_mut() {
-        m.remove("certificate-authority");
+    if let Some(obj) = cluster_config.as_object_mut() {
+        obj.remove("certificate-authority");
     }
 
     // Update certificate-authority-data with the cluster's CA
@@ -90,10 +90,10 @@ fn update_cluster_entry(cluster_entry: &mut serde_yaml::Value, cluster_name: &st
     // the cluster's own CA for self-management.
     if let Ok(cluster_ca) = std::fs::read_to_string(CLUSTER_CA_PATH) {
         let ca_b64 = STANDARD.encode(cluster_ca.as_bytes());
-        if let Some(m) = cluster_config.as_mapping_mut() {
-            m.insert(
-                serde_yaml::Value::String("certificate-authority-data".to_string()),
-                serde_yaml::Value::String(ca_b64),
+        if let Some(obj) = cluster_config.as_object_mut() {
+            obj.insert(
+                "certificate-authority-data".to_string(),
+                serde_json::Value::String(ca_b64),
             );
         }
         debug!(
@@ -119,32 +119,27 @@ fn update_cluster_entry(cluster_entry: &mut serde_yaml::Value, cluster_name: &st
     true
 }
 
-fn update_all_cluster_entries(kubeconfig: &mut serde_yaml::Value, cluster_name: &str) -> usize {
-    let Some(clusters) = kubeconfig
-        .get_mut("clusters")
-        .and_then(|c| c.as_sequence_mut())
-    else {
+fn update_all_cluster_entries(kubeconfig: &mut serde_json::Value, cluster_name: &str) -> usize {
+    let Some(clusters) = kubeconfig.get_mut("clusters").and_then(|c| c.as_array_mut()) else {
         return 0;
     };
 
-    clusters
-        .iter_mut()
-        .filter_map(|entry| {
-            if update_cluster_entry(entry, cluster_name) {
-                Some(())
-            } else {
-                None
-            }
-        })
-        .count()
+    let mut count = 0;
+    for entry in clusters.iter_mut() {
+        if update_cluster_entry(entry, cluster_name) {
+            count += 1;
+        }
+    }
+    count
 }
 
 async fn apply_kubeconfig_patch(
     secrets: &Api<Secret>,
     secret_name: &str,
-    kubeconfig: &serde_yaml::Value,
+    kubeconfig: &serde_json::Value,
 ) -> Result<(), PivotError> {
-    let updated_kubeconfig = serde_yaml::to_string(kubeconfig)
+    // Serialize as JSON - Kubernetes accepts both JSON and YAML
+    let updated_kubeconfig = serde_json::to_string(kubeconfig)
         .map_err(|e| PivotError::Internal(format!("failed to serialize kubeconfig: {}", e)))?;
 
     let encoded = STANDARD.encode(updated_kubeconfig.as_bytes());
@@ -219,8 +214,10 @@ pub async fn apply_distributed_resources(
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for secret_bytes in &resources.secrets {
         let yaml_str = String::from_utf8_lossy(secret_bytes);
-        let secret: Secret = serde_yaml::from_str(&yaml_str)
+        let value = lattice_common::yaml::parse_yaml(&yaml_str)
             .map_err(|e| PivotError::Internal(format!("failed to parse secret YAML: {}", e)))?;
+        let secret: Secret = serde_json::from_value(value)
+            .map_err(|e| PivotError::Internal(format!("failed to deserialize secret: {}", e)))?;
 
         let name = secret
             .metadata
@@ -240,8 +237,11 @@ pub async fn apply_distributed_resources(
     let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for cp_bytes in &resources.cloud_providers {
         let yaml_str = String::from_utf8_lossy(cp_bytes);
-        let cp: CloudProvider = serde_yaml::from_str(&yaml_str).map_err(|e| {
+        let value = lattice_common::yaml::parse_yaml(&yaml_str).map_err(|e| {
             PivotError::Internal(format!("failed to parse CloudProvider YAML: {}", e))
+        })?;
+        let cp: CloudProvider = serde_json::from_value(value).map_err(|e| {
+            PivotError::Internal(format!("failed to deserialize CloudProvider: {}", e))
         })?;
 
         let name = cp
@@ -264,8 +264,11 @@ pub async fn apply_distributed_resources(
     let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for sp_bytes in &resources.secrets_providers {
         let yaml_str = String::from_utf8_lossy(sp_bytes);
-        let sp: SecretsProvider = serde_yaml::from_str(&yaml_str).map_err(|e| {
+        let value = lattice_common::yaml::parse_yaml(&yaml_str).map_err(|e| {
             PivotError::Internal(format!("failed to parse SecretsProvider YAML: {}", e))
+        })?;
+        let sp: SecretsProvider = serde_json::from_value(value).map_err(|e| {
+            PivotError::Internal(format!("failed to deserialize SecretsProvider: {}", e))
         })?;
 
         let name = sp
@@ -290,10 +293,11 @@ pub async fn apply_distributed_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_common::yaml::parse_yaml;
 
     #[test]
     fn test_update_cluster_entry_updates_server() {
-        let mut entry = serde_yaml::from_str::<serde_yaml::Value>(
+        let mut entry = parse_yaml(
             r#"
             name: test-cluster
             cluster:
@@ -314,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_update_cluster_entry_skips_already_internal() {
-        let mut entry = serde_yaml::from_str::<serde_yaml::Value>(
+        let mut entry = parse_yaml(
             r#"
             name: test-cluster
             cluster:
@@ -341,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_update_all_cluster_entries_multiple() {
-        let mut kubeconfig = serde_yaml::from_str::<serde_yaml::Value>(
+        let mut kubeconfig = parse_yaml(
             r#"
             clusters:
               - name: cluster-1
@@ -361,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_update_all_cluster_entries_mixed() {
-        let mut kubeconfig = serde_yaml::from_str::<serde_yaml::Value>(
+        let mut kubeconfig = parse_yaml(
             r#"
             clusters:
               - name: external
@@ -381,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_update_all_cluster_entries_no_clusters() {
-        let mut kubeconfig = serde_yaml::from_str::<serde_yaml::Value>(
+        let mut kubeconfig = parse_yaml(
             r#"
             apiVersion: v1
             kind: Config
@@ -395,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_update_cluster_entry_missing_cluster_key() {
-        let mut entry = serde_yaml::from_str::<serde_yaml::Value>(
+        let mut entry = parse_yaml(
             r#"
             name: test-cluster
             "#,
@@ -408,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_update_cluster_entry_missing_server() {
-        let mut entry = serde_yaml::from_str::<serde_yaml::Value>(
+        let mut entry = parse_yaml(
             r#"
             name: test-cluster
             cluster:

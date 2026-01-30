@@ -120,7 +120,10 @@ impl Installer {
         registry_credentials: Option<String>,
         bootstrap_override: Option<BootstrapProvider>,
     ) -> Result<Self> {
-        let mut cluster: LatticeCluster = serde_yaml::from_str(&cluster_yaml)?;
+        let value = lattice_common::yaml::parse_yaml(&cluster_yaml)
+            .map_err(|e| Error::validation(format!("Invalid YAML: {}", e)))?;
+        let mut cluster: LatticeCluster = serde_json::from_value(value)
+            .map_err(|e| Error::validation(format!("Invalid LatticeCluster: {}", e)))?;
 
         if let Some(bootstrap) = bootstrap_override {
             cluster.spec.provider.kubernetes.bootstrap = bootstrap;
@@ -633,22 +636,22 @@ impl Installer {
         let localhost_url = format!("https://127.0.0.1:{}", port);
 
         // Parse kubeconfig as YAML and update the server URL
-        let mut config: serde_yaml::Value = serde_yaml::from_str(kubeconfig).map_err(|e| {
+        let mut config = lattice_common::yaml::parse_yaml(kubeconfig).map_err(|e| {
             Error::command_failed(format!("Failed to parse kubeconfig YAML: {}", e))
         })?;
 
-        if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+        if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {
             for cluster in clusters {
                 if let Some(cluster_data) = cluster.get_mut("cluster") {
                     if let Some(server) = cluster_data.get_mut("server") {
-                        *server = serde_yaml::Value::String(localhost_url.clone());
+                        *server = serde_json::Value::String(localhost_url.clone());
                     }
                 }
             }
         }
 
-        serde_yaml::to_string(&config).map_err(|e| {
-            Error::command_failed(format!("Failed to serialize kubeconfig YAML: {}", e))
+        serde_json::to_string(&config).map_err(|e| {
+            Error::command_failed(format!("Failed to serialize kubeconfig: {}", e))
         })
     }
 
@@ -1182,7 +1185,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_kubeconfig_server_yaml() {
+    fn test_rewrite_kubeconfig_server() {
+        use lattice_common::yaml::parse_yaml;
+
         let kubeconfig = r#"apiVersion: v1
 kind: Config
 clusters:
@@ -1205,31 +1210,26 @@ users:
         let new_server = "https://127.0.0.1:12345";
 
         // Parse and update using the same logic as rewrite_docker_kubeconfig
-        let mut config: serde_yaml::Value =
-            serde_yaml::from_str(kubeconfig).expect("kubeconfig should be valid YAML");
+        let mut config = parse_yaml(kubeconfig).expect("kubeconfig should be valid YAML");
 
-        if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+        if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {
             for cluster in clusters {
                 if let Some(cluster_data) = cluster.get_mut("cluster") {
                     if let Some(server) = cluster_data.get_mut("server") {
-                        *server = serde_yaml::Value::String(new_server.to_string());
+                        *server = serde_json::Value::String(new_server.to_string());
                     }
                 }
             }
         }
 
-        let result = serde_yaml::to_string(&config).expect("config should serialize to YAML");
-
         // Verify the server was updated
-        let parsed: serde_yaml::Value =
-            serde_yaml::from_str(&result).expect("result should be valid YAML");
-        let server = parsed["clusters"][0]["cluster"]["server"]
+        let server = config["clusters"][0]["cluster"]["server"]
             .as_str()
             .expect("server should be a string");
         assert_eq!(server, new_server);
 
         // Verify other fields are preserved
-        let ca_data = parsed["clusters"][0]["cluster"]["certificate-authority-data"]
+        let ca_data = config["clusters"][0]["cluster"]["certificate-authority-data"]
             .as_str()
             .expect("certificate-authority-data should be a string");
         assert_eq!(ca_data, "LS0tLS1CRUdJTg==");
@@ -1237,6 +1237,8 @@ users:
 
     #[test]
     fn test_rewrite_kubeconfig_multiple_clusters() {
+        use lattice_common::yaml::parse_yaml;
+
         let kubeconfig = r#"apiVersion: v1
 kind: Config
 clusters:
@@ -1250,28 +1252,23 @@ clusters:
 
         let new_server = "https://127.0.0.1:12345";
 
-        let mut config: serde_yaml::Value =
-            serde_yaml::from_str(kubeconfig).expect("kubeconfig should be valid YAML");
+        let mut config = parse_yaml(kubeconfig).expect("kubeconfig should be valid YAML");
 
-        if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+        if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {
             for cluster in clusters {
                 if let Some(cluster_data) = cluster.get_mut("cluster") {
                     if let Some(server) = cluster_data.get_mut("server") {
-                        *server = serde_yaml::Value::String(new_server.to_string());
+                        *server = serde_json::Value::String(new_server.to_string());
                     }
                 }
             }
         }
 
-        let result = serde_yaml::to_string(&config).expect("config should serialize to YAML");
-        let parsed: serde_yaml::Value =
-            serde_yaml::from_str(&result).expect("result should be valid YAML");
-
         // Both clusters should be updated
-        let server1 = parsed["clusters"][0]["cluster"]["server"]
+        let server1 = config["clusters"][0]["cluster"]["server"]
             .as_str()
             .expect("server1 should be a string");
-        let server2 = parsed["clusters"][1]["cluster"]["server"]
+        let server2 = config["clusters"][1]["cluster"]["server"]
             .as_str()
             .expect("server2 should be a string");
         assert_eq!(server1, new_server);
