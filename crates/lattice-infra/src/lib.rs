@@ -16,6 +16,7 @@
 pub mod bootstrap;
 pub mod mtls;
 pub mod pki;
+pub mod system_namespaces;
 
 // Re-export main types
 pub use bootstrap::cilium::{

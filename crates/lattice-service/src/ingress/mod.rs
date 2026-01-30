@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use lattice_common::crd::{IngressSpec, IngressTls, PathMatchType, TlsMode};
 
+use crate::mesh;
+
 // =============================================================================
 // Gateway API Types
 // =============================================================================
@@ -430,11 +432,6 @@ pub struct WaypointOperationSpec {
 pub struct WaypointCompiler;
 
 impl WaypointCompiler {
-    /// Istio's native waypoint GatewayClass
-    const GATEWAY_CLASS: &'static str = "istio-waypoint";
-    /// HBONE port for Istio Ambient waypoint communication
-    const HBONE_PORT: u16 = 15008;
-
     /// Compile waypoint Gateway and policies for a namespace
     ///
     /// Generates:
@@ -458,20 +455,21 @@ impl WaypointCompiler {
         let mut metadata = GatewayMetadata::new(&gateway_name, namespace);
 
         // Required label for Istio to recognize as service waypoint
-        metadata
-            .labels
-            .insert("istio.io/waypoint-for".to_string(), "service".to_string());
+        metadata.labels.insert(
+            mesh::WAYPOINT_FOR_LABEL.to_string(),
+            mesh::WAYPOINT_FOR_SERVICE.to_string(),
+        );
 
         Gateway {
             api_version: "gateway.networking.k8s.io/v1".to_string(),
             kind: "Gateway".to_string(),
             metadata,
             spec: GatewaySpec {
-                gateway_class_name: Self::GATEWAY_CLASS.to_string(),
+                gateway_class_name: mesh::WAYPOINT_GATEWAY_CLASS.to_string(),
                 listeners: vec![GatewayListener {
                     name: "mesh".to_string(),
                     hostname: None,
-                    port: Self::HBONE_PORT,
+                    port: mesh::HBONE_PORT,
                     protocol: "HBONE".to_string(),
                     tls: None,
                     allowed_routes: Some(AllowedRoutes {
@@ -503,7 +501,10 @@ impl WaypointCompiler {
         );
 
         let mut match_labels = BTreeMap::new();
-        match_labels.insert("istio.io/waypoint-for".to_string(), "service".to_string());
+        match_labels.insert(
+            mesh::WAYPOINT_FOR_LABEL.to_string(),
+            mesh::WAYPOINT_FOR_SERVICE.to_string(),
+        );
 
         WaypointAuthorizationPolicy {
             api_version: "security.istio.io/v1beta1".to_string(),
@@ -520,7 +521,7 @@ impl WaypointCompiler {
                     from: vec![], // Empty = any authenticated source
                     to: vec![WaypointOperation {
                         operation: WaypointOperationSpec {
-                            ports: vec![Self::HBONE_PORT.to_string()],
+                            ports: vec![mesh::HBONE_PORT.to_string()],
                         },
                     }],
                 }],

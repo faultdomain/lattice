@@ -6,17 +6,32 @@
 //! Also provides CiliumNetworkPolicy generation for Lattice components.
 
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 use tracing::info;
 
 use lattice_common::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT};
 
 use super::{charts_dir, split_yaml_documents};
+use crate::system_namespaces;
+
+/// Cached Cilium manifests to avoid repeated helm template calls
+static CILIUM_MANIFESTS: OnceCell<Result<Vec<String>, String>> = OnceCell::const_new();
 
 /// Generate Cilium manifests for a cluster
 ///
-/// Renders via `helm template` on-demand. This is an async function to avoid
-/// blocking the tokio runtime during helm execution.
+/// Renders via `helm template` on-demand with caching. The first call executes helm
+/// and caches the result; subsequent calls return the cached manifests.
+///
+/// This is an async function to avoid blocking the tokio runtime during helm execution.
 pub async fn generate_cilium_manifests() -> Result<Vec<String>, String> {
+    CILIUM_MANIFESTS
+        .get_or_init(|| async { render_cilium_helm().await })
+        .await
+        .clone()
+}
+
+/// Internal function to render Cilium manifests via helm template
+async fn render_cilium_helm() -> Result<Vec<String>, String> {
     let charts_dir = charts_dir();
     let version = env!("CILIUM_VERSION");
     let chart_path = format!("{}/cilium-{}.tgz", charts_dir, version);
@@ -139,9 +154,17 @@ spec:
 /// Per Cilium docs: https://docs.cilium.io/en/latest/network/servicemesh/default-deny-ingress-policy/
 /// - No ingress rules = deny all ingress
 /// - Only allow DNS egress to kube-dns
-/// - Exclude kube-system namespace from policy
+/// - Exclude system namespaces from policy
 pub fn generate_default_deny() -> String {
-    r#"---
+    // Build the namespace exclusion list from centralized registry
+    let namespace_values: String = system_namespaces::all()
+        .iter()
+        .map(|ns| format!("          - {}", ns))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        r#"---
 apiVersion: cilium.io/v2
 kind: CiliumClusterwideNetworkPolicy
 metadata:
@@ -155,21 +178,7 @@ spec:
       - key: k8s:io.kubernetes.pod.namespace
         operator: NotIn
         values:
-          - kube-system
-          - cilium-system
-          - istio-system
-          - lattice-system
-          - cert-manager
-          - capi-system
-          - capi-kubeadm-bootstrap-system
-          - capi-kubeadm-control-plane-system
-          - rke2-bootstrap-system
-          - rke2-control-plane-system
-          - capd-system
-          - capo-system
-          - capa-system
-          - capmox-system
-          - capi-ipam-in-cluster-system
+{namespace_values}
   egress:
     # Allow DNS to kube-dns
     - toEndpoints:
@@ -189,7 +198,7 @@ spec:
     - toEntities:
         - kube-apiserver
 "#
-    .to_string()
+    )
 }
 
 /// Generate a CiliumClusterwideNetworkPolicy for Istio waypoint proxies.

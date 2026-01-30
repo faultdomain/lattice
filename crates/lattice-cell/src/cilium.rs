@@ -169,23 +169,23 @@ mod tests {
 
     #[test]
     fn test_generate_ip_pool() {
-        let yaml = generate_ip_pool("default", "172.18.255.1/32");
+        let json = generate_ip_pool("default", "172.18.255.1/32");
 
-        assert!(yaml.contains("apiVersion: cilium.io/v2alpha1"));
-        assert!(yaml.contains("kind: CiliumLoadBalancerIPPool"));
-        assert!(yaml.contains("name: default"));
-        assert!(yaml.contains("cidr: 172.18.255.1/32"));
-        assert!(yaml.contains("app.kubernetes.io/managed-by: lattice"));
+        assert!(json.contains(r#""apiVersion":"cilium.io/v2alpha1""#));
+        assert!(json.contains(r#""kind":"CiliumLoadBalancerIPPool""#));
+        assert!(json.contains(r#""name":"default""#));
+        assert!(json.contains(r#""cidr":"172.18.255.1/32""#));
+        assert!(json.contains(r#""app.kubernetes.io/managed-by":"lattice""#));
     }
 
     #[test]
     fn test_generate_l2_policy() {
-        let yaml = generate_l2_policy();
+        let json = generate_l2_policy();
 
-        assert!(yaml.contains("apiVersion: cilium.io/v2alpha1"));
-        assert!(yaml.contains("kind: CiliumL2AnnouncementPolicy"));
-        assert!(yaml.contains("loadBalancerIPs: true"));
-        assert!(yaml.contains("- ^.*$")); // Match all interfaces
+        assert!(json.contains(r#""apiVersion":"cilium.io/v2alpha1""#));
+        assert!(json.contains(r#""kind":"CiliumL2AnnouncementPolicy""#));
+        assert!(json.contains(r#""loadBalancerIPs":true"#));
+        assert!(json.contains(r#""^.*$""#)); // Match all interfaces
     }
 
     #[test]
@@ -216,9 +216,9 @@ mod tests {
     #[test]
     fn test_single_ip_cidr() {
         // Single IP for cell LoadBalancer
-        let yaml = generate_ip_pool("cell", "172.18.255.1/32");
+        let json = generate_ip_pool("cell", "172.18.255.1/32");
 
-        assert!(yaml.contains("cidr: 172.18.255.1/32"));
+        assert!(json.contains(r#""cidr":"172.18.255.1/32""#));
     }
 
     #[test]

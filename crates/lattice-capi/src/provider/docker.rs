@@ -1100,22 +1100,23 @@ mod tests {
                 .await
                 .expect("manifest generation should succeed");
 
-            // Verify we can serialize all manifests to YAML
-            let mut yaml_docs = Vec::new();
-            for manifest in &manifests {
-                yaml_docs.push(
-                    manifest
-                        .to_json()
-                        .expect("manifest should serialize to YAML"),
-                );
-            }
+            // Verify all expected resource kinds are present
+            let kinds: Vec<&str> = manifests.iter().map(|m| m.kind.as_str()).collect();
+            assert!(kinds.contains(&"Cluster"), "missing Cluster");
+            assert!(kinds.contains(&"DockerCluster"), "missing DockerCluster");
+            assert!(
+                kinds.contains(&"KubeadmControlPlane"),
+                "missing KubeadmControlPlane"
+            );
+            assert!(
+                kinds.contains(&"MachineDeployment"),
+                "missing MachineDeployment"
+            );
 
-            // Join with separator for multi-document YAML
-            let full_yaml = yaml_docs.join("---\n");
-            assert!(full_yaml.contains("kind: Cluster"));
-            assert!(full_yaml.contains("kind: DockerCluster"));
-            assert!(full_yaml.contains("kind: KubeadmControlPlane"));
-            assert!(full_yaml.contains("kind: MachineDeployment"));
+            // Verify all manifests can serialize to JSON
+            for manifest in &manifests {
+                manifest.to_json().expect("manifest should serialize");
+            }
         }
 
         /// Story: A workload cluster should generate valid manifests that

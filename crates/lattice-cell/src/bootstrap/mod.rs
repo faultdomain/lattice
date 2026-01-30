@@ -25,14 +25,12 @@
 //! 3. Cell signs CSR with CA and returns certificate
 //! 4. Agent uses cert for mTLS connection to gRPC server
 
-mod autoscaler;
-mod aws_addons;
-mod docker_addons;
+mod addons;
 mod token;
 
-pub use autoscaler::generate_autoscaler_manifests;
-pub use aws_addons::generate_aws_addon_manifests;
-pub use docker_addons::generate_docker_addon_manifests;
+pub use addons::{
+    generate_autoscaler_manifests, generate_aws_addon_manifests, generate_docker_addon_manifests,
+};
 pub use lattice_common::AwsCredentials;
 
 use std::collections::BTreeMap;
@@ -289,28 +287,16 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
         manifests.extend(crate::cilium::generate_lb_resources_from_proxmox(ipv4_pool));
     }
 
-    // Add provider-specific addons
-    if let Some(provider) = config.provider {
-        match provider {
-            ProviderType::Aws => {
-                if let Some(k8s_version) = config.k8s_version {
-                    manifests.extend(generate_aws_addon_manifests(k8s_version));
-                }
-            }
-            ProviderType::Docker => {
-                // Docker/kind clusters need local-path-provisioner for PVC support
-                manifests.extend(generate_docker_addon_manifests());
-            }
-            _ => {} // Other providers don't need special addons yet
-        }
-    }
-
-    // Add cluster-autoscaler when any pool has autoscaling enabled
-    if config.autoscaling_enabled {
-        if let Some(cluster_name) = config.cluster_name {
-            let capi_namespace = format!("capi-{}", cluster_name);
-            manifests.push(generate_autoscaler_manifests(&capi_namespace));
-        }
+    // Add provider-specific addons (CCM, CSI, storage, autoscaler)
+    if let (Some(provider), Some(k8s_version), Some(cluster_name)) =
+        (config.provider, config.k8s_version, config.cluster_name)
+    {
+        manifests.extend(addons::generate_for_provider(
+            provider,
+            k8s_version,
+            cluster_name,
+            config.autoscaling_enabled,
+        ));
     }
 
     manifests

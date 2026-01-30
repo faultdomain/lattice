@@ -824,6 +824,7 @@ impl GeneratedWorkloads {
 // =============================================================================
 
 use crate::crd::{DeployStrategy, LatticeService, LatticeServiceSpec, ProviderType};
+use crate::mesh;
 
 /// Compiler for generating Kubernetes workload resources from LatticeService
 ///
@@ -1314,10 +1315,10 @@ impl WorkloadCompiler {
             })
             .unwrap_or_default();
 
-        // Add istio.io/use-waypoint label to route traffic through namespace waypoint
+        // Add use-waypoint label to route traffic through namespace waypoint
         let waypoint_name = format!("{}-waypoint", namespace);
         let metadata =
-            ObjectMeta::new(name, namespace).with_label("istio.io/use-waypoint", waypoint_name);
+            ObjectMeta::new(name, namespace).with_label(mesh::USE_WAYPOINT_LABEL, waypoint_name);
 
         Service {
             api_version: "v1".to_string(),

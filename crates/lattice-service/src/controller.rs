@@ -26,6 +26,7 @@ use crate::crd::{
     LatticeService, LatticeServiceSpec, LatticeServiceStatus, ProviderType, ServicePhase,
 };
 use crate::graph::ServiceGraph;
+use crate::mesh;
 use crate::Error;
 
 // =============================================================================
@@ -112,8 +113,8 @@ impl ServiceKubeClientImpl {
             "metadata": {
                 "name": name,
                 "labels": {
-                    "istio.io/dataplane-mode": "ambient",
-                    "istio.io/use-waypoint": waypoint_name
+                    (mesh::DATAPLANE_MODE_LABEL): mesh::DATAPLANE_MODE_AMBIENT,
+                    (mesh::USE_WAYPOINT_LABEL): waypoint_name
                 }
             }
         });

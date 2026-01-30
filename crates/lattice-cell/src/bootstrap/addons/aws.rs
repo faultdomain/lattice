@@ -1442,7 +1442,7 @@ mod tests {
         let manifests = generate_aws_addon_manifests("1.32.0");
         let combined = manifests.join("\n");
 
-        assert_eq!(manifests.len(), 22); // 22 resources
+        assert_eq!(manifests.len(), 23); // CCM (5) + EBS CSI (17) + StorageClass (1)
 
         // CCM resources
         assert!(combined.contains("cloud-controller-manager"));
