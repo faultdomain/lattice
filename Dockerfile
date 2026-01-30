@@ -45,24 +45,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -o /usr/local/bin/clusterctl ./cmd/clusterctl
 
 # -----------------------------------------------------------------------------
-# Stage 2a: Prepare recipe with cargo-chef
+# Stage 2: Build Rust application with BuildKit cache
 # -----------------------------------------------------------------------------
-FROM rust:latest AS chef
-RUN cargo install cargo-chef
-WORKDIR /app
-
-# -----------------------------------------------------------------------------
-# Stage 2b: Create dependency recipe (only changes when Cargo.toml/lock change)
-# -----------------------------------------------------------------------------
-FROM chef AS planner
-COPY Cargo.toml Cargo.lock versions.toml ./
-COPY crates ./crates
-RUN cargo chef prepare --recipe-path recipe.json
-
-# -----------------------------------------------------------------------------
-# Stage 2c: Build dependencies (cached layer)
-# -----------------------------------------------------------------------------
-FROM chef AS rust-deps
+FROM rust:latest AS rust-builder
 
 ARG FIPS
 
@@ -77,24 +62,17 @@ RUN apt-get update && apt-get install -y \
 # Copy helm from go-builder (FIPS-compliant, built from source)
 COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
 
-# Build dependencies - this layer is cached until Cargo.toml/lock changes
-COPY --from=planner /app/recipe.json recipe.json
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo chef cook --release --recipe-path recipe.json
-
-# -----------------------------------------------------------------------------
-# Stage 2d: Build application (fast incremental build)
-# -----------------------------------------------------------------------------
-FROM rust-deps AS rust-builder
-
+WORKDIR /app
 COPY Cargo.toml Cargo.lock versions.toml ./
 COPY crates ./crates
 COPY scripts/runtime ./scripts
 
-# Build only our code - dependencies are already compiled
+# Build with BuildKit cache mounts for incremental compilation
+# - registry/git: caches downloaded crates
+# - target: caches compiled artifacts (the expensive part)
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
     cargo build --release -p lattice-operator && \
     cp /app/target/release/lattice-operator /usr/local/bin/lattice-operator
 

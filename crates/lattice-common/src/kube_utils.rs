@@ -407,16 +407,20 @@ pub struct ManifestMetadata {
 
 /// Parse a manifest and extract its metadata
 pub fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> {
+    // Convert YAML octal literals to decimal before parsing
+    // serde_yaml treats 0NNN as strings, but Kubernetes expects integers
+    let manifest = convert_yaml_octal_to_decimal(manifest);
+
     // Parse the manifest - try JSON first, then YAML
     let value: serde_json::Value = if manifest.trim().starts_with('{') {
-        serde_json::from_str(manifest).map_err(|e| {
+        serde_json::from_str(&manifest).map_err(|e| {
             Error::internal_with_context(
                 "parse_manifest",
                 format!("Failed to parse manifest as JSON: {}", e),
             )
         })?
     } else {
-        serde_yaml::from_str(manifest).map_err(|e| {
+        serde_yaml::from_str(&manifest).map_err(|e| {
             Error::internal_with_context(
                 "parse_manifest",
                 format!("Failed to parse manifest as YAML: {}", e),
@@ -739,6 +743,27 @@ pub async fn get_ready_worker_count(client: &Client) -> Result<usize, Error> {
     });
 
     Ok(ready_workers.count())
+}
+
+/// Convert YAML 1.1 octal literals to decimal
+///
+/// YAML 1.1 interprets numbers with leading zeros as octal (e.g., 0400 = 256).
+/// However, serde_yaml treats these as strings. Kubernetes expects integers.
+/// This function converts octal patterns to decimal before parsing.
+///
+/// Only matches 4-digit octal (0NNN) which is the Unix permission format.
+fn convert_yaml_octal_to_decimal(yaml: &str) -> String {
+    // Match: colon + space + exactly 4 digits starting with 0 (e.g., 0400, 0755)
+    let re = regex::Regex::new(r"(:\s+)0([0-7]{3})\b").unwrap();
+    re.replace_all(yaml, |caps: &regex::Captures| {
+        let prefix = &caps[1];
+        let octal_str = &caps[2];
+        match i64::from_str_radix(octal_str, 8) {
+            Ok(decimal) => format!("{}{}", prefix, decimal),
+            Err(_) => caps[0].to_string(),
+        }
+    })
+    .into_owned()
 }
 
 /// Simple pluralization for Kubernetes resource kinds
@@ -1114,5 +1139,44 @@ metadata:
 
         assert_eq!(meta.namespace, Some("custom-ns".to_string()));
         assert!(meta.uid.is_none());
+    }
+
+    #[test]
+    fn test_convert_yaml_octal_to_decimal() {
+        // Basic scalar value: 0400 octal = 256 decimal
+        assert_eq!(
+            convert_yaml_octal_to_decimal("defaultMode: 0400"),
+            "defaultMode: 256"
+        );
+
+        // 0644 octal = 420 decimal
+        assert_eq!(
+            convert_yaml_octal_to_decimal("mode: 0644"),
+            "mode: 420"
+        );
+
+        // 0755 octal = 493 decimal
+        assert_eq!(
+            convert_yaml_octal_to_decimal("mode: 0755"),
+            "mode: 493"
+        );
+
+        // Multiple octals in one document
+        let yaml = "mode: 0644\ndefaultMode: 0400";
+        let result = convert_yaml_octal_to_decimal(yaml);
+        assert!(result.contains("mode: 420"), "0644 octal = 420 decimal");
+        assert!(result.contains("defaultMode: 256"), "0400 octal = 256 decimal");
+
+        // Don't touch regular numbers
+        assert_eq!(
+            convert_yaml_octal_to_decimal("replicas: 3"),
+            "replicas: 3"
+        );
+
+        // Don't touch numbers with 8 or 9 (not valid octal)
+        assert_eq!(
+            convert_yaml_octal_to_decimal("port: 8080"),
+            "port: 8080"
+        );
     }
 }

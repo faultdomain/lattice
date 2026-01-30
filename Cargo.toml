@@ -114,6 +114,9 @@ uuid = { version = "1.11", features = ["v4"] }
 # Random
 rand = "0.8"
 
+# Regex
+regex = "1"
+
 # Git
 git2 = "0.19"
 

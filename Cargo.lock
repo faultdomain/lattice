@@ -2087,6 +2087,7 @@ dependencies = [
  "kube",
  "minijinja",
  "rand 0.8.5",
+ "regex",
  "rstest",
  "rustls",
  "schemars",

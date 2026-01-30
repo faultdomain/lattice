@@ -129,6 +129,9 @@ pub async fn generate_certmanager() -> Result<Vec<String>, String> {
 ///
 /// This is an async function to avoid blocking the tokio runtime during
 /// clusterctl execution.
+///
+/// Calls `clusterctl generate provider` separately for each provider type
+/// since clusterctl only accepts one provider type flag at a time.
 pub async fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String> {
     let infra = match provider {
         ProviderType::Docker => "docker",
@@ -139,18 +142,26 @@ pub async fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String
         ProviderType::OpenStack => "openstack",
     };
 
-    // Always include both kubeadm and rke2 for clusterctl move compatibility
+    let mut manifests = Vec::new();
+
+    // Infrastructure provider
+    manifests.extend(run_clusterctl_generate("--infrastructure", infra).await?);
+
+    // Bootstrap providers (kubeadm and rke2 for clusterctl move compatibility)
+    manifests.extend(run_clusterctl_generate("--bootstrap", "kubeadm").await?);
+    manifests.extend(run_clusterctl_generate("--bootstrap", "rke2").await?);
+
+    // Control-plane providers
+    manifests.extend(run_clusterctl_generate("--control-plane", "kubeadm").await?);
+    manifests.extend(run_clusterctl_generate("--control-plane", "rke2").await?);
+
+    Ok(manifests)
+}
+
+/// Run a single clusterctl generate provider command
+async fn run_clusterctl_generate(flag: &str, provider: &str) -> Result<Vec<String>, String> {
     let output = Command::new("clusterctl")
-        .args([
-            "generate",
-            "provider",
-            "--infrastructure",
-            infra,
-            "--bootstrap",
-            "kubeadm,rke2",
-            "--control-plane",
-            "kubeadm,rke2",
-        ])
+        .args(["generate", "provider", flag, provider])
         .output()
         .await
         .map_err(|e| format!("clusterctl: {}", e))?;
@@ -159,9 +170,7 @@ pub async fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
 
-    Ok(split_yaml_documents(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
+    Ok(split_yaml_documents(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// Generate Istio manifests
