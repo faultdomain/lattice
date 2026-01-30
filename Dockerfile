@@ -45,9 +45,24 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -o /usr/local/bin/clusterctl ./cmd/clusterctl
 
 # -----------------------------------------------------------------------------
-# Stage 2: Build Lattice with aws-lc-rs FIPS
+# Stage 2a: Prepare recipe with cargo-chef
 # -----------------------------------------------------------------------------
-FROM rust:latest AS rust-builder
+FROM rust:latest AS chef
+RUN cargo install cargo-chef
+WORKDIR /app
+
+# -----------------------------------------------------------------------------
+# Stage 2b: Create dependency recipe (only changes when Cargo.toml/lock change)
+# -----------------------------------------------------------------------------
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock versions.toml ./
+COPY crates ./crates
+RUN cargo chef prepare --recipe-path recipe.json
+
+# -----------------------------------------------------------------------------
+# Stage 2c: Build dependencies (cached layer)
+# -----------------------------------------------------------------------------
+FROM chef AS rust-deps
 
 ARG FIPS
 
@@ -62,20 +77,24 @@ RUN apt-get update && apt-get install -y \
 # Copy helm from go-builder (FIPS-compliant, built from source)
 COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
 
-WORKDIR /app
+# Build dependencies - this layer is cached until Cargo.toml/lock changes
+COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo chef cook --release --recipe-path recipe.json
 
-# Copy workspace structure
+# -----------------------------------------------------------------------------
+# Stage 2d: Build application (fast incremental build)
+# -----------------------------------------------------------------------------
+FROM rust-deps AS rust-builder
+
 COPY Cargo.toml Cargo.lock versions.toml ./
 COPY crates ./crates
 COPY scripts/runtime ./scripts
 
-# Build with FIPS if enabled, otherwise standard build
-# Use BuildKit cache mounts for cargo registry and target directory
-# This dramatically speeds up rebuilds by caching compiled dependencies
+# Build only our code - dependencies are already compiled
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
-    echo "Building without FIPS..." && \
     cargo build --release -p lattice-operator && \
     cp /app/target/release/lattice-operator /usr/local/bin/lattice-operator
 

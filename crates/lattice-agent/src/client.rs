@@ -1683,7 +1683,6 @@ mod tests {
             &Arc::new(WatchRegistry::new()),
         )
         .await;
-        // ApplyManifests command doesn't change state - CAPI install is lazy
     }
 
     #[tokio::test]
@@ -1707,7 +1706,6 @@ mod tests {
             &Arc::new(WatchRegistry::new()),
         )
         .await;
-        // Status request doesn't change state (TODO in code)
     }
 
     #[tokio::test]

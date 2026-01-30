@@ -445,36 +445,22 @@ impl Installer {
     }
 
     async fn apply_bootstrap_to_management(&self, bootstrap_client: &Client) -> Result<()> {
-        // Fetch and prepare kubeconfig
         info!("Fetching management cluster kubeconfig...");
         let kubeconfig = self.fetch_management_kubeconfig(bootstrap_client).await?;
         let kubeconfig_path = self.kubeconfig_path();
         info!("Writing kubeconfig to {:?}", kubeconfig_path);
         tokio::fs::write(&kubeconfig_path, &kubeconfig).await?;
 
-        // Wait for management cluster API server to be reachable
         info!("Waiting for management cluster API server...");
         self.wait_for_api_server().await?;
 
         info!("Creating management cluster client...");
         let mgmt_client = self.management_client().await?;
 
-        // Wait for nodes to be ready
-        info!("Waiting for nodes to be ready...");
-        kube_utils::wait_for_nodes_ready(&mgmt_client, Duration::from_secs(300))
-            .await
-            .cmd_err()?;
-
-        // Generate all bootstrap manifests (operator + infrastructure + LatticeCluster)
         info!("Generating bootstrap manifests...");
         let manifests = self.generate_bootstrap_manifests().await?;
-        info!(
-            "Applying {} bootstrap manifests to management cluster",
-            manifests.len()
-        );
+        info!("Applying {} bootstrap manifests...", manifests.len());
 
-        // Apply manifests with retry - CRDs must be ready before CRs can be applied
-        // Use infinite retry since CRD ordering may cause transient failures
         let retry_config = lattice_common::retry::RetryConfig::infinite();
         for manifest in &manifests {
             let client = mgmt_client.clone();
@@ -488,13 +474,13 @@ impl Installer {
             .cmd_err()?;
         }
 
-        // Install CAPI via clusterctl
+        info!("Waiting for nodes to be ready...");
+        kube_utils::wait_for_nodes_ready(&mgmt_client, Duration::from_secs(300))
+            .await
+            .cmd_err()?;
+
         self.install_capi_on_management(&kubeconfig_path).await?;
-
-        // Wait for controllers to be ready
         self.wait_for_management_controllers(&mgmt_client).await?;
-
-        // Copy CloudProvider and credentials from bootstrap to management cluster
         self.copy_cloud_provider_to_management(bootstrap_client, &mgmt_client)
             .await?;
 
@@ -668,19 +654,28 @@ impl Installer {
 
     /// Waits for the management cluster API server to become reachable.
     async fn wait_for_api_server(&self) -> Result<()> {
+        use k8s_openapi::api::core::v1::Namespace;
+        use kube::Api;
+
         let start = Instant::now();
         loop {
             if start.elapsed() > Duration::from_secs(300) {
                 return Err(Error::command_failed("Timeout waiting for API server"));
             }
 
-            if let Ok(client) = self.management_client().await {
-                if kube_utils::wait_for_nodes_ready(&client, Duration::from_secs(5))
-                    .await
-                    .is_ok()
-                {
-                    return Ok(());
+            match self.management_client().await {
+                Ok(client) => {
+                    // Just check if we can list namespaces - proves API is reachable
+                    let ns: Api<Namespace> = Api::all(client);
+                    match ns.list(&Default::default()).await {
+                        Ok(_) => {
+                            info!("API server is reachable");
+                            return Ok(());
+                        }
+                        Err(e) => info!("API not ready yet: {}", e),
+                    }
                 }
+                Err(e) => info!("Client creation failed: {}", e),
             }
 
             tokio::time::sleep(Duration::from_secs(5)).await;
