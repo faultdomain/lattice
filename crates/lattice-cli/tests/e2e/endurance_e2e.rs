@@ -141,12 +141,12 @@ async fn run_endurance_test() -> Result<(), String> {
     watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, Some(600)).await?;
     info!("[SETUP] Management cluster ready!");
 
-    // Start aggressive chaos monkey on mgmt cluster
+    // Start coordinated chaos monkey on mgmt cluster
     let chaos_targets = Arc::new(ChaosTargets::new());
-    chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path);
+    chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, None);
 
-    info!("[CHAOS] Starting aggressive chaos monkey...");
-    let _chaos = ChaosMonkey::start_with_config(chaos_targets.clone(), ChaosConfig::aggressive());
+    info!("[CHAOS] Starting coordinated chaos monkey...");
+    let _chaos = ChaosMonkey::start_with_config(chaos_targets.clone(), ChaosConfig::coordinated());
 
     let mut iteration = 0u64;
     let test_start = Instant::now();
@@ -217,12 +217,12 @@ async fn run_endurance_test() -> Result<(), String> {
             wait_all_running(&mgmt_client, &cluster_names).await?;
             info!("[ITERATION {}] All clusters running!", iteration);
 
-            // Add workload clusters to chaos targets
+            // Add workload clusters to chaos targets (parent: mgmt)
             for name in &cluster_names {
                 let cluster_kc_path = kc_path(name);
                 if let Ok(kc) = get_docker_kubeconfig(name) {
                     if std::fs::write(&cluster_kc_path, &kc).is_ok() {
-                        chaos_targets.add(name, &cluster_kc_path);
+                        chaos_targets.add(name, &cluster_kc_path, Some(&mgmt_kubeconfig_path));
                     }
                 }
             }

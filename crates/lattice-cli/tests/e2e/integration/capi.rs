@@ -196,8 +196,8 @@ pub async fn verify_capi_machines_ready(
 #[ignore]
 async fn test_capi_standalone() {
     let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG to run standalone CAPI tests");
-    let cluster_name =
-        std::env::var("LATTICE_MGMT_CLUSTER_NAME").unwrap_or_else(|_| MGMT_CLUSTER_NAME.to_string());
+    let cluster_name = std::env::var("LATTICE_MGMT_CLUSTER_NAME")
+        .unwrap_or_else(|_| MGMT_CLUSTER_NAME.to_string());
     verify_mgmt_capi_resources(&ctx, &cluster_name)
         .await
         .unwrap();

@@ -14,7 +14,9 @@
 use tracing::info;
 
 use super::super::context::{init_test_env, InfraContext};
-use super::super::helpers::{run_cmd, run_cmd_allow_fail, watch_worker_scaling, WORKLOAD_CLUSTER_NAME};
+use super::super::helpers::{
+    run_cmd, run_cmd_allow_fail, watch_worker_scaling, WORKLOAD_CLUSTER_NAME,
+};
 
 /// Verify worker node count on workload cluster
 ///

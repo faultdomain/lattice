@@ -177,13 +177,17 @@ async fn run_upgrade_test() -> Result<(), String> {
     mesh_handle.check_no_policy_gaps().await?;
     info!("Initial policy verification passed");
 
-    // Start chaos
-    info!("[Phase 4] Starting chaos monkey...");
+    // Start chaos with coordinated attacks for upgrade stress testing
+    info!("[Phase 4] Starting coordinated chaos monkey...");
     let chaos_targets = Arc::new(ChaosTargets::new());
-    chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig);
-    chaos_targets.add(UPGRADE_WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path);
+    chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig, None);
+    chaos_targets.add(
+        UPGRADE_WORKLOAD_CLUSTER_NAME,
+        &workload_kubeconfig_path,
+        Some(&mgmt_kubeconfig),
+    );
 
-    let _chaos = ChaosMonkey::start_with_config(chaos_targets, ChaosConfig::aggressive());
+    let _chaos = ChaosMonkey::start_with_config(chaos_targets, ChaosConfig::coordinated());
 
     // Trigger upgrade
     info!("[Phase 5] Triggering upgrade to v{}...", to_version);
@@ -238,7 +242,11 @@ async fn run_upgrade_test() -> Result<(), String> {
     );
     let _ = run_cmd_allow_fail(
         "docker",
-        &["rm", "-f", &format!("{}-worker", UPGRADE_WORKLOAD_CLUSTER_NAME)],
+        &[
+            "rm",
+            "-f",
+            &format!("{}-worker", UPGRADE_WORKLOAD_CLUSTER_NAME),
+        ],
     );
 
     info!(

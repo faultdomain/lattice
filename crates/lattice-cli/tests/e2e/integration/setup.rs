@@ -239,9 +239,9 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     info!("[Setup] SUCCESS: Management cluster is self-managing!");
 
-    // Add mgmt to chaos targets
+    // Add mgmt to chaos targets (no parent)
     if let Some(ref targets) = chaos_targets {
-        targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path);
+        targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, None);
     }
 
     // =========================================================================
@@ -293,9 +293,13 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     info!("[Setup] SUCCESS: Workload cluster verified!");
 
-    // Add workload to chaos targets
+    // Add workload to chaos targets (parent: mgmt)
     if let Some(ref targets) = chaos_targets {
-        targets.add(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path);
+        targets.add(
+            WORKLOAD_CLUSTER_NAME,
+            &workload_kubeconfig_path,
+            Some(&mgmt_kubeconfig_path),
+        );
     }
 
     // =========================================================================
@@ -351,6 +355,15 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     capi::verify_workload2_capi_resources(&ctx, WORKLOAD2_CLUSTER_NAME).await?;
 
     info!("[Setup] SUCCESS: Workload2 cluster verified!");
+
+    // Add workload2 to chaos targets (parent: workload)
+    if let Some(ref targets) = chaos_targets {
+        targets.add(
+            WORKLOAD2_CLUSTER_NAME,
+            &workload2_kubeconfig_path,
+            Some(&workload_kubeconfig_path),
+        );
+    }
 
     // =========================================================================
     // Setup Complete
@@ -446,7 +459,7 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
     pivot::wait_for_cluster_ready(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
 
     if let Some(ref targets) = chaos_targets {
-        targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path);
+        targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, None);
     }
 
     info!("");
@@ -507,7 +520,11 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     scaling::verify_workers(&result.ctx, WORKLOAD_CLUSTER_NAME, 1).await?;
 
     if let Some(ref targets) = result.chaos_targets {
-        targets.add(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path);
+        targets.add(
+            WORKLOAD_CLUSTER_NAME,
+            &workload_kubeconfig_path,
+            Some(&result.ctx.mgmt_kubeconfig),
+        );
     }
 
     info!("");

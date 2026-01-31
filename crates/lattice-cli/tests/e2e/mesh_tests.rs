@@ -220,6 +220,36 @@ impl TestTarget {
     }
 }
 
+// =============================================================================
+// Log Result Parsing
+// =============================================================================
+
+/// Parse traffic test result from logs
+///
+/// Checks for allowed/blocked patterns and returns the most recent result.
+/// When both patterns are found, uses rfind to determine which occurred last.
+///
+/// Returns:
+/// - `Some(true)` if traffic was allowed
+/// - `Some(false)` if traffic was blocked
+/// - `None` if no result found
+fn parse_traffic_result(logs: &str, allowed_pattern: &str, blocked_pattern: &str) -> Option<bool> {
+    let has_allowed = logs.contains(allowed_pattern);
+    let has_blocked = logs.contains(blocked_pattern);
+
+    match (has_allowed, has_blocked) {
+        (true, true) => {
+            // Both found - use the LAST occurrence to get most recent result
+            let last_allowed = logs.rfind(allowed_pattern).unwrap();
+            let last_blocked = logs.rfind(blocked_pattern).unwrap();
+            Some(last_allowed > last_blocked)
+        }
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+    }
+}
+
 // Markers for cycle detection in logs
 const CYCLE_START_MARKER: &str = "===CYCLE_START===";
 const CYCLE_END_MARKER: &str = "===CYCLE_END===";
@@ -233,7 +263,7 @@ const CYCLE_END_MARKER: &str = "===CYCLE_END===";
 ///
 /// * `kubeconfig_path` - Path to kubeconfig
 /// * `namespace` - Namespace containing the pods
-/// * `service_names` - Names of the LatticeServices (used to find pods via lattice.dev/name label)
+/// * `service_names` - Names of the LatticeServices (used to find pods via LABEL_NAME label)
 /// * `min_cycles` - Minimum number of complete cycles to wait for
 async fn wait_for_cycles(
     kubeconfig_path: &str,
@@ -260,6 +290,11 @@ async fn wait_for_cycles(
         }
 
         // Get all pods in the namespace with their labels
+        // Use bracket notation for labels with special characters (e.g., app.kubernetes.io/name)
+        let jsonpath = format!(
+            "{{range .items[*]}}{{.metadata.name}}:{{.metadata.labels['{}']}}{{\"\\n\"}}{{end}}",
+            lattice_common::LABEL_NAME
+        );
         let pods_output = run_cmd_allow_fail(
             "kubectl",
             &[
@@ -270,7 +305,7 @@ async fn wait_for_cycles(
                 "-n",
                 namespace,
                 "-o",
-                "jsonpath={range .items[*]}{.metadata.name}:{.metadata.labels.lattice\\.dev/name}{\"\\n\"}{end}",
+                &format!("jsonpath={}", jsonpath),
             ],
         );
 
@@ -1031,32 +1066,14 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
         )?;
 
         for (target, expected_allowed) in expected_results.iter() {
-            let expected_str = if *expected_allowed {
-                "ALLOWED"
-            } else {
-                "BLOCKED"
-            };
+            let expected_str = if *expected_allowed { "ALLOWED" } else { "BLOCKED" };
             let allowed_pattern = format!("{}: ALLOWED", target);
             let blocked_pattern = format!("{}: BLOCKED", target);
 
-            // Check for ANY occurrence (handles partial logs from in-progress runs)
-            let has_allowed = logs.contains(&allowed_pattern);
-            let has_blocked = logs.contains(&blocked_pattern);
-
-            let actual_str = match (has_allowed, has_blocked) {
-                (true, true) => {
-                    // Both found - use the LAST occurrence to get most recent result
-                    let last_allowed = logs.rfind(&allowed_pattern).unwrap();
-                    let last_blocked = logs.rfind(&blocked_pattern).unwrap();
-                    if last_allowed > last_blocked {
-                        "ALLOWED"
-                    } else {
-                        "BLOCKED"
-                    }
-                }
-                (true, false) => "ALLOWED",
-                (false, true) => "BLOCKED",
-                (false, false) => "UNKNOWN",
+            let actual_str = match parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern) {
+                Some(true) => "ALLOWED",
+                Some(false) => "BLOCKED",
+                None => "UNKNOWN",
             };
 
             let result_ok = actual_str == expected_str;
@@ -1933,23 +1950,9 @@ async fn verify_random_mesh_traffic(
             if src != source {
                 continue;
             }
-            // Find ANY occurrence of ALLOWED or BLOCKED (accept results from any test run)
             let allowed_pattern = format!("{}->{}:ALLOWED", src, tgt);
             let blocked_pattern = format!("{}->{}:BLOCKED", src, tgt);
-            let has_allowed = logs.contains(&allowed_pattern);
-            let has_blocked = logs.contains(&blocked_pattern);
-
-            match (has_allowed, has_blocked) {
-                (true, true) => {
-                    // Both found - use the LAST occurrence to get most recent result
-                    let last_allowed = logs.rfind(&allowed_pattern).unwrap();
-                    let last_blocked = logs.rfind(&blocked_pattern).unwrap();
-                    *actual = Some(last_allowed > last_blocked);
-                }
-                (true, false) => *actual = Some(true),
-                (false, true) => *actual = Some(false),
-                (false, false) => {} // No result found
-            }
+            *actual = parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern);
         }
     }
 
