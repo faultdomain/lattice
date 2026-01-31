@@ -224,22 +224,30 @@ impl TestTarget {
 const CYCLE_START_MARKER: &str = "===CYCLE_START===";
 const CYCLE_END_MARKER: &str = "===CYCLE_END===";
 
-/// Wait for N complete test cycles across all traffic generator pods
+/// Wait for N complete test cycles across specified traffic generator pods
 ///
 /// Monitors logs for CYCLE_END markers and returns once all traffic generators
 /// have completed at least `min_cycles` cycles.
+///
+/// # Arguments
+///
+/// * `kubeconfig_path` - Path to kubeconfig
+/// * `namespace` - Namespace containing the pods
+/// * `service_names` - Names of the LatticeServices (used to find pods via lattice.dev/name label)
+/// * `min_cycles` - Minimum number of complete cycles to wait for
 async fn wait_for_cycles(
     kubeconfig_path: &str,
     namespace: &str,
-    pod_label_selector: &str,
+    service_names: &[&str],
     min_cycles: usize,
 ) -> Result<(), String> {
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(600); // 10 minute max
 
     info!(
-        "Waiting for {} complete test cycles on pods matching '{}'...",
-        min_cycles, pod_label_selector
+        "Waiting for {} complete test cycles on {} traffic generators...",
+        min_cycles,
+        service_names.len()
     );
 
     loop {
@@ -251,7 +259,7 @@ async fn wait_for_cycles(
             ));
         }
 
-        // Get all pods matching the label selector
+        // Get all pods in the namespace with their labels
         let pods_output = run_cmd_allow_fail(
             "kubectl",
             &[
@@ -261,21 +269,33 @@ async fn wait_for_cycles(
                 "pods",
                 "-n",
                 namespace,
-                "-l",
-                pod_label_selector,
                 "-o",
-                "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+                "jsonpath={range .items[*]}{.metadata.name}:{.metadata.labels.lattice\\.dev/name}{\"\\n\"}{end}",
             ],
         );
 
+        // Filter to only pods matching our service names
         let pods: Vec<&str> = pods_output
             .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() == 2 {
+                    let pod_name = parts[0].trim();
+                    let label_value = parts[1].trim();
+                    if service_names.contains(&label_value) {
+                        return Some(pod_name);
+                    }
+                }
+                None
+            })
             .collect();
 
-        if pods.is_empty() {
-            info!("No pods found yet, waiting...");
+        if pods.len() < service_names.len() {
+            info!(
+                "Found {}/{} traffic generator pods, waiting...",
+                pods.len(),
+                service_names.len()
+            );
             sleep(Duration::from_secs(5)).await;
             continue;
         }
@@ -337,7 +357,7 @@ async fn wait_for_mesh_test_cycles(kubeconfig_path: &str, min_cycles: usize) -> 
     wait_for_cycles(
         kubeconfig_path,
         TEST_SERVICES_NAMESPACE,
-        "lattice.dev/environment=mesh-test,lattice.dev/name in (frontend-web,frontend-mobile,frontend-admin)",
+        &["frontend-web", "frontend-mobile", "frontend-admin"],
         min_cycles,
     )
     .await
@@ -349,19 +369,8 @@ async fn wait_for_random_mesh_test_cycles(
     traffic_generators: &[String],
     min_cycles: usize,
 ) -> Result<(), String> {
-    // Build label selector for traffic generators
-    let names = traffic_generators.join(",");
-    let selector = format!(
-        "lattice.dev/environment={},lattice.dev/name in ({})",
-        RANDOM_MESH_NAMESPACE, names
-    );
-    wait_for_cycles(
-        kubeconfig_path,
-        RANDOM_MESH_NAMESPACE,
-        &selector,
-        min_cycles,
-    )
-    .await
+    let names: Vec<&str> = traffic_generators.iter().map(|s| s.as_str()).collect();
+    wait_for_cycles(kubeconfig_path, RANDOM_MESH_NAMESPACE, &names, min_cycles).await
 }
 
 /// Generate a traffic test script that waits for policies and tests connections
