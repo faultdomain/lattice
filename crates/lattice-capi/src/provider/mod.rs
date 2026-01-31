@@ -224,6 +224,25 @@ pub fn get_cluster_name(cluster: &LatticeCluster) -> Result<&str> {
         .ok_or_else(|| Error::validation("cluster name required"))
 }
 
+/// Get required secrets for a provider, using cluster's credentials_secret_ref or defaults
+///
+/// Returns a vec of (secret_name, namespace) tuples.
+pub fn get_provider_secrets(
+    cluster: &LatticeCluster,
+    default_name: &str,
+    default_namespace: &str,
+) -> Vec<(String, String)> {
+    let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
+    vec![(
+        secret_ref
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| default_name.to_string()),
+        secret_ref
+            .map(|s| s.namespace.clone())
+            .unwrap_or_else(|| default_namespace.to_string()),
+    )]
+}
+
 // ============================================================================
 // Configuration Structs
 // ============================================================================

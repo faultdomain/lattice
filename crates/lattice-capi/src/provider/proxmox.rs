@@ -326,16 +326,7 @@ impl Provider for ProxmoxProvider {
     }
 
     fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
-        // Use credentials_secret_ref from ProviderSpec if set, otherwise use default
-        let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
-        vec![(
-            secret_ref
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| PROXMOX_CREDENTIALS_SECRET.to_string()),
-            secret_ref
-                .map(|s| s.namespace.clone())
-                .unwrap_or_else(|| CAPMOX_NAMESPACE.to_string()),
-        )]
+        super::get_provider_secrets(cluster, PROXMOX_CREDENTIALS_SECRET, CAPMOX_NAMESPACE)
     }
 }
 

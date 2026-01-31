@@ -19,8 +19,8 @@ pub struct OpenStackConfig {
     // ==========================================================================
     // Required Fields
     // ==========================================================================
-    /// External network ID for floating IPs and API server load balancer
-    pub external_network_id: String,
+    /// External network name for floating IPs and API server load balancer
+    pub external_network: String,
 
     /// OpenStack flavor for control plane nodes (e.g., "b2-30")
     pub cp_flavor: String,
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn minimal_config() {
         let yaml = r#"
-externalNetworkId: ext-net
+externalNetwork: ext-net
 cpFlavor: m1.large
 workerFlavor: m1.medium
 imageName: ubuntu-22.04
@@ -124,7 +124,7 @@ sshKeyName: default
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let config: OpenStackConfig = serde_json::from_value(value)
             .expect("minimal OpenStackConfig deserialization should succeed");
-        assert_eq!(config.external_network_id, "ext-net");
+        assert_eq!(config.external_network, "ext-net");
         assert_eq!(config.cp_flavor, "m1.large");
         assert!(config.cloud_name.is_none());
     }
@@ -132,7 +132,7 @@ sshKeyName: default
     #[test]
     fn full_config_with_options() {
         let yaml = r#"
-externalNetworkId: Ext-Net
+externalNetwork: Ext-Net
 cpFlavor: b2-30
 workerFlavor: b2-15
 imageName: Ubuntu 22.04

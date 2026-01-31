@@ -113,6 +113,7 @@ fn serialize_for_distribution<T: serde::Serialize + Clone + kube::ResourceExt>(
 mod tests {
     use super::*;
     use lattice_common::crd::{CloudProviderSpec, CloudProviderType, SecretRef};
+    use lattice_common::CAPA_NAMESPACE;
 
     // =========================================================================
     // serialize_for_distribution Tests

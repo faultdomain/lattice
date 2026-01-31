@@ -15,7 +15,7 @@ spec:
         - "localhost"
     config:
       openstack:
-        externalNetworkId: "Ext-Net"
+        externalNetwork: "Ext-Net"
         cpFlavor: "b2-30"
         workerFlavor: "b2-15"
         imageName: "Ubuntu 22.04"

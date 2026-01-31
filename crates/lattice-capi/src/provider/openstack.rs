@@ -77,13 +77,16 @@ impl OpenStackProvider {
             .clone()
             .unwrap_or_else(|| DEFAULT_NODE_CIDR.to_string());
 
+        // Use filter.name for network lookup (more flexible than requiring UUID)
         let mut spec = serde_json::json!({
             "externalNetwork": {
-                "id": &cfg.external_network_id
+                "filter": {
+                    "name": &cfg.external_network
+                }
             },
             "identityRef": {
                 "cloudName": cloud_name,
-                "name": format!("{}-cloud-config", name)
+                "name": OPENSTACK_CREDENTIALS_SECRET
             },
             "managedSubnets": [{
                 "cidr": node_cidr,
@@ -237,9 +240,9 @@ impl Provider for OpenStackProvider {
 
         // Validate OpenStack-specific config
         if let Some(ref cfg) = spec.config.openstack {
-            if cfg.external_network_id.is_empty() {
+            if cfg.external_network.is_empty() {
                 return Err(Error::validation(
-                    "openstack config requires externalNetworkId",
+                    "openstack config requires externalNetwork",
                 ));
             }
             if cfg.cp_flavor.is_empty() {
@@ -260,16 +263,7 @@ impl Provider for OpenStackProvider {
     }
 
     fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
-        // Use credentials_secret_ref from ProviderSpec if set, otherwise use default
-        let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
-        vec![(
-            secret_ref
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| OPENSTACK_CREDENTIALS_SECRET.to_string()),
-            secret_ref
-                .map(|s| s.namespace.clone())
-                .unwrap_or_else(|| CAPO_NAMESPACE.to_string()),
-        )]
+        super::get_provider_secrets(cluster, OPENSTACK_CREDENTIALS_SECRET, CAPO_NAMESPACE)
     }
 }
 
@@ -284,7 +278,7 @@ mod tests {
 
     fn test_openstack_config() -> OpenStackConfig {
         OpenStackConfig {
-            external_network_id: "ext-net-123".to_string(),
+            external_network: "ext-net-123".to_string(),
             cp_flavor: "b2-30".to_string(),
             worker_flavor: "b2-15".to_string(),
             image_name: "Ubuntu 22.04".to_string(),
@@ -399,7 +393,7 @@ mod tests {
         let provider = OpenStackProvider::with_namespace("capi-system");
 
         let mut cfg = test_openstack_config();
-        cfg.external_network_id = String::new();
+        cfg.external_network = String::new();
 
         let spec = ProviderSpec {
             kubernetes: KubernetesSpec {
@@ -416,7 +410,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("externalNetworkId"));
+            .contains("externalNetwork"));
     }
 
     #[tokio::test]

@@ -81,13 +81,18 @@ pub const CAPMOX_NAMESPACE: &str = "capmox-system";
 /// Target namespace for CAPO (OpenStack) provider
 pub const CAPO_NAMESPACE: &str = "capo-system";
 
-// CAPI provider credential secret names
+// CAPI provider credential secret names (source secrets in lattice-system)
 /// Secret name for Proxmox credentials
 pub const PROXMOX_CREDENTIALS_SECRET: &str = "proxmox-credentials";
-/// Secret name for AWS credentials
+/// Secret name for AWS credentials (source secret)
 pub const AWS_CREDENTIALS_SECRET: &str = "aws-credentials";
 /// Secret name for OpenStack credentials
 pub const OPENSTACK_CREDENTIALS_SECRET: &str = "openstack-cloud-config";
+
+// CAPI provider secret names (target secrets in provider namespaces)
+// These are the names expected by each CAPI provider
+/// AWS CAPA expects this specific secret name
+pub const AWS_CAPA_CREDENTIALS_SECRET: &str = "capa-manager-bootstrap-credentials";
 
 /// Label key for provider identification on secrets
 pub const PROVIDER_LABEL: &str = "lattice.dev/provider";

@@ -176,6 +176,7 @@ pub enum ReconcileError {
 mod tests {
     use super::*;
     use lattice_common::crd::{CloudProviderSpec, SecretRef};
+    use lattice_common::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
 
     fn sample_aws_provider() -> CloudProvider {
         CloudProvider::new(

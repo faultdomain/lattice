@@ -1361,7 +1361,7 @@ mod tests {
         #[test]
         fn test_openstack_config() {
             let openstack = OpenStackConfig {
-                external_network_id: "ext-net".to_string(),
+                external_network: "ext-net".to_string(),
                 cp_flavor: "m1.large".to_string(),
                 worker_flavor: "m1.medium".to_string(),
                 image_name: "Ubuntu 22.04".to_string(),

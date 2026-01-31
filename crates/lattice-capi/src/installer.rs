@@ -23,16 +23,14 @@ use tracing::{debug, info, warn};
 
 use lattice_common::crd::{ProviderType, SecretRef};
 use lattice_common::{
-    AwsCredentials, Error, CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE,
-    OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+    AwsCredentials, Error, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE, CAPMOX_NAMESPACE,
+    CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
 
 /// Copy credentials from CloudProvider's secret reference to the CAPI provider namespace.
 ///
-/// CAPI providers expect credentials in specific namespaces with specific names:
-/// - AWS: `capa-system/capa-manager-bootstrap-credentials`
-/// - Proxmox: `capmox-system/proxmox-credentials`
-/// - OpenStack: `capo-system/openstack-credentials`
+/// CAPI providers expect credentials in specific namespaces with specific names.
+/// This copies the source secret to the location expected by each CAPI provider.
 pub async fn copy_credentials_to_provider_namespace(
     client: &KubeClient,
     provider: ProviderType,
@@ -41,7 +39,7 @@ pub async fn copy_credentials_to_provider_namespace(
     use k8s_openapi::api::core::v1::{Namespace, Secret};
 
     let (target_namespace, target_name) = match provider {
-        ProviderType::Aws => (CAPA_NAMESPACE, "capa-manager-bootstrap-credentials"),
+        ProviderType::Aws => (CAPA_NAMESPACE, AWS_CAPA_CREDENTIALS_SECRET),
         ProviderType::Proxmox => (CAPMOX_NAMESPACE, PROXMOX_CREDENTIALS_SECRET),
         ProviderType::OpenStack => (CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET),
         // Docker and other providers don't need credentials
@@ -203,9 +201,8 @@ impl InfraProviderInfo {
             ProviderType::Aws => Ok(Self {
                 name: "aws",
                 version: env!("CAPA_VERSION").to_string(),
-                credentials_secret: Some((CAPA_NAMESPACE, "capa-manager-bootstrap-credentials")),
-                // AWS generates AWS_B64ENCODED_CREDENTIALS from these fields in get_provider_env_vars
-                // credentials_env_map is not used directly - see generate_aws_b64_credentials()
+                credentials_secret: Some((CAPA_NAMESPACE, AWS_CAPA_CREDENTIALS_SECRET)),
+                // AWS generates AWS_B64ENCODED_CREDENTIALS from the secret - see get_provider_env_vars()
                 credentials_env_map: &[],
                 extra_init_args: &[],
             }),

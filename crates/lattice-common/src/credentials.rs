@@ -234,8 +234,10 @@ impl OpenStackCredentials {
             .map_err(|_| CredentialError::EnvVarNotSet("OS_USERNAME"))?;
         let password = std::env::var("OS_PASSWORD")
             .map_err(|_| CredentialError::EnvVarNotSet("OS_PASSWORD"))?;
+        // Support both OS_PROJECT_NAME (v3) and OS_TENANT_NAME (v2, legacy)
         let project_name = std::env::var("OS_PROJECT_NAME")
-            .map_err(|_| CredentialError::EnvVarNotSet("OS_PROJECT_NAME"))?;
+            .or_else(|_| std::env::var("OS_TENANT_NAME"))
+            .map_err(|_| CredentialError::EnvVarNotSet("OS_PROJECT_NAME or OS_TENANT_NAME"))?;
         let user_domain =
             std::env::var("OS_USER_DOMAIN_NAME").unwrap_or_else(|_| "Default".to_string());
         let project_domain =
