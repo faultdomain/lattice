@@ -44,7 +44,7 @@ use super::helpers::{
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
     load_registry_credentials, run_cmd_allow_fail, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
-use super::integration::setup::cleanup_bootstrap_clusters;
+use super::integration::{pivot, setup::cleanup_bootstrap_clusters};
 use super::mesh_tests::start_mesh_test;
 use super::providers::InfraProvider;
 
@@ -155,7 +155,7 @@ async fn run_upgrade_test() -> Result<(), String> {
         .map_err(|e| format!("Failed to create workload cluster: {}", e))?;
 
     // Wait for cluster to be ready
-    wait_for_cluster_ready(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME).await?;
+    pivot::wait_for_cluster_ready(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME, Some(600)).await?;
     info!("Workload cluster ready at v{}!", from_version);
 
     // Extract kubeconfig
@@ -246,33 +246,6 @@ async fn run_upgrade_test() -> Result<(), String> {
         from_version, to_version
     );
     Ok(())
-}
-
-async fn wait_for_cluster_ready(client: &kube::Client, name: &str) -> Result<(), String> {
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-    let start = Instant::now();
-    let timeout = Duration::from_secs(600);
-
-    loop {
-        if start.elapsed() > timeout {
-            return Err(format!("Timeout waiting for cluster {} to be ready", name));
-        }
-
-        match api.get(name).await {
-            Ok(cluster) => {
-                if let Some(status) = &cluster.status {
-                    if status.phase == ClusterPhase::Ready {
-                        return Ok(());
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(format!("Failed to get cluster {}: {}", name, e));
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
 }
 
 async fn wait_for_cluster_deleted(client: &kube::Client, name: &str) -> Result<(), String> {
