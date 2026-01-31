@@ -13,14 +13,9 @@ use tracing::debug;
 
 use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretsProvider};
 pub use lattice_common::DistributableResources;
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
-
-/// Label indicating which cluster originally created this resource
-pub const ORIGIN_CLUSTER_LABEL: &str = "lattice.dev/origin-cluster";
-/// Label indicating the original name before prefixing
-pub const ORIGINAL_NAME_LABEL: &str = "lattice.dev/original-name";
-/// Label indicating this resource was inherited from a parent
-pub const INHERITED_LABEL: &str = "lattice.dev/inherited";
+use lattice_common::{
+    INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL,
+};
 
 /// Error type for resource distribution
 #[derive(Debug, Error)]

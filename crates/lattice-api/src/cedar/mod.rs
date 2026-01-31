@@ -28,9 +28,7 @@ use tracing::{debug, info, warn};
 use crate::auth::UserIdentity;
 use crate::error::{Error, Result};
 use lattice_common::crd::CedarPolicy;
-
-/// Label indicating this resource was inherited from a parent cluster
-const INHERITED_LABEL: &str = "lattice.dev/inherited";
+use lattice_common::INHERITED_LABEL;
 
 /// Lattice Cedar schema namespace
 const NAMESPACE: &str = "Lattice";

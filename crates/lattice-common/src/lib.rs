@@ -264,3 +264,11 @@ pub const LABEL_MANAGED_BY_LATTICE: &str = "lattice";
 pub const CILIUM_LABEL_NAME: &str = "k8s:app.kubernetes.io/name";
 /// Cilium selector for pod namespace
 pub const CILIUM_LABEL_NAMESPACE: &str = "k8s:io.kubernetes.pod.namespace";
+
+// Resource inheritance labels (for hierarchical policy propagation)
+/// Label indicating which cluster originally created this resource
+pub const ORIGIN_CLUSTER_LABEL: &str = "lattice.dev/origin-cluster";
+/// Label indicating the original name before prefixing
+pub const ORIGINAL_NAME_LABEL: &str = "lattice.dev/original-name";
+/// Label indicating this resource was inherited from a parent cluster
+pub const INHERITED_LABEL: &str = "lattice.dev/inherited";

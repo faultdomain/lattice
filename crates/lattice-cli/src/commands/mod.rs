@@ -55,3 +55,18 @@ impl<T, E: Display> CommandErrorExt<T> for std::result::Result<T, E> {
         self.map_err(|e| Error::command_failed(e.to_string()))
     }
 }
+
+/// Generate a short readable run ID (6 hex chars).
+///
+/// Used by install/uninstall commands to create unique kind cluster names
+/// and temp files for parallel execution.
+pub fn generate_run_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u32;
+    let pid = std::process::id();
+    // Combine timestamp and pid, take 6 hex chars for readability
+    format!("{:06x}", (timestamp ^ pid) & 0xFFFFFF)
+}

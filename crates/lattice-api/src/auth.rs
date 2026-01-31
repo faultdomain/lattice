@@ -23,9 +23,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 use lattice_common::crd::OIDCProvider;
-
-/// Label indicating this resource was inherited from a parent cluster
-const INHERITED_LABEL: &str = "lattice.dev/inherited";
+use lattice_common::INHERITED_LABEL;
 
 /// Validated user identity from OIDC token
 #[derive(Debug, Clone, Serialize, Deserialize)]

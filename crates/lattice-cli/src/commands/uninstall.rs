@@ -25,7 +25,7 @@ use kube::Client;
 use tokio::process::Command;
 use tracing::{debug, info};
 
-use super::{kind_utils, CommandErrorExt};
+use super::{generate_run_id, kind_utils, CommandErrorExt};
 
 use lattice_common::clusterctl::{move_to_kubeconfig, teardown_cluster, TeardownConfig};
 use lattice_common::kube_utils;
@@ -58,18 +58,6 @@ pub struct UninstallArgs {
     /// Used to create unique kind cluster names and temp files for parallel runs.
     #[arg(long, env = "LATTICE_RUN_ID")]
     pub run_id: Option<String>,
-}
-
-/// Generate a short readable run ID (6 hex chars from random bytes)
-fn generate_run_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u32;
-    let pid = std::process::id();
-    // Combine timestamp and pid, take 6 hex chars for readability
-    format!("{:06x}", (timestamp ^ pid) & 0xFFFFFF)
 }
 
 pub struct Uninstaller {

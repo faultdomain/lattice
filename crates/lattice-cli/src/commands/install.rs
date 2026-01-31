@@ -19,7 +19,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::info;
 
-use super::kind_utils;
+use super::{generate_run_id, kind_utils};
 
 use lattice_common::clusterctl::move_to_kubeconfig;
 use lattice_common::kube_utils;
@@ -101,18 +101,6 @@ pub struct Installer {
     registry_credentials: Option<String>,
     /// Run ID for this install session (used for kind cluster name and temp files)
     run_id: String,
-}
-
-/// Generate a short readable run ID (6 hex chars from random bytes)
-fn generate_run_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u32;
-    let pid = std::process::id();
-    // Combine timestamp and pid, take 6 hex chars for readability
-    format!("{:06x}", (timestamp ^ pid) & 0xFFFFFF)
 }
 
 impl Installer {
