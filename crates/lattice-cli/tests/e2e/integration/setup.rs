@@ -22,7 +22,7 @@
 //! cargo test --features provider-e2e --test e2e test_setup_hierarchy_only -- --ignored --nocapture
 //!
 //! # Then run integration tests against the existing clusters
-//! LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
+//! LATTICE_WORKLOAD_KUBECONFIG=/tmp/e2e-workload-kubeconfig-xxx \
 //! cargo test --features provider-e2e --test e2e test_mesh_standalone -- --ignored --nocapture
 //! ```
 //!
@@ -44,7 +44,7 @@ use tracing::info;
 use lattice_cli::commands::install::Installer;
 use lattice_operator::crd::LatticeCluster;
 
-use super::super::chaos::{ChaosMonkey, ChaosTargets};
+use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::super::context::InfraContext;
 use super::super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
@@ -226,10 +226,11 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
     }
 
-    // Start chaos monkey if configured
+    // Start chaos monkey if configured (uses provider-appropriate intervals)
     let (chaos, chaos_targets) = if config.enable_chaos {
         let targets = Arc::new(ChaosTargets::new());
-        let monkey = ChaosMonkey::start(targets.clone());
+        let config = ChaosConfig::for_provider(mgmt_provider);
+        let monkey = ChaosMonkey::start_with_config(targets.clone(), config);
         (Some(monkey), Some(targets))
     } else {
         (None, None)
@@ -467,9 +468,11 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
     }
 
+    // Start chaos monkey if configured (uses provider-appropriate intervals)
     let (chaos, chaos_targets) = if config.enable_chaos {
         let targets = Arc::new(ChaosTargets::new());
-        let monkey = ChaosMonkey::start(targets.clone());
+        let config = ChaosConfig::for_provider(mgmt_provider);
+        let monkey = ChaosMonkey::start_with_config(targets.clone(), config);
         (Some(monkey), Some(targets))
     } else {
         (None, None)

@@ -2192,6 +2192,25 @@ async fn handle_deletion(
         return Ok(Action::await_change());
     }
 
+    // Wait for cluster to be stable before unpivoting (no scaling in progress)
+    let capi_namespace = format!("capi-{}", name);
+    let is_stable = ctx
+        .capi
+        .is_cluster_stable(&name, &capi_namespace)
+        .await
+        .unwrap_or(false);
+
+    if !is_stable {
+        info!(cluster = %name, "Waiting for cluster to stabilize before unpivoting");
+        let status = cluster
+            .status
+            .clone()
+            .unwrap_or_default()
+            .message("Deletion pending: waiting for cluster to stabilize");
+        ctx.kube.patch_status(&name, &status).await?;
+        return Ok(Action::requeue(Duration::from_secs(10)));
+    }
+
     // Self cluster with parent - agent handles unpivot automatically
     // The agent detects deletion_timestamp on connect and starts an unpivot retry loop
     // that keeps sending ClusterDeleting to parent until parent's CAPI deletes us.
@@ -2261,6 +2280,7 @@ mod tests {
             async fn scale_pool(&self, cluster_name: &str, pool_id: &str, namespace: &str, replicas: u32) -> Result<(), Error>;
             async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
             async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
+            async fn is_cluster_stable(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
             fn kube_client(&self) -> Client;
         }
     }

@@ -55,6 +55,12 @@ impl ProviderType {
                     "service.beta.kubernetes.io/aws-load-balancer-type".to_string(),
                     "nlb".to_string(),
                 );
+                // Enable cross-zone load balancing so all NLB IPs route to the single pod
+                // Without this, only the NLB IP in the pod's AZ works
+                annotations.insert(
+                    "service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled".to_string(),
+                    "true".to_string(),
+                );
             }
             Self::Gcp => {
                 // GCP uses regional external LB by default, no special annotations needed
@@ -872,10 +878,15 @@ mod tests {
         #[test]
         fn test_load_balancer_annotations_aws() {
             let annotations = ProviderType::Aws.load_balancer_annotations();
-            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations.len(), 2);
             assert_eq!(
                 annotations.get("service.beta.kubernetes.io/aws-load-balancer-type"),
                 Some(&"nlb".to_string())
+            );
+            // Cross-zone LB ensures all NLB IPs route to single pod
+            assert_eq!(
+                annotations.get("service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled"),
+                Some(&"true".to_string())
             );
         }
 

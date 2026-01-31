@@ -36,7 +36,7 @@
 //!
 //! ```bash
 //! # Set kubeconfig paths from a previous E2E run
-//! LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
+//! LATTICE_WORKLOAD_KUBECONFIG=/tmp/e2e-workload-kubeconfig-xxx \
 //! cargo test --features provider-e2e --test e2e test_mesh_standalone -- --ignored --nocapture
 //! ```
 

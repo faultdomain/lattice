@@ -189,7 +189,8 @@ async fn run_upgrade_test() -> Result<(), String> {
         Some(&mgmt_kubeconfig),
     );
 
-    let _chaos = ChaosMonkey::start_with_config(chaos_targets, ChaosConfig::coordinated());
+    let chaos_config = ChaosConfig::for_provider(workload_provider).with_coordinated(0.5);
+    let _chaos = ChaosMonkey::start_with_config(chaos_targets, chaos_config);
 
     // Trigger upgrade
     info!("[Phase 5] Triggering upgrade to v{}...", to_version);

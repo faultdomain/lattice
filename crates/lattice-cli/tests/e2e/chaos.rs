@@ -2,6 +2,12 @@
 //!
 //! Supports both random single-cluster attacks and coordinated parent-child attacks
 //! that target critical phases like pivoting and unpivoting.
+//!
+//! # Provider-Aware Configuration
+//!
+//! Use `ChaosConfig::for_provider()` to get appropriate settings:
+//! - Docker/kind: Fast intervals (30-90s) since no LB delays
+//! - AWS/cloud: Slow intervals (90-150s) to account for NLB target registration
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +22,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_operator::crd::{ClusterPhase, LatticeCluster};
 
 use super::helpers::{client_from_kubeconfig, run_cmd_allow_fail};
+use super::providers::InfraProvider;
 
 const OPERATOR_NS: &str = LATTICE_SYSTEM_NAMESPACE;
 const OPERATOR_LABEL: &str = "app=lattice-operator";
@@ -55,28 +62,45 @@ impl Default for ChaosConfig {
 }
 
 impl ChaosConfig {
-    /// Aggressive chaos settings for endurance testing
-    pub fn aggressive() -> Self {
-        Self {
-            pod_interval: (30, 60),
-            net_interval: (45, 90),
-            net_blackout_secs: 3,
-            enable_coordinated: false,
-            coordinated_probability: 0.0,
-            critical_blackout_secs: 3,
+    /// Get appropriate chaos config for a provider
+    ///
+    /// - Docker/kind: Fast intervals since no LB delays
+    /// - AWS/cloud: Slow intervals to account for NLB target registration (30-90s)
+    pub fn for_provider(provider: InfraProvider) -> Self {
+        match provider {
+            InfraProvider::Docker => Self::default(),
+            InfraProvider::Aws | InfraProvider::OpenStack | InfraProvider::Proxmox => Self {
+                pod_interval: (90, 150),   // 90-150s between pod kills
+                net_interval: (120, 180),  // 120-180s between network cuts
+                net_blackout_secs: 5,
+                enable_coordinated: false,
+                coordinated_probability: 0.0,
+                critical_blackout_secs: 5,
+            },
         }
     }
 
-    /// Coordinated chaos that targets parent-child relationships during critical phases
-    pub fn coordinated() -> Self {
-        Self {
-            pod_interval: (30, 60),
-            net_interval: (45, 90),
-            net_blackout_secs: 3,
-            enable_coordinated: true,
-            coordinated_probability: 0.5,
-            critical_blackout_secs: 15,
-        }
+    /// Enable coordinated attacks that target parent-child relationships
+    pub fn with_coordinated(mut self, probability: f32) -> Self {
+        self.enable_coordinated = true;
+        self.coordinated_probability = probability;
+        self.critical_blackout_secs = match self.pod_interval.0 {
+            0..=60 => 15,   // Docker: shorter critical blackout
+            _ => 20,        // AWS/cloud: longer critical blackout
+        };
+        self
+    }
+
+    /// Set custom pod kill interval
+    pub fn with_pod_interval(mut self, min_secs: u64, max_secs: u64) -> Self {
+        self.pod_interval = (min_secs, max_secs);
+        self
+    }
+
+    /// Set custom network cut interval
+    pub fn with_net_interval(mut self, min_secs: u64, max_secs: u64) -> Self {
+        self.net_interval = (min_secs, max_secs);
+        self
     }
 }
 
@@ -695,17 +719,46 @@ mod tests {
     }
 
     #[test]
-    fn test_chaos_config_presets() {
-        let default = ChaosConfig::default();
-        assert!(!default.enable_coordinated);
+    fn test_chaos_config_for_provider() {
+        use super::InfraProvider;
 
-        let aggressive = ChaosConfig::aggressive();
-        assert!(!aggressive.enable_coordinated);
-        assert!(aggressive.pod_interval.1 < default.pod_interval.1);
+        // Docker uses fast intervals (no LB delays)
+        let docker = ChaosConfig::for_provider(InfraProvider::Docker);
+        assert!(!docker.enable_coordinated);
+        assert!(docker.pod_interval.0 <= 60);
 
-        let coordinated = ChaosConfig::coordinated();
-        assert!(coordinated.enable_coordinated);
-        assert!(coordinated.coordinated_probability > 0.0);
-        assert!(coordinated.critical_blackout_secs > coordinated.net_blackout_secs);
+        // AWS uses slow intervals (NLB registration takes 30-90s)
+        let aws = ChaosConfig::for_provider(InfraProvider::Aws);
+        assert!(!aws.enable_coordinated);
+        assert!(aws.pod_interval.0 >= 90);
+        assert!(aws.pod_interval.0 > docker.pod_interval.0);
+    }
+
+    #[test]
+    fn test_chaos_config_builder() {
+        let config = ChaosConfig::default()
+            .with_pod_interval(120, 180)
+            .with_net_interval(60, 90)
+            .with_coordinated(0.3);
+
+        assert_eq!(config.pod_interval, (120, 180));
+        assert_eq!(config.net_interval, (60, 90));
+        assert!(config.enable_coordinated);
+        assert!((config.coordinated_probability - 0.3).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_chaos_config_coordinated_by_provider() {
+        use super::InfraProvider;
+
+        // Docker coordinated has shorter critical blackout
+        let docker_coord = ChaosConfig::for_provider(InfraProvider::Docker).with_coordinated(0.5);
+        assert!(docker_coord.enable_coordinated);
+        assert_eq!(docker_coord.critical_blackout_secs, 15);
+
+        // AWS coordinated has longer critical blackout
+        let aws_coord = ChaosConfig::for_provider(InfraProvider::Aws).with_coordinated(0.5);
+        assert!(aws_coord.enable_coordinated);
+        assert_eq!(aws_coord.critical_blackout_secs, 20);
     }
 }

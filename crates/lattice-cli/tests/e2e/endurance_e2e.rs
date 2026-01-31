@@ -158,7 +158,8 @@ async fn run_endurance_test() -> Result<(), String> {
     chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, None);
 
     info!("[CHAOS] Starting coordinated chaos monkey...");
-    let _chaos = ChaosMonkey::start_with_config(chaos_targets.clone(), ChaosConfig::coordinated());
+    let chaos_config = ChaosConfig::for_provider(InfraProvider::Docker).with_coordinated(0.5);
+    let _chaos = ChaosMonkey::start_with_config(chaos_targets.clone(), chaos_config);
 
     let mut iteration = 0u64;
     let test_start = Instant::now();

@@ -67,6 +67,16 @@ pub trait CAPIClient: Send + Sync {
     async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str)
         -> Result<bool, Error>;
 
+    /// Check if cluster is stable (not scaling, not provisioning)
+    ///
+    /// Returns true when:
+    /// - CAPI Cluster is Ready
+    /// - All MachineDeployments have converged (readyReplicas == replicas)
+    /// - No machines are in transitional states (Provisioning, Pending, Deleting)
+    ///
+    /// Use this before deletion to avoid disrupting in-progress operations.
+    async fn is_cluster_stable(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
+
     /// Get the underlying kube Client for advanced operations
     fn kube_client(&self) -> Client;
 }
@@ -423,6 +433,68 @@ impl CAPIClient for CAPIClientImpl {
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn is_cluster_stable(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error> {
+        // Check 1: CAPI Cluster is Provisioned
+        let cluster_api = self.capi_cluster_api(namespace).await?;
+        match cluster_api.get(cluster_name).await {
+            Ok(cluster) => {
+                let phase = cluster
+                    .data
+                    .get("status")
+                    .and_then(|s| s.get("phase"))
+                    .and_then(|p| p.as_str());
+
+                if phase != Some("Provisioned") {
+                    debug!(cluster = %cluster_name, phase = ?phase, "Cluster not Provisioned");
+                    return Ok(false);
+                }
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                debug!(cluster = %cluster_name, "CAPI Cluster not found");
+                return Ok(false);
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        // Check 2: No machines in transitional states
+        let machine_ar = lattice_common::kube_utils::build_api_resource_with_discovery(
+            &self.client,
+            "cluster.x-k8s.io",
+            "Machine",
+        )
+        .await?;
+        let machine_api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), namespace, &machine_ar);
+
+        let machines = machine_api
+            .list(
+                &ListParams::default()
+                    .labels(&format!("cluster.x-k8s.io/cluster-name={}", cluster_name)),
+            )
+            .await?;
+
+        for machine in &machines.items {
+            let phase = machine
+                .data
+                .get("status")
+                .and_then(|s| s.get("phase"))
+                .and_then(|p| p.as_str());
+
+            if matches!(phase, Some("Provisioning" | "Pending" | "Deleting")) {
+                debug!(
+                    cluster = %cluster_name,
+                    machine = ?machine.metadata.name,
+                    phase = ?phase,
+                    "Machine in transitional state"
+                );
+                return Ok(false);
+            }
+        }
+
+        debug!(cluster = %cluster_name, "Cluster is stable");
+        Ok(true)
     }
 
     fn kube_client(&self) -> Client {

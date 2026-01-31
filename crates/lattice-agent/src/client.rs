@@ -212,6 +212,8 @@ impl AgentClient {
 
         let http_client = reqwest::Client::builder()
             .add_root_certificate(ca_cert)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| {
                 CertificateError::HttpError(format!("Failed to build HTTP client: {}", e))

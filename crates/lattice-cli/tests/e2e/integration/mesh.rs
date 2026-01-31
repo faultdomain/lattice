@@ -87,17 +87,23 @@ pub async fn start_mesh_tests_async(
     let handle = tokio::spawn(async move {
         info!("[Integration/Mesh] Running service mesh tests in background...");
 
-        // Run mesh tests in parallel
-        let (r1, r2) = tokio::join!(
-            run_mesh_test(&kubeconfig),
-            run_random_mesh_test(&kubeconfig)
-        );
-        r1?;
-        r2?;
-
-        // Docker includes media server test
+        // Run all mesh tests in parallel (including media server for Docker)
         if is_docker {
-            super::super::media_server_e2e::run_media_server_test(&kubeconfig).await?;
+            let (r1, r2, r3) = tokio::join!(
+                run_mesh_test(&kubeconfig),
+                run_random_mesh_test(&kubeconfig),
+                super::super::media_server_e2e::run_media_server_test(&kubeconfig)
+            );
+            r1?;
+            r2?;
+            r3?;
+        } else {
+            let (r1, r2) = tokio::join!(
+                run_mesh_test(&kubeconfig),
+                run_random_mesh_test(&kubeconfig)
+            );
+            r1?;
+            r2?;
         }
 
         info!("[Integration/Mesh] All background mesh tests complete!");

@@ -62,16 +62,18 @@ pub fn run_id() -> &'static str {
 
 /// Generate a unique kubeconfig path for a cluster.
 ///
-/// The path includes the run ID to allow parallel test execution.
+/// The path includes the run ID as a suffix to allow parallel test execution.
+/// Example: `/tmp/e2e-mgmt-kubeconfig-8156-965202`
 #[cfg(feature = "provider-e2e")]
 pub fn kubeconfig_path(cluster_name: &str) -> String {
-    format!("/tmp/{}-{}-kubeconfig", run_id(), cluster_name)
+    format!("/tmp/{}-kubeconfig-{}", cluster_name, run_id())
 }
 
 /// Generate a unique localhost-patched kubeconfig path for a cluster.
+/// Example: `/tmp/e2e-mgmt-kubeconfig-local-8156-965202`
 #[cfg(feature = "provider-e2e")]
 pub fn kubeconfig_local_path(cluster_name: &str) -> String {
-    format!("/tmp/{}-{}-kubeconfig-local", run_id(), cluster_name)
+    format!("/tmp/{}-kubeconfig-local-{}", cluster_name, run_id())
 }
 
 // =============================================================================
