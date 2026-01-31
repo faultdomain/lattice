@@ -11,9 +11,7 @@ use kube::runtime::Controller;
 use kube::{Api, Client};
 
 use lattice_operator::bootstrap::DefaultManifestGenerator;
-use lattice_operator::cloud_provider::{
-    self as cloud_provider_ctrl, Context as CloudProviderContext,
-};
+use lattice_operator::cloud_provider::{self as cloud_provider_ctrl, ControllerContext};
 use lattice_operator::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
     service_reconcile, Context, ServiceContext,
@@ -23,9 +21,7 @@ use lattice_operator::crd::{
     SecretsProvider,
 };
 use lattice_operator::parent::ParentServers;
-use lattice_operator::secrets_provider::{
-    self as secrets_provider_ctrl, Context as SecretsProviderContext,
-};
+use lattice_operator::secrets_provider as secrets_provider_ctrl;
 
 use crate::ControllerMode;
 
@@ -206,13 +202,13 @@ fn create_service_controllers(
 
 fn create_cloud_provider_controller(client: Client) -> impl std::future::Future<Output = ()> {
     let cloud_providers: Api<CloudProvider> = Api::all(client.clone());
-    let ctx = Arc::new(CloudProviderContext::new(client));
+    let ctx = Arc::new(ControllerContext::new(client));
 
     Controller::new(cloud_providers, WatcherConfig::default())
         .shutdown_on_signal()
         .run(
             cloud_provider_ctrl::reconcile,
-            cloud_provider_ctrl::error_policy,
+            cloud_provider_ctrl::default_error_policy,
             ctx,
         )
         .for_each(|result| async move {
@@ -225,13 +221,13 @@ fn create_cloud_provider_controller(client: Client) -> impl std::future::Future<
 
 fn create_secrets_provider_controller(client: Client) -> impl std::future::Future<Output = ()> {
     let secrets_providers: Api<SecretsProvider> = Api::all(client.clone());
-    let ctx = Arc::new(SecretsProviderContext::new(client));
+    let ctx = Arc::new(ControllerContext::new(client));
 
     Controller::new(secrets_providers, WatcherConfig::default())
         .shutdown_on_signal()
         .run(
             secrets_provider_ctrl::reconcile,
-            secrets_provider_ctrl::error_policy,
+            secrets_provider_ctrl::default_error_policy,
             ctx,
         )
         .for_each(|result| async move {

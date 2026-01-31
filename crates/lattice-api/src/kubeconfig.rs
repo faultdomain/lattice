@@ -112,7 +112,7 @@ pub async fn kubeconfig_handler(
 
     // Update Cedar's known clusters and filter by authorization
     state.cedar.set_known_clusters(subtree_clusters.clone()).await;
-    let accessible_clusters = state.cedar.accessible_clusters_async(&identity).await;
+    let accessible_clusters = state.cedar.accessible_clusters(&identity).await;
 
     if accessible_clusters.is_empty() {
         return Err(Error::Forbidden("No accessible clusters".into()));

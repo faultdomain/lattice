@@ -9,4 +9,4 @@
 
 mod controller;
 
-pub use controller::{error_policy, reconcile, Context};
+pub use controller::{default_error_policy, reconcile, ControllerContext};

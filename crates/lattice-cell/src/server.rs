@@ -27,12 +27,18 @@ use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use lattice_proto::{agent_message::Payload, AgentMessage, AgentState, CellCommand};
 
 use crate::kubeconfig::patch_kubeconfig_for_proxy;
+use crate::subtree_registry::{ClusterInfo, SubtreeRegistry};
 use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::ServerMtlsConfig;
+
+/// Shared reference to SubtreeRegistry
+pub type SharedSubtreeRegistry = std::sync::Arc<SubtreeRegistry>;
 
 /// gRPC server for agent communication
 pub struct AgentServer {
     registry: SharedAgentRegistry,
+    /// Subtree registry for tracking cluster hierarchy
+    subtree_registry: SharedSubtreeRegistry,
     /// Kubernetes client for persisting deletion requests
     kube_client: Client,
 }
@@ -40,6 +46,7 @@ pub struct AgentServer {
 /// Handle an agent message (standalone function to avoid temporary object creation)
 async fn handle_agent_message_impl(
     registry: SharedAgentRegistry,
+    subtree_registry: SharedSubtreeRegistry,
     msg: &AgentMessage,
     command_tx: &mpsc::Sender<CellCommand>,
     kube_client: &Client,
@@ -393,24 +400,57 @@ async fn handle_agent_message_impl(
                 service_count = state.services.len(),
                 "Subtree state received"
             );
-            // TODO: Update SubtreeRegistry when integrated
-            // For now, just log the received state
-            for cluster in &state.clusters {
-                if cluster.removed {
+
+            if state.is_full_sync {
+                // Full sync: replace all clusters from this agent
+                let clusters: Vec<ClusterInfo> = state
+                    .clusters
+                    .iter()
+                    .filter(|c| !c.removed)
+                    .map(|c| ClusterInfo {
+                        name: c.name.clone(),
+                        parent: c.parent.clone(),
+                        phase: c.phase.clone(),
+                        labels: c.labels.clone(),
+                    })
+                    .collect();
+
+                info!(
+                    cluster = %cluster_name,
+                    subtree_clusters = clusters.len(),
+                    "Full sync: updating subtree registry"
+                );
+                subtree_registry.handle_full_sync(cluster_name, clusters).await;
+            } else {
+                // Delta: add/remove specific clusters
+                let added: Vec<ClusterInfo> = state
+                    .clusters
+                    .iter()
+                    .filter(|c| !c.removed)
+                    .map(|c| ClusterInfo {
+                        name: c.name.clone(),
+                        parent: c.parent.clone(),
+                        phase: c.phase.clone(),
+                        labels: c.labels.clone(),
+                    })
+                    .collect();
+
+                let removed: Vec<String> = state
+                    .clusters
+                    .iter()
+                    .filter(|c| c.removed)
+                    .map(|c| c.name.clone())
+                    .collect();
+
+                if !added.is_empty() || !removed.is_empty() {
                     debug!(
                         cluster = %cluster_name,
-                        subtree_cluster = %cluster.name,
-                        "Subtree cluster removed"
-                    );
-                } else {
-                    debug!(
-                        cluster = %cluster_name,
-                        subtree_cluster = %cluster.name,
-                        parent = %cluster.parent,
-                        phase = %cluster.phase,
-                        "Subtree cluster added/updated"
+                        added = added.len(),
+                        removed = removed.len(),
+                        "Delta: updating subtree registry"
                     );
                 }
+                subtree_registry.handle_delta(cluster_name, added, removed).await;
             }
         }
         None => {
@@ -420,10 +460,15 @@ async fn handle_agent_message_impl(
 }
 
 impl AgentServer {
-    /// Create a new agent server with the given registry and kube client
-    pub fn new(registry: SharedAgentRegistry, kube_client: Client) -> Self {
+    /// Create a new agent server with the given registries and kube client
+    pub fn new(
+        registry: SharedAgentRegistry,
+        subtree_registry: SharedSubtreeRegistry,
+        kube_client: Client,
+    ) -> Self {
         Self {
             registry,
+            subtree_registry,
             kube_client,
         }
     }
@@ -442,11 +487,12 @@ impl AgentServer {
     /// - CA certificate (for verifying agent certificates)
     pub async fn serve_with_mtls(
         registry: SharedAgentRegistry,
+        subtree_registry: SharedSubtreeRegistry,
         addr: SocketAddr,
         mtls_config: ServerMtlsConfig,
         kube_client: Client,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let server = Self::new(registry, kube_client);
+        let server = Self::new(registry, subtree_registry, kube_client);
         let tls_config = mtls_config.to_tonic_config()?;
 
         info!(%addr, "Starting gRPC server with mTLS");
@@ -481,6 +527,7 @@ impl LatticeAgent for AgentServer {
 
         // Clone for the spawned task
         let registry = self.registry.clone();
+        let subtree_registry = self.subtree_registry.clone();
         let kube_client = self.kube_client.clone();
         let command_tx_clone = command_tx.clone();
 
@@ -499,6 +546,7 @@ impl LatticeAgent for AgentServer {
                         // Handle message directly using standalone function (no temp object)
                         handle_agent_message_impl(
                             registry.clone(),
+                            subtree_registry.clone(),
                             &msg,
                             &command_tx_clone,
                             &kube_client,
@@ -516,6 +564,7 @@ impl LatticeAgent for AgentServer {
             if let Some(name) = cluster_name {
                 info!(cluster = %name, "Agent disconnected");
                 registry.unregister(&name);
+                subtree_registry.handle_agent_disconnect(&name).await;
             }
         });
 
@@ -533,13 +582,14 @@ mod tests {
     use crate::AgentRegistry;
     use lattice_proto::{
         agent_message::Payload, AgentReady, BootstrapComplete, ClusterHealth, Heartbeat,
-        StatusResponse,
+        StatusResponse, SubtreeCluster, SubtreeState,
     };
 
     /// Test helper: handle message directly without needing a server
     /// This bypasses the kube client requirement for unit tests
     async fn test_handle_message(
         registry: &AgentRegistry,
+        subtree_registry: &SubtreeRegistry,
         msg: &AgentMessage,
         command_tx: &mpsc::Sender<CellCommand>,
     ) {
@@ -572,7 +622,41 @@ mod tests {
             Some(Payload::KubernetesResponse(_)) => {}
             Some(Payload::MoveAck(_)) => {}
             Some(Payload::MoveCompleteAck(_)) => {}
-            Some(Payload::SubtreeState(_)) => {}
+            Some(Payload::SubtreeState(state)) => {
+                if state.is_full_sync {
+                    let clusters: Vec<ClusterInfo> = state
+                        .clusters
+                        .iter()
+                        .filter(|c| !c.removed)
+                        .map(|c| ClusterInfo {
+                            name: c.name.clone(),
+                            parent: c.parent.clone(),
+                            phase: c.phase.clone(),
+                            labels: c.labels.clone(),
+                        })
+                        .collect();
+                    subtree_registry.handle_full_sync(cluster_name, clusters).await;
+                } else {
+                    let added: Vec<ClusterInfo> = state
+                        .clusters
+                        .iter()
+                        .filter(|c| !c.removed)
+                        .map(|c| ClusterInfo {
+                            name: c.name.clone(),
+                            parent: c.parent.clone(),
+                            phase: c.phase.clone(),
+                            labels: c.labels.clone(),
+                        })
+                        .collect();
+                    let removed: Vec<String> = state
+                        .clusters
+                        .iter()
+                        .filter(|c| c.removed)
+                        .map(|c| c.name.clone())
+                        .collect();
+                    subtree_registry.handle_delta(cluster_name, added, removed).await;
+                }
+            }
             None => {}
         }
     }
@@ -582,10 +666,15 @@ mod tests {
         Arc::new(AgentRegistry::new())
     }
 
-    // Test handle_agent_message with Ready payload
+    /// Create a new subtree registry for tests
+    fn create_test_subtree_registry() -> SubtreeRegistry {
+        SubtreeRegistry::new("test-cell".to_string())
+    }
+
     #[tokio::test]
     async fn test_handle_ready_message() {
         let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
         let msg = AgentMessage {
@@ -598,9 +687,8 @@ mod tests {
             })),
         };
 
-        test_handle_message(&registry, &msg, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
 
-        // Verify agent was registered
         assert!(!registry.is_empty());
         let conn = registry
             .get("test-cluster")
@@ -614,9 +702,9 @@ mod tests {
     #[tokio::test]
     async fn test_handle_ready_message_updates_existing() {
         let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
-        // First ready message
         let msg1 = AgentMessage {
             cluster_name: "test-cluster".to_string(),
             payload: Some(Payload::Ready(AgentReady {
@@ -626,9 +714,8 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        test_handle_message(&registry, &msg1, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg1, &tx).await;
 
-        // Second ready message with updated state
         let msg2 = AgentMessage {
             cluster_name: "test-cluster".to_string(),
             payload: Some(Payload::Ready(AgentReady {
@@ -638,7 +725,7 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        test_handle_message(&registry, &msg2, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg2, &tx).await;
 
         let conn = registry
             .get("test-cluster")
@@ -646,10 +733,10 @@ mod tests {
         assert_eq!(conn.state, AgentState::Ready);
     }
 
-    // Test handle_agent_message with BootstrapComplete payload
     #[tokio::test]
     async fn test_handle_bootstrap_complete_message() {
         let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
         let msg = AgentMessage {
@@ -660,17 +747,15 @@ mod tests {
             })),
         };
 
-        // Should not panic
-        test_handle_message(&registry, &msg, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
     }
 
-    // Test handle_agent_message with Heartbeat payload
     #[tokio::test]
     async fn test_handle_heartbeat_message() {
         let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
-        // First register the agent
         let ready_msg = AgentMessage {
             cluster_name: "test-cluster".to_string(),
             payload: Some(Payload::Ready(AgentReady {
@@ -680,9 +765,8 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        test_handle_message(&registry, &ready_msg, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &ready_msg, &tx).await;
 
-        // Send heartbeat
         let msg = AgentMessage {
             cluster_name: "test-cluster".to_string(),
             payload: Some(Payload::Heartbeat(Heartbeat {
@@ -691,19 +775,18 @@ mod tests {
                 uptime_seconds: 3600,
             })),
         };
-        test_handle_message(&registry, &msg, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
 
-        // State should remain Ready
         let conn = registry
             .get("test-cluster")
             .expect("agent should be registered");
         assert_eq!(conn.state, AgentState::Ready);
     }
 
-    // Test handle_agent_message with ClusterHealth payload
     #[tokio::test]
     async fn test_handle_cluster_health_message() {
         let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
         let msg = AgentMessage {
@@ -717,14 +800,13 @@ mod tests {
             })),
         };
 
-        // Should not panic
-        test_handle_message(&registry, &msg, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
     }
 
-    // Test handle_agent_message with StatusResponse payload
     #[tokio::test]
     async fn test_handle_status_response_message() {
         let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
         let msg = AgentMessage {
@@ -737,14 +819,13 @@ mod tests {
             })),
         };
 
-        // Should not panic
-        test_handle_message(&registry, &msg, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
     }
 
-    // Test handle_agent_message with no payload
     #[tokio::test]
     async fn test_handle_empty_payload_message() {
         let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
         let msg = AgentMessage {
@@ -752,17 +833,15 @@ mod tests {
             payload: None,
         };
 
-        // Should not panic, just log warning
-        test_handle_message(&registry, &msg, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
     }
 
-    // Test registry interactions through server
     #[tokio::test]
     async fn test_multiple_agents_registration() {
         let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
-        // Register first agent
         let msg1 = AgentMessage {
             cluster_name: "cluster-1".to_string(),
             payload: Some(Payload::Ready(AgentReady {
@@ -772,9 +851,8 @@ mod tests {
                 api_server_endpoint: "https://api.cluster1:6443".to_string(),
             })),
         };
-        test_handle_message(&registry, &msg1, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg1, &tx).await;
 
-        // Register second agent
         let msg2 = AgentMessage {
             cluster_name: "cluster-2".to_string(),
             payload: Some(Payload::Ready(AgentReady {
@@ -784,9 +862,8 @@ mod tests {
                 api_server_endpoint: "https://api.cluster2:6443".to_string(),
             })),
         };
-        test_handle_message(&registry, &msg2, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg2, &tx).await;
 
-        // Verify both are registered
         assert_eq!(registry.len(), 2);
 
         let conn1 = registry
@@ -800,13 +877,12 @@ mod tests {
         assert_eq!(conn2.agent_version, "0.2.0");
     }
 
-    // Test state transitions through messages
     #[tokio::test]
     async fn test_full_state_transition_lifecycle() {
         let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
-        // Initial: Provisioning
         let msg = AgentMessage {
             cluster_name: "test-cluster".to_string(),
             payload: Some(Payload::Ready(AgentReady {
@@ -816,7 +892,7 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        test_handle_message(&registry, &msg, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
         assert_eq!(
             registry
                 .get("test-cluster")
@@ -825,7 +901,6 @@ mod tests {
             AgentState::Provisioning
         );
 
-        // Heartbeat with Ready state
         let msg = AgentMessage {
             cluster_name: "test-cluster".to_string(),
             payload: Some(Payload::Heartbeat(Heartbeat {
@@ -834,7 +909,7 @@ mod tests {
                 uptime_seconds: 60,
             })),
         };
-        test_handle_message(&registry, &msg, &tx).await;
+        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
         assert_eq!(
             registry
                 .get("test-cluster")
@@ -842,5 +917,87 @@ mod tests {
                 .state,
             AgentState::Ready
         );
+    }
+
+    #[tokio::test]
+    async fn test_subtree_state_full_sync() {
+        let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
+        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+
+        let msg = AgentMessage {
+            cluster_name: "child-cluster".to_string(),
+            payload: Some(Payload::SubtreeState(SubtreeState {
+                is_full_sync: true,
+                clusters: vec![
+                    SubtreeCluster {
+                        name: "child-cluster".to_string(),
+                        parent: "test-cell".to_string(),
+                        phase: "Ready".to_string(),
+                        removed: false,
+                        labels: std::collections::HashMap::new(),
+                    },
+                    SubtreeCluster {
+                        name: "grandchild".to_string(),
+                        parent: "child-cluster".to_string(),
+                        phase: "Ready".to_string(),
+                        removed: false,
+                        labels: std::collections::HashMap::new(),
+                    },
+                ],
+                services: vec![],
+            })),
+        };
+
+        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+
+        // Verify subtree registry was updated
+        assert!(subtree_registry.contains("child-cluster").await);
+        assert!(subtree_registry.contains("grandchild").await);
+        // Self is always present
+        assert!(subtree_registry.contains("test-cell").await);
+    }
+
+    #[tokio::test]
+    async fn test_subtree_state_delta() {
+        let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
+        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+
+        // First, full sync
+        let msg1 = AgentMessage {
+            cluster_name: "child-cluster".to_string(),
+            payload: Some(Payload::SubtreeState(SubtreeState {
+                is_full_sync: true,
+                clusters: vec![SubtreeCluster {
+                    name: "child-cluster".to_string(),
+                    parent: "test-cell".to_string(),
+                    phase: "Ready".to_string(),
+                    removed: false,
+                    labels: std::collections::HashMap::new(),
+                }],
+                services: vec![],
+            })),
+        };
+        test_handle_message(&registry, &subtree_registry, &msg1, &tx).await;
+
+        // Then, delta with removal
+        let msg2 = AgentMessage {
+            cluster_name: "child-cluster".to_string(),
+            payload: Some(Payload::SubtreeState(SubtreeState {
+                is_full_sync: false,
+                clusters: vec![SubtreeCluster {
+                    name: "child-cluster".to_string(),
+                    parent: "test-cell".to_string(),
+                    phase: "Ready".to_string(),
+                    removed: true,
+                    labels: std::collections::HashMap::new(),
+                }],
+                services: vec![],
+            })),
+        };
+        test_handle_message(&registry, &subtree_registry, &msg2, &tx).await;
+
+        assert!(!subtree_registry.contains("child-cluster").await);
     }
 }

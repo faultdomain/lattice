@@ -14,25 +14,15 @@ use lattice_common::crd::{
     SecretsProvider, SecretsProviderPhase, SecretsProviderStatus, VaultAuthMethod,
 };
 use lattice_common::kube_utils::HasApiResource;
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::eso::{
     AppRoleAuth, ClusterSecretStore, ClusterSecretStoreSpec, KubernetesAuth, ProviderSpec,
     SecretKeyRef, ServiceAccountRef, VaultAuth, VaultProvider,
 };
 
-/// Controller context
-pub struct Context {
-    /// Kubernetes client
-    pub client: Client,
-}
-
-impl Context {
-    /// Create a new context
-    pub fn new(client: Client) -> Self {
-        Self { client }
-    }
-}
+// Re-export for convenience
+pub use lattice_common::{default_error_policy, ControllerContext};
 
 /// Reconcile a SecretsProvider
 ///
@@ -40,7 +30,7 @@ impl Context {
 /// If ESO is not installed, requeues to retry later.
 pub async fn reconcile(
     sp: Arc<SecretsProvider>,
-    ctx: Arc<Context>,
+    ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
     let name = sp.name_any();
     let client = &ctx.client;
@@ -95,16 +85,6 @@ pub async fn reconcile(
             Ok(Action::requeue(Duration::from_secs(60)))
         }
     }
-}
-
-/// Error policy - always requeue on error
-pub fn error_policy(
-    _sp: Arc<SecretsProvider>,
-    error: &ReconcileError,
-    _ctx: Arc<Context>,
-) -> Action {
-    warn!(error = %error, "Reconcile error, will retry");
-    Action::requeue(Duration::from_secs(30))
 }
 
 /// Check if error is due to CRD not found (ESO not installed)
@@ -281,22 +261,6 @@ async fn update_status(
     .map_err(|e| ReconcileError::Kube(format!("failed to update status: {}", e)))?;
 
     Ok(())
-}
-
-/// Reconcile errors
-#[derive(Debug, thiserror::Error)]
-pub enum ReconcileError {
-    /// Kubernetes API error
-    #[error("kubernetes error: {0}")]
-    Kube(String),
-
-    /// Validation error
-    #[error("validation error: {0}")]
-    Validation(String),
-
-    /// Internal error
-    #[error("internal error: {0}")]
-    Internal(String),
 }
 
 #[cfg(test)]

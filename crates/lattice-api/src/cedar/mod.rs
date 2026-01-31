@@ -135,15 +135,13 @@ impl PolicyEngine {
     ///
     /// # Returns
     /// Ok(()) if authorized, Err(Forbidden) otherwise
-    pub fn authorize(&self, identity: &UserIdentity, cluster: &str, action: &str) -> Result<()> {
-        // Build the authorization request synchronously
-        // Use block_on for the async lock since this is called from sync context
-        let policy_set = {
-            // We need to handle this carefully - try_read to avoid blocking
-            // In practice, the policy set is rarely updated
-            futures::executor::block_on(self.policy_set.read()).clone()
-        };
-
+    pub async fn authorize(
+        &self,
+        identity: &UserIdentity,
+        cluster: &str,
+        action: &str,
+    ) -> Result<()> {
+        let policy_set = self.policy_set.read().await.clone();
         self.authorize_with_policy_set(identity, cluster, action, &policy_set)
     }
 
@@ -209,21 +207,7 @@ impl PolicyEngine {
     ///
     /// # Returns
     /// List of cluster names the user can access
-    pub fn accessible_clusters(&self, identity: &UserIdentity) -> Vec<String> {
-        let known_clusters = futures::executor::block_on(self.known_clusters.read()).clone();
-        let policy_set = futures::executor::block_on(self.policy_set.read()).clone();
-
-        known_clusters
-            .into_iter()
-            .filter(|cluster| {
-                self.authorize_with_policy_set(identity, cluster, "get", &policy_set)
-                    .is_ok()
-            })
-            .collect()
-    }
-
-    /// Async version of accessible_clusters
-    pub async fn accessible_clusters_async(&self, identity: &UserIdentity) -> Vec<String> {
+    pub async fn accessible_clusters(&self, identity: &UserIdentity) -> Vec<String> {
         let known_clusters = self.known_clusters.read().await.clone();
         let policy_set = self.policy_set.read().await.clone();
 
@@ -427,8 +411,8 @@ mod tests {
         assert_eq!(entities.iter().count(), 4);
     }
 
-    #[test]
-    fn test_permit_all_policy() {
+    #[tokio::test]
+    async fn test_permit_all_policy() {
         let policy = r#"
             permit(principal, action, resource);
         "#;
@@ -439,12 +423,12 @@ mod tests {
             groups: vec![],
         };
 
-        let result = engine.authorize(&identity, "any-cluster", "get");
+        let result = engine.authorize(&identity, "any-cluster", "get").await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_deny_by_default() {
+    #[tokio::test]
+    async fn test_deny_by_default() {
         // Empty policy set should deny by default
         let engine = PolicyEngine::new();
         let identity = UserIdentity {
@@ -452,12 +436,12 @@ mod tests {
             groups: vec![],
         };
 
-        let result = engine.authorize(&identity, "any-cluster", "get");
+        let result = engine.authorize(&identity, "any-cluster", "get").await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_user_specific_policy() {
+    #[tokio::test]
+    async fn test_user_specific_policy() {
         let policy = r#"
             permit(
                 principal == Lattice::User::"alice@example.com",
@@ -473,21 +457,21 @@ mod tests {
             username: "alice@example.com".to_string(),
             groups: vec![],
         };
-        assert!(engine.authorize(&alice, "prod-frontend", "get").is_ok());
+        assert!(engine.authorize(&alice, "prod-frontend", "get").await.is_ok());
 
         // Alice cannot access other clusters
-        assert!(engine.authorize(&alice, "staging", "get").is_err());
+        assert!(engine.authorize(&alice, "staging", "get").await.is_err());
 
         // Bob cannot access prod-frontend
         let bob = UserIdentity {
             username: "bob@example.com".to_string(),
             groups: vec![],
         };
-        assert!(engine.authorize(&bob, "prod-frontend", "get").is_err());
+        assert!(engine.authorize(&bob, "prod-frontend", "get").await.is_err());
     }
 
-    #[test]
-    fn test_group_policy() {
+    #[tokio::test]
+    async fn test_group_policy() {
         let policy = r#"
             permit(
                 principal in Lattice::Group::"admins",
@@ -503,19 +487,19 @@ mod tests {
             username: "alice@example.com".to_string(),
             groups: vec!["admins".to_string()],
         };
-        assert!(engine.authorize(&admin, "any-cluster", "get").is_ok());
-        assert!(engine.authorize(&admin, "another-cluster", "delete").is_ok());
+        assert!(engine.authorize(&admin, "any-cluster", "get").await.is_ok());
+        assert!(engine.authorize(&admin, "another-cluster", "delete").await.is_ok());
 
         // Non-admin cannot access
         let user = UserIdentity {
             username: "bob@example.com".to_string(),
             groups: vec!["developers".to_string()],
         };
-        assert!(engine.authorize(&user, "any-cluster", "get").is_err());
+        assert!(engine.authorize(&user, "any-cluster", "get").await.is_err());
     }
 
-    #[test]
-    fn test_action_specific_policy() {
+    #[tokio::test]
+    async fn test_action_specific_policy() {
         let policy = r#"
             permit(
                 principal,
@@ -531,12 +515,12 @@ mod tests {
         };
 
         // Read actions allowed
-        assert!(engine.authorize(&identity, "any-cluster", "get").is_ok());
-        assert!(engine.authorize(&identity, "any-cluster", "list").is_ok());
+        assert!(engine.authorize(&identity, "any-cluster", "get").await.is_ok());
+        assert!(engine.authorize(&identity, "any-cluster", "list").await.is_ok());
 
         // Write actions denied
-        assert!(engine.authorize(&identity, "any-cluster", "create").is_err());
-        assert!(engine.authorize(&identity, "any-cluster", "delete").is_err());
+        assert!(engine.authorize(&identity, "any-cluster", "create").await.is_err());
+        assert!(engine.authorize(&identity, "any-cluster", "delete").await.is_err());
     }
 
     #[tokio::test]
@@ -568,7 +552,7 @@ mod tests {
             groups: vec![],
         };
 
-        let accessible = engine.accessible_clusters_async(&alice).await;
+        let accessible = engine.accessible_clusters(&alice).await;
         assert_eq!(accessible.len(), 2);
         assert!(accessible.contains(&"prod-frontend".to_string()));
         assert!(accessible.contains(&"staging-frontend".to_string()));

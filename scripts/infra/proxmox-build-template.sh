@@ -11,8 +11,7 @@
 #   PROXMOX_TOKEN    - API token ID (e.g., root@pam!lattice)
 #   PROXMOX_SECRET   - API token secret
 #   PROXMOX_NODE     - Proxmox node name
-# root@pam!root
-# 3ecf222b-8d84-4166-8485-fb4934be60f0
+#
 # Optional:
 #   PROXMOX_TEMPLATE_ID  - Template VM ID (default: 9000)
 #   PROXMOX_STORAGE      - Storage pool (default: local-lvm)

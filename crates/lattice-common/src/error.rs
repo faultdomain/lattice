@@ -4,10 +4,63 @@
 //! Each error variant includes contextual information like cluster names,
 //! provider types, and underlying causes.
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use kube::runtime::controller::Action;
+use kube::Client;
 use thiserror::Error;
+use tracing::warn;
 
 /// Default context value when no specific context is available
 pub const UNKNOWN_CONTEXT: &str = "unknown";
+
+/// Simple reconciliation error for controllers.
+///
+/// This is a lightweight error type suitable for kube-runtime controllers
+/// that don't need the full context of the main [`Error`] type.
+#[derive(Debug, Error)]
+pub enum ReconcileError {
+    /// Kubernetes API error
+    #[error("kubernetes error: {0}")]
+    Kube(String),
+
+    /// Validation error
+    #[error("validation error: {0}")]
+    Validation(String),
+
+    /// Internal error
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+/// Standard controller context with a Kubernetes client.
+///
+/// This is the common context type used by all Lattice controllers.
+/// Controllers that need additional context should wrap this type.
+pub struct ControllerContext {
+    /// Kubernetes client
+    pub client: Client,
+}
+
+impl ControllerContext {
+    /// Create a new controller context
+    pub fn new(client: Client) -> Self {
+        Self { client }
+    }
+}
+
+/// Default error policy for controllers.
+///
+/// Logs the error and requeues for retry after 30 seconds.
+pub fn default_error_policy<T>(
+    _obj: Arc<T>,
+    error: &ReconcileError,
+    _ctx: Arc<ControllerContext>,
+) -> Action {
+    warn!(error = %error, "Reconcile error, will retry");
+    Action::requeue(Duration::from_secs(30))
+}
 
 /// Main error type for Lattice operations
 #[derive(Debug, Error)]

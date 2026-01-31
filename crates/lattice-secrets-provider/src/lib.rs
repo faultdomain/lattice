@@ -9,5 +9,5 @@
 mod controller;
 mod eso;
 
-pub use controller::{error_policy, reconcile, Context};
+pub use controller::{default_error_policy, reconcile, ControllerContext};
 pub use eso::{ClusterSecretStore, ClusterSecretStoreSpec, ProviderSpec, VaultProvider};

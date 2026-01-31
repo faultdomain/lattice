@@ -16,7 +16,7 @@ pub mod template;
 pub mod yaml;
 
 pub use credentials::{AwsCredentials, CredentialError, OpenStackCredentials, ProxmoxCredentials};
-pub use error::Error;
+pub use error::{default_error_policy, ControllerContext, Error, ReconcileError};
 pub use kube_utils::{
     apply_manifest_with_discovery, apply_manifests_with_discovery, kind_priority, pluralize_kind,
     ApplyOptions,
@@ -96,7 +96,7 @@ impl CellEndpoint {
     /// ```
     /// use lattice_common::CellEndpoint;
     ///
-    /// let endpoint = CellEndpoint::parse("172.18.255.10:8443:50051").unwrap();
+    /// let endpoint = CellEndpoint::parse("172.18.255.10:8443:50051").expect("valid endpoint");
     /// assert_eq!(endpoint.host, "172.18.255.10");
     /// assert_eq!(endpoint.http_port, 8443);
     /// assert_eq!(endpoint.grpc_port, 50051);
@@ -241,6 +241,12 @@ pub const CA_TRUST_KEY: &str = "ca-trust.crt";
 pub const CELL_SERVICE_NAME: &str = "lattice-cell";
 /// Name of the Lattice operator deployment and service account
 pub const OPERATOR_NAME: &str = "lattice-operator";
+
+/// Internal Kubernetes service endpoint for self-management
+///
+/// This is the standard in-cluster endpoint that pods use to access the
+/// Kubernetes API from within the cluster.
+pub const INTERNAL_K8S_ENDPOINT: &str = "https://kubernetes.default.svc:443";
 
 /// Label key for provider identification on secrets
 pub const PROVIDER_LABEL: &str = "lattice.dev/provider";

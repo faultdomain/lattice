@@ -36,5 +36,5 @@ pub use kubeconfig::patch_kubeconfig_for_proxy;
 pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{load_or_create_ca, CellServerError, ParentConfig, ParentServers};
 pub use resources::{fetch_distributable_resources, DistributableResources, ResourceError};
-pub use server::AgentServer;
+pub use server::{AgentServer, SharedSubtreeRegistry};
 pub use subtree_registry::{ClusterInfo, RouteInfo, SubtreeRegistry};

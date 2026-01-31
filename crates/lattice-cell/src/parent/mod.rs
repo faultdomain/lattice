@@ -29,7 +29,8 @@ use crate::bootstrap::{
 use crate::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::capi_proxy::{start_capi_proxy, CapiProxyConfig};
 use crate::resources::fetch_distributable_resources;
-use crate::server::AgentServer;
+use crate::server::{AgentServer, SharedSubtreeRegistry};
+use crate::subtree_registry::SubtreeRegistry;
 use lattice_common::crd::{CloudProvider, SecretsProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{
@@ -43,6 +44,8 @@ use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
 /// Configuration for cell servers
 #[derive(Debug, Clone)]
 pub struct ParentConfig {
+    /// This cluster's name (used for subtree registry)
+    pub cluster_name: String,
     /// Address for the bootstrap HTTPS server
     pub bootstrap_addr: SocketAddr,
     /// Address for the gRPC server
@@ -62,6 +65,7 @@ pub struct ParentConfig {
 impl Default for ParentConfig {
     fn default() -> Self {
         Self {
+            cluster_name: std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "unknown".to_string()),
             bootstrap_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_BOOTSTRAP_PORT)
                 .parse()
                 .expect("hardcoded socket address is valid"),
@@ -128,6 +132,8 @@ pub struct ParentServers<G: ManifestGenerator + Send + Sync + 'static = DefaultM
     bootstrap_state: Arc<RwLock<Option<Arc<BootstrapState<G>>>>>,
     /// Agent registry for connected agents
     agent_registry: SharedAgentRegistry,
+    /// Subtree registry for tracking cluster hierarchy
+    subtree_registry: SharedSubtreeRegistry,
     /// Server handles
     handles: RwLock<Option<ServerHandles>>,
 }
@@ -498,6 +504,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// This ensures the CA survives operator restarts.
     pub async fn new(config: ParentConfig, client: &Client) -> Result<Self, CellServerError> {
         let ca_bundle = Arc::new(RwLock::new(load_or_create_ca(client).await?));
+        let subtree_registry = Arc::new(SubtreeRegistry::new(config.cluster_name.clone()));
 
         Ok(Self {
             running: AtomicBool::new(false),
@@ -506,6 +513,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             kube_client: client.clone(),
             bootstrap_state: Arc::new(RwLock::new(None)),
             agent_registry: Arc::new(AgentRegistry::new()),
+            subtree_registry,
             handles: RwLock::new(None),
         })
     }
@@ -513,6 +521,8 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// Create with an existing CA (for testing)
     #[cfg(test)]
     pub fn with_ca(config: ParentConfig, ca: CertificateAuthority, client: Client) -> Self {
+        let subtree_registry = Arc::new(SubtreeRegistry::new(config.cluster_name.clone()));
+
         Self {
             running: AtomicBool::new(false),
             config,
@@ -520,6 +530,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             kube_client: client,
             bootstrap_state: Arc::new(RwLock::new(None)),
             agent_registry: Arc::new(AgentRegistry::new()),
+            subtree_registry,
             handles: RwLock::new(None),
         }
     }
@@ -532,6 +543,11 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// Get the agent registry
     pub fn agent_registry(&self) -> SharedAgentRegistry {
         self.agent_registry.clone()
+    }
+
+    /// Get the subtree registry
+    pub fn subtree_registry(&self) -> SharedSubtreeRegistry {
+        self.subtree_registry.clone()
     }
 
     /// Get the CA bundle
@@ -716,12 +732,18 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         let grpc_addr = self.config.grpc_addr;
         let registry = self.agent_registry.clone();
+        let subtree_registry = self.subtree_registry.clone();
 
         info!(addr = %grpc_addr, "Starting gRPC server");
         let grpc_handle = tokio::spawn(async move {
-            if let Err(e) =
-                AgentServer::serve_with_mtls(registry, grpc_addr, mtls_config, grpc_kube_client)
-                    .await
+            if let Err(e) = AgentServer::serve_with_mtls(
+                registry,
+                subtree_registry,
+                grpc_addr,
+                mtls_config,
+                grpc_kube_client,
+            )
+            .await
             {
                 error!(error = %e, "gRPC server error");
             }
@@ -823,6 +845,7 @@ mod tests {
 
         let client = try_test_client().await?;
         let config = ParentConfig {
+            cluster_name: "test-cluster".to_string(),
             bootstrap_addr: "127.0.0.1:0".parse().expect("valid address"),
             grpc_addr: "127.0.0.1:0".parse().expect("valid address"),
             ..Default::default()

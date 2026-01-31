@@ -13,10 +13,7 @@ use tracing::{debug, info};
 
 use lattice_common::crd::{CloudProvider, SecretsProvider};
 pub use lattice_common::DistributableResources;
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
-
-/// Internal Kubernetes service endpoint for self-management
-const INTERNAL_K8S_ENDPOINT: &str = "https://kubernetes.default.svc:443";
+use lattice_common::{INTERNAL_K8S_ENDPOINT, LATTICE_SYSTEM_NAMESPACE};
 
 /// Pivot errors
 #[derive(Debug, Error)]

@@ -7,11 +7,21 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
+use std::sync::OnceLock;
 use tracing::debug;
 
 use crate::error::Error;
 use crate::server::AppState;
 use lattice_cell::{tunnel_request, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT};
+
+/// Maximum request body size (10 MB - reasonable for K8s API)
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+/// Path to the in-cluster CA certificate
+const CA_CERT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+
+/// Shared HTTP client for local K8s API requests
+static K8S_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Route a request to the target cluster
 ///
@@ -76,13 +86,8 @@ async fn route_to_local_api(
     // Read ServiceAccount token
     let sa_token = read_service_account_token().await?;
 
-    // Build HTTP client
-    // TODO: Use proper CA from /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(DEFAULT_TIMEOUT)
-        .build()
-        .map_err(|e| Error::Internal(format!("Failed to create HTTP client: {}", e)))?;
+    // Get or create the shared HTTP client with proper TLS
+    let client = get_k8s_client().await?;
 
     // Build request with service account auth
     let mut req_builder = client.request(method.clone(), &target_url);
@@ -90,11 +95,13 @@ async fn route_to_local_api(
 
     // Copy content-type if present
     if let Some(content_type) = request.headers().get("content-type") {
-        req_builder = req_builder.header("Content-Type", content_type.to_str().unwrap_or(""));
+        if let Ok(ct) = content_type.to_str() {
+            req_builder = req_builder.header("Content-Type", ct);
+        }
     }
 
-    // Copy body
-    let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+    // Copy body with size limit to prevent memory exhaustion
+    let body = axum::body::to_bytes(request.into_body(), MAX_BODY_SIZE)
         .await
         .map_err(|e| Error::Internal(format!("Failed to read request body: {}", e)))?;
 
@@ -163,7 +170,7 @@ async fn route_to_child_cluster(
         .unwrap_or("application/json")
         .to_string();
 
-    let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+    let body = axum::body::to_bytes(request.into_body(), MAX_BODY_SIZE)
         .await
         .map_err(|e| Error::Internal(format!("Failed to read request body: {}", e)))?;
 
@@ -193,6 +200,31 @@ fn tunnel_error_to_api_error(e: TunnelError) -> Error {
         TunnelError::AgentError(msg) => Error::Proxy(msg),
         TunnelError::ResponseBuild(msg) => Error::Internal(msg),
     }
+}
+
+/// Get or create the shared K8s HTTP client with proper TLS verification
+async fn get_k8s_client() -> Result<&'static reqwest::Client, Error> {
+    if let Some(client) = K8S_CLIENT.get() {
+        return Ok(client);
+    }
+
+    // Read the in-cluster CA certificate
+    let ca_cert = tokio::fs::read(CA_CERT_PATH).await.map_err(|e| {
+        Error::Internal(format!("Failed to read in-cluster CA certificate: {}", e))
+    })?;
+
+    let cert = reqwest::Certificate::from_pem(&ca_cert)
+        .map_err(|e| Error::Internal(format!("Invalid CA certificate: {}", e)))?;
+
+    let client = reqwest::Client::builder()
+        .add_root_certificate(cert)
+        .timeout(DEFAULT_TIMEOUT)
+        .build()
+        .map_err(|e| Error::Internal(format!("Failed to create HTTP client: {}", e)))?;
+
+    // Try to set the client, but another thread may have beaten us
+    let _ = K8S_CLIENT.set(client);
+    Ok(K8S_CLIENT.get().expect("client was just set"))
 }
 
 /// Read the ServiceAccount token from the mounted volume

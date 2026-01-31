@@ -13,27 +13,17 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{
     CloudProvider, CloudProviderPhase, CloudProviderStatus, CloudProviderType,
 };
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
-/// Controller context
-pub struct Context {
-    /// Kubernetes client
-    pub client: Client,
-}
-
-impl Context {
-    /// Create a new context
-    pub fn new(client: Client) -> Self {
-        Self { client }
-    }
-}
+// Re-export for convenience - callers can use this or ControllerContext
+pub use lattice_common::{default_error_policy, ControllerContext};
 
 /// Reconcile a CloudProvider
 ///
 /// Validates credentials and updates status.
 pub async fn reconcile(
     cp: Arc<CloudProvider>,
-    ctx: Arc<Context>,
+    ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
     let name = cp.name_any();
     let client = &ctx.client;
@@ -63,12 +53,6 @@ pub async fn reconcile(
             Ok(Action::requeue(Duration::from_secs(60)))
         }
     }
-}
-
-/// Error policy - always requeue on error
-pub fn error_policy(_cp: Arc<CloudProvider>, error: &ReconcileError, _ctx: Arc<Context>) -> Action {
-    warn!(error = %error, "Reconcile error, will retry");
-    Action::requeue(Duration::from_secs(30))
 }
 
 /// Validate credentials for the cloud provider
@@ -154,22 +138,6 @@ async fn update_status(
     .map_err(|e| ReconcileError::Kube(format!("failed to update status: {}", e)))?;
 
     Ok(())
-}
-
-/// Reconcile errors
-#[derive(Debug, thiserror::Error)]
-pub enum ReconcileError {
-    /// Kubernetes API error
-    #[error("kubernetes error: {0}")]
-    Kube(String),
-
-    /// Validation error
-    #[error("validation error: {0}")]
-    Validation(String),
-
-    /// Internal error
-    #[error("internal error: {0}")]
-    Internal(String),
 }
 
 #[cfg(test)]
