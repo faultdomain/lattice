@@ -35,7 +35,7 @@ use serde_json::json;
 use tracing::{error, info};
 
 use lattice_cli::commands::install::Installer;
-use lattice_operator::crd::{ClusterPhase, LatticeCluster};
+use lattice_operator::crd::LatticeCluster;
 
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::context::init_e2e_test;
