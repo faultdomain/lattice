@@ -109,8 +109,8 @@ fn generate_l2_policy() -> String {
 fn managed_by_labels() -> std::collections::BTreeMap<String, String> {
     let mut labels = std::collections::BTreeMap::new();
     labels.insert(
-        "app.kubernetes.io/managed-by".to_string(),
-        "lattice".to_string(),
+        lattice_common::LABEL_MANAGED_BY.to_string(),
+        lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
     );
     labels
 }

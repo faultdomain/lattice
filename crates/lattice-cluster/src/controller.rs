@@ -314,8 +314,8 @@ impl KubeClient for KubeClientImpl {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 labels: Some(std::collections::BTreeMap::from([(
-                    "app.kubernetes.io/managed-by".to_string(),
-                    "lattice".to_string(),
+                    lattice_common::LABEL_MANAGED_BY.to_string(),
+                    lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
                 )])),
                 ..Default::default()
             },

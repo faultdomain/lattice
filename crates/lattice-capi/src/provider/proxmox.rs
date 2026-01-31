@@ -17,7 +17,7 @@ use super::{
     InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
 };
 use lattice_common::crd::{LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig};
-use lattice_common::{Error, Result};
+use lattice_common::{Error, Result, CAPMOX_NAMESPACE, PROXMOX_CREDENTIALS_SECRET};
 
 const PROXMOX_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1alpha1";
 const DEFAULT_VIP_INTERFACE: &str = "ens18";
@@ -85,7 +85,7 @@ impl ProxmoxProvider {
         let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
         let credentials_name = secret_ref
             .map(|s| s.name.clone())
-            .unwrap_or_else(|| "proxmox-credentials".to_string());
+            .unwrap_or_else(|| PROXMOX_CREDENTIALS_SECRET.to_string());
 
         let mut spec = serde_json::json!({
             "controlPlaneEndpoint": {
@@ -331,10 +331,10 @@ impl Provider for ProxmoxProvider {
         vec![(
             secret_ref
                 .map(|s| s.name.clone())
-                .unwrap_or_else(|| "proxmox-credentials".to_string()),
+                .unwrap_or_else(|| PROXMOX_CREDENTIALS_SECRET.to_string()),
             secret_ref
                 .map(|s| s.namespace.clone())
-                .unwrap_or_else(|| "capmox-system".to_string()),
+                .unwrap_or_else(|| CAPMOX_NAMESPACE.to_string()),
         )]
     }
 }

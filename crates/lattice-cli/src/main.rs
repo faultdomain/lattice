@@ -10,9 +10,10 @@ use lattice_cli::{Cli, Result};
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install FIPS-validated crypto provider
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .expect("Failed to install crypto provider");
+    if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
+        eprintln!("CRITICAL: Failed to install crypto provider: {:?}", e);
+        std::process::exit(1);
+    }
 
     // Initialize tracing
     tracing_subscriber::registry()

@@ -31,7 +31,6 @@ mod token;
 pub use addons::{
     generate_autoscaler_manifests, generate_aws_addon_manifests, generate_docker_addon_manifests,
 };
-pub use lattice_common::AwsCredentials;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -393,87 +392,6 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     manifests.push(config.cluster_manifest.to_string());
 
     Ok(manifests)
-}
-
-/// Label key for identifying the provider type
-pub const PROVIDER_LABEL: &str = "lattice.dev/provider";
-
-/// Secret name for Proxmox credentials
-pub const PROXMOX_CREDENTIALS_SECRET: &str = "proxmox-credentials";
-/// Secret name for AWS credentials
-pub const AWS_CREDENTIALS_SECRET: &str = "aws-credentials";
-/// Secret name for OpenStack credentials (clouds.yaml)
-pub const OPENSTACK_CREDENTIALS_SECRET: &str = "openstack-cloud-config";
-
-/// Target namespace for CAPMOX provider
-pub const CAPMOX_NAMESPACE: &str = "capmox-system";
-/// Target namespace for CAPA provider
-pub const CAPA_NAMESPACE: &str = "capa-system";
-/// Target namespace for CAPO provider (OpenStack)
-pub const CAPO_NAMESPACE: &str = "capo-system";
-
-/// Generate Proxmox credentials manifest
-///
-/// Creates a secret in lattice-system. The secret is referenced by a CloudProvider CRD
-/// and distributed to children when the CloudProvider is distributed.
-/// The controller copies this to capmox-system when running clusterctl.
-pub fn proxmox_credentials_manifests(url: &str, token: &str, secret: &str) -> String {
-    format!(
-        r#"apiVersion: v1
-kind: Namespace
-metadata:
-  name: {LATTICE_SYSTEM_NAMESPACE}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {PROXMOX_CREDENTIALS_SECRET}
-  namespace: {LATTICE_SYSTEM_NAMESPACE}
-  labels:
-    {PROVIDER_LABEL}: proxmox
-type: Opaque
-stringData:
-  url: "{url}"
-  token: "{token}"
-  secret: "{secret}""#
-    )
-}
-
-/// Generate AWS credentials manifest
-///
-/// Creates a secret in lattice-system. The secret is referenced by a CloudProvider CRD
-/// and distributed to children when the CloudProvider is distributed.
-/// The controller copies this to capa-system when running clusterctl.
-pub fn aws_credentials_manifests(creds: &AwsCredentials) -> String {
-    let session_token_line = creds
-        .session_token
-        .as_ref()
-        .map(|t| format!("\n  AWS_SESSION_TOKEN: \"{}\"", t))
-        .unwrap_or_default();
-
-    format!(
-        r#"apiVersion: v1
-kind: Namespace
-metadata:
-  name: {LATTICE_SYSTEM_NAMESPACE}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {AWS_CREDENTIALS_SECRET}
-  namespace: {LATTICE_SYSTEM_NAMESPACE}
-  labels:
-    {PROVIDER_LABEL}: aws
-type: Opaque
-stringData:
-  AWS_ACCESS_KEY_ID: "{access_key}"
-  AWS_SECRET_ACCESS_KEY: "{secret_key}"
-  AWS_REGION: "{region}"{session_token}"#,
-        access_key = creds.access_key_id,
-        secret_key = creds.secret_access_key,
-        region = creds.region,
-        session_token = session_token_line
-    )
 }
 
 /// Default manifest generator that creates CNI and operator manifests

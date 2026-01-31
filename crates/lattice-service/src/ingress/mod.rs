@@ -9,12 +9,15 @@
 //! Uses Istio's native waypoint proxy (`istio-waypoint` GatewayClass) which:
 //! - Speaks HBONE natively (no ztunnel conflicts)
 //! - Integrates with AuthorizationPolicy for L7 enforcement
+//!
+//! All resource types implement `HasApiResource` for consistent API version handling.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use lattice_common::crd::{IngressSpec, IngressTls, PathMatchType, TlsMode};
+use lattice_common::kube_utils::HasApiResource;
 use lattice_common::policy::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     OperationSpec, PolicyMetadata, WorkloadSelector,
@@ -31,13 +34,39 @@ use crate::mesh;
 #[serde(rename_all = "camelCase")]
 pub struct Gateway {
     /// API version (gateway.networking.k8s.io/v1)
+    #[serde(default = "Gateway::default_api_version")]
     pub api_version: String,
     /// Resource kind (Gateway)
+    #[serde(default = "Gateway::default_kind")]
     pub kind: String,
     /// Resource metadata
     pub metadata: GatewayMetadata,
     /// Gateway specification
     pub spec: GatewaySpec,
+}
+
+impl HasApiResource for Gateway {
+    const API_VERSION: &'static str = "gateway.networking.k8s.io/v1";
+    const KIND: &'static str = "Gateway";
+}
+
+impl Gateway {
+    fn default_api_version() -> String {
+        <Self as HasApiResource>::API_VERSION.to_string()
+    }
+    fn default_kind() -> String {
+        <Self as HasApiResource>::KIND.to_string()
+    }
+
+    /// Create a new Gateway
+    pub fn new(metadata: GatewayMetadata, spec: GatewaySpec) -> Self {
+        Self {
+            api_version: Self::default_api_version(),
+            kind: Self::default_kind(),
+            metadata,
+            spec,
+        }
+    }
 }
 
 /// Metadata for Gateway resources
@@ -57,8 +86,8 @@ impl GatewayMetadata {
     pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
         let mut labels = BTreeMap::new();
         labels.insert(
-            "app.kubernetes.io/managed-by".to_string(),
-            "lattice".to_string(),
+            lattice_common::LABEL_MANAGED_BY.to_string(),
+            lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
         );
         Self {
             name: name.into(),
@@ -145,13 +174,39 @@ pub struct RouteNamespaces {
 #[serde(rename_all = "camelCase")]
 pub struct HttpRoute {
     /// API version (gateway.networking.k8s.io/v1)
+    #[serde(default = "HttpRoute::default_api_version")]
     pub api_version: String,
     /// Resource kind (HTTPRoute)
+    #[serde(default = "HttpRoute::default_kind")]
     pub kind: String,
     /// Resource metadata
     pub metadata: GatewayMetadata,
     /// HTTPRoute specification
     pub spec: HttpRouteSpec,
+}
+
+impl HasApiResource for HttpRoute {
+    const API_VERSION: &'static str = "gateway.networking.k8s.io/v1";
+    const KIND: &'static str = "HTTPRoute";
+}
+
+impl HttpRoute {
+    fn default_api_version() -> String {
+        <Self as HasApiResource>::API_VERSION.to_string()
+    }
+    fn default_kind() -> String {
+        <Self as HasApiResource>::KIND.to_string()
+    }
+
+    /// Create a new HTTPRoute
+    pub fn new(metadata: GatewayMetadata, spec: HttpRouteSpec) -> Self {
+        Self {
+            api_version: Self::default_api_version(),
+            kind: Self::default_kind(),
+            metadata,
+            spec,
+        }
+    }
 }
 
 /// HTTPRoute spec
@@ -237,13 +292,39 @@ pub struct BackendRef {
 #[serde(rename_all = "camelCase")]
 pub struct Certificate {
     /// API version (cert-manager.io/v1)
+    #[serde(default = "Certificate::default_api_version")]
     pub api_version: String,
     /// Resource kind (Certificate)
+    #[serde(default = "Certificate::default_kind")]
     pub kind: String,
     /// Resource metadata
     pub metadata: GatewayMetadata,
     /// Certificate specification
     pub spec: CertificateSpec,
+}
+
+impl HasApiResource for Certificate {
+    const API_VERSION: &'static str = "cert-manager.io/v1";
+    const KIND: &'static str = "Certificate";
+}
+
+impl Certificate {
+    fn default_api_version() -> String {
+        <Self as HasApiResource>::API_VERSION.to_string()
+    }
+    fn default_kind() -> String {
+        <Self as HasApiResource>::KIND.to_string()
+    }
+
+    /// Create a new Certificate
+    pub fn new(metadata: GatewayMetadata, spec: CertificateSpec) -> Self {
+        Self {
+            api_version: Self::default_api_version(),
+            kind: Self::default_kind(),
+            metadata,
+            spec,
+        }
+    }
 }
 
 /// Certificate spec
@@ -390,11 +471,9 @@ impl WaypointCompiler {
             mesh::WAYPOINT_FOR_SERVICE.to_string(),
         );
 
-        Gateway {
-            api_version: "gateway.networking.k8s.io/v1".to_string(),
-            kind: "Gateway".to_string(),
+        Gateway::new(
             metadata,
-            spec: GatewaySpec {
+            GatewaySpec {
                 gateway_class_name: mesh::WAYPOINT_GATEWAY_CLASS.to_string(),
                 listeners: vec![GatewayListener {
                     name: "mesh".to_string(),
@@ -409,7 +488,7 @@ impl WaypointCompiler {
                     }),
                 }],
             },
-        }
+        )
     }
 
     /// Compile policy allowing traffic TO the waypoint on HBONE port
@@ -531,15 +610,13 @@ impl IngressCompiler {
             });
         }
 
-        Gateway {
-            api_version: "gateway.networking.k8s.io/v1".to_string(),
-            kind: "Gateway".to_string(),
-            metadata: GatewayMetadata::new(format!("{}-gateway", service_name), namespace),
-            spec: GatewaySpec {
+        Gateway::new(
+            GatewayMetadata::new(format!("{}-gateway", service_name), namespace),
+            GatewaySpec {
                 gateway_class_name: gateway_class.to_string(),
                 listeners,
             },
-        }
+        )
     }
 
     fn compile_http_route(
@@ -578,11 +655,9 @@ impl IngressCompiler {
             namespace: Some(namespace.to_string()),
         }];
 
-        HttpRoute {
-            api_version: "gateway.networking.k8s.io/v1".to_string(),
-            kind: "HTTPRoute".to_string(),
-            metadata: GatewayMetadata::new(format!("{}-route", service_name), namespace),
-            spec: HttpRouteSpec {
+        HttpRoute::new(
+            GatewayMetadata::new(format!("{}-route", service_name), namespace),
+            HttpRouteSpec {
                 parent_refs,
                 hostnames: ingress.hosts.clone(),
                 rules: vec![HttpRouteRule {
@@ -594,7 +669,7 @@ impl IngressCompiler {
                     }],
                 }],
             },
-        }
+        )
     }
 
     fn compile_certificate(
@@ -605,11 +680,9 @@ impl IngressCompiler {
     ) -> Option<Certificate> {
         let issuer_ref = tls.issuer_ref.as_ref()?;
 
-        Some(Certificate {
-            api_version: "cert-manager.io/v1".to_string(),
-            kind: "Certificate".to_string(),
-            metadata: GatewayMetadata::new(format!("{}-cert", service_name), namespace),
-            spec: CertificateSpec {
+        Some(Certificate::new(
+            GatewayMetadata::new(format!("{}-cert", service_name), namespace),
+            CertificateSpec {
                 secret_name: format!("{}-tls", service_name),
                 dns_names: ingress.hosts.clone(),
                 issuer_ref: IssuerRef {
@@ -621,7 +694,7 @@ impl IngressCompiler {
                     group: Some("cert-manager.io".to_string()),
                 },
             },
-        })
+        ))
     }
 }
 

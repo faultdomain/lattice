@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::kube_utils::HasApiResource;
+
 /// Istio AuthorizationPolicy for L7 mTLS identity-based access control
 ///
 /// This policy is applied to Services via targetRefs (Istio Ambient mode)
@@ -27,22 +29,24 @@ pub struct AuthorizationPolicy {
     pub spec: AuthorizationPolicySpec,
 }
 
-impl AuthorizationPolicy {
+impl HasApiResource for AuthorizationPolicy {
     const API_VERSION: &'static str = "security.istio.io/v1";
     const KIND: &'static str = "AuthorizationPolicy";
+}
 
+impl AuthorizationPolicy {
     fn api_version() -> String {
-        Self::API_VERSION.to_string()
+        <Self as HasApiResource>::API_VERSION.to_string()
     }
     fn kind() -> String {
-        Self::KIND.to_string()
+        <Self as HasApiResource>::KIND.to_string()
     }
 
     /// Create a new AuthorizationPolicy
     pub fn new(metadata: PolicyMetadata, spec: AuthorizationPolicySpec) -> Self {
         Self {
-            api_version: Self::API_VERSION.to_string(),
-            kind: Self::KIND.to_string(),
+            api_version: Self::api_version(),
+            kind: Self::kind(),
             metadata,
             spec,
         }
@@ -66,8 +70,8 @@ impl PolicyMetadata {
     pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
         let mut labels = BTreeMap::new();
         labels.insert(
-            "app.kubernetes.io/managed-by".to_string(),
-            "lattice".to_string(),
+            crate::LABEL_MANAGED_BY.to_string(),
+            crate::LABEL_MANAGED_BY_LATTICE.to_string(),
         );
         Self {
             name: name.into(),
@@ -179,22 +183,24 @@ pub struct PeerAuthentication {
     pub spec: PeerAuthenticationSpec,
 }
 
-impl PeerAuthentication {
+impl HasApiResource for PeerAuthentication {
     const API_VERSION: &'static str = "security.istio.io/v1";
     const KIND: &'static str = "PeerAuthentication";
+}
 
+impl PeerAuthentication {
     fn api_version() -> String {
-        Self::API_VERSION.to_string()
+        <Self as HasApiResource>::API_VERSION.to_string()
     }
     fn kind() -> String {
-        Self::KIND.to_string()
+        <Self as HasApiResource>::KIND.to_string()
     }
 
     /// Create a new PeerAuthentication
     pub fn new(metadata: PolicyMetadata, spec: PeerAuthenticationSpec) -> Self {
         Self {
-            api_version: Self::API_VERSION.to_string(),
-            kind: Self::KIND.to_string(),
+            api_version: Self::api_version(),
+            kind: Self::kind(),
             metadata,
             spec,
         }

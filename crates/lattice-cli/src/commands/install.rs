@@ -23,11 +23,12 @@ use super::kind_utils;
 
 use lattice_common::clusterctl::move_to_kubeconfig;
 use lattice_common::kube_utils;
-use lattice_common::AwsCredentials;
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{
+    AwsCredentials, OpenStackCredentials, ProxmoxCredentials, AWS_CREDENTIALS_SECRET,
+    LATTICE_SYSTEM_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+};
 use lattice_operator::bootstrap::{
-    aws_credentials_manifests, generate_bootstrap_bundle, proxmox_credentials_manifests,
-    BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
+    generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
 };
 use lattice_operator::crd::{
     BootstrapProvider, CloudProvider, CloudProviderSpec, CloudProviderType, LatticeCluster,
@@ -721,14 +722,14 @@ impl Installer {
         match self.provider() {
             ProviderType::Proxmox => self.create_proxmox_credentials(client).await,
             ProviderType::Aws => self.create_aws_credentials(client).await,
+            ProviderType::OpenStack => self.create_openstack_credentials(client).await,
             ProviderType::Docker => {
                 self.create_cloud_provider(client, CloudProviderType::Docker, "")
                     .await
             }
-            ProviderType::OpenStack | ProviderType::Gcp | ProviderType::Azure => {
-                // TODO: Add credential support for these providers
+            ProviderType::Gcp | ProviderType::Azure => {
                 info!(
-                    "Provider {:?} does not require credentials setup",
+                    "Provider {:?} credential setup not yet implemented",
                     self.provider()
                 );
                 Ok(())
@@ -736,51 +737,74 @@ impl Installer {
         }
     }
 
-    fn get_proxmox_credentials() -> Result<(String, String, String)> {
-        let url = std::env::var("PROXMOX_URL").map_err(|_| {
-            Error::validation("PROXMOX_URL environment variable required for Proxmox provider")
-        })?;
-        let token = std::env::var("PROXMOX_TOKEN").map_err(|_| {
-            Error::validation("PROXMOX_TOKEN environment variable required for Proxmox provider")
-        })?;
-        let secret = std::env::var("PROXMOX_SECRET").map_err(|_| {
-            Error::validation("PROXMOX_SECRET environment variable required for Proxmox provider")
-        })?;
-        Ok((url, token, secret))
-    }
-
     async fn create_proxmox_credentials(&self, client: &Client) -> Result<()> {
-        let (url, token, secret) = Self::get_proxmox_credentials()?;
-        info!("PROXMOX_URL: {}", url);
+        let creds = ProxmoxCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
+        info!("PROXMOX_URL: {}", creds.url);
 
-        // Create credentials secret
-        let manifests = proxmox_credentials_manifests(&url, &token, &secret);
-        kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
-            .await
-            .cmd_err()?;
-
-        // Create CloudProvider referencing the credentials
-        self.create_cloud_provider(client, CloudProviderType::Proxmox, "proxmox-credentials")
-            .await
-    }
-
-    fn get_aws_credentials() -> Result<AwsCredentials> {
-        AwsCredentials::from_env().map_err(|e| Error::validation(e.to_string()))
+        Self::apply_credentials_secret(client, &creds.to_k8s_secret()).await?;
+        self.create_cloud_provider(
+            client,
+            CloudProviderType::Proxmox,
+            PROXMOX_CREDENTIALS_SECRET,
+        )
+        .await
     }
 
     async fn create_aws_credentials(&self, client: &Client) -> Result<()> {
-        let creds = Self::get_aws_credentials()?;
+        let creds = AwsCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
         info!("AWS_REGION: {}", creds.region);
 
-        // Create credentials secret
-        let manifests = aws_credentials_manifests(&creds);
-        kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
+        Self::apply_credentials_secret(client, &creds.to_k8s_secret()).await?;
+        self.create_cloud_provider(client, CloudProviderType::AWS, AWS_CREDENTIALS_SECRET)
+            .await
+    }
+
+    async fn create_openstack_credentials(&self, client: &Client) -> Result<()> {
+        let creds =
+            OpenStackCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
+        info!("OpenStack cloud: {}", creds.cloud_name);
+
+        Self::apply_credentials_secret(client, &creds.to_k8s_secret()).await?;
+        self.create_cloud_provider(
+            client,
+            CloudProviderType::OpenStack,
+            OPENSTACK_CREDENTIALS_SECRET,
+        )
+        .await
+    }
+
+    /// Apply a credentials secret to the cluster, creating the namespace if needed.
+    async fn apply_credentials_secret(
+        client: &Client,
+        secret: &k8s_openapi::api::core::v1::Secret,
+    ) -> Result<()> {
+        use kube::api::{Api, Patch, PatchParams};
+
+        // Ensure namespace exists
+        kube_utils::create_namespace(client, LATTICE_SYSTEM_NAMESPACE)
             .await
             .cmd_err()?;
 
-        // Create CloudProvider referencing the credentials
-        self.create_cloud_provider(client, CloudProviderType::AWS, "aws-credentials")
+        // Apply secret
+        let secrets: Api<k8s_openapi::api::core::v1::Secret> =
+            Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let name = secret
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| Error::validation("Secret must have a name"))?;
+        secrets
+            .patch(
+                name,
+                &PatchParams::apply("lattice-cli").force(),
+                &Patch::Apply(secret),
+            )
             .await
+            .map_err(|e| {
+                Error::command_failed(format!("Failed to create credentials secret: {}", e))
+            })?;
+
+        Ok(())
     }
 
     /// Create a CloudProvider CRD referencing credentials

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::PolicyMetadata;
+use crate::kube_utils::HasApiResource;
 
 /// Cilium Network Policy for L4 eBPF-based network enforcement
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -25,22 +26,24 @@ pub struct CiliumNetworkPolicy {
     pub spec: CiliumNetworkPolicySpec,
 }
 
-impl CiliumNetworkPolicy {
+impl HasApiResource for CiliumNetworkPolicy {
     const API_VERSION: &'static str = "cilium.io/v2";
     const KIND: &'static str = "CiliumNetworkPolicy";
+}
 
+impl CiliumNetworkPolicy {
     fn api_version() -> String {
-        Self::API_VERSION.to_string()
+        <Self as HasApiResource>::API_VERSION.to_string()
     }
     fn kind() -> String {
-        Self::KIND.to_string()
+        <Self as HasApiResource>::KIND.to_string()
     }
 
     /// Create a new CiliumNetworkPolicy
     pub fn new(metadata: PolicyMetadata, spec: CiliumNetworkPolicySpec) -> Self {
         Self {
-            api_version: Self::API_VERSION.to_string(),
-            kind: Self::KIND.to_string(),
+            api_version: Self::api_version(),
+            kind: Self::kind(),
             metadata,
             spec,
         }
@@ -149,22 +152,24 @@ pub struct CiliumClusterwideNetworkPolicy {
     pub spec: CiliumClusterwideSpec,
 }
 
-impl CiliumClusterwideNetworkPolicy {
+impl HasApiResource for CiliumClusterwideNetworkPolicy {
     const API_VERSION: &'static str = "cilium.io/v2";
     const KIND: &'static str = "CiliumClusterwideNetworkPolicy";
+}
 
+impl CiliumClusterwideNetworkPolicy {
     fn api_version() -> String {
-        Self::API_VERSION.to_string()
+        <Self as HasApiResource>::API_VERSION.to_string()
     }
     fn kind() -> String {
-        Self::KIND.to_string()
+        <Self as HasApiResource>::KIND.to_string()
     }
 
     /// Create a new CiliumClusterwideNetworkPolicy
     pub fn new(metadata: ClusterwideMetadata, spec: CiliumClusterwideSpec) -> Self {
         Self {
-            api_version: Self::API_VERSION.to_string(),
-            kind: Self::KIND.to_string(),
+            api_version: Self::api_version(),
+            kind: Self::kind(),
             metadata,
             spec,
         }
@@ -186,8 +191,8 @@ impl ClusterwideMetadata {
     pub fn new(name: impl Into<String>) -> Self {
         let mut labels = BTreeMap::new();
         labels.insert(
-            "app.kubernetes.io/managed-by".to_string(),
-            "lattice".to_string(),
+            crate::LABEL_MANAGED_BY.to_string(),
+            crate::LABEL_MANAGED_BY_LATTICE.to_string(),
         );
         Self {
             name: name.into(),

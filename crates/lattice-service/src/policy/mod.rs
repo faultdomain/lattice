@@ -231,7 +231,7 @@ impl<'a> PolicyCompiler<'a> {
         }
 
         let mut match_labels = BTreeMap::new();
-        match_labels.insert("app.kubernetes.io/name".to_string(), service.name.clone());
+        match_labels.insert(lattice_common::LABEL_NAME.to_string(), service.name.clone());
 
         Some(AuthorizationPolicy::new(
             PolicyMetadata::new(format!("allow-waypoint-to-{}", service.name), namespace),
@@ -265,7 +265,7 @@ impl<'a> PolicyCompiler<'a> {
     ) -> CiliumNetworkPolicy {
         let mut endpoint_labels = BTreeMap::new();
         endpoint_labels.insert(
-            "k8s:app.kubernetes.io/name".to_string(),
+            lattice_common::CILIUM_LABEL_NAME.to_string(),
             service.name.clone(),
         );
 
@@ -279,11 +279,11 @@ impl<'a> PolicyCompiler<'a> {
                 .map(|edge| {
                     let mut labels = BTreeMap::new();
                     labels.insert(
-                        "k8s:io.kubernetes.pod.namespace".to_string(),
+                        lattice_common::CILIUM_LABEL_NAMESPACE.to_string(),
                         edge.caller_namespace.clone(),
                     );
                     labels.insert(
-                        "k8s:app.kubernetes.io/name".to_string(),
+                        lattice_common::CILIUM_LABEL_NAME.to_string(),
                         edge.caller_name.clone(),
                     );
                     EndpointSelector {
@@ -324,7 +324,7 @@ impl<'a> PolicyCompiler<'a> {
         // Allow traffic from waypoint proxy on HBONE port
         let mut waypoint_ingress_labels = BTreeMap::new();
         waypoint_ingress_labels.insert(
-            "k8s:io.kubernetes.pod.namespace".to_string(),
+            lattice_common::CILIUM_LABEL_NAMESPACE.to_string(),
             namespace.to_string(),
         );
         waypoint_ingress_labels.insert(
@@ -350,7 +350,7 @@ impl<'a> PolicyCompiler<'a> {
         // Always allow DNS to kube-dns
         let mut kube_dns_labels = BTreeMap::new();
         kube_dns_labels.insert(
-            "k8s:io.kubernetes.pod.namespace".to_string(),
+            lattice_common::CILIUM_LABEL_NAMESPACE.to_string(),
             "kube-system".to_string(),
         );
         kube_dns_labels.insert("k8s:k8s-app".to_string(), "kube-dns".to_string());
@@ -406,11 +406,11 @@ impl<'a> PolicyCompiler<'a> {
                     ServiceType::Local => {
                         let mut dep_labels = BTreeMap::new();
                         dep_labels.insert(
-                            "k8s:io.kubernetes.pod.namespace".to_string(),
+                            lattice_common::CILIUM_LABEL_NAMESPACE.to_string(),
                             edge.callee_namespace.clone(),
                         );
                         dep_labels.insert(
-                            "k8s:app.kubernetes.io/name".to_string(),
+                            lattice_common::CILIUM_LABEL_NAME.to_string(),
                             edge.callee_name.clone(),
                         );
 

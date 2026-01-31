@@ -189,11 +189,17 @@ async fn verify_node_colocation(kubeconfig_path: &str) -> Result<(), String> {
                 p.metadata
                     .labels
                     .as_ref()
-                    .and_then(|l| l.get("app.kubernetes.io/name"))
+                    .and_then(|l| l.get(lattice_common::LABEL_NAME))
                     .map(|v| v == name)
                     .unwrap_or(false)
             })
-            .ok_or_else(|| format!("No pod found with label app.kubernetes.io/name={}", name))?;
+            .ok_or_else(|| {
+                format!(
+                    "No pod found with label {}={}",
+                    lattice_common::LABEL_NAME,
+                    name
+                )
+            })?;
 
         pod.spec
             .as_ref()

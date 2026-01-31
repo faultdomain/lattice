@@ -42,8 +42,8 @@ pub async fn copy_credentials_to_provider_namespace(
 
     let (target_namespace, target_name) = match provider {
         ProviderType::Aws => (CAPA_NAMESPACE, "capa-manager-bootstrap-credentials"),
-        ProviderType::Proxmox => (CAPMOX_NAMESPACE, "proxmox-credentials"),
-        ProviderType::OpenStack => (CAPO_NAMESPACE, "openstack-credentials"),
+        ProviderType::Proxmox => (CAPMOX_NAMESPACE, PROXMOX_CREDENTIALS_SECRET),
+        ProviderType::OpenStack => (CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET),
         // Docker and other providers don't need credentials
         _ => return Ok(()),
     };
@@ -203,7 +203,7 @@ impl InfraProviderInfo {
             ProviderType::Aws => Ok(Self {
                 name: "aws",
                 version: env!("CAPA_VERSION").to_string(),
-                credentials_secret: Some(("capa-system", "capa-manager-bootstrap-credentials")),
+                credentials_secret: Some((CAPA_NAMESPACE, "capa-manager-bootstrap-credentials")),
                 // AWS generates AWS_B64ENCODED_CREDENTIALS from these fields in get_provider_env_vars
                 // credentials_env_map is not used directly - see generate_aws_b64_credentials()
                 credentials_env_map: &[],

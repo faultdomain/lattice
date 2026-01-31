@@ -20,12 +20,16 @@ use tracing::{debug, error, info, instrument, warn};
 #[cfg(test)]
 use mockall::automock;
 
+use lattice_common::kube_utils::HasApiResource;
+use lattice_common::policy::{AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry};
+
 use crate::compiler::{CompiledService, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
     LatticeService, LatticeServiceSpec, LatticeServiceStatus, ProviderType, ServicePhase,
 };
 use crate::graph::ServiceGraph;
+use crate::ingress::{Certificate, Gateway, HttpRoute};
 use crate::mesh;
 use crate::Error;
 
@@ -220,7 +224,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler as K8sHpa;
         use k8s_openapi::api::core::v1::{Service as K8sService, ServiceAccount as K8sSA};
         use kube::api::DynamicObject;
-        use kube::discovery::ApiResource;
 
         // Ensure namespace exists with ambient mode label for Istio traffic routing
         self.ensure_namespace_with_ambient(namespace).await?;
@@ -306,11 +309,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // CiliumNetworkPolicies
-        let cnp_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-            group: "cilium.io".to_string(),
-            version: "v2".to_string(),
-            kind: "CiliumNetworkPolicy".to_string(),
-        });
+        let cnp_ar = CiliumNetworkPolicy::api_resource();
         for cnp in &compiled.policies.cilium_policies {
             let name = cnp.metadata.name.clone();
             let json = serde_json::to_value(cnp)
@@ -326,11 +325,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // AuthorizationPolicies
-        let authz_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-            group: "security.istio.io".to_string(),
-            version: "v1beta1".to_string(),
-            kind: "AuthorizationPolicy".to_string(),
-        });
+        let authz_ar = AuthorizationPolicy::api_resource();
         for authz in &compiled.policies.authorization_policies {
             let name = authz.metadata.name.clone();
             let json = serde_json::to_value(authz)
@@ -346,11 +341,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // ServiceEntries
-        let se_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-            group: "networking.istio.io".to_string(),
-            version: "v1beta1".to_string(),
-            kind: "ServiceEntry".to_string(),
-        });
+        let se_ar = ServiceEntry::api_resource();
         for entry in &compiled.policies.service_entries {
             let name = entry.metadata.name.clone();
             let json = serde_json::to_value(entry)
@@ -366,11 +357,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // Gateway
-        let gw_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-            group: "gateway.networking.k8s.io".to_string(),
-            version: "v1".to_string(),
-            kind: "Gateway".to_string(),
-        });
+        let gw_ar = Gateway::api_resource();
         if let Some(ref gateway) = compiled.ingress.gateway {
             let name = gateway.metadata.name.clone();
             let json = serde_json::to_value(gateway)
@@ -386,11 +373,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // HTTPRoute
-        let route_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-            group: "gateway.networking.k8s.io".to_string(),
-            version: "v1".to_string(),
-            kind: "HTTPRoute".to_string(),
-        });
+        let route_ar = HttpRoute::api_resource();
         if let Some(ref route) = compiled.ingress.http_route {
             let name = route.metadata.name.clone();
             let json = serde_json::to_value(route)
@@ -406,11 +389,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // Certificate
-        let cert_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-            group: "cert-manager.io".to_string(),
-            version: "v1".to_string(),
-            kind: "Certificate".to_string(),
-        });
+        let cert_ar = Certificate::api_resource();
         if let Some(ref cert) = compiled.ingress.certificate {
             let name = cert.metadata.name.clone();
             let json = serde_json::to_value(cert)

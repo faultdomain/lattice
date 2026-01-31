@@ -462,17 +462,11 @@ pub async fn run(args: UninstallArgs) -> Result<()> {
         print!("Are you sure? [y/N] ");
 
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        tokio::io::stdout()
-            .flush()
-            .await
-            .expect("stdout flush failed");
+        tokio::io::stdout().flush().await?;
 
         let mut input = String::new();
         let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-        reader
-            .read_line(&mut input)
-            .await
-            .expect("stdin read failed");
+        reader.read_line(&mut input).await?;
         if !input.trim().eq_ignore_ascii_case("y") {
             println!("Aborted");
             return Ok(());

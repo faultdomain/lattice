@@ -173,8 +173,8 @@ pub fn create_cluster_labels(name: &str) -> std::collections::BTreeMap<String, S
     );
     labels.insert("lattice.dev/cluster".to_string(), name.to_string());
     labels.insert(
-        "app.kubernetes.io/managed-by".to_string(),
-        "lattice".to_string(),
+        lattice_common::LABEL_MANAGED_BY.to_string(),
+        lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
     );
     labels
 }
@@ -1911,8 +1911,8 @@ mod tests {
                 Some(&"my-cluster".to_string())
             );
             assert_eq!(
-                labels.get("app.kubernetes.io/managed-by"),
-                Some(&"lattice".to_string())
+                labels.get(lattice_common::LABEL_MANAGED_BY),
+                Some(&lattice_common::LABEL_MANAGED_BY_LATTICE.to_string())
             );
         }
 

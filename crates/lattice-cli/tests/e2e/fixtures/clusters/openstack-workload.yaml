@@ -9,7 +9,7 @@ spec:
   provider:
     kubernetes:
       version: "1.32.0"
-      bootstrap: rke2
+      bootstrap: kubeadm
       certSANs:
         - "127.0.0.1"
         - "localhost"

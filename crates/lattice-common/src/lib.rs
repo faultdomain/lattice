@@ -15,7 +15,7 @@ pub mod retry;
 pub mod template;
 pub mod yaml;
 
-pub use credentials::{AwsCredentials, CredentialError};
+pub use credentials::{AwsCredentials, CredentialError, OpenStackCredentials, ProxmoxCredentials};
 pub use error::Error;
 pub use kube_utils::pluralize_kind;
 pub use protocol::{CsrRequest, CsrResponse, DistributableResources};
@@ -88,3 +88,20 @@ pub const PROXMOX_CREDENTIALS_SECRET: &str = "proxmox-credentials";
 pub const AWS_CREDENTIALS_SECRET: &str = "aws-credentials";
 /// Secret name for OpenStack credentials
 pub const OPENSTACK_CREDENTIALS_SECRET: &str = "openstack-cloud-config";
+
+/// Label key for provider identification on secrets
+pub const PROVIDER_LABEL: &str = "lattice.dev/provider";
+
+// Standard Kubernetes labels (see https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/)
+/// Standard name label key - identifies the name of the application
+pub const LABEL_NAME: &str = "app.kubernetes.io/name";
+/// Standard managed-by label key - identifies the tool managing the resource
+pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
+/// Standard managed-by label value for Lattice-managed resources
+pub const LABEL_MANAGED_BY_LATTICE: &str = "lattice";
+
+// Cilium label selectors (use k8s: prefix for Kubernetes labels)
+/// Cilium selector for app name label
+pub const CILIUM_LABEL_NAME: &str = "k8s:app.kubernetes.io/name";
+/// Cilium selector for pod namespace
+pub const CILIUM_LABEL_NAMESPACE: &str = "k8s:io.kubernetes.pod.namespace";

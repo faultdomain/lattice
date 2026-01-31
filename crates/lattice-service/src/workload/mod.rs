@@ -114,10 +114,10 @@ impl ObjectMeta {
     pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
         let name = name.into();
         let mut labels = BTreeMap::new();
-        labels.insert("app.kubernetes.io/name".to_string(), name.clone());
+        labels.insert(lattice_common::LABEL_NAME.to_string(), name.clone());
         labels.insert(
-            "app.kubernetes.io/managed-by".to_string(),
-            "lattice".to_string(),
+            lattice_common::LABEL_MANAGED_BY.to_string(),
+            lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
         );
         Self {
             name,
@@ -1217,10 +1217,10 @@ impl WorkloadCompiler {
 
         // Build pod labels
         let mut labels = BTreeMap::new();
-        labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
+        labels.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
         labels.insert(
-            "app.kubernetes.io/managed-by".to_string(),
-            "lattice".to_string(),
+            lattice_common::LABEL_MANAGED_BY.to_string(),
+            lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
         );
 
         // Add volume ownership labels (for RWO affinity)
@@ -1255,7 +1255,7 @@ impl WorkloadCompiler {
                 selector: LabelSelector {
                     match_labels: {
                         let mut selector = BTreeMap::new();
-                        selector.insert("app.kubernetes.io/name".to_string(), name.to_string());
+                        selector.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
                         selector
                     },
                 },
@@ -1281,7 +1281,7 @@ impl WorkloadCompiler {
                                 match_labels: {
                                     let mut labels = BTreeMap::new();
                                     labels.insert(
-                                        "app.kubernetes.io/name".to_string(),
+                                        lattice_common::LABEL_NAME.to_string(),
                                         name.to_string(),
                                     );
                                     labels
@@ -1297,7 +1297,7 @@ impl WorkloadCompiler {
 
     fn compile_service(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Service {
         let mut selector = BTreeMap::new();
-        selector.insert("app.kubernetes.io/name".to_string(), name.to_string());
+        selector.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
 
         let ports: Vec<ServicePort> = spec
             .service
@@ -1487,7 +1487,7 @@ mod tests {
                 .spec
                 .selector
                 .match_labels
-                .get("app.kubernetes.io/name"),
+                .get(lattice_common::LABEL_NAME),
             Some(&"my-app".to_string())
         );
         assert_eq!(
@@ -1496,8 +1496,8 @@ mod tests {
                 .template
                 .metadata
                 .labels
-                .get("app.kubernetes.io/managed-by"),
-            Some(&"lattice".to_string())
+                .get(lattice_common::LABEL_MANAGED_BY),
+            Some(&lattice_common::LABEL_MANAGED_BY_LATTICE.to_string())
         );
     }
 
@@ -1538,7 +1538,7 @@ mod tests {
             constraint
                 .label_selector
                 .match_labels
-                .get("app.kubernetes.io/name"),
+                .get(lattice_common::LABEL_NAME),
             Some(&"my-app".to_string())
         );
     }

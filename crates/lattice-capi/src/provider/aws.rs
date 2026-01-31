@@ -13,7 +13,7 @@ use super::{
     InfrastructureRef, Provider, WorkerPoolConfig,
 };
 use lattice_common::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
-use lattice_common::{Error, Result};
+use lattice_common::{Error, Result, CAPA_NAMESPACE};
 
 const AWS_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
 
@@ -290,7 +290,7 @@ impl Provider for AwsProvider {
                 .unwrap_or_else(|| "capa-manager-bootstrap-credentials".to_string()),
             secret_ref
                 .map(|s| s.namespace.clone())
-                .unwrap_or_else(|| "capa-system".to_string()),
+                .unwrap_or_else(|| CAPA_NAMESPACE.to_string()),
         )]
     }
 }

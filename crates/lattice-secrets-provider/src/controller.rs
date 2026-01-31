@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kube::api::{Api, DynamicObject, Patch, PatchParams};
-use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
@@ -14,7 +13,13 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{
     SecretsProvider, SecretsProviderPhase, SecretsProviderStatus, VaultAuthMethod,
 };
+use lattice_common::kube_utils::HasApiResource;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+
+use crate::eso::{
+    AppRoleAuth, ClusterSecretStore, ClusterSecretStoreSpec, KubernetesAuth, ProviderSpec,
+    SecretKeyRef, ServiceAccountRef, VaultAuth, VaultProvider,
+};
 
 /// Controller context
 pub struct Context {
@@ -118,39 +123,32 @@ async fn ensure_cluster_secret_store(
 ) -> Result<(), ReconcileError> {
     let name = sp.name_any();
 
-    // Build the ClusterSecretStore spec based on auth method
-    let provider_spec = build_vault_provider_spec(sp)?;
-
-    let cluster_secret_store = serde_json::json!({
-        "apiVersion": "external-secrets.io/v1beta1",
-        "kind": "ClusterSecretStore",
-        "metadata": {
-            "name": name,
-            "labels": {
-                "app.kubernetes.io/managed-by": "lattice",
-                "lattice.dev/secrets-provider": name
-            }
+    // Build the ClusterSecretStore using typed structs
+    let vault_provider = build_vault_provider(sp)?;
+    let css = ClusterSecretStore::new(
+        &name,
+        ClusterSecretStoreSpec {
+            provider: ProviderSpec {
+                vault: vault_provider,
+            },
         },
-        "spec": {
-            "provider": provider_spec
-        }
-    });
+    );
+
+    // Serialize to JSON for dynamic API
+    let css_json = serde_json::to_value(&css).map_err(|e| {
+        ReconcileError::Internal(format!("failed to serialize ClusterSecretStore: {}", e))
+    })?;
 
     // Use dynamic API to apply ClusterSecretStore
-    let api_resource = ApiResource::from_gvk(&kube::api::GroupVersionKind {
-        group: "external-secrets.io".to_string(),
-        version: "v1beta1".to_string(),
-        kind: "ClusterSecretStore".to_string(),
-    });
-
+    let api_resource = ClusterSecretStore::api_resource();
     let css_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
-    let css: DynamicObject = serde_json::from_value(cluster_secret_store).map_err(|e| {
+    let css_obj: DynamicObject = serde_json::from_value(css_json).map_err(|e| {
         ReconcileError::Internal(format!("failed to build ClusterSecretStore: {}", e))
     })?;
 
     let params = PatchParams::apply("lattice-secrets-provider").force();
     css_api
-        .patch(&name, &params, &Patch::Apply(&css))
+        .patch(&name, &params, &Patch::Apply(&css_obj))
         .await
         .map_err(|e| ReconcileError::Kube(e.to_string()))?;
 
@@ -158,79 +156,87 @@ async fn ensure_cluster_secret_store(
     Ok(())
 }
 
-/// Build Vault provider spec for ClusterSecretStore
-fn build_vault_provider_spec(sp: &SecretsProvider) -> Result<serde_json::Value, ReconcileError> {
+/// Build VaultProvider from SecretsProvider spec
+fn build_vault_provider(sp: &SecretsProvider) -> Result<VaultProvider, ReconcileError> {
     let auth = build_vault_auth(sp)?;
 
-    Ok(serde_json::json!({
-        "vault": {
-            "server": sp.spec.server,
-            "path": sp.spec.path.as_deref().unwrap_or("secret"),
-            "version": "v2",
-            "namespace": sp.spec.namespace,
-            "caBundle": sp.spec.ca_bundle,
-            "auth": auth
-        }
-    }))
+    Ok(VaultProvider {
+        server: sp.spec.server.clone(),
+        path: sp.spec.path.clone().unwrap_or_else(|| "secret".to_string()),
+        version: "v2".to_string(),
+        namespace: sp.spec.namespace.clone(),
+        ca_bundle: sp.spec.ca_bundle.clone(),
+        auth,
+    })
 }
 
 /// Build Vault auth configuration based on auth method
-fn build_vault_auth(sp: &SecretsProvider) -> Result<serde_json::Value, ReconcileError> {
+fn build_vault_auth(sp: &SecretsProvider) -> Result<VaultAuth, ReconcileError> {
     match sp.spec.auth_method {
         VaultAuthMethod::Token => {
             let secret_ref = sp.spec.credentials_secret_ref.as_ref().ok_or_else(|| {
                 ReconcileError::Validation("Token auth requires credentialsSecretRef".to_string())
             })?;
-            Ok(serde_json::json!({
-                "tokenSecretRef": {
-                    "name": secret_ref.name,
-                    "namespace": &secret_ref.namespace,
-                    "key": "token"
-                }
-            }))
+            Ok(VaultAuth {
+                token_secret_ref: Some(SecretKeyRef {
+                    name: secret_ref.name.clone(),
+                    namespace: secret_ref.namespace.clone(),
+                    key: "token".to_string(),
+                }),
+                kubernetes: None,
+                app_role: None,
+            })
         }
         VaultAuthMethod::Kubernetes => {
             let mount_path = sp
                 .spec
                 .kubernetes_mount_path
-                .as_deref()
-                .unwrap_or("kubernetes");
+                .clone()
+                .unwrap_or_else(|| "kubernetes".to_string());
             let role = sp
                 .spec
                 .kubernetes_role
-                .as_deref()
-                .unwrap_or("external-secrets");
-            Ok(serde_json::json!({
-                "kubernetes": {
-                    "mountPath": mount_path,
-                    "role": role,
-                    "serviceAccountRef": {
-                        "name": "external-secrets",
-                        "namespace": "external-secrets"
-                    }
-                }
-            }))
+                .clone()
+                .unwrap_or_else(|| "external-secrets".to_string());
+            Ok(VaultAuth {
+                token_secret_ref: None,
+                kubernetes: Some(KubernetesAuth {
+                    mount_path,
+                    role,
+                    service_account_ref: ServiceAccountRef {
+                        name: "external-secrets".to_string(),
+                        namespace: "external-secrets".to_string(),
+                    },
+                }),
+                app_role: None,
+            })
         }
         VaultAuthMethod::AppRole => {
             let secret_ref = sp.spec.credentials_secret_ref.as_ref().ok_or_else(|| {
                 ReconcileError::Validation("AppRole auth requires credentialsSecretRef".to_string())
             })?;
-            let mount_path = sp.spec.approle_mount_path.as_deref().unwrap_or("approle");
-            Ok(serde_json::json!({
-                "appRole": {
-                    "path": mount_path,
-                    "roleRef": {
-                        "name": secret_ref.name,
-                        "namespace": &secret_ref.namespace,
-                        "key": "role_id"
+            let mount_path = sp
+                .spec
+                .approle_mount_path
+                .clone()
+                .unwrap_or_else(|| "approle".to_string());
+            Ok(VaultAuth {
+                token_secret_ref: None,
+                kubernetes: None,
+                app_role: Some(AppRoleAuth {
+                    path: mount_path,
+                    role_ref: SecretKeyRef {
+                        name: secret_ref.name.clone(),
+                        namespace: secret_ref.namespace.clone(),
+                        key: "role_id".to_string(),
                     },
-                    "secretRef": {
-                        "name": secret_ref.name,
-                        "namespace": &secret_ref.namespace,
-                        "key": "secret_id"
-                    }
-                }
-            }))
+                    secret_ref: SecretKeyRef {
+                        name: secret_ref.name.clone(),
+                        namespace: secret_ref.namespace.clone(),
+                        key: "secret_id".to_string(),
+                    },
+                }),
+            })
         }
     }
 }
@@ -336,28 +342,28 @@ mod tests {
     }
 
     #[test]
-    fn token_auth_builds_correct_spec() {
+    fn token_auth_builds_correct_provider() {
         let sp = sample_token_provider();
-        let spec = build_vault_provider_spec(&sp).expect("should build spec");
+        let provider = build_vault_provider(&sp).expect("should build provider");
 
-        let vault = spec.get("vault").expect("should have vault");
-        assert_eq!(vault.get("server").unwrap(), "https://vault.example.com");
+        assert_eq!(provider.server, "https://vault.example.com");
+        assert!(provider.auth.token_secret_ref.is_some());
+        assert!(provider.auth.kubernetes.is_none());
+        assert!(provider.auth.app_role.is_none());
 
-        let auth = vault.get("auth").expect("should have auth");
-        assert!(auth.get("tokenSecretRef").is_some());
+        let token_ref = provider.auth.token_secret_ref.unwrap();
+        assert_eq!(token_ref.key, "token");
     }
 
     #[test]
-    fn kubernetes_auth_builds_correct_spec() {
+    fn kubernetes_auth_builds_correct_provider() {
         let sp = sample_k8s_auth_provider();
-        let spec = build_vault_provider_spec(&sp).expect("should build spec");
+        let provider = build_vault_provider(&sp).expect("should build provider");
 
-        let vault = spec.get("vault").expect("should have vault");
-        let auth = vault.get("auth").expect("should have auth");
-        let k8s = auth.get("kubernetes").expect("should have kubernetes auth");
-
-        assert_eq!(k8s.get("role").unwrap(), "my-role");
-        assert_eq!(k8s.get("mountPath").unwrap(), "kubernetes");
+        assert!(provider.auth.kubernetes.is_some());
+        let k8s = provider.auth.kubernetes.unwrap();
+        assert_eq!(k8s.role, "my-role");
+        assert_eq!(k8s.mount_path, "kubernetes");
     }
 
     #[test]
@@ -365,7 +371,7 @@ mod tests {
         let mut sp = sample_token_provider();
         sp.spec.credentials_secret_ref = None;
 
-        let result = build_vault_provider_spec(&sp);
+        let result = build_vault_provider(&sp);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -398,29 +404,24 @@ mod tests {
     }
 
     #[test]
-    fn approle_auth_builds_correct_spec() {
+    fn approle_auth_builds_correct_provider() {
         let sp = sample_approle_provider();
-        let spec = build_vault_provider_spec(&sp).expect("should build spec");
+        let provider = build_vault_provider(&sp).expect("should build provider");
 
-        let vault = spec.get("vault").expect("should have vault");
-        assert_eq!(vault.get("server").unwrap(), "https://vault.example.com");
-        assert_eq!(vault.get("namespace").unwrap(), "my-vault-namespace");
+        assert_eq!(provider.server, "https://vault.example.com");
+        assert_eq!(provider.namespace, Some("my-vault-namespace".to_string()));
         assert_eq!(
-            vault.get("caBundle").unwrap(),
-            "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t"
+            provider.ca_bundle,
+            Some("LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t".to_string())
         );
 
-        let auth = vault.get("auth").expect("should have auth");
-        let approle = auth.get("appRole").expect("should have appRole");
-        assert_eq!(approle.get("path").unwrap(), "approle");
-
-        let role_ref = approle.get("roleRef").expect("should have roleRef");
-        assert_eq!(role_ref.get("name").unwrap(), "vault-approle");
-        assert_eq!(role_ref.get("key").unwrap(), "role_id");
-
-        let secret_ref = approle.get("secretRef").expect("should have secretRef");
-        assert_eq!(secret_ref.get("name").unwrap(), "vault-approle");
-        assert_eq!(secret_ref.get("key").unwrap(), "secret_id");
+        assert!(provider.auth.app_role.is_some());
+        let approle = provider.auth.app_role.unwrap();
+        assert_eq!(approle.path, "approle");
+        assert_eq!(approle.role_ref.name, "vault-approle");
+        assert_eq!(approle.role_ref.key, "role_id");
+        assert_eq!(approle.secret_ref.name, "vault-approle");
+        assert_eq!(approle.secret_ref.key, "secret_id");
     }
 
     #[test]
@@ -428,7 +429,7 @@ mod tests {
         let mut sp = sample_approle_provider();
         sp.spec.credentials_secret_ref = None;
 
-        let result = build_vault_provider_spec(&sp);
+        let result = build_vault_provider(&sp);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -441,12 +442,9 @@ mod tests {
         let mut sp = sample_approle_provider();
         sp.spec.approle_mount_path = Some("custom-approle".to_string());
 
-        let spec = build_vault_provider_spec(&sp).expect("should build spec");
-
-        let vault = spec.get("vault").expect("should have vault");
-        let auth = vault.get("auth").expect("should have auth");
-        let approle = auth.get("appRole").expect("should have appRole");
-        assert_eq!(approle.get("path").unwrap(), "custom-approle");
+        let provider = build_vault_provider(&sp).expect("should build provider");
+        let approle = provider.auth.app_role.expect("should have appRole");
+        assert_eq!(approle.path, "custom-approle");
     }
 
     // =========================================================================
@@ -469,15 +467,16 @@ mod tests {
                 ca_bundle: None,
             },
         );
-        let spec = build_vault_provider_spec(&sp).expect("should build spec");
+        let provider = build_vault_provider(&sp).expect("should build provider");
 
-        let vault = spec.get("vault").expect("should have vault");
-        assert_eq!(vault.get("path").unwrap(), "secret");
+        assert_eq!(provider.path, "secret");
 
-        let auth = vault.get("auth").expect("should have auth");
-        let k8s = auth.get("kubernetes").expect("should have kubernetes auth");
-        assert_eq!(k8s.get("mountPath").unwrap(), "kubernetes");
-        assert_eq!(k8s.get("role").unwrap(), "external-secrets");
+        let k8s = provider
+            .auth
+            .kubernetes
+            .expect("should have kubernetes auth");
+        assert_eq!(k8s.mount_path, "kubernetes");
+        assert_eq!(k8s.role, "external-secrets");
     }
 
     // =========================================================================
@@ -535,9 +534,8 @@ mod tests {
                 ca_bundle: None,
             },
         );
-        let spec = build_vault_provider_spec(&sp).expect("should build spec");
+        let provider = build_vault_provider(&sp).expect("should build provider");
 
-        let vault = spec.get("vault").expect("should have vault");
-        assert_eq!(vault.get("path").unwrap(), "secret");
+        assert_eq!(provider.path, "secret");
     }
 }

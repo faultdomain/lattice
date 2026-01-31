@@ -18,6 +18,37 @@ use tracing::{info, trace, warn};
 
 use crate::Error;
 
+// =============================================================================
+// HasApiResource Trait
+// =============================================================================
+
+/// Trait for types that have a known API group, version, and kind.
+///
+/// Implement this for CRD types to derive their `ApiResource` from their
+/// internal constants, ensuring consistency between serialization and API calls.
+///
+/// # Example
+/// ```ignore
+/// impl HasApiResource for AuthorizationPolicy {
+///     const API_VERSION: &'static str = "security.istio.io/v1";
+///     const KIND: &'static str = "AuthorizationPolicy";
+/// }
+///
+/// // Now you can get the ApiResource:
+/// let ar = AuthorizationPolicy::api_resource();
+/// ```
+pub trait HasApiResource {
+    /// Full API version (e.g., "security.istio.io/v1", "v1")
+    const API_VERSION: &'static str;
+    /// Resource kind (e.g., "AuthorizationPolicy")
+    const KIND: &'static str;
+
+    /// Build an ApiResource from the type's constants.
+    fn api_resource() -> ApiResource {
+        build_api_resource(Self::API_VERSION, Self::KIND)
+    }
+}
+
 /// Discover the API version for a resource group/kind.
 ///
 /// Uses Kubernetes API discovery to find the resource. Searches all versions within

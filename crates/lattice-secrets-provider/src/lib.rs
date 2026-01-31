@@ -7,5 +7,7 @@
 #![deny(missing_docs)]
 
 mod controller;
+mod eso;
 
 pub use controller::{error_policy, reconcile, Context};
+pub use eso::{ClusterSecretStore, ClusterSecretStoreSpec, ProviderSpec, VaultProvider};

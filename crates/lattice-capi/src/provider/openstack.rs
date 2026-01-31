@@ -13,7 +13,7 @@ use super::{
     InfrastructureRef, Provider, WorkerPoolConfig,
 };
 use lattice_common::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
-use lattice_common::{Error, Result};
+use lattice_common::{Error, Result, CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET};
 
 const OPENSTACK_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta1";
 const DEFAULT_NODE_CIDR: &str = "10.6.0.0/24";
@@ -265,10 +265,10 @@ impl Provider for OpenStackProvider {
         vec![(
             secret_ref
                 .map(|s| s.name.clone())
-                .unwrap_or_else(|| "openstack-cloud-config".to_string()),
+                .unwrap_or_else(|| OPENSTACK_CREDENTIALS_SECRET.to_string()),
             secret_ref
                 .map(|s| s.namespace.clone())
-                .unwrap_or_else(|| "capo-system".to_string()),
+                .unwrap_or_else(|| CAPO_NAMESPACE.to_string()),
         )]
     }
 }

@@ -325,7 +325,7 @@ fn ebs_csi_controller_service_account() -> ServiceAccount {
             name: Some("ebs-csi-controller-sa".to_string()),
             namespace: Some("kube-system".to_string()),
             labels: Some(BTreeMap::from([(
-                "app.kubernetes.io/name".to_string(),
+                lattice_common::LABEL_NAME.to_string(),
                 "aws-ebs-csi-driver".to_string(),
             )])),
             ..Default::default()
@@ -340,7 +340,7 @@ fn ebs_csi_node_service_account() -> ServiceAccount {
             name: Some("ebs-csi-node-sa".to_string()),
             namespace: Some("kube-system".to_string()),
             labels: Some(BTreeMap::from([(
-                "app.kubernetes.io/name".to_string(),
+                lattice_common::LABEL_NAME.to_string(),
                 "aws-ebs-csi-driver".to_string(),
             )])),
             ..Default::default()
@@ -351,7 +351,7 @@ fn ebs_csi_node_service_account() -> ServiceAccount {
 
 fn ebs_csi_labels() -> BTreeMap<String, String> {
     BTreeMap::from([(
-        "app.kubernetes.io/name".to_string(),
+        lattice_common::LABEL_NAME.to_string(),
         "aws-ebs-csi-driver".to_string(),
     )])
 }
@@ -711,7 +711,7 @@ fn ebs_csi_controller_deployment(version: &str) -> Deployment {
     let labels = BTreeMap::from([
         ("app".to_string(), "ebs-csi-controller".to_string()),
         (
-            "app.kubernetes.io/name".to_string(),
+            lattice_common::LABEL_NAME.to_string(),
             "aws-ebs-csi-driver".to_string(),
         ),
     ]);
@@ -983,7 +983,7 @@ fn ebs_csi_controller_pdb() -> PodDisruptionBudget {
                 match_labels: Some(BTreeMap::from([
                     ("app".to_string(), "ebs-csi-controller".to_string()),
                     (
-                        "app.kubernetes.io/name".to_string(),
+                        lattice_common::LABEL_NAME.to_string(),
                         "aws-ebs-csi-driver".to_string(),
                     ),
                 ])),
@@ -999,7 +999,7 @@ fn ebs_csi_node_daemonset(version: &str) -> DaemonSet {
     let labels = BTreeMap::from([
         ("app".to_string(), "ebs-csi-node".to_string()),
         (
-            "app.kubernetes.io/name".to_string(),
+            lattice_common::LABEL_NAME.to_string(),
             "aws-ebs-csi-driver".to_string(),
         ),
     ]);
