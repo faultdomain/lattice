@@ -20,7 +20,7 @@ use tracing::info;
 use lattice_operator::crd::{
     ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalService,
     LatticeExternalServiceSpec, LatticeService, LatticeServiceSpec, PortSpec, ReplicaSpec,
-    Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
+    Resolution, ResourceSpec, ResourceType, ServicePhase, ServicePortsSpec,
 };
 
 use super::helpers::{client_from_kubeconfig, run_cmd, run_cmd_allow_fail};
@@ -58,6 +58,90 @@ fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
             "--wait=false",
         ],
     );
+}
+
+/// Wait for all LatticeServices in a namespace to be Ready
+async fn wait_for_services_ready(
+    kubeconfig_path: &str,
+    namespace: &str,
+    expected_count: usize,
+) -> Result<(), String> {
+    use kube::api::ListParams;
+
+    let client = client_from_kubeconfig(kubeconfig_path).await?;
+    let api: Api<LatticeService> = Api::namespaced(client, namespace);
+
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(300);
+
+    info!(
+        "Waiting for {} LatticeServices to be Ready...",
+        expected_count
+    );
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for LatticeServices to be Ready (expected {})",
+                expected_count
+            ));
+        }
+
+        let services = api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| format!("Failed to list services: {}", e))?;
+
+        let ready_count = services
+            .items
+            .iter()
+            .filter(|svc| {
+                svc.status
+                    .as_ref()
+                    .map(|s| s.phase == ServicePhase::Ready)
+                    .unwrap_or(false)
+            })
+            .count();
+
+        let total = services.items.len();
+
+        info!(
+            "{}/{} LatticeServices ready (total: {})",
+            ready_count, expected_count, total
+        );
+
+        if ready_count >= expected_count {
+            info!("All {} LatticeServices are Ready!", expected_count);
+            return Ok(());
+        }
+
+        // Log which services are not ready yet
+        let not_ready: Vec<_> = services
+            .items
+            .iter()
+            .filter(|svc| {
+                svc.status
+                    .as_ref()
+                    .map(|s| s.phase != ServicePhase::Ready)
+                    .unwrap_or(true)
+            })
+            .filter_map(|svc| {
+                let name = svc.metadata.name.as_deref()?;
+                let phase = svc
+                    .status
+                    .as_ref()
+                    .map(|s| format!("{:?}", s.phase))
+                    .unwrap_or_else(|| "NoStatus".to_string());
+                Some(format!("{}:{}", name, phase))
+            })
+            .collect();
+
+        if !not_ready.is_empty() && not_ready.len() <= 5 {
+            info!("  Not ready: {}", not_ready.join(", "));
+        }
+
+        sleep(Duration::from_secs(5)).await;
+    }
 }
 
 // =============================================================================
@@ -963,6 +1047,11 @@ async fn check_no_incorrectly_allowed(
 pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, String> {
     info!("\n[Mesh Test] Starting service mesh bilateral agreement test...");
     deploy_test_services(kubeconfig_path).await?;
+
+    // Wait for LatticeServices to be Ready (controller has reconciled)
+    wait_for_services_ready(kubeconfig_path, TEST_SERVICES_NAMESPACE, TOTAL_SERVICES).await?;
+
+    // Wait for pods to be running
     wait_for_service_pods(kubeconfig_path).await?;
 
     // Wait for initial policy propagation
@@ -1784,6 +1873,11 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
     mesh.print_manifest();
 
     deploy_random_mesh(&mesh, kubeconfig_path).await?;
+
+    // Wait for LatticeServices to be Ready (controller has reconciled)
+    wait_for_services_ready(kubeconfig_path, RANDOM_MESH_NAMESPACE, mesh.services.len()).await?;
+
+    // Wait for pods to be running
     info!("Waiting for pods...");
     wait_for_random_mesh_pods(&mesh, kubeconfig_path).await?;
 

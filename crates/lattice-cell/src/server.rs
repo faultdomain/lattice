@@ -385,6 +385,34 @@ async fn handle_agent_message_impl(
                 );
             }
         }
+        Some(Payload::SubtreeState(state)) => {
+            debug!(
+                cluster = %cluster_name,
+                is_full_sync = state.is_full_sync,
+                cluster_count = state.clusters.len(),
+                service_count = state.services.len(),
+                "Subtree state received"
+            );
+            // TODO: Update SubtreeRegistry when integrated
+            // For now, just log the received state
+            for cluster in &state.clusters {
+                if cluster.removed {
+                    debug!(
+                        cluster = %cluster_name,
+                        subtree_cluster = %cluster.name,
+                        "Subtree cluster removed"
+                    );
+                } else {
+                    debug!(
+                        cluster = %cluster_name,
+                        subtree_cluster = %cluster.name,
+                        parent = %cluster.parent,
+                        phase = %cluster.phase,
+                        "Subtree cluster added/updated"
+                    );
+                }
+            }
+        }
         None => {
             warn!(cluster = %cluster_name, "Received message with no payload");
         }
@@ -544,6 +572,7 @@ mod tests {
             Some(Payload::KubernetesResponse(_)) => {}
             Some(Payload::MoveAck(_)) => {}
             Some(Payload::MoveCompleteAck(_)) => {}
+            Some(Payload::SubtreeState(_)) => {}
             None => {}
         }
     }

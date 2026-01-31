@@ -2,15 +2,20 @@
 //!
 //! This module contains all CRD definitions used by the Lattice operator.
 
+mod cedar_policy;
 mod cloud_provider;
 mod cluster;
 mod external_service;
+mod oidc_provider;
 mod providers;
 mod secrets_provider;
 mod service;
 mod service_policy;
 mod types;
 
+pub use cedar_policy::{
+    CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus,
+};
 pub use cloud_provider::{
     AwsProviderConfig, CloudProvider, CloudProviderPhase, CloudProviderSpec, CloudProviderStatus,
     CloudProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
@@ -19,6 +24,9 @@ pub use cluster::{LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, Work
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
+};
+pub use oidc_provider::{
+    OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
 };
 pub use secrets_provider::{
     SecretsProvider, SecretsProviderPhase, SecretsProviderSpec, SecretsProviderStatus,

@@ -1,0 +1,60 @@
+[package]
+name = "lattice-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Auth proxy for Lattice cluster access"
+
+[features]
+default = []
+fips = ["lattice-common/fips"]
+
+[dependencies]
+# Internal
+lattice-common = { workspace = true }
+lattice-proto = { workspace = true }
+lattice-cell = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# HTTP
+axum = { workspace = true }
+axum-server = { workspace = true }
+reqwest = { workspace = true }
+
+# Auth
+jsonwebtoken = { workspace = true }
+cedar-policy = { workspace = true }
+
+# Crypto
+rustls = { workspace = true }
+aws-lc-rs = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+rstest = { workspace = true }

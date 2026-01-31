@@ -14,6 +14,7 @@
 pub mod client;
 pub mod executor;
 pub mod pivot;
+pub mod subtree;
 pub mod watch;
 
 pub use client::{AgentClient, AgentClientConfig, AgentCredentials, CertificateError, ClientState};
@@ -25,6 +26,7 @@ pub use pivot::{
     apply_distributed_resources, patch_kubeconfig_for_self_management, DistributableResources,
     PivotError,
 };
+pub use subtree::SubtreeSender;
 pub use watch::{execute_watch, WatchRegistry};
 
 // Re-export proto types for convenience

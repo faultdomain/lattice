@@ -10,14 +10,16 @@
 //! - **Move Sender**: gRPC-based move command sender for distributed pivot
 
 pub mod bootstrap;
+pub mod capi_proxy;
 pub mod cilium;
 pub mod connection;
-pub mod k8s_proxy;
+pub mod k8s_tunnel;
 pub mod kubeconfig;
 pub mod move_sender;
 pub mod parent;
 pub mod resources;
 pub mod server;
+pub mod subtree_registry;
 
 pub use bootstrap::{
     bootstrap_router, generate_autoscaler_manifests, generate_aws_addon_manifests,
@@ -28,9 +30,11 @@ pub use connection::{
     AgentConnection, AgentRegistry, KubeconfigProxyConfig, PivotSourceManifests, SendError,
     SharedAgentRegistry, UnpivotManifests,
 };
-pub use k8s_proxy::{start_proxy_server, ProxyConfig, ProxyError};
+pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
+pub use k8s_tunnel::{tunnel_request, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT};
 pub use kubeconfig::patch_kubeconfig_for_proxy;
 pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{load_or_create_ca, CellServerError, ParentConfig, ParentServers};
 pub use resources::{fetch_distributable_resources, DistributableResources, ResourceError};
 pub use server::AgentServer;
+pub use subtree_registry::{ClusterInfo, RouteInfo, SubtreeRegistry};

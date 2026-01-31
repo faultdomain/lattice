@@ -39,6 +39,7 @@ use lattice_proto::{
     UidMapping,
 };
 
+use crate::subtree::SubtreeSender;
 use crate::watch::{execute_watch, WatchRegistry};
 use crate::{execute_k8s_request, is_watch_request, ClientMtlsConfig};
 
@@ -133,6 +134,8 @@ pub struct AgentClient {
     command_handler_handle: Option<tokio::task::JoinHandle<()>>,
     /// Handle to deletion watcher task for unpivot detection
     deletion_watcher_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Handle to subtree watcher task for state bubbling
+    subtree_watcher_handle: Option<tokio::task::JoinHandle<()>>,
     /// Registry for tracking active K8s API watches
     watch_registry: Arc<WatchRegistry>,
 }
@@ -150,6 +153,7 @@ impl AgentClient {
             heartbeat_handle: None,
             command_handler_handle: None,
             deletion_watcher_handle: None,
+            subtree_watcher_handle: None,
             watch_registry: Arc::new(WatchRegistry::new()),
         }
     }
@@ -320,6 +324,11 @@ impl AgentClient {
             handle.abort();
         }
 
+        // Abort subtree watcher task
+        if let Some(handle) = self.subtree_watcher_handle.take() {
+            handle.abort();
+        }
+
         // Clear message sender
         self.message_tx = None;
 
@@ -419,6 +428,25 @@ impl AgentClient {
         // Send bootstrap complete with CAPI status
         self.send_bootstrap_complete(capi_ready, installed_providers)
             .await?;
+
+        // Send full subtree state to parent and start watcher for changes
+        // This enables the parent cell to know about all clusters in our subtree
+        // for routing K8s API requests and authorization decisions
+        if let Ok(k8s_client) = kube::Client::try_default().await {
+            let subtree_sender = SubtreeSender::new(
+                self.config.cluster_name.clone(),
+                k8s_client,
+            );
+
+            // Send full state on connect
+            subtree_sender.send_full_state(&message_tx).await;
+
+            // Spawn watcher to send deltas on LatticeCluster changes
+            // spawn_watcher consumes the sender and runs until the channel closes
+            self.subtree_watcher_handle = Some(subtree_sender.spawn_watcher(message_tx.clone()));
+        } else {
+            warn!("Failed to create K8s client for subtree watcher - subtree state will not be reported");
+        }
 
         // Clone for spawned tasks
         let config = self.config.clone();
@@ -1425,6 +1453,9 @@ impl Drop for AgentClient {
             handle.abort();
         }
         if let Some(handle) = self.deletion_watcher_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.subtree_watcher_handle.take() {
             handle.abort();
         }
     }

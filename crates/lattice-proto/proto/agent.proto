@@ -60,6 +60,8 @@ message AgentMessage {
     MoveObjectAck move_ack = 9;
     // Distributed move: ack after unpause complete
     MoveCompleteAck move_complete_ack = 10;
+    // Subtree state bubbling for routing
+    SubtreeState subtree_state = 11;
   }
 }
 
@@ -382,4 +384,55 @@ message MoveCompleteAck {
   string error = 3;
   // Total resources created
   int32 resources_created = 4;
+}
+
+// =============================================================================
+// Subtree State Bubbling Messages
+// =============================================================================
+
+// Agent → Cell: State of this cluster's subtree
+//
+// Each cluster bubbles up its subtree membership to its parent. This enables:
+// - Routing: parent knows which child agent connection routes to which clusters
+// - Authorization: Cedar policies can reference cluster hierarchy
+//
+// Protocol:
+// - On connect: Agent sends full subtree state (is_full_sync=true)
+// - On change: Agent sends delta with added/removed clusters
+// - Parent aggregates and bubbles up to its own parent
+message SubtreeState {
+  // Clusters in this subtree (including self)
+  repeated SubtreeCluster clusters = 1;
+  // Services in this subtree (future: for service mesh routing)
+  repeated SubtreeService services = 2;
+  // True on initial connect (full state), false for incremental updates
+  bool is_full_sync = 3;
+}
+
+// Information about a cluster in the subtree
+message SubtreeCluster {
+  // Cluster name (unique identifier)
+  string name = 1;
+  // Immediate parent cluster name (empty for root)
+  string parent = 2;
+  // True if this cluster is being removed (delta only)
+  bool removed = 3;
+  // Cluster phase (Pending, Provisioning, Ready, etc.)
+  string phase = 4;
+  // Labels for policy matching
+  map<string, string> labels = 5;
+}
+
+// Information about a service in the subtree (future use)
+message SubtreeService {
+  // Service name
+  string name = 1;
+  // Namespace
+  string namespace = 2;
+  // Cluster hosting this service
+  string cluster = 3;
+  // True if this service is being removed
+  bool removed = 4;
+  // Labels for policy matching
+  map<string, string> labels = 5;
 }

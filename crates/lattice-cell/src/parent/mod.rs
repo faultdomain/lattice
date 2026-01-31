@@ -27,7 +27,7 @@ use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
 };
 use crate::connection::{AgentRegistry, SharedAgentRegistry};
-use crate::k8s_proxy::{start_proxy_server, ProxyConfig};
+use crate::capi_proxy::{start_capi_proxy, CapiProxyConfig};
 use crate::resources::fetch_distributable_resources;
 use crate::server::AgentServer;
 use lattice_common::crd::{CloudProvider, SecretsProvider};
@@ -743,15 +743,15 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             .map_err(|e| CellServerError::CertGeneration(e.to_string()))?;
         drop(ca_bundle_for_proxy);
 
-        info!(addr = %proxy_addr, "Starting K8s API proxy server");
+        info!(addr = %proxy_addr, "Starting CAPI proxy server");
         let proxy_handle = tokio::spawn(async move {
-            let config = ProxyConfig {
+            let config = CapiProxyConfig {
                 addr: proxy_addr,
                 cert_pem: proxy_cert_pem,
                 key_pem: proxy_key_pem,
             };
-            if let Err(e) = start_proxy_server(proxy_registry, config).await {
-                error!(error = %e, "K8s API proxy server error");
+            if let Err(e) = start_capi_proxy(proxy_registry, config).await {
+                error!(error = %e, "CAPI proxy server error");
             }
         });
 
