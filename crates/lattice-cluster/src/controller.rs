@@ -1362,21 +1362,23 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Check if pivot was already completed (persisted in status)
             // This handles controller restarts - we don't need to wait for agent reconnection
+            // If we're reconciling our own LatticeCluster, pivot was already completed.
+            // We received this CRD post-pivot (via ApplyManifestsCommand from parent or installer).
+            if is_self_cluster(&name, ctx.self_cluster_name.as_deref()) {
+                info!("reconciling self cluster, pivot already complete");
+                return try_transition_to_ready(&cluster, &ctx, true).await;
+            }
+
+            // Child cluster with pivot already complete - transition to Pivoted
             if cluster
                 .status
                 .as_ref()
                 .map(|s| s.pivot_complete)
                 .unwrap_or(false)
             {
-                info!("pivot already complete (from status)");
-                return try_transition_to_ready(&cluster, &ctx, false).await;
-            }
-
-            // If we're reconciling our own LatticeCluster, pivot was already completed.
-            // We received this CRD post-pivot (via ApplyManifestsCommand from parent or installer).
-            if is_self_cluster(&name, ctx.self_cluster_name.as_deref()) {
-                info!("reconciling self cluster, pivot already complete");
-                return try_transition_to_ready(&cluster, &ctx, true).await;
+                info!("pivot already complete (from status), child is self-managing");
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoted, None, false).await?;
+                return Ok(Action::requeue(Duration::from_secs(60)));
             }
 
             // We're the parent cell, orchestrating pivot for a child cluster
@@ -1414,22 +1416,36 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
                 match action {
                     PivotAction::Complete => {
-                        // Pivot complete - transition to Ready
-                        info!("pivot complete");
-                        try_transition_to_ready(&cluster, &ctx, true).await
+                        // Pivot complete - child cluster is now self-managing
+                        info!("pivot complete, child cluster is self-managing");
+                        update_cluster_status(
+                            &cluster,
+                            &ctx,
+                            ClusterPhase::Pivoted,
+                            None,
+                            true,
+                        )
+                        .await?;
+                        Ok(Action::requeue(Duration::from_secs(60)))
                     }
                     PivotAction::TriggerPivot => {
-                        // Agent ready for pivot - trigger it
-                        // Note: Infrastructure (including network policies) is reconciled
-                        // continuously by the child cluster's controller after pivot
+                        // Agent ready for pivot - set Pivoting phase and trigger
                         info!("agent ready, triggering pivot");
+                        update_cluster_status(
+                            &cluster,
+                            &ctx,
+                            ClusterPhase::Pivoting,
+                            None,
+                            false,
+                        )
+                        .await?;
+
                         match pivot_ops
                             .trigger_pivot(&name, &capi_namespace, &capi_namespace)
                             .await
                         {
                             Ok(()) => {
                                 info!("pivot completed successfully");
-                                // Requeue to transition to Ready phase
                             }
                             Err(e) => {
                                 error!(cluster = %name, error = %e, "pivot failed, will retry");
@@ -1449,16 +1465,13 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 try_transition_to_ready(&cluster, &ctx, false).await
             }
         }
+        ClusterPhase::Pivoted => {
+            // Child cluster is self-managing after pivot, just monitor
+            debug!("child cluster is self-managing (pivoted), monitoring");
+            Ok(Action::requeue(Duration::from_secs(60)))
+        }
         ClusterPhase::Ready => {
-            // Only do full reconciliation (worker scaling, tainting) for our OWN cluster.
-            // For workload clusters we provisioned, they are now self-managing after pivot.
-            // The CAPI resources have been moved to the workload cluster.
-            if !is_self {
-                debug!("cluster is ready (post-pivot), monitoring only - workload cluster is self-managing");
-                return Ok(Action::requeue(Duration::from_secs(60)));
-            }
-
-            // Self-cluster: reconcile infrastructure and worker pools
+            // Ready is only for self clusters - reconcile infrastructure and worker pools
             debug!("cluster is ready, reconciling infrastructure and worker pools");
 
             // Reconcile infrastructure (Cilium policies, Istio, etc.)
@@ -1867,6 +1880,12 @@ async fn update_cluster_status(
             ConditionStatus::True,
             "StartingPivot",
             "Pivoting cluster to self-managed",
+        ),
+        ClusterPhase::Pivoted => (
+            "Pivoted",
+            ConditionStatus::True,
+            "PivotComplete",
+            "Child cluster is self-managing",
         ),
         ClusterPhase::Deleting => (
             "Deleting",
@@ -2478,7 +2497,7 @@ mod tests {
             )
         }
 
-        /// Creates a context for read-only scenarios where no status updates happen.
+        /// Creates a context for read-only scenarios (minimal status updates).
         fn mock_context_readonly() -> Arc<Context> {
             use lattice_common::crd::{CloudProvider, CloudProviderSpec, CloudProviderType};
 
@@ -2491,6 +2510,8 @@ mod tests {
             mock.expect_taint_control_plane_nodes().returning(|| Ok(()));
             // Non-self clusters get a finalizer added on first reconcile
             mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
+            // Ready phase updates worker pool status
+            mock.expect_patch_status().returning(|_, _| Ok(()));
             // Return a Docker CloudProvider (no credentials needed)
             mock.expect_get_cloud_provider().returning(|_| {
                 Ok(Some(CloudProvider::new(
@@ -3355,7 +3376,9 @@ mod tests {
                 ClusterPhase::Pending,
                 ClusterPhase::Provisioning,
                 ClusterPhase::Pivoting,
+                ClusterPhase::Pivoted,
                 ClusterPhase::Ready,
+                ClusterPhase::Deleting,
                 ClusterPhase::Unpivoting,
                 ClusterPhase::Failed,
             ];

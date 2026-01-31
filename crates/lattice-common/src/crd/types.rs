@@ -645,6 +645,8 @@ pub enum ClusterPhase {
     Provisioning,
     /// CAPI resources are being pivoted to the cluster
     Pivoting,
+    /// Pivot complete - cluster is self-managing (parent's view of child cluster)
+    Pivoted,
     /// Cluster is fully operational and self-managing
     Ready,
     /// Cluster is being deleted (infrastructure teardown in progress)
@@ -661,6 +663,7 @@ impl std::fmt::Display for ClusterPhase {
             Self::Pending => write!(f, "Pending"),
             Self::Provisioning => write!(f, "Provisioning"),
             Self::Pivoting => write!(f, "Pivoting"),
+            Self::Pivoted => write!(f, "Pivoted"),
             Self::Ready => write!(f, "Ready"),
             Self::Deleting => write!(f, "Deleting"),
             Self::Unpivoting => write!(f, "Unpivoting"),
@@ -1190,7 +1193,10 @@ mod tests {
             assert_eq!(ClusterPhase::Pending.to_string(), "Pending");
             assert_eq!(ClusterPhase::Provisioning.to_string(), "Provisioning");
             assert_eq!(ClusterPhase::Pivoting.to_string(), "Pivoting");
+            assert_eq!(ClusterPhase::Pivoted.to_string(), "Pivoted");
             assert_eq!(ClusterPhase::Ready.to_string(), "Ready");
+            assert_eq!(ClusterPhase::Deleting.to_string(), "Deleting");
+            assert_eq!(ClusterPhase::Unpivoting.to_string(), "Unpivoting");
             assert_eq!(ClusterPhase::Failed.to_string(), "Failed");
         }
 
@@ -1200,7 +1206,10 @@ mod tests {
                 ClusterPhase::Pending,
                 ClusterPhase::Provisioning,
                 ClusterPhase::Pivoting,
+                ClusterPhase::Pivoted,
                 ClusterPhase::Ready,
+                ClusterPhase::Deleting,
+                ClusterPhase::Unpivoting,
                 ClusterPhase::Failed,
             ];
             for phase in phases {

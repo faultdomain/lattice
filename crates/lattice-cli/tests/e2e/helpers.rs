@@ -414,8 +414,8 @@ pub async fn watch_cluster_phases(
                     last_phase = Some(current_phase.clone());
                 }
 
-                if matches!(current_phase, ClusterPhase::Ready) {
-                    info!("Cluster {} reached Ready state!", cluster_name);
+                if matches!(current_phase, ClusterPhase::Ready | ClusterPhase::Pivoted) {
+                    info!("Cluster {} is operational ({:?})!", cluster_name, current_phase);
                     return Ok(());
                 }
 
@@ -511,11 +511,11 @@ pub async fn watch_cluster_phases_with_kubeconfig(
                     }
                 }
 
-                if matches!(current_phase, ClusterPhase::Ready) {
-                    info!("Cluster {} reached Ready state!", cluster_name);
+                if matches!(current_phase, ClusterPhase::Ready | ClusterPhase::Pivoted) {
+                    info!("Cluster {} is operational ({:?})!", cluster_name, current_phase);
                     if !kubeconfig_extracted {
                         return Err(format!(
-                            "Cluster {} is Ready but kubeconfig was not extracted before pivot",
+                            "Cluster {} is operational but kubeconfig was not extracted before pivot",
                             cluster_name
                         ));
                     }

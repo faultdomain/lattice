@@ -611,18 +611,18 @@ mod tests {
         assert!(unpivoting.is_critical());
 
         let unpivot_pending = ClusterContext {
-            phase: ClusterPhase::Ready,
+            phase: ClusterPhase::Pivoted,
             pivot_complete: true,
             unpivot_pending: true,
         };
         assert!(unpivot_pending.is_critical());
 
-        let ready = ClusterContext {
-            phase: ClusterPhase::Ready,
+        let pivoted = ClusterContext {
+            phase: ClusterPhase::Pivoted,
             pivot_complete: true,
             unpivot_pending: false,
         };
-        assert!(!ready.is_critical());
+        assert!(!pivoted.is_critical());
     }
 
     #[test]
@@ -650,11 +650,11 @@ mod tests {
         targets.add("parent", "/tmp/parent-kc", None);
         targets.add("child", "/tmp/child-kc", Some("/tmp/parent-kc"));
 
-        // No attack when child is Ready
+        // No attack when child is Pivoted (stable state)
         targets.update_context(
             "child",
             ClusterContext {
-                phase: ClusterPhase::Ready,
+                phase: ClusterPhase::Pivoted,
                 pivot_complete: true,
                 unpivot_pending: false,
             },
@@ -681,7 +681,7 @@ mod tests {
         targets.update_context(
             "child",
             ClusterContext {
-                phase: ClusterPhase::Ready,
+                phase: ClusterPhase::Pivoted,
                 pivot_complete: true,
                 unpivot_pending: true,
             },
