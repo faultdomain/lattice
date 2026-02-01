@@ -256,7 +256,7 @@ pub struct ManifestConfig<'a> {
 pub async fn generate_all_manifests<G: ManifestGenerator>(
     generator: &G,
     config: &ManifestConfig<'_>,
-) -> Vec<String> {
+) -> Result<Vec<String>, BootstrapError> {
     let mut manifests = generator
         .generate(
             config.image,
@@ -283,10 +283,17 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
     // Add Cilium LB-IPAM resources
     // Priority: explicit networking config > auto-derived from Proxmox ipv4_pool
     if let Some(networking) = config.networking {
-        manifests.extend(crate::cilium::generate_lb_resources(networking));
+        let lb_resources = crate::cilium::generate_lb_resources(networking).map_err(|e| {
+            BootstrapError::Internal(format!("failed to generate Cilium LB resources: {}", e))
+        })?;
+        manifests.extend(lb_resources);
     } else if let Some(ipv4_pool) = config.proxmox_ipv4_pool {
         // Auto-derive LB pool from Proxmox ipv4_pool (uses .200/27 range from same subnet)
-        manifests.extend(crate::cilium::generate_lb_resources_from_proxmox(ipv4_pool));
+        let lb_resources =
+            crate::cilium::generate_lb_resources_from_proxmox(ipv4_pool).map_err(|e| {
+                BootstrapError::Internal(format!("failed to generate Cilium LB resources: {}", e))
+            })?;
+        manifests.extend(lb_resources);
     }
 
     // Add provider-specific addons (CCM, CSI, storage, autoscaler)
@@ -301,7 +308,7 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
         ));
     }
 
-    manifests
+    Ok(manifests)
 }
 
 /// Configuration for generating a complete bootstrap bundle
@@ -365,7 +372,7 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
         relax_fips: config.relax_fips,
         autoscaling_enabled: config.autoscaling_enabled,
     };
-    let mut manifests = generate_all_manifests(generator, &manifest_config).await;
+    let mut manifests = generate_all_manifests(generator, &manifest_config).await?;
 
     // Generate infrastructure manifests (cert-manager, CAPI, Istio, Cilium)
     let infra_config = lattice_infra::InfrastructureConfig {

@@ -90,6 +90,7 @@ impl IntoResponse for CapiProxyError {
             CapiProxyError::Server(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
 
+        // Build the error response - the fallback uses default() which is infallible
         Response::builder()
             .status(status)
             .header("Content-Type", "application/json")
@@ -99,10 +100,9 @@ impl IntoResponse for CapiProxyError {
                 status.as_u16()
             )))
             .unwrap_or_else(|_| {
-                Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::empty())
-                    .expect("empty body response should always build")
+                let mut response = Response::default();
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                response
             })
     }
 }

@@ -57,9 +57,7 @@ pub use agent::{
 };
 pub use cell::{
     // Standalone functions (used by both pivot and unpivot)
-    pause_cluster,
     prepare_move_objects,
-    unpause_cluster,
     // Data types
     BatchAck,
     CellMover,

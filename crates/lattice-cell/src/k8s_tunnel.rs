@@ -231,12 +231,12 @@ async fn handle_watch_response(
 
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx));
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .header("Transfer-Encoding", "chunked")
         .body(body)
-        .expect("streaming response should build"))
+        .map_err(|e| TunnelError::ResponseBuild(e.to_string()))
 }
 
 /// Build HTTP response from KubernetesResponse

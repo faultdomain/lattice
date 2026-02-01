@@ -8,14 +8,7 @@ pub mod startup;
 
 // Re-export cell modules from lattice-cell
 pub use lattice_cell::bootstrap;
-pub use lattice_cell::cilium;
 pub use lattice_cell::parent;
-
-// Re-export from lattice-capi
-pub use lattice_capi::provider;
-
-// Re-export pivot from lattice-agent
-pub use lattice_agent::pivot;
 
 // Re-export CAPI from lattice-capi
 pub use lattice_capi as capi;
@@ -29,10 +22,6 @@ pub mod controller;
 
 // Re-export infrastructure modules from lattice-infra
 pub mod infra;
-pub use lattice_infra::pki;
-
-// Re-export proto from lattice-proto
-pub use lattice_proto as proto;
 
 // Re-export common types
 pub use lattice_common::{

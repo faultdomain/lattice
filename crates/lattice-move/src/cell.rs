@@ -79,12 +79,12 @@ pub async fn prepare_move_objects(
 }
 
 /// Pause Cluster and ClusterClass resources in a namespace
-pub async fn pause_cluster(client: &Client, namespace: &str) -> Result<(), MoveError> {
+pub(crate) async fn pause_cluster(client: &Client, namespace: &str) -> Result<(), MoveError> {
     set_cluster_paused(client, namespace, true).await
 }
 
 /// Unpause Cluster and ClusterClass resources in a namespace
-pub async fn unpause_cluster(client: &Client, namespace: &str) -> Result<(), MoveError> {
+pub(crate) async fn unpause_cluster(client: &Client, namespace: &str) -> Result<(), MoveError> {
     set_cluster_paused(client, namespace, false).await
 }
 

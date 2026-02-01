@@ -10,17 +10,12 @@ lattice-common = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }
-k8s-openapi = { workspace = true }
 
 # Async
 tokio = { workspace = true }
 
 # Serialization
-serde = { workspace = true }
 serde_json = { workspace = true }
-
-# Error handling
-thiserror = { workspace = true }
 
 # Time
 chrono = { workspace = true }

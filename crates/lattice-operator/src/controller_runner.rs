@@ -231,7 +231,7 @@ fn create_secrets_provider_controller(client: Client) -> impl std::future::Futur
         .shutdown_on_signal()
         .run(
             secrets_provider_ctrl::reconcile,
-            secrets_provider_ctrl::default_error_policy,
+            lattice_common::default_error_policy,
             ctx,
         )
         .for_each(|result| async move {

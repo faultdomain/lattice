@@ -15,20 +15,22 @@ use lattice_common::crd::{Ipv4PoolConfig, NetworkingSpec};
 /// Returns YAML strings for:
 /// - CiliumLoadBalancerIPPool (one per pool in networking spec)
 /// - CiliumL2AnnouncementPolicy (enables L2 announcements)
-pub fn generate_lb_resources(networking: &NetworkingSpec) -> Vec<String> {
+pub fn generate_lb_resources(
+    networking: &NetworkingSpec,
+) -> Result<Vec<String>, serde_json::Error> {
     let mut resources = Vec::new();
 
     // Generate IP pool for default network if configured
     if let Some(ref pool) = networking.default {
-        resources.push(generate_ip_pool("default", &pool.cidr));
+        resources.push(generate_ip_pool("default", &pool.cidr)?);
     }
 
     // Always generate L2 announcement policy if we have any pools
     if !resources.is_empty() {
-        resources.push(generate_l2_policy());
+        resources.push(generate_l2_policy()?);
     }
 
-    resources
+    Ok(resources)
 }
 
 /// Generate Cilium LB-IPAM resources auto-derived from Proxmox ipv4_pool
@@ -40,17 +42,19 @@ pub fn generate_lb_resources(networking: &NetworkingSpec) -> Vec<String> {
 /// Returns YAML strings for:
 /// - CiliumLoadBalancerIPPool (derived from ipv4_pool subnet)
 /// - CiliumL2AnnouncementPolicy (enables L2 announcements)
-pub fn generate_lb_resources_from_proxmox(ipv4_pool: &Ipv4PoolConfig) -> Vec<String> {
+pub fn generate_lb_resources_from_proxmox(
+    ipv4_pool: &Ipv4PoolConfig,
+) -> Result<Vec<String>, serde_json::Error> {
     let mut resources = Vec::new();
 
     // Derive LB CIDR from the same subnet as ipv4_pool
     // Use .200/27 range (200-231) which doesn't overlap with typical node ranges
     if let Some(cidr) = derive_lb_cidr_from_pool(ipv4_pool) {
-        resources.push(generate_ip_pool("default", &cidr));
-        resources.push(generate_l2_policy());
+        resources.push(generate_ip_pool("default", &cidr)?);
+        resources.push(generate_l2_policy()?);
     }
 
-    resources
+    Ok(resources)
 }
 
 /// Derive a LoadBalancer CIDR from the Proxmox ipv4_pool gateway
@@ -70,7 +74,7 @@ fn derive_lb_cidr_from_pool(pool: &Ipv4PoolConfig) -> Option<String> {
 }
 
 /// Generate a CiliumLoadBalancerIPPool resource
-fn generate_ip_pool(name: &str, cidr: &str) -> String {
+fn generate_ip_pool(name: &str, cidr: &str) -> Result<String, serde_json::Error> {
     let pool = CiliumLoadBalancerIPPool {
         api_version: "cilium.io/v2alpha1".to_string(),
         kind: "CiliumLoadBalancerIPPool".to_string(),
@@ -85,11 +89,11 @@ fn generate_ip_pool(name: &str, cidr: &str) -> String {
         },
     };
 
-    serde_json::to_string(&pool).expect("CiliumLoadBalancerIPPool serialization")
+    serde_json::to_string(&pool)
 }
 
 /// Generate CiliumL2AnnouncementPolicy resource
-fn generate_l2_policy() -> String {
+fn generate_l2_policy() -> Result<String, serde_json::Error> {
     let policy = CiliumL2AnnouncementPolicy {
         api_version: "cilium.io/v2alpha1".to_string(),
         kind: "CiliumL2AnnouncementPolicy".to_string(),
@@ -103,7 +107,7 @@ fn generate_l2_policy() -> String {
         },
     };
 
-    serde_json::to_string(&policy).expect("CiliumL2AnnouncementPolicy serialization")
+    serde_json::to_string(&policy)
 }
 
 fn managed_by_labels() -> std::collections::BTreeMap<String, String> {
@@ -169,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_generate_ip_pool() {
-        let json = generate_ip_pool("default", "172.18.255.1/32");
+        let json = generate_ip_pool("default", "172.18.255.1/32").unwrap();
 
         assert!(json.contains(r#""apiVersion":"cilium.io/v2alpha1""#));
         assert!(json.contains(r#""kind":"CiliumLoadBalancerIPPool""#));
@@ -180,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_generate_l2_policy() {
-        let json = generate_l2_policy();
+        let json = generate_l2_policy().unwrap();
 
         assert!(json.contains(r#""apiVersion":"cilium.io/v2alpha1""#));
         assert!(json.contains(r#""kind":"CiliumL2AnnouncementPolicy""#));
@@ -196,7 +200,7 @@ mod tests {
             }),
         };
 
-        let resources = generate_lb_resources(&networking);
+        let resources = generate_lb_resources(&networking).unwrap();
 
         assert_eq!(resources.len(), 2); // IP pool + L2 policy
         assert!(resources[0].contains("CiliumLoadBalancerIPPool"));
@@ -208,7 +212,7 @@ mod tests {
     fn test_generate_lb_resources_empty_networking() {
         let networking = NetworkingSpec::default();
 
-        let resources = generate_lb_resources(&networking);
+        let resources = generate_lb_resources(&networking).unwrap();
 
         assert!(resources.is_empty());
     }
@@ -216,7 +220,7 @@ mod tests {
     #[test]
     fn test_single_ip_cidr() {
         // Single IP for cell LoadBalancer
-        let json = generate_ip_pool("cell", "172.18.255.1/32");
+        let json = generate_ip_pool("cell", "172.18.255.1/32").unwrap();
 
         assert!(json.contains(r#""cidr":"172.18.255.1/32""#));
     }
@@ -252,7 +256,7 @@ mod tests {
             gateway: "10.0.0.1".to_string(),
         };
 
-        let resources = generate_lb_resources_from_proxmox(&pool);
+        let resources = generate_lb_resources_from_proxmox(&pool).unwrap();
 
         assert_eq!(resources.len(), 2); // IP pool + L2 policy
         assert!(resources[0].contains("CiliumLoadBalancerIPPool"));
