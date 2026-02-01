@@ -12,13 +12,13 @@ use lattice_common::kube_utils::build_api_resource;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
+use crate::error::MoveError;
+
 /// Annotation key used to store the source UID on created resources
 ///
 /// This enables crash recovery: on restart, the agent can query resources
 /// with this annotation to rebuild the UID map (source UID -> target UID).
 pub const SOURCE_UID_ANNOTATION: &str = "lattice.dev/source-uid";
-
-use crate::error::MoveError;
 
 /// Agent-side executor for distributed move operations
 pub struct AgentMover {

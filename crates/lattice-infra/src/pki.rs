@@ -665,14 +665,7 @@ pub fn verify_client_cert(
     }
 
     // Check validity period
-    // SystemTime::now() returns the current time, and UNIX_EPOCH is 1970-01-01.
-    // This can only fail if the system clock is set before 1970, which would
-    // indicate a severely misconfigured system. In such cases, we return 0
-    // which will cause certificates to appear as not yet valid - a safe failure mode.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = CertificateInfo::current_timestamp();
 
     let not_before = cert.validity().not_before.timestamp();
     let not_after = cert.validity().not_after.timestamp();

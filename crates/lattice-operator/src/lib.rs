@@ -20,12 +20,6 @@ pub use lattice_agent::pivot;
 // Re-export CAPI from lattice-capi
 pub use lattice_capi as capi;
 
-// Re-export service modules from lattice-service
-pub use lattice_service::compiler;
-pub use lattice_service::ingress;
-pub use lattice_service::policy;
-pub use lattice_service::workload;
-
 // Re-export provider controllers
 pub use lattice_cloud_provider as cloud_provider;
 pub use lattice_secrets_provider as secrets_provider;

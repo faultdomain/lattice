@@ -296,7 +296,7 @@ const PROXY_PORT: u16 = 8082;
 use super::super::providers::InfraProvider;
 
 // =============================================================================
-// Proxy URL Resolution Helpers
+// Proxy URL Resolution
 // =============================================================================
 
 /// Check if the lattice-cell proxy service exists
@@ -318,23 +318,40 @@ pub fn proxy_service_exists(kubeconfig: &str) -> bool {
     !result.trim().is_empty() && !result.contains("not found")
 }
 
-/// Extract cluster name from kubeconfig context.
-/// Handles both kind and CAPD naming conventions.
-fn get_cluster_name_from_kubeconfig(kubeconfig: &str) -> Result<String, String> {
+/// Get the proxy URL with provider-specific handling.
+///
+/// - Docker: Uses control plane container IP + NodePort (LB IPs aren't accessible from localhost)
+/// - Cloud: Uses LoadBalancer external IP
+pub fn get_proxy_url_for_provider(
+    kubeconfig: &str,
+    provider: InfraProvider,
+) -> Result<String, String> {
+    if !proxy_service_exists(kubeconfig) {
+        return Err(format!(
+            "{} service not found - proxy may not be deployed",
+            PROXY_SERVICE_NAME
+        ));
+    }
+
+    match provider {
+        InfraProvider::Docker => get_proxy_url_docker(kubeconfig),
+        _ => get_proxy_url_cloud(kubeconfig),
+    }
+}
+
+/// Get proxy URL for Docker/CAPD clusters via NodePort on control plane container.
+fn get_proxy_url_docker(kubeconfig: &str) -> Result<String, String> {
+    // Get cluster name from kubeconfig context
     let context = run_cmd_allow_fail(
         "kubectl",
         &["--kubeconfig", kubeconfig, "config", "current-context"],
     );
-
     let cluster_name = context.trim().replace("-admin@", "").replace("kind-", "");
     if cluster_name.is_empty() {
         return Err("Could not determine cluster name from kubeconfig".to_string());
     }
-    Ok(cluster_name)
-}
 
-/// Get the NodePort for the proxy service
-fn get_proxy_nodeport(kubeconfig: &str) -> Result<String, String> {
+    // Get NodePort for proxy service
     let node_port = run_cmd_allow_fail(
         "kubectl",
         &[
@@ -352,41 +369,41 @@ fn get_proxy_nodeport(kubeconfig: &str) -> Result<String, String> {
             ),
         ],
     );
-
     if node_port.trim().is_empty() {
         return Err(format!(
             "Proxy service {} does not have a NodePort for port {}",
             PROXY_SERVICE_NAME, PROXY_PORT
         ));
     }
-    Ok(node_port.trim().to_string())
-}
 
-/// Get the proxy URL with provider-specific handling
-///
-/// For Docker provider: Uses kubectl port-forward since LoadBalancer IPs
-/// are only accessible within the Docker network, not from localhost.
-///
-/// For cloud providers: Uses the LoadBalancer external IP directly.
-pub fn get_proxy_url_for_provider(
-    kubeconfig: &str,
-    provider: InfraProvider,
-) -> Result<String, String> {
-    // First check if the service exists
-    if !proxy_service_exists(kubeconfig) {
+    // Get control plane container IP (accessible from localhost via Docker network)
+    let cp_container = format!("{}-control-plane", cluster_name);
+    let cp_ip = run_cmd_allow_fail(
+        "docker",
+        &[
+            "inspect",
+            "-f",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            &cp_container,
+        ],
+    );
+    if cp_ip.trim().is_empty() {
         return Err(format!(
-            "{} service not found - proxy may not be deployed",
-            PROXY_SERVICE_NAME
+            "Could not get IP for control plane container {}",
+            cp_container
         ));
     }
 
-    // For Docker provider, we need to use port-forward since the LoadBalancer IP
-    // (172.18.x.x) is only accessible within the Docker network
-    if provider == InfraProvider::Docker {
-        return get_proxy_url_via_port_forward(kubeconfig);
-    }
+    info!(
+        "[Integration/Cedar] Using Docker control plane {}:{} for proxy",
+        cp_ip.trim(),
+        node_port.trim()
+    );
+    Ok(format!("https://{}:{}", cp_ip.trim(), node_port.trim()))
+}
 
-    // For cloud providers, try LoadBalancer external IP
+/// Get proxy URL for cloud providers via LoadBalancer IP.
+fn get_proxy_url_cloud(kubeconfig: &str) -> Result<String, String> {
     let lb_ip = run_cmd_allow_fail(
         "kubectl",
         &[
@@ -402,137 +419,14 @@ pub fn get_proxy_url_for_provider(
         ],
     );
 
-    if !lb_ip.trim().is_empty() {
-        return Ok(format!("https://{}:{}", lb_ip.trim(), PROXY_PORT));
+    if lb_ip.trim().is_empty() {
+        return Err(format!(
+            "LoadBalancer IP not available for {} service",
+            PROXY_SERVICE_NAME
+        ));
     }
 
-    // Try NodePort with node IP
-    if let Ok(node_port) = get_proxy_nodeport(kubeconfig) {
-        let node_ip = run_cmd_allow_fail(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig,
-                "get",
-                "nodes",
-                "-o",
-                "jsonpath={.items[0].status.addresses[?(@.type==\"InternalIP\")].address}",
-            ],
-        );
-
-        if !node_ip.trim().is_empty() {
-            return Ok(format!("https://{}:{}", node_ip.trim(), node_port));
-        }
-    }
-
-    // Fall back to cluster IP (for testing within the cluster)
-    let cluster_ip = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "svc",
-            PROXY_SERVICE_NAME,
-            "-n",
-            "lattice-system",
-            "-o",
-            "jsonpath={.spec.clusterIP}",
-        ],
-    );
-
-    if cluster_ip.trim().is_empty() {
-        return Err("Could not determine proxy URL - no ClusterIP".to_string());
-    }
-
-    Ok(format!("https://{}:{}", cluster_ip.trim(), PROXY_PORT))
-}
-
-/// Get proxy URL by finding an available local port and using it for reference.
-/// For Docker tests, we'll use the control plane container's port mapping.
-fn get_proxy_url_via_port_forward(kubeconfig: &str) -> Result<String, String> {
-    // For Docker/kind clusters, find the cluster name from the kubeconfig path
-    let cluster_name = get_cluster_name_from_kubeconfig(kubeconfig)?;
-
-    // For CAPD (Docker provider), the LoadBalancer is implemented by a Docker container
-    // named {cluster}-lb that maps the LoadBalancer ports to localhost
-    let lb_container = format!("{}-lb", cluster_name);
-
-    // Check if this container exists
-    let container_check = run_cmd_allow_fail(
-        "docker",
-        &["ps", "-q", "-f", &format!("name={}", lb_container)],
-    );
-
-    if container_check.trim().is_empty() {
-        // No LoadBalancer container - fall back to trying the service NodePort on localhost
-        info!(
-            "[Integration/Cedar] No LoadBalancer container found for {}, trying NodePort",
-            cluster_name
-        );
-        return get_proxy_url_via_nodeport(kubeconfig);
-    }
-
-    // Get the port mapping for the proxy port (8082)
-    let port_output = run_cmd_allow_fail(
-        "docker",
-        &["port", &lb_container, &format!("{}/tcp", PROXY_PORT)],
-    );
-
-    if port_output.trim().is_empty() {
-        // Port 8082 might not be mapped - the LoadBalancer might only map 6443 (API) and 8081 (gRPC)
-        // In this case, we need to add the mapping or use a different approach
-        info!(
-            "[Integration/Cedar] Port {} not mapped on LoadBalancer container, trying NodePort",
-            PROXY_PORT
-        );
-        return get_proxy_url_via_nodeport(kubeconfig);
-    }
-
-    // Parse the port output (e.g., "0.0.0.0:12345" or "127.0.0.1:12345")
-    let parts: Vec<&str> = port_output.trim().split(':').collect();
-    if parts.len() == 2 {
-        let local_port = parts[1];
-        info!(
-            "[Integration/Cedar] Using localhost:{} for proxy (mapped from LoadBalancer)",
-            local_port
-        );
-        return Ok(format!("https://127.0.0.1:{}", local_port));
-    }
-
-    Err(format!(
-        "Could not parse LoadBalancer port mapping: {}",
-        port_output
-    ))
-}
-
-/// Get proxy URL via NodePort on localhost (for kind clusters)
-fn get_proxy_url_via_nodeport(kubeconfig: &str) -> Result<String, String> {
-    let node_port = get_proxy_nodeport(kubeconfig)?;
-    let cluster_name = get_cluster_name_from_kubeconfig(kubeconfig)?;
-
-    // For kind clusters, access NodePort services via the control plane container
-    let cp_container = format!("{}-control-plane", cluster_name);
-    let cp_ip = run_cmd_allow_fail(
-        "docker",
-        &[
-            "inspect",
-            "-f",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-            &cp_container,
-        ],
-    );
-
-    if !cp_ip.trim().is_empty() {
-        info!(
-            "[Integration/Cedar] Using control plane {}:{} for proxy via NodePort",
-            cp_ip.trim(),
-            node_port
-        );
-        return Ok(format!("https://{}:{}", cp_ip.trim(), node_port));
-    }
-
-    Err("Could not determine proxy URL for Docker cluster".to_string())
+    Ok(format!("https://{}:{}", lb_ip.trim(), PROXY_PORT))
 }
 
 // =============================================================================

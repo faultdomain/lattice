@@ -16,7 +16,7 @@ use crate::graph::{GraphNode, ObjectGraph};
 /// All objects in a group have their owners already placed, so they can be
 /// created concurrently without violating ownership constraints.
 #[derive(Debug, Clone)]
-pub struct MoveGroup {
+pub(crate) struct MoveGroup {
     /// UIDs of objects in this group
     pub uids: Vec<String>,
 }
@@ -137,8 +137,9 @@ impl MoveSequence {
         })
     }
 
-    /// Get the ordered groups
-    pub fn groups(&self) -> &[MoveGroup] {
+    /// Get the ordered groups (test-only)
+    #[cfg(test)]
+    pub(crate) fn groups(&self) -> &[MoveGroup] {
         &self.groups
     }
 
@@ -153,15 +154,8 @@ impl MoveSequence {
     }
 
     /// Iterate over groups with their index
-    pub fn iter_groups(&self) -> impl Iterator<Item = (usize, &MoveGroup)> {
+    pub(crate) fn iter_groups(&self) -> impl Iterator<Item = (usize, &MoveGroup)> {
         self.groups.iter().enumerate()
-    }
-
-    /// Get the reverse sequence for deletion
-    ///
-    /// Returns groups in reverse order so dependents are deleted before owners.
-    pub fn reverse_for_deletion(&self) -> Vec<&MoveGroup> {
-        self.groups.iter().rev().collect()
     }
 
     /// Get all UIDs in move order (flattened)
@@ -183,7 +177,7 @@ impl MoveSequence {
 }
 
 /// Extract nodes from graph for a specific group
-pub fn extract_nodes_for_group<'a>(
+pub(crate) fn extract_nodes_for_group<'a>(
     graph: &'a ObjectGraph,
     group: &MoveGroup,
 ) -> Vec<&'a GraphNode> {
@@ -308,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reverse_for_deletion() {
+    fn test_all_uids_for_deletion() {
         let nodes = vec![
             make_test_node("a", vec![]),
             make_test_node("b", vec!["a"]),

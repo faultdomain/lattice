@@ -251,15 +251,15 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             let results = join_all(futures).await;
 
             // Collect all errors and log them
-            let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
+            let mut errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
 
+            // Log all failures and return the first error if any
             if !errors.is_empty() {
-                // Log all failures
                 for (i, err) in errors.iter().enumerate() {
                     error!(error = %err, index = i, "resource application failed");
                 }
-                // Return the first error
-                return Err(errors.into_iter().next().unwrap());
+                // Use swap_remove to avoid the unwrap - we verified errors is non-empty above
+                return Err(errors.swap_remove(0));
             }
         }
 

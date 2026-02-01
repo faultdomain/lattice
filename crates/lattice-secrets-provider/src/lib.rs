@@ -10,5 +10,5 @@ mod controller;
 mod eso;
 
 pub use controller::reconcile;
-pub use eso::{ClusterSecretStore, ClusterSecretStoreSpec, ProviderSpec, VaultProvider};
+pub use eso::ClusterSecretStore;
 pub use lattice_common::{default_error_policy, ControllerContext};

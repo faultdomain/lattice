@@ -143,7 +143,7 @@ impl PolicyEngine {
         let mut loaded = 0;
         let mut errors = 0;
 
-        match PolicySet::from_str(&crd.spec.policies) {
+        match crd.spec.policies.parse::<PolicySet>() {
             Ok(parsed) => {
                 for policy in parsed.policies() {
                     if let Err(e) = policy_set.add(policy.clone()) {
@@ -173,8 +173,9 @@ impl PolicyEngine {
 
     /// Create policy engine with explicit policies (for testing)
     pub fn with_policies(policy_text: &str) -> Result<Self> {
-        let policy_set = PolicySet::from_str(policy_text)
-            .map_err(|e| Error::Config(format!("Invalid Cedar policy: {}", e)))?;
+        let policy_set: PolicySet = policy_text
+            .parse()
+            .map_err(|e: cedar_policy::ParseErrors| Error::Config(format!("Invalid Cedar policy: {}", e)))?;
 
         Ok(Self {
             authorizer: Authorizer::new(),
@@ -206,7 +207,7 @@ impl PolicyEngine {
         cluster: &str,
         action: &str,
     ) -> Result<()> {
-        let policy_set = self.policy_set.read().await.clone();
+        let policy_set = self.policy_set.read().await;
         self.authorize_with_policy_set(identity, cluster, action, &policy_set)
     }
 
@@ -275,8 +276,9 @@ impl PolicyEngine {
     /// # Returns
     /// List of cluster names the user can access
     pub async fn accessible_clusters(&self, identity: &UserIdentity) -> Vec<String> {
-        let known_clusters = self.known_clusters.read().await.clone();
-        let policy_set = self.policy_set.read().await.clone();
+        // Clone cluster names (cheap) to release lock, but hold policy_set lock during filter
+        let known_clusters: Vec<String> = self.known_clusters.read().await.clone();
+        let policy_set = self.policy_set.read().await;
 
         known_clusters
             .into_iter()
@@ -324,14 +326,16 @@ impl Default for PolicyEngine {
 /// Result containing the EntityUid or an error if the type name is invalid
 fn build_entity_uid(type_name: &str, id: &str) -> Result<EntityUid> {
     let full_type_name = format!("{}::{}", NAMESPACE, type_name);
-    let entity_type = EntityTypeName::from_str(&full_type_name).map_err(|e| {
-        Error::Internal(format!(
-            "Invalid Cedar entity type name '{}': {}",
-            full_type_name, e
-        ))
-    })?;
-    let entity_id = EntityId::from_str(id)
-        .map_err(|e| Error::Internal(format!("Invalid Cedar entity ID '{}': {}", id, e)))?;
+    let entity_type: EntityTypeName =
+        full_type_name
+            .parse()
+            .map_err(|e: cedar_policy::ParseErrors| {
+                Error::Internal(format!(
+                    "Invalid Cedar entity type name '{}': {}",
+                    full_type_name, e
+                ))
+            })?;
+    let entity_id = EntityId::new(id);
     Ok(EntityUid::from_type_name_and_id(entity_type, entity_id))
 }
 
@@ -399,31 +403,6 @@ fn build_entities(identity: &UserIdentity, cluster: &str) -> Result<Entities> {
 
     Entities::from_entities(entities, None)
         .map_err(|e| Error::Internal(format!("Failed to create entities set: {}", e)))
-}
-
-/// Helper trait for parsing entity UIDs
-trait FromStrExt: Sized {
-    fn from_str(s: &str) -> std::result::Result<Self, String>;
-}
-
-impl FromStrExt for EntityTypeName {
-    fn from_str(s: &str) -> std::result::Result<Self, String> {
-        s.parse()
-            .map_err(|e: cedar_policy::ParseErrors| e.to_string())
-    }
-}
-
-impl FromStrExt for EntityId {
-    fn from_str(s: &str) -> std::result::Result<Self, String> {
-        Ok(Self::new(s))
-    }
-}
-
-impl FromStrExt for PolicySet {
-    fn from_str(s: &str) -> std::result::Result<Self, String> {
-        s.parse()
-            .map_err(|e: cedar_policy::ParseErrors| e.to_string())
-    }
 }
 
 #[cfg(test)]

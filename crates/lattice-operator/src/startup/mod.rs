@@ -6,7 +6,6 @@ mod ca_rotation;
 mod cell;
 mod crds;
 mod infrastructure;
-mod manifests;
 mod polling;
 mod recovery;
 
@@ -14,7 +13,6 @@ pub use ca_rotation::start_ca_rotation;
 pub use cell::{discover_cell_host, ensure_cell_service_exists, get_cell_server_sans};
 pub use crds::ensure_crds_installed;
 pub use infrastructure::ensure_infrastructure;
-pub use manifests::apply_manifests;
 pub use polling::{
     wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT, LOAD_BALANCER_POLL_INTERVAL,
 };

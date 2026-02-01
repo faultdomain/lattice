@@ -74,7 +74,7 @@ pub use cell::{
 };
 pub use error::MoveError;
 pub use graph::{GraphNode, ObjectGraph, ObjectIdentity};
-pub use sequence::{extract_nodes_for_group, MoveGroup, MoveSequence};
+pub use sequence::MoveSequence;
 
 /// Annotation added before deletion (matches clusterctl behavior)
 pub const DELETE_FOR_MOVE_ANNOTATION: &str = "clusterctl.cluster.x-k8s.io/delete-for-move";

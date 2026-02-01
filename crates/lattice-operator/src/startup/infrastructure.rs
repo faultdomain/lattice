@@ -5,13 +5,14 @@
 use kube::api::ListParams;
 use kube::{Api, Client};
 
-use lattice_common::{ParentConfig, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    apply_manifests_with_discovery, ApplyOptions, ParentConfig, LATTICE_SYSTEM_NAMESPACE,
+};
 
 use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
 use crate::crd::{CloudProvider, LatticeCluster, ProviderType};
 use crate::infra::bootstrap::{self, InfrastructureConfig};
 
-use super::manifests::apply_manifests;
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
 
 /// Reconcile infrastructure components
@@ -42,7 +43,7 @@ pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("failed to generate core infrastructure: {}", e))?;
         tracing::info!(count = manifests.len(), "applying core infrastructure");
-        apply_manifests(client, &manifests).await?;
+        apply_manifests_with_discovery(client, &manifests, &ApplyOptions::default()).await?;
 
         tracing::info!("Installing CAPI on bootstrap cluster...");
         ensure_capi_on_bootstrap(client).await?;
@@ -82,7 +83,7 @@ pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
             count = manifests.len(),
             "applying all infrastructure (same as bootstrap webhook)"
         );
-        apply_manifests(client, &manifests).await?;
+        apply_manifests_with_discovery(client, &manifests, &ApplyOptions::default()).await?;
     }
 
     tracing::info!("Infrastructure installation complete");
