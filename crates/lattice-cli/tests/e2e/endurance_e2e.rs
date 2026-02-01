@@ -38,11 +38,10 @@ use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
-    ensure_docker_network, force_delete_docker_cluster, get_docker_kubeconfig,
-    kubeconfig_path as kc_path, load_cluster_config, load_registry_credentials, run_cmd_allow_fail,
-    watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    ensure_docker_network, extract_docker_cluster_kubeconfig, force_delete_docker_cluster,
+    get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials,
+    run_cmd_allow_fail, run_id, watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
-use super::helpers::run_id;
 use super::integration::setup;
 use super::providers::InfraProvider;
 
@@ -121,6 +120,7 @@ async fn run_endurance_test() -> Result<(), String> {
     // Load workload cluster configs (we'll create multiple instances with unique names)
     let (_, workload_template) =
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
+    let workload_bootstrap = workload_template.spec.provider.kubernetes.bootstrap.clone();
 
     ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
 
@@ -143,11 +143,9 @@ async fn run_endurance_test() -> Result<(), String> {
         .await
         .map_err(|e| format!("Installer failed: {}", e))?;
 
-    let mgmt_kubeconfig_path = kc_path(MGMT_CLUSTER_NAME);
-    let mgmt_kubeconfig = get_docker_kubeconfig(MGMT_CLUSTER_NAME)?;
-    std::fs::write(&mgmt_kubeconfig_path, &mgmt_kubeconfig)
-        .map_err(|e| format!("Failed to write mgmt kubeconfig: {}", e))?;
-    let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig).await?;
+    // get_docker_kubeconfig returns the path to the patched kubeconfig (for localhost access)
+    let mgmt_kubeconfig_path = get_docker_kubeconfig(MGMT_CLUSTER_NAME)?;
+    let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig_path).await?;
 
     // Verify management cluster
     watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, Some(600)).await?;
@@ -231,12 +229,13 @@ async fn run_endurance_test() -> Result<(), String> {
             info!("[ITERATION {}] All clusters running!", iteration);
 
             // Add workload clusters to chaos targets (parent: mgmt)
+            // These clusters were created by mgmt, so kubeconfig must be extracted from Docker
             for name in &cluster_names {
-                let cluster_kc_path = kc_path(name);
-                if let Ok(kc) = get_docker_kubeconfig(name) {
-                    if std::fs::write(&cluster_kc_path, &kc).is_ok() {
-                        chaos_targets.add(name, &cluster_kc_path, Some(&mgmt_kubeconfig_path));
-                    }
+                let cluster_kc_path = kubeconfig_path(name);
+                if extract_docker_cluster_kubeconfig(name, &workload_bootstrap, &cluster_kc_path)
+                    .is_ok()
+                {
+                    chaos_targets.add(name, &cluster_kc_path, Some(&mgmt_kubeconfig_path));
                 }
             }
 
@@ -251,7 +250,8 @@ async fn run_endurance_test() -> Result<(), String> {
             // Delete all clusters (must delete from child cluster to trigger unpivot)
             info!("[ITERATION {}] Deleting all clusters...", iteration);
             for name in &cluster_names {
-                let cluster_kc_path = kc_path(name);
+                // Use the kubeconfig path that was extracted above
+                let cluster_kc_path = kubeconfig_path(name);
                 delete_cluster_and_wait(
                     &cluster_kc_path,
                     &mgmt_kubeconfig_path,

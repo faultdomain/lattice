@@ -224,13 +224,24 @@ pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Run a shell command, allowing failure (returns empty string on error)
+/// Run a shell command, allowing failure (returns combined stdout+stderr, or empty on error)
 #[cfg(feature = "provider-e2e")]
 pub fn run_cmd_allow_fail(cmd: &str, args: &[&str]) -> String {
     Command::new(cmd)
         .args(args)
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .map(|o| {
+            // Combine stdout and stderr so we don't lose error messages
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if stderr.is_empty() {
+                stdout.to_string()
+            } else if stdout.is_empty() {
+                stderr.to_string()
+            } else {
+                format!("{}\n{}", stdout, stderr)
+            }
+        })
         .unwrap_or_default()
 }
 
@@ -654,10 +665,10 @@ pub async fn watch_worker_scaling(
     }
 }
 
-/// Wait for a cluster to be fully stable (Ready phase + workers scaled)
+/// Wait for a cluster to be fully stable (operational phase + workers scaled)
 ///
 /// This checks that:
-/// 1. The LatticeCluster phase is Ready
+/// 1. The LatticeCluster phase is Ready or Pivoted (both are operational states)
 /// 2. The status.readyWorkers matches the sum of spec.nodes.workerPools replicas
 #[cfg(feature = "provider-e2e")]
 pub async fn wait_for_cluster_stable(
@@ -689,7 +700,14 @@ pub async fn wait_for_cluster_stable(
             ],
         );
 
-        if output.trim().is_empty() || output.contains("not found") {
+        if output.trim().is_empty() {
+            info!("Cluster {} not found yet, waiting...", cluster_name);
+            sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        if output.contains("not found") || output.contains("NotFound") {
+            info!("Cluster {} not found, waiting...", cluster_name);
             sleep(Duration::from_secs(5)).await;
             continue;
         }
@@ -697,22 +715,30 @@ pub async fn wait_for_cluster_stable(
         // Parse the JSON
         let cluster: serde_json::Value = match serde_json::from_str(&output) {
             Ok(v) => v,
-            Err(_) => {
+            Err(e) => {
+                // Log the parse error for debugging
+                info!(
+                    "Cluster {} JSON parse error: {} (output: {})",
+                    cluster_name,
+                    e,
+                    output.chars().take(200).collect::<String>()
+                );
                 sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
 
-        // Check phase is Ready
+        // Check phase is operational (Ready or Pivoted are both valid stable states)
         let phase = cluster
             .get("status")
             .and_then(|s| s.get("phase"))
             .and_then(|p| p.as_str())
             .unwrap_or("");
 
-        if phase != "Ready" {
+        let is_operational = phase == "Ready" || phase == "Pivoted";
+        if !is_operational {
             info!(
-                "Cluster {} phase is {}, waiting for Ready...",
+                "Cluster {} phase is {}, waiting for Ready/Pivoted...",
                 cluster_name, phase
             );
             sleep(Duration::from_secs(10)).await;
@@ -743,8 +769,8 @@ pub async fn wait_for_cluster_stable(
 
         if ready_workers >= desired_workers {
             info!(
-                "Cluster {} is stable: phase=Ready, workers={}/{}",
-                cluster_name, ready_workers, desired_workers
+                "Cluster {} is stable: phase={}, workers={}/{}",
+                cluster_name, phase, ready_workers, desired_workers
             );
             return Ok(());
         }

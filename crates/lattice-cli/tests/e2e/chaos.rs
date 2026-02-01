@@ -510,15 +510,17 @@ fn kill_pod(cluster: &str, kubeconfig: &str) {
     );
 
     let msg = if output.contains("deleted") {
-        "killed"
+        "killed operator pod"
     } else if output.contains("No resources found") {
-        "no pod (restarting)"
+        "no pod found (may be restarting)"
     } else if is_unreachable(&output) {
-        "unreachable"
+        "cluster unreachable"
+    } else if output.trim().is_empty() {
+        "command completed (no output)"
     } else {
         output.trim()
     };
-    info!("[Chaos] Pod on {}: {}", cluster, msg);
+    info!("[Chaos] Pod kill on {}: {}", cluster, msg);
 }
 
 async fn cut_network(
@@ -543,19 +545,26 @@ async fn cut_network(
 
     if !policy_applied {
         let _ = std::fs::remove_file(&policy_file);
-        if !is_unreachable(&output) {
-            info!("[Chaos] Network on {}: {}", cluster, output.trim());
-        }
+        let msg = if is_unreachable(&output) {
+            "cluster unreachable"
+        } else if output.trim().is_empty() {
+            "policy apply failed (no output)"
+        } else {
+            output.trim()
+        };
+        info!("[Chaos] Network cut on {} failed: {}", cluster, msg);
         return;
     }
 
     let status = if output.contains("unchanged") {
-        "cut (clearing stale policy)"
+        "blackout applied (clearing stale policy)"
+    } else if output.contains("created") {
+        "blackout policy created"
     } else {
-        "cut"
+        "blackout policy configured"
     };
     info!(
-        "[Chaos] Network on {}: {} for {}s",
+        "[Chaos] Network cut on {}: {} for {}s",
         cluster, status, blackout_secs
     );
 
@@ -587,18 +596,19 @@ async fn cut_network(
             continue;
         }
 
-        if !is_unreachable(&output) {
-            info!(
-                "[Chaos] Network restore on {} failed: {}",
-                cluster,
-                output.trim()
-            );
-        }
+        let msg = if is_unreachable(&output) {
+            "cluster unreachable"
+        } else if output.trim().is_empty() {
+            "delete failed (no output)"
+        } else {
+            output.trim()
+        };
+        info!("[Chaos] Network restore on {} failed: {}", cluster, msg);
         break;
     }
 
     let _ = std::fs::remove_file(&policy_file);
-    info!("[Chaos] Network on {}: restored", cluster);
+    info!("[Chaos] Network restore on {}: blackout policy removed", cluster);
 }
 
 fn is_unreachable(output: &str) -> bool {

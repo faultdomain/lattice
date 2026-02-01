@@ -42,9 +42,9 @@ use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd_allow_fail, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    load_registry_credentials, run_cmd_allow_fail, run_id, DEFAULT_LATTICE_IMAGE,
+    MGMT_CLUSTER_NAME,
 };
-use super::helpers::run_id;
 use super::integration::{pivot, setup};
 use super::mesh_tests::start_mesh_test;
 use super::providers::InfraProvider;
