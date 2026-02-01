@@ -10,9 +10,9 @@
 pub use lattice_common::policy::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     AuthorizationSource, CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy,
-    CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule, EndpointSelector, FqdnSelector,
-    OperationSpec, PolicyMetadata, ServiceEntry, ServiceEntryPort, ServiceEntrySpec, SourceSpec,
-    TargetRef, WorkloadSelector,
+    CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule, DnsMatch, DnsRules, EndpointSelector,
+    FqdnSelector, OperationSpec, PolicyMetadata, ServiceEntry, ServiceEntryPort, ServiceEntrySpec,
+    SourceSpec, TargetRef, WorkloadSelector,
 };
 
 use std::collections::BTreeMap;
@@ -312,6 +312,7 @@ impl<'a> PolicyCompiler<'a> {
                             ]
                         })
                         .collect(),
+                    rules: None,
                 }]
             };
 
@@ -341,13 +342,28 @@ impl<'a> PolicyCompiler<'a> {
                     port: mesh::HBONE_PORT.to_string(),
                     protocol: "TCP".to_string(),
                 }],
+                rules: None,
             }],
         });
 
         // Build egress rules
         let mut egress_rules = Vec::new();
 
-        // Always allow DNS to kube-dns
+        // Check if service has external FQDN dependencies (need DNS interception for toFQDNs)
+        let has_external_fqdns = outbound_edges.iter().any(|edge| {
+            self.graph
+                .get_service(&edge.callee_namespace, &edge.callee_name)
+                .map(|callee| {
+                    callee.type_ == ServiceType::External
+                        && callee
+                            .endpoints
+                            .values()
+                            .any(|ep| !Self::is_ip_address(&ep.host))
+                })
+                .unwrap_or(false)
+        });
+
+        // Always allow DNS to kube-dns (with DNS interception if we have external FQDNs)
         let mut kube_dns_labels = BTreeMap::new();
         kube_dns_labels.insert(
             lattice_common::CILIUM_LABEL_NAMESPACE.to_string(),
@@ -372,6 +388,16 @@ impl<'a> PolicyCompiler<'a> {
                         protocol: "TCP".to_string(),
                     },
                 ],
+                // DNS interception rules required for toFQDNs to work
+                rules: if has_external_fqdns {
+                    Some(DnsRules {
+                        dns: vec![DnsMatch {
+                            match_pattern: Some("*".to_string()),
+                        }],
+                    })
+                } else {
+                    None
+                },
             }],
         });
 
@@ -393,6 +419,7 @@ impl<'a> PolicyCompiler<'a> {
                     port: mesh::HBONE_PORT.to_string(),
                     protocol: "TCP".to_string(),
                 }],
+                rules: None,
             }],
         });
 
@@ -434,6 +461,7 @@ impl<'a> PolicyCompiler<'a> {
                                         ]
                                     })
                                     .collect(),
+                                rules: None,
                             }]
                         };
 
@@ -474,7 +502,7 @@ impl<'a> PolicyCompiler<'a> {
                         let to_ports = if ports.is_empty() {
                             vec![]
                         } else {
-                            vec![CiliumPortRule { ports }]
+                            vec![CiliumPortRule { ports, rules: None }]
                         };
 
                         if !fqdns.is_empty() {

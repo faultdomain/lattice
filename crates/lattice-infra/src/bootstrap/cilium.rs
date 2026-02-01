@@ -15,8 +15,8 @@ use lattice_common::policy::{
     CiliumClusterwideNetworkPolicy, CiliumClusterwideSpec, CiliumEgressRule, CiliumIngressRule,
     CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule,
     ClusterwideEgressRule, ClusterwideEndpointSelector, ClusterwideIngressRule,
-    ClusterwideMetadata, ClusterwidePortRule, DnsMatch, DnsRules, EnableDefaultDeny,
-    EndpointSelector, FqdnSelector, MatchExpression, PolicyMetadata,
+    ClusterwideMetadata, DnsMatch, DnsRules, EnableDefaultDeny, EndpointSelector, FqdnSelector,
+    MatchExpression, PolicyMetadata,
 };
 use lattice_common::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE};
 
@@ -198,7 +198,7 @@ pub fn generate_default_deny() -> CiliumClusterwideNetworkPolicy {
                     }],
                     to_entities: vec![],
                     to_cidr: vec![],
-                    to_ports: vec![ClusterwidePortRule {
+                    to_ports: vec![CiliumPortRule {
                         ports: vec![
                             CiliumPort {
                                 port: "53".to_string(),
@@ -266,7 +266,7 @@ pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
                     }],
                     to_entities: vec![],
                     to_cidr: vec![],
-                    to_ports: vec![ClusterwidePortRule {
+                    to_ports: vec![CiliumPortRule {
                         ports: vec![CiliumPort {
                             port: "15012".to_string(),
                             protocol: "TCP".to_string(),
@@ -279,7 +279,7 @@ pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
                     to_endpoints: vec![],
                     to_entities: vec![],
                     to_cidr: vec![],
-                    to_ports: vec![ClusterwidePortRule {
+                    to_ports: vec![CiliumPortRule {
                         ports: vec![CiliumPort {
                             port: "15008".to_string(),
                             protocol: "TCP".to_string(),
@@ -317,12 +317,33 @@ pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
 ///
 /// This follows the principle of least privilege - the agent should only
 /// be able to reach what it needs for normal operation.
+///
+/// IMPORTANT: For FQDN-based egress rules to work, the DNS egress rule must include
+/// `rules.dns` with a matching pattern. This tells Cilium's DNS proxy to intercept
+/// the DNS queries and cache the FQDN-to-IP mappings.
 pub fn generate_operator_network_policy(
     parent_host: Option<&str>,
     parent_port: u16,
 ) -> CiliumNetworkPolicy {
+    // Determine DNS match pattern - if we have a hostname parent, we need to intercept its DNS
+    let dns_rules = if let Some(host) = parent_host {
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            // IP address - no DNS interception needed
+            None
+        } else {
+            // Hostname - Cilium needs to intercept DNS to learn the IP
+            Some(DnsRules {
+                dns: vec![DnsMatch {
+                    match_pattern: Some("*".to_string()),
+                }],
+            })
+        }
+    } else {
+        None
+    };
+
     let mut egress_rules = vec![
-        // DNS to kube-dns
+        // DNS to kube-dns (with DNS interception rules if we have an FQDN parent)
         CiliumEgressRule {
             to_endpoints: vec![EndpointSelector {
                 match_labels: BTreeMap::from([
@@ -347,6 +368,7 @@ pub fn generate_operator_network_policy(
                         protocol: "TCP".to_string(),
                     },
                 ],
+                rules: dns_rules,
             }],
         },
         // K8s API server
@@ -373,9 +395,11 @@ pub fn generate_operator_network_policy(
                     protocol: "TCP".to_string(),
                 },
             ],
+            rules: None,
         }];
 
         if is_ip {
+            // For IP addresses (Docker), use CIDR rule
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
                 to_entities: vec![],
@@ -384,6 +408,7 @@ pub fn generate_operator_network_policy(
                 to_ports: parent_ports,
             });
         } else {
+            // For hostnames (AWS NLB, etc.), use FQDN rule
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
                 to_entities: vec![],
@@ -416,6 +441,7 @@ pub fn generate_operator_network_policy(
                             protocol: "TCP".to_string(),
                         },
                     ],
+                    rules: None,
                 }],
             }],
             egress: egress_rules,
@@ -464,6 +490,13 @@ mod tests {
             .to_ports
             .iter()
             .any(|p| p.ports.iter().any(|port| port.port == "53")));
+
+        // DNS rules should be None when no FQDN parent
+        let dns_port_rule = &dns_rule.to_ports[0];
+        assert!(
+            dns_port_rule.rules.is_none(),
+            "DNS rules should be None when no FQDN parent"
+        );
 
         // Should have API server egress
         assert!(policy
@@ -515,12 +548,26 @@ mod tests {
         // Should NOT use toCIDR for hostname
         assert!(fqdn_rule.to_cidr.is_empty());
 
-        // Should still have DNS and API server
-        assert!(policy.spec.egress.iter().any(|r| {
+        // Should have DNS with interception rules (required for toFQDNs to work)
+        let dns_rule = policy.spec.egress.iter().find(|r| {
             r.to_endpoints
                 .iter()
                 .any(|e| e.match_labels.get("k8s:k8s-app") == Some(&"kube-dns".to_string()))
-        }));
+        });
+        assert!(dns_rule.is_some());
+        let dns_rule = dns_rule.unwrap();
+        let dns_port_rule = &dns_rule.to_ports[0];
+        assert!(
+            dns_port_rule.rules.is_some(),
+            "DNS egress must have rules.dns for FQDN policies to work"
+        );
+        let dns_rules = dns_port_rule.rules.as_ref().unwrap();
+        assert!(
+            dns_rules.dns.iter().any(|d| d.match_pattern.is_some()),
+            "DNS rules must have a match pattern"
+        );
+
+        // Should have API server egress
         assert!(policy
             .spec
             .egress
@@ -551,12 +598,20 @@ mod tests {
         // Should NOT use toFQDNs for IP
         assert!(cidr_rule.to_fqdns.is_empty());
 
-        // Should still have DNS and API server
-        assert!(policy.spec.egress.iter().any(|r| {
+        // DNS rules should be None for IP parent (no FQDN to intercept)
+        let dns_rule = policy.spec.egress.iter().find(|r| {
             r.to_endpoints
                 .iter()
                 .any(|e| e.match_labels.get("k8s:k8s-app") == Some(&"kube-dns".to_string()))
-        }));
+        });
+        assert!(dns_rule.is_some());
+        let dns_port_rule = &dns_rule.unwrap().to_ports[0];
+        assert!(
+            dns_port_rule.rules.is_none(),
+            "DNS rules should be None for IP parent"
+        );
+
+        // Should have API server egress
         assert!(policy
             .spec
             .egress

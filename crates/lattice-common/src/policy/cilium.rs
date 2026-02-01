@@ -125,6 +125,9 @@ pub struct FqdnSelector {
 pub struct CiliumPortRule {
     /// Ports
     pub ports: Vec<CiliumPort>,
+    /// DNS rules (required for toFQDNs to work - Cilium needs to intercept DNS)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<DnsRules>,
 }
 
 /// Cilium port specification
@@ -286,17 +289,7 @@ pub struct ClusterwideEgressRule {
     pub to_cidr: Vec<String>,
     /// To ports with optional DNS rules
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub to_ports: Vec<ClusterwidePortRule>,
-}
-
-/// Port rule with optional DNS rules
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ClusterwidePortRule {
-    /// Ports
-    pub ports: Vec<CiliumPort>,
-    /// DNS rules
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rules: Option<DnsRules>,
+    pub to_ports: Vec<CiliumPortRule>,
 }
 
 /// DNS rules for egress
