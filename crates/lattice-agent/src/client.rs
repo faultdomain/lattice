@@ -35,8 +35,7 @@ use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
     BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, KubernetesResponse,
-    MoveCompleteAck, MoveObject, MoveObjectAck, MoveObjectError, SourceOwnerRef, StatusResponse,
-    UidMapping,
+    MoveCompleteAck, MoveObject, MoveObjectAck, MoveObjectError, StatusResponse, UidMapping,
 };
 
 use crate::subtree::SubtreeSender;
@@ -606,7 +605,7 @@ impl AgentClient {
     /// Returns Some((namespace, cluster_name)) if the cluster has a deletion timestamp,
     /// indicating we should start the unpivot retry loop.
     async fn check_cluster_deleting() -> Option<(String, String)> {
-        let client = create_k8s_client().await.ok()?;
+        let client = crate::create_k8s_client_logged("cluster deletion check").await?;
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
         let list = clusters
             .list(&kube::api::ListParams::default())
@@ -664,26 +663,9 @@ impl AgentClient {
                         "Sending ClusterDeleting to parent (unpivot)"
                     );
 
-                    // Convert to proto format
-                    let proto_objects: Vec<MoveObject> = objects
-                        .into_iter()
-                        .map(|obj| MoveObject {
-                            source_uid: obj.source_uid,
-                            manifest: obj.manifest,
-                            owners: obj
-                                .owners
-                                .into_iter()
-                                .map(|o| SourceOwnerRef {
-                                    source_uid: o.source_uid,
-                                    api_version: o.api_version,
-                                    kind: o.kind,
-                                    name: o.name,
-                                    controller: o.controller,
-                                    block_owner_deletion: o.block_owner_deletion,
-                                })
-                                .collect(),
-                        })
-                        .collect();
+                    // Convert to proto format using From impl
+                    let proto_objects: Vec<MoveObject> =
+                        objects.into_iter().map(Into::into).collect();
 
                     let msg = AgentMessage {
                         cluster_name: cluster_name.to_string(),

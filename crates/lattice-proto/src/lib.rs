@@ -47,10 +47,12 @@
 //! - [`ClusterDeleting`]: Initiates unpivot (moving resources back to parent)
 //! - [`MoveObjectAck`]: Acknowledges receipt of CAPI resources during pivot
 //! - [`SubtreeState`]: Reports cluster hierarchy for routing
+//! - [`StatusResponse`]: Response to status request with agent state and health
 //!
 //! ## Cell to Agent (CellCommand)
 //!
 //! - [`ApplyManifestsCommand`]: Apply Kubernetes manifests on the child cluster
+//! - [`StatusRequest`]: Request current cluster status from agent
 //! - [`SyncDistributedResourcesCommand`]: Sync CloudProviders, SecretsProviders, policies
 //! - [`MoveObjectBatch`]: Batch of CAPI resources during pivot
 //! - [`MoveComplete`]: Signals all resources sent, agent should unpause CAPI

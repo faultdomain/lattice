@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::discovery::ApiResource;
 use kube::Client;
+use lattice_common::kube_utils::build_api_resource;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -256,8 +257,6 @@ impl ObjectGraph {
 
     /// Add core Kubernetes types that are commonly included in CAPI moves
     fn add_core_types(&mut self) {
-        use lattice_common::kube_utils::build_api_resource;
-
         // Secrets are often referenced by CAPI resources
         self.discovered_types.push(DiscoveredType {
             api_resource: build_api_resource("v1", "Secret"),

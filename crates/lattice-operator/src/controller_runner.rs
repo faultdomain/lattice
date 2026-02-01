@@ -212,7 +212,7 @@ fn create_cloud_provider_controller(client: Client) -> impl std::future::Future<
         .shutdown_on_signal()
         .run(
             cloud_provider_ctrl::reconcile,
-            cloud_provider_ctrl::default_error_policy,
+            lattice_common::default_error_policy,
             ctx,
         )
         .for_each(|result| async move {

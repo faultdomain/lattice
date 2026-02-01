@@ -140,11 +140,11 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
     if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
         crate::capi::copy_credentials_to_provider_namespace(client, infrastructure, secret_ref)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to copy provider credentials: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to copy provider credentials: {}", e))?;
     }
 
     let config = CapiProviderConfig::new(infrastructure)
-        .map_err(|e| anyhow::anyhow!("Failed to create CAPI config: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("failed to create CAPI config: {}", e))?;
     ensure_capi_installed(&ClusterctlInstaller::new(), &config)
         .await
         .map_err(|e| anyhow::anyhow!("CAPI installation failed: {}", e))?;

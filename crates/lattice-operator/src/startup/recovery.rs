@@ -3,7 +3,7 @@
 //! Provides functions for recovering state after operator restarts.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kube::api::ListParams;
 use kube::{Api, Client};
@@ -13,6 +13,7 @@ use crate::crd::{ClusterPhase, LatticeCluster};
 use crate::parent::ParentServers;
 
 use super::cell::discover_cell_host;
+use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL};
 
 /// Wait for the API server to be responsive after infrastructure installation
 ///
@@ -25,45 +26,57 @@ use super::cell::discover_cell_host;
 /// the response time is reasonable. This prevents race conditions where
 /// controllers start before the API server is ready.
 pub async fn wait_for_api_ready(client: &Client) -> anyhow::Result<()> {
-    use std::time::Instant;
-
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let max_wait = Duration::from_secs(30);
-    let start = Instant::now();
 
     tracing::info!("Waiting for API server to be ready...");
 
-    loop {
-        let op_start = Instant::now();
-        match tokio::time::timeout(Duration::from_secs(5), api.list(&ListParams::default())).await {
-            Ok(Ok(_)) => {
-                let elapsed = op_start.elapsed();
-                if elapsed < Duration::from_millis(500) {
-                    // API responded quickly - we're good to go
-                    tracing::info!(response_time_ms = elapsed.as_millis(), "API server ready");
-                    return Ok(());
+    let result = wait_for_resource(
+        "API server readiness",
+        max_wait,
+        DEFAULT_POLL_INTERVAL,
+        || {
+            let api = api.clone();
+            async move {
+                let op_start = Instant::now();
+                match tokio::time::timeout(Duration::from_secs(5), api.list(&ListParams::default()))
+                    .await
+                {
+                    Ok(Ok(_)) => {
+                        let elapsed = op_start.elapsed();
+                        if elapsed < Duration::from_millis(500) {
+                            tracing::info!(
+                                response_time_ms = elapsed.as_millis(),
+                                "API server ready"
+                            );
+                            Ok(Some(()))
+                        } else {
+                            tracing::debug!(
+                                response_time_ms = elapsed.as_millis(),
+                                "API slow, waiting for it to settle..."
+                            );
+                            Ok(None)
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!(error = %e, "API request failed, retrying...");
+                        Ok(None)
+                    }
+                    Err(_) => {
+                        tracing::debug!("API request timed out, retrying...");
+                        Ok(None)
+                    }
                 }
-                // API is slow, wait a bit and retry
-                tracing::debug!(
-                    response_time_ms = elapsed.as_millis(),
-                    "API slow, waiting for it to settle..."
-                );
             }
-            Ok(Err(e)) => {
-                tracing::debug!(error = %e, "API request failed, retrying...");
-            }
-            Err(_) => {
-                tracing::debug!("API request timed out, retrying...");
-            }
-        }
+        },
+    )
+    .await;
 
-        if start.elapsed() > max_wait {
-            tracing::warn!("API server still slow after 30s, proceeding anyway");
-            return Ok(());
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    if result.is_err() {
+        tracing::warn!("API server still slow after 30s, proceeding anyway");
     }
+
+    Ok(())
 }
 
 /// Re-register clusters that completed bootstrap before operator restart

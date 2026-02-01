@@ -63,7 +63,7 @@ pub async fn ensure_crds_installed(client: &Client) -> anyhow::Result<()> {
         tracing::info!("Installing {} CRD...", def.name);
         crds.patch(def.name, &params, &Patch::Apply(&def.crd))
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to install {} CRD: {}", def.name, e))?;
+            .map_err(|e| anyhow::anyhow!("failed to install {} CRD: {}", def.name, e))?;
     }
 
     tracing::info!("All Lattice CRDs installed/updated");

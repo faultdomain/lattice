@@ -44,6 +44,18 @@ pub const DEFAULT_VIP_INTERFACE_PROXMOX: &str = "ens18";
 /// Default node CIDR for OpenStack
 pub const DEFAULT_NODE_CIDR_OPENSTACK: &str = "10.6.0.0/24";
 
+/// Default network interface for VIP configuration (generic)
+pub const DEFAULT_NETWORK_INTERFACE: &str = "eth0";
+
+/// Infrastructure API group for all CAPI providers
+pub const INFRASTRUCTURE_API_GROUP: &str = "infrastructure.cluster.x-k8s.io";
+
+/// Default DNS servers used when not specified
+pub const DEFAULT_DNS_SERVERS: &[&str] = &["8.8.8.8", "8.8.4.4"];
+
+/// Kubernetes API server port
+pub const KUBERNETES_API_SERVER_PORT: u16 = 6443;
+
 // =============================================================================
 // Helper Functions
 // =============================================================================

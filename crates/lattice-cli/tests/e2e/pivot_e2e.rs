@@ -64,7 +64,13 @@ async fn run_full_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 1-6: Set up full hierarchy using integration module
     // =========================================================================
-    let config = setup::SetupConfig::with_chaos();
+    // Allow disabling chaos via environment variable for debugging
+    let config = if std::env::var("LATTICE_DISABLE_CHAOS").is_ok() {
+        info!("[E2E] Chaos monkey disabled via LATTICE_DISABLE_CHAOS");
+        setup::SetupConfig::default()
+    } else {
+        setup::SetupConfig::with_chaos()
+    };
     let mut setup_result = integration::setup::setup_full_hierarchy(&config).await?;
     let ctx = setup_result.ctx.clone();
 

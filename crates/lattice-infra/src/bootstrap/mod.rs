@@ -77,7 +77,7 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
     manifests.extend(gw_api);
 
     // External Secrets Operator (for Vault integration)
-    manifests.extend(eso::generate_eso().await?);
+    manifests.extend(eso::generate_eso().await?.iter().cloned());
 
     Ok(manifests)
 }

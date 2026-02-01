@@ -12,8 +12,7 @@ use lattice_move::{
     BatchAck, CompleteAck, MoveBatch, MoveCommandSender, MoveCompleteInput, MoveError,
 };
 use lattice_proto::{
-    cell_command::Command, CellCommand, DistributableResources, MoveComplete, MoveObject,
-    MoveObjectBatch, SourceOwnerRef,
+    cell_command::Command, CellCommand, DistributableResources, MoveComplete, MoveObjectBatch,
 };
 
 use crate::SharedAgentRegistry;
@@ -139,26 +138,7 @@ fn to_proto_batch(batch: &MoveBatch) -> MoveObjectBatch {
         total_batches: batch.total_batches,
         target_namespace: batch.target_namespace.clone(),
         cluster_name: batch.cluster_name.clone(),
-        objects: batch
-            .objects
-            .iter()
-            .map(|obj| MoveObject {
-                source_uid: obj.source_uid.clone(),
-                manifest: obj.manifest.clone(),
-                owners: obj
-                    .owners
-                    .iter()
-                    .map(|o| SourceOwnerRef {
-                        source_uid: o.source_uid.clone(),
-                        api_version: o.api_version.clone(),
-                        kind: o.kind.clone(),
-                        name: o.name.clone(),
-                        controller: o.controller,
-                        block_owner_deletion: o.block_owner_deletion,
-                    })
-                    .collect(),
-            })
-            .collect(),
+        objects: batch.objects.iter().map(Into::into).collect(),
     }
 }
 

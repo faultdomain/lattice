@@ -6,6 +6,7 @@
 //! Also provides CiliumNetworkPolicy generation for Lattice components.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 use tracing::info;
@@ -22,8 +23,9 @@ use lattice_common::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, LATTICE_SYSTEM_N
 use super::{charts_dir, run_helm_template};
 use crate::system_namespaces;
 
-/// Cached Cilium manifests to avoid repeated helm template calls
-static CILIUM_MANIFESTS: OnceCell<Result<Vec<String>, String>> = OnceCell::const_new();
+/// Cached Cilium manifests to avoid repeated helm template calls.
+/// Uses Arc for efficient sharing without cloning the full Vec on each access.
+static CILIUM_MANIFESTS: OnceCell<Result<Arc<Vec<String>>, String>> = OnceCell::const_new();
 
 /// Generate Cilium manifests for a cluster
 ///
@@ -31,9 +33,9 @@ static CILIUM_MANIFESTS: OnceCell<Result<Vec<String>, String>> = OnceCell::const
 /// and caches the result; subsequent calls return the cached manifests.
 ///
 /// This is an async function to avoid blocking the tokio runtime during helm execution.
-pub async fn generate_cilium_manifests() -> Result<Vec<String>, String> {
+pub async fn generate_cilium_manifests() -> Result<Arc<Vec<String>>, String> {
     CILIUM_MANIFESTS
-        .get_or_init(|| async { render_cilium_helm().await })
+        .get_or_init(|| async { render_cilium_helm().await.map(Arc::new) })
         .await
         .clone()
 }

@@ -30,8 +30,9 @@ use super::super::context::{init_test_env, InfraContext};
 use super::super::helpers::{
     http_get_with_token, run_cmd_allow_fail, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
+use super::super::providers::InfraProvider;
 use super::cedar::{
-    apply_e2e_default_policy, get_proxy_url, get_sa_token, remove_e2e_default_policy,
+    apply_e2e_default_policy, get_proxy_url_for_provider, get_sa_token, remove_e2e_default_policy,
 };
 
 // ============================================================================
@@ -112,14 +113,19 @@ pub async fn wait_for_agent_ready(
 pub async fn test_proxy_access_to_child(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
+    provider: InfraProvider,
 ) -> Result<(), String> {
     info!(
         "[Integration/Proxy] Testing proxy access to {}...",
         child_cluster_name
     );
 
-    // Get the proxy URL
-    let proxy_url = get_proxy_url(parent_kubeconfig)?;
+    // Get the proxy URL (provider-aware for Docker vs cloud)
+    info!(
+        "[Integration/Proxy] Getting proxy URL for {:?} provider...",
+        provider
+    );
+    let proxy_url = get_proxy_url_for_provider(parent_kubeconfig, provider)?;
     info!("[Integration/Proxy] Using proxy URL: {}", proxy_url);
 
     // Get a ServiceAccount token from the parent cluster
@@ -129,12 +135,47 @@ pub async fn test_proxy_access_to_child(
         PROXY_TEST_NAMESPACE, PROXY_TEST_SA
     );
 
-    // Call the auth proxy to get namespaces from the child cluster
-    let url = format!(
-        "{}/clusters/{}/api/v1/namespaces",
-        proxy_url, child_cluster_name
+    // Test proxy access and validate response
+    verify_proxy_namespace_access(&proxy_url, &token, child_cluster_name, "child")
+}
+
+/// Test proxy access from root cluster to grandchild cluster.
+///
+/// This tests hierarchical proxy routing:
+/// Root (mgmt) → Child (workload) → Grandchild (workload2)
+///
+/// The request should route through the hierarchy via gRPC tunnels.
+pub async fn test_proxy_access_to_grandchild(
+    root_kubeconfig: &str,
+    grandchild_cluster_name: &str,
+    provider: InfraProvider,
+) -> Result<(), String> {
+    info!(
+        "[Integration/Proxy] Testing proxy access from root to grandchild {}...",
+        grandchild_cluster_name
     );
-    let response = http_get_with_token(&url, &token, 30);
+
+    // Get the proxy URL from root cluster
+    let proxy_url = get_proxy_url_for_provider(root_kubeconfig, provider)?;
+
+    // Get a ServiceAccount token from the root cluster
+    let token = get_sa_token(root_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
+
+    // Test proxy access and validate response
+    verify_proxy_namespace_access(&proxy_url, &token, grandchild_cluster_name, "grandchild")
+}
+
+/// Verify proxy access to a cluster by fetching namespaces.
+///
+/// This is the core validation logic used by both direct child and grandchild tests.
+fn verify_proxy_namespace_access(
+    proxy_url: &str,
+    token: &str,
+    cluster_name: &str,
+    cluster_type: &str,
+) -> Result<(), String> {
+    let url = format!("{}/clusters/{}/api/v1/namespaces", proxy_url, cluster_name);
+    let response = http_get_with_token(&url, token, 30);
 
     // Check for successful response
     if response.is_success() {
@@ -144,8 +185,8 @@ pub async fn test_proxy_access_to_child(
             let namespace_count = response.body.matches("\"kind\":\"Namespace\"").count()
                 + response.body.matches("\"kind\": \"Namespace\"").count();
             info!(
-                "[Integration/Proxy] SUCCESS: Proxy access to {} worked - {} namespaces visible",
-                child_cluster_name, namespace_count
+                "[Integration/Proxy] SUCCESS: {} proxy access to {} worked - {} namespaces visible",
+                cluster_type, cluster_name, namespace_count
             );
             return Ok(());
         }
@@ -154,22 +195,22 @@ pub async fn test_proxy_access_to_child(
     // Check for specific error types
     if response.is_forbidden() {
         return Err(format!(
-            "Proxy access denied (403 Forbidden) - Cedar policy may be missing. Response: {}",
-            truncate_response(&response.body)
+            "Proxy access denied (403 Forbidden) to {} {} - Cedar policy may be missing. Response: {}",
+            cluster_type, cluster_name, truncate_response(&response.body)
         ));
     }
 
     if response.is_unauthorized() {
         return Err(format!(
-            "Proxy authentication failed (401 Unauthorized) - token validation failed. Response: {}",
-            truncate_response(&response.body)
+            "Proxy authentication failed (401 Unauthorized) to {} {} - token validation failed. Response: {}",
+            cluster_type, cluster_name, truncate_response(&response.body)
         ));
     }
 
-    if response.body.contains("agent not connected") {
+    if response.body.contains("agent not connected") || response.body.contains("ClusterNotFound") {
         return Err(format!(
-            "Agent not connected for cluster {} - cluster may not be registered",
-            child_cluster_name
+            "{} {} not reachable - cluster may not be registered or agent disconnected",
+            cluster_type, cluster_name
         ));
     }
 
@@ -181,74 +222,9 @@ pub async fn test_proxy_access_to_child(
     }
 
     Err(format!(
-        "Unexpected proxy response for {} (HTTP {}) - expected NamespaceList. Response: {}",
-        child_cluster_name,
-        response.status_code,
-        truncate_response(&response.body)
-    ))
-}
-
-/// Test proxy access from root cluster to grandchild cluster.
-///
-/// This tests hierarchical proxy routing:
-/// Root (mgmt) → Child (workload) → Grandchild (workload2)
-///
-/// The request should route through the hierarchy via gRPC tunnels.
-pub async fn test_proxy_access_to_grandchild(
-    root_kubeconfig: &str,
-    _child_cluster_name: &str,
-    grandchild_cluster_name: &str,
-) -> Result<(), String> {
-    info!(
-        "[Integration/Proxy] Testing proxy access from root to grandchild {}...",
-        grandchild_cluster_name
-    );
-
-    // Get the proxy URL from root cluster
-    let proxy_url = get_proxy_url(root_kubeconfig)?;
-
-    // Get a ServiceAccount token from the root cluster
-    let token = get_sa_token(root_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
-
-    // Call the auth proxy to get namespaces from the grandchild cluster
-    // The proxy should route this through the child cluster's agent
-    let url = format!(
-        "{}/clusters/{}/api/v1/namespaces",
-        proxy_url, grandchild_cluster_name
-    );
-    let response = http_get_with_token(&url, &token, 30);
-
-    // Check for successful response
-    if response.is_success() {
-        if response.body.contains("\"kind\":\"NamespaceList\"")
-            || response.body.contains("\"kind\": \"NamespaceList\"")
-        {
-            let namespace_count = response.body.matches("\"kind\":\"Namespace\"").count()
-                + response.body.matches("\"kind\": \"Namespace\"").count();
-            info!(
-                "[Integration/Proxy] SUCCESS: Grandchild proxy access worked - {} namespaces visible through hierarchy",
-                namespace_count
-            );
-            return Ok(());
-        }
-    }
-
-    if response.is_forbidden() {
-        return Err(format!(
-            "Grandchild proxy access denied (403) - Cedar policy may not cover grandchild. Response: {}",
-            truncate_response(&response.body)
-        ));
-    }
-
-    if response.body.contains("agent not connected") || response.body.contains("ClusterNotFound") {
-        return Err(format!(
-            "Grandchild {} not reachable - subtree not registered or agent disconnected",
-            grandchild_cluster_name
-        ));
-    }
-
-    Err(format!(
-        "Unexpected grandchild proxy response (HTTP {}). Response: {}",
+        "Unexpected proxy response for {} {} (HTTP {}) - expected NamespaceList. Response: {}",
+        cluster_type,
+        cluster_name,
         response.status_code,
         truncate_response(&response.body)
     ))
@@ -293,7 +269,7 @@ async fn run_proxy_tests_inner(
     wait_for_agent_ready(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
 
     // Test direct child access through proxy
-    test_proxy_access_to_child(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
+    test_proxy_access_to_child(&ctx.mgmt_kubeconfig, workload_cluster_name, ctx.provider).await?;
 
     // Wait for grandchild agent and test hierarchical access
     if ctx.has_workload() {
@@ -304,12 +280,8 @@ async fn run_proxy_tests_inner(
         .await?;
 
         // Test grandchild access through hierarchy
-        test_proxy_access_to_grandchild(
-            &ctx.mgmt_kubeconfig,
-            workload_cluster_name,
-            workload2_cluster_name,
-        )
-        .await?;
+        test_proxy_access_to_grandchild(&ctx.mgmt_kubeconfig, workload2_cluster_name, ctx.provider)
+            .await?;
     }
 
     info!("[Integration/Proxy] Proxy hierarchy tests complete");
@@ -344,7 +316,8 @@ async fn test_proxy_access_standalone() {
         .await
         .unwrap();
 
-    let result = test_proxy_access_to_child(&ctx.mgmt_kubeconfig, &workload_name).await;
+    let result =
+        test_proxy_access_to_child(&ctx.mgmt_kubeconfig, &workload_name, ctx.provider).await;
 
     // Cleanup
     remove_e2e_default_policy(&ctx.mgmt_kubeconfig);

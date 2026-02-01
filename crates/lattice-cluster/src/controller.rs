@@ -484,7 +484,13 @@ impl KubeClient for KubeClientImpl {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
 
         // Get current cluster to read existing finalizers
-        let cluster = api.get(cluster_name).await?;
+        let cluster = match get_optional(&api, cluster_name).await? {
+            Some(c) => c,
+            None => {
+                debug!(cluster = %cluster_name, "Cluster not found, skipping finalizer addition");
+                return Ok(());
+            }
+        };
         let mut finalizers = cluster.metadata.finalizers.unwrap_or_default();
 
         // Don't add if already present
@@ -518,7 +524,13 @@ impl KubeClient for KubeClientImpl {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
 
         // Get current cluster to read existing finalizers
-        let cluster = api.get(cluster_name).await?;
+        let cluster = match get_optional(&api, cluster_name).await? {
+            Some(c) => c,
+            None => {
+                debug!(cluster = %cluster_name, "Cluster not found, finalizer already removed");
+                return Ok(());
+            }
+        };
         let finalizers: Vec<String> = cluster
             .metadata
             .finalizers
@@ -1463,11 +1475,17 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             for (pool_id, pool_spec) in &cluster.spec.nodes.worker_pools {
                 // Get current MachineDeployment replica count for this pool
-                let current_replicas = ctx
+                let current_replicas = match ctx
                     .capi
                     .get_pool_replicas(&name, pool_id, &capi_namespace)
                     .await
-                    .unwrap_or(None);
+                {
+                    Ok(replicas) => replicas,
+                    Err(e) => {
+                        debug!(pool = %pool_id, error = %e, "Failed to get pool replicas");
+                        None
+                    }
+                };
 
                 // Determine scaling action
                 let action = determine_scaling_action(pool_spec, current_replicas);
@@ -1521,7 +1539,13 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             }
 
             // Get current ready worker count (actual running nodes across all pools)
-            let ready_workers = ctx.kube.get_ready_worker_count().await.unwrap_or(0);
+            let ready_workers = match ctx.kube.get_ready_worker_count().await {
+                Ok(count) => count,
+                Err(e) => {
+                    warn!(error = %e, "Failed to get ready worker count, assuming 0");
+                    0
+                }
+            };
 
             // For single-pool clusters, set ready_replicas on the pool
             // (Multi-pool would need per-pool node labels to distinguish)
@@ -2104,19 +2128,24 @@ async fn handle_deletion(
         }
 
         // Check if CAPI Cluster still exists
-        let capi_exists = ctx
-            .capi
-            .capi_cluster_exists(&name, &capi_namespace)
-            .await
-            .unwrap_or(true); // Assume exists on error to avoid premature deletion
+        let capi_exists = match ctx.capi.capi_cluster_exists(&name, &capi_namespace).await {
+            Ok(exists) => exists,
+            Err(e) => {
+                // Assume exists on error to avoid premature deletion
+                warn!(cluster = %name, error = %e, "Failed to check CAPI cluster existence, assuming exists");
+                true
+            }
+        };
 
         if capi_exists {
             // Wait for CAPI to be stable before deleting (prevents race with provisioning)
-            let is_stable = ctx
-                .capi
-                .is_cluster_stable(&name, &capi_namespace)
-                .await
-                .unwrap_or(false);
+            let is_stable = match ctx.capi.is_cluster_stable(&name, &capi_namespace).await {
+                Ok(stable) => stable,
+                Err(e) => {
+                    debug!(cluster = %name, error = %e, "Failed to check CAPI stability, assuming unstable");
+                    false
+                }
+            };
 
             if !is_stable {
                 info!(cluster = %name, "Waiting for CAPI to stabilize before deletion");
@@ -2185,11 +2214,13 @@ async fn handle_deletion(
     // Wait for cluster to be stable before unpivoting (no scaling in progress)
     // Check 1: CAPI resources are stable (no machines provisioning/deleting)
     let capi_namespace = capi_namespace(&name);
-    let capi_stable = ctx
-        .capi
-        .is_cluster_stable(&name, &capi_namespace)
-        .await
-        .unwrap_or(false);
+    let capi_stable = match ctx.capi.is_cluster_stable(&name, &capi_namespace).await {
+        Ok(stable) => stable,
+        Err(e) => {
+            debug!(cluster = %name, error = %e, "Failed to check CAPI stability, assuming unstable");
+            false
+        }
+    };
 
     if !capi_stable {
         info!(cluster = %name, "Waiting for CAPI to stabilize before unpivoting");

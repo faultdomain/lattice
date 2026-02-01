@@ -326,7 +326,7 @@ impl Provider for DockerProvider {
         }
 
         manifests.push(self.generate_docker_cluster(cluster)?);
-        manifests.push(generate_control_plane(&config, &infra, &cp_config));
+        manifests.push(generate_control_plane(&config, &infra, &cp_config)?);
         manifests.push(self.generate_control_plane_machine_template(cluster)?);
 
         // Worker pool resources - generate MachineDeployment, MachineTemplate, ConfigTemplate per pool

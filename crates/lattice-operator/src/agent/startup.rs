@@ -65,7 +65,7 @@ async fn start_agent_if_needed(
             tracing::debug!("No parent config secret, this is a root cluster");
             return Ok(None);
         }
-        Err(e) => return Err(anyhow::anyhow!("Failed to read parent config: {}", e)),
+        Err(e) => return Err(anyhow::anyhow!("failed to read parent config: {}", e)),
     };
 
     let http_endpoint = parent.endpoint.https_url();
@@ -90,7 +90,7 @@ async fn start_agent_if_needed(
             let creds =
                 AgentClient::request_certificate(&http_endpoint, cluster_name, &parent.ca_cert_pem)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to get certificate: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("failed to get certificate: {}", e))?;
 
             // Store credentials for future restarts
             if let Err(e) = save_agent_credentials(&secrets, &creds).await {
@@ -115,7 +115,7 @@ async fn start_agent_if_needed(
     agent
         .connect_with_mtls(&credentials)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to cell: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("failed to connect to cell: {}", e))?;
 
     tracing::info!("Agent connected to parent cell");
     Ok(Some(agent))

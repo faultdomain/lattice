@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "{}",
             serde_json::to_string(&LatticeCluster::crd())
-                .map_err(|e| anyhow::anyhow!("Failed to serialize CRD: {}", e))?
+                .map_err(|e| anyhow::anyhow!("failed to serialize CRD: {}", e))?
         );
         return Ok(());
     }

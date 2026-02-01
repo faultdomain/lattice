@@ -95,22 +95,26 @@ impl CertificateInfo {
         self.not_after - self.not_before
     }
 
+    /// Get current Unix timestamp in seconds
+    fn current_timestamp() -> i64 {
+        // SystemTime::now() returns the current time, and UNIX_EPOCH is 1970-01-01.
+        // This can only fail if the system clock is set before 1970, which would
+        // indicate a severely misconfigured system. In such cases, we return 0
+        // which will cause certificates to appear expired - a safe failure mode.
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
     /// Seconds elapsed since certificate was issued
     pub fn age_secs(&self) -> i64 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock is after 1970")
-            .as_secs() as i64;
-        now - self.not_before
+        Self::current_timestamp() - self.not_before
     }
 
     /// Seconds remaining until certificate expires
     pub fn remaining_secs(&self) -> i64 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock is after 1970")
-            .as_secs() as i64;
-        self.not_after - now
+        self.not_after - Self::current_timestamp()
     }
 
     /// Check if certificate has expired
@@ -390,28 +394,22 @@ impl CertificateAuthority {
         // Add SANs for the agent
         // These are well-known DNS name patterns that should always be valid.
         // If they fail, it indicates a bug in the cluster_id format.
-        let agent_dns = format!("lattice-agent-{}", cluster_id);
-        let svc_dns = lattice_svc_dns("lattice-agent");
-        let svc_dns_fqdn = lattice_svc_dns_fqdn("lattice-agent");
+        // Helper to convert DNS name string to SanType with proper error handling
+        fn make_dns_san(dns_name: String) -> Result<SanType> {
+            Ia5String::try_from(dns_name.clone())
+                .map(SanType::DnsName)
+                .map_err(|e| {
+                    PkiError::CertificateGenerationFailed(format!(
+                        "invalid DNS name '{}': {}",
+                        dns_name, e
+                    ))
+                })
+        }
+
         csr_params.params.subject_alt_names = vec![
-            SanType::DnsName(Ia5String::try_from(agent_dns.clone()).map_err(|e| {
-                PkiError::CertificateGenerationFailed(format!(
-                    "invalid agent DNS name '{}': {}",
-                    agent_dns, e
-                ))
-            })?),
-            SanType::DnsName(Ia5String::try_from(svc_dns.clone()).map_err(|e| {
-                PkiError::CertificateGenerationFailed(format!(
-                    "invalid DNS name '{}': {}",
-                    svc_dns, e
-                ))
-            })?),
-            SanType::DnsName(Ia5String::try_from(svc_dns_fqdn.clone()).map_err(|e| {
-                PkiError::CertificateGenerationFailed(format!(
-                    "invalid DNS name '{}': {}",
-                    svc_dns_fqdn, e
-                ))
-            })?),
+            make_dns_san(format!("lattice-agent-{}", cluster_id))?,
+            make_dns_san(lattice_svc_dns("lattice-agent"))?,
+            make_dns_san(lattice_svc_dns_fqdn("lattice-agent"))?,
         ];
 
         // Create the Issuer from our CA certificate and key
@@ -602,6 +600,43 @@ pub struct VerificationResult {
     pub reason: Option<String>,
 }
 
+/// Extract cluster ID from a certificate's Common Name (CN).
+///
+/// The CN is expected to be in the format "lattice-agent-{cluster_id}".
+/// Returns an error if the certificate cannot be parsed, has no CN,
+/// or the CN doesn't have the expected prefix.
+///
+/// This is the canonical implementation used by both pki and mtls modules.
+pub fn extract_cluster_id(cert_der: &[u8]) -> Result<String> {
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| PkiError::ParseError(format!("failed to parse certificate: {}", e)))?;
+
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .ok_or_else(|| PkiError::ParseError("no CN found in certificate".to_string()))?;
+
+    let cluster_id = cn
+        .strip_prefix("lattice-agent-")
+        .ok_or_else(|| {
+            PkiError::ParseError(format!(
+                "CN '{}' does not have expected prefix 'lattice-agent-'",
+                cn
+            ))
+        })?
+        .to_string();
+
+    if cluster_id.is_empty() {
+        return Err(PkiError::ParseError(
+            "cluster ID is empty after stripping prefix".to_string(),
+        ));
+    }
+
+    Ok(cluster_id)
+}
+
 /// Verify a client certificate was signed by our CA
 pub fn verify_client_cert(
     cert_der: &[u8],
@@ -630,10 +665,14 @@ pub fn verify_client_cert(
     }
 
     // Check validity period
+    // SystemTime::now() returns the current time, and UNIX_EPOCH is 1970-01-01.
+    // This can only fail if the system clock is set before 1970, which would
+    // indicate a severely misconfigured system. In such cases, we return 0
+    // which will cause certificates to appear as not yet valid - a safe failure mode.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock is after 1970")
-        .as_secs() as i64;
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
 
     let not_before = cert.validity().not_before.timestamp();
     let not_after = cert.validity().not_after.timestamp();
@@ -654,29 +693,19 @@ pub fn verify_client_cert(
         });
     }
 
-    // Extract cluster ID from CN
-    let cn = cert
-        .subject()
-        .iter_common_name()
-        .next()
-        .and_then(|cn| cn.as_str().ok())
-        .unwrap_or("");
-
-    let cluster_id = cn.strip_prefix("lattice-agent-").unwrap_or("").to_string();
-
-    if cluster_id.is_empty() {
-        return Ok(VerificationResult {
+    // Extract cluster ID from CN using shared helper
+    match extract_cluster_id(cert_der) {
+        Ok(cluster_id) => Ok(VerificationResult {
+            cluster_id,
+            valid: true,
+            reason: None,
+        }),
+        Err(e) => Ok(VerificationResult {
             cluster_id: String::new(),
             valid: false,
-            reason: Some("invalid CN format, expected lattice-agent-<cluster_id>".to_string()),
-        });
+            reason: Some(e.to_string()),
+        }),
     }
-
-    Ok(VerificationResult {
-        cluster_id,
-        valid: true,
-        reason: None,
-    })
 }
 
 #[cfg(test)]
@@ -1149,11 +1178,12 @@ mod tests {
 
         assert!(!result.valid);
         assert!(result.cluster_id.is_empty());
+        // The error message comes from extract_cluster_id which provides detailed prefix info
         assert!(result
             .reason
             .as_ref()
             .expect("reason should be set for invalid result")
-            .contains("invalid CN format"));
+            .contains("does not have expected prefix"));
     }
 
     /// Test certificate that is not yet valid (future notBefore)

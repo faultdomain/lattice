@@ -670,7 +670,7 @@ impl DefaultManifestGenerator {
 
         // CNI manifests first (Cilium) - rendered on-demand
         match lattice_infra::generate_cilium_manifests().await {
-            Ok(cilium_manifests) => manifests.extend(cilium_manifests),
+            Ok(cilium_manifests) => manifests.extend(cilium_manifests.iter().cloned()),
             Err(e) => {
                 return Err(ManifestError::Cilium(e.to_string()));
             }

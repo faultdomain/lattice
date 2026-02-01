@@ -26,8 +26,8 @@ use lattice_common::crd::{
 };
 use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
-// Re-export for convenience - callers can use this or ControllerContext
-pub use lattice_common::{default_error_policy, ControllerContext};
+// Re-export for convenience
+pub use lattice_common::ControllerContext;
 
 /// Reconcile a CloudProvider
 ///
@@ -264,15 +264,6 @@ mod tests {
     // These tests validate the reconcile logic by testing validate_credentials
     // directly, which is the core of reconcile(). Integration tests with a
     // real cluster provide full reconcile() coverage.
-
-    #[tokio::test]
-    async fn reconcile_returns_ready_for_valid_provider() {
-        // This test validates that the reconcile flow would succeed by testing
-        // the validation step. Full reconcile requires a k8s client.
-        let cp = sample_provider(CloudProviderType::Docker);
-        let result = validate_credentials(&cp).await;
-        assert!(result.is_ok(), "Valid provider should pass validation");
-    }
 
     #[tokio::test]
     async fn reconcile_returns_error_for_missing_credentials() {

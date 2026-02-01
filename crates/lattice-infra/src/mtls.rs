@@ -98,37 +98,11 @@ impl ClientMtlsConfig {
 
 /// Extract cluster ID from a client certificate's CN
 ///
-/// The CN is expected to be in the format "lattice-agent-{cluster_id}"
+/// The CN is expected to be in the format "lattice-agent-{cluster_id}".
+/// This is a wrapper around the shared implementation in pki module.
 pub fn extract_cluster_id_from_cert(cert_der: &[u8]) -> Result<String, MtlsError> {
-    use x509_parser::prelude::*;
-
-    let (_, cert) = X509Certificate::from_der(cert_der)
-        .map_err(|e| MtlsError::CertificateParseError(format!("failed to parse cert: {}", e)))?;
-
-    let cn = cert
-        .subject()
-        .iter_common_name()
-        .next()
-        .and_then(|cn| cn.as_str().ok())
-        .ok_or_else(|| MtlsError::CertificateParseError("no CN found".to_string()))?;
-
-    let cluster_id = cn
-        .strip_prefix("lattice-agent-")
-        .ok_or_else(|| {
-            MtlsError::CertificateParseError(format!(
-                "CN '{}' does not have expected prefix 'lattice-agent-'",
-                cn
-            ))
-        })?
-        .to_string();
-
-    if cluster_id.is_empty() {
-        return Err(MtlsError::CertificateParseError(
-            "cluster ID is empty".to_string(),
-        ));
-    }
-
-    Ok(cluster_id)
+    crate::pki::extract_cluster_id(cert_der)
+        .map_err(|e| MtlsError::CertificateParseError(e.to_string()))
 }
 
 /// Verify a certificate chain against a CA

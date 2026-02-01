@@ -15,6 +15,7 @@ use kube::Client;
 use tracing::{debug, error, info, warn};
 
 use lattice_common::kube_utils::build_api_resource;
+use lattice_proto::{MoveObject, SourceOwnerRef};
 
 use crate::error::MoveError;
 use crate::graph::{GraphNode, ObjectGraph};
@@ -95,8 +96,14 @@ async fn set_cluster_paused(
     let action = if paused { "Pausing" } else { "Unpausing" };
 
     // Pause/unpause Cluster (required)
-    if let Err(e) =
-        set_resource_paused(client, namespace, "cluster.x-k8s.io", "Cluster", paused).await
+    if let Err(e) = crate::utils::patch_resources_paused(
+        client,
+        namespace,
+        "cluster.x-k8s.io",
+        "Cluster",
+        paused,
+    )
+    .await
     {
         return Err(MoveError::PauseFailed(format!(
             "{} Cluster failed: {}",
@@ -105,7 +112,7 @@ async fn set_cluster_paused(
     }
 
     // Pause/unpause ClusterClass (optional - might not exist)
-    if let Err(e) = set_resource_paused(
+    if let Err(e) = crate::utils::patch_resources_paused(
         client,
         namespace,
         "cluster.x-k8s.io",
@@ -118,17 +125,6 @@ async fn set_cluster_paused(
     }
 
     info!(namespace = %namespace, paused = paused, "Cluster resources {}", if paused { "paused" } else { "unpaused" });
-    Ok(())
-}
-
-async fn set_resource_paused(
-    client: &Client,
-    namespace: &str,
-    group: &str,
-    kind: &str,
-    paused: bool,
-) -> Result<(), MoveError> {
-    crate::utils::patch_resources_paused(client, namespace, group, kind, paused).await?;
     Ok(())
 }
 
@@ -226,6 +222,26 @@ pub struct MoveObjectOutput {
     pub owners: Vec<SourceOwnerRefOutput>,
 }
 
+impl From<MoveObjectOutput> for MoveObject {
+    fn from(obj: MoveObjectOutput) -> Self {
+        Self {
+            source_uid: obj.source_uid,
+            manifest: obj.manifest,
+            owners: obj.owners.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&MoveObjectOutput> for MoveObject {
+    fn from(obj: &MoveObjectOutput) -> Self {
+        Self {
+            source_uid: obj.source_uid.clone(),
+            manifest: obj.manifest.clone(),
+            owners: obj.owners.iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// Owner reference to send
 #[derive(Debug, Clone)]
 pub struct SourceOwnerRefOutput {
@@ -241,6 +257,32 @@ pub struct SourceOwnerRefOutput {
     pub controller: bool,
     /// Block owner deletion
     pub block_owner_deletion: bool,
+}
+
+impl From<SourceOwnerRefOutput> for SourceOwnerRef {
+    fn from(o: SourceOwnerRefOutput) -> Self {
+        Self {
+            source_uid: o.source_uid,
+            api_version: o.api_version,
+            kind: o.kind,
+            name: o.name,
+            controller: o.controller,
+            block_owner_deletion: o.block_owner_deletion,
+        }
+    }
+}
+
+impl From<&SourceOwnerRefOutput> for SourceOwnerRef {
+    fn from(o: &SourceOwnerRefOutput) -> Self {
+        Self {
+            source_uid: o.source_uid.clone(),
+            api_version: o.api_version.clone(),
+            kind: o.kind.clone(),
+            name: o.name.clone(),
+            controller: o.controller,
+            block_owner_deletion: o.block_owner_deletion,
+        }
+    }
 }
 
 /// Acknowledgment for a batch

@@ -322,14 +322,16 @@ pub struct VipConfig {
     pub image: String,
 }
 
-use crate::constants::DEFAULT_KUBE_VIP_IMAGE;
+use crate::constants::{
+    DEFAULT_KUBE_VIP_IMAGE, DEFAULT_NETWORK_INTERFACE, KUBERNETES_API_SERVER_PORT,
+};
 
 impl VipConfig {
     /// Create a new VipConfig with defaults
     pub fn new(address: String, interface: Option<String>, image: Option<String>) -> Self {
         Self {
             address,
-            interface: interface.unwrap_or_else(|| "eth0".to_string()),
+            interface: interface.unwrap_or_else(|| DEFAULT_NETWORK_INTERFACE.to_string()),
             image: image.unwrap_or_else(|| DEFAULT_KUBE_VIP_IMAGE.to_string()),
         }
     }
@@ -339,7 +341,7 @@ impl VipConfig {
 fn generate_kube_vip_manifest(
     vip: &VipConfig,
     bootstrap: &lattice_common::crd::BootstrapProvider,
-) -> String {
+) -> Result<String> {
     use k8s_openapi::api::core::v1::{
         Capabilities, Container, EnvVar, HostAlias, HostPathVolumeSource, Pod, PodSpec,
         SecurityContext, Volume, VolumeMount,
@@ -387,7 +389,7 @@ fn generate_kube_vip_manifest(
                     },
                     EnvVar {
                         name: "port".to_string(),
-                        value: Some("6443".to_string()),
+                        value: Some(KUBERNETES_API_SERVER_PORT.to_string()),
                         ..Default::default()
                     },
                     EnvVar {
@@ -443,7 +445,7 @@ fn generate_kube_vip_manifest(
         ..Default::default()
     };
 
-    serde_json::to_string(&pod).expect("kube-vip pod serialization")
+    serde_json::to_string(&pod).map_err(|e| Error::serialization(format!("kube-vip pod: {}", e)))
 }
 
 /// Configuration for a worker pool
@@ -698,19 +700,10 @@ fn generate_kubeadm_config_template_for_pool(
     let suffix = pool_resource_suffix(pool.pool_id);
     let template_name = format!("{}-{}", config.name, suffix);
 
-    // Build kubelet extra args using the shared function
-    let kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
+    // Build kubelet extra args using the shared function - keep as mutable Vec
+    let mut kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
 
-    // Build nodeRegistration with optional name field for cloud providers
-    let mut node_registration = serde_json::json!({
-        "criSocket": "/var/run/containerd/containerd.sock",
-        "kubeletExtraArgs": kubelet_extra_args
-    });
-    if let Some(name_template) = get_node_name_template(config.provider_type) {
-        node_registration["name"] = serde_json::json!(name_template);
-    }
-
-    // Add pool labels to node registration
+    // Add pool labels to kubelet args
     let mut node_labels = pool.spec.labels.clone();
     node_labels.insert("lattice.dev/pool".to_string(), pool.pool_id.to_string());
     if !node_labels.is_empty() {
@@ -718,13 +711,11 @@ fn generate_kubeadm_config_template_for_pool(
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
-        node_registration["kubeletExtraArgs"]
-            .as_array_mut()
-            .expect("kubeletExtraArgs was initialized as array")
+        kubelet_extra_args
             .push(serde_json::json!({"name": "node-labels", "value": labels_str.join(",")}));
     }
 
-    // Add pool taints to node registration
+    // Add pool taints to kubelet args
     if !pool.spec.taints.is_empty() {
         let taints_str: Vec<String> = pool
             .spec
@@ -738,12 +729,18 @@ fn generate_kubeadm_config_template_for_pool(
                 }
             })
             .collect();
-        node_registration["kubeletExtraArgs"]
-            .as_array_mut()
-            .expect("kubeletExtraArgs was initialized as array")
-            .push(
-                serde_json::json!({"name": "register-with-taints", "value": taints_str.join(",")}),
-            );
+        kubelet_extra_args.push(
+            serde_json::json!({"name": "register-with-taints", "value": taints_str.join(",")}),
+        );
+    }
+
+    // Build nodeRegistration with optional name field for cloud providers
+    let mut node_registration = serde_json::json!({
+        "criSocket": "/var/run/containerd/containerd.sock",
+        "kubeletExtraArgs": kubelet_extra_args
+    });
+    if let Some(name_template) = get_node_name_template(config.provider_type) {
+        node_registration["name"] = serde_json::json!(name_template);
     }
 
     let spec = serde_json::json!({
@@ -881,7 +878,7 @@ pub fn generate_control_plane(
     config: &ClusterConfig,
     infra: &InfrastructureRef,
     cp_config: &ControlPlaneConfig,
-) -> CAPIManifest {
+) -> Result<CAPIManifest> {
     use lattice_common::crd::BootstrapProvider;
 
     match config.bootstrap {
@@ -895,7 +892,7 @@ fn generate_kubeadm_control_plane(
     config: &ClusterConfig,
     infra: &InfrastructureRef,
     cp_config: &ControlPlaneConfig,
-) -> CAPIManifest {
+) -> Result<CAPIManifest> {
     let cp_name = control_plane_name(config.name);
 
     // Build extra args based on provider type
@@ -947,9 +944,10 @@ fn generate_kubeadm_control_plane(
 
     // Add kube-vip static pod if VIP is configured
     if let Some(ref vip) = cp_config.vip {
+        let kube_vip_content = generate_kube_vip_manifest(vip, &config.bootstrap)?;
         kubeadm_config_spec["files"] = serde_json::json!([
             {
-                "content": generate_kube_vip_manifest(vip, &config.bootstrap),
+                "content": kube_vip_content,
                 "owner": "root:root",
                 "path": "/etc/kubernetes/manifests/kube-vip.yaml",
                 "permissions": "0644"
@@ -991,14 +989,14 @@ fn generate_kubeadm_control_plane(
         "kubeadmConfigSpec": kubeadm_config_spec
     });
 
-    CAPIManifest::new(
+    Ok(CAPIManifest::new(
         CAPI_CONTROLPLANE_API_VERSION,
         "KubeadmControlPlane",
         &cp_name,
         config.namespace,
     )
     .with_labels(config.labels.clone())
-    .with_spec(spec)
+    .with_spec(spec))
 }
 
 /// Generate RKE2ControlPlane resource
@@ -1009,7 +1007,7 @@ fn generate_rke2_control_plane(
     config: &ClusterConfig,
     infra: &InfrastructureRef,
     cp_config: &ControlPlaneConfig,
-) -> CAPIManifest {
+) -> Result<CAPIManifest> {
     let cp_name = control_plane_name(config.name);
 
     // Build files array for static pods and SSH keys
@@ -1017,8 +1015,9 @@ fn generate_rke2_control_plane(
 
     // Add kube-vip static pod if VIP is configured
     if let Some(ref vip) = cp_config.vip {
+        let kube_vip_content = generate_kube_vip_manifest(vip, &config.bootstrap)?;
         files.push(serde_json::json!({
-            "content": generate_kube_vip_manifest(vip, &config.bootstrap),
+            "content": kube_vip_content,
             "owner": "root:root",
             "path": "/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml",
             "permissions": "0644"
@@ -1106,14 +1105,14 @@ fn generate_rke2_control_plane(
         spec["files"] = serde_json::json!(files);
     }
 
-    CAPIManifest::new(
+    Ok(CAPIManifest::new(
         RKE2_CONTROLPLANE_API_VERSION,
         "RKE2ControlPlane",
         &cp_name,
         config.namespace,
     )
     .with_labels(config.labels.clone())
-    .with_spec(spec)
+    .with_spec(spec))
 }
 
 /// Default scripts directory (set by LATTICE_SCRIPTS_DIR env var in container)
@@ -1332,6 +1331,7 @@ pub fn create_provider(provider_type: ProviderType, namespace: &str) -> Result<B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::INFRASTRUCTURE_API_GROUP;
 
     mod capi_manifest {
         use super::*;
@@ -1427,7 +1427,7 @@ mod tests {
 
         fn test_infra() -> InfrastructureRef<'static> {
             InfrastructureRef {
-                api_group: "infrastructure.cluster.x-k8s.io",
+                api_group: INFRASTRUCTURE_API_GROUP,
                 api_version: "infrastructure.cluster.x-k8s.io/v1beta1",
                 cluster_kind: "DockerCluster",
                 machine_template_kind: "DockerMachineTemplate",
@@ -1446,7 +1446,8 @@ mod tests {
                 ssh_authorized_keys: vec![],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
 
             assert_eq!(manifest.kind, "KubeadmControlPlane");
             assert_eq!(manifest.api_version, CAPI_CONTROLPLANE_API_VERSION);
@@ -1464,7 +1465,8 @@ mod tests {
                 ssh_authorized_keys: vec![],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
 
             assert_eq!(manifest.kind, "RKE2ControlPlane");
             assert_eq!(manifest.api_version, RKE2_CONTROLPLANE_API_VERSION);
@@ -1631,7 +1633,8 @@ mod tests {
                 ssh_authorized_keys: vec![],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
             let spec = manifest.spec.expect("should have spec");
 
             let version = spec
@@ -1661,7 +1664,8 @@ mod tests {
                 ssh_authorized_keys: vec![],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
             let spec = manifest.spec.expect("should have spec");
 
             let cni = spec
@@ -1684,7 +1688,8 @@ mod tests {
                 ssh_authorized_keys: vec![],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
             let spec = manifest.spec.expect("should have spec");
 
             let files = spec
@@ -1752,7 +1757,8 @@ mod tests {
                 ssh_authorized_keys: vec![],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
             let spec = manifest.spec.expect("should have spec");
 
             assert!(
@@ -1778,7 +1784,8 @@ mod tests {
                 ssh_authorized_keys: vec![],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
             let spec = manifest.spec.expect("should have spec");
 
             let files = spec
@@ -1852,7 +1859,8 @@ mod tests {
                 ssh_authorized_keys: vec![],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
             let spec = manifest.spec.expect("should have spec");
 
             assert!(
@@ -1880,7 +1888,8 @@ mod tests {
                 ],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
             let spec = manifest.spec.expect("should have spec");
 
             let files = spec
@@ -1917,7 +1926,8 @@ mod tests {
                 ssh_authorized_keys: vec!["ssh-ed25519 AAAAC3... user@host".to_string()],
             };
 
-            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let manifest = generate_control_plane(&config, &infra, &cp_config)
+                .expect("should generate control plane");
             let spec = manifest.spec.expect("should have spec");
 
             let files = spec.pointer("/files").expect("should have files");

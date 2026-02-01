@@ -718,6 +718,28 @@ mod tests {
         SubtreeRegistry::new("test-cell".to_string())
     }
 
+    /// Test context containing all components needed for message handling tests
+    struct TestContext {
+        registry: SharedAgentRegistry,
+        subtree_registry: SubtreeRegistry,
+        tx: mpsc::Sender<CellCommand>,
+        #[allow(dead_code)]
+        rx: mpsc::Receiver<CellCommand>,
+    }
+
+    /// Setup common test context for message handling tests
+    fn setup_test_context() -> TestContext {
+        let registry = create_test_registry();
+        let subtree_registry = create_test_subtree_registry();
+        let (tx, rx) = mpsc::channel::<CellCommand>(32);
+        TestContext {
+            registry,
+            subtree_registry,
+            tx,
+            rx,
+        }
+    }
+
     /// Factory function to create a Ready message for tests
     fn make_ready_msg(cluster: &str, state: AgentState) -> AgentMessage {
         AgentMessage {
@@ -761,18 +783,67 @@ mod tests {
         }
     }
 
+    /// Factory function to create a BootstrapComplete message for tests
+    fn make_bootstrap_complete_msg(cluster: &str, capi_ready: bool) -> AgentMessage {
+        AgentMessage {
+            cluster_name: cluster.to_string(),
+            payload: Some(Payload::BootstrapComplete(BootstrapComplete {
+                capi_ready,
+                installed_providers: vec!["docker".to_string()],
+            })),
+        }
+    }
+
+    /// Factory function to create a ClusterHealth message for tests
+    fn make_cluster_health_msg(cluster: &str, ready_nodes: i32, total_nodes: i32) -> AgentMessage {
+        AgentMessage {
+            cluster_name: cluster.to_string(),
+            payload: Some(Payload::ClusterHealth(ClusterHealth {
+                ready_nodes,
+                total_nodes,
+                ready_control_plane: 1,
+                total_control_plane: 1,
+                conditions: vec![],
+            })),
+        }
+    }
+
+    /// Factory function to create a StatusResponse message for tests
+    fn make_status_response_msg(
+        cluster: &str,
+        request_id: &str,
+        state: AgentState,
+    ) -> AgentMessage {
+        AgentMessage {
+            cluster_name: cluster.to_string(),
+            payload: Some(Payload::StatusResponse(StatusResponse {
+                request_id: request_id.to_string(),
+                state: state.into(),
+                health: None,
+                capi_status: None,
+            })),
+        }
+    }
+
+    /// Factory function to create an empty (no payload) message for tests
+    fn make_empty_msg(cluster: &str) -> AgentMessage {
+        AgentMessage {
+            cluster_name: cluster.to_string(),
+            payload: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_handle_ready_message() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
         let msg = make_ready_msg("test-cluster", AgentState::Provisioning);
 
-        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
 
-        assert!(!registry.is_empty());
-        let conn = registry
+        assert!(!ctx.registry.is_empty());
+        let conn = ctx
+            .registry
             .get("test-cluster")
             .expect("agent should be registered");
         assert_eq!(conn.cluster_name, "test-cluster");
@@ -783,17 +854,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_ready_message_updates_existing() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
         let msg1 = make_ready_msg("test-cluster", AgentState::Provisioning);
-        test_handle_message(&registry, &subtree_registry, &msg1, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg1, &ctx.tx).await;
 
         let msg2 = make_ready_msg("test-cluster", AgentState::Ready);
-        test_handle_message(&registry, &subtree_registry, &msg2, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg2, &ctx.tx).await;
 
-        let conn = registry
+        let conn = ctx
+            .registry
             .get("test-cluster")
             .expect("agent should be registered");
         assert_eq!(conn.state, AgentState::Ready);
@@ -801,34 +871,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_bootstrap_complete_message() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::BootstrapComplete(BootstrapComplete {
-                capi_ready: true,
-                installed_providers: vec!["docker".to_string()],
-            })),
-        };
+        let msg = make_bootstrap_complete_msg("test-cluster", true);
 
-        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
     }
 
     #[tokio::test]
     async fn test_handle_heartbeat_message() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
         let ready_msg = make_ready_msg("test-cluster", AgentState::Ready);
-        test_handle_message(&registry, &subtree_registry, &ready_msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &ready_msg, &ctx.tx).await;
 
         let msg = make_heartbeat_msg("test-cluster", AgentState::Ready);
-        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
 
-        let conn = registry
+        let conn = ctx
+            .registry
             .get("test-cluster")
             .expect("agent should be registered");
         assert_eq!(conn.state, AgentState::Ready);
@@ -836,78 +897,52 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_cluster_health_message() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::ClusterHealth(ClusterHealth {
-                ready_nodes: 3,
-                total_nodes: 3,
-                ready_control_plane: 1,
-                total_control_plane: 1,
-                conditions: vec![],
-            })),
-        };
+        let msg = make_cluster_health_msg("test-cluster", 3, 3);
 
-        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
     }
 
     #[tokio::test]
     async fn test_handle_status_response_message() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::StatusResponse(StatusResponse {
-                request_id: "req-123".to_string(),
-                state: AgentState::Ready.into(),
-                health: None,
-                capi_status: None,
-            })),
-        };
+        let msg = make_status_response_msg("test-cluster", "req-123", AgentState::Ready);
 
-        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
     }
 
     #[tokio::test]
     async fn test_handle_empty_payload_message() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: None,
-        };
+        let msg = make_empty_msg("test-cluster");
 
-        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
     }
 
     #[tokio::test]
     async fn test_multiple_agents_registration() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
         let msg1 = make_ready_msg("cluster-1", AgentState::Ready);
-        test_handle_message(&registry, &subtree_registry, &msg1, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg1, &ctx.tx).await;
 
         let msg2 =
             make_ready_msg_with_versions("cluster-2", AgentState::Provisioning, "0.2.0", "1.29.0");
-        test_handle_message(&registry, &subtree_registry, &msg2, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg2, &ctx.tx).await;
 
-        assert_eq!(registry.len(), 2);
+        assert_eq!(ctx.registry.len(), 2);
 
-        let conn1 = registry
+        let conn1 = ctx
+            .registry
             .get("cluster-1")
             .expect("cluster-1 should be registered");
         assert_eq!(conn1.agent_version, "0.1.0");
 
-        let conn2 = registry
+        let conn2 = ctx
+            .registry
             .get("cluster-2")
             .expect("cluster-2 should be registered");
         assert_eq!(conn2.agent_version, "0.2.0");
@@ -915,14 +950,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_full_state_transition_lifecycle() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
         let msg = make_ready_msg("test-cluster", AgentState::Provisioning);
-        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
         assert_eq!(
-            registry
+            ctx.registry
                 .get("test-cluster")
                 .expect("agent should be registered")
                 .state,
@@ -930,9 +963,9 @@ mod tests {
         );
 
         let msg = make_heartbeat_msg("test-cluster", AgentState::Ready);
-        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
         assert_eq!(
-            registry
+            ctx.registry
                 .get("test-cluster")
                 .expect("agent should be registered")
                 .state,
@@ -942,9 +975,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subtree_state_full_sync() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
         let msg = AgentMessage {
             cluster_name: "child-cluster".to_string(),
@@ -970,20 +1001,18 @@ mod tests {
             })),
         };
 
-        test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
 
         // Verify subtree registry was updated
-        assert!(subtree_registry.contains("child-cluster").await);
-        assert!(subtree_registry.contains("grandchild").await);
+        assert!(ctx.subtree_registry.contains("child-cluster").await);
+        assert!(ctx.subtree_registry.contains("grandchild").await);
         // Self is always present
-        assert!(subtree_registry.contains("test-cell").await);
+        assert!(ctx.subtree_registry.contains("test-cell").await);
     }
 
     #[tokio::test]
     async fn test_subtree_state_delta() {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
-        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
+        let ctx = setup_test_context();
 
         // First, full sync
         let msg1 = AgentMessage {
@@ -1000,7 +1029,7 @@ mod tests {
                 services: vec![],
             })),
         };
-        test_handle_message(&registry, &subtree_registry, &msg1, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg1, &ctx.tx).await;
 
         // Then, delta with removal
         let msg2 = AgentMessage {
@@ -1017,8 +1046,8 @@ mod tests {
                 services: vec![],
             })),
         };
-        test_handle_message(&registry, &subtree_registry, &msg2, &tx).await;
+        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg2, &ctx.tx).await;
 
-        assert!(!subtree_registry.contains("child-cluster").await);
+        assert!(!ctx.subtree_registry.contains("child-cluster").await);
     }
 }

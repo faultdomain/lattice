@@ -12,7 +12,10 @@ use super::{
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
     InfrastructureRef, Provider, WorkerPoolConfig,
 };
-use crate::constants::{DEFAULT_NODE_CIDR_OPENSTACK, OPENSTACK_API_VERSION};
+use crate::constants::{
+    DEFAULT_DNS_SERVERS, DEFAULT_NODE_CIDR_OPENSTACK, INFRASTRUCTURE_API_GROUP,
+    OPENSTACK_API_VERSION,
+};
 use lattice_common::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result, CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET};
 
@@ -43,7 +46,7 @@ impl OpenStackProvider {
 
     fn infra_ref(&self) -> InfrastructureRef<'static> {
         InfrastructureRef {
-            api_group: "infrastructure.cluster.x-k8s.io",
+            api_group: INFRASTRUCTURE_API_GROUP,
             api_version: OPENSTACK_API_VERSION,
             cluster_kind: "OpenStackCluster",
             machine_template_kind: "OpenStackMachineTemplate",
@@ -68,7 +71,7 @@ impl OpenStackProvider {
         let dns_nameservers = cfg
             .dns_nameservers
             .clone()
-            .unwrap_or_else(|| vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]);
+            .unwrap_or_else(|| DEFAULT_DNS_SERVERS.iter().map(|s| s.to_string()).collect());
 
         let node_cidr = cfg
             .node_cidr
@@ -190,7 +193,7 @@ impl Provider for OpenStackProvider {
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_openstack_cluster(cluster)?,
-            generate_control_plane(&config, &infra, &cp_config),
+            generate_control_plane(&config, &infra, &cp_config)?,
             self.generate_machine_template(MachineTemplateConfig {
                 name,
                 openstack_cfg: cfg,

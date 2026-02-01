@@ -16,7 +16,10 @@ use super::{
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
     InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
 };
-use crate::constants::{DEFAULT_VIP_INTERFACE_PROXMOX, PROXMOX_API_VERSION};
+use crate::constants::{
+    DEFAULT_DNS_SERVERS, DEFAULT_VIP_INTERFACE_PROXMOX, INFRASTRUCTURE_API_GROUP,
+    PROXMOX_API_VERSION,
+};
 use lattice_common::crd::{LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig};
 use lattice_common::{Error, Result, CAPMOX_NAMESPACE, PROXMOX_CREDENTIALS_SECRET};
 
@@ -44,7 +47,7 @@ impl ProxmoxProvider {
 
     fn infra_ref(&self) -> InfrastructureRef<'static> {
         InfrastructureRef {
-            api_group: "infrastructure.cluster.x-k8s.io",
+            api_group: INFRASTRUCTURE_API_GROUP,
             api_version: PROXMOX_API_VERSION,
             cluster_kind: "ProxmoxCluster",
             machine_template_kind: "ProxmoxMachineTemplate",
@@ -64,7 +67,7 @@ impl ProxmoxProvider {
         let dns_servers = cfg
             .dns_servers
             .clone()
-            .unwrap_or_else(|| vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]);
+            .unwrap_or_else(|| DEFAULT_DNS_SERVERS.iter().map(|s| s.to_string()).collect());
         let allowed_nodes = cfg.allowed_nodes.clone().unwrap_or_default();
 
         // Parse ipv4_pool range to get start-end and prefix
@@ -272,7 +275,7 @@ impl Provider for ProxmoxProvider {
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_proxmox_cluster(cluster)?,
-            generate_control_plane(&config, &infra, &cp_config),
+            generate_control_plane(&config, &infra, &cp_config)?,
             self.generate_machine_template(
                 name,
                 cfg,

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{Api, DynamicObject, ListParams, PostParams};
 use kube::Client;
+use lattice_common::kube_utils::build_api_resource;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -72,10 +73,10 @@ impl AgentMover {
         let mut count = 0;
 
         // Get all CRDs that have the move label (same discovery as ObjectGraph)
-        let crd_types = self.discover_move_types().await?;
+        let crd_types = crate::utils::discover_move_crds(&self.client).await?;
 
-        for (api_version, kind, _plural) in crd_types {
-            let api_resource = build_api_resource(&api_version, &kind);
+        for crd_type in crd_types {
+            let api_resource = build_api_resource(&crd_type.api_version, &crd_type.kind);
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), &self.namespace, &api_resource);
 
@@ -83,7 +84,7 @@ impl AgentMover {
             let list = match api.list(&ListParams::default()).await {
                 Ok(l) => l,
                 Err(e) => {
-                    debug!(kind = %kind, error = %e, "Failed to list resources (may not exist)");
+                    debug!(kind = %crd_type.kind, error = %e, "Failed to list resources (may not exist)");
                     continue;
                 }
             };
@@ -98,7 +99,7 @@ impl AgentMover {
                             debug!(
                                 source_uid = %source_uid,
                                 target_uid = %target_uid,
-                                kind = %kind,
+                                kind = %crd_type.kind,
                                 "Recovered UID mapping"
                             );
                         }
@@ -161,15 +162,6 @@ impl AgentMover {
         }
 
         Ok(count)
-    }
-
-    /// Discover types that have move labels (for UID map rebuild)
-    async fn discover_move_types(&self) -> Result<Vec<(String, String, String)>, MoveError> {
-        let discovered = crate::utils::discover_move_crds(&self.client).await?;
-        Ok(discovered
-            .into_iter()
-            .map(|t| (t.api_version, t.kind, t.plural))
-            .collect())
     }
 
     /// Ensure the target namespace exists
@@ -504,9 +496,6 @@ fn strip_transient_fields(obj: &mut Value) {
         obj_map.remove("status");
     }
 }
-
-// Use shared utility function from lattice-common
-use lattice_common::kube_utils::build_api_resource;
 
 #[cfg(test)]
 mod tests {

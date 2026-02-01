@@ -12,7 +12,7 @@ use super::{
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
     InfrastructureRef, Provider, WorkerPoolConfig,
 };
-use crate::constants::AWS_API_VERSION;
+use crate::constants::{AWS_API_VERSION, INFRASTRUCTURE_API_GROUP};
 use lattice_common::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE};
 
@@ -43,7 +43,7 @@ impl AwsProvider {
 
     fn infra_ref(&self) -> InfrastructureRef<'static> {
         InfrastructureRef {
-            api_group: "infrastructure.cluster.x-k8s.io",
+            api_group: INFRASTRUCTURE_API_GROUP,
             api_version: AWS_API_VERSION,
             cluster_kind: "AWSCluster",
             machine_template_kind: "AWSMachineTemplate",
@@ -208,7 +208,7 @@ impl Provider for AwsProvider {
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_aws_cluster(cluster)?,
-            generate_control_plane(&config, &infra, &cp_config),
+            generate_control_plane(&config, &infra, &cp_config)?,
             self.generate_machine_template(MachineTemplateConfig {
                 name,
                 aws_cfg: cfg,

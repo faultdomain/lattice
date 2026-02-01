@@ -2,13 +2,16 @@
 //!
 //! Generates ESO manifests for secret synchronization from external providers.
 
+use std::sync::Arc;
+
 use tokio::sync::OnceCell;
 use tracing::info;
 
 use super::{charts_dir, namespace_yaml, run_helm_template};
 
-/// Cached ESO manifests to avoid repeated helm template calls
-static ESO_MANIFESTS: OnceCell<Result<Vec<String>, String>> = OnceCell::const_new();
+/// Cached ESO manifests to avoid repeated helm template calls.
+/// Uses Arc for efficient sharing without cloning the full Vec on each access.
+static ESO_MANIFESTS: OnceCell<Result<Arc<Vec<String>>, String>> = OnceCell::const_new();
 
 /// ESO version (pinned at build time)
 pub fn eso_version() -> &'static str {
@@ -19,9 +22,9 @@ pub fn eso_version() -> &'static str {
 ///
 /// Renders via `helm template` on-demand with caching. The first call executes helm
 /// and caches the result; subsequent calls return the cached manifests.
-pub async fn generate_eso() -> Result<Vec<String>, String> {
+pub async fn generate_eso() -> Result<Arc<Vec<String>>, String> {
     ESO_MANIFESTS
-        .get_or_init(|| async { render_eso_helm().await })
+        .get_or_init(|| async { render_eso_helm().await.map(Arc::new) })
         .await
         .clone()
 }

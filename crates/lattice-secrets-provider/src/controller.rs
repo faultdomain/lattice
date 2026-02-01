@@ -14,7 +14,7 @@ use lattice_common::crd::{
     SecretsProvider, SecretsProviderPhase, SecretsProviderStatus, VaultAuthMethod,
 };
 use lattice_common::kube_utils::HasApiResource;
-use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::eso::{
     AppRoleAuth, ClusterSecretStore, ClusterSecretStoreSpec, KubernetesAuth, ProviderSpec,
@@ -23,12 +23,18 @@ use crate::eso::{
 
 /// Default Vault secret path
 const DEFAULT_PATH: &str = "secret";
+/// Default Vault KV version
+const DEFAULT_VAULT_VERSION: &str = "v2";
 /// Default Kubernetes auth mount path in Vault
 const DEFAULT_MOUNT_PATH: &str = "kubernetes";
 /// Default Kubernetes auth role name
 const DEFAULT_ROLE: &str = "external-secrets";
 /// Default AppRole auth mount path in Vault
 const DEFAULT_APPROLE_PATH: &str = "approle";
+/// Default ESO namespace
+const ESO_NAMESPACE: &str = "external-secrets";
+/// Default ESO service account name
+const ESO_SERVICE_ACCOUNT: &str = "external-secrets";
 
 /// Requeue interval for successful reconciliation (handles drift detection)
 const REQUEUE_SUCCESS_SECS: u64 = 300;
@@ -36,9 +42,6 @@ const REQUEUE_SUCCESS_SECS: u64 = 300;
 const REQUEUE_CRD_NOT_FOUND_SECS: u64 = 30;
 /// Requeue interval on other errors (with backoff)
 const REQUEUE_ERROR_SECS: u64 = 60;
-
-// Re-export for convenience
-pub use lattice_common::{default_error_policy, ControllerContext};
 
 /// Reconcile a SecretsProvider
 ///
@@ -164,7 +167,7 @@ fn build_vault_provider(sp: &SecretsProvider) -> Result<VaultProvider, Reconcile
             .path
             .clone()
             .unwrap_or_else(|| DEFAULT_PATH.to_string()),
-        version: "v2".to_string(),
+        version: DEFAULT_VAULT_VERSION.to_string(),
         namespace: sp.spec.namespace.clone(),
         ca_bundle: sp.spec.ca_bundle.clone(),
         auth,
@@ -205,8 +208,8 @@ fn build_vault_auth(sp: &SecretsProvider) -> Result<VaultAuth, ReconcileError> {
                     mount_path,
                     role,
                     service_account_ref: ServiceAccountRef {
-                        name: "external-secrets".to_string(),
-                        namespace: "external-secrets".to_string(),
+                        name: ESO_SERVICE_ACCOUNT.to_string(),
+                        namespace: ESO_NAMESPACE.to_string(),
                     },
                 }),
                 app_role: None,
