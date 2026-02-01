@@ -13,7 +13,11 @@ use kube::{
     Client,
 };
 #[cfg(feature = "provider-e2e")]
+use lattice_common::{capi_namespace, kubeconfig_secret_name};
+#[cfg(feature = "provider-e2e")]
 use lattice_operator::crd::{BootstrapProvider, ClusterPhase};
+#[cfg(feature = "provider-e2e")]
+use serde_json;
 #[cfg(feature = "provider-e2e")]
 use tokio::time::sleep;
 #[cfg(feature = "provider-e2e")]
@@ -91,7 +95,7 @@ pub async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
             .await
             .map_err(|e| format!("Failed to create kube config: {}", e))?;
 
-    config.connect_timeout = Some(Duration::from_secs(10));
+    config.connect_timeout = Some(Duration::from_secs(5));
     config.read_timeout = Some(Duration::from_secs(30));
 
     Client::try_from(config).map_err(|e| format!("Failed to create client: {}", e))
@@ -554,8 +558,8 @@ fn try_extract_kubeconfig(
 ) -> Result<(), String> {
     use base64::Engine;
 
-    let namespace = format!("capi-{}", cluster_name);
-    let secret_name = format!("{}-kubeconfig", cluster_name);
+    let namespace = capi_namespace(cluster_name);
+    let secret_name = kubeconfig_secret_name(cluster_name);
 
     let result = run_cmd(
         "kubectl",
@@ -647,6 +651,109 @@ pub async fn watch_worker_scaling(
         }
 
         sleep(Duration::from_secs(15)).await;
+    }
+}
+
+/// Wait for a cluster to be fully stable (Ready phase + workers scaled)
+///
+/// This checks that:
+/// 1. The LatticeCluster phase is Ready
+/// 2. The status.readyWorkers matches the sum of spec.nodes.workerPools replicas
+#[cfg(feature = "provider-e2e")]
+pub async fn wait_for_cluster_stable(
+    kubeconfig_path: &str,
+    cluster_name: &str,
+) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(600); // 10 minutes
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for cluster {} to be stable",
+                cluster_name
+            ));
+        }
+
+        // Get the LatticeCluster
+        let output = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "latticecluster",
+                cluster_name,
+                "-o",
+                "json",
+            ],
+        );
+
+        if output.trim().is_empty() || output.contains("not found") {
+            sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        // Parse the JSON
+        let cluster: serde_json::Value = match serde_json::from_str(&output) {
+            Ok(v) => v,
+            Err(_) => {
+                sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        // Check phase is Ready
+        let phase = cluster
+            .get("status")
+            .and_then(|s| s.get("phase"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("");
+
+        if phase != "Ready" {
+            info!(
+                "Cluster {} phase is {}, waiting for Ready...",
+                cluster_name, phase
+            );
+            sleep(Duration::from_secs(10)).await;
+            continue;
+        }
+
+        // Get desired worker count from spec
+        let desired_workers: u32 = cluster
+            .get("spec")
+            .and_then(|s| s.get("nodes"))
+            .and_then(|n| n.get("workerPools"))
+            .and_then(|wp| wp.as_object())
+            .map(|pools| {
+                pools
+                    .values()
+                    .filter_map(|p| p.get("replicas").and_then(|r| r.as_u64()))
+                    .sum::<u64>() as u32
+            })
+            .unwrap_or(0);
+
+        // Get ready workers from status
+        let ready_workers: u32 = cluster
+            .get("status")
+            .and_then(|s| s.get("readyWorkers"))
+            .and_then(|r| r.as_u64())
+            .map(|r| r as u32)
+            .unwrap_or(0);
+
+        if ready_workers >= desired_workers {
+            info!(
+                "Cluster {} is stable: phase=Ready, workers={}/{}",
+                cluster_name, ready_workers, desired_workers
+            );
+            return Ok(());
+        }
+
+        info!(
+            "Cluster {} workers {}/{}, waiting...",
+            cluster_name, ready_workers, desired_workers
+        );
+        sleep(Duration::from_secs(10)).await;
     }
 }
 
@@ -905,6 +1012,10 @@ pub async fn verify_cluster_capi_resources(
 }
 
 /// Delete a cluster via kubectl and wait for cleanup
+///
+/// IMPORTANT: This function waits for the cluster to be fully scaled up before
+/// deleting. This prevents race conditions where deletion starts before CAPI
+/// resources are stable, which can cause weird ownership issues.
 #[cfg(feature = "provider-e2e")]
 pub async fn delete_cluster_and_wait(
     cluster_kubeconfig: &str,
@@ -912,6 +1023,12 @@ pub async fn delete_cluster_and_wait(
     cluster_name: &str,
     provider: InfraProvider,
 ) -> Result<(), String> {
+    // Step 0: Wait for cluster to be fully scaled up before deleting
+    // This prevents race conditions where we delete during provisioning
+    info!("Waiting for cluster {} to be fully scaled up before deletion...", cluster_name);
+    wait_for_cluster_stable(cluster_kubeconfig, cluster_name).await?;
+    info!("Cluster {} is stable, proceeding with deletion", cluster_name);
+
     // Initiate deletion on the cluster itself with --wait=false
     // We can't wait for completion because:
     // 1. The finalizer (lattice.dev/unpivot) blocks deletion

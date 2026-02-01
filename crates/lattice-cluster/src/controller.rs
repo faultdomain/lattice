@@ -23,8 +23,8 @@ use lattice_common::crd::{
 };
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{
-    lattice_svc_dns, Error, ParentConfig, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE,
-    PARENT_CONFIG_SECRET,
+    capi_namespace, lattice_svc_dns, Error, ParentConfig, CELL_SERVICE_NAME,
+    LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_SECRET,
 };
 use lattice_infra::InfrastructureConfig;
 use lattice_move::{CellMover, CellMoverConfig};
@@ -1147,7 +1147,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // If so, skip provisioning - we ARE this cluster, we don't need to create it
             // But we need to wait for CAPI resources to exist (from pivot) before going Ready
             if is_self {
-                let capi_namespace = format!("capi-{}", name);
+                let capi_namespace = capi_namespace(&name);
 
                 // First check if CAPI resources exist (from pivot)
                 // Don't try to patch kubeconfig until pivot has completed
@@ -1233,7 +1233,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             info!("generating CAPI manifests for cluster");
 
             // Each cluster gets its own CAPI namespace for pivot isolation
-            let capi_namespace = format!("capi-{}", name);
+            let capi_namespace = capi_namespace(&name);
 
             // Ensure the namespace exists
             ctx.kube.ensure_namespace(&capi_namespace).await?;
@@ -1280,7 +1280,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             debug!("checking infrastructure status");
 
             // Each cluster gets its own CAPI namespace
-            let capi_namespace = format!("capi-{}", name);
+            let capi_namespace = capi_namespace(&name);
 
             let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
             let is_ready = ctx
@@ -1358,7 +1358,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
         }
         ClusterPhase::Pivoting => {
             // Each cluster gets its own CAPI namespace
-            let capi_namespace = format!("capi-{}", name);
+            let capi_namespace = capi_namespace(&name);
 
             // Check if pivot was already completed (persisted in status)
             // This handles controller restarts - we don't need to wait for agent reconnection
@@ -1484,7 +1484,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             }
 
             // Each cluster has its own CAPI namespace
-            let capi_namespace = format!("capi-{}", name);
+            let capi_namespace = capi_namespace(&name);
 
             // Reconcile each worker pool and collect status
             let mut total_desired: u32 = 0;
@@ -1667,7 +1667,7 @@ async fn generate_capi_manifests(
         .name
         .as_deref()
         .ok_or_else(|| Error::validation("cluster must have a name"))?;
-    let capi_namespace = format!("capi-{}", cluster_name);
+    let capi_namespace = capi_namespace(cluster_name);
 
     // Build bootstrap info - if parent_servers is running, we're a cell provisioning a cluster
     // that needs to connect back to us. Bootstrap clusters skip this since they don't provision children.
@@ -1928,7 +1928,7 @@ async fn update_cluster_status(
         endpoint: current_status.endpoint,
         pivot_complete: current_status.pivot_complete,
         bootstrap_complete: current_status.bootstrap_complete,
-        unpivot_pending: current_status.unpivot_pending,
+        unpivot_import_complete: current_status.unpivot_import_complete,
         observed_generation: current_status.observed_generation,
         bootstrap_token: current_status.bootstrap_token,
     };
@@ -2119,7 +2119,7 @@ async fn handle_deletion(
 
     // For non-self clusters (we're the parent), delete CAPI infrastructure
     if !is_self {
-        let capi_namespace = format!("capi-{}", name);
+        let capi_namespace = capi_namespace(&name);
 
         // Set phase to Deleting if not already
         let current_phase = cluster.status.as_ref().map(|s| &s.phase);
@@ -2140,6 +2140,25 @@ async fn handle_deletion(
             .unwrap_or(true); // Assume exists on error to avoid premature deletion
 
         if capi_exists {
+            // Wait for CAPI to be stable before deleting (prevents race with provisioning)
+            let is_stable = ctx
+                .capi
+                .is_cluster_stable(&name, &capi_namespace)
+                .await
+                .unwrap_or(false);
+
+            if !is_stable {
+                info!(cluster = %name, "Waiting for CAPI to stabilize before deletion");
+                let status = cluster
+                    .status
+                    .clone()
+                    .unwrap_or_default()
+                    .phase(ClusterPhase::Deleting)
+                    .message("Waiting for CAPI to stabilize before cleanup");
+                ctx.kube.patch_status(&name, &status).await?;
+                return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+
             // Delete CAPI Cluster to trigger infrastructure cleanup
             info!(cluster = %name, "Deleting CAPI Cluster to trigger infrastructure cleanup");
             if let Err(e) = ctx.capi.delete_capi_cluster(&name, &capi_namespace).await {
@@ -2193,20 +2212,54 @@ async fn handle_deletion(
     }
 
     // Wait for cluster to be stable before unpivoting (no scaling in progress)
-    let capi_namespace = format!("capi-{}", name);
-    let is_stable = ctx
+    // Check 1: CAPI resources are stable (no machines provisioning/deleting)
+    let capi_namespace = capi_namespace(&name);
+    let capi_stable = ctx
         .capi
         .is_cluster_stable(&name, &capi_namespace)
         .await
         .unwrap_or(false);
 
-    if !is_stable {
-        info!(cluster = %name, "Waiting for cluster to stabilize before unpivoting");
+    if !capi_stable {
+        info!(cluster = %name, "Waiting for CAPI to stabilize before unpivoting");
         let status = cluster
             .status
             .clone()
             .unwrap_or_default()
-            .message("Deletion pending: waiting for cluster to stabilize");
+            .message("Deletion pending: waiting for CAPI to stabilize");
+        ctx.kube.patch_status(&name, &status).await?;
+        return Ok(Action::requeue(Duration::from_secs(10)));
+    }
+
+    // Check 2: Actual node count matches LatticeCluster spec (prevents TOCTOU with scaling)
+    let desired_workers: u32 = cluster
+        .spec
+        .nodes
+        .worker_pools
+        .values()
+        .map(|p| p.replicas)
+        .sum();
+    let ready_workers = cluster
+        .status
+        .as_ref()
+        .and_then(|s| s.ready_workers)
+        .unwrap_or(0);
+
+    if ready_workers < desired_workers {
+        info!(
+            cluster = %name,
+            ready = ready_workers,
+            desired = desired_workers,
+            "Waiting for workers to match spec before unpivoting"
+        );
+        let status = cluster
+            .status
+            .clone()
+            .unwrap_or_default()
+            .message(format!(
+                "Deletion pending: waiting for workers ({}/{})",
+                ready_workers, desired_workers
+            ));
         ctx.kube.patch_status(&name, &status).await?;
         return Ok(Action::requeue(Duration::from_secs(10)));
     }

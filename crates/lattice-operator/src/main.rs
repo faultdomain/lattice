@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use kube::{Client, CustomResourceExt};
+use kube::CustomResourceExt;
 
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
@@ -97,7 +97,8 @@ fn init_tracing() {
 async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     tracing::info!(?mode, "Starting...");
 
-    let client = Client::try_default().await?;
+    // Create client with proper timeouts (5s connect, 30s read)
+    let client = lattice_common::kube_utils::create_client(None).await?;
 
     // Install CRDs and infrastructure
     ensure_crds_installed(&client).await?;

@@ -27,6 +27,6 @@ pub use installer::MockCapiInstaller;
 
 // Re-export provider types
 pub use provider::{
-    create_provider, pool_resource_suffix, AwsProvider, BootstrapInfo, CAPIManifest,
-    DockerProvider, ManifestMetadata, OpenStackProvider, Provider, ProxmoxProvider,
+    control_plane_name, create_provider, pool_resource_suffix, AwsProvider, BootstrapInfo,
+    CAPIManifest, DockerProvider, ManifestMetadata, OpenStackProvider, Provider, ProxmoxProvider,
 };

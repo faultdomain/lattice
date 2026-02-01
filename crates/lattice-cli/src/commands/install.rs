@@ -24,8 +24,9 @@ use super::{generate_run_id, kind_utils};
 use lattice_common::clusterctl::move_to_kubeconfig;
 use lattice_common::kube_utils;
 use lattice_common::{
-    AwsCredentials, OpenStackCredentials, ProxmoxCredentials, AWS_CREDENTIALS_SECRET,
-    LATTICE_SYSTEM_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+    capi_namespace, kubeconfig_secret_name, AwsCredentials, OpenStackCredentials,
+    ProxmoxCredentials, AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE,
+    OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
 use lattice_operator::bootstrap::{
     generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
@@ -175,13 +176,13 @@ impl Installer {
     }
 
     /// Returns the CAPI namespace for this cluster (e.g., "capi-my-cluster")
-    fn capi_namespace(&self) -> String {
-        format!("capi-{}", self.cluster_name)
+    fn capi_ns(&self) -> String {
+        capi_namespace(&self.cluster_name)
     }
 
     /// Returns the kubeconfig secret name for this cluster (e.g., "my-cluster-kubeconfig")
-    fn kubeconfig_secret_name(&self) -> String {
-        format!("{}-kubeconfig", self.cluster_name)
+    fn kubeconfig_secret(&self) -> String {
+        kubeconfig_secret_name(&self.cluster_name)
     }
 
     /// Returns the kind cluster name for this install session
@@ -434,8 +435,8 @@ impl Installer {
     async fn wait_for_management_cluster(&self, client: &Client) -> Result<()> {
         let start = Instant::now();
         let timeout = Duration::from_secs(600);
-        let namespace = self.capi_namespace();
-        let secret_name = self.kubeconfig_secret_name();
+        let namespace = self.capi_ns();
+        let secret_name = self.kubeconfig_secret();
 
         // Wait for kubeconfig secret to exist. We don't wait for Ready phase because
         // the cluster needs CNI to reach Ready, and CNI is applied after this phase.
@@ -601,8 +602,8 @@ impl Installer {
     /// Fetches the management cluster kubeconfig from the bootstrap cluster secret,
     /// rewriting the server URL for Docker provider if needed.
     async fn fetch_management_kubeconfig(&self, bootstrap_client: &Client) -> Result<String> {
-        let namespace = self.capi_namespace();
-        let secret_name = self.kubeconfig_secret_name();
+        let namespace = self.capi_ns();
+        let secret_name = self.kubeconfig_secret();
 
         info!("Fetching kubeconfig secret {}/{}", namespace, secret_name);
         let kubeconfig_bytes =
@@ -885,7 +886,7 @@ impl Installer {
     }
 
     async fn pivot_capi_resources(&self) -> Result<()> {
-        let namespace = self.capi_namespace();
+        let namespace = self.capi_ns();
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
         let mgmt_kubeconfig = self.kubeconfig_path();
         let bootstrap_client = self.bootstrap_client().await?;
@@ -1381,9 +1382,9 @@ clusters:
     fn test_capi_namespace_format() {
         // Test the naming conventions directly
         let cluster_name = "test-cluster";
-        assert_eq!(format!("capi-{}", cluster_name), "capi-test-cluster");
+        assert_eq!(capi_namespace(cluster_name), "capi-test-cluster");
         assert_eq!(
-            format!("{}-kubeconfig", cluster_name),
+            kubeconfig_secret_name(cluster_name),
             "test-cluster-kubeconfig"
         );
     }

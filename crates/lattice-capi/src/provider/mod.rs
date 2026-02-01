@@ -461,6 +461,13 @@ pub fn pool_resource_suffix(pool_id: &str) -> String {
     format!("pool-{}", pool_id)
 }
 
+/// Get the control plane resource name for a cluster
+///
+/// This is used for KubeadmControlPlane, RKE2ControlPlane, and related resources.
+pub fn control_plane_name(cluster_name: &str) -> String {
+    format!("{}-control-plane", cluster_name)
+}
+
 /// Autoscaler annotation keys
 const AUTOSCALER_MIN_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size";
 const AUTOSCALER_MAX_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size";
@@ -846,7 +853,7 @@ pub fn generate_cluster(config: &ClusterConfig, infra: &InfrastructureRef) -> CA
         "controlPlaneRef": {
             "apiGroup": "controlplane.cluster.x-k8s.io",
             "kind": cp_kind,
-            "name": format!("{}-control-plane", config.name)
+            "name": control_plane_name(config.name)
         },
         "infrastructureRef": {
             "apiGroup": infra.api_group,
@@ -888,7 +895,7 @@ fn generate_kubeadm_control_plane(
     infra: &InfrastructureRef,
     cp_config: &ControlPlaneConfig,
 ) -> CAPIManifest {
-    let cp_name = format!("{}-control-plane", config.name);
+    let cp_name = control_plane_name(config.name);
 
     // Build extra args based on provider type
     let kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
@@ -976,7 +983,7 @@ fn generate_kubeadm_control_plane(
                 "infrastructureRef": {
                     "apiGroup": infra.api_group,
                     "kind": infra.machine_template_kind,
-                    "name": format!("{}-control-plane", config.name)
+                    "name": control_plane_name(config.name)
                 }
             }
         },
@@ -1002,7 +1009,7 @@ fn generate_rke2_control_plane(
     infra: &InfrastructureRef,
     cp_config: &ControlPlaneConfig,
 ) -> CAPIManifest {
-    let cp_name = format!("{}-control-plane", config.name);
+    let cp_name = control_plane_name(config.name);
 
     // Build files array for static pods and SSH keys
     let mut files: Vec<serde_json::Value> = Vec::new();
@@ -1055,7 +1062,7 @@ fn generate_rke2_control_plane(
             "infrastructureRef": {
                 "apiVersion": infra.api_version,
                 "kind": infra.machine_template_kind,
-                "name": format!("{}-control-plane", config.name)
+                "name": control_plane_name(config.name)
             }
         },
         "agentConfig": {

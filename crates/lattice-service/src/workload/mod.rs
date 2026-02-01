@@ -1316,9 +1316,8 @@ impl WorkloadCompiler {
             .unwrap_or_default();
 
         // Add use-waypoint label to route traffic through namespace waypoint
-        let waypoint_name = format!("{}-waypoint", namespace);
         let metadata =
-            ObjectMeta::new(name, namespace).with_label(mesh::USE_WAYPOINT_LABEL, waypoint_name);
+            ObjectMeta::new(name, namespace).with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
 
         Service {
             api_version: "v1".to_string(),

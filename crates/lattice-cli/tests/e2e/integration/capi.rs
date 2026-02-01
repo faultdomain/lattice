@@ -12,6 +12,7 @@
 
 #![cfg(feature = "provider-e2e")]
 
+use lattice_common::capi_namespace;
 use tracing::info;
 
 use super::super::context::{init_test_env, InfraContext};
@@ -131,7 +132,7 @@ pub async fn get_capi_cluster_details(
     kubeconfig: &str,
     cluster_name: &str,
 ) -> Result<String, String> {
-    let namespace = format!("capi-{}", cluster_name);
+    let namespace = capi_namespace(cluster_name);
 
     run_cmd(
         "kubectl",
@@ -153,7 +154,7 @@ pub async fn verify_capi_machines_ready(
     cluster_name: &str,
     expected_machines: usize,
 ) -> Result<(), String> {
-    let namespace = format!("capi-{}", cluster_name);
+    let namespace = capi_namespace(cluster_name);
 
     let output = run_cmd(
         "kubectl",

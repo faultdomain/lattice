@@ -462,7 +462,7 @@ impl WaypointCompiler {
     /// Required labels:
     /// - `istio.io/waypoint-for: service` - handles service-destined traffic
     fn compile_gateway(namespace: &str) -> Gateway {
-        let gateway_name = format!("{}-waypoint", namespace);
+        let gateway_name = mesh::waypoint_name(namespace);
         let mut metadata = GatewayMetadata::new(&gateway_name, namespace);
 
         // Required label for Istio to recognize as service waypoint

@@ -11,6 +11,7 @@ pub mod eso;
 pub mod istio;
 
 use kube::ResourceExt;
+use tokio::process::Command;
 use tracing::{debug, info};
 
 use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderType};
@@ -170,6 +171,38 @@ pub fn generate_gateway_api_crds() -> Result<Vec<String>, String> {
 }
 
 // Helpers
+
+/// Run `helm template` command and return parsed manifests
+///
+/// This is the centralized helper for all helm template execution.
+/// Handles error conversion and YAML parsing consistently.
+///
+/// # Arguments
+/// * `release_name` - Helm release name (e.g., "cilium", "istio-base")
+/// * `chart_path` - Path to chart tarball
+/// * `namespace` - Target namespace
+/// * `extra_args` - Additional helm arguments (e.g., "--set", "key=value")
+pub(crate) async fn run_helm_template(
+    release_name: &str,
+    chart_path: &str,
+    namespace: &str,
+    extra_args: &[&str],
+) -> Result<Vec<String>, String> {
+    let output = Command::new("helm")
+        .args(["template", release_name, chart_path, "--namespace", namespace])
+        .args(extra_args)
+        .output()
+        .await
+        .map_err(|e| format!("failed to run helm: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("helm template {} failed: {}", release_name, stderr));
+    }
+
+    let yaml_str = String::from_utf8_lossy(&output.stdout);
+    Ok(split_yaml_documents(&yaml_str))
+}
 
 /// Get charts directory from environment or use default
 pub fn charts_dir() -> String {

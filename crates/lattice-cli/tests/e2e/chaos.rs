@@ -126,8 +126,6 @@ pub struct ClusterContext {
     pub phase: ClusterPhase,
     /// Whether pivot has completed
     pub pivot_complete: bool,
-    /// Whether unpivot is pending (deletion in progress)
-    pub unpivot_pending: bool,
 }
 
 impl ClusterContext {
@@ -136,7 +134,7 @@ impl ClusterContext {
         matches!(
             self.phase,
             ClusterPhase::Pivoting | ClusterPhase::Unpivoting
-        ) || self.unpivot_pending
+        )
     }
 }
 
@@ -219,9 +217,7 @@ impl ChaosTargets {
                     // Find the parent target
                     if let Some(parent) = targets.iter().find(|t| t.kubeconfig == *parent_kc) {
                         if ctx.is_critical() {
-                            let attack = if ctx.unpivot_pending
-                                || matches!(ctx.phase, ClusterPhase::Unpivoting)
-                            {
+                            let attack = if matches!(ctx.phase, ClusterPhase::Unpivoting) {
                                 CoordinatedAttack::UnpivotStress {
                                     parent: parent.clone(),
                                     child: target.clone(),
@@ -284,8 +280,8 @@ impl CoordinatedAttack {
                 child_context,
             } => {
                 format!(
-                    "UnpivotStress: parent={} child={} (unpivot_pending: {})",
-                    parent.name, child.name, child_context.unpivot_pending
+                    "UnpivotStress: parent={} child={} (phase: {:?})",
+                    parent.name, child.name, child_context.phase
                 )
             }
         }
@@ -490,7 +486,6 @@ async fn query_cluster_context(
     Ok(ClusterContext {
         phase: status.phase,
         pivot_complete: status.pivot_complete,
-        unpivot_pending: status.unpivot_pending,
     })
 }
 
@@ -623,28 +618,18 @@ mod tests {
         let pivoting = ClusterContext {
             phase: ClusterPhase::Pivoting,
             pivot_complete: false,
-            unpivot_pending: false,
         };
         assert!(pivoting.is_critical());
 
         let unpivoting = ClusterContext {
             phase: ClusterPhase::Unpivoting,
             pivot_complete: true,
-            unpivot_pending: false,
         };
         assert!(unpivoting.is_critical());
-
-        let unpivot_pending = ClusterContext {
-            phase: ClusterPhase::Pivoted,
-            pivot_complete: true,
-            unpivot_pending: true,
-        };
-        assert!(unpivot_pending.is_critical());
 
         let pivoted = ClusterContext {
             phase: ClusterPhase::Pivoted,
             pivot_complete: true,
-            unpivot_pending: false,
         };
         assert!(!pivoted.is_critical());
     }
@@ -680,18 +665,16 @@ mod tests {
             ClusterContext {
                 phase: ClusterPhase::Pivoted,
                 pivot_complete: true,
-                unpivot_pending: false,
             },
         );
         assert!(targets.find_coordinated_attack().is_none());
 
-        // Attack when child is Pivoting
+        // PivotStress when child is Pivoting
         targets.update_context(
             "child",
             ClusterContext {
                 phase: ClusterPhase::Pivoting,
                 pivot_complete: false,
-                unpivot_pending: false,
             },
         );
         let attack = targets.find_coordinated_attack();
@@ -701,13 +684,12 @@ mod tests {
             CoordinatedAttack::PivotStress { .. }
         ));
 
-        // UnpivotStress when unpivot_pending
+        // UnpivotStress when child is Unpivoting
         targets.update_context(
             "child",
             ClusterContext {
-                phase: ClusterPhase::Pivoted,
+                phase: ClusterPhase::Unpivoting,
                 pivot_complete: true,
-                unpivot_pending: true,
             },
         );
         let attack = targets.find_coordinated_attack();

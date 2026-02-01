@@ -38,6 +38,22 @@ pub const DEFAULT_PROXY_PORT: u16 = 8081;
 /// Namespace for Lattice system resources (CA, credentials, operator)
 pub const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";
 
+/// Construct the CAPI namespace for a cluster.
+///
+/// CAPI resources for each cluster are stored in a dedicated namespace
+/// named `capi-{cluster_name}`.
+pub fn capi_namespace(cluster_name: &str) -> String {
+    format!("capi-{}", cluster_name)
+}
+
+/// Construct the kubeconfig secret name for a cluster.
+///
+/// CAPI creates a kubeconfig secret named `{cluster_name}-kubeconfig`
+/// in the CAPI namespace.
+pub fn kubeconfig_secret_name(cluster_name: &str) -> String {
+    format!("{}-kubeconfig", cluster_name)
+}
+
 /// Construct a Kubernetes service DNS name for a Lattice service.
 ///
 /// Returns `{service}.{LATTICE_SYSTEM_NAMESPACE}.svc`

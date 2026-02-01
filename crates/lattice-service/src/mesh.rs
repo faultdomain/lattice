@@ -54,6 +54,17 @@ pub const WAYPOINT_FOR_SERVICE: &str = "service";
 pub const DATAPLANE_MODE_AMBIENT: &str = "ambient";
 
 // =============================================================================
+// Naming Helpers
+// =============================================================================
+
+/// Get the waypoint Gateway name for a namespace.
+///
+/// Waypoints are per-namespace in Istio Ambient mode.
+pub fn waypoint_name(namespace: &str) -> String {
+    format!("{}-waypoint", namespace)
+}
+
+// =============================================================================
 // Trust Domain Helpers
 // =============================================================================
 
@@ -86,7 +97,7 @@ pub mod trust_domain {
     ///
     /// Waypoint service accounts follow the pattern: `{namespace}-waypoint`
     pub fn waypoint_principal(cluster_name: &str, namespace: &str) -> String {
-        principal(cluster_name, namespace, &format!("{}-waypoint", namespace))
+        principal(cluster_name, namespace, &super::waypoint_name(namespace))
     }
 
     /// Build a SPIFFE principal for the Envoy Gateway.

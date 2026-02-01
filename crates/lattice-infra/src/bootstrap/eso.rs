@@ -2,10 +2,13 @@
 //!
 //! Generates ESO manifests for secret synchronization from external providers.
 
-use tokio::process::Command;
+use tokio::sync::OnceCell;
 use tracing::info;
 
-use super::{charts_dir, namespace_yaml, split_yaml_documents};
+use super::{charts_dir, namespace_yaml, run_helm_template};
+
+/// Cached ESO manifests to avoid repeated helm template calls
+static ESO_MANIFESTS: OnceCell<Result<Vec<String>, String>> = OnceCell::const_new();
 
 /// ESO version (pinned at build time)
 pub fn eso_version() -> &'static str {
@@ -13,35 +16,34 @@ pub fn eso_version() -> &'static str {
 }
 
 /// Generate ESO manifests using helm template
+///
+/// Renders via `helm template` on-demand with caching. The first call executes helm
+/// and caches the result; subsequent calls return the cached manifests.
 pub async fn generate_eso() -> Result<Vec<String>, String> {
+    ESO_MANIFESTS
+        .get_or_init(|| async { render_eso_helm().await })
+        .await
+        .clone()
+}
+
+/// Internal function to render ESO manifests via helm template
+async fn render_eso_helm() -> Result<Vec<String>, String> {
     let version = eso_version();
     let charts = charts_dir();
     let chart_path = format!("{}/external-secrets-{}.tgz", charts, version);
 
     info!(version, "Rendering ESO chart");
 
-    let output = Command::new("helm")
-        .args([
-            "template",
-            "external-secrets",
-            &chart_path,
-            "--namespace",
-            "external-secrets",
-            "--set",
-            "installCRDs=true",
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("failed to run helm: {}", e))?;
+    let helm_manifests = run_helm_template(
+        "external-secrets",
+        &chart_path,
+        "external-secrets",
+        &["--set", "installCRDs=true"],
+    )
+    .await?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("helm template external-secrets failed: {}", stderr));
-    }
-
-    let yaml = String::from_utf8_lossy(&output.stdout);
     let mut manifests = vec![namespace_yaml("external-secrets")];
-    manifests.extend(split_yaml_documents(&yaml));
+    manifests.extend(helm_manifests);
 
     info!(count = manifests.len(), "Rendered ESO manifests");
     Ok(manifests)

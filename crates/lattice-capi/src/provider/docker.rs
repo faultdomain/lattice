@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{
-    build_cert_sans, build_post_kubeadm_commands, create_cluster_labels,
+    build_cert_sans, build_post_kubeadm_commands, control_plane_name, create_cluster_labels,
     generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
     generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix, CAPIManifest,
     ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, WorkerPoolConfig,
@@ -209,7 +209,7 @@ backend rke2-servers
         let name = get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
         let labels = create_cluster_labels(name);
-        let template_name = format!("{}-control-plane", name);
+        let template_name = control_plane_name(name);
         let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
 
         let spec = json!({

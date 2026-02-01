@@ -798,8 +798,8 @@ impl Default for ClusterctlInstaller {
 #[async_trait]
 impl CapiInstaller for ClusterctlInstaller {
     async fn ensure(&self, config: &CapiProviderConfig) -> Result<(), Error> {
-        // Create kube client for all k8s operations
-        let client = KubeClient::try_default()
+        // Create kube client for all k8s operations (with proper timeouts)
+        let client = lattice_common::kube_utils::create_client(None)
             .await
             .map_err(|e| Error::capi_installation(format!("Failed to create k8s client: {}", e)))?;
 

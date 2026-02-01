@@ -29,8 +29,9 @@ use super::{generate_run_id, kind_utils, CommandErrorExt};
 
 use lattice_common::clusterctl::{move_to_kubeconfig, teardown_cluster, TeardownConfig};
 use lattice_common::kube_utils;
-use lattice_common::AwsCredentials;
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{
+    capi_namespace, kubeconfig_secret_name, AwsCredentials, LATTICE_SYSTEM_NAMESPACE,
+};
 use lattice_operator::crd::{LatticeCluster, ProviderType};
 
 use crate::{Error, Result};
@@ -114,13 +115,13 @@ impl Uninstaller {
             .ok_or_else(|| Error::command_failed("Cluster has no name"))?;
 
         let provider = cluster.spec.provider.provider_type();
-        let capi_namespace = format!("capi-{}", cluster_name);
+        let capi_ns = capi_namespace(&cluster_name);
 
         Ok(Self {
             kubeconfig: args.kubeconfig.clone(),
             cluster_name,
             provider,
-            capi_namespace,
+            capi_namespace: capi_ns,
             keep_bootstrap_on_failure: args.keep_bootstrap_on_failure,
             run_id: args.run_id.clone().unwrap_or_else(generate_run_id),
         })
@@ -263,7 +264,7 @@ impl Uninstaller {
         let server_url = self.get_control_plane_endpoint(client).await?;
 
         let secrets: Api<Secret> = Api::namespaced(client.clone(), &self.capi_namespace);
-        let secret_name = format!("{}-kubeconfig", self.cluster_name);
+        let secret_name = kubeconfig_secret_name(&self.cluster_name);
 
         let secret = secrets.get(&secret_name).await.map_err(|e| {
             Error::command_failed(format!("Failed to get kubeconfig secret: {}", e))

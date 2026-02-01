@@ -109,7 +109,7 @@ impl ServiceKubeClientImpl {
         use k8s_openapi::api::core::v1::Namespace;
 
         let api: Api<Namespace> = Api::all(self.client.clone());
-        let waypoint_name = format!("{}-waypoint", name);
+        let waypoint = mesh::waypoint_name(name);
 
         let ns = serde_json::json!({
             "apiVersion": "v1",
@@ -118,7 +118,7 @@ impl ServiceKubeClientImpl {
                 "name": name,
                 "labels": {
                     (mesh::DATAPLANE_MODE_LABEL): mesh::DATAPLANE_MODE_AMBIENT,
-                    (mesh::USE_WAYPOINT_LABEL): waypoint_name
+                    (mesh::USE_WAYPOINT_LABEL): waypoint
                 }
             }
         });
@@ -130,7 +130,7 @@ impl ServiceKubeClientImpl {
         )
         .await?;
 
-        debug!(namespace = %name, waypoint = %waypoint_name, "ensured namespace with ambient mode labels");
+        debug!(namespace = %name, waypoint = %waypoint, "ensured namespace with ambient mode labels");
         Ok(())
     }
 }

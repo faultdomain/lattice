@@ -29,7 +29,7 @@ use lattice_capi::{
     ClusterctlInstaller,
 };
 use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
-use lattice_common::{CsrRequest, CsrResponse, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{capi_namespace, CsrRequest, CsrResponse, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::pki::AgentCertRequest;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
@@ -41,7 +41,7 @@ use lattice_proto::{
 
 use crate::subtree::SubtreeSender;
 use crate::watch::{execute_watch, WatchRegistry};
-use crate::{execute_k8s_request, is_watch_request, ClientMtlsConfig};
+use crate::{create_k8s_client, execute_k8s_request, is_watch_request, ClientMtlsConfig};
 
 /// Configuration for the agent client
 #[derive(Clone, Debug)]
@@ -434,7 +434,7 @@ impl AgentClient {
         // Send full subtree state to parent and start watcher for changes
         // This enables the parent cell to know about all clusters in our subtree
         // for routing K8s API requests and authorization decisions
-        if let Ok(k8s_client) = kube::Client::try_default().await {
+        if let Ok(k8s_client) = create_k8s_client().await {
             let subtree_sender = SubtreeSender::new(self.config.cluster_name.clone(), k8s_client);
 
             // Send full state on connect
@@ -555,7 +555,7 @@ impl AgentClient {
     /// Send the ready message to cell
     async fn send_ready(&self) -> Result<(), ClientError> {
         // Get K8s version from in-cluster client
-        let k8s_version = match kube::Client::try_default().await {
+        let k8s_version = match create_k8s_client().await {
             Ok(client) => match client.apiserver_version().await {
                 Ok(info) => format!("v{}.{}", info.major, info.minor),
                 Err(_) => "unknown".to_string(),
@@ -606,7 +606,7 @@ impl AgentClient {
     /// Returns Some((namespace, cluster_name)) if the cluster has a deletion timestamp,
     /// indicating we should start the unpivot retry loop.
     async fn check_cluster_deleting() -> Option<(String, String)> {
-        let client = kube::Client::try_default().await.ok()?;
+        let client = create_k8s_client().await.ok()?;
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
         let list = clusters
             .list(&kube::api::ListParams::default())
@@ -616,7 +616,7 @@ impl AgentClient {
         let cluster = list.items.first()?;
         if cluster.metadata.deletion_timestamp.is_some() {
             let name = cluster.metadata.name.clone()?;
-            let namespace = format!("capi-{}", name);
+            let namespace = capi_namespace(&name);
             Some((namespace, name))
         } else {
             None
@@ -637,7 +637,7 @@ impl AgentClient {
 
         loop {
             // Create k8s client for this iteration
-            let client = match kube::Client::try_default().await {
+            let client = match create_k8s_client().await {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(error = %e, "Failed to create k8s client for unpivot");
@@ -812,7 +812,7 @@ impl AgentClient {
     async fn install_capi() -> Result<String, std::io::Error> {
         use kube::api::ListParams;
 
-        let client = kube::Client::try_default()
+        let client = create_k8s_client()
             .await
             .map_err(|e| std::io::Error::other(format!("failed to create kube client: {}", e)))?;
 
@@ -879,7 +879,7 @@ impl AgentClient {
         use kube::api::Api;
         use tokio::time::{sleep, Duration};
 
-        let client = match kube::Client::try_default().await {
+        let client = match create_k8s_client().await {
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "Failed to create client for CRD check");
@@ -928,7 +928,7 @@ impl AgentClient {
                     return;
                 }
 
-                let client = match kube::Client::try_default().await {
+                let client = match create_k8s_client().await {
                     Ok(c) => c,
                     Err(e) => {
                         error!(error = %e, "Failed to create k8s client for apply manifests");
@@ -1014,7 +1014,7 @@ impl AgentClient {
                 let full_sync = cmd.full_sync;
 
                 tokio::spawn(async move {
-                    let client = match kube::Client::try_default().await {
+                    let client = match create_k8s_client().await {
                         Ok(c) => c,
                         Err(e) => {
                             warn!(error = %e, "Failed to create k8s client for synced resources");
@@ -1076,7 +1076,7 @@ impl AgentClient {
                 let registry = watch_registry.clone();
 
                 tokio::spawn(async move {
-                    let client = match kube::Client::try_default().await {
+                    let client = match create_k8s_client().await {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create K8s client for proxy request");
@@ -1150,7 +1150,7 @@ impl AgentClient {
                 );
 
                 tokio::spawn(async move {
-                    let client = match kube::Client::try_default().await {
+                    let client = match create_k8s_client().await {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create k8s client");
@@ -1253,7 +1253,7 @@ impl AgentClient {
                 }
 
                 tokio::spawn(async move {
-                    let client = match kube::Client::try_default().await {
+                    let client = match create_k8s_client().await {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create k8s client");
@@ -1359,7 +1359,7 @@ impl AgentClient {
     /// If pivot_complete is already true, duplicate MoveComplete commands
     /// can be immediately acked without re-applying resources.
     async fn check_local_pivot_complete(cluster_name: &str) -> bool {
-        let client = match kube::Client::try_default().await {
+        let client = match create_k8s_client().await {
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "Failed to create k8s client for pivot check");
@@ -1386,7 +1386,7 @@ impl AgentClient {
     /// This ensures the agent remembers the pivot completed even if it crashes
     /// after setting status but before the parent receives the ack.
     async fn set_local_pivot_complete(cluster_name: &str) -> Result<(), kube::Error> {
-        let client = kube::Client::try_default().await?;
+        let client = create_k8s_client().await?;
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
 
         let patch = serde_json::json!({

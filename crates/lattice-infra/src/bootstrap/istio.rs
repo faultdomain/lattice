@@ -11,11 +11,10 @@ use lattice_common::policy::{
     TargetRef, WorkloadSelector,
 };
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
-use tokio::process::Command;
 use tokio::sync::OnceCell;
 use tracing::info;
 
-use super::charts_dir;
+use super::{charts_dir, run_helm_template};
 
 /// Istio configuration
 #[derive(Debug, Clone)]
@@ -167,126 +166,60 @@ impl IstioReconciler {
 
         // 1. Render istio base chart (CRDs)
         info!(version = config.version, "Rendering Istio base chart");
-        let base_output = Command::new("helm")
-            .args([
-                "template",
-                "istio-base",
-                &base_chart,
-                "--namespace",
-                "istio-system",
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("failed to run helm: {}", e))?;
-
-        if !base_output.status.success() {
-            let stderr = String::from_utf8_lossy(&base_output.stderr);
-            return Err(format!("helm template base failed: {}", stderr));
-        }
-
-        all_manifests.extend(parse_yaml_documents(&String::from_utf8_lossy(
-            &base_output.stdout,
-        )));
+        all_manifests.extend(run_helm_template("istio-base", &base_chart, "istio-system", &[]).await?);
 
         // 2. Render istio-cni chart (must be installed before ztunnel)
         info!(version = config.version, "Rendering Istio CNI chart");
-        let cni_output = Command::new("helm")
-            .args([
-                "template",
+        all_manifests.extend(
+            run_helm_template(
                 "istio-cni",
                 &cni_chart,
-                "--namespace",
                 "istio-system",
-                "--set",
-                "profile=ambient",
-                // Chain with Cilium CNI
-                "--set",
-                "cni.cniConfFileName=05-cilium.conflist",
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("failed to run helm: {}", e))?;
-
-        if !cni_output.status.success() {
-            let stderr = String::from_utf8_lossy(&cni_output.stderr);
-            return Err(format!("helm template istio-cni failed: {}", stderr));
-        }
-
-        all_manifests.extend(parse_yaml_documents(&String::from_utf8_lossy(
-            &cni_output.stdout,
-        )));
+                &[
+                    "--set",
+                    "profile=ambient",
+                    // Chain with Cilium CNI
+                    "--set",
+                    "cni.cniConfFileName=05-cilium.conflist",
+                ],
+            )
+            .await?,
+        );
 
         // 3. Render istiod chart (control plane with ambient mode)
         info!(
             version = config.version,
             "Rendering Istiod chart with ambient mode"
         );
-
-        let istiod_output = Command::new("helm")
-            .args([
-                "template",
+        // Configure trust domain to match Lattice SPIFFE identity format
+        // Each cluster gets its own trust domain: lattice.{cluster}.local
+        let trust_domain_arg = format!("meshConfig.trustDomain=lattice.{}.local", config.cluster_name);
+        all_manifests.extend(
+            run_helm_template(
                 "istiod",
                 &istiod_chart,
-                "--namespace",
                 "istio-system",
-                "--set",
-                "profile=ambient",
-                // Configure trust domain to match Lattice SPIFFE identity format
-                // Each cluster gets its own trust domain: lattice.{cluster}.local
-                "--set",
-                &format!(
-                    "meshConfig.trustDomain=lattice.{}.local",
-                    config.cluster_name
-                ),
-                "--set",
-                "pilot.resources.requests.cpu=100m",
-                "--set",
-                "pilot.resources.requests.memory=128Mi",
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("failed to run helm: {}", e))?;
-
-        if !istiod_output.status.success() {
-            let stderr = String::from_utf8_lossy(&istiod_output.stderr);
-            return Err(format!("helm template istiod failed: {}", stderr));
-        }
-
-        all_manifests.extend(parse_yaml_documents(&String::from_utf8_lossy(
-            &istiod_output.stdout,
-        )));
+                &[
+                    "--set",
+                    "profile=ambient",
+                    "--set",
+                    &trust_domain_arg,
+                    "--set",
+                    "pilot.resources.requests.cpu=100m",
+                    "--set",
+                    "pilot.resources.requests.memory=128Mi",
+                ],
+            )
+            .await?,
+        );
 
         // 4. Render ztunnel chart (L4 data plane for ambient mode)
         info!(version = config.version, "Rendering ztunnel chart");
-        let ztunnel_output = Command::new("helm")
-            .args([
-                "template",
-                "ztunnel",
-                &ztunnel_chart,
-                "--namespace",
-                "istio-system",
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("failed to run helm: {}", e))?;
-
-        if !ztunnel_output.status.success() {
-            let stderr = String::from_utf8_lossy(&ztunnel_output.stderr);
-            return Err(format!("helm template ztunnel failed: {}", stderr));
-        }
-
-        all_manifests.extend(parse_yaml_documents(&String::from_utf8_lossy(
-            &ztunnel_output.stdout,
-        )));
+        all_manifests.extend(run_helm_template("ztunnel", &ztunnel_chart, "istio-system", &[]).await?);
 
         info!(count = all_manifests.len(), "Rendered Istio manifests");
         Ok(all_manifests)
     }
-}
-
-/// Parse YAML string into individual documents
-fn parse_yaml_documents(yaml_str: &str) -> Vec<String> {
-    super::split_yaml_documents(yaml_str)
 }
 
 #[cfg(test)]
@@ -391,32 +324,36 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_yaml_documents_single() {
+    fn test_split_yaml_documents_single() {
+        use crate::bootstrap::split_yaml_documents;
         let yaml = "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test";
-        let docs = parse_yaml_documents(yaml);
+        let docs = split_yaml_documents(yaml);
         assert_eq!(docs.len(), 1);
         assert!(docs[0].starts_with("---"));
         assert!(docs[0].contains("kind: ConfigMap"));
     }
 
     #[test]
-    fn test_parse_yaml_documents_multiple() {
+    fn test_split_yaml_documents_multiple() {
+        use crate::bootstrap::split_yaml_documents;
         let yaml = "---\napiVersion: v1\nkind: ConfigMap\n---\napiVersion: v1\nkind: Secret\n---\napiVersion: v1\nkind: Service";
-        let docs = parse_yaml_documents(yaml);
+        let docs = split_yaml_documents(yaml);
         assert_eq!(docs.len(), 3);
     }
 
     #[test]
-    fn test_parse_yaml_documents_filters_empty() {
+    fn test_split_yaml_documents_filters_empty() {
+        use crate::bootstrap::split_yaml_documents;
         let yaml = "---\napiVersion: v1\nkind: ConfigMap\n---\n\n---\n# comment\n---\napiVersion: v1\nkind: Secret";
-        let docs = parse_yaml_documents(yaml);
+        let docs = split_yaml_documents(yaml);
         assert_eq!(docs.len(), 2);
     }
 
     #[test]
-    fn test_parse_yaml_documents_adds_separator() {
+    fn test_split_yaml_documents_adds_separator() {
+        use crate::bootstrap::split_yaml_documents;
         let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test";
-        let docs = parse_yaml_documents(yaml);
+        let docs = split_yaml_documents(yaml);
         assert_eq!(docs.len(), 1);
         assert!(docs[0].starts_with("---"));
     }

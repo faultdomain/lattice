@@ -168,12 +168,15 @@ pub struct LatticeClusterStatus {
     #[serde(default, skip_serializing_if = "is_false")]
     pub bootstrap_complete: bool,
 
-    /// Whether unpivot is in progress for this cluster (as a child being deleted)
+    /// Whether CAPI import is complete for unpivot (crash-safe marker)
     ///
-    /// Set to true when a child cluster sends its CAPI manifests back during deletion.
-    /// Cleared after CAPI cleanup is complete. Persists across operator restarts.
+    /// Set to true AFTER successfully importing CAPI objects from child and unpausing,
+    /// but BEFORE initiating LatticeCluster deletion. This prevents re-importing on
+    /// crash recovery which could cause ownership/UID conflicts.
+    ///
+    /// Flow: import -> unpause -> set this true -> delete LatticeCluster
     #[serde(default, skip_serializing_if = "is_false")]
-    pub unpivot_pending: bool,
+    pub unpivot_import_complete: bool,
 
     /// Bootstrap token for authenticating with the parent cell during bootstrap
     ///
@@ -214,6 +217,12 @@ impl LatticeClusterStatus {
         // Remove existing condition of the same type
         self.conditions.retain(|c| c.type_ != condition.type_);
         self.conditions.push(condition);
+        self
+    }
+
+    /// Mark unpivot import as complete and return self for chaining
+    pub fn unpivot_import_complete(mut self, complete: bool) -> Self {
+        self.unpivot_import_complete = complete;
         self
     }
 }

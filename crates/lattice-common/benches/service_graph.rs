@@ -102,19 +102,6 @@ fn simple_service_spec() -> LatticeServiceSpec {
     service_spec_with_deps(&[], &[])
 }
 
-#[allow(dead_code)]
-fn external_service_spec() -> LatticeExternalServiceSpec {
-    let mut endpoints = BTreeMap::new();
-    endpoints.insert("api".to_string(), "https://api.example.com".to_string());
-
-    LatticeExternalServiceSpec {
-        endpoints,
-        allowed_requesters: vec!["*".to_string()],
-        resolution: Resolution::Dns,
-        description: None,
-    }
-}
-
 // =============================================================================
 // Graph Setup Helpers
 // =============================================================================

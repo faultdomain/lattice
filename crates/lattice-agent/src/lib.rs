@@ -11,11 +11,31 @@
 //! The agent runs on child clusters and maintains an **outbound** connection
 //! to the parent cell. All communication is initiated by the agent.
 
+use std::time::Duration;
+
 pub mod client;
 pub mod executor;
 pub mod pivot;
 pub mod subtree;
 pub mod watch;
+
+/// Default connection timeout for kube clients (5s is plenty for local API server)
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default read timeout for kube clients
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Create a Kubernetes client with proper timeouts
+///
+/// Uses in-cluster configuration with explicit timeouts (5s connect, 30s read)
+/// instead of kube-rs defaults which may be too long and cause hangs.
+pub async fn create_k8s_client() -> Result<kube::Client, kube::Error> {
+    let mut config = kube::Config::infer()
+        .await
+        .map_err(kube::Error::InferConfig)?;
+    config.connect_timeout = Some(DEFAULT_CONNECT_TIMEOUT);
+    config.read_timeout = Some(DEFAULT_READ_TIMEOUT);
+    kube::Client::try_from(config)
+}
 
 pub use client::{AgentClient, AgentClientConfig, AgentCredentials, CertificateError, ClientState};
 

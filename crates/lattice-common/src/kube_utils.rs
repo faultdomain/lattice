@@ -264,10 +264,10 @@ where
     }
 }
 
-/// Default connection timeout for kube clients
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default connection timeout for kube clients (5s is plenty for local API server)
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default read timeout for kube clients
-const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Create a kube client from optional kubeconfig path with default timeouts
 pub async fn create_client(kubeconfig: Option<&Path>) -> Result<Client, Error> {

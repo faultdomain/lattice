@@ -13,6 +13,7 @@ pub use autoscaler::generate_autoscaler_manifests;
 pub use aws::generate_aws_addon_manifests;
 pub use docker::generate_docker_addon_manifests;
 
+use lattice_common::capi_namespace;
 use lattice_common::crd::ProviderType;
 
 /// Generate provider-specific addon manifests for a cluster.
@@ -42,8 +43,8 @@ pub fn generate_for_provider(
 
     // Add cluster-autoscaler when any pool has autoscaling enabled
     if autoscaling_enabled {
-        let capi_namespace = format!("capi-{}", cluster_name);
-        manifests.push(autoscaler::generate_autoscaler_manifests(&capi_namespace));
+        let capi_ns = capi_namespace(cluster_name);
+        manifests.push(autoscaler::generate_autoscaler_manifests(&capi_ns));
     }
 
     manifests

@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 
-use tokio::process::Command;
 use tokio::sync::OnceCell;
 use tracing::info;
 
@@ -20,7 +19,7 @@ use lattice_common::policy::{
 };
 use lattice_common::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE};
 
-use super::{charts_dir, split_yaml_documents};
+use super::{charts_dir, run_helm_template};
 use crate::system_namespaces;
 
 /// Cached Cilium manifests to avoid repeated helm template calls
@@ -41,76 +40,61 @@ pub async fn generate_cilium_manifests() -> Result<Vec<String>, String> {
 
 /// Internal function to render Cilium manifests via helm template
 async fn render_cilium_helm() -> Result<Vec<String>, String> {
-    let charts_dir = charts_dir();
+    let charts = charts_dir();
     let version = env!("CILIUM_VERSION");
-    let chart_path = format!("{}/cilium-{}.tgz", charts_dir, version);
-
-    let values = vec![
-        "--set",
-        "hubble.enabled=false",
-        "--set",
-        "hubble.relay.enabled=false",
-        "--set",
-        "hubble.ui.enabled=false",
-        "--set",
-        "prometheus.enabled=false",
-        "--set",
-        "operator.prometheus.enabled=false",
-        "--set",
-        "cni.exclusive=false",
-        // Don't replace kube-proxy - less invasive
-        "--set",
-        "kubeProxyReplacement=false",
-        // Enable L2 announcements for LoadBalancer IPs (required for VIP reachability)
-        "--set",
-        "l2announcements.enabled=true",
-        "--set",
-        "externalIPs.enabled=true",
-        // Disable host firewall - prevents blocking bridge traffic
-        "--set",
-        "hostFirewall.enabled=false",
-        // VXLAN tunnel mode with reduced MTU (tunnelProtocol replaces deprecated tunnel option)
-        "--set",
-        "routingMode=tunnel",
-        "--set",
-        "tunnelProtocol=vxlan",
-        "--set",
-        "mtu=1450",
-        // Use Kubernetes IPAM - gets pod CIDR from kubeadm (192.168.0.0/16)
-        // Default cluster-pool mode uses 10.0.0.0/8 which conflicts with common LANs
-        "--set",
-        "ipam.mode=kubernetes",
-        // Disable BPF-based masquerading - use iptables instead (less invasive)
-        "--set",
-        "bpf.masquerade=false",
-        // Disable host routing via BPF - use kernel routing
-        "--set",
-        "bpf.hostLegacyRouting=true",
-    ];
+    let chart_path = format!("{}/cilium-{}.tgz", charts, version);
 
     info!("Rendering Cilium manifests");
 
-    let output = Command::new("helm")
-        .args([
-            "template",
-            "cilium",
-            &chart_path,
-            "--namespace",
-            "kube-system",
+    let manifests = run_helm_template(
+        "cilium",
+        &chart_path,
+        "kube-system",
+        &[
             "--include-crds",
-        ])
-        .args(&values)
-        .output()
-        .await
-        .map_err(|e| format!("failed to run helm: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("helm template failed: {}", stderr));
-    }
-
-    let yaml_str = String::from_utf8_lossy(&output.stdout);
-    let manifests = split_yaml_documents(&yaml_str);
+            "--set",
+            "hubble.enabled=false",
+            "--set",
+            "hubble.relay.enabled=false",
+            "--set",
+            "hubble.ui.enabled=false",
+            "--set",
+            "prometheus.enabled=false",
+            "--set",
+            "operator.prometheus.enabled=false",
+            "--set",
+            "cni.exclusive=false",
+            // Don't replace kube-proxy - less invasive
+            "--set",
+            "kubeProxyReplacement=false",
+            // Enable L2 announcements for LoadBalancer IPs (required for VIP reachability)
+            "--set",
+            "l2announcements.enabled=true",
+            "--set",
+            "externalIPs.enabled=true",
+            // Disable host firewall - prevents blocking bridge traffic
+            "--set",
+            "hostFirewall.enabled=false",
+            // VXLAN tunnel mode with reduced MTU (tunnelProtocol replaces deprecated tunnel option)
+            "--set",
+            "routingMode=tunnel",
+            "--set",
+            "tunnelProtocol=vxlan",
+            "--set",
+            "mtu=1450",
+            // Use Kubernetes IPAM - gets pod CIDR from kubeadm (192.168.0.0/16)
+            // Default cluster-pool mode uses 10.0.0.0/8 which conflicts with common LANs
+            "--set",
+            "ipam.mode=kubernetes",
+            // Disable BPF-based masquerading - use iptables instead (less invasive)
+            "--set",
+            "bpf.masquerade=false",
+            // Disable host routing via BPF - use kernel routing
+            "--set",
+            "bpf.hostLegacyRouting=true",
+        ],
+    )
+    .await?;
 
     info!(
         count = manifests.len(),

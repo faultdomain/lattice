@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
-use lattice_common::Error;
+use lattice_common::{kubeconfig_secret_name, Error};
 use tracing::{debug, info};
 
 /// Patch a CAPI-generated kubeconfig Secret to use the K8s API proxy.
@@ -39,7 +39,7 @@ pub async fn patch_kubeconfig_for_proxy(
     ca_cert_pem: &str,
 ) -> Result<bool, Error> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
-    let secret_name = format!("{}-kubeconfig", cluster_name);
+    let secret_name = kubeconfig_secret_name(cluster_name);
 
     // Check if the Secret exists
     let secret = match secrets.get(&secret_name).await {

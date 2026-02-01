@@ -11,7 +11,7 @@ use tracing::{debug, info};
 #[cfg(test)]
 use mockall::automock;
 
-use crate::provider::{pool_resource_suffix, CAPIManifest};
+use crate::provider::{control_plane_name, pool_resource_suffix, CAPIManifest};
 use lattice_common::crd::BootstrapProvider;
 use lattice_common::kube_utils::build_api_resource;
 use lattice_common::Error;
@@ -271,7 +271,7 @@ impl CAPIClient for CAPIClientImpl {
         let cp_api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), namespace, &cp_ar);
 
-        let cp_name = format!("{}-control-plane", cluster_name);
+        let cp_name = control_plane_name(cluster_name);
         let cp_initialized = match cp_api.get(&cp_name).await {
             Ok(cp) => {
                 if let Some(status) = cp.data.get("status") {

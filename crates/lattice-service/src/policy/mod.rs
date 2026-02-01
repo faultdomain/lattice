@@ -611,7 +611,7 @@ impl<'a> PolicyCompiler<'a> {
         let mut metadata = PolicyMetadata::new(&service.name, namespace);
         metadata.labels.insert(
             mesh::USE_WAYPOINT_LABEL.to_string(),
-            format!("{}-waypoint", namespace),
+            mesh::waypoint_name(namespace),
         );
 
         let resolution = service
