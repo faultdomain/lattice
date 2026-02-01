@@ -24,7 +24,11 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::context::{init_test_env, InfraContext};
-use super::super::helpers::{http_get_with_token, run_cmd, run_cmd_allow_fail};
+use super::super::helpers::{
+    get_proxy_url_for_provider, get_sa_token, http_get_with_token, proxy_service_exists, run_cmd,
+    run_cmd_allow_fail,
+};
+use super::super::providers::InfraProvider;
 
 // =============================================================================
 // Constants
@@ -180,24 +184,6 @@ pub fn delete_cedar_policy(kubeconfig: &str, policy_name: &str) -> Result<(), St
     Ok(())
 }
 
-/// Get a ServiceAccount token using kubectl create token
-pub fn get_sa_token(kubeconfig: &str, namespace: &str, sa_name: &str) -> Result<String, String> {
-    let token = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "create",
-            "token",
-            sa_name,
-            "-n",
-            namespace,
-            "--duration=1h",
-        ],
-    )?;
-    Ok(token.trim().to_string())
-}
-
 /// Clean up test resources
 pub fn cleanup_cedar_test_resources(kubeconfig: &str) {
     info!("[Integration/Cedar] Cleaning up test resources...");
@@ -287,146 +273,6 @@ pub fn remove_e2e_default_policy(kubeconfig: &str) {
             "--ignore-not-found",
         ],
     );
-}
-
-/// The auth proxy runs as part of the lattice-cell service on port 8082
-const PROXY_SERVICE_NAME: &str = "lattice-cell";
-const PROXY_PORT: u16 = 8082;
-
-use super::super::providers::InfraProvider;
-
-// =============================================================================
-// Proxy URL Resolution
-// =============================================================================
-
-/// Check if the lattice-cell proxy service exists
-pub fn proxy_service_exists(kubeconfig: &str) -> bool {
-    let result = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "svc",
-            PROXY_SERVICE_NAME,
-            "-n",
-            "lattice-system",
-            "-o",
-            "name",
-        ],
-    );
-    !result.trim().is_empty() && !result.contains("not found")
-}
-
-/// Get the proxy URL with provider-specific handling.
-///
-/// - Docker: Uses control plane container IP + NodePort (LB IPs aren't accessible from localhost)
-/// - Cloud: Uses LoadBalancer external IP
-pub fn get_proxy_url_for_provider(
-    kubeconfig: &str,
-    provider: InfraProvider,
-) -> Result<String, String> {
-    if !proxy_service_exists(kubeconfig) {
-        return Err(format!(
-            "{} service not found - proxy may not be deployed",
-            PROXY_SERVICE_NAME
-        ));
-    }
-
-    match provider {
-        InfraProvider::Docker => get_proxy_url_docker(kubeconfig),
-        _ => get_proxy_url_cloud(kubeconfig),
-    }
-}
-
-/// Get proxy URL for Docker/CAPD clusters via NodePort on control plane container.
-fn get_proxy_url_docker(kubeconfig: &str) -> Result<String, String> {
-    // Get cluster name from kubeconfig context
-    let context = run_cmd_allow_fail(
-        "kubectl",
-        &["--kubeconfig", kubeconfig, "config", "current-context"],
-    );
-    let cluster_name = context.trim().replace("-admin@", "").replace("kind-", "");
-    if cluster_name.is_empty() {
-        return Err("Could not determine cluster name from kubeconfig".to_string());
-    }
-
-    // Get NodePort for proxy service
-    let node_port = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "svc",
-            PROXY_SERVICE_NAME,
-            "-n",
-            "lattice-system",
-            "-o",
-            &format!(
-                "jsonpath={{.spec.ports[?(@.port=={})].nodePort}}",
-                PROXY_PORT
-            ),
-        ],
-    );
-    if node_port.trim().is_empty() {
-        return Err(format!(
-            "Proxy service {} does not have a NodePort for port {}",
-            PROXY_SERVICE_NAME, PROXY_PORT
-        ));
-    }
-
-    // Get control plane container IP (accessible from localhost via Docker network)
-    let cp_container = format!("{}-control-plane", cluster_name);
-    let cp_ip = run_cmd_allow_fail(
-        "docker",
-        &[
-            "inspect",
-            "-f",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-            &cp_container,
-        ],
-    );
-    if cp_ip.trim().is_empty() {
-        return Err(format!(
-            "Could not get IP for control plane container {}",
-            cp_container
-        ));
-    }
-
-    info!(
-        "[Integration/Cedar] Using Docker control plane {}:{} for proxy",
-        cp_ip.trim(),
-        node_port.trim()
-    );
-    Ok(format!("https://{}:{}", cp_ip.trim(), node_port.trim()))
-}
-
-/// Get proxy URL for cloud providers via LoadBalancer IP.
-fn get_proxy_url_cloud(kubeconfig: &str) -> Result<String, String> {
-    let lb_ip = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "svc",
-            PROXY_SERVICE_NAME,
-            "-n",
-            "lattice-system",
-            "-o",
-            "jsonpath={.status.loadBalancer.ingress[0].ip}",
-        ],
-    );
-
-    if lb_ip.trim().is_empty() {
-        return Err(format!(
-            "LoadBalancer IP not available for {} service",
-            PROXY_SERVICE_NAME
-        ));
-    }
-
-    Ok(format!("https://{}:{}", lb_ip.trim(), PROXY_PORT))
 }
 
 // =============================================================================

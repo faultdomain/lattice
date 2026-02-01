@@ -28,12 +28,11 @@ use tracing::info;
 
 use super::super::context::{init_test_env, InfraContext};
 use super::super::helpers::{
-    http_get_with_token, run_cmd_allow_fail, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+    get_proxy_url_for_provider, get_sa_token, http_get_with_token, run_cmd_allow_fail,
+    WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 use super::super::providers::InfraProvider;
-use super::cedar::{
-    apply_e2e_default_policy, get_proxy_url_for_provider, get_sa_token, remove_e2e_default_policy,
-};
+use super::cedar::{apply_e2e_default_policy, remove_e2e_default_policy};
 
 // ============================================================================
 // Constants

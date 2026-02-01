@@ -173,9 +173,12 @@ impl PolicyEngine {
 
     /// Create policy engine with explicit policies (for testing)
     pub fn with_policies(policy_text: &str) -> Result<Self> {
-        let policy_set: PolicySet = policy_text
-            .parse()
-            .map_err(|e: cedar_policy::ParseErrors| Error::Config(format!("Invalid Cedar policy: {}", e)))?;
+        let policy_set: PolicySet =
+            policy_text
+                .parse()
+                .map_err(|e: cedar_policy::ParseErrors| {
+                    Error::Config(format!("Invalid Cedar policy: {}", e))
+                })?;
 
         Ok(Self {
             authorizer: Authorizer::new(),
