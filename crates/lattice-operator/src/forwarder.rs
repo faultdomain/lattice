@@ -3,7 +3,9 @@
 //! Implements the K8sRequestForwarder trait to enable agents to forward
 //! K8s API requests to their child clusters via the gRPC tunnel.
 
-use lattice_agent::{K8sRequestForwarder, KubernetesRequest, KubernetesResponse};
+use lattice_agent::{
+    build_k8s_status_response, K8sRequestForwarder, KubernetesRequest, KubernetesResponse,
+};
 use lattice_cell::{
     tunnel_request, K8sRequestParams, SharedAgentRegistry, SharedSubtreeRegistry, TunnelError,
 };
@@ -20,7 +22,10 @@ pub struct SubtreeForwarder {
 
 impl SubtreeForwarder {
     /// Create a new SubtreeForwarder with the given registries.
-    pub fn new(subtree_registry: SharedSubtreeRegistry, agent_registry: SharedAgentRegistry) -> Self {
+    pub fn new(
+        subtree_registry: SharedSubtreeRegistry,
+        agent_registry: SharedAgentRegistry,
+    ) -> Self {
         Self {
             subtree_registry,
             agent_registry,
@@ -44,7 +49,7 @@ impl K8sRequestForwarder for SubtreeForwarder {
                     request_id = %request.request_id,
                     "Target cluster not found in subtree"
                 );
-                return build_error_response(
+                return build_k8s_status_response(
                     &request.request_id,
                     404,
                     &format!("cluster '{}' not found in subtree", target_cluster),
@@ -61,7 +66,7 @@ impl K8sRequestForwarder for SubtreeForwarder {
                     request_id = %request.request_id,
                     "Route info missing agent_id"
                 );
-                return build_error_response(
+                return build_k8s_status_response(
                     &request.request_id,
                     502,
                     "internal routing error: missing agent_id",
@@ -79,7 +84,7 @@ impl K8sRequestForwarder for SubtreeForwarder {
                     request_id = %request.request_id,
                     "Agent not connected"
                 );
-                return build_error_response(
+                return build_k8s_status_response(
                     &request.request_id,
                     502,
                     &format!("agent '{}' not connected", agent_id),
@@ -98,6 +103,7 @@ impl K8sRequestForwarder for SubtreeForwarder {
         );
 
         // Forward the request using the tunnel
+        // Source identity is preserved from the original request for Cedar checks
         let params = K8sRequestParams {
             method: request.verb.clone(),
             path: request.path.clone(),
@@ -105,6 +111,8 @@ impl K8sRequestForwarder for SubtreeForwarder {
             body: request.body.clone(),
             content_type: request.content_type.clone(),
             target_cluster: target_cluster.to_string(),
+            source_user: request.source_user.clone(),
+            source_groups: request.source_groups.clone(),
         };
 
         match tunnel_request(&self.agent_registry, target_cluster, command_tx, params).await {
@@ -118,10 +126,11 @@ impl K8sRequestForwarder for SubtreeForwarder {
                     .unwrap_or("application/json")
                     .to_string();
 
-                let body = match axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024).await {
+                let body = match axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024).await
+                {
                     Ok(b) => b.to_vec(),
                     Err(e) => {
-                        return build_error_response(
+                        return build_k8s_status_response(
                             &request.request_id,
                             502,
                             &format!("failed to read response body: {}", e),
@@ -147,38 +156,9 @@ impl K8sRequestForwarder for SubtreeForwarder {
                     TunnelError::AgentError(m) => (502, format!("agent error: {}", m)),
                     TunnelError::ResponseBuild(m) => (500, format!("response build error: {}", m)),
                 };
-                build_error_response(&request.request_id, status, &msg)
+                build_k8s_status_response(&request.request_id, status, &msg)
             }
         }
-    }
-}
-
-/// Build an error response with the given status code and message.
-fn build_error_response(request_id: &str, status: u32, message: &str) -> KubernetesResponse {
-    KubernetesResponse {
-        request_id: request_id.to_string(),
-        status_code: status,
-        body: format!(
-            r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"{}","reason":"{}","code":{}}}"#,
-            message,
-            status_reason(status),
-            status
-        )
-        .into_bytes(),
-        content_type: "application/json".to_string(),
-        error: String::new(),
-        streaming: false,
-        stream_end: false,
-    }
-}
-
-/// Get the K8s status reason for an HTTP status code.
-fn status_reason(status: u32) -> &'static str {
-    match status {
-        404 => "NotFound",
-        502 => "BadGateway",
-        504 => "GatewayTimeout",
-        _ => "InternalError",
     }
 }
 
@@ -187,18 +167,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_error_response() {
-        let response = build_error_response("req-1", 404, "cluster not found");
+    fn test_build_k8s_status_response() {
+        let response = build_k8s_status_response("req-1", 404, "cluster not found");
         assert_eq!(response.request_id, "req-1");
         assert_eq!(response.status_code, 404);
         assert!(String::from_utf8_lossy(&response.body).contains("cluster not found"));
-    }
-
-    #[test]
-    fn test_status_reason() {
-        assert_eq!(status_reason(404), "NotFound");
-        assert_eq!(status_reason(502), "BadGateway");
-        assert_eq!(status_reason(504), "GatewayTimeout");
-        assert_eq!(status_reason(500), "InternalError");
     }
 }

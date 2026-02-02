@@ -50,7 +50,7 @@ use super::super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
     load_registry_credentials, rebuild_and_restart_operators, run_cmd_allow_fail,
-    watch_cluster_phases, watch_cluster_phases_with_kubeconfig,
+    watch_cluster_phases, watch_cluster_phases_with_kubeconfig, ProxySession,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, pivot, scaling};
@@ -104,12 +104,16 @@ impl SetupConfig {
 
 /// Result of infrastructure setup containing context and optional chaos handle
 pub struct SetupResult {
-    /// Infrastructure context with kubeconfig paths
+    /// Infrastructure context with kubeconfig paths (proxy-based for child clusters)
     pub ctx: InfraContext,
     /// Chaos monkey handle (if enabled)
     pub chaos: Option<ChaosMonkey>,
     /// Chaos targets (if enabled)
     pub chaos_targets: Option<Arc<ChaosTargets>>,
+    /// Proxy session to mgmt cluster (keeps port-forward alive for workload access)
+    pub mgmt_proxy: Option<ProxySession>,
+    /// Proxy session to workload cluster (keeps port-forward alive for workload2 access)
+    pub workload_proxy: Option<ProxySession>,
 }
 
 impl SetupResult {
@@ -415,6 +419,28 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     }
 
     // =========================================================================
+    // Phase 7: Generate Proxy Kubeconfigs
+    // =========================================================================
+    info!("[Setup/Phase 7] Generating proxy kubeconfigs...");
+
+    // Start proxy session to mgmt for accessing workload
+    let mgmt_proxy = ProxySession::start(&mgmt_kubeconfig_path)?;
+    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME)?;
+
+    // Start proxy session to workload for accessing workload2
+    // Note: We use the direct workload kubeconfig here since we need to access workload directly
+    let workload_proxy = ProxySession::start(&workload_kubeconfig_path)?;
+    let workload2_proxy_kc = workload_proxy.kubeconfig_for(WORKLOAD2_CLUSTER_NAME)?;
+
+    // Build final context with proxy kubeconfigs
+    let ctx = InfraContext::new(
+        mgmt_kubeconfig_path.clone(),
+        Some(workload_proxy_kc.clone()),
+        Some(workload2_proxy_kc.clone()),
+        mgmt_provider,
+    );
+
+    // =========================================================================
     // Setup Complete
     // =========================================================================
     info!("");
@@ -424,27 +450,15 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     info!("");
     info!("Cluster hierarchy: mgmt -> workload -> workload2");
     info!("");
-    info!("Kubeconfig paths:");
+    info!("Kubeconfig paths (proxy-based for child clusters):");
     info!("  LATTICE_MGMT_KUBECONFIG={}", ctx.mgmt_kubeconfig);
-    info!(
-        "  LATTICE_WORKLOAD_KUBECONFIG={}",
-        ctx.workload_kubeconfig.as_deref().unwrap_or("N/A")
-    );
-    info!(
-        "  LATTICE_WORKLOAD2_KUBECONFIG={}",
-        ctx.workload2_kubeconfig.as_deref().unwrap_or("N/A")
-    );
+    info!("  LATTICE_WORKLOAD_KUBECONFIG={}", workload_proxy_kc);
+    info!("  LATTICE_WORKLOAD2_KUBECONFIG={}", workload2_proxy_kc);
     info!("");
     info!("Run integration tests with:");
     info!("  LATTICE_MGMT_KUBECONFIG={} \\", ctx.mgmt_kubeconfig);
-    info!(
-        "  LATTICE_WORKLOAD_KUBECONFIG={} \\",
-        ctx.workload_kubeconfig.as_deref().unwrap_or("")
-    );
-    info!(
-        "  LATTICE_WORKLOAD2_KUBECONFIG={} \\",
-        ctx.workload2_kubeconfig.as_deref().unwrap_or("")
-    );
+    info!("  LATTICE_WORKLOAD_KUBECONFIG={} \\", workload_proxy_kc);
+    info!("  LATTICE_WORKLOAD2_KUBECONFIG={} \\", workload2_proxy_kc);
     info!("  cargo test --features provider-e2e --test e2e <test_name> -- --ignored --nocapture");
     info!("");
 
@@ -452,6 +466,8 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         ctx,
         chaos,
         chaos_targets,
+        mgmt_proxy: Some(mgmt_proxy),
+        workload_proxy: Some(workload_proxy),
     })
 }
 
@@ -525,6 +541,8 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         ctx,
         chaos,
         chaos_targets,
+        mgmt_proxy: None,
+        workload_proxy: None,
     })
 }
 
@@ -579,15 +597,26 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
         );
     }
 
+    // Generate proxy kubeconfig for workload
+    info!("[Setup] Generating proxy kubeconfig for workload...");
+    let mgmt_proxy = ProxySession::start(&result.ctx.mgmt_kubeconfig)?;
+    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME)?;
+
+    // Update context with proxy kubeconfig
+    result.ctx = InfraContext::new(
+        result.ctx.mgmt_kubeconfig.clone(),
+        Some(workload_proxy_kc.clone()),
+        None,
+        result.ctx.provider,
+    );
+    result.mgmt_proxy = Some(mgmt_proxy);
+
     info!("");
     info!("========================================");
     info!("MGMT + WORKLOAD SETUP COMPLETE");
     info!("========================================");
     info!("  LATTICE_MGMT_KUBECONFIG={}", result.ctx.mgmt_kubeconfig);
-    info!(
-        "  LATTICE_WORKLOAD_KUBECONFIG={}",
-        result.ctx.workload_kubeconfig.as_deref().unwrap_or("N/A")
-    );
+    info!("  LATTICE_WORKLOAD_KUBECONFIG={}", workload_proxy_kc);
     info!("");
 
     Ok(result)

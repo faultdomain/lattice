@@ -10,6 +10,7 @@ use axum::response::Response;
 use std::sync::OnceLock;
 use tracing::debug;
 
+use crate::auth::UserIdentity;
 use crate::error::Error;
 use crate::server::AppState;
 use lattice_cell::{tunnel_request, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT};
@@ -26,10 +27,12 @@ static K8S_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// Route a request to the target cluster
 ///
 /// Authorization is handled by Cedar before this function is called.
-/// The proxy's service account is used for K8s API calls.
+/// The proxy's service account is used for K8s API calls to the local cluster.
+/// For child clusters, the source identity is passed through for Cedar checks at each hop.
 pub async fn route_to_cluster(
     state: &AppState,
     cluster_name: &str,
+    identity: &UserIdentity,
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     // Check if this is the local cluster
@@ -61,7 +64,7 @@ pub async fn route_to_cluster(
         "Routing to child cluster via gRPC tunnel"
     );
 
-    route_to_child_cluster(state, cluster_name, &agent_id, request).await
+    route_to_child_cluster(state, cluster_name, &agent_id, identity, request).await
 }
 
 /// Route request to local K8s API server
@@ -163,11 +166,13 @@ async fn route_to_local_api(
 /// * `state` - Application state
 /// * `cluster_name` - Target cluster name (for path rewriting)
 /// * `agent_id` - Agent to route through (may be different from cluster_name for grandchildren)
+/// * `identity` - Source user identity (preserved through routing chain for Cedar)
 /// * `request` - HTTP request to forward
 async fn route_to_child_cluster(
     state: &AppState,
     cluster_name: &str,
     agent_id: &str,
+    identity: &UserIdentity,
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let agent_registry = state
@@ -210,6 +215,7 @@ async fn route_to_child_cluster(
     // Use shared tunnel logic - target_cluster is always the final destination
     // The agent compares this to its own cluster name to decide whether to
     // execute locally or forward through its subtree
+    // Source identity is preserved through the entire chain for Cedar checks
     tunnel_request(
         agent_registry,
         cluster_name,
@@ -221,6 +227,8 @@ async fn route_to_child_cluster(
             body: body.to_vec(),
             content_type,
             target_cluster: cluster_name.to_string(),
+            source_user: identity.username.clone(),
+            source_groups: identity.groups.clone(),
         },
     )
     .await

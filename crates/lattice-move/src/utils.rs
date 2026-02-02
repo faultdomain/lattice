@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_find_cluster_owner_for_secret() {
-        let clusters = vec![("my-cluster", "uid-1"), ("other-cluster", "uid-2")];
+        let clusters = [("my-cluster", "uid-1"), ("other-cluster", "uid-2")];
 
         // Test kubeconfig secret
         assert_eq!(

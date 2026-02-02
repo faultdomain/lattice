@@ -125,15 +125,18 @@ fn create_cluster_controller(
     }
 
     Some(
-        Controller::new(clusters, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
-            .shutdown_on_signal()
-            .run(reconcile, error_policy, ctx)
-            .for_each(|result| async move {
-                match result {
-                    Ok(action) => tracing::debug!(?action, "Cluster reconciliation completed"),
-                    Err(e) => tracing::error!(error = ?e, "Cluster reconciliation error"),
-                }
-            }),
+        Controller::new(
+            clusters,
+            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        )
+        .shutdown_on_signal()
+        .run(reconcile, error_policy, ctx)
+        .for_each(|result| async move {
+            match result {
+                Ok(action) => tracing::debug!(?action, "Cluster reconciliation completed"),
+                Err(e) => tracing::error!(error = ?e, "Cluster reconciliation error"),
+            }
+        }),
     )
 }
 
@@ -155,56 +158,62 @@ fn create_service_controllers(
     let graph_for_watch = ctx.graph.clone();
     let services_for_watch = services.clone();
 
-    let svc_ctrl = Controller::new(services, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
-        .watches(
-            services_for_watch,
-            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-            move |service| {
-                let graph = graph_for_watch.clone();
-                let namespace = match service.metadata.namespace.as_deref() {
-                    Some(ns) => ns,
-                    None => return vec![],
-                };
-                let name = service.metadata.name.as_deref().unwrap_or_default();
+    let svc_ctrl = Controller::new(
+        services,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .watches(
+        services_for_watch,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        move |service| {
+            let graph = graph_for_watch.clone();
+            let namespace = match service.metadata.namespace.as_deref() {
+                Some(ns) => ns,
+                None => return vec![],
+            };
+            let name = service.metadata.name.as_deref().unwrap_or_default();
 
-                // Get affected services (dependencies + dependents)
-                let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
-                affected.extend(graph.get_dependents(namespace, name));
-                affected.sort();
-                affected.dedup();
+            // Get affected services (dependencies + dependents)
+            let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
+            affected.extend(graph.get_dependents(namespace, name));
+            affected.sort();
+            affected.dedup();
 
-                tracing::debug!(
-                    service = %name,
-                    namespace = %namespace,
-                    affected_count = affected.len(),
-                    "Triggering re-reconciliation of affected services"
-                );
+            tracing::debug!(
+                service = %name,
+                namespace = %namespace,
+                affected_count = affected.len(),
+                "Triggering re-reconciliation of affected services"
+            );
 
-                let ns = namespace.to_string();
-                affected
-                    .into_iter()
-                    .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
-                    .collect()
-            },
-        )
-        .shutdown_on_signal()
-        .run(service_reconcile, service_error_policy, ctx.clone())
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => tracing::debug!(?action, "Service reconciliation completed"),
-                Err(e) => tracing::error!(error = ?e, "Service reconciliation error"),
-            }
-        });
+            let ns = namespace.to_string();
+            affected
+                .into_iter()
+                .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
+                .collect()
+        },
+    )
+    .shutdown_on_signal()
+    .run(service_reconcile, service_error_policy, ctx.clone())
+    .for_each(|result| async move {
+        match result {
+            Ok(action) => tracing::debug!(?action, "Service reconciliation completed"),
+            Err(e) => tracing::error!(error = ?e, "Service reconciliation error"),
+        }
+    });
 
-    let ext_ctrl = Controller::new(external_services, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
-        .shutdown_on_signal()
-        .run(reconcile_external, error_policy_external, ctx)
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => tracing::debug!(?action, "External service reconciliation completed"),
-                Err(e) => tracing::error!(error = ?e, "External service reconciliation error"),
-            }
-        });
+    let ext_ctrl = Controller::new(
+        external_services,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .shutdown_on_signal()
+    .run(reconcile_external, error_policy_external, ctx)
+    .for_each(|result| async move {
+        match result {
+            Ok(action) => tracing::debug!(?action, "External service reconciliation completed"),
+            Err(e) => tracing::error!(error = ?e, "External service reconciliation error"),
+        }
+    });
 
     (Some(svc_ctrl), Some(ext_ctrl))
 }
@@ -213,36 +222,42 @@ fn create_cloud_provider_controller(client: Client) -> impl std::future::Future<
     let cloud_providers: Api<CloudProvider> = Api::all(client.clone());
     let ctx = Arc::new(ControllerContext::new(client));
 
-    Controller::new(cloud_providers, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
-        .shutdown_on_signal()
-        .run(
-            cloud_provider_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx,
-        )
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => tracing::debug!(?action, "CloudProvider reconciliation completed"),
-                Err(e) => tracing::error!(error = ?e, "CloudProvider reconciliation error"),
-            }
-        })
+    Controller::new(
+        cloud_providers,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .shutdown_on_signal()
+    .run(
+        cloud_provider_ctrl::reconcile,
+        lattice_common::default_error_policy,
+        ctx,
+    )
+    .for_each(|result| async move {
+        match result {
+            Ok(action) => tracing::debug!(?action, "CloudProvider reconciliation completed"),
+            Err(e) => tracing::error!(error = ?e, "CloudProvider reconciliation error"),
+        }
+    })
 }
 
 fn create_secrets_provider_controller(client: Client) -> impl std::future::Future<Output = ()> {
     let secrets_providers: Api<SecretsProvider> = Api::all(client.clone());
     let ctx = Arc::new(ControllerContext::new(client));
 
-    Controller::new(secrets_providers, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
-        .shutdown_on_signal()
-        .run(
-            secrets_provider_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx,
-        )
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => tracing::debug!(?action, "SecretsProvider reconciliation completed"),
-                Err(e) => tracing::error!(error = ?e, "SecretsProvider reconciliation error"),
-            }
-        })
+    Controller::new(
+        secrets_providers,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .shutdown_on_signal()
+    .run(
+        secrets_provider_ctrl::reconcile,
+        lattice_common::default_error_policy,
+        ctx,
+    )
+    .for_each(|result| async move {
+        match result {
+            Ok(action) => tracing::debug!(?action, "SecretsProvider reconciliation completed"),
+            Err(e) => tracing::error!(error = ?e, "SecretsProvider reconciliation error"),
+        }
+    })
 }

@@ -38,40 +38,51 @@ pub trait K8sRequestForwarder: Send + Sync {
     /// - The cluster is not in this agent's subtree (404)
     /// - The cluster's agent is not connected (502)
     /// - The request times out (504)
-    async fn forward(
-        &self,
-        target_cluster: &str,
-        request: KubernetesRequest,
-    ) -> KubernetesResponse;
+    async fn forward(&self, target_cluster: &str, request: KubernetesRequest)
+        -> KubernetesResponse;
 }
 
 /// Shared forwarder type used by the agent for hierarchical routing.
 pub type SharedK8sForwarder = Arc<dyn K8sRequestForwarder>;
 
-/// Default forwarder for clusters without children.
-/// Returns 404 for all requests since there's no subtree to route to.
-pub struct NoChildrenForwarder;
+/// Build a K8s Status response with the given status code and message.
+/// This creates a proper K8s API Status object in the response body.
+pub fn build_k8s_status_response(
+    request_id: &str,
+    status_code: u32,
+    message: &str,
+) -> KubernetesResponse {
+    let reason = match status_code {
+        404 => "NotFound",
+        502 => "BadGateway",
+        504 => "GatewayTimeout",
+        _ => "InternalError",
+    };
 
-#[async_trait::async_trait]
-impl K8sRequestForwarder for NoChildrenForwarder {
-    async fn forward(
-        &self,
-        target_cluster: &str,
-        request: KubernetesRequest,
-    ) -> KubernetesResponse {
-        KubernetesResponse {
-            request_id: request.request_id,
-            status_code: 404,
-            body: format!(
-                r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"cluster '{}' not found in subtree","reason":"NotFound","code":404}}"#,
-                target_cluster
-            ).into_bytes(),
-            content_type: "application/json".to_string(),
-            error: String::new(),
-            streaming: false,
-            stream_end: false,
-        }
+    KubernetesResponse {
+        request_id: request_id.to_string(),
+        status_code,
+        body: format!(
+            r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"{}","reason":"{}","code":{}}}"#,
+            message, reason, status_code
+        ).into_bytes(),
+        content_type: "application/json".to_string(),
+        error: String::new(),
+        streaming: false,
+        stream_end: false,
     }
+}
+
+/// Build a 404 response for a cluster not found in the subtree.
+pub fn build_cluster_not_found_response(
+    target_cluster: &str,
+    request_id: &str,
+) -> KubernetesResponse {
+    build_k8s_status_response(
+        request_id,
+        404,
+        &format!("cluster '{}' not found in subtree", target_cluster),
+    )
 }
 
 /// Create a Kubernetes client with proper timeouts

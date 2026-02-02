@@ -180,13 +180,13 @@ mod tests {
     #[test]
     fn test_sa_groups_format() {
         // Verify expected ServiceAccount groups format
-        let groups = vec![
-            "system:serviceaccounts".to_string(),
-            "system:serviceaccounts:kube-system".to_string(),
-            "system:authenticated".to_string(),
+        let groups = [
+            "system:serviceaccounts",
+            "system:serviceaccounts:kube-system",
+            "system:authenticated",
         ];
 
-        assert!(groups.iter().any(|g| g == "system:serviceaccounts"));
+        assert!(groups.contains(&"system:serviceaccounts"));
         assert!(groups
             .iter()
             .any(|g| g.starts_with("system:serviceaccounts:")));

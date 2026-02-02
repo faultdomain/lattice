@@ -88,8 +88,12 @@ async fn run_full_e2e() -> Result<(), String> {
     .await?;
 
     // Test proxy access through the hierarchy
-    integration::proxy::run_proxy_hierarchy_tests(&ctx, WORKLOAD_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME)
-        .await?;
+    integration::proxy::run_proxy_hierarchy_tests(
+        &ctx,
+        WORKLOAD_CLUSTER_NAME,
+        WORKLOAD2_CLUSTER_NAME,
+    )
+    .await?;
 
     info!("SUCCESS: Kubeconfig and proxy verification complete!");
 

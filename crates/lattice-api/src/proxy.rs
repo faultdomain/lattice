@@ -61,8 +61,8 @@ pub async fn proxy_handler(
         .authorize(&identity, cluster_name, action)
         .await?;
 
-    // 4. Route to the target cluster
-    route_to_cluster(&state, cluster_name, request).await
+    // 4. Route to the target cluster (passing identity for downstream Cedar checks)
+    route_to_cluster(&state, cluster_name, &identity, request).await
 }
 
 /// Map HTTP method to Kubernetes verb

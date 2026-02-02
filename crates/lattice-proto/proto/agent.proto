@@ -278,10 +278,17 @@ message KubernetesRequest {
   // Agent will stop the watch and send stream_end response
   bool cancel = 8;
 
-  // Target cluster for hierarchical routing (optional)
-  // If set, the receiving agent should route to this cluster instead of handling locally
-  // Empty means execute on the receiving agent's cluster
+  // Target cluster for hierarchical routing
+  // The receiving agent compares this to its own cluster name:
+  // - If equal: execute request locally using operator's SA
+  // - If different: forward to target cluster via its subtree
   string target_cluster = 9;
+
+  // Source identity - preserved through the entire routing chain for Cedar checks
+  // Each hop can authorize based on who originally made the request
+  // Works for any auth type: SA ("system:serviceaccount:ns:name"), OIDC ("user@example.com"), etc.
+  string source_user = 10;
+  repeated string source_groups = 11;
 }
 
 // Agent → Cell: Response from child's K8s API

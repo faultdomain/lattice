@@ -39,6 +39,10 @@ pub struct K8sRequestParams {
     /// - If equal: execute request locally
     /// - If different: forward to target cluster via its subtree
     pub target_cluster: String,
+    /// Source user identity (preserved through routing chain for Cedar)
+    pub source_user: String,
+    /// Source user groups (preserved through routing chain for Cedar)
+    pub source_groups: Vec<String>,
 }
 
 /// Check if a query indicates a watch request
@@ -73,6 +77,8 @@ pub async fn tunnel_request(
         },
         cancel: false,
         target_cluster: params.target_cluster,
+        source_user: params.source_user,
+        source_groups: params.source_groups,
     };
 
     // Create response channel

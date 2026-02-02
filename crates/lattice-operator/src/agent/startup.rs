@@ -11,7 +11,9 @@ use k8s_openapi::ByteString;
 use kube::api::{Api, PostParams};
 use kube::Client;
 
-use lattice_agent::{AgentClient, AgentClientConfig, AgentCredentials, ClientState, SharedK8sForwarder};
+use lattice_agent::{
+    AgentClient, AgentClientConfig, AgentCredentials, ClientState, SharedK8sForwarder,
+};
 use lattice_common::{
     ParentConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE, TLS_CERT_KEY,
     TLS_KEY_KEY,
@@ -23,7 +25,11 @@ use lattice_common::{
 ///
 /// The forwarder is used for hierarchical routing - when this cluster receives
 /// K8s API requests destined for child clusters, it forwards them via the forwarder.
-pub async fn start_agent_with_retry(client: &Client, cluster_name: &str, forwarder: SharedK8sForwarder) {
+pub async fn start_agent_with_retry(
+    client: &Client,
+    cluster_name: &str,
+    forwarder: SharedK8sForwarder,
+) {
     let mut retry_delay = Duration::from_secs(1);
     let max_retry_delay = Duration::from_secs(5);
 

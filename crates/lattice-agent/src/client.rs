@@ -40,7 +40,10 @@ use lattice_proto::{
 
 use crate::subtree::SubtreeSender;
 use crate::watch::{execute_watch, WatchRegistry};
-use crate::{create_k8s_client, execute_k8s_request, is_watch_request, ClientMtlsConfig, NoChildrenForwarder, SharedK8sForwarder};
+use crate::{
+    build_cluster_not_found_response, create_k8s_client, execute_k8s_request, is_watch_request,
+    ClientMtlsConfig, SharedK8sForwarder,
+};
 
 /// Configuration for the agent client
 #[derive(Clone, Debug)]
@@ -137,19 +140,33 @@ pub struct AgentClient {
     subtree_watcher_handle: Option<tokio::task::JoinHandle<()>>,
     /// Registry for tracking active K8s API watches
     watch_registry: Arc<WatchRegistry>,
-    /// Forwarder for routing K8s requests to child clusters
-    forwarder: SharedK8sForwarder,
+    /// Optional forwarder for routing K8s requests to child clusters.
+    /// When None, requests targeting other clusters return 404.
+    forwarder: Option<SharedK8sForwarder>,
 }
 
 impl AgentClient {
     /// Create a new agent client with the given configuration.
-    /// Uses the default NoChildrenForwarder which returns 404 for forwarding requests.
+    /// Without a forwarder, requests targeting other clusters return 404.
     pub fn new(config: AgentClientConfig) -> Self {
-        Self::with_forwarder(config, Arc::new(NoChildrenForwarder))
+        Self {
+            config,
+            state: Arc::new(RwLock::new(ClientState::Disconnected)),
+            agent_state: Arc::new(RwLock::new(AgentState::Provisioning)),
+            message_tx: None,
+            shutdown_tx: None,
+            start_time: Instant::now(),
+            heartbeat_handle: None,
+            command_handler_handle: None,
+            deletion_watcher_handle: None,
+            subtree_watcher_handle: None,
+            watch_registry: Arc::new(WatchRegistry::new()),
+            forwarder: None,
+        }
     }
 
-    /// Create a new agent client with a custom forwarder for hierarchical routing.
-    /// Use this when this cluster has children that may need K8s API requests forwarded.
+    /// Create a new agent client with a forwarder for hierarchical routing.
+    /// Use this when this cluster has children that need K8s API requests forwarded.
     pub fn with_forwarder(config: AgentClientConfig, forwarder: SharedK8sForwarder) -> Self {
         Self {
             config,
@@ -163,7 +180,7 @@ impl AgentClient {
             deletion_watcher_handle: None,
             subtree_watcher_handle: None,
             watch_registry: Arc::new(WatchRegistry::new()),
-            forwarder,
+            forwarder: Some(forwarder),
         }
     }
 
@@ -527,7 +544,7 @@ impl AgentClient {
                     Some(result) = inbound.next() => {
                         match result {
                             Ok(command) => {
-                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry, &forwarder).await;
+                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry, forwarder.as_ref()).await;
                             }
                             Err(e) => {
                                 error!(error = %e, "Error receiving command");
@@ -892,13 +909,17 @@ impl AgentClient {
     }
 
     /// Handle incoming command from cell
+    ///
+    /// # Arguments
+    /// * `forwarder` - Optional forwarder for routing requests to child clusters.
+    ///   When None, returns 404 for requests targeting other clusters.
     async fn handle_command(
         command: &CellCommand,
         agent_state: &Arc<RwLock<AgentState>>,
         message_tx: &mpsc::Sender<AgentMessage>,
         cluster_name: &str,
         watch_registry: &Arc<WatchRegistry>,
-        forwarder: &SharedK8sForwarder,
+        forwarder: Option<&SharedK8sForwarder>,
     ) {
         debug!(command_id = %command.command_id, "Received command");
 
@@ -1054,7 +1075,7 @@ impl AgentClient {
                 let message_tx = message_tx.clone();
                 let req = req.clone();
                 let registry = watch_registry.clone();
-                let forwarder = forwarder.clone();
+                let forwarder = forwarder.cloned(); // Clone the Arc if Some
 
                 tokio::spawn(async move {
                     let response = if is_local {
@@ -1081,19 +1102,32 @@ impl AgentClient {
 
                         // Route watch requests to execute_watch, others to execute_k8s_request
                         if is_watch_request(&req) {
-                            execute_watch(client, req, cluster_name_clone, message_tx, registry).await;
+                            execute_watch(client, req, cluster_name_clone, message_tx, registry)
+                                .await;
                             return; // Watch handles its own response sending
                         }
                         execute_k8s_request(&client, &req).await
                     } else {
                         // Forward to child cluster via our subtree
                         let target = req.target_cluster.clone();
-                        debug!(
-                            request_id = %request_id,
-                            target = %target,
-                            "Forwarding request to child cluster"
-                        );
-                        forwarder.forward(&target, req).await
+                        match &forwarder {
+                            Some(f) => {
+                                debug!(
+                                    request_id = %request_id,
+                                    target = %target,
+                                    "Forwarding request to child cluster"
+                                );
+                                f.forward(&target, req).await
+                            }
+                            None => {
+                                debug!(
+                                    request_id = %request_id,
+                                    target = %target,
+                                    "No forwarder configured, returning 404"
+                                );
+                                build_cluster_not_found_response(&target, &request_id)
+                            }
+                        }
                     };
 
                     let msg = AgentMessage {
@@ -1810,7 +1844,7 @@ mod tests {
             &tx,
             "test-cluster",
             &Arc::new(WatchRegistry::new()),
-            &Arc::new(crate::NoChildrenForwarder),
+            None,
         )
         .await;
     }
@@ -1834,7 +1868,7 @@ mod tests {
             &tx,
             "test-cluster",
             &Arc::new(WatchRegistry::new()),
-            &Arc::new(crate::NoChildrenForwarder),
+            None,
         )
         .await;
     }
@@ -1855,7 +1889,7 @@ mod tests {
             &tx,
             "test-cluster",
             &Arc::new(WatchRegistry::new()),
-            &Arc::new(crate::NoChildrenForwarder),
+            None,
         )
         .await;
         // Should log warning but not crash
@@ -2182,7 +2216,7 @@ mod tests {
             &tx,
             "apply-cluster",
             &Arc::new(WatchRegistry::new()),
-            &Arc::new(crate::NoChildrenForwarder),
+            None,
         )
         .await;
 
@@ -2211,7 +2245,7 @@ mod tests {
             &tx,
             "status-cluster",
             &Arc::new(WatchRegistry::new()),
-            &Arc::new(crate::NoChildrenForwarder),
+            None,
         )
         .await;
 
@@ -2239,7 +2273,7 @@ mod tests {
             &tx,
             "robust-cluster",
             &Arc::new(WatchRegistry::new()),
-            &Arc::new(crate::NoChildrenForwarder),
+            None,
         )
         .await;
 

@@ -1334,3 +1334,126 @@ pub async fn delete_cluster_and_wait(
 
     Ok(())
 }
+
+// =============================================================================
+// Proxy Session
+// =============================================================================
+
+/// A session for accessing clusters through the parent's proxy.
+///
+/// Manages a port-forward to the proxy service and provides methods to generate
+/// kubeconfigs for child clusters. The port-forward is cleaned up on drop.
+///
+/// # Example
+///
+/// ```ignore
+/// let session = ProxySession::start(mgmt_kubeconfig)?;
+/// let workload_kc = session.kubeconfig_for("e2e-workload")?;
+/// // Use workload_kc with kubectl...
+/// // Port-forward stays alive while session is in scope
+/// ```
+#[cfg(feature = "provider-e2e")]
+pub struct ProxySession {
+    /// Localhost URL for the port-forward (e.g., "https://127.0.0.1:12345")
+    pub url: String,
+    /// SA token for authentication
+    token: String,
+    /// Port-forward process
+    port_forward: std::process::Child,
+}
+
+#[cfg(feature = "provider-e2e")]
+impl ProxySession {
+    /// Start a proxy session to a cluster.
+    ///
+    /// Creates a port-forward to the lattice-cell service and obtains an SA token.
+    pub fn start(kubeconfig: &str) -> Result<Self, String> {
+        let (url, port_forward) = start_proxy_port_forward(kubeconfig)?;
+        let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "default")?;
+
+        Ok(Self {
+            url,
+            token,
+            port_forward,
+        })
+    }
+
+    /// Generate a kubeconfig for a child cluster accessible through this proxy.
+    ///
+    /// Calls the /kubeconfig endpoint and writes a kubeconfig file that routes
+    /// requests through this proxy session's port-forward.
+    pub fn kubeconfig_for(&self, cluster_name: &str) -> Result<String, String> {
+        info!("[ProxySession] Fetching kubeconfig for {}...", cluster_name);
+
+        // Call /kubeconfig?format=token
+        let response = http_get_with_token(
+            &format!("{}/kubeconfig?format=token", self.url),
+            &self.token,
+            30,
+        );
+
+        if !response.is_success() {
+            return Err(format!(
+                "Failed to fetch kubeconfig: HTTP {} - {}",
+                response.status_code, response.body
+            ));
+        }
+
+        // Parse the response and build a kubeconfig for the specific cluster
+        let kubeconfig = self.build_kubeconfig(&response.body, cluster_name)?;
+
+        // Write to temp file
+        let path = format!("/tmp/{}-kubeconfig-{}", cluster_name, run_id());
+        std::fs::write(&path, &kubeconfig)
+            .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
+
+        info!("[ProxySession] Kubeconfig written to {}", path);
+        Ok(path)
+    }
+
+    /// Build a kubeconfig JSON for a specific cluster.
+    fn build_kubeconfig(&self, response_body: &str, cluster_name: &str) -> Result<String, String> {
+        let config: serde_json::Value = lattice_common::yaml::parse_yaml(response_body)
+            .map_err(|e| format!("Failed to parse kubeconfig response: {}", e))?;
+
+        // Extract the user (with token) from the response
+        let user = config
+            .get("users")
+            .and_then(|u| u.as_array())
+            .and_then(|arr| arr.first())
+            .ok_or("No user in kubeconfig response")?;
+
+        // Build a minimal kubeconfig for this cluster
+        let kubeconfig = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Config",
+            "current-context": cluster_name,
+            "clusters": [{
+                "name": cluster_name,
+                "cluster": {
+                    "server": format!("{}/clusters/{}", self.url, cluster_name),
+                    "insecure-skip-tls-verify": true
+                }
+            }],
+            "contexts": [{
+                "name": cluster_name,
+                "context": {
+                    "cluster": cluster_name,
+                    "user": user.get("name").and_then(|n| n.as_str()).unwrap_or("default")
+                }
+            }],
+            "users": [user]
+        });
+
+        serde_json::to_string_pretty(&kubeconfig)
+            .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))
+    }
+}
+
+#[cfg(feature = "provider-e2e")]
+impl Drop for ProxySession {
+    fn drop(&mut self) {
+        info!("[ProxySession] Stopping port-forward");
+        let _ = self.port_forward.kill();
+    }
+}

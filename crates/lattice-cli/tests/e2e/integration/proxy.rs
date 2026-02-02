@@ -171,16 +171,30 @@ fn verify_proxy_namespace_access(
 
     // Check for successful response
     if response.is_success() {
-        if response.body.contains("\"kind\":\"NamespaceList\"")
-            || response.body.contains("\"kind\": \"NamespaceList\"")
-        {
-            let namespace_count = response.body.matches("\"kind\":\"Namespace\"").count()
-                + response.body.matches("\"kind\": \"Namespace\"").count();
-            info!(
-                "[Integration/Proxy] SUCCESS: {} proxy access to {} worked - {} namespaces visible",
-                cluster_type, cluster_name, namespace_count
-            );
-            return Ok(());
+        // Parse the JSON response to count items properly
+        // K8s list responses have items array but don't include "kind" on each item
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response.body) {
+            if json.get("kind").and_then(|k| k.as_str()) == Some("NamespaceList") {
+                let namespace_count = json
+                    .get("items")
+                    .and_then(|items| items.as_array())
+                    .map(|arr| arr.len())
+                    .unwrap_or(0);
+
+                // Every cluster has at least kube-system, default, etc.
+                if namespace_count == 0 {
+                    return Err(format!(
+                        "Proxy returned NamespaceList but 0 namespaces visible for {} {} - this indicates a permission issue",
+                        cluster_type, cluster_name
+                    ));
+                }
+
+                info!(
+                    "[Integration/Proxy] SUCCESS: {} proxy access to {} worked - {} namespaces visible",
+                    cluster_type, cluster_name, namespace_count
+                );
+                return Ok(());
+            }
         }
     }
 

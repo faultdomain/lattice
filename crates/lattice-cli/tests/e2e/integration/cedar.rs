@@ -346,6 +346,11 @@ pub async fn run_cedar_proxy_test(
         child_cluster_name
     );
 
+    // Remove any existing default E2E policy that would override our test policies
+    // This is important for standalone tests where the E2E setup might have left it behind
+    remove_e2e_default_policy(parent_kubeconfig);
+    sleep_sync(Duration::from_secs(2));
+
     // Start port-forward to proxy (needed on macOS where Docker network isn't accessible)
     let (proxy_url, _port_forward) = start_proxy_port_forward(parent_kubeconfig)?;
     info!("[Integration/Cedar] Using proxy URL: {}", proxy_url);
@@ -403,6 +408,10 @@ pub async fn run_cedar_group_test(
         "[Integration/Cedar] Running group policy test for {}...",
         child_cluster_name
     );
+
+    // Remove any existing default E2E policy that would override our test policies
+    remove_e2e_default_policy(parent_kubeconfig);
+    sleep_sync(Duration::from_secs(2));
 
     // Start port-forward to proxy
     let (proxy_url, _port_forward) = start_proxy_port_forward(parent_kubeconfig)?;

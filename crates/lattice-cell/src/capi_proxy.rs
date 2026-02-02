@@ -205,6 +205,7 @@ async fn proxy_handler(
     };
 
     // Use shared tunnel logic
+    // Source identity is the system (CAPI controller) since this is the pre-pivot proxy
     let result = tunnel_request(
         &state.registry,
         cluster_name,
@@ -216,6 +217,8 @@ async fn proxy_handler(
             body: Vec::new(), // Read-only, no body
             content_type: String::new(),
             target_cluster: cluster_name.to_string(),
+            source_user: "system:capi-proxy".to_string(),
+            source_groups: vec!["system:masters".to_string()],
         },
     )
     .await?;

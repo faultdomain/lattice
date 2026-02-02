@@ -14,7 +14,9 @@ use kube::{Api, CustomResourceExt};
 
 use lattice_api::{AuthChain, PolicyEngine, SaValidator, ServerConfig as AuthProxyConfig};
 use lattice_common::crd::CedarPolicy;
-use lattice_common::{lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
+};
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
 use lattice_operator::crd::LatticeCluster;
@@ -129,10 +131,11 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         let client = client.clone();
         let name = name.clone();
         let token = agent_token.clone();
-        let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> = Arc::new(SubtreeForwarder::new(
-            parent_servers.subtree_registry(),
-            parent_servers.agent_registry(),
-        ));
+        let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> =
+            Arc::new(SubtreeForwarder::new(
+                parent_servers.subtree_registry(),
+                parent_servers.agent_registry(),
+            ));
         tokio::spawn(async move {
             tokio::select! {
                 _ = token.cancelled() => {}
@@ -286,7 +289,9 @@ fn start_cedar_policy_watcher(client: kube::Client, cedar: Arc<PolicyEngine>) {
 
         loop {
             match watcher.next().await {
-                Some(Ok(Event::Apply(_))) | Some(Ok(Event::InitApply(_))) | Some(Ok(Event::Delete(_))) => {
+                Some(Ok(Event::Apply(_)))
+                | Some(Ok(Event::InitApply(_)))
+                | Some(Ok(Event::Delete(_))) => {
                     tracing::info!("CedarPolicy changed, reloading policies...");
                     if let Err(e) = cedar.reload(&client).await {
                         tracing::warn!(error = %e, "Failed to reload Cedar policies");
