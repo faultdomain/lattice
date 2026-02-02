@@ -1248,6 +1248,36 @@ fn find_available_port() -> Result<u16, String> {
     Ok(port)
 }
 
+/// Get proxy URL, creating a port-forward if necessary.
+///
+/// This is a convenience wrapper that uses an existing proxy URL if provided,
+/// or creates a new port-forward if not. The returned process handle must be
+/// kept alive to maintain the port-forward connection.
+///
+/// # Arguments
+/// * `kubeconfig` - Kubeconfig for the cluster
+/// * `existing_url` - Optional existing proxy URL to reuse
+///
+/// # Returns
+/// Tuple of (proxy_url, optional_port_forward_handle)
+#[cfg(feature = "provider-e2e")]
+pub fn get_or_create_proxy(
+    kubeconfig: &str,
+    existing_url: Option<&str>,
+) -> Result<(String, Option<std::process::Child>), String> {
+    match existing_url {
+        Some(url) => {
+            info!("[Helpers] Using existing proxy URL: {}", url);
+            Ok((url.to_string(), None))
+        }
+        None => {
+            info!("[Helpers] Creating new port-forward to proxy...");
+            let (url, pf) = start_proxy_port_forward(kubeconfig)?;
+            Ok((url, Some(pf)))
+        }
+    }
+}
+
 // =============================================================================
 // ServiceAccount Token Helpers
 // =============================================================================

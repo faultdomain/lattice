@@ -28,7 +28,7 @@ use tracing::info;
 
 use super::super::context::{init_test_env, InfraContext};
 use super::super::helpers::{
-    get_sa_token, http_get_with_token, run_cmd_allow_fail, start_proxy_port_forward,
+    get_or_create_proxy, get_sa_token, http_get_with_token, run_cmd_allow_fail,
     WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 use super::cedar::{apply_e2e_default_policy, remove_e2e_default_policy};
@@ -108,18 +108,23 @@ pub async fn wait_for_agent_ready(
 /// 1. Gets a ServiceAccount token from the parent cluster
 /// 2. Calls the auth proxy endpoint directly with curl
 /// 3. Verifies we get a valid K8s API response
+///
+/// # Arguments
+/// * `parent_kubeconfig` - Kubeconfig for the parent cluster
+/// * `child_cluster_name` - Name of the child cluster to access
+/// * `existing_proxy_url` - Optional existing proxy URL (avoids creating new port-forward)
 pub async fn test_proxy_access_to_child(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
+    existing_proxy_url: Option<&str>,
 ) -> Result<(), String> {
     info!(
         "[Integration/Proxy] Testing proxy access to {}...",
         child_cluster_name
     );
 
-    // Start port-forward to proxy (needed on macOS where Docker network isn't accessible)
-    let (proxy_url, _port_forward) = start_proxy_port_forward(parent_kubeconfig)?;
-    info!("[Integration/Proxy] Using proxy URL: {}", proxy_url);
+    // Get or create proxy connection
+    let (proxy_url, _port_forward) = get_or_create_proxy(parent_kubeconfig, existing_proxy_url)?;
 
     // Get a ServiceAccount token from the parent cluster
     let token = get_sa_token(parent_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
@@ -138,17 +143,23 @@ pub async fn test_proxy_access_to_child(
 /// Root (mgmt) → Child (workload) → Grandchild (workload2)
 ///
 /// The request should route through the hierarchy via gRPC tunnels.
+///
+/// # Arguments
+/// * `root_kubeconfig` - Kubeconfig for the root cluster
+/// * `grandchild_cluster_name` - Name of the grandchild cluster to access
+/// * `existing_proxy_url` - Optional existing proxy URL (avoids creating new port-forward)
 pub async fn test_proxy_access_to_grandchild(
     root_kubeconfig: &str,
     grandchild_cluster_name: &str,
+    existing_proxy_url: Option<&str>,
 ) -> Result<(), String> {
     info!(
         "[Integration/Proxy] Testing proxy access from root to grandchild {}...",
         grandchild_cluster_name
     );
 
-    // Start port-forward to proxy
-    let (proxy_url, _port_forward) = start_proxy_port_forward(root_kubeconfig)?;
+    // Get or create proxy connection
+    let (proxy_url, _port_forward) = get_or_create_proxy(root_kubeconfig, existing_proxy_url)?;
 
     // Get a ServiceAccount token from the root cluster
     let token = get_sa_token(root_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
@@ -271,11 +282,14 @@ async fn run_proxy_tests_inner(
     workload_cluster_name: &str,
     workload2_cluster_name: &str,
 ) -> Result<(), String> {
+    // Use existing proxy URL from context if available
+    let mgmt_proxy_url = ctx.mgmt_proxy_url.as_deref();
+
     // Wait for child agent
     wait_for_agent_ready(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
 
     // Test direct child access through proxy
-    test_proxy_access_to_child(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
+    test_proxy_access_to_child(&ctx.mgmt_kubeconfig, workload_cluster_name, mgmt_proxy_url).await?;
 
     // Wait for grandchild agent and test hierarchical access
     if ctx.has_workload() {
@@ -285,8 +299,8 @@ async fn run_proxy_tests_inner(
         )
         .await?;
 
-        // Test grandchild access through hierarchy
-        test_proxy_access_to_grandchild(&ctx.mgmt_kubeconfig, workload2_cluster_name).await?;
+        // Test grandchild access through hierarchy (use mgmt proxy for hierarchical access)
+        test_proxy_access_to_grandchild(&ctx.mgmt_kubeconfig, workload2_cluster_name, mgmt_proxy_url).await?;
     }
 
     info!("[Integration/Proxy] Proxy hierarchy tests complete");
@@ -321,7 +335,8 @@ async fn test_proxy_access_standalone() {
         .await
         .unwrap();
 
-    let result = test_proxy_access_to_child(&ctx.mgmt_kubeconfig, &workload_name).await;
+    // Use proxy URL from context if available, otherwise test will create its own
+    let result = test_proxy_access_to_child(&ctx.mgmt_kubeconfig, &workload_name, ctx.mgmt_proxy_url.as_deref()).await;
 
     // Cleanup
     remove_e2e_default_policy(&ctx.mgmt_kubeconfig);

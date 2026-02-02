@@ -106,13 +106,18 @@ async fn run_full_e2e() -> Result<(), String> {
     integration::cedar::run_cedar_hierarchy_tests(&ctx, WORKLOAD_CLUSTER_NAME).await?;
 
     // Test Cedar policies for access from workload -> workload2
+    // The workload cluster becomes the "parent" for this test, so we use workload_proxy_url
     if let Some(workload_kubeconfig) = &ctx.workload_kubeconfig {
-        let workload_ctx = super::context::InfraContext::new(
+        let mut workload_ctx = super::context::InfraContext::new(
             workload_kubeconfig.clone(),
             None,
             None,
             ctx.provider,
         );
+        // Pass workload's proxy URL so Cedar tests use the existing port-forward
+        if let Some(proxy_url) = &ctx.workload_proxy_url {
+            workload_ctx = workload_ctx.with_mgmt_proxy_url(proxy_url.clone());
+        }
         integration::cedar::run_cedar_hierarchy_tests(&workload_ctx, WORKLOAD2_CLUSTER_NAME)
             .await?;
     }

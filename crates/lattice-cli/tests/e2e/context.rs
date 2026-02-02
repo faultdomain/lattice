@@ -30,6 +30,12 @@ pub struct InfraContext {
 
     /// Infrastructure provider type
     pub provider: InfraProvider,
+
+    /// Mgmt proxy URL (if port-forward is active) - for accessing workload
+    pub mgmt_proxy_url: Option<String>,
+
+    /// Workload proxy URL (if port-forward is active) - for accessing workload2
+    pub workload_proxy_url: Option<String>,
 }
 
 impl InfraContext {
@@ -40,6 +46,8 @@ impl InfraContext {
             workload_kubeconfig: std::env::var("LATTICE_WORKLOAD_KUBECONFIG").ok(),
             workload2_kubeconfig: std::env::var("LATTICE_WORKLOAD2_KUBECONFIG").ok(),
             provider: Self::provider_from_env(),
+            mgmt_proxy_url: std::env::var("LATTICE_MGMT_PROXY_URL").ok(),
+            workload_proxy_url: std::env::var("LATTICE_WORKLOAD_PROXY_URL").ok(),
         })
     }
 
@@ -55,12 +63,26 @@ impl InfraContext {
             workload_kubeconfig,
             workload2_kubeconfig,
             provider,
+            mgmt_proxy_url: None,
+            workload_proxy_url: None,
         }
     }
 
     /// Create with only management cluster
     pub fn mgmt_only(mgmt_kubeconfig: String, provider: InfraProvider) -> Self {
         Self::new(mgmt_kubeconfig, None, None, provider)
+    }
+
+    /// Set mgmt proxy URL
+    pub fn with_mgmt_proxy_url(mut self, url: String) -> Self {
+        self.mgmt_proxy_url = Some(url);
+        self
+    }
+
+    /// Set workload proxy URL
+    pub fn with_workload_proxy_url(mut self, url: String) -> Self {
+        self.workload_proxy_url = Some(url);
+        self
     }
 
     /// Add workload cluster kubeconfig

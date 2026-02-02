@@ -441,13 +441,15 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     let workload_proxy = ProxySession::start(&workload_kubeconfig_path)?;
     let workload2_proxy_kc = workload_proxy.kubeconfig_for(WORKLOAD2_CLUSTER_NAME).await?;
 
-    // Build final context with proxy kubeconfigs
+    // Build final context with proxy kubeconfigs and URLs
     let ctx = InfraContext::new(
         mgmt_kubeconfig_path.clone(),
         Some(workload_proxy_kc.clone()),
         Some(workload2_proxy_kc.clone()),
         mgmt_provider,
-    );
+    )
+    .with_mgmt_proxy_url(mgmt_proxy.url.clone())
+    .with_workload_proxy_url(workload_proxy.url.clone());
 
     // =========================================================================
     // Setup Complete

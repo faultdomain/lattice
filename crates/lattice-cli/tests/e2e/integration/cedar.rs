@@ -27,8 +27,8 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::super::context::{init_test_env, InfraContext};
 use super::super::helpers::{
-    get_sa_token, http_get_with_token, proxy_service_exists, run_cmd, run_cmd_allow_fail,
-    start_proxy_port_forward,
+    get_or_create_proxy, get_sa_token, http_get_with_token, proxy_service_exists, run_cmd,
+    run_cmd_allow_fail,
 };
 
 // =============================================================================
@@ -324,9 +324,11 @@ fn verify_sa_access_denied(proxy_url: &str, token: &str, cluster_name: &str) -> 
 /// # Arguments
 /// * `parent_kubeconfig` - Kubeconfig for the parent cluster (where proxy runs)
 /// * `child_cluster_name` - Name of the child cluster to test access to
+/// * `existing_proxy_url` - Optional existing proxy URL (avoids creating new port-forward)
 pub async fn run_cedar_proxy_test(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
+    existing_proxy_url: Option<&str>,
 ) -> Result<(), String> {
     info!(
         "[Integration/Cedar] Running Cedar proxy test for access to {}...",
@@ -338,9 +340,8 @@ pub async fn run_cedar_proxy_test(
     remove_e2e_default_policy(parent_kubeconfig);
     sleep_sync(Duration::from_secs(2));
 
-    // Start port-forward to proxy (needed on macOS where Docker network isn't accessible)
-    let (proxy_url, _port_forward) = start_proxy_port_forward(parent_kubeconfig)?;
-    info!("[Integration/Cedar] Using proxy URL: {}", proxy_url);
+    // Get or create proxy connection
+    let (proxy_url, _port_forward) = get_or_create_proxy(parent_kubeconfig, existing_proxy_url)?;
 
     // Setup test resources on parent cluster
     setup_cedar_test_resources(parent_kubeconfig).await?;
@@ -387,9 +388,11 @@ pub async fn run_cedar_proxy_test(
 /// # Arguments
 /// * `parent_kubeconfig` - Kubeconfig for the parent cluster (where proxy runs)
 /// * `child_cluster_name` - Name of the child cluster to test access to
+/// * `existing_proxy_url` - Optional existing proxy URL (avoids creating new port-forward)
 pub async fn run_cedar_group_test(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
+    existing_proxy_url: Option<&str>,
 ) -> Result<(), String> {
     info!(
         "[Integration/Cedar] Running group policy test for {}...",
@@ -400,8 +403,8 @@ pub async fn run_cedar_group_test(
     remove_e2e_default_policy(parent_kubeconfig);
     sleep_sync(Duration::from_secs(2));
 
-    // Start port-forward to proxy
-    let (proxy_url, _port_forward) = start_proxy_port_forward(parent_kubeconfig)?;
+    // Get or create proxy connection
+    let (proxy_url, _port_forward) = get_or_create_proxy(parent_kubeconfig, existing_proxy_url)?;
 
     // Setup
     setup_cedar_test_resources(parent_kubeconfig).await?;
@@ -449,6 +452,7 @@ pub async fn run_cedar_group_test(
 ///
 /// This is the main entry point for E2E tests.
 /// If the proxy service is not deployed, tests are skipped gracefully.
+/// Uses the proxy URL from the context if available to avoid creating redundant port-forwards.
 pub async fn run_cedar_hierarchy_tests(
     ctx: &InfraContext,
     child_cluster_name: &str,
@@ -465,11 +469,14 @@ pub async fn run_cedar_hierarchy_tests(
         return Ok(());
     }
 
+    // Use existing proxy URL from context if available
+    let proxy_url = ctx.mgmt_proxy_url.as_deref();
+
     // Run SA-specific policy test
-    run_cedar_proxy_test(&ctx.mgmt_kubeconfig, child_cluster_name).await?;
+    run_cedar_proxy_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
 
     // Run group policy test
-    run_cedar_group_test(&ctx.mgmt_kubeconfig, child_cluster_name).await?;
+    run_cedar_group_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
 
     info!("[Integration/Cedar] All Cedar hierarchy tests passed!");
     Ok(())
@@ -524,6 +531,7 @@ fn sleep_sync(duration: Duration) {
 /// Standalone test - test SA token authentication with Cedar policies
 ///
 /// Requires `LATTICE_MGMT_KUBECONFIG` and `LATTICE_CHILD_CLUSTER_NAME` environment variables.
+/// Optionally set `LATTICE_MGMT_PROXY_URL` to reuse an existing port-forward.
 #[tokio::test]
 #[ignore]
 async fn test_cedar_sa_auth_standalone() {
@@ -531,12 +539,14 @@ async fn test_cedar_sa_auth_standalone() {
     let child_cluster_name =
         std::env::var("LATTICE_CHILD_CLUSTER_NAME").unwrap_or_else(|_| "e2e-workload".to_string());
 
-    run_cedar_proxy_test(&ctx.mgmt_kubeconfig, &child_cluster_name)
+    run_cedar_proxy_test(&ctx.mgmt_kubeconfig, &child_cluster_name, ctx.mgmt_proxy_url.as_deref())
         .await
         .unwrap();
 }
 
 /// Standalone test - test group-based Cedar policies
+///
+/// Optionally set `LATTICE_MGMT_PROXY_URL` to reuse an existing port-forward.
 #[tokio::test]
 #[ignore]
 async fn test_cedar_group_policy_standalone() {
@@ -544,7 +554,7 @@ async fn test_cedar_group_policy_standalone() {
     let child_cluster_name =
         std::env::var("LATTICE_CHILD_CLUSTER_NAME").unwrap_or_else(|_| "e2e-workload".to_string());
 
-    run_cedar_group_test(&ctx.mgmt_kubeconfig, &child_cluster_name)
+    run_cedar_group_test(&ctx.mgmt_kubeconfig, &child_cluster_name, ctx.mgmt_proxy_url.as_deref())
         .await
         .unwrap();
 }
