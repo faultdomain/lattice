@@ -59,7 +59,9 @@ pub async fn ensure_cell_service_exists(
         },
         spec: Some(ServiceSpec {
             type_: Some("LoadBalancer".to_string()),
-            selector: Some(labels),
+            // No selector - leader election manages Endpoints directly
+            // This ensures clean handoff: new leader overwrites Endpoints with its own IP
+            selector: None,
             load_balancer_ip: load_balancer_ip.clone(),
             ports: Some(vec![
                 ServicePort {

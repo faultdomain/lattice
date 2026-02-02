@@ -2,11 +2,19 @@
 //!
 //! This is the main entry point. It handles CLI parsing and starts subsystems.
 //! All business logic lives in library modules.
+//!
+//! # HA Leader Election
+//!
+//! When running with replicas > 1, pods compete for leadership using Kubernetes
+//! Leases. Only the leader runs controllers and accepts traffic. The leader writes
+//! Endpoints directly to route all Service traffic to itself.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::routing::get;
+use axum::Router;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use kube::runtime::watcher::{self, Event};
@@ -15,7 +23,9 @@ use kube::{Api, CustomResourceExt};
 use lattice_api::{AuthChain, PolicyEngine, SaValidator, ServerConfig as AuthProxyConfig};
 use lattice_common::crd::CedarPolicy;
 use lattice_common::{
-    lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
+    lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
+    DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_HEALTH_PORT, DEFAULT_PROXY_PORT,
+    LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
 };
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
@@ -122,7 +132,39 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     // Create client with proper timeouts (5s connect, 30s read)
     let client = lattice_common::kube_utils::create_client(None).await?;
 
-    // Install CRDs and infrastructure
+    // Get pod identity from Downward API env vars (set in deployment manifest)
+    let pod_name = std::env::var("POD_NAME").unwrap_or_else(|_| {
+        // Fallback for local development
+        format!("lattice-operator-{}", uuid::Uuid::new_v4())
+    });
+    let pod_ip = std::env::var("POD_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
+
+    // Start health server (runs on all pods for K8s probes)
+    let health_handle = start_health_server();
+
+    // Acquire leadership using Kubernetes Lease BEFORE any initialization
+    // Only the leader should install CRDs and infrastructure
+    let elector = Arc::new(LeaderElector::new(
+        client.clone(),
+        LEADER_LEASE_NAME,
+        LATTICE_SYSTEM_NAMESPACE,
+        &pod_name,
+    ));
+    let mut guard = elector.acquire().await?;
+
+    // Claim traffic by writing Endpoints to route all Service traffic to this pod
+    let ports = vec![
+        ("bootstrap".to_string(), DEFAULT_BOOTSTRAP_PORT as i32),
+        ("grpc".to_string(), DEFAULT_GRPC_PORT as i32),
+        ("proxy".to_string(), DEFAULT_PROXY_PORT as i32),
+        ("auth-proxy".to_string(), DEFAULT_AUTH_PROXY_PORT as i32),
+    ];
+    tracing::info!(pod = %pod_name, ip = %pod_ip, "Claiming traffic via Endpoints...");
+    guard
+        .claim_traffic(CELL_SERVICE_NAME, &pod_ip, &ports)
+        .await?;
+
+    // Install CRDs and infrastructure (only leader does this)
     ensure_crds_installed(&client).await?;
     ensure_infrastructure(&client).await?;
     wait_for_api_ready(&client).await?;
@@ -191,12 +233,19 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         );
     }
 
-    // Run controllers until shutdown
-    controller_runner::run_controllers(client, mode, self_cluster_name, parent_servers.clone())
-        .await;
+    // Run controllers until shutdown OR leadership lost
+    tokio::select! {
+        _ = controller_runner::run_controllers(client, mode, self_cluster_name, parent_servers.clone()) => {
+            tracing::info!("Controllers exited");
+        }
+        _ = guard.lost() => {
+            tracing::warn!("Leadership lost, shutting down");
+        }
+    }
 
-    // Shutdown
+    // Shutdown (no Endpoints cleanup needed - new leader will overwrite)
     agent_token.cancel();
+    health_handle.abort();
     if let Some(handle) = auth_proxy_handle {
         handle.abort();
     }
@@ -205,6 +254,31 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     }
     tracing::info!("Shutting down");
     Ok(())
+}
+
+/// Start the health check server for Kubernetes probes
+///
+/// Runs on all pods:
+/// - `/healthz` - liveness probe (process alive)
+/// - `/readyz` - readiness probe (ready to become leader or already leading)
+fn start_health_server() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let app = Router::new()
+            .route("/healthz", get(|| async { "ok" }))
+            .route("/readyz", get(|| async { "ok" }));
+
+        let addr: SocketAddr = ([0, 0, 0, 0], DEFAULT_HEALTH_PORT).into();
+        tracing::info!(port = DEFAULT_HEALTH_PORT, "Health server started");
+
+        if let Err(e) = axum::serve(
+            tokio::net::TcpListener::bind(addr).await.unwrap(),
+            app.into_make_service(),
+        )
+        .await
+        {
+            tracing::error!(error = %e, "Health server error");
+        }
+    })
 }
 
 /// Start the auth proxy server for authenticated cluster access
@@ -270,10 +344,7 @@ async fn start_auth_proxy(
 
     // Use LB address for base_url if available (for external kubeconfig generation)
     // Fall back to internal service DNS if no LB
-    let base_host = extra_sans
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or(&cell_dns);
+    let base_host = extra_sans.first().map(|s| s.as_str()).unwrap_or(&cell_dns);
     let base_url = format!("https://{}:{}", base_host, DEFAULT_AUTH_PROXY_PORT);
 
     let config = AuthProxyConfig {

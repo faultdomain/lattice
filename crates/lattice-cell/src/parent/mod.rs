@@ -70,7 +70,8 @@ pub struct ParentConfig {
 impl Default for ParentConfig {
     fn default() -> Self {
         Self {
-            cluster_name: std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "unknown".to_string()),
+            cluster_name: std::env::var("LATTICE_CLUSTER_NAME")
+                .unwrap_or_else(|_| "unknown".to_string()),
             bootstrap_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_BOOTSTRAP_PORT)
                 .parse()
                 .expect("hardcoded socket address is valid"),

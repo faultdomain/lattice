@@ -9,6 +9,7 @@ pub mod error;
 pub mod fips;
 pub mod graph;
 pub mod kube_utils;
+pub mod leader_election;
 pub mod mesh;
 pub mod policy;
 pub mod protocol;
@@ -24,6 +25,7 @@ pub use kube_utils::{
     apply_manifest_with_discovery, apply_manifests_with_discovery, kind_priority, pluralize_kind,
     ApplyOptions,
 };
+pub use leader_election::{LeaderElectionError, LeaderElector, LeaderGuard, LEADER_LEASE_NAME};
 pub use protocol::{CsrRequest, CsrResponse, DistributableResources};
 
 /// Result type alias using our custom Error type
@@ -40,6 +42,9 @@ pub const DEFAULT_PROXY_PORT: u16 = 8081;
 
 /// Default port for the authenticated K8s API proxy (user/service access with Cedar)
 pub const DEFAULT_AUTH_PROXY_PORT: u16 = 8082;
+
+/// Default port for health check endpoints (liveness/readiness probes)
+pub const DEFAULT_HEALTH_PORT: u16 = 8080;
 
 /// Namespace for Lattice system resources (CA, credentials, operator)
 pub const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";

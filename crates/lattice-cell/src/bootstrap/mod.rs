@@ -45,11 +45,13 @@ use axum::Json;
 use dashmap::DashMap;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, LocalObjectReference, Namespace, PodSpec, PodTemplateSpec,
-    Secret, SecretVolumeSource, ServiceAccount, Volume, VolumeMount,
+    Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, LocalObjectReference, Namespace,
+    ObjectFieldSelector, PodSpec, PodTemplateSpec, Probe, Secret, SecretVolumeSource,
+    ServiceAccount, Volume, VolumeMount,
 };
 use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::ByteString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -500,7 +502,8 @@ impl DefaultManifestGenerator {
                 ..Default::default()
             },
             spec: Some(DeploymentSpec {
-                replicas: Some(1),
+                // HA: 2 replicas with leader election - only leader runs controllers
+                replicas: Some(2),
                 selector: LabelSelector {
                     match_labels: Some(labels.clone()),
                     ..Default::default()
@@ -539,11 +542,47 @@ impl DefaultManifestGenerator {
                             // No args needed - controller is default mode
                             // Controller reads LatticeCluster CRD to determine behavior
                             env: Some({
-                                let mut envs = vec![EnvVar {
-                                    name: "RUST_LOG".to_string(),
-                                    value: Some("info,lattice=debug".to_string()),
-                                    ..Default::default()
-                                }];
+                                let mut envs = vec![
+                                    EnvVar {
+                                        name: "RUST_LOG".to_string(),
+                                        value: Some("info,lattice=debug".to_string()),
+                                        ..Default::default()
+                                    },
+                                    // Downward API env vars for leader election identity
+                                    EnvVar {
+                                        name: "POD_NAME".to_string(),
+                                        value_from: Some(EnvVarSource {
+                                            field_ref: Some(ObjectFieldSelector {
+                                                field_path: "metadata.name".to_string(),
+                                                ..Default::default()
+                                            }),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    },
+                                    EnvVar {
+                                        name: "POD_NAMESPACE".to_string(),
+                                        value_from: Some(EnvVarSource {
+                                            field_ref: Some(ObjectFieldSelector {
+                                                field_path: "metadata.namespace".to_string(),
+                                                ..Default::default()
+                                            }),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    },
+                                    EnvVar {
+                                        name: "POD_IP".to_string(),
+                                        value_from: Some(EnvVarSource {
+                                            field_ref: Some(ObjectFieldSelector {
+                                                field_path: "status.podIP".to_string(),
+                                                ..Default::default()
+                                            }),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    },
+                                ];
                                 if let Some(name) = cluster_name {
                                     envs.push(EnvVar {
                                         name: "LATTICE_CLUSTER_NAME".to_string(),
@@ -595,7 +634,34 @@ impl DefaultManifestGenerator {
                                     protocol: Some("TCP".to_string()),
                                     ..Default::default()
                                 },
+                                ContainerPort {
+                                    name: Some("health".to_string()),
+                                    container_port: lattice_common::DEFAULT_HEALTH_PORT as i32,
+                                    protocol: Some("TCP".to_string()),
+                                    ..Default::default()
+                                },
                             ]),
+                            // Health probes for HA leader election
+                            liveness_probe: Some(Probe {
+                                http_get: Some(HTTPGetAction {
+                                    path: Some("/healthz".to_string()),
+                                    port: IntOrString::Int(lattice_common::DEFAULT_HEALTH_PORT as i32),
+                                    ..Default::default()
+                                }),
+                                initial_delay_seconds: Some(5),
+                                period_seconds: Some(10),
+                                ..Default::default()
+                            }),
+                            readiness_probe: Some(Probe {
+                                http_get: Some(HTTPGetAction {
+                                    path: Some("/readyz".to_string()),
+                                    port: IntOrString::Int(lattice_common::DEFAULT_HEALTH_PORT as i32),
+                                    ..Default::default()
+                                }),
+                                initial_delay_seconds: Some(5),
+                                period_seconds: Some(5),
+                                ..Default::default()
+                            }),
                             ..Default::default()
                         }],
                         ..Default::default()
