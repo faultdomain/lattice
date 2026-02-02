@@ -45,18 +45,42 @@ pub trait K8sRequestForwarder: Send + Sync {
 /// Shared forwarder type used by the agent for hierarchical routing.
 pub type SharedK8sForwarder = Arc<dyn K8sRequestForwarder>;
 
-/// Build a K8s Status response with the given status code and message.
-/// This creates a proper K8s API Status object in the response body.
+// =============================================================================
+// Error Response Builders
+// =============================================================================
+// There are two types of error responses, used at different layers:
+//
+// 1. `build_k8s_status_response` - Creates a K8s Status JSON body for HTTP clients.
+//    Used when responding to external clients (kubectl) who expect K8s API format.
+//    The body contains a proper Status object; the `.error` field is empty.
+//
+// 2. `build_grpc_error_response` - Sets the `.error` field for gRPC protocol.
+//    Used for internal errors within the agent/cell gRPC communication.
+//    The receiving cell converts this to TunnelError::AgentError.
+// =============================================================================
+
+/// Build a K8s Status response for HTTP clients.
+///
+/// Creates a proper K8s API Status object in the response body. Use this when
+/// the response will be sent directly to an HTTP client (kubectl, controllers).
+///
+/// The `.error` field is left empty - the error info is in the JSON body.
 pub fn build_k8s_status_response(
     request_id: &str,
     status_code: u32,
     message: &str,
 ) -> KubernetesResponse {
     let reason = match status_code {
+        400 => "BadRequest",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "NotFound",
+        409 => "Conflict",
+        500 => "InternalError",
         502 => "BadGateway",
+        503 => "ServiceUnavailable",
         504 => "GatewayTimeout",
-        _ => "InternalError",
+        _ => "Unknown",
     };
 
     KubernetesResponse {
@@ -70,6 +94,25 @@ pub fn build_k8s_status_response(
         error: String::new(),
         streaming: false,
         stream_end: false,
+    }
+}
+
+/// Build an error response for the gRPC protocol layer.
+///
+/// Sets the `.error` field which signals to the receiving cell that the request
+/// failed. The cell will convert this to `TunnelError::AgentError`.
+///
+/// Use this for internal errors during request execution (not for HTTP clients).
+pub fn build_grpc_error_response(
+    request_id: &str,
+    status_code: u32,
+    error: &str,
+) -> KubernetesResponse {
+    KubernetesResponse {
+        request_id: request_id.to_string(),
+        status_code,
+        error: error.to_string(),
+        ..Default::default()
     }
 }
 
@@ -139,7 +182,7 @@ pub use pivot::{
     PivotError,
 };
 pub use subtree::SubtreeSender;
-pub use watch::{build_k8s_error_response, execute_watch, WatchRegistry};
+pub use watch::{execute_watch, WatchRegistry};
 
 // Re-export proto types for convenience
 pub use lattice_proto::{
@@ -150,3 +193,71 @@ pub use lattice_proto::{
 
 // Re-export mTLS from infra
 pub use lattice_infra::{ClientMtlsConfig, MtlsError, ServerMtlsConfig};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_k8s_status_response_404() {
+        let resp = build_k8s_status_response("req-1", 404, "not found");
+        assert_eq!(resp.request_id, "req-1");
+        assert_eq!(resp.status_code, 404);
+        assert!(resp.error.is_empty());
+        assert_eq!(resp.content_type, "application/json");
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("\"kind\":\"Status\""));
+        assert!(body.contains("\"reason\":\"NotFound\""));
+        assert!(body.contains("\"code\":404"));
+    }
+
+    #[test]
+    fn test_build_k8s_status_response_all_codes() {
+        // Test all mapped status codes have correct reasons
+        let cases = [
+            (400, "BadRequest"),
+            (401, "Unauthorized"),
+            (403, "Forbidden"),
+            (404, "NotFound"),
+            (409, "Conflict"),
+            (500, "InternalError"),
+            (502, "BadGateway"),
+            (503, "ServiceUnavailable"),
+            (504, "GatewayTimeout"),
+            (418, "Unknown"), // Unmapped code
+        ];
+
+        for (code, expected_reason) in cases {
+            let resp = build_k8s_status_response("test", code, "msg");
+            let body = String::from_utf8_lossy(&resp.body);
+            assert!(
+                body.contains(&format!("\"reason\":\"{}\"", expected_reason)),
+                "Code {} should have reason {}, got body: {}",
+                code,
+                expected_reason,
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_grpc_error_response() {
+        let resp = build_grpc_error_response("req-2", 500, "internal error");
+        assert_eq!(resp.request_id, "req-2");
+        assert_eq!(resp.status_code, 500);
+        assert_eq!(resp.error, "internal error");
+        assert!(resp.body.is_empty());
+        assert!(!resp.streaming);
+        assert!(!resp.stream_end);
+    }
+
+    #[test]
+    fn test_build_cluster_not_found_response() {
+        let resp = build_cluster_not_found_response("my-cluster", "req-3");
+        assert_eq!(resp.request_id, "req-3");
+        assert_eq!(resp.status_code, 404);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("my-cluster"));
+        assert!(body.contains("not found in subtree"));
+    }
+}

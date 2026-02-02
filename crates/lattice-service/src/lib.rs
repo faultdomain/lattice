@@ -11,7 +11,6 @@
 pub mod compiler;
 pub mod controller;
 pub mod ingress;
-pub mod mesh;
 pub mod policy;
 pub mod workload;
 

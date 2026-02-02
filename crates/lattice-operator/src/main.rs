@@ -151,11 +151,9 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
             let client = client.clone();
             let name = name.clone();
             let token = agent_token.clone();
-            let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> =
-                Arc::new(SubtreeForwarder::new(
-                    servers.subtree_registry(),
-                    servers.agent_registry(),
-                ));
+            let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> = Arc::new(
+                SubtreeForwarder::new(servers.subtree_registry(), servers.agent_registry()),
+            );
             tokio::spawn(async move {
                 tokio::select! {
                     _ = token.cancelled() => {}
@@ -186,7 +184,10 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     } else {
         parent_servers = None;
         auth_proxy_handle = None;
-        tracing::info!("Skipping cell infrastructure (not needed for {:?} mode)", mode);
+        tracing::info!(
+            "Skipping cell infrastructure (not needed for {:?} mode)",
+            mode
+        );
     }
 
     // Run controllers until shutdown
@@ -239,7 +240,7 @@ async fn start_auth_proxy(
     // Start Cedar policy watcher to reload policies when CRDs change
     start_cedar_policy_watcher(client.clone(), cedar.clone());
 
-    // Generate server certificate
+    // Generate server certificate and get CA cert for kubeconfig generation
     let ca_bundle = parent_servers.ca_bundle().read().await;
     let cell_dns = lattice_svc_dns(CELL_SERVICE_NAME);
     let sans = vec!["localhost", "127.0.0.1", &cell_dns];
@@ -250,6 +251,7 @@ async fn start_auth_proxy(
             return None;
         }
     };
+    let ca_cert_pem = ca_bundle.trust_bundle_pem();
     drop(ca_bundle);
 
     // Create server config
@@ -271,6 +273,7 @@ async fn start_auth_proxy(
         addr,
         cert_pem,
         key_pem,
+        ca_cert_pem,
         k8s_api_url: "https://kubernetes.default.svc".to_string(),
         cluster_name: cluster_name.clone(),
         base_url,

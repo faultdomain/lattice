@@ -213,7 +213,9 @@ fn create_service_controllers(
     (Some(svc_ctrl), Some(ext_ctrl))
 }
 
-fn create_cloud_provider_controller(client: Client) -> Option<impl std::future::Future<Output = ()>> {
+fn create_cloud_provider_controller(
+    client: Client,
+) -> Option<impl std::future::Future<Output = ()>> {
     let cloud_providers: Api<CloudProvider> = Api::all(client.clone());
     let ctx = Arc::new(ControllerContext::new(client));
 
@@ -232,7 +234,9 @@ fn create_cloud_provider_controller(client: Client) -> Option<impl std::future::
     )
 }
 
-fn create_secrets_provider_controller(client: Client) -> Option<impl std::future::Future<Output = ()>> {
+fn create_secrets_provider_controller(
+    client: Client,
+) -> Option<impl std::future::Future<Output = ()>> {
     let secrets_providers: Api<SecretsProvider> = Api::all(client.clone());
     let ctx = Arc::new(ControllerContext::new(client));
 

@@ -11,7 +11,31 @@
 //! LATTICE_WORKLOAD2_KUBECONFIG=/path/to/workload2-kubeconfig
 //! ```
 
+#[cfg(feature = "provider-e2e")]
+use super::helpers::ProxySession;
 use super::providers::InfraProvider;
+
+/// Identifies which cluster level to operate on
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterLevel {
+    /// Management cluster (accessed directly)
+    Mgmt,
+    /// First workload cluster (accessed via mgmt proxy)
+    Workload,
+    /// Second workload cluster (accessed via workload proxy)
+    Workload2,
+}
+
+impl ClusterLevel {
+    /// Returns a display name for logging
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ClusterLevel::Mgmt => "management",
+            ClusterLevel::Workload => "workload",
+            ClusterLevel::Workload2 => "workload2",
+        }
+    }
+}
 
 /// Cluster infrastructure context for tests
 ///
@@ -121,6 +145,15 @@ impl InfraContext {
             .ok_or_else(|| "Workload2 kubeconfig not set".to_string())
     }
 
+    /// Get kubeconfig for a specific cluster level
+    pub fn kubeconfig_for(&self, level: ClusterLevel) -> Result<&str, String> {
+        match level {
+            ClusterLevel::Mgmt => Ok(&self.mgmt_kubeconfig),
+            ClusterLevel::Workload => self.require_workload(),
+            ClusterLevel::Workload2 => self.require_workload2(),
+        }
+    }
+
     /// Get all kubeconfigs as (name, path) tuples
     pub fn all_kubeconfigs(&self) -> Vec<(&str, &str)> {
         let mut configs = vec![("mgmt", self.mgmt_kubeconfig.as_str())];
@@ -159,10 +192,130 @@ pub fn init_e2e_test() {
         .try_init();
 }
 
-/// Initialize test environment and load config from env
-pub fn init_test_env(require_msg: &str) -> InfraContext {
-    init_e2e_test();
-    InfraContext::from_env().expect(require_msg)
+// =============================================================================
+// Test Session with Managed Proxy Connections
+// =============================================================================
+
+/// A test session that manages proxy connections for the duration of the test.
+///
+/// When proxy kubeconfigs are used, this struct ensures the required port-forwards
+/// are running. The port-forwards are automatically stopped when the session is dropped.
+///
+/// # Example
+///
+/// ```ignore
+/// let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG")?;
+/// // Use session.ctx for test operations
+/// // Port-forwards stay alive while session is in scope
+/// ```
+#[cfg(feature = "provider-e2e")]
+pub struct TestSession {
+    /// Infrastructure context with kubeconfig paths
+    pub ctx: InfraContext,
+    /// Proxy session to mgmt cluster (keeps port-forward alive for workload access)
+    mgmt_proxy: Option<ProxySession>,
+    /// Proxy session to workload cluster (keeps port-forward alive for workload2 access)
+    workload_proxy: Option<ProxySession>,
+}
+
+#[cfg(feature = "provider-e2e")]
+impl TestSession {
+    /// Create a test session from environment variables.
+    ///
+    /// This starts any required port-forwards for proxy kubeconfigs.
+    /// The port-forwards are kept alive while the session exists.
+    pub fn from_env(require_msg: &str) -> Result<Self, String> {
+        init_e2e_test();
+        let mut ctx = InfraContext::from_env().ok_or(require_msg)?;
+
+        // Start port-forward to mgmt proxy if we have workload kubeconfig
+        // (workload is accessed through mgmt's proxy)
+        let mgmt_proxy = if ctx.workload_kubeconfig.is_some() {
+            match ProxySession::start(&ctx.mgmt_kubeconfig) {
+                Ok(session) => {
+                    ctx.mgmt_proxy_url = Some(session.url.clone());
+                    Some(session)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to start mgmt proxy session: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Start port-forward to workload proxy if we have workload2 kubeconfig
+        // AND we have a working mgmt proxy (workload2 is accessed through workload's proxy)
+        let workload_proxy = if ctx.workload2_kubeconfig.is_some() && mgmt_proxy.is_some() {
+            // We need the workload's direct kubeconfig to start its proxy session
+            // For now, try to derive it from the proxy kubeconfig path
+            if let Some(ref workload_kc) = ctx.workload_kubeconfig {
+                // If this is a proxy kubeconfig, we can't start workload's proxy from it
+                // because we'd need the direct kubeconfig. Skip for now.
+                if workload_kc.contains("-proxy-") {
+                    tracing::info!(
+                        "Skipping workload proxy - would need workload's direct kubeconfig"
+                    );
+                    None
+                } else {
+                    match ProxySession::start(workload_kc) {
+                        Ok(session) => {
+                            ctx.workload_proxy_url = Some(session.url.clone());
+                            Some(session)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to start workload proxy session: {}", e);
+                            None
+                        }
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(Self {
+            ctx,
+            mgmt_proxy,
+            workload_proxy,
+        })
+    }
+
+    /// Rebuild operators and restart port-forwards.
+    ///
+    /// This is useful when you need to deploy new code to the operators.
+    /// After rebuilding, the port-forwards are automatically restarted
+    /// since the operator pods (which include lattice-cell) are replaced.
+    pub async fn rebuild_operators(&mut self, image: &str) -> Result<(), String> {
+        use super::helpers::rebuild_and_restart_operators;
+
+        let kubeconfigs = self.ctx.all_kubeconfigs();
+        rebuild_and_restart_operators(image, &kubeconfigs).await?;
+
+        // Restart port-forwards since the operator pods were replaced
+        self.restart_port_forwards()
+    }
+
+    /// Restart port-forwards if they died.
+    ///
+    /// Call this after any operation that might kill the operator pods,
+    /// such as rebuilding or chaos testing.
+    pub fn restart_port_forwards(&mut self) -> Result<(), String> {
+        if let Some(ref mut proxy) = self.mgmt_proxy {
+            proxy.ensure_alive()?;
+            self.ctx.mgmt_proxy_url = Some(proxy.url.clone());
+        }
+
+        if let Some(ref mut proxy) = self.workload_proxy {
+            proxy.ensure_alive()?;
+            self.ctx.workload_proxy_url = Some(proxy.url.clone());
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

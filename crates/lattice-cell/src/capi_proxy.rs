@@ -216,6 +216,12 @@ async fn proxy_handler(
             query: query.to_string(),
             body: Vec::new(), // Read-only, no body
             content_type: String::new(),
+            accept: request
+                .headers()
+                .get("accept")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string(),
             target_cluster: cluster_name.to_string(),
             source_user: "system:capi-proxy".to_string(),
             source_groups: vec!["system:masters".to_string()],

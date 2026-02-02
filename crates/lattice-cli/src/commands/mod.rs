@@ -11,6 +11,7 @@ use crate::{Error, Result};
 
 pub mod install;
 pub mod kind_utils;
+pub mod token;
 pub mod uninstall;
 
 /// Build clusterctl init arguments for a given provider type.

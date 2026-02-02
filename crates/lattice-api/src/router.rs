@@ -24,6 +24,13 @@ const CA_CERT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 /// Shared HTTP client for local K8s API requests
 static K8S_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// Strip /clusters/{cluster_name} prefix from a path to get the K8s API path.
+/// e.g., /clusters/e2e-mgmt/api/v1/namespaces -> /api/v1/namespaces
+fn strip_cluster_prefix<'a>(full_path: &'a str, cluster_name: &str) -> &'a str {
+    let prefix = format!("/clusters/{}", cluster_name);
+    full_path.strip_prefix(&prefix).unwrap_or(full_path)
+}
+
 /// Route a request to the target cluster
 ///
 /// Authorization is handled by Cedar before this function is called.
@@ -75,17 +82,7 @@ async fn route_to_local_api(
 ) -> Result<Response<Body>, Error> {
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let full_path = uri.path();
-
-    // Strip /clusters/{cluster_name} prefix to get the K8s API path
-    // e.g., /clusters/e2e-mgmt/api/v1/namespaces -> /api/v1/namespaces
-    let cluster_prefix = format!("/clusters/{}", cluster_name);
-    let path = if full_path.starts_with(&cluster_prefix) {
-        &full_path[cluster_prefix.len()..]
-    } else {
-        full_path
-    };
-
+    let path = strip_cluster_prefix(uri.path(), cluster_name);
     let query = uri.query();
 
     debug!(
@@ -189,21 +186,17 @@ async fn route_to_child_cluster(
 
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let full_path = uri.path();
-
-    // Strip /clusters/{cluster_name} prefix to get the K8s API path
-    // e.g., /clusters/e2e-workload/api/v1/namespaces -> /api/v1/namespaces
-    let cluster_prefix = format!("/clusters/{}", cluster_name);
-    let path = if full_path.starts_with(&cluster_prefix) {
-        full_path[cluster_prefix.len()..].to_string()
-    } else {
-        full_path.to_string()
-    };
-
+    let path = strip_cluster_prefix(uri.path(), cluster_name).to_string();
     let query = uri.query().unwrap_or("").to_string();
     let content_type = request
         .headers()
         .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let accept = request
+        .headers()
+        .get("accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
@@ -226,6 +219,7 @@ async fn route_to_child_cluster(
             query,
             body: body.to_vec(),
             content_type,
+            accept,
             target_cluster: cluster_name.to_string(),
             source_user: identity.username.clone(),
             source_groups: identity.groups.clone(),
@@ -284,14 +278,29 @@ async fn read_service_account_token() -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use lattice_cell::k8s_tunnel::is_watch_query;
+    use super::*;
 
     #[test]
-    fn test_is_watch_query() {
-        assert!(is_watch_query("watch=true"));
-        assert!(is_watch_query("watch=1"));
-        assert!(is_watch_query("labelSelector=app&watch=true"));
-        assert!(!is_watch_query("watch=false"));
-        assert!(!is_watch_query(""));
+    fn test_strip_cluster_prefix() {
+        assert_eq!(
+            strip_cluster_prefix("/clusters/e2e-mgmt/api/v1/pods", "e2e-mgmt"),
+            "/api/v1/pods"
+        );
+    }
+
+    #[test]
+    fn test_strip_cluster_prefix_no_match() {
+        assert_eq!(
+            strip_cluster_prefix("/api/v1/pods", "e2e-mgmt"),
+            "/api/v1/pods"
+        );
+    }
+
+    #[test]
+    fn test_strip_cluster_prefix_root_path() {
+        assert_eq!(
+            strip_cluster_prefix("/clusters/test-cluster", "test-cluster"),
+            ""
+        );
     }
 }

@@ -30,8 +30,8 @@ use crate::crd::{
 };
 use crate::graph::ServiceGraph;
 use crate::ingress::{Certificate, Gateway, HttpRoute};
-use crate::mesh;
 use crate::Error;
+use lattice_common::mesh;
 
 // =============================================================================
 // Traits for dependency injection and testability

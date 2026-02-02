@@ -824,7 +824,7 @@ impl GeneratedWorkloads {
 // =============================================================================
 
 use crate::crd::{DeployStrategy, LatticeService, LatticeServiceSpec, ProviderType};
-use crate::mesh;
+use lattice_common::mesh;
 
 /// Compiler for generating Kubernetes workload resources from LatticeService
 ///

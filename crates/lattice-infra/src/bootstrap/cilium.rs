@@ -11,6 +11,9 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tracing::info;
 
+use lattice_common::mesh::{
+    CILIUM_WAYPOINT_FOR_LABEL, HBONE_PORT, ISTIOD_XDS_PORT, WAYPOINT_FOR_SERVICE,
+};
 use lattice_common::policy::{
     CiliumClusterwideNetworkPolicy, CiliumClusterwideSpec, CiliumEgressRule, CiliumIngressRule,
     CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule,
@@ -232,8 +235,8 @@ pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
             enable_default_deny: None,
             endpoint_selector: ClusterwideEndpointSelector {
                 match_labels: BTreeMap::from([(
-                    "k8s:istio.io/waypoint-for".to_string(),
-                    "service".to_string(),
+                    CILIUM_WAYPOINT_FOR_LABEL.to_string(),
+                    WAYPOINT_FOR_SERVICE.to_string(),
                 )]),
                 match_expressions: vec![],
             },
@@ -254,7 +257,7 @@ pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
                     to_cidr: vec![],
                     to_ports: vec![CiliumPortRule {
                         ports: vec![CiliumPort {
-                            port: "15012".to_string(),
+                            port: ISTIOD_XDS_PORT.to_string(),
                             protocol: "TCP".to_string(),
                         }],
                         rules: None,
@@ -267,7 +270,7 @@ pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
                     to_cidr: vec![],
                     to_ports: vec![CiliumPortRule {
                         ports: vec![CiliumPort {
-                            port: "15008".to_string(),
+                            port: HBONE_PORT.to_string(),
                             protocol: "TCP".to_string(),
                         }],
                         rules: None,

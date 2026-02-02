@@ -18,12 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use lattice_common::crd::{IngressSpec, IngressTls, PathMatchType, TlsMode};
 use lattice_common::kube_utils::HasApiResource;
+use lattice_common::mesh;
 use lattice_common::policy::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     OperationSpec, PolicyMetadata, WorkloadSelector,
 };
-
-use crate::mesh;
 
 // =============================================================================
 // Macro for default serde functions
@@ -895,9 +894,12 @@ mod tests {
         let rule = &policy.spec.rules[0];
         // from is empty = any authenticated source
         assert!(rule.from.is_empty());
-        // to allows port 15008
+        // to allows HBONE port
         assert_eq!(rule.to.len(), 1);
-        assert_eq!(rule.to[0].operation.ports, vec!["15008"]);
+        assert_eq!(
+            rule.to[0].operation.ports,
+            vec![mesh::HBONE_PORT.to_string()]
+        );
     }
 
     #[test]

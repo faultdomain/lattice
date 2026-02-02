@@ -21,7 +21,7 @@ use tracing::info;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_operator::crd::{ClusterPhase, LatticeCluster};
 
-use super::helpers::{client_from_kubeconfig, run_cmd_allow_fail, OPERATOR_LABEL};
+use super::helpers::{client_from_kubeconfig, run_cmd, OPERATOR_LABEL};
 use super::providers::InfraProvider;
 
 // =============================================================================
@@ -491,7 +491,7 @@ async fn query_cluster_context(
 // =============================================================================
 
 fn kill_pod(cluster: &str, kubeconfig: &str) {
-    let output = run_cmd_allow_fail(
+    let msg = match run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
@@ -504,18 +504,11 @@ fn kill_pod(cluster: &str, kubeconfig: &str) {
             OPERATOR_LABEL,
             "--wait=false",
         ],
-    );
-
-    let msg = if output.contains("deleted") {
-        "killed operator pod"
-    } else if output.contains("No resources found") {
-        "no pod found (may be restarting)"
-    } else if is_unreachable(&output) {
-        "cluster unreachable"
-    } else if output.trim().is_empty() {
-        "command completed (no output)"
-    } else {
-        output.trim()
+    ) {
+        Ok(output) if output.contains("deleted") => "killed operator pod".to_string(),
+        Ok(_) => "no pod found (may be restarting)".to_string(),
+        Err(e) if is_unreachable(&e) => "cluster unreachable".to_string(),
+        Err(_) => "no pod found or not accessible".to_string(),
     };
     info!("[Chaos] Pod kill on {}: {}", cluster, msg);
 }
@@ -532,34 +525,39 @@ async fn cut_network(
         return;
     }
 
-    let output = run_cmd_allow_fail(
+    let (policy_applied, status) = match run_cmd(
         "kubectl",
         &["--kubeconfig", kubeconfig, "apply", "-f", &policy_file],
-    );
-
-    let policy_applied =
-        output.contains("created") || output.contains("configured") || output.contains("unchanged");
+    ) {
+        Ok(output) if output.contains("created") => (true, "blackout policy created"),
+        Ok(output) if output.contains("unchanged") => {
+            (true, "blackout applied (clearing stale policy)")
+        }
+        Ok(output) if output.contains("configured") => (true, "blackout policy configured"),
+        Ok(_) => (true, "blackout policy applied"),
+        Err(e) if is_unreachable(&e) => {
+            let _ = std::fs::remove_file(&policy_file);
+            info!(
+                "[Chaos] Network cut on {} failed: cluster unreachable",
+                cluster
+            );
+            return;
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(&policy_file);
+            info!(
+                "[Chaos] Network cut on {} failed: policy apply failed",
+                cluster
+            );
+            return;
+        }
+    };
 
     if !policy_applied {
         let _ = std::fs::remove_file(&policy_file);
-        let msg = if is_unreachable(&output) {
-            "cluster unreachable"
-        } else if output.trim().is_empty() {
-            "policy apply failed (no output)"
-        } else {
-            output.trim()
-        };
-        info!("[Chaos] Network cut on {} failed: {}", cluster, msg);
         return;
     }
 
-    let status = if output.contains("unchanged") {
-        "blackout applied (clearing stale policy)"
-    } else if output.contains("created") {
-        "blackout policy created"
-    } else {
-        "blackout policy configured"
-    };
     info!(
         "[Chaos] Network cut on {}: {} for {}s",
         cluster, status, blackout_secs
@@ -572,7 +570,7 @@ async fn cut_network(
 
     // Restore network with retries
     for attempt in 1..=5 {
-        let output = run_cmd_allow_fail(
+        match run_cmd(
             "kubectl",
             &[
                 "--kubeconfig",
@@ -582,26 +580,27 @@ async fn cut_network(
                 &policy_file,
                 "--ignore-not-found",
             ],
-        );
-
-        if output.contains("deleted") || output.contains("not found") || output.is_empty() {
-            break;
+        ) {
+            Ok(_) => break,
+            Err(e) if is_unreachable(&e) && attempt < 5 => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            Err(e) if is_unreachable(&e) => {
+                info!(
+                    "[Chaos] Network restore on {} failed: cluster unreachable",
+                    cluster
+                );
+                break;
+            }
+            Err(_) => {
+                info!(
+                    "[Chaos] Network restore on {} failed: delete failed",
+                    cluster
+                );
+                break;
+            }
         }
-
-        if is_unreachable(&output) && attempt < 5 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            continue;
-        }
-
-        let msg = if is_unreachable(&output) {
-            "cluster unreachable"
-        } else if output.trim().is_empty() {
-            "delete failed (no output)"
-        } else {
-            output.trim()
-        };
-        info!("[Chaos] Network restore on {} failed: {}", cluster, msg);
-        break;
     }
 
     let _ = std::fs::remove_file(&policy_file);

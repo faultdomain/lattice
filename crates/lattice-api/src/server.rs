@@ -28,6 +28,8 @@ pub struct ServerConfig {
     pub cert_pem: String,
     /// TLS private key PEM
     pub key_pem: String,
+    /// CA certificate PEM - included in generated kubeconfigs for TLS verification
+    pub ca_cert_pem: String,
     /// Kubernetes API server URL (for proxying to self)
     pub k8s_api_url: String,
     /// This cluster's name
@@ -55,6 +57,8 @@ pub struct AppState {
     pub base_url: String,
     /// OIDC configuration for kubeconfig exec plugin
     pub oidc_config: Option<OidcConfig>,
+    /// CA certificate (base64 encoded) for kubeconfig generation
+    pub ca_cert_base64: String,
 }
 
 /// Start the auth proxy server
@@ -75,8 +79,13 @@ pub async fn start_server_with_registry(
     subtree: Arc<SubtreeRegistry>,
     agent_registry: Option<SharedAgentRegistry>,
 ) -> Result<(), Error> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
     // Get OIDC config for kubeconfig generation
     let oidc_config = auth.oidc_config().cloned();
+
+    // Base64 encode CA cert for kubeconfig
+    let ca_cert_base64 = STANDARD.encode(&config.ca_cert_pem);
 
     let state = AppState {
         auth,
@@ -87,6 +96,7 @@ pub async fn start_server_with_registry(
         agent_registry,
         base_url: config.base_url.clone(),
         oidc_config,
+        ca_cert_base64,
     };
 
     let app = Router::new()
@@ -94,11 +104,9 @@ pub async fn start_server_with_registry(
         .route("/kubeconfig", get(kubeconfig_handler))
         // Health check
         .route("/healthz", get(|| async { "ok" }))
-        // K8s API proxy - cluster access
-        .route("/clusters/{cluster_name}/api", any(proxy_handler))
-        .route("/clusters/{cluster_name}/api/{*path}", any(proxy_handler))
-        .route("/clusters/{cluster_name}/apis", any(proxy_handler))
-        .route("/clusters/{cluster_name}/apis/{*path}", any(proxy_handler))
+        // K8s API proxy - route all cluster paths to the proxy handler
+        .route("/clusters/{cluster_name}", any(proxy_handler))
+        .route("/clusters/{cluster_name}/{*path}", any(proxy_handler))
         .with_state(state);
 
     let tls_config =

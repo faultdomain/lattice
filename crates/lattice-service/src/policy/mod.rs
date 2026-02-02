@@ -18,7 +18,7 @@ pub use lattice_common::policy::{
 use std::collections::BTreeMap;
 
 use crate::graph::{ActiveEdge, ServiceGraph, ServiceNode, ServiceType};
-use crate::mesh;
+use lattice_common::mesh;
 
 // =============================================================================
 // Generated Policies Container
@@ -329,7 +329,7 @@ impl<'a> PolicyCompiler<'a> {
             namespace.to_string(),
         );
         waypoint_ingress_labels.insert(
-            format!("k8s:{}", mesh::WAYPOINT_FOR_LABEL),
+            mesh::CILIUM_WAYPOINT_FOR_LABEL.to_string(),
             mesh::WAYPOINT_FOR_SERVICE.to_string(),
         );
 
@@ -404,7 +404,7 @@ impl<'a> PolicyCompiler<'a> {
         // Always allow HBONE to waypoint
         let mut waypoint_egress_labels = BTreeMap::new();
         waypoint_egress_labels.insert(
-            format!("k8s:{}", mesh::WAYPOINT_FOR_LABEL),
+            mesh::CILIUM_WAYPOINT_FOR_LABEL.to_string(),
             mesh::WAYPOINT_FOR_SERVICE.to_string(),
         );
         egress_rules.push(CiliumEgressRule {
@@ -536,7 +536,9 @@ impl<'a> PolicyCompiler<'a> {
 
         for ep in callee.endpoints.values() {
             if Self::is_ip_address(&ep.host) {
-                cidrs.push(format!("{}/32", ep.host));
+                // IPv6 addresses use /128 prefix, IPv4 addresses use /32
+                let prefix = if ep.host.contains(':') { 128 } else { 32 };
+                cidrs.push(format!("{}/{}", ep.host, prefix));
             } else {
                 fqdns.push(FqdnSelector {
                     match_name: Some(ep.host.clone()),
@@ -693,8 +695,9 @@ impl<'a> PolicyCompiler<'a> {
                     name: external_name.to_string(),
                 }],
                 selector: None,
-                action: String::new(),
-                rules: vec![],
+                action: "DENY".to_string(),
+                // Istio requires at least one rule for DENY to trigger - empty rule matches all
+                rules: vec![AuthorizationRule::default()],
             },
         )
     }
@@ -947,14 +950,18 @@ mod tests {
             .iter()
             .any(|i| i.from_endpoints.iter().any(|ep| ep
                 .match_labels
-                .get("k8s:istio.io/waypoint-for")
-                .map(|v| v == "service")
+                .get(mesh::CILIUM_WAYPOINT_FOR_LABEL)
+                .map(|v| v == mesh::WAYPOINT_FOR_SERVICE)
                 .unwrap_or(false))));
 
-        assert!(cnp.spec.ingress.iter().any(|i| i
-            .to_ports
+        assert!(cnp
+            .spec
+            .ingress
             .iter()
-            .any(|pr| pr.ports.iter().any(|p| p.port == "15008"))));
+            .any(|i| i.to_ports.iter().any(|pr| pr
+                .ports
+                .iter()
+                .any(|p| p.port == mesh::HBONE_PORT.to_string()))));
     }
 
     #[test]
@@ -1065,5 +1072,75 @@ mod tests {
             .principals
             .iter()
             .any(|p| p.contains("gateway")));
+    }
+
+    #[test]
+    fn story_ipv6_cidr_uses_128_prefix() {
+        use crate::crd::ParsedEndpoint;
+
+        // Create a service node with IPv4 and IPv6 endpoints
+        let mut node = crate::graph::ServiceNode::unknown("test-ns", "external-svc");
+        node.endpoints.insert(
+            "ipv4".to_string(),
+            ParsedEndpoint {
+                protocol: "tcp".to_string(),
+                host: "192.168.1.1".to_string(),
+                port: 443,
+                url: "tcp://192.168.1.1:443".to_string(),
+            },
+        );
+        node.endpoints.insert(
+            "ipv6".to_string(),
+            ParsedEndpoint {
+                protocol: "tcp".to_string(),
+                host: "2001:db8::1".to_string(),
+                port: 443,
+                url: "tcp://[2001:db8::1]:443".to_string(),
+            },
+        );
+
+        let (fqdns, cidrs) = PolicyCompiler::categorize_external_endpoints(&node);
+
+        // Should have no FQDNs (only IPs)
+        assert!(fqdns.is_empty());
+
+        // Should have both CIDRs with correct prefixes
+        assert_eq!(cidrs.len(), 2);
+        assert!(cidrs.contains(&"192.168.1.1/32".to_string()));
+        assert!(cidrs.contains(&"2001:db8::1/128".to_string()));
+    }
+
+    #[test]
+    fn story_mixed_endpoints_categorized_correctly() {
+        use crate::crd::ParsedEndpoint;
+
+        // Create a service node with mixed FQDN and IP endpoints
+        let mut node = crate::graph::ServiceNode::unknown("test-ns", "external-svc");
+        node.endpoints.insert(
+            "fqdn".to_string(),
+            ParsedEndpoint {
+                protocol: "https".to_string(),
+                host: "api.example.com".to_string(),
+                port: 443,
+                url: "https://api.example.com".to_string(),
+            },
+        );
+        node.endpoints.insert(
+            "ipv4".to_string(),
+            ParsedEndpoint {
+                protocol: "tcp".to_string(),
+                host: "10.0.0.1".to_string(),
+                port: 8080,
+                url: "tcp://10.0.0.1:8080".to_string(),
+            },
+        );
+
+        let (fqdns, cidrs) = PolicyCompiler::categorize_external_endpoints(&node);
+
+        assert_eq!(fqdns.len(), 1);
+        assert_eq!(fqdns[0].match_name, Some("api.example.com".to_string()));
+
+        assert_eq!(cidrs.len(), 1);
+        assert!(cidrs.contains(&"10.0.0.1/32".to_string()));
     }
 }

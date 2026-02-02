@@ -6,7 +6,8 @@
 //! # Running Standalone
 //!
 //! ```bash
-//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload-kubeconfig \
+//! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
+//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload-proxy-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_mesh_standalone -- --ignored --nocapture
 //! ```
 
@@ -14,9 +15,10 @@
 
 use tracing::info;
 
-use super::super::context::{init_test_env, InfraContext};
+use super::super::context::{InfraContext, TestSession};
 use super::super::mesh_tests::{run_mesh_test, run_random_mesh_test, start_mesh_test};
 use super::super::providers::InfraProvider;
+use super::cedar::apply_e2e_default_policy;
 
 /// Run all mesh bilateral agreement tests
 ///
@@ -143,26 +145,41 @@ pub fn is_docker_provider(ctx: &InfraContext) -> bool {
 
 /// Standalone test - run mesh tests on existing cluster
 ///
-/// Requires `LATTICE_WORKLOAD_KUBECONFIG` environment variable.
+/// Applies Cedar policy, then runs mesh tests through the proxy.
 #[tokio::test]
 #[ignore]
 async fn test_mesh_standalone() {
-    let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone mesh tests");
-    run_mesh_tests(&ctx).await.unwrap();
+    let session =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .unwrap();
+    apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
+        .await
+        .unwrap();
+    run_mesh_tests(&session.ctx).await.unwrap();
 }
 
 /// Standalone test - run only the fixed 10-service mesh test
 #[tokio::test]
 #[ignore]
 async fn test_fixed_mesh_standalone() {
-    let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone mesh tests");
-    run_fixed_mesh_test(&ctx).await.unwrap();
+    let session =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .unwrap();
+    apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
+        .await
+        .unwrap();
+    run_fixed_mesh_test(&session.ctx).await.unwrap();
 }
 
 /// Standalone test - run only the randomized mesh test
 #[tokio::test]
 #[ignore]
 async fn test_random_mesh_standalone() {
-    let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone mesh tests");
-    run_randomized_mesh_test(&ctx).await.unwrap();
+    let session =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .unwrap();
+    apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
+        .await
+        .unwrap();
+    run_randomized_mesh_test(&session.ctx).await.unwrap();
 }

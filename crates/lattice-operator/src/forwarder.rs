@@ -110,6 +110,7 @@ impl K8sRequestForwarder for SubtreeForwarder {
             query: request.query.clone(),
             body: request.body.clone(),
             content_type: request.content_type.clone(),
+            accept: request.accept.clone(),
             target_cluster: target_cluster.to_string(),
             source_user: request.source_user.clone(),
             source_groups: request.source_groups.clone(),

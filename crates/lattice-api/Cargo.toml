@@ -47,6 +47,7 @@ thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+base64.workspace = true
 
 [dev-dependencies]
 tokio-test = { workspace = true }

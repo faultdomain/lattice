@@ -1,65 +1,23 @@
 //! Watch execution for K8s API proxy
 //!
-//! Handles streaming watch requests from the parent cell by using
-//! kube-rs to watch resources and streaming events back via gRPC.
+//! Handles streaming watch requests from the parent cell by streaming
+//! raw bytes from the K8s API. This is a pure L4 proxy approach.
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use kube::api::DynamicObject;
-use kube::discovery::{ApiCapabilities, ApiResource, Scope};
-use kube::{Api, Client, Discovery};
+use futures::io::AsyncReadExt;
+use http::Request;
+use kube::Client;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
+use crate::executor::build_url;
 use lattice_proto::{agent_message::Payload, AgentMessage, KubernetesRequest, KubernetesResponse};
 
-/// Parsed watch query parameters
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct WatchQueryParams {
-    /// Label selector filter
-    pub label_selector: Option<String>,
-    /// Field selector filter
-    pub field_selector: Option<String>,
-    /// Resource version to start from
-    pub resource_version: Option<String>,
-}
-
-/// Parse query string into watch parameters (pure function)
-pub fn parse_watch_query(query: &str) -> WatchQueryParams {
-    let mut params = WatchQueryParams::default();
-
-    for param in query.split('&') {
-        if let Some((key, value)) = param.split_once('=') {
-            match key {
-                "labelSelector" => params.label_selector = Some(value.to_string()),
-                "fieldSelector" => params.field_selector = Some(value.to_string()),
-                "resourceVersion" => params.resource_version = Some(value.to_string()),
-                _ => {}
-            }
-        }
-    }
-
-    params
-}
-
-/// Build a watch event JSON response (pure function)
-pub fn build_watch_event_response(
-    request_id: &str,
-    event_type: &str,
-    object: &serde_json::Value,
-) -> KubernetesResponse {
-    let event_json = serde_json::json!({
-        "type": event_type,
-        "object": object
-    });
-    // Safety: serde_json::to_vec only fails on non-string map keys or
-    // custom serializers that fail. Since we're serializing a json!() macro
-    // output (always valid JSON), this cannot fail. Using unwrap_or_default()
-    // as a defensive fallback returns an empty body instead of panicking.
-    let body = serde_json::to_vec(&event_json).unwrap_or_default();
-
+/// Build a streaming response chunk (pure function)
+pub fn build_stream_chunk_response(request_id: &str, body: Vec<u8>) -> KubernetesResponse {
     KubernetesResponse {
         request_id: request_id.to_string(),
         status_code: 200,
@@ -83,22 +41,6 @@ pub fn build_watch_error_response(
         error: error.to_string(),
         streaming: true,
         stream_end: true,
-        ..Default::default()
-    }
-}
-
-/// Build an error response for non-streaming K8s API failures (pure function)
-///
-/// Used when K8s client creation or API calls fail before streaming begins.
-pub fn build_k8s_error_response(
-    request_id: &str,
-    status_code: u32,
-    error: &str,
-) -> KubernetesResponse {
-    KubernetesResponse {
-        request_id: request_id.to_string(),
-        status_code,
-        error: error.to_string(),
         ..Default::default()
     }
 }
@@ -164,7 +106,10 @@ impl WatchRegistry {
     }
 }
 
-/// Execute a watch request and stream events back
+/// Execute a watch request and stream events back using raw byte streaming.
+///
+/// This is a pure L4 proxy approach - we stream raw bytes from the K8s API
+/// without parsing them. Each chunk of data is forwarded as-is.
 pub async fn execute_watch(
     client: Client,
     req: KubernetesRequest,
@@ -174,27 +119,46 @@ pub async fn execute_watch(
 ) {
     let request_id = req.request_id.clone();
     let cancel_token = registry.register(request_id.clone());
+    let url = build_url(&req.path, &req.query);
 
-    // Parse the path to determine resource type
-    let (api_resource, namespace) = match parse_api_path(&req.path) {
-        Ok(parsed) => parsed,
+    debug!(
+        request_id = %request_id,
+        url = %url,
+        "Starting raw byte streaming watch"
+    );
+
+    // Build raw HTTP request
+    let http_request = match Request::builder()
+        .method(req.verb.as_str())
+        .uri(&url)
+        .header("Accept", &req.accept)
+        .body(Vec::new())
+    {
+        Ok(r) => r,
         Err(e) => {
-            send_error_response(&message_tx, &cluster_name, &request_id, 400, &e).await;
+            send_error_response(
+                &message_tx,
+                &cluster_name,
+                &request_id,
+                400,
+                &format!("Failed to build request: {}", e),
+            )
+            .await;
             registry.unregister(&request_id);
             return;
         }
     };
 
-    // Discover the API resource
-    let discovery = match Discovery::new(client.clone()).run().await {
-        Ok(d) => d,
+    // Execute streaming request
+    let stream = match client.request_stream(http_request).await {
+        Ok(s) => s,
         Err(e) => {
             send_error_response(
                 &message_tx,
                 &cluster_name,
                 &request_id,
                 500,
-                &format!("Discovery failed: {}", e),
+                &format!("Failed to start stream: {}", e),
             )
             .await;
             registry.unregister(&request_id);
@@ -202,62 +166,11 @@ pub async fn execute_watch(
         }
     };
 
-    // Find the API resource in discovery
-    let (ar, caps) = match find_api_resource(&discovery, &api_resource) {
-        Some(found) => found,
-        None => {
-            send_error_response(
-                &message_tx,
-                &cluster_name,
-                &request_id,
-                404,
-                &format!("Resource not found: {}", api_resource),
-            )
-            .await;
-            registry.unregister(&request_id);
-            return;
-        }
-    };
+    // Pin the stream for async reading
+    let mut stream = std::pin::pin!(stream);
 
-    // Create the API based on scope
-    let api: Api<DynamicObject> = if caps.scope == Scope::Cluster {
-        Api::all_with(client.clone(), &ar)
-    } else if let Some(ns) = &namespace {
-        Api::namespaced_with(client.clone(), ns, &ar)
-    } else {
-        Api::all_with(client.clone(), &ar)
-    };
-
-    // Parse query params for watch options (pure logic)
-    let query_params = parse_watch_query(&req.query);
-
-    debug!(
-        request_id = %request_id,
-        resource = %api_resource,
-        namespace = ?namespace,
-        label_selector = ?query_params.label_selector,
-        field_selector = ?query_params.field_selector,
-        "Starting watch"
-    );
-
-    // Use kube-rs watcher
-    use futures::StreamExt;
-    use kube::runtime::{watcher, WatchStreamExt};
-
-    // Build watcher config with selectors
-    let mut watcher_config = watcher::Config::default().any_semantic();
-    if let Some(labels) = &query_params.label_selector {
-        watcher_config = watcher_config.labels(labels);
-    }
-    if let Some(fields) = &query_params.field_selector {
-        watcher_config = watcher_config.fields(fields);
-    }
-
-    let watcher = watcher(api, watcher_config)
-        .default_backoff()
-        .applied_objects();
-
-    tokio::pin!(watcher);
+    // Read chunks from the stream and forward them
+    let mut buf = vec![0u8; 8192]; // 8KB buffer
 
     loop {
         tokio::select! {
@@ -266,19 +179,29 @@ pub async fn execute_watch(
                 send_stream_end(&message_tx, &cluster_name, &request_id).await;
                 break;
             }
-            event = watcher.next() => {
-                match event {
-                    Some(Ok(obj)) => {
-                        // Convert to watch event format (pure logic)
-                        let obj_json = serde_json::to_value(&obj).unwrap_or_default();
-                        let response = build_watch_event_response(&request_id, "ADDED", &obj_json);
+            read_result = stream.read(&mut buf) => {
+                match read_result {
+                    Ok(0) => {
+                        // Stream ended
+                        debug!(request_id = %request_id, "Watch stream ended");
+                        send_stream_end(&message_tx, &cluster_name, &request_id).await;
+                        break;
+                    }
+                    Ok(n) => {
+                        debug!(
+                            request_id = %request_id,
+                            bytes = n,
+                            "Forwarding watch chunk"
+                        );
 
+                        // Send the chunk as a streaming response
+                        let response = build_stream_chunk_response(&request_id, buf[..n].to_vec());
                         if send_response(&message_tx, &cluster_name, response).await.is_err() {
                             break;
                         }
                     }
-                    Some(Err(e)) => {
-                        error!(request_id = %request_id, error = %e, "Watch error");
+                    Err(e) => {
+                        error!(request_id = %request_id, error = %e, "Watch read error");
                         send_error_response(
                             &message_tx,
                             &cluster_name,
@@ -288,84 +211,12 @@ pub async fn execute_watch(
                         ).await;
                         break;
                     }
-                    None => {
-                        // Stream ended
-                        send_stream_end(&message_tx, &cluster_name, &request_id).await;
-                        break;
-                    }
                 }
             }
         }
     }
 
     registry.unregister(&request_id);
-}
-
-/// Parse an API path to extract resource type and namespace
-fn parse_api_path(path: &str) -> Result<(String, Option<String>), String> {
-    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-
-    // Handle different path formats:
-    // /api/v1/pods -> core pods
-    // /api/v1/namespaces/default/pods -> namespaced pods
-    // /apis/apps/v1/deployments -> apps deployments
-    // /apis/apps/v1/namespaces/default/deployments -> namespaced deployments
-
-    if parts.is_empty() {
-        return Err("Empty path".to_string());
-    }
-
-    let (resource, namespace) = if parts[0] == "api" {
-        // Core API
-        if parts.len() >= 4 && parts[2] == "namespaces" {
-            // /api/v1/namespaces/{ns}/{resource}
-            let ns = parts[3].to_string();
-            let resource = parts.get(4).unwrap_or(&"").to_string();
-            (resource, Some(ns))
-        } else if parts.len() >= 3 {
-            // /api/v1/{resource}
-            (parts[2].to_string(), None)
-        } else {
-            return Err("Invalid core API path".to_string());
-        }
-    } else if parts[0] == "apis" {
-        // Extended APIs
-        if parts.len() >= 5 && parts[3] == "namespaces" {
-            // /apis/{group}/{version}/namespaces/{ns}/{resource}
-            let ns = parts[4].to_string();
-            let resource = parts.get(5).unwrap_or(&"").to_string();
-            (resource, Some(ns))
-        } else if parts.len() >= 4 {
-            // /apis/{group}/{version}/{resource}
-            (parts[3].to_string(), None)
-        } else {
-            return Err("Invalid extended API path".to_string());
-        }
-    } else {
-        return Err(format!("Unknown API prefix: {}", parts[0]));
-    };
-
-    if resource.is_empty() {
-        return Err("Could not determine resource type".to_string());
-    }
-
-    Ok((resource, namespace))
-}
-
-/// Find an API resource in discovery results
-fn find_api_resource(
-    discovery: &Discovery,
-    resource_name: &str,
-) -> Option<(ApiResource, ApiCapabilities)> {
-    for group in discovery.groups() {
-        for (ar, caps) in group.recommended_resources() {
-            if ar.plural == resource_name || ar.kind.to_lowercase() == resource_name.to_lowercase()
-            {
-                return Some((ar, caps));
-            }
-        }
-    }
-    None
 }
 
 async fn send_response(
@@ -401,41 +252,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_api_path_core_cluster_scoped() {
-        let (resource, ns) = parse_api_path("/api/v1/nodes").unwrap();
-        assert_eq!(resource, "nodes");
-        assert!(ns.is_none());
-    }
-
-    #[test]
-    fn test_parse_api_path_core_namespaced() {
-        let (resource, ns) = parse_api_path("/api/v1/namespaces/default/pods").unwrap();
-        assert_eq!(resource, "pods");
-        assert_eq!(ns, Some("default".to_string()));
-    }
-
-    #[test]
-    fn test_parse_api_path_extended_cluster_scoped() {
-        let (resource, ns) = parse_api_path("/apis/apps/v1/deployments").unwrap();
-        assert_eq!(resource, "deployments");
-        assert!(ns.is_none());
-    }
-
-    #[test]
-    fn test_parse_api_path_extended_namespaced() {
-        let (resource, ns) =
-            parse_api_path("/apis/apps/v1/namespaces/kube-system/deployments").unwrap();
-        assert_eq!(resource, "deployments");
-        assert_eq!(ns, Some("kube-system".to_string()));
-    }
-
-    #[test]
-    fn test_parse_api_path_invalid() {
-        assert!(parse_api_path("").is_err());
-        assert!(parse_api_path("/unknown/v1/pods").is_err());
-    }
-
-    #[test]
     fn test_watch_registry() {
         let registry = WatchRegistry::new();
 
@@ -462,7 +278,6 @@ mod tests {
     #[test]
     fn test_watch_registry_cancel_nonexistent() {
         let registry = WatchRegistry::new();
-        // Should return false when cancelling non-existent watch
         assert!(!registry.cancel("nonexistent"));
     }
 
@@ -471,232 +286,28 @@ mod tests {
         let registry = WatchRegistry::new();
         let token = registry.register("watch-1".to_string());
 
-        // Unregister should remove without cancelling
         registry.unregister("watch-1");
 
-        // Token should NOT be cancelled by unregister
         assert!(!token.is_cancelled());
-
-        // But now cancel should return false since it's gone
         assert!(!registry.cancel("watch-1"));
     }
 
     #[test]
     fn test_watch_registry_cancel_all_empty() {
         let registry = WatchRegistry::new();
-        // Should not panic on empty registry
         registry.cancel_all();
     }
 
     #[test]
-    fn test_watch_registry_multiple_operations() {
-        let registry = WatchRegistry::new();
-
-        let t1 = registry.register("w1".to_string());
-        let _t2 = registry.register("w2".to_string());
-        let t3 = registry.register("w3".to_string());
-
-        // Cancel one
-        assert!(registry.cancel("w2"));
-
-        // Unregister another
-        registry.unregister("w3");
-
-        // Cancel all remaining
-        registry.cancel_all();
-
-        assert!(t1.is_cancelled());
-        // t3 was unregistered, so it won't be cancelled by cancel_all
-        assert!(!t3.is_cancelled());
-    }
-
-    // =========================================================================
-    // Parse API Path Edge Cases
-    // =========================================================================
-
-    #[test]
-    fn test_parse_api_path_pods_all_namespaces() {
-        let (resource, ns) = parse_api_path("/api/v1/pods").unwrap();
-        assert_eq!(resource, "pods");
-        assert!(ns.is_none());
-    }
-
-    #[test]
-    fn test_parse_api_path_configmaps() {
-        let (resource, ns) = parse_api_path("/api/v1/namespaces/kube-system/configmaps").unwrap();
-        assert_eq!(resource, "configmaps");
-        assert_eq!(ns, Some("kube-system".to_string()));
-    }
-
-    #[test]
-    fn test_parse_api_path_statefulsets() {
-        let (resource, ns) =
-            parse_api_path("/apis/apps/v1/namespaces/default/statefulsets").unwrap();
-        assert_eq!(resource, "statefulsets");
-        assert_eq!(ns, Some("default".to_string()));
-    }
-
-    #[test]
-    fn test_parse_api_path_crds() {
-        let (resource, ns) =
-            parse_api_path("/apis/apiextensions.k8s.io/v1/customresourcedefinitions").unwrap();
-        assert_eq!(resource, "customresourcedefinitions");
-        assert!(ns.is_none());
-    }
-
-    #[test]
-    fn test_parse_api_path_lattice_cluster() {
-        let (resource, ns) = parse_api_path("/apis/lattice.dev/v1alpha1/latticeclusters").unwrap();
-        assert_eq!(resource, "latticeclusters");
-        assert!(ns.is_none());
-    }
-
-    #[test]
-    fn test_parse_api_path_namespaced_crd() {
-        let (resource, ns) =
-            parse_api_path("/apis/lattice.dev/v1alpha1/namespaces/prod/latticeservices").unwrap();
-        assert_eq!(resource, "latticeservices");
-        assert_eq!(ns, Some("prod".to_string()));
-    }
-
-    #[test]
-    fn test_parse_api_path_short_api() {
-        // /api/v1 is too short - no resource
-        let result = parse_api_path("/api/v1");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_api_path_short_apis() {
-        // /apis/group/v1 is too short - no resource
-        let result = parse_api_path("/apis/apps/v1");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_api_path_events() {
-        let (resource, ns) = parse_api_path("/api/v1/namespaces/default/events").unwrap();
-        assert_eq!(resource, "events");
-        assert_eq!(ns, Some("default".to_string()));
-    }
-
-    #[test]
-    fn test_parse_api_path_services() {
-        let (resource, ns) = parse_api_path("/api/v1/services").unwrap();
-        assert_eq!(resource, "services");
-        assert!(ns.is_none());
-    }
-
-    #[test]
-    fn test_parse_api_path_leading_slash_stripped() {
-        let (resource, _) = parse_api_path("api/v1/pods").unwrap();
-        assert_eq!(resource, "pods");
-    }
-
-    // =========================================================================
-    // parse_watch_query Tests
-    // =========================================================================
-
-    #[test]
-    fn test_parse_watch_query_empty() {
-        let params = parse_watch_query("");
-        assert_eq!(params, WatchQueryParams::default());
-    }
-
-    #[test]
-    fn test_parse_watch_query_label_selector() {
-        let params = parse_watch_query("labelSelector=app%3Dtest");
-        assert_eq!(params.label_selector, Some("app%3Dtest".to_string()));
-        assert_eq!(params.field_selector, None);
-        assert_eq!(params.resource_version, None);
-    }
-
-    #[test]
-    fn test_parse_watch_query_field_selector() {
-        let params = parse_watch_query("fieldSelector=status.phase%3DRunning");
-        assert_eq!(params.label_selector, None);
-        assert_eq!(
-            params.field_selector,
-            Some("status.phase%3DRunning".to_string())
-        );
-        assert_eq!(params.resource_version, None);
-    }
-
-    #[test]
-    fn test_parse_watch_query_resource_version() {
-        let params = parse_watch_query("resourceVersion=12345");
-        assert_eq!(params.resource_version, Some("12345".to_string()));
-    }
-
-    #[test]
-    fn test_parse_watch_query_multiple() {
-        let params = parse_watch_query("watch=true&labelSelector=app%3Dtest&resourceVersion=100");
-        assert_eq!(params.label_selector, Some("app%3Dtest".to_string()));
-        assert_eq!(params.resource_version, Some("100".to_string()));
-    }
-
-    #[test]
-    fn test_parse_watch_query_all_params() {
-        let params = parse_watch_query(
-            "labelSelector=app%3Dtest&fieldSelector=status.phase%3DRunning&resourceVersion=999",
-        );
-        assert_eq!(params.label_selector, Some("app%3Dtest".to_string()));
-        assert_eq!(
-            params.field_selector,
-            Some("status.phase%3DRunning".to_string())
-        );
-        assert_eq!(params.resource_version, Some("999".to_string()));
-    }
-
-    #[test]
-    fn test_parse_watch_query_ignores_unknown() {
-        let params = parse_watch_query("unknown=value&labelSelector=app");
-        assert_eq!(params.label_selector, Some("app".to_string()));
-        assert_eq!(params.field_selector, None);
-    }
-
-    // =========================================================================
-    // build_watch_event_response Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_watch_event_response() {
-        let obj = serde_json::json!({"kind": "Pod", "metadata": {"name": "test"}});
-        let resp = build_watch_event_response("req-123", "ADDED", &obj);
+    fn test_build_stream_chunk_response() {
+        let resp = build_stream_chunk_response("req-123", b"test data".to_vec());
 
         assert_eq!(resp.request_id, "req-123");
         assert_eq!(resp.status_code, 200);
         assert!(resp.streaming);
         assert!(!resp.stream_end);
-        assert_eq!(resp.content_type, "application/json");
-
-        // Verify the body structure
-        let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
-        assert_eq!(body["type"], "ADDED");
-        assert_eq!(body["object"]["kind"], "Pod");
+        assert_eq!(resp.body, b"test data");
     }
-
-    #[test]
-    fn test_build_watch_event_response_modified() {
-        let obj = serde_json::json!({"kind": "Deployment"});
-        let resp = build_watch_event_response("req-456", "MODIFIED", &obj);
-
-        let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
-        assert_eq!(body["type"], "MODIFIED");
-    }
-
-    #[test]
-    fn test_build_watch_event_response_deleted() {
-        let obj = serde_json::json!({"kind": "Service"});
-        let resp = build_watch_event_response("req-789", "DELETED", &obj);
-
-        let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
-        assert_eq!(body["type"], "DELETED");
-    }
-
-    // =========================================================================
-    // build_watch_error_response Tests
-    // =========================================================================
 
     #[test]
     fn test_build_watch_error_response() {
@@ -710,18 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_watch_error_response_not_found() {
-        let resp = build_watch_error_response("req-404", 404, "Resource not found");
-
-        assert_eq!(resp.status_code, 404);
-        assert_eq!(resp.error, "Resource not found");
-    }
-
-    // =========================================================================
-    // build_stream_end_response Tests
-    // =========================================================================
-
-    #[test]
     fn test_build_stream_end_response() {
         let resp = build_stream_end_response("req-end");
 
@@ -732,15 +331,4 @@ mod tests {
         assert!(resp.error.is_empty());
     }
 
-    // =========================================================================
-    // WatchQueryParams Tests
-    // =========================================================================
-
-    #[test]
-    fn test_watch_query_params_default() {
-        let params = WatchQueryParams::default();
-        assert!(params.label_selector.is_none());
-        assert!(params.field_selector.is_none());
-        assert!(params.resource_version.is_none());
-    }
 }

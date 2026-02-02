@@ -1084,7 +1084,7 @@ impl AgentClient {
                             Ok(c) => c,
                             Err(e) => {
                                 error!(error = %e, "Failed to create K8s client for proxy request");
-                                let response = crate::build_k8s_error_response(
+                                let response = crate::build_grpc_error_response(
                                     &request_id,
                                     500,
                                     &format!("Failed to create K8s client: {}", e),

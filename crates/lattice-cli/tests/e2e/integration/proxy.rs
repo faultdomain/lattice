@@ -26,10 +26,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 
-use super::super::context::{init_test_env, InfraContext};
+use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
-    get_or_create_proxy, get_sa_token, http_get_with_token, run_cmd_allow_fail,
-    WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+    get_or_create_proxy, get_sa_token, get_workload2_cluster_name, get_workload_cluster_name,
+    http_get_with_retry, run_cmd,
 };
 use super::cedar::{apply_e2e_default_policy, remove_e2e_default_policy};
 
@@ -40,8 +40,8 @@ use super::cedar::{apply_e2e_default_policy, remove_e2e_default_policy};
 /// Namespace for proxy test ServiceAccount
 const PROXY_TEST_NAMESPACE: &str = "lattice-system";
 
-/// ServiceAccount name for proxy tests (uses default SA in lattice-system)
-const PROXY_TEST_SA: &str = "default";
+/// ServiceAccount name for proxy tests (uses the operator SA which has proper permissions)
+const PROXY_TEST_SA: &str = "lattice-operator";
 
 // ============================================================================
 // Core Test Functions
@@ -62,7 +62,7 @@ pub async fn wait_for_agent_ready(
     );
 
     for attempt in 1..=30 {
-        let phase = run_cmd_allow_fail(
+        let phase_trimmed = match run_cmd(
             "kubectl",
             &[
                 "--kubeconfig",
@@ -73,9 +73,10 @@ pub async fn wait_for_agent_ready(
                 "-o",
                 "jsonpath={.status.phase}",
             ],
-        );
-
-        let phase_trimmed = phase.trim();
+        ) {
+            Ok(output) => output.trim().to_string(),
+            Err(_) => String::new(),
+        };
 
         // Pivoted or Ready means the cluster is operational
         // Pivoted specifically means the agent was connected (pivot requires agent)
@@ -134,7 +135,7 @@ pub async fn test_proxy_access_to_child(
     );
 
     // Test proxy access and validate response
-    verify_proxy_namespace_access(&proxy_url, &token, child_cluster_name, "child")
+    verify_proxy_namespace_access(&proxy_url, &token, child_cluster_name, "child").await
 }
 
 /// Test proxy access from root cluster to grandchild cluster.
@@ -165,20 +166,21 @@ pub async fn test_proxy_access_to_grandchild(
     let token = get_sa_token(root_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
 
     // Test proxy access and validate response
-    verify_proxy_namespace_access(&proxy_url, &token, grandchild_cluster_name, "grandchild")
+    verify_proxy_namespace_access(&proxy_url, &token, grandchild_cluster_name, "grandchild").await
 }
 
 /// Verify proxy access to a cluster by fetching namespaces.
 ///
 /// This is the core validation logic used by both direct child and grandchild tests.
-fn verify_proxy_namespace_access(
+/// Uses retry logic to handle transient failures from chaos testing.
+async fn verify_proxy_namespace_access(
     proxy_url: &str,
     token: &str,
     cluster_name: &str,
     cluster_type: &str,
 ) -> Result<(), String> {
     let url = format!("{}/clusters/{}/api/v1/namespaces", proxy_url, cluster_name);
-    let response = http_get_with_token(&url, token, 30);
+    let response = http_get_with_retry(&url, token, 30).await?;
 
     // Check for successful response
     if response.is_success() {
@@ -231,13 +233,6 @@ fn verify_proxy_namespace_access(
         ));
     }
 
-    if response.status_code == 0 {
-        return Err(format!(
-            "Proxy request failed - could not connect to {}",
-            url
-        ));
-    }
-
     Err(format!(
         "Unexpected proxy response for {} {} (HTTP {}) - expected NamespaceList. Response: {}",
         cluster_type,
@@ -247,41 +242,32 @@ fn verify_proxy_namespace_access(
     ))
 }
 
-/// Run full proxy hierarchy tests with proper setup/teardown.
+/// Run proxy tests with proper setup/teardown.
 ///
 /// This function:
 /// 1. Applies a default Cedar policy to allow E2E access
-/// 2. Tests proxy access through the hierarchy
-/// 3. Cleans up the policy
-pub async fn run_proxy_hierarchy_tests(
+/// 2. Tests proxy access to workload cluster
+/// 3. Optionally tests proxy access to workload2 cluster (if provided)
+pub async fn run_proxy_tests(
     ctx: &InfraContext,
     workload_cluster_name: &str,
-    workload2_cluster_name: &str,
+    workload2_cluster_name: Option<&str>,
 ) -> Result<(), String> {
-    info!("[Integration/Proxy] Running full hierarchy proxy tests...");
-    info!(
-        "[Integration/Proxy] Hierarchy: mgmt -> {} -> {}",
-        workload_cluster_name, workload2_cluster_name
-    );
+    if let Some(w2_name) = workload2_cluster_name {
+        info!(
+            "[Integration/Proxy] Running proxy tests (hierarchy: mgmt -> {} -> {})...",
+            workload_cluster_name, w2_name
+        );
+    } else {
+        info!(
+            "[Integration/Proxy] Running proxy tests (hierarchy: mgmt -> {})...",
+            workload_cluster_name
+        );
+    }
 
     // Apply default E2E policy to allow proxy access
-    apply_e2e_default_policy(&ctx.mgmt_kubeconfig)?;
+    apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
 
-    // Use a closure to ensure cleanup happens even on error
-    let result = run_proxy_tests_inner(ctx, workload_cluster_name, workload2_cluster_name).await;
-
-    // Note: We don't remove the policy here because other tests may need it
-    // The policy is labeled for E2E cleanup at test suite end
-
-    result
-}
-
-/// Inner proxy test logic (separated for cleanup handling)
-async fn run_proxy_tests_inner(
-    ctx: &InfraContext,
-    workload_cluster_name: &str,
-    workload2_cluster_name: &str,
-) -> Result<(), String> {
     // Use existing proxy URL from context if available
     let mgmt_proxy_url = ctx.mgmt_proxy_url.as_deref();
 
@@ -291,19 +277,17 @@ async fn run_proxy_tests_inner(
     // Test direct child access through proxy
     test_proxy_access_to_child(&ctx.mgmt_kubeconfig, workload_cluster_name, mgmt_proxy_url).await?;
 
-    // Wait for grandchild agent and test hierarchical access
-    if ctx.has_workload() {
-        wait_for_agent_ready(
-            ctx.workload_kubeconfig.as_deref().unwrap(),
-            workload2_cluster_name,
-        )
-        .await?;
+    // Wait for grandchild agent and test hierarchical access (if workload2 exists)
+    if let Some(w2_name) = workload2_cluster_name {
+        if ctx.has_workload() {
+            wait_for_agent_ready(ctx.workload_kubeconfig.as_deref().unwrap(), w2_name).await?;
 
-        // Test grandchild access through hierarchy (use mgmt proxy for hierarchical access)
-        test_proxy_access_to_grandchild(&ctx.mgmt_kubeconfig, workload2_cluster_name, mgmt_proxy_url).await?;
+            // Test grandchild access through hierarchy
+            test_proxy_access_to_grandchild(&ctx.mgmt_kubeconfig, w2_name, mgmt_proxy_url).await?;
+        }
     }
 
-    info!("[Integration/Proxy] Proxy hierarchy tests complete");
+    info!("[Integration/Proxy] Proxy tests complete");
     Ok(())
 }
 
@@ -321,25 +305,33 @@ fn truncate_response(response: &str) -> String {
 // ============================================================================
 
 /// Standalone test - test proxy access to child cluster
+///
+/// Uses TestSession to automatically manage port-forwards for proxy access.
 #[tokio::test]
 #[ignore]
 async fn test_proxy_access_standalone() {
-    let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG");
-    let workload_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
-        .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string());
+    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG").unwrap();
+    let workload_name = get_workload_cluster_name();
 
     // Apply E2E policy
-    apply_e2e_default_policy(&ctx.mgmt_kubeconfig).unwrap();
-
-    wait_for_agent_ready(&ctx.mgmt_kubeconfig, &workload_name)
+    apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
         .await
         .unwrap();
 
-    // Use proxy URL from context if available, otherwise test will create its own
-    let result = test_proxy_access_to_child(&ctx.mgmt_kubeconfig, &workload_name, ctx.mgmt_proxy_url.as_deref()).await;
+    wait_for_agent_ready(&session.ctx.mgmt_kubeconfig, &workload_name)
+        .await
+        .unwrap();
+
+    // Use proxy URL from session (port-forward is managed by TestSession)
+    let result = test_proxy_access_to_child(
+        &session.ctx.mgmt_kubeconfig,
+        &workload_name,
+        session.ctx.mgmt_proxy_url.as_deref(),
+    )
+    .await;
 
     // Cleanup
-    remove_e2e_default_policy(&ctx.mgmt_kubeconfig);
+    remove_e2e_default_policy(&session.ctx.mgmt_kubeconfig);
 
     result.unwrap();
 }
@@ -348,13 +340,17 @@ async fn test_proxy_access_standalone() {
 #[tokio::test]
 #[ignore]
 async fn test_proxy_hierarchy_standalone() {
-    let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG");
-    let workload_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
-        .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string());
-    let workload2_name = std::env::var("LATTICE_WORKLOAD2_CLUSTER_NAME")
-        .unwrap_or_else(|_| WORKLOAD2_CLUSTER_NAME.to_string());
+    let session =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .unwrap();
+    let workload_name = get_workload_cluster_name();
+    let workload2_name = if session.ctx.has_workload2() {
+        Some(get_workload2_cluster_name())
+    } else {
+        None
+    };
 
-    run_proxy_hierarchy_tests(&ctx, &workload_name, &workload2_name)
+    run_proxy_tests(&session.ctx, &workload_name, workload2_name.as_deref())
         .await
         .unwrap();
 }

@@ -5,7 +5,8 @@
 //! # Running Standalone
 //!
 //! ```bash
-//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload-kubeconfig \
+//! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
+//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload-proxy-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_scaling_standalone -- --ignored --nocapture
 //! ```
 
@@ -13,64 +14,48 @@
 
 use tracing::info;
 
-use super::super::context::{init_test_env, InfraContext};
+use super::super::context::{ClusterLevel, InfraContext, TestSession};
 use super::super::helpers::{
-    run_cmd, run_cmd_allow_fail, watch_worker_scaling, WORKLOAD_CLUSTER_NAME,
+    count_ready_nodes, get_workload_cluster_name, run_cmd, watch_worker_scaling,
 };
+use super::cedar::apply_e2e_default_policy;
 
-/// Verify worker node count on workload cluster
+/// Verify worker node count on a cluster at the specified level
 ///
 /// Waits for the expected number of worker nodes to be ready.
 ///
 /// # Arguments
 ///
-/// * `ctx` - Infrastructure context (requires workload_kubeconfig)
+/// * `ctx` - Infrastructure context
 /// * `cluster_name` - Name of the cluster
 /// * `expected_workers` - Expected number of ready worker nodes
-pub async fn verify_workers(
+/// * `level` - Which cluster level to verify (Mgmt, Workload, or Workload2)
+pub async fn verify_cluster_workers(
     ctx: &InfraContext,
     cluster_name: &str,
     expected_workers: u32,
+    level: ClusterLevel,
 ) -> Result<(), String> {
-    let kubeconfig = ctx.require_workload()?;
+    let kubeconfig = ctx.kubeconfig_for(level)?;
+    let level_name = level.display_name();
 
     info!(
-        "[Integration/Scaling] Verifying {} workers on cluster {}...",
-        expected_workers, cluster_name
+        "[Integration/Scaling] Verifying {} workers on {} cluster {}...",
+        expected_workers, level_name, cluster_name
     );
 
     watch_worker_scaling(kubeconfig, cluster_name, expected_workers).await?;
 
     info!(
-        "[Integration/Scaling] Cluster {} has {} workers",
-        cluster_name, expected_workers
-    );
-    Ok(())
-}
-
-/// Verify worker node count on management cluster
-pub async fn verify_mgmt_workers(
-    ctx: &InfraContext,
-    cluster_name: &str,
-    expected_workers: u32,
-) -> Result<(), String> {
-    info!(
-        "[Integration/Scaling] Verifying {} workers on management cluster {}...",
-        expected_workers, cluster_name
-    );
-
-    watch_worker_scaling(&ctx.mgmt_kubeconfig, cluster_name, expected_workers).await?;
-
-    info!(
-        "[Integration/Scaling] Management cluster {} has {} workers",
-        cluster_name, expected_workers
+        "[Integration/Scaling] {} cluster {} has {} workers",
+        level_name, cluster_name, expected_workers
     );
     Ok(())
 }
 
 /// Get current worker count for a cluster
 pub async fn get_worker_count(kubeconfig: &str) -> Result<u32, String> {
-    let nodes_output = run_cmd_allow_fail(
+    let output = run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
@@ -82,10 +67,9 @@ pub async fn get_worker_count(kubeconfig: &str) -> Result<u32, String> {
             "-o",
             "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
         ],
-    );
-
-    let ready_workers = nodes_output.lines().filter(|line| *line == "True").count() as u32;
-    Ok(ready_workers)
+    )
+    .unwrap_or_default();
+    Ok(count_ready_nodes(&output))
 }
 
 /// List all nodes with their status
@@ -98,7 +82,7 @@ pub async fn list_nodes(kubeconfig: &str) -> Result<String, String> {
 
 /// Get control plane node count
 pub async fn get_control_plane_count(kubeconfig: &str) -> Result<u32, String> {
-    let nodes_output = run_cmd_allow_fail(
+    let output = run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
@@ -110,10 +94,9 @@ pub async fn get_control_plane_count(kubeconfig: &str) -> Result<u32, String> {
             "-o",
             "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
         ],
-    );
-
-    let ready_cp = nodes_output.lines().filter(|line| *line == "True").count() as u32;
-    Ok(ready_cp)
+    )
+    .unwrap_or_default();
+    Ok(count_ready_nodes(&output))
 }
 
 /// Verify total node count (control plane + workers)
@@ -141,32 +124,46 @@ pub async fn verify_total_nodes(kubeconfig: &str, expected_total: u32) -> Result
 // =============================================================================
 
 /// Standalone test - verify worker scaling on workload cluster
-///
-/// Requires `LATTICE_WORKLOAD_KUBECONFIG` environment variable.
 #[tokio::test]
 #[ignore]
 async fn test_scaling_standalone() {
-    let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone scaling tests");
-    let cluster_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
-        .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string());
+    let session = TestSession::from_env(
+        "Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG to run standalone scaling tests",
+    )
+    .unwrap();
+    apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
+        .await
+        .unwrap();
+    let cluster_name = get_workload_cluster_name();
     let expected_workers: u32 = std::env::var("LATTICE_EXPECTED_WORKERS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
-    verify_workers(&ctx, &cluster_name, expected_workers)
-        .await
-        .unwrap();
+    verify_cluster_workers(
+        &session.ctx,
+        &cluster_name,
+        expected_workers,
+        ClusterLevel::Workload,
+    )
+    .await
+    .unwrap();
 }
 
 /// Standalone test - list all nodes
 #[tokio::test]
 #[ignore]
 async fn test_list_nodes_standalone() {
-    let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG or LATTICE_WORKLOAD_KUBECONFIG");
-    let kubeconfig = ctx
+    let session =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .unwrap();
+    apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
+        .await
+        .unwrap();
+    let kubeconfig = session
+        .ctx
         .workload_kubeconfig
         .as_deref()
-        .unwrap_or(&ctx.mgmt_kubeconfig);
+        .unwrap_or(&session.ctx.mgmt_kubeconfig);
     let nodes = list_nodes(kubeconfig).await.unwrap();
     println!("Nodes:\n{}", nodes);
 }

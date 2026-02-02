@@ -16,7 +16,7 @@
 
 use tracing::info;
 
-use super::super::context::{init_test_env, InfraContext};
+use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{delete_cluster_and_wait, watch_cluster_phases};
 use super::super::providers::InfraProvider;
 
@@ -64,23 +64,6 @@ pub async fn delete_workload_and_verify_unpivot(
     delete_and_verify_unpivot(
         workload_kubeconfig,
         &ctx.mgmt_kubeconfig,
-        cluster_name,
-        ctx.provider,
-    )
-    .await
-}
-
-/// Delete workload2 cluster and verify unpivot to workload
-pub async fn delete_workload2_and_verify_unpivot(
-    ctx: &InfraContext,
-    cluster_name: &str,
-) -> Result<(), String> {
-    let workload_kubeconfig = ctx.require_workload()?;
-    let workload2_kubeconfig = ctx.require_workload2()?;
-
-    delete_and_verify_unpivot(
-        workload2_kubeconfig,
-        workload_kubeconfig,
         cluster_name,
         ctx.provider,
     )
@@ -145,12 +128,15 @@ pub fn start_cluster_deletion_async(
 /// - `LATTICE_WORKLOAD_KUBECONFIG`: Cluster to delete
 /// - `LATTICE_MGMT_KUBECONFIG`: Parent cluster
 /// - `LATTICE_CLUSTER_TO_DELETE`: Name of cluster to delete
+///
+/// Uses TestSession for consistent test initialization.
 #[tokio::test]
 #[ignore]
 async fn test_unpivot_standalone() {
-    let ctx = init_test_env(
+    let session = TestSession::from_env(
         "Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG for unpivot test",
-    );
+    )
+    .unwrap();
     let cluster_name =
         std::env::var("LATTICE_CLUSTER_TO_DELETE").expect("LATTICE_CLUSTER_TO_DELETE must be set");
 
@@ -160,7 +146,7 @@ async fn test_unpivot_standalone() {
     );
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    delete_workload_and_verify_unpivot(&ctx, &cluster_name)
+    delete_workload_and_verify_unpivot(&session.ctx, &cluster_name)
         .await
         .unwrap();
 }

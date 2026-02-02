@@ -39,7 +39,7 @@ use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
     ensure_docker_network, extract_docker_cluster_kubeconfig, force_delete_docker_cluster,
     get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials,
-    run_cmd_allow_fail, run_id, watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    run_cmd, run_id, watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
 use super::integration::setup;
 use super::providers::InfraProvider;
@@ -49,10 +49,11 @@ const BATCH_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes per 
 /// Clean up endurance-* Docker containers
 fn cleanup_endurance_containers() {
     let containers =
-        run_cmd_allow_fail("docker", &["ps", "-a", "--filter", "name=endurance-", "-q"]);
+        run_cmd("docker", &["ps", "-a", "--filter", "name=endurance-", "-q"]).unwrap_or_default();
     for id in containers.lines() {
-        if !id.trim().is_empty() {
-            let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
+        let id = id.trim();
+        if !id.is_empty() {
+            let _ = run_cmd("docker", &["rm", "-f", id]);
         }
     }
 }

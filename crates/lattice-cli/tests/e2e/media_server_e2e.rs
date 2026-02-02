@@ -17,7 +17,7 @@ use kube::api::{Api, ListParams, PostParams};
 
 use lattice_operator::crd::LatticeService;
 
-use super::helpers::{client_from_kubeconfig, load_service_config, run_cmd, run_cmd_allow_fail};
+use super::helpers::{client_from_kubeconfig, load_service_config, run_cmd};
 
 const NAMESPACE: &str = "media";
 
@@ -263,8 +263,8 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
         return Err("sonarr cannot read nzbget's marker".into());
     }
 
-    // Verify subpath isolation
-    let result = run_cmd_allow_fail(
+    // Verify subpath isolation - jellyfin should NOT see nzbget's marker in its /media mount
+    let isolated = match run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
@@ -277,8 +277,11 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
             "cat",
             "/media/.test-marker",
         ],
-    );
-    if result.contains("nzbget-marker") {
+    ) {
+        Ok(result) => !result.contains("nzbget-marker"),
+        Err(_) => true, // File doesn't exist - good, isolation works
+    };
+    if !isolated {
         return Err("Subpath isolation failed".into());
     }
 
@@ -327,12 +330,12 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     info!("Verifying bilateral agreements...");
 
     let curl_check = |from: &str, to: &str, port: u16| -> String {
-        run_cmd_allow_fail("kubectl", &[
+        run_cmd("kubectl", &[
             "--kubeconfig", kubeconfig_path,
             "exec", "-n", NAMESPACE, &format!("deploy/{}", from),
             "--", "sh", "-c",
             &format!("curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 5 http://{}:{}/ || echo '000'", to, port),
-        ]).trim().to_string()
+        ]).unwrap_or_else(|_| "000".to_string()).trim().to_string()
     };
 
     // sonarr -> jellyfin (allowed)

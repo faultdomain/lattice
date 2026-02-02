@@ -42,8 +42,7 @@ use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd_allow_fail, run_id, DEFAULT_LATTICE_IMAGE,
-    MGMT_CLUSTER_NAME,
+    load_registry_credentials, run_cmd, run_id, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
 use super::integration::{pivot, setup};
 use super::mesh_tests::{start_mesh_test, wait_for_mesh_test_cycles};
@@ -235,7 +234,7 @@ async fn run_upgrade_test() -> Result<(), String> {
     wait_for_cluster_deleted(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME).await?;
 
     // Force cleanup Docker containers
-    let _ = run_cmd_allow_fail(
+    let _ = run_cmd(
         "docker",
         &[
             "rm",
@@ -243,7 +242,7 @@ async fn run_upgrade_test() -> Result<(), String> {
             &format!("{}-control-plane", UPGRADE_WORKLOAD_CLUSTER_NAME),
         ],
     );
-    let _ = run_cmd_allow_fail(
+    let _ = run_cmd(
         "docker",
         &[
             "rm",
@@ -289,14 +288,14 @@ async fn monitor_upgrade(
         }
 
         // Check node versions
-        let output = run_cmd_allow_fail(
+        let output = run_cmd(
             "kubectl",
             &[
                 "--kubeconfig", kubeconfig_path,
                 "get", "nodes",
                 "-o", "jsonpath={range .items[*]}{.status.nodeInfo.kubeletVersion} {.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
             ],
-        );
+        ).unwrap_or_default();
 
         let mut all_upgraded = true;
         let mut all_ready = true;

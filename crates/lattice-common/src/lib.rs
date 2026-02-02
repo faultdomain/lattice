@@ -9,6 +9,7 @@ pub mod error;
 pub mod fips;
 pub mod graph;
 pub mod kube_utils;
+pub mod mesh;
 pub mod policy;
 pub mod protocol;
 pub mod retry;

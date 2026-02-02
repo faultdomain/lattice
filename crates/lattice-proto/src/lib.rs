@@ -100,3 +100,50 @@ pub mod agent {
 }
 
 pub use agent::v1::*;
+
+/// Check if a query string indicates a streaming request.
+///
+/// Streaming requests include:
+/// - `watch=true` or `watch=1` for K8s watch API
+/// - `follow=true` or `follow=1` for streaming pod logs
+///
+/// # Examples
+///
+/// ```
+/// use lattice_proto::is_watch_query;
+///
+/// assert!(is_watch_query("watch=true"));
+/// assert!(is_watch_query("labelSelector=app&watch=true"));
+/// assert!(is_watch_query("follow=true"));
+/// assert!(!is_watch_query("watch=false"));
+/// assert!(!is_watch_query(""));
+/// ```
+pub fn is_watch_query(query: &str) -> bool {
+    query.contains("watch=true")
+        || query.contains("watch=1")
+        || query.contains("follow=true")
+        || query.contains("follow=1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_watch_query() {
+        // Watch queries
+        assert!(is_watch_query("watch=true"));
+        assert!(is_watch_query("watch=1"));
+        assert!(is_watch_query("labelSelector=app&watch=true"));
+        assert!(is_watch_query("watch=true&resourceVersion=100"));
+        // Follow queries (for logs)
+        assert!(is_watch_query("follow=true"));
+        assert!(is_watch_query("follow=1"));
+        assert!(is_watch_query("container=main&follow=true"));
+        // Non-streaming
+        assert!(!is_watch_query("watch=false"));
+        assert!(!is_watch_query("follow=false"));
+        assert!(!is_watch_query("labelSelector=app"));
+        assert!(!is_watch_query(""));
+    }
+}

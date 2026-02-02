@@ -12,7 +12,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
-use lattice_proto::{cell_command, CellCommand, KubernetesRequest, KubernetesResponse};
+use lattice_proto::{
+    cell_command, is_watch_query, CellCommand, KubernetesRequest, KubernetesResponse,
+};
 
 use crate::connection::SharedAgentRegistry;
 
@@ -34,6 +36,8 @@ pub struct K8sRequestParams {
     pub body: Vec<u8>,
     /// Content-Type header
     pub content_type: String,
+    /// Accept header - desired response format
+    pub accept: String,
     /// Target cluster - the final destination cluster
     /// Agent compares this to its own cluster name:
     /// - If equal: execute request locally
@@ -43,11 +47,6 @@ pub struct K8sRequestParams {
     pub source_user: String,
     /// Source user groups (preserved through routing chain for Cedar)
     pub source_groups: Vec<String>,
-}
-
-/// Check if a query indicates a watch request
-pub fn is_watch_query(query: &str) -> bool {
-    query.contains("watch=true") || query.contains("watch=1")
 }
 
 /// Send a K8s API request through the gRPC tunnel and wait for response
@@ -70,6 +69,7 @@ pub async fn tunnel_request(
         query: params.query,
         body: params.body,
         content_type: params.content_type,
+        accept: params.accept,
         timeout_ms: if is_watch {
             0
         } else {
@@ -309,17 +309,6 @@ impl TunnelError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_is_watch_query() {
-        assert!(is_watch_query("watch=true"));
-        assert!(is_watch_query("watch=1"));
-        assert!(is_watch_query("labelSelector=app&watch=true"));
-        assert!(is_watch_query("watch=true&resourceVersion=100"));
-        assert!(!is_watch_query("watch=false"));
-        assert!(!is_watch_query("labelSelector=app"));
-        assert!(!is_watch_query(""));
-    }
 
     #[test]
     fn test_tunnel_error_status_codes() {

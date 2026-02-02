@@ -5,8 +5,12 @@
 //! ## Query Parameters
 //!
 //! - `format`: Optional. Controls the authentication method in the generated kubeconfig.
-//!   - `exec` (default): Uses OIDC exec plugin for token refresh
-//!   - `token`: Embeds the caller's Bearer token directly (for SA auth or CLI tools)
+//!   - `oidc` (default): Uses OIDC exec plugin for human users
+//!   - `sa`: Uses lattice token exec plugin for ServiceAccount token refresh
+//!
+//! - `kubeconfig`: Required when format=sa. Path to the kubeconfig for token refresh.
+//! - `namespace`: ServiceAccount namespace (default: lattice-system, used with format=sa)
+//! - `service_account`: ServiceAccount name (default: lattice-operator, used with format=sa)
 
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -78,9 +82,18 @@ pub struct UserConfig {
 /// Query parameters for kubeconfig endpoint
 #[derive(Debug, Deserialize, Default)]
 pub struct KubeconfigParams {
-    /// Format: "exec" (default OIDC) or "token" (embed Bearer token)
+    /// Format: "oidc" (default) or "sa" (ServiceAccount with auto-refresh)
     #[serde(default)]
     pub format: Option<String>,
+    /// Kubeconfig path for format=sa (where the ServiceAccount exists)
+    #[serde(default)]
+    pub kubeconfig: Option<String>,
+    /// ServiceAccount namespace (default: lattice-system)
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// ServiceAccount name (default: lattice-operator)
+    #[serde(default)]
+    pub service_account: Option<String>,
 }
 
 /// Exec credential plugin configuration
@@ -145,7 +158,7 @@ pub async fn kubeconfig_handler(
         &identity.username,
         &state.base_url,
         state.oidc_config.as_ref(),
-        Some(token),
+        &state.ca_cert_base64,
         &params,
     );
 
@@ -170,29 +183,26 @@ pub async fn kubeconfig_handler(
 /// * `clusters` - List of cluster names the user can access
 /// * `username` - Username for the kubeconfig user entry
 /// * `base_url` - Base URL of the proxy (e.g., "https://lattice.example.com")
-/// * `oidc_config` - OIDC configuration for exec plugin (used when format != "token")
-/// * `token` - Bearer token to embed when format == "token"
+/// * `oidc_config` - OIDC configuration for exec plugin (used for OIDC format)
+/// * `ca_cert_base64` - Base64-encoded CA certificate for TLS verification
 /// * `params` - Query parameters controlling output format
 fn build_kubeconfig(
     clusters: &[String],
     username: &str,
     base_url: &str,
     oidc_config: Option<&OidcConfig>,
-    token: Option<&str>,
+    ca_cert_base64: &str,
     params: &KubeconfigParams,
 ) -> Kubeconfig {
     // Build cluster entries - all point to the same entry point but with different paths
-    // Note: certificate_authority_data is None because:
-    // 1. The entry point cluster typically uses a public CA (Let's Encrypt, etc.)
-    // 2. Users can add CA data to their kubeconfig manually if using a private CA
-    // 3. The CA for internal cluster communication is handled separately via in-cluster certs
+    // CA cert is always included to ensure kubeconfigs are self-contained
     let cluster_entries: Vec<KubeconfigCluster> = clusters
         .iter()
         .map(|name| KubeconfigCluster {
             name: name.clone(),
             cluster: ClusterConfig {
                 server: format!("{}/clusters/{}", base_url, name),
-                certificate_authority_data: None,
+                certificate_authority_data: Some(ca_cert_base64.to_string()),
             },
         })
         .collect();
@@ -210,25 +220,47 @@ fn build_kubeconfig(
         .collect();
 
     // Build user config based on format parameter
-    let user_config = if params.format.as_deref() == Some("token") {
-        // Token format: embed the Bearer token directly
-        UserConfig {
-            exec: None,
-            token: token.map(|t| t.to_string()),
+    let user_config = match params.format.as_deref() {
+        Some("sa") => {
+            // ServiceAccount format: use lattice token exec plugin for automatic refresh
+            let kubeconfig_path = params.kubeconfig.clone().unwrap_or_default();
+            let namespace = params
+                .namespace
+                .clone()
+                .unwrap_or_else(|| "lattice-system".to_string());
+            let service_account = params
+                .service_account
+                .clone()
+                .unwrap_or_else(|| "lattice-operator".to_string());
+
+            UserConfig {
+                exec: Some(ExecConfig {
+                    api_version: "client.authentication.k8s.io/v1beta1".into(),
+                    command: "lattice".into(),
+                    args: vec![
+                        "token".into(),
+                        format!("--kubeconfig={}", kubeconfig_path),
+                        format!("--namespace={}", namespace),
+                        format!("--service-account={}", service_account),
+                    ],
+                }),
+                token: None,
+            }
         }
-    } else {
-        // Exec format (default): use OIDC exec plugin
-        let exec = oidc_config.map(|config| ExecConfig {
-            api_version: "client.authentication.k8s.io/v1beta1".into(),
-            command: "kubectl".into(),
-            args: vec![
-                "oidc-login".into(),
-                "get-token".into(),
-                format!("--oidc-issuer-url={}", config.issuer_url),
-                format!("--oidc-client-id={}", config.client_id),
-            ],
-        });
-        UserConfig { exec, token: None }
+        _ => {
+            // OIDC format (default): use kubectl oidc-login exec plugin
+            let exec = oidc_config.map(|config| ExecConfig {
+                api_version: "client.authentication.k8s.io/v1beta1".into(),
+                command: "kubectl".into(),
+                args: vec![
+                    "oidc-login".into(),
+                    "get-token".into(),
+                    format!("--oidc-issuer-url={}", config.issuer_url),
+                    format!("--oidc-client-id={}", config.client_id),
+                ],
+            });
+            UserConfig { exec, token: None }
+        }
     };
 
     let current_context = clusters.first().cloned().unwrap_or_default();
@@ -250,6 +282,8 @@ fn build_kubeconfig(
 mod tests {
     use super::*;
 
+    const TEST_CA_CERT: &str = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t";
+
     #[test]
     fn test_build_kubeconfig_basic() {
         let clusters = vec!["prod-frontend".into(), "staging-frontend".into()];
@@ -259,7 +293,7 @@ mod tests {
             "alice@example.com",
             "https://lattice.example.com",
             None,
-            None,
+            TEST_CA_CERT,
             &params,
         );
 
@@ -267,6 +301,12 @@ mod tests {
         assert_eq!(config.contexts.len(), 2);
         assert_eq!(config.users.len(), 1);
         assert_eq!(config.current_context, "prod-frontend");
+
+        // CA cert always included
+        assert_eq!(
+            config.clusters[0].cluster.certificate_authority_data,
+            Some(TEST_CA_CERT.to_string())
+        );
 
         // Verify server URLs point to entry point
         assert_eq!(
@@ -294,7 +334,7 @@ mod tests {
             "alice@example.com",
             "https://lattice.example.com",
             Some(&oidc_config),
-            None,
+            TEST_CA_CERT,
             &params,
         );
 
@@ -307,57 +347,64 @@ mod tests {
             .iter()
             .any(|a| a.contains("https://idp.example.com")));
         assert!(exec.args.iter().any(|a| a.contains("lattice")));
-        // Token should be None
         assert!(config.users[0].user.token.is_none());
     }
 
     #[test]
-    fn test_build_kubeconfig_with_token_format() {
+    fn test_build_kubeconfig_with_sa_format() {
         let clusters = vec!["test-cluster".into()];
         let params = KubeconfigParams {
-            format: Some("token".to_string()),
+            format: Some("sa".to_string()),
+            kubeconfig: Some("/path/to/kubeconfig".to_string()),
+            namespace: Some("my-namespace".to_string()),
+            service_account: Some("my-sa".to_string()),
         };
-        let token = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.test-token";
 
         let config = build_kubeconfig(
             &clusters,
-            "alice@example.com",
+            "system:serviceaccount:my-namespace:my-sa",
             "https://lattice.example.com",
             None,
-            Some(token),
+            TEST_CA_CERT,
             &params,
         );
 
-        // Verify token is embedded and exec is None
-        assert!(config.users[0].user.exec.is_none());
-        assert_eq!(config.users[0].user.token.as_deref(), Some(token));
+        // Verify exec config uses lattice token command
+        let exec = config.users[0].user.exec.as_ref().unwrap();
+        assert_eq!(exec.command, "lattice");
+        assert!(exec.args.contains(&"token".to_string()));
+        assert!(exec.args.iter().any(|a| a.contains("/path/to/kubeconfig")));
+        assert!(exec.args.iter().any(|a| a.contains("my-namespace")));
+        assert!(exec.args.iter().any(|a| a.contains("my-sa")));
+        assert!(config.users[0].user.token.is_none());
     }
 
     #[test]
-    fn test_build_kubeconfig_token_format_ignores_oidc() {
+    fn test_build_kubeconfig_sa_format_defaults() {
         let clusters = vec!["test-cluster".into()];
-        let oidc_config = OidcConfig {
-            issuer_url: "https://idp.example.com".into(),
-            client_id: "lattice".into(),
-            ..Default::default()
-        };
         let params = KubeconfigParams {
-            format: Some("token".to_string()),
+            format: Some("sa".to_string()),
+            kubeconfig: None,
+            namespace: None,
+            service_account: None,
         };
-        let token = "test-token-value";
 
         let config = build_kubeconfig(
             &clusters,
-            "alice@example.com",
+            "default-user",
             "https://lattice.example.com",
-            Some(&oidc_config),
-            Some(token),
+            None,
+            TEST_CA_CERT,
             &params,
         );
 
-        // Even with OIDC config, token format should use embedded token
-        assert!(config.users[0].user.exec.is_none());
-        assert_eq!(config.users[0].user.token.as_deref(), Some(token));
+        // Verify defaults are used (lattice-system namespace, lattice-operator SA)
+        let exec = config.users[0].user.exec.as_ref().unwrap();
+        assert!(exec.args.iter().any(|a| a.contains("lattice-system")));
+        assert!(exec
+            .args
+            .iter()
+            .any(|a| a.contains("--service-account=lattice-operator")));
     }
 
     #[test]
@@ -369,7 +416,7 @@ mod tests {
             "alice@example.com",
             "https://lattice.example.com",
             None,
-            None,
+            TEST_CA_CERT,
             &params,
         );
 

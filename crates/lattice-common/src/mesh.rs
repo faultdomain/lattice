@@ -35,6 +35,10 @@ pub const INGRESS_GATEWAY_CLASS: &str = "eg";
 /// Value: "service" for service-destined traffic.
 pub const WAYPOINT_FOR_LABEL: &str = "istio.io/waypoint-for";
 
+/// Cilium label selector for waypoint-for label.
+/// Cilium requires the `k8s:` prefix for Kubernetes labels.
+pub const CILIUM_WAYPOINT_FOR_LABEL: &str = "k8s:istio.io/waypoint-for";
+
 /// Label key to route traffic through a specific waypoint.
 /// Value: name of the waypoint Gateway (e.g., "{namespace}-waypoint").
 pub const USE_WAYPOINT_LABEL: &str = "istio.io/use-waypoint";
@@ -148,5 +152,11 @@ mod tests {
             principal,
             "lattice.prod.local/ns/envoy-gateway-system/sa/envoy-default"
         );
+    }
+
+    #[test]
+    fn cilium_waypoint_label_has_k8s_prefix() {
+        assert!(CILIUM_WAYPOINT_FOR_LABEL.starts_with("k8s:"));
+        assert!(CILIUM_WAYPOINT_FOR_LABEL.contains(WAYPOINT_FOR_LABEL));
     }
 }

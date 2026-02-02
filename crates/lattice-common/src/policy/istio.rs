@@ -124,7 +124,7 @@ pub struct WorkloadSelector {
 }
 
 /// Authorization rule
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct AuthorizationRule {
     /// Source conditions (who is calling)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

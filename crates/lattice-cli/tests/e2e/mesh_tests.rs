@@ -23,31 +23,16 @@ use lattice_operator::crd::{
     Resolution, ResourceSpec, ResourceType, ServicePhase, ServicePortsSpec,
 };
 
-use super::helpers::{client_from_kubeconfig, run_cmd, run_cmd_allow_fail};
+use super::helpers::{client_from_kubeconfig, run_cmd};
 
 // =============================================================================
 // Namespace Helpers
 // =============================================================================
 
-/// Create a namespace using kubectl
-fn create_namespace(kubeconfig_path: &str, namespace: &str) {
-    info!("Creating namespace {}...", namespace);
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "create",
-            "namespace",
-            namespace,
-        ],
-    );
-}
-
 /// Delete a namespace using kubectl (non-blocking)
 fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
     info!("[Mesh Cleanup] Deleting namespace {}...", namespace);
-    let _ = run_cmd_allow_fail(
+    let _ = run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
@@ -58,6 +43,106 @@ fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
             "--wait=false",
         ],
     );
+}
+
+/// Ensure a fresh namespace exists by deleting if present and waiting for full cleanup.
+///
+/// This is important for re-running tests - stale resources cause conflicts.
+async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> Result<(), String> {
+    // Check if namespace exists
+    let ns_exists = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "namespace",
+            namespace,
+            "-o",
+            "name",
+        ],
+    )
+    .is_ok();
+
+    if ns_exists {
+        info!(
+            "[Mesh] Namespace {} exists, deleting for fresh start...",
+            namespace
+        );
+        delete_namespace(kubeconfig_path, namespace);
+
+        // Wait for namespace to be fully deleted
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(120);
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(format!(
+                    "Timeout waiting for namespace {} to be deleted",
+                    namespace
+                ));
+            }
+
+            // If the command fails or returns empty, the namespace is deleted
+            let deleted = match run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "get",
+                    "namespace",
+                    namespace,
+                    "-o",
+                    "name",
+                ],
+            ) {
+                Ok(output) => output.trim().is_empty(),
+                Err(_) => true, // Error means not found
+            };
+
+            if deleted {
+                info!("[Mesh] Namespace {} fully deleted", namespace);
+                break;
+            }
+
+            // Check phase for logging
+            let phase = run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "get",
+                    "namespace",
+                    namespace,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ],
+            )
+            .unwrap_or_default();
+            info!(
+                "[Mesh] Waiting for namespace {} deletion (phase: {})...",
+                namespace,
+                phase.trim()
+            );
+
+            sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    // Create fresh namespace
+    info!("[Mesh] Creating fresh namespace {}...", namespace);
+    run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "create",
+            "namespace",
+            namespace,
+        ],
+    )?;
+
+    Ok(())
 }
 
 /// Wait for all LatticeServices in a namespace to be Ready
@@ -308,7 +393,7 @@ async fn wait_for_cycles(
             "{{range .items[*]}}{{.metadata.name}}:{{.metadata.labels.{}}}{{\"\\n\"}}{{end}}",
             label_escaped
         );
-        let pods_output = run_cmd_allow_fail(
+        let pods_output = run_cmd(
             "kubectl",
             &[
                 "--kubeconfig",
@@ -320,12 +405,13 @@ async fn wait_for_cycles(
                 "-o",
                 &format!("jsonpath={}", jsonpath),
             ],
-        );
+        )
+        .unwrap_or_default();
 
         // Filter to only pods matching our service names
         let pods: Vec<&str> = pods_output
             .lines()
-            .filter_map(|line| {
+            .filter_map(|line: &str| {
                 let parts: Vec<&str> = line.split(':').collect();
                 if parts.len() == 2 {
                     let pod_name = parts[0].trim();
@@ -354,7 +440,7 @@ async fn wait_for_cycles(
         let mut min_cycles_found = usize::MAX;
 
         for pod in &pods {
-            let logs = run_cmd_allow_fail(
+            let logs = run_cmd(
                 "kubectl",
                 &[
                     "--kubeconfig",
@@ -366,7 +452,8 @@ async fn wait_for_cycles(
                     "--tail",
                     "2000",
                 ],
-            );
+            )
+            .unwrap_or_default();
 
             let cycle_count = logs.matches(CYCLE_END_MARKER).count();
             min_cycles_found = min_cycles_found.min(cycle_count);
@@ -932,7 +1019,7 @@ fn create_public_api() -> LatticeService {
 }
 
 async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
-    create_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE);
+    ensure_fresh_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await?;
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::namespaced(client, TEST_SERVICES_NAMESPACE);
@@ -998,7 +1085,7 @@ async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
             ));
         }
 
-        let pods_output = run_cmd_allow_fail(
+        let running_count = match run_cmd(
             "kubectl",
             &[
                 "--kubeconfig",
@@ -1010,9 +1097,10 @@ async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
                 "-o",
                 "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}",
             ],
-        );
-
-        let running_count = pods_output.lines().filter(|l| *l == "Running").count();
+        ) {
+            Ok(output) => output.lines().filter(|l: &&str| *l == "Running").count(),
+            Err(_) => 0,
+        };
         info!(
             "[Fixed Mesh] {}/{} pods running",
             running_count, expected_pods
@@ -1211,7 +1299,7 @@ async fn check_no_incorrectly_allowed(
             continue;
         }
 
-        let logs = run_cmd_allow_fail(
+        let logs = run_cmd(
             "kubectl",
             &[
                 "--kubeconfig",
@@ -1223,7 +1311,8 @@ async fn check_no_incorrectly_allowed(
                 "--tail",
                 "500",
             ],
-        );
+        )
+        .unwrap_or_default();
 
         // Look for "ALLOWED(UNEXPECTED)" or "ALLOWED (UNEXPECTED" patterns
         for line in logs.lines() {
@@ -1861,7 +1950,7 @@ impl RandomMesh {
 const RANDOM_MESH_NAMESPACE: &str = "random-mesh";
 
 async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<(), String> {
-    create_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE);
+    ensure_fresh_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE).await?;
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
 
@@ -1925,7 +2014,7 @@ async fn wait_for_random_mesh_pods(mesh: &RandomMesh, kubeconfig_path: &str) -> 
             ));
         }
 
-        let output = run_cmd_allow_fail(
+        let running = match run_cmd(
             "kubectl",
             &[
                 "--kubeconfig",
@@ -1937,9 +2026,13 @@ async fn wait_for_random_mesh_pods(mesh: &RandomMesh, kubeconfig_path: &str) -> 
                 "-o",
                 "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}",
             ],
-        );
-
-        let running = output.lines().filter(|l| l.trim() == "Running").count();
+        ) {
+            Ok(output) => output
+                .lines()
+                .filter(|l: &&str| l.trim() == "Running")
+                .count(),
+            Err(_) => 0,
+        };
         info!("[Random Mesh] {}/{} pods running", running, expected_pods);
 
         if running >= expected_pods {

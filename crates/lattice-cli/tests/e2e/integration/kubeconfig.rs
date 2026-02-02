@@ -17,8 +17,8 @@ use tracing::info;
 
 use lattice_common::{capi_namespace, kubeconfig_secret_name};
 
-use super::super::context::{init_test_env, InfraContext};
-use super::super::helpers::{run_cmd, run_cmd_allow_fail, WORKLOAD_CLUSTER_NAME};
+use super::super::context::{InfraContext, TestSession};
+use super::super::helpers::{get_workload_cluster_name, run_cmd};
 
 // ============================================================================
 // Core Test Functions
@@ -44,7 +44,8 @@ pub async fn verify_kubeconfig_patched(
     let secret_name = kubeconfig_secret_name(cluster_name);
 
     // Try to get the kubeconfig secret from the parent cluster (pre-pivot location)
-    let kubeconfig_b64 = run_cmd_allow_fail(
+    // Use run_cmd which returns Result - if kubectl fails (e.g., secret not found), it's an Err
+    let kubeconfig_b64 = match run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
@@ -57,21 +58,22 @@ pub async fn verify_kubeconfig_patched(
             "-o",
             "jsonpath={.data.value}",
         ],
-    );
-
-    if kubeconfig_b64.trim().is_empty() || kubeconfig_b64.contains("not found") {
-        // After pivot, the secret is moved to the child cluster
-        // This is expected - the cluster is now self-managing
-        info!(
-            "[Integration/Kubeconfig] Kubeconfig secret {}/{} not on parent (expected after pivot)",
-            namespace, secret_name
-        );
-        info!(
-            "[Integration/Kubeconfig] Cluster {} has pivoted - CAPI resources moved to child",
-            cluster_name
-        );
-        return Ok(());
-    }
+    ) {
+        Ok(data) if !data.trim().is_empty() => data,
+        Ok(_) | Err(_) => {
+            // After pivot, the secret is moved to the child cluster
+            // This is expected - the cluster is now self-managing
+            info!(
+                "[Integration/Kubeconfig] Kubeconfig secret {}/{} not on parent (expected after pivot)",
+                namespace, secret_name
+            );
+            info!(
+                "[Integration/Kubeconfig] Cluster {} has pivoted - CAPI resources moved to child",
+                cluster_name
+            );
+            return Ok(());
+        }
+    };
 
     let kubeconfig = String::from_utf8(
         STANDARD
@@ -119,7 +121,7 @@ pub async fn verify_cedar_policies_loaded(kubeconfig: &str) -> Result<(), String
         return Ok(());
     }
 
-    let policies = run_cmd_allow_fail(
+    let policy_count = match run_cmd(
         "kubectl",
         &[
             "--kubeconfig",
@@ -130,9 +132,10 @@ pub async fn verify_cedar_policies_loaded(kubeconfig: &str) -> Result<(), String
             "-o",
             "name",
         ],
-    );
-
-    let policy_count = policies.lines().filter(|l| !l.is_empty()).count();
+    ) {
+        Ok(policies) => policies.lines().filter(|l| !l.is_empty()).count(),
+        Err(_) => 0,
+    };
     info!(
         "[Integration/Kubeconfig] Found {} Cedar policies",
         policy_count
@@ -167,23 +170,28 @@ pub async fn run_kubeconfig_verification(
 // Standalone Tests
 // ============================================================================
 
+/// Standalone test - verify kubeconfig patching for proxy access
+///
+/// Uses TestSession to automatically manage port-forwards.
 #[tokio::test]
 #[ignore]
 async fn test_kubeconfig_patched() {
-    let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG");
-    let workload_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
-        .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string());
+    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG").unwrap();
+    let workload_name = get_workload_cluster_name();
 
-    verify_kubeconfig_patched(&ctx.mgmt_kubeconfig, &workload_name)
+    verify_kubeconfig_patched(&session.ctx.mgmt_kubeconfig, &workload_name)
         .await
         .unwrap();
 }
 
+/// Standalone test - verify Cedar policies are loaded
+///
+/// Uses TestSession to automatically manage port-forwards.
 #[tokio::test]
 #[ignore]
 async fn test_cedar_policies() {
-    let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG");
-    verify_cedar_policies_loaded(&ctx.mgmt_kubeconfig)
+    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG").unwrap();
+    verify_cedar_policies_loaded(&session.ctx.mgmt_kubeconfig)
         .await
         .unwrap();
 }
