@@ -185,11 +185,12 @@ pub fn delete_cedar_policy(kubeconfig: &str, policy_name: &str) -> Result<(), St
     Ok(())
 }
 
-/// Clean up test resources
+/// Clean up test resources (policies only, namespace persists for subsequent tests)
 pub fn cleanup_cedar_test_resources(kubeconfig: &str) {
     info!("[Integration/Cedar] Cleaning up test resources...");
 
-    // Delete test policies
+    // Delete test policies only - namespace persists to avoid race conditions
+    // between consecutive tests. Namespace gets cleaned up with cluster deletion.
     let _ = run_cmd_allow_fail(
         "kubectl",
         &[
@@ -202,20 +203,6 @@ pub fn cleanup_cedar_test_resources(kubeconfig: &str) {
             "-l",
             "lattice.dev/test=cedar",
             "--ignore-not-found",
-        ],
-    );
-
-    // Delete namespace (cascades to ServiceAccounts)
-    let _ = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "namespace",
-            CEDAR_TEST_NAMESPACE,
-            "--ignore-not-found",
-            "--wait=false",
         ],
     );
 

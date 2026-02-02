@@ -39,12 +39,24 @@ struct Cli {
     command: Option<Commands>,
 }
 
+/// Vertical slice modes for the modular monolith architecture.
+///
+/// Each mode runs a specific subset of controllers and infrastructure:
+/// - `All`: Complete operator (default for single-deployment scenarios)
+/// - `Cluster`: Cluster lifecycle (provisioning, pivoting, scaling) + cell infrastructure
+/// - `Service`: Service mesh (policies, workloads, ingress) - no cell infrastructure
+/// - `Provider`: Provider validation only (CloudProvider, SecretsProvider)
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 pub enum ControllerMode {
+    /// Run all controllers and infrastructure
     #[default]
     All,
+    /// Run cluster lifecycle controller + cell infrastructure (gRPC, bootstrap, auth proxy)
     Cluster,
+    /// Run service mesh controller only (no cell infrastructure)
     Service,
+    /// Run provider validation controllers only (CloudProvider, SecretsProvider)
+    Provider,
 }
 
 #[derive(Subcommand, Debug)]
@@ -115,52 +127,66 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     ensure_infrastructure(&client).await?;
     wait_for_api_ready(&client).await?;
 
-    // Create cell servers
-    let parent_config = ParentConfig::default();
-    let parent_servers = Arc::new(ParentServers::new(parent_config, &client).await?);
+    // Determine what infrastructure this mode needs
+    let needs_cell_infra = matches!(mode, ControllerMode::All | ControllerMode::Cluster);
 
     // Get cluster identity from environment
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
     let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
-    // Start agent connection to parent (if we have one)
-    // The forwarder enables hierarchical routing - when this cluster receives
-    // K8s requests for child clusters, it forwards them via the gRPC tunnel.
+    // Cell infrastructure (only for Cluster and All modes)
+    let parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>;
     let agent_token = tokio_util::sync::CancellationToken::new();
-    if let Some(ref name) = self_cluster_name {
-        let client = client.clone();
-        let name = name.clone();
-        let token = agent_token.clone();
-        let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> =
-            Arc::new(SubtreeForwarder::new(
-                parent_servers.subtree_registry(),
-                parent_servers.agent_registry(),
-            ));
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = token.cancelled() => {}
-                _ = start_agent_with_retry(&client, &name, forwarder) => {}
-            }
-        });
-    }
+    let auth_proxy_handle: Option<tokio::task::JoinHandle<()>>;
 
-    // Start cell servers with TLS SANs from LoadBalancer
-    let extra_sans = get_cell_server_sans(&client, &self_cluster_name, is_bootstrap).await;
-    parent_servers
-        .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
-        .await?;
-    tracing::info!("Cell servers started");
+    if needs_cell_infra {
+        // Create cell servers
+        let parent_config = ParentConfig::default();
+        let servers = Arc::new(ParentServers::new(parent_config, &client).await?);
 
-    // Start auth proxy server (for authenticated access with Cedar authorization)
-    let auth_proxy_handle =
-        start_auth_proxy(&client, parent_servers.clone(), &self_cluster_name).await;
+        // Start agent connection to parent (if we have one)
+        // The forwarder enables hierarchical routing - when this cluster receives
+        // K8s requests for child clusters, it forwards them via the gRPC tunnel.
+        if let Some(ref name) = self_cluster_name {
+            let client = client.clone();
+            let name = name.clone();
+            let token = agent_token.clone();
+            let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> =
+                Arc::new(SubtreeForwarder::new(
+                    servers.subtree_registry(),
+                    servers.agent_registry(),
+                ));
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = token.cancelled() => {}
+                    _ = start_agent_with_retry(&client, &name, forwarder) => {}
+                }
+            });
+        }
 
-    // Start CA rotation background task
-    start_ca_rotation(parent_servers.clone());
+        // Start cell servers with TLS SANs from LoadBalancer
+        let extra_sans = get_cell_server_sans(&client, &self_cluster_name, is_bootstrap).await;
+        servers
+            .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
+            .await?;
+        tracing::info!("Cell servers started");
 
-    // Re-register clusters after restart (crash recovery)
-    if let Some(state) = parent_servers.bootstrap_state().await {
-        re_register_existing_clusters(&client, &state, &self_cluster_name, &parent_servers).await;
+        // Start auth proxy server (for authenticated access with Cedar authorization)
+        auth_proxy_handle = start_auth_proxy(&client, servers.clone(), &self_cluster_name).await;
+
+        // Start CA rotation background task
+        start_ca_rotation(servers.clone());
+
+        // Re-register clusters after restart (crash recovery)
+        if let Some(state) = servers.bootstrap_state().await {
+            re_register_existing_clusters(&client, &state, &self_cluster_name, &servers).await;
+        }
+
+        parent_servers = Some(servers);
+    } else {
+        parent_servers = None;
+        auth_proxy_handle = None;
+        tracing::info!("Skipping cell infrastructure (not needed for {:?} mode)", mode);
     }
 
     // Run controllers until shutdown
@@ -172,7 +198,9 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     if let Some(handle) = auth_proxy_handle {
         handle.abort();
     }
-    parent_servers.shutdown().await;
+    if let Some(servers) = parent_servers {
+        servers.shutdown().await;
+    }
     tracing::info!("Shutting down");
     Ok(())
 }

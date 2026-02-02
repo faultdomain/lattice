@@ -31,54 +31,72 @@ pub async fn run_controllers(
     client: Client,
     mode: ControllerMode,
     self_cluster_name: Option<String>,
-    parent_servers: Arc<ParentServers<DefaultManifestGenerator>>,
+    parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
 ) {
     let run_cluster = matches!(mode, ControllerMode::All | ControllerMode::Cluster);
     let run_service = matches!(mode, ControllerMode::All | ControllerMode::Service);
+    let run_provider = matches!(mode, ControllerMode::All | ControllerMode::Provider);
 
-    // Build cluster controller context
-    let mut ctx_builder = Context::builder(client.clone()).parent_servers(parent_servers);
-    if let Some(ref name) = self_cluster_name {
-        tracing::info!(cluster = %name, "Running as self-managed cluster");
-        ctx_builder = ctx_builder.self_cluster_name(name.clone());
-    }
-    let ctx = Arc::new(ctx_builder.build());
+    log_enabled_controllers(run_cluster, run_service, run_provider);
 
-    // Get provider type for topology-aware scheduling
-    let clusters: Api<LatticeCluster> = Api::all(client.clone());
-    let provider_type = match clusters.list(&kube::api::ListParams::default()).await {
-        Ok(list) => list
-            .items
-            .first()
-            .map(|c| c.spec.provider.provider_type())
-            .unwrap_or(ProviderType::Docker),
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to read LatticeCluster, defaulting to Docker");
-            ProviderType::Docker
+    // Build cluster controller context and controller (only if needed)
+    let cluster_controller = if run_cluster {
+        let mut ctx_builder = Context::builder(client.clone());
+        if let Some(servers) = parent_servers {
+            ctx_builder = ctx_builder.parent_servers(servers);
         }
+        if let Some(ref name) = self_cluster_name {
+            tracing::info!(cluster = %name, "Running as self-managed cluster");
+            ctx_builder = ctx_builder.self_cluster_name(name.clone());
+        }
+        let ctx = Arc::new(ctx_builder.build());
+        let clusters: Api<LatticeCluster> = Api::all(client.clone());
+        create_cluster_controller(clusters, ctx)
+    } else {
+        None
     };
 
-    // Build service controller context
-    let cluster_name_for_service = self_cluster_name.unwrap_or_else(|| "default".to_string());
-    let service_ctx = Arc::new(ServiceContext::from_client(
-        client.clone(),
-        cluster_name_for_service,
-        provider_type,
-    ));
+    // Build service controller context and controllers (only if needed)
+    let (service_controller, external_controller) = if run_service {
+        // Get provider type for topology-aware scheduling
+        let clusters: Api<LatticeCluster> = Api::all(client.clone());
+        let provider_type = match clusters.list(&kube::api::ListParams::default()).await {
+            Ok(list) => list
+                .items
+                .first()
+                .map(|c| c.spec.provider.provider_type())
+                .unwrap_or(ProviderType::Docker),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read LatticeCluster, defaulting to Docker");
+                ProviderType::Docker
+            }
+        };
 
-    log_enabled_controllers(run_cluster, run_service);
+        let cluster_name_for_service = self_cluster_name.unwrap_or_else(|| "default".to_string());
+        let service_ctx = Arc::new(ServiceContext::from_client(
+            client.clone(),
+            cluster_name_for_service,
+            provider_type,
+        ));
+        create_service_controllers(client.clone(), service_ctx)
+    } else {
+        (None, None)
+    };
 
-    // Create controller futures
-    let cluster_controller = create_cluster_controller(run_cluster, clusters, ctx);
-    let (service_controller, external_controller) =
-        create_service_controllers(run_service, client.clone(), service_ctx);
-    let cloud_provider_controller = create_cloud_provider_controller(client.clone());
-    let secrets_provider_controller = create_secrets_provider_controller(client);
+    // Build provider controllers (only if needed)
+    let (cloud_provider_controller, secrets_provider_controller) = if run_provider {
+        (
+            create_cloud_provider_controller(client.clone()),
+            create_secrets_provider_controller(client),
+        )
+    } else {
+        (None, None)
+    };
 
     // Run all controllers until one exits
     tokio::select! {
-        _ = cloud_provider_controller => tracing::info!("CloudProvider controller completed"),
-        _ = secrets_provider_controller => tracing::info!("SecretsProvider controller completed"),
+        _ = run_optional_controller(cloud_provider_controller) => tracing::info!("CloudProvider controller completed"),
+        _ = run_optional_controller(secrets_provider_controller) => tracing::info!("SecretsProvider controller completed"),
         _ = run_optional_controller(cluster_controller) => tracing::info!("Cluster controller completed"),
         _ = run_optional_controller(service_controller) => tracing::info!("Service controller completed"),
         _ = run_optional_controller(external_controller) => tracing::info!("External service controller completed"),
@@ -97,7 +115,7 @@ async fn run_optional_controller<F: Future<Output = ()>>(controller: Option<F>) 
     }
 }
 
-fn log_enabled_controllers(run_cluster: bool, run_service: bool) {
+fn log_enabled_controllers(run_cluster: bool, run_service: bool, run_provider: bool) {
     tracing::info!("Starting Lattice controllers...");
     if run_cluster {
         tracing::info!("- LatticeCluster controller");
@@ -106,8 +124,10 @@ fn log_enabled_controllers(run_cluster: bool, run_service: bool) {
         tracing::info!("- LatticeService controller");
         tracing::info!("- LatticeExternalService controller");
     }
-    tracing::info!("- CloudProvider controller");
-    tracing::info!("- SecretsProvider controller");
+    if run_provider {
+        tracing::info!("- CloudProvider controller");
+        tracing::info!("- SecretsProvider controller");
+    }
 }
 
 /// Watcher timeout (seconds) - must be less than client read_timeout (30s)
@@ -116,14 +136,9 @@ fn log_enabled_controllers(run_cluster: bool, run_service: bool) {
 const WATCH_TIMEOUT_SECS: u32 = 25;
 
 fn create_cluster_controller(
-    enabled: bool,
     clusters: Api<LatticeCluster>,
     ctx: Arc<Context>,
 ) -> Option<impl std::future::Future<Output = ()>> {
-    if !enabled {
-        return None;
-    }
-
     Some(
         Controller::new(
             clusters,
@@ -131,27 +146,17 @@ fn create_cluster_controller(
         )
         .shutdown_on_signal()
         .run(reconcile, error_policy, ctx)
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => tracing::debug!(?action, "Cluster reconciliation completed"),
-                Err(e) => tracing::error!(error = ?e, "Cluster reconciliation error"),
-            }
-        }),
+        .for_each(log_reconcile_result("Cluster")),
     )
 }
 
 fn create_service_controllers(
-    enabled: bool,
     client: Client,
     ctx: Arc<ServiceContext>,
 ) -> (
     Option<impl std::future::Future<Output = ()>>,
     Option<impl std::future::Future<Output = ()>>,
 ) {
-    if !enabled {
-        return (None, None);
-    }
-
     let services: Api<LatticeService> = Api::all(client.clone());
     let external_services: Api<LatticeExternalService> = Api::all(client);
 
@@ -195,12 +200,7 @@ fn create_service_controllers(
     )
     .shutdown_on_signal()
     .run(service_reconcile, service_error_policy, ctx.clone())
-    .for_each(|result| async move {
-        match result {
-            Ok(action) => tracing::debug!(?action, "Service reconciliation completed"),
-            Err(e) => tracing::error!(error = ?e, "Service reconciliation error"),
-        }
-    });
+    .for_each(log_reconcile_result("Service"));
 
     let ext_ctrl = Controller::new(
         external_services,
@@ -208,56 +208,60 @@ fn create_service_controllers(
     )
     .shutdown_on_signal()
     .run(reconcile_external, error_policy_external, ctx)
-    .for_each(|result| async move {
-        match result {
-            Ok(action) => tracing::debug!(?action, "External service reconciliation completed"),
-            Err(e) => tracing::error!(error = ?e, "External service reconciliation error"),
-        }
-    });
+    .for_each(log_reconcile_result("ExternalService"));
 
     (Some(svc_ctrl), Some(ext_ctrl))
 }
 
-fn create_cloud_provider_controller(client: Client) -> impl std::future::Future<Output = ()> {
+fn create_cloud_provider_controller(client: Client) -> Option<impl std::future::Future<Output = ()>> {
     let cloud_providers: Api<CloudProvider> = Api::all(client.clone());
     let ctx = Arc::new(ControllerContext::new(client));
 
-    Controller::new(
-        cloud_providers,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    Some(
+        Controller::new(
+            cloud_providers,
+            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        )
+        .shutdown_on_signal()
+        .run(
+            cloud_provider_ctrl::reconcile,
+            lattice_common::default_error_policy,
+            ctx,
+        )
+        .for_each(log_reconcile_result("CloudProvider")),
     )
-    .shutdown_on_signal()
-    .run(
-        cloud_provider_ctrl::reconcile,
-        lattice_common::default_error_policy,
-        ctx,
-    )
-    .for_each(|result| async move {
-        match result {
-            Ok(action) => tracing::debug!(?action, "CloudProvider reconciliation completed"),
-            Err(e) => tracing::error!(error = ?e, "CloudProvider reconciliation error"),
-        }
-    })
 }
 
-fn create_secrets_provider_controller(client: Client) -> impl std::future::Future<Output = ()> {
+fn create_secrets_provider_controller(client: Client) -> Option<impl std::future::Future<Output = ()>> {
     let secrets_providers: Api<SecretsProvider> = Api::all(client.clone());
     let ctx = Arc::new(ControllerContext::new(client));
 
-    Controller::new(
-        secrets_providers,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    Some(
+        Controller::new(
+            secrets_providers,
+            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        )
+        .shutdown_on_signal()
+        .run(
+            secrets_provider_ctrl::reconcile,
+            lattice_common::default_error_policy,
+            ctx,
+        )
+        .for_each(log_reconcile_result("SecretsProvider")),
     )
-    .shutdown_on_signal()
-    .run(
-        secrets_provider_ctrl::reconcile,
-        lattice_common::default_error_policy,
-        ctx,
-    )
-    .for_each(|result| async move {
+}
+
+/// Creates a closure for logging reconciliation results.
+///
+/// This consolidates the duplicated pattern of logging Ok/Err results from controller runs.
+fn log_reconcile_result<T: std::fmt::Debug, E: std::fmt::Debug>(
+    controller_name: &'static str,
+) -> impl Fn(Result<T, E>) -> std::future::Ready<()> {
+    move |result| {
         match result {
-            Ok(action) => tracing::debug!(?action, "SecretsProvider reconciliation completed"),
-            Err(e) => tracing::error!(error = ?e, "SecretsProvider reconciliation error"),
+            Ok(action) => tracing::debug!(?action, "{} reconciliation completed", controller_name),
+            Err(e) => tracing::error!(error = ?e, "{} reconciliation error", controller_name),
         }
-    })
+        std::future::ready(())
+    }
 }

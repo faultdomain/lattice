@@ -50,7 +50,8 @@ use super::super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
     load_registry_credentials, rebuild_and_restart_operators, run_cmd_allow_fail,
-    watch_cluster_phases, watch_cluster_phases_with_kubeconfig, ProxySession,
+    wait_for_operator_ready, watch_cluster_phases, watch_cluster_phases_with_kubeconfig,
+    ProxySession,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, cedar, pivot, scaling};
@@ -422,6 +423,11 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // Phase 7: Generate Proxy Kubeconfigs
     // =========================================================================
     info!("[Setup/Phase 7] Generating proxy kubeconfigs...");
+
+    // Wait for operators to be ready before trying to connect to their proxies
+    // The operator includes the auth proxy server, so we need it running first
+    wait_for_operator_ready(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, Some(120)).await?;
+    wait_for_operator_ready(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path, Some(120)).await?;
 
     // Apply Cedar policies to allow proxy access
     cedar::apply_e2e_default_policy(&mgmt_kubeconfig_path)?;

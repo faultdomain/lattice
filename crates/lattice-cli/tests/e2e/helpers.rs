@@ -1173,7 +1173,7 @@ pub fn start_proxy_port_forward(kubeconfig: &str) -> Result<(String, std::proces
     );
 
     // Start kubectl port-forward in background
-    let child = Command::new("kubectl")
+    let mut child = Command::new("kubectl")
         .args([
             "--kubeconfig",
             kubeconfig,
@@ -1188,13 +1188,49 @@ pub fn start_proxy_port_forward(kubeconfig: &str) -> Result<(String, std::proces
         .spawn()
         .map_err(|e| format!("Failed to start port-forward: {}", e))?;
 
-    // Wait for port-forward to be ready
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
     let url = format!("https://127.0.0.1:{}", local_port);
-    info!("[Helpers] Port-forward ready at {}", url);
 
-    Ok((url, child))
+    // Poll /healthz until ready (up to 60 seconds)
+    for attempt in 1..=60 {
+        // Check if port-forward process died
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "Port-forward process died unexpectedly with status: {}",
+                status
+            ));
+        }
+
+        // Try to hit the health endpoint
+        let health_url = format!("{}/healthz", url);
+        let output = run_cmd_allow_fail(
+            "curl",
+            &[
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "--insecure",
+                "--max-time",
+                "2",
+                &health_url,
+            ],
+        );
+
+        if output.trim() == "200" {
+            info!("[Helpers] Port-forward ready at {} (attempt {})", url, attempt);
+            return Ok((url, child));
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+
+    // Clean up the failed port-forward
+    let _ = child.kill();
+    Err(format!(
+        "Port-forward to {} failed to become ready after 60 seconds",
+        url
+    ))
 }
 
 /// Find an available local port for port-forwarding.
@@ -1410,8 +1446,8 @@ impl ProxySession {
         // Parse the response and build a kubeconfig for the specific cluster
         let kubeconfig = self.build_kubeconfig(&body, cluster_name)?;
 
-        // Write to temp file
-        let path = format!("/tmp/{}-kubeconfig-{}", cluster_name, run_id());
+        // Write to temp file (use -proxy- suffix to avoid overwriting direct kubeconfigs)
+        let path = format!("/tmp/{}-proxy-kubeconfig-{}", cluster_name, run_id());
         std::fs::write(&path, &kubeconfig)
             .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
 
