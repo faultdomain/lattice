@@ -4,27 +4,30 @@
 //! coordination.k8s.io/v1 Lease API. Only the leader runs controllers
 //! and accepts traffic.
 //!
-//! # Split-Brain Prevention
+//! # Atomicity
 //!
-//! Split-brain is prevented by timing: `lease_duration` (30s) > `renew_interval` (10s)
-//! means the old leader detects loss and stops at least 20s before the new leader
-//! can acquire the expired lease.
+//! Uses resourceVersion for compare-and-swap semantics. If the lease changes
+//! between read and write, the update fails with 409 Conflict and we retry.
+//! This prevents race conditions where two pods both think they acquired leadership.
 //!
 //! # Traffic Routing
 //!
-//! The leader writes Endpoints directly (Service has no selector). This ensures
-//! clean handoff: new leader overwrites Endpoints with its own IP, no stale state.
+//! The leader adds a `lattice.dev/leader=true` label to its pod. The Service
+//! selector includes this label, so only the leader receives traffic. Kubernetes
+//! readiness probes ensure the old leader is removed from Endpoints before the
+//! lease expires (30s lease > 15s readiness removal time).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use k8s_openapi::api::coordination::v1::Lease;
-use k8s_openapi::api::core::v1::{EndpointAddress, EndpointPort, EndpointSubset, Endpoints};
+use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::Client;
+use serde_json::json;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -35,7 +38,13 @@ use crate::LATTICE_SYSTEM_NAMESPACE;
 /// Lease name for the Lattice operator leader election
 pub const LEADER_LEASE_NAME: &str = "lattice-operator-leader";
 
-// Timing constants (not public - use new() defaults)
+/// Label key added to leader pod for Service selector
+pub const LEADER_LABEL_KEY: &str = "lattice.dev/leader";
+
+/// Label value for leader pod
+pub const LEADER_LABEL_VALUE: &str = "true";
+
+// Timing constants
 const LEASE_DURATION: Duration = Duration::from_secs(30);
 const RENEW_INTERVAL: Duration = Duration::from_secs(10);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -52,7 +61,7 @@ pub enum LeaderElectionError {
 /// Leader elector using Kubernetes Leases
 ///
 /// Manages leader election for HA deployments. Only one pod holds the
-/// lease at a time. The leader writes Endpoints to route all traffic to itself.
+/// lease at a time. The leader adds a label to route traffic to itself.
 pub struct LeaderElector {
     client: Client,
     lease_name: String,
@@ -91,7 +100,7 @@ impl LeaderElector {
         );
 
         loop {
-            match self.try_acquire_lease().await {
+            match self.try_acquire_or_renew().await {
                 Ok(true) => {
                     info!(identity = %self.identity, "Leadership acquired");
                     self.is_leader.store(true, Ordering::SeqCst);
@@ -105,6 +114,7 @@ impl LeaderElector {
                     );
                 }
                 Err(e) => {
+                    // Log but continue - transient errors shouldn't stop us
                     warn!(
                         identity = %self.identity,
                         error = %e,
@@ -132,22 +142,39 @@ impl LeaderElector {
         }
     }
 
-    /// Try to acquire or renew the lease
-    async fn try_acquire_lease(&self) -> Result<bool, LeaderElectionError> {
+    /// Try to acquire or renew the lease atomically
+    ///
+    /// Uses resourceVersion for compare-and-swap semantics:
+    /// - Read lease and its resourceVersion
+    /// - Decide if we can acquire/renew
+    /// - Update with resourceVersion - fails if lease changed since read
+    async fn try_acquire_or_renew(&self) -> Result<bool, LeaderElectionError> {
         let api: Api<Lease> = Api::namespaced(self.client.clone(), &self.namespace);
         let now = Utc::now();
 
-        match api.get(&self.lease_name).await {
-            Ok(lease) => {
+        // Try to get existing lease
+        let existing = match api.get(&self.lease_name).await {
+            Ok(lease) => Some(lease),
+            Err(kube::Error::Api(e)) if e.code == 404 => None,
+            Err(e) => return Err(e.into()),
+        };
+
+        match existing {
+            None => {
+                // No lease exists - create it (first leader)
+                self.create_lease(&api, now).await
+            }
+            Some(lease) => {
                 let spec = lease.spec.as_ref();
                 let holder = spec.and_then(|s| s.holder_identity.as_ref());
+                let resource_version = lease.metadata.resource_version.clone();
 
-                // Already hold it? Renew.
+                // Do we already hold it?
                 if holder == Some(&self.identity) {
-                    return self.renew_lease(&api, now).await;
+                    return self.renew_lease(&api, &lease, now).await;
                 }
 
-                // Check expiry
+                // Check if expired
                 let renew_time = spec.and_then(|s| s.renew_time.as_ref());
                 let duration_secs = spec.and_then(|s| s.lease_duration_seconds);
                 let is_expired = match (renew_time, duration_secs) {
@@ -159,13 +186,12 @@ impl LeaderElector {
 
                 if is_expired {
                     let transitions = spec.and_then(|s| s.lease_transitions).unwrap_or(0);
-                    self.take_over_lease(&api, now, transitions).await
+                    self.take_over_lease(&api, resource_version, now, transitions).await
                 } else {
+                    // Lease held by someone else and not expired
                     Ok(false)
                 }
             }
-            Err(kube::Error::Api(e)) if e.code == 404 => self.create_lease(&api, now).await,
-            Err(e) => Err(e.into()),
         }
     }
 
@@ -181,7 +207,7 @@ impl LeaderElector {
                 namespace: Some(self.namespace.clone()),
                 ..Default::default()
             },
-            spec: Some(k8s_openapi::api::coordination::v1::LeaseSpec {
+            spec: Some(LeaseSpec {
                 holder_identity: Some(self.identity.clone()),
                 lease_duration_seconds: Some(self.lease_duration.as_secs() as i32),
                 acquire_time: Some(MicroTime(now)),
@@ -196,69 +222,95 @@ impl LeaderElector {
                 info!(identity = %self.identity, "Created new lease");
                 Ok(true)
             }
-            Err(kube::Error::Api(e)) if e.code == 409 => Ok(false),
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                // Someone else created it first - not an error, just retry
+                debug!(identity = %self.identity, "Lease creation conflict, will retry");
+                Ok(false)
+            }
             Err(e) => Err(e.into()),
         }
     }
 
-    /// Renew an existing lease that we hold
+    /// Renew an existing lease that we hold (atomic with resourceVersion)
     async fn renew_lease(
         &self,
         api: &Api<Lease>,
+        existing: &Lease,
         now: chrono::DateTime<Utc>,
     ) -> Result<bool, LeaderElectionError> {
-        let patch = serde_json::json!({
-            "apiVersion": "coordination.k8s.io/v1",
-            "kind": "Lease",
-            "metadata": {
-                "name": self.lease_name,
-                "namespace": self.namespace,
-            },
-            "spec": {
-                "renewTime": MicroTime(now),
+        let resource_version = existing
+            .metadata
+            .resource_version
+            .as_ref()
+            .ok_or_else(|| LeaderElectionError::Kube(kube::Error::Api(
+                kube::error::ErrorResponse {
+                    status: "Failed".to_string(),
+                    message: "Lease missing resourceVersion".to_string(),
+                    reason: "Invalid".to_string(),
+                    code: 500,
+                },
+            )))?;
+
+        // Build updated lease with same resourceVersion for atomic update
+        let mut updated = existing.clone();
+        if let Some(ref mut spec) = updated.spec {
+            spec.renew_time = Some(MicroTime(now));
+        }
+        updated.metadata.resource_version = Some(resource_version.clone());
+
+        match api
+            .replace(&self.lease_name, &PostParams::default(), &updated)
+            .await
+        {
+            Ok(_) => {
+                debug!(identity = %self.identity, "Lease renewed");
+                Ok(true)
             }
-        });
-
-        api.patch(
-            &self.lease_name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(&patch),
-        )
-        .await?;
-
-        debug!(identity = %self.identity, "Lease renewed");
-        Ok(true)
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                // Conflict - lease was modified, we lost leadership
+                warn!(identity = %self.identity, "Lease renewal conflict - lost leadership");
+                Ok(false)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
-    /// Take over an expired lease
+    /// Take over an expired lease (atomic with resourceVersion)
     async fn take_over_lease(
         &self,
         api: &Api<Lease>,
+        resource_version: Option<String>,
         now: chrono::DateTime<Utc>,
         transitions: i32,
     ) -> Result<bool, LeaderElectionError> {
-        let patch = serde_json::json!({
-            "apiVersion": "coordination.k8s.io/v1",
-            "kind": "Lease",
-            "metadata": {
-                "name": self.lease_name,
-                "namespace": self.namespace,
+        let rv = resource_version.ok_or_else(|| {
+            LeaderElectionError::Kube(kube::Error::Api(kube::error::ErrorResponse {
+                status: "Failed".to_string(),
+                message: "Lease missing resourceVersion".to_string(),
+                reason: "Invalid".to_string(),
+                code: 500,
+            }))
+        })?;
+
+        let lease = Lease {
+            metadata: ObjectMeta {
+                name: Some(self.lease_name.clone()),
+                namespace: Some(self.namespace.clone()),
+                resource_version: Some(rv),
+                ..Default::default()
             },
-            "spec": {
-                "holderIdentity": self.identity,
-                "acquireTime": MicroTime(now),
-                "renewTime": MicroTime(now),
-                "leaseDurationSeconds": self.lease_duration.as_secs() as i32,
-                "leaseTransitions": transitions + 1,
-            }
-        });
+            spec: Some(LeaseSpec {
+                holder_identity: Some(self.identity.clone()),
+                lease_duration_seconds: Some(self.lease_duration.as_secs() as i32),
+                acquire_time: Some(MicroTime(now)),
+                renew_time: Some(MicroTime(now)),
+                lease_transitions: Some(transitions + 1),
+                ..Default::default()
+            }),
+        };
 
         match api
-            .patch(
-                &self.lease_name,
-                &PatchParams::apply(FIELD_MANAGER).force(),
-                &Patch::Apply(&patch),
-            )
+            .replace(&self.lease_name, &PostParams::default(), &lease)
             .await
         {
             Ok(_) => {
@@ -269,7 +321,11 @@ impl LeaderElector {
                 );
                 Ok(true)
             }
-            Err(kube::Error::Api(e)) if e.code == 409 => Ok(false),
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                // Conflict - someone else got it first
+                debug!(identity = %self.identity, "Lease takeover conflict, will retry");
+                Ok(false)
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -279,7 +335,7 @@ impl LeaderElector {
         loop {
             tokio::time::sleep(self.renew_interval).await;
 
-            match self.try_acquire_lease().await {
+            match self.try_acquire_or_renew().await {
                 Ok(true) => {} // Still leader
                 Ok(false) | Err(_) => {
                     warn!(identity = %self.identity, "Leadership lost");
@@ -311,53 +367,31 @@ impl LeaderGuard {
         }
     }
 
-    /// Update Endpoints to route all Service traffic to this pod
+    /// Add leader label to this pod so Service routes traffic to it
     ///
-    /// The Endpoints object is overwritten completely via SSA, ensuring
-    /// clean handoff even if the previous leader crashed.
-    pub async fn claim_traffic(
-        &self,
-        service_name: &str,
-        pod_ip: &str,
-        ports: &[(String, i32)],
-    ) -> Result<(), LeaderElectionError> {
-        let api: Api<Endpoints> =
+    /// The Service selector includes `lattice.dev/leader=true`, so only the
+    /// leader pod receives traffic. Kubernetes readiness probes handle removal
+    /// of unresponsive pods from Endpoints.
+    pub async fn claim_traffic(&self, pod_name: &str) -> Result<(), LeaderElectionError> {
+        let api: Api<Pod> =
             Api::namespaced(self.elector.client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-        let endpoints = Endpoints {
-            metadata: ObjectMeta {
-                name: Some(service_name.to_string()),
-                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-                ..Default::default()
-            },
-            subsets: Some(vec![EndpointSubset {
-                addresses: Some(vec![EndpointAddress {
-                    ip: pod_ip.to_string(),
-                    ..Default::default()
-                }]),
-                ports: Some(
-                    ports
-                        .iter()
-                        .map(|(name, port)| EndpointPort {
-                            name: Some(name.clone()),
-                            port: *port,
-                            protocol: Some("TCP".to_string()),
-                            ..Default::default()
-                        })
-                        .collect(),
-                ),
-                ..Default::default()
-            }]),
-        };
+        let patch = json!({
+            "metadata": {
+                "labels": {
+                    LEADER_LABEL_KEY: LEADER_LABEL_VALUE
+                }
+            }
+        });
 
         api.patch(
-            service_name,
+            pod_name,
             &PatchParams::apply(FIELD_MANAGER),
-            &Patch::Apply(&endpoints),
+            &Patch::Merge(&patch),
         )
         .await?;
 
-        info!(service = service_name, pod_ip = pod_ip, "Traffic claimed");
+        info!(pod = pod_name, "Leader label added, traffic claimed");
         Ok(())
     }
 }

@@ -571,17 +571,6 @@ impl DefaultManifestGenerator {
                                         }),
                                         ..Default::default()
                                     },
-                                    EnvVar {
-                                        name: "POD_IP".to_string(),
-                                        value_from: Some(EnvVarSource {
-                                            field_ref: Some(ObjectFieldSelector {
-                                                field_path: "status.podIP".to_string(),
-                                                ..Default::default()
-                                            }),
-                                            ..Default::default()
-                                        }),
-                                        ..Default::default()
-                                    },
                                 ];
                                 if let Some(name) = cluster_name {
                                     envs.push(EnvVar {

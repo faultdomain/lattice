@@ -293,6 +293,13 @@ message KubernetesRequest {
   // Works for any auth type: SA ("system:serviceaccount:ns:name"), OIDC ("user@example.com"), etc.
   string source_user = 10;
   repeated string source_groups = 11;
+
+  // W3C Trace Context for distributed tracing
+  // Format: "00-{trace_id}-{span_id}-{flags}" (32-char trace_id, 16-char span_id)
+  // See: https://www.w3.org/TR/trace-context/
+  string traceparent = 13;
+  // Additional vendor-specific trace information
+  string tracestate = 14;
 }
 
 // Agent → Cell: Response from child's K8s API

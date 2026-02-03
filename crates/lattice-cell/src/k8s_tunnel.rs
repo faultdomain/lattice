@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::Response;
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
 
 use lattice_proto::{
@@ -52,6 +52,15 @@ pub struct K8sRequestParams {
 /// Send a K8s API request through the gRPC tunnel and wait for response
 ///
 /// This is the main entry point for tunneling K8s requests to child clusters.
+#[instrument(
+    skip(registry, command_tx, params),
+    fields(
+        target_cluster = %params.target_cluster,
+        verb = %params.method,
+        path = %params.path,
+        otel.kind = "client"
+    )
+)]
 pub async fn tunnel_request(
     registry: &SharedAgentRegistry,
     cluster_name: &str,
@@ -61,8 +70,8 @@ pub async fn tunnel_request(
     let request_id = Uuid::new_v4().to_string();
     let is_watch = is_watch_query(&params.query);
 
-    // Build KubernetesRequest
-    let k8s_request = KubernetesRequest {
+    // Build KubernetesRequest with trace context injection
+    let mut k8s_request = KubernetesRequest {
         request_id: request_id.clone(),
         verb: params.method,
         path: params.path,
@@ -79,7 +88,12 @@ pub async fn tunnel_request(
         target_cluster: params.target_cluster,
         source_user: params.source_user,
         source_groups: params.source_groups,
+        traceparent: String::new(),
+        tracestate: String::new(),
     };
+
+    // Inject trace context for distributed tracing
+    lattice_proto::tracing::inject_context(&mut k8s_request);
 
     // Create response channel
     let (response_tx, mut response_rx) = mpsc::channel::<KubernetesResponse>(RESPONSE_CHANNEL_SIZE);

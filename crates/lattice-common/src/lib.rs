@@ -11,9 +11,11 @@ pub mod graph;
 pub mod kube_utils;
 pub mod leader_election;
 pub mod mesh;
+pub mod metrics;
 pub mod policy;
 pub mod protocol;
 pub mod retry;
+pub mod telemetry;
 pub mod template;
 pub mod yaml;
 
@@ -25,7 +27,10 @@ pub use kube_utils::{
     apply_manifest_with_discovery, apply_manifests_with_discovery, kind_priority, pluralize_kind,
     ApplyOptions,
 };
-pub use leader_election::{LeaderElectionError, LeaderElector, LeaderGuard, LEADER_LEASE_NAME};
+pub use leader_election::{
+    LeaderElectionError, LeaderElector, LeaderGuard, LEADER_LABEL_KEY, LEADER_LABEL_VALUE,
+    LEADER_LEASE_NAME,
+};
 pub use protocol::{CsrRequest, CsrResponse, DistributableResources};
 
 /// Result type alias using our custom Error type

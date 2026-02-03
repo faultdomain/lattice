@@ -8,7 +8,7 @@ use axum::extract::{Path, State};
 use axum::http::{Method, Request};
 use axum::response::Response;
 use serde::Deserialize;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::auth::extract_bearer_token;
 use crate::error::Error;
@@ -31,6 +31,12 @@ pub struct ProxyPath {
 /// 1. Validate OIDC token
 /// 2. Authorize with Cedar
 /// 3. Route to cluster (uses proxy's service account)
+#[instrument(
+    skip(state, request),
+    fields(
+        otel.kind = "server"
+    )
+)]
 pub async fn proxy_handler(
     State(state): State<AppState>,
     Path(params): Path<ProxyPath>,

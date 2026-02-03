@@ -7,7 +7,7 @@ use http::Request;
 use kube::client::Body;
 use kube::Client;
 use lattice_proto::{is_watch_query, KubernetesRequest, KubernetesResponse};
-use tracing::{debug, error};
+use tracing::{debug, error, instrument};
 
 use crate::build_grpc_error_response;
 
@@ -28,7 +28,19 @@ pub(crate) fn build_url(path: &str, query: &str) -> String {
 /// Execute a single (non-watch) K8s API request against the local cluster.
 ///
 /// This is a pure L4 proxy - it forwards raw bytes and preserves response headers.
+#[instrument(
+    skip(client, req),
+    fields(
+        request_id = %req.request_id,
+        verb = %req.verb,
+        path = %req.path,
+        trace_id = lattice_proto::tracing::get_trace_id(req).unwrap_or_default(),
+        otel.kind = "server"
+    )
+)]
 pub async fn execute_k8s_request(client: &Client, req: &KubernetesRequest) -> KubernetesResponse {
+    // Extract trace context from request if present
+    let _ctx = lattice_proto::tracing::extract_context(req);
     // Handle cancellation requests
     if req.cancel {
         return KubernetesResponse {

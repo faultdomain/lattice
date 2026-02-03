@@ -13,20 +13,26 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, CustomResourceExt};
+use once_cell::sync::OnceCell;
 
 use lattice_api::{AuthChain, PolicyEngine, SaValidator, ServerConfig as AuthProxyConfig};
 use lattice_common::crd::CedarPolicy;
+use lattice_common::telemetry::{init_telemetry, PrometheusHandle, TelemetryConfig};
 use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
-    DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_HEALTH_PORT, DEFAULT_PROXY_PORT,
-    LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
+    DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
 };
+
+/// Global Prometheus handle for metrics endpoint
+static PROMETHEUS_HANDLE: OnceCell<PrometheusHandle> = OnceCell::new();
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
 use lattice_operator::crd::LatticeCluster;
@@ -80,7 +86,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_crypto();
-    init_tracing();
+    init_telemetry_global();
 
     let cli = Cli::parse();
 
@@ -118,12 +124,30 @@ fn init_crypto() {
     eprintln!("WARNING: Running without FIPS mode");
 }
 
-fn init_tracing() {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-    tracing_subscriber::registry()
-        .with(fmt::layer())
-        .with(EnvFilter::from_default_env())
-        .init();
+fn init_telemetry_global() {
+    let config = TelemetryConfig {
+        service_name: "lattice-operator".to_string(),
+        ..Default::default()
+    };
+
+    match init_telemetry(config) {
+        Ok(Some(handle)) => {
+            let _ = PROMETHEUS_HANDLE.set(handle);
+            tracing::info!("Telemetry initialized with Prometheus metrics");
+        }
+        Ok(None) => {
+            tracing::info!("Telemetry initialized without Prometheus metrics");
+        }
+        Err(e) => {
+            eprintln!("WARNING: Failed to initialize telemetry: {}", e);
+            // Fall back to basic tracing
+            use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+            let _ = tracing_subscriber::registry()
+                .with(fmt::layer())
+                .with(EnvFilter::from_default_env())
+                .try_init();
+        }
+    }
 }
 
 async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
@@ -137,7 +161,6 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         // Fallback for local development
         format!("lattice-operator-{}", uuid::Uuid::new_v4())
     });
-    let pod_ip = std::env::var("POD_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
 
     // Start health server (runs on all pods for K8s probes)
     let health_handle = start_health_server();
@@ -152,17 +175,10 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     ));
     let mut guard = elector.acquire().await?;
 
-    // Claim traffic by writing Endpoints to route all Service traffic to this pod
-    let ports = vec![
-        ("bootstrap".to_string(), DEFAULT_BOOTSTRAP_PORT as i32),
-        ("grpc".to_string(), DEFAULT_GRPC_PORT as i32),
-        ("proxy".to_string(), DEFAULT_PROXY_PORT as i32),
-        ("auth-proxy".to_string(), DEFAULT_AUTH_PROXY_PORT as i32),
-    ];
-    tracing::info!(pod = %pod_name, ip = %pod_ip, "Claiming traffic via Endpoints...");
-    guard
-        .claim_traffic(CELL_SERVICE_NAME, &pod_ip, &ports)
-        .await?;
+    // Claim traffic by adding leader label to this pod
+    // Service selector includes this label, so only leader gets traffic
+    tracing::info!(pod = %pod_name, "Adding leader label to claim traffic...");
+    guard.claim_traffic(&pod_name).await?;
 
     // Install CRDs and infrastructure (only leader does this)
     ensure_crds_installed(&client).await?;
@@ -261,11 +277,13 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 /// Runs on all pods:
 /// - `/healthz` - liveness probe (process alive)
 /// - `/readyz` - readiness probe (ready to become leader or already leading)
+/// - `/metrics` - Prometheus metrics endpoint
 fn start_health_server() -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
-            .route("/readyz", get(|| async { "ok" }));
+            .route("/readyz", get(|| async { "ok" }))
+            .route("/metrics", get(metrics_handler));
 
         let addr: SocketAddr = ([0, 0, 0, 0], DEFAULT_HEALTH_PORT).into();
         tracing::info!(port = DEFAULT_HEALTH_PORT, "Health server started");
@@ -279,6 +297,23 @@ fn start_health_server() -> tokio::task::JoinHandle<()> {
             tracing::error!(error = %e, "Health server error");
         }
     })
+}
+
+/// Handler for /metrics endpoint returning Prometheus text format
+async fn metrics_handler() -> impl IntoResponse {
+    match PROMETHEUS_HANDLE.get() {
+        Some(handle) => (
+            StatusCode::OK,
+            [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+            handle.encode(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Prometheus metrics not initialized",
+        )
+            .into_response(),
+    }
 }
 
 /// Start the auth proxy server for authenticated cluster access

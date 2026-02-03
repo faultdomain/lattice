@@ -1051,7 +1051,14 @@ pub const CLUSTER_FINALIZER: &str = "lattice.dev/unpivot";
 ///
 /// Returns an `Action` indicating when to requeue the resource, or an error
 /// if reconciliation failed.
-#[instrument(skip(cluster, ctx), fields(cluster = %cluster.name_any()))]
+#[instrument(
+    skip(cluster, ctx),
+    fields(
+        cluster = %cluster.name_any(),
+        phase = ?cluster.status.as_ref().map(|s| &s.phase),
+        otel.kind = "internal"
+    )
+)]
 pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Result<Action, Error> {
     let name = cluster.name_any();
     info!("reconciling cluster");

@@ -99,6 +99,8 @@ pub mod agent {
     }
 }
 
+pub mod tracing;
+
 pub use agent::v1::*;
 
 /// Check if a query string indicates a streaming request.

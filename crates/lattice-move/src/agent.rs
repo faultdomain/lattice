@@ -10,7 +10,7 @@ use kube::api::{Api, DynamicObject, ListParams, PostParams};
 use kube::Client;
 use lattice_common::kube_utils::build_api_resource;
 use serde_json::Value;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::MoveError;
 
@@ -209,6 +209,14 @@ impl AgentMover {
     ///
     /// Returns a list of (source_uid, target_uid) mappings for successfully created objects,
     /// and a list of errors for failed objects.
+    #[instrument(
+        skip(self, objects),
+        fields(
+            namespace = %self.namespace,
+            batch_size = objects.len(),
+            otel.kind = "internal"
+        )
+    )]
     pub async fn apply_batch(
         &mut self,
         objects: &[MoveObjectInput],

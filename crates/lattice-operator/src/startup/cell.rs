@@ -10,7 +10,10 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, PostParams};
 use kube::Client;
 
-use lattice_common::{DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    leader_election::{LEADER_LABEL_KEY, LEADER_LABEL_VALUE},
+    DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
+};
 
 use crate::crd::{LatticeCluster, ProviderType};
 
@@ -42,6 +45,12 @@ pub async fn ensure_cell_service_exists(
     let mut labels = BTreeMap::new();
     labels.insert("app".to_string(), "lattice-operator".to_string());
 
+    // Selector requires both the app label AND the leader label
+    // Only the leader pod will have lattice.dev/leader=true
+    let mut selector = BTreeMap::new();
+    selector.insert("app".to_string(), "lattice-operator".to_string());
+    selector.insert(LEADER_LABEL_KEY.to_string(), LEADER_LABEL_VALUE.to_string());
+
     // Cloud-specific LoadBalancer annotations
     let annotations = provider_type.load_balancer_annotations();
 
@@ -59,9 +68,10 @@ pub async fn ensure_cell_service_exists(
         },
         spec: Some(ServiceSpec {
             type_: Some("LoadBalancer".to_string()),
-            // No selector - leader election manages Endpoints directly
-            // This ensures clean handoff: new leader overwrites Endpoints with its own IP
-            selector: None,
+            // Selector requires leader label - only leader pod gets traffic
+            // Kubernetes readiness probes remove unresponsive pods from Endpoints
+            // before lease expires (30s lease > 15s readiness removal time)
+            selector: Some(selector),
             load_balancer_ip: load_balancer_ip.clone(),
             ports: Some(vec![
                 ServicePort {

@@ -12,7 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
 use kube::Client;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use lattice_common::kube_utils::build_api_resource;
 use lattice_proto::{MoveObject, SourceOwnerRef};
@@ -34,6 +34,10 @@ use crate::DELETE_FOR_MOVE_ANNOTATION;
 ///
 /// Returns objects in topological order (owners before dependents).
 /// The cluster is paused before objects are collected.
+#[instrument(
+    skip(client),
+    fields(otel.kind = "internal")
+)]
 pub async fn prepare_move_objects(
     client: &Client,
     namespace: &str,
@@ -438,6 +442,16 @@ impl<S: MoveCommandSender> CellMover<S> {
     /// 3. Streaming batches to agent
     /// 4. Finalizing (agent unpause)
     /// 5. Deleting source resources
+    #[instrument(
+        skip(self),
+        fields(
+            move_id = %self.config.move_id,
+            cluster = %self.config.cluster_name,
+            source_ns = %self.config.source_namespace,
+            target_ns = %self.config.target_namespace,
+            otel.kind = "internal"
+        )
+    )]
     pub async fn execute(&mut self) -> Result<MoveResult, MoveError> {
         info!(
             move_id = %self.config.move_id,

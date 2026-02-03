@@ -23,7 +23,7 @@ use cedar_policy::{
 use kube::api::ListParams;
 use kube::{Api, Client};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::auth::UserIdentity;
 use crate::error::{Error, Result};
@@ -204,6 +204,13 @@ impl PolicyEngine {
     ///
     /// # Returns
     /// Ok(()) if authorized, Err(Forbidden) otherwise
+    #[instrument(
+        skip(self, identity),
+        fields(
+            user = %identity.username,
+            otel.kind = "internal"
+        )
+    )]
     pub async fn authorize(
         &self,
         identity: &UserIdentity,
@@ -261,11 +268,23 @@ impl PolicyEngine {
         );
 
         match response.decision() {
-            Decision::Allow => Ok(()),
-            Decision::Deny => Err(Error::Forbidden(format!(
-                "Access denied: user '{}' cannot '{}' cluster '{}'",
-                identity.username, action, cluster
-            ))),
+            Decision::Allow => {
+                lattice_common::metrics::record_cedar_decision(
+                    lattice_common::metrics::AuthDecision::Allow,
+                    action,
+                );
+                Ok(())
+            }
+            Decision::Deny => {
+                lattice_common::metrics::record_cedar_decision(
+                    lattice_common::metrics::AuthDecision::Deny,
+                    action,
+                );
+                Err(Error::Forbidden(format!(
+                    "Access denied: user '{}' cannot '{}' cluster '{}'",
+                    identity.username, action, cluster
+                )))
+            }
         }
     }
 

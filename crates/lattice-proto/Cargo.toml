@@ -9,6 +9,9 @@ description = "gRPC protocol definitions for Lattice agent-cell communication"
 tonic.workspace = true
 prost.workspace = true
 prost-types.workspace = true
+opentelemetry.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true
