@@ -93,6 +93,11 @@ impl LeaderElector {
     /// The guard maintains leadership through periodic renewal.
     /// When the guard is dropped or leadership is lost, the lost channel signals.
     pub async fn acquire(self: Arc<Self>) -> Result<LeaderGuard, LeaderElectionError> {
+        // Remove any stale leader label from a previous run (e.g., after crash)
+        if let Err(e) = self.remove_leader_label().await {
+            debug!(identity = %self.identity, error = %e, "No stale leader label to remove");
+        }
+
         info!(
             identity = %self.identity,
             lease = %self.lease_name,
@@ -339,12 +344,40 @@ impl LeaderElector {
                 Ok(true) => {} // Still leader
                 Ok(false) | Err(_) => {
                     warn!(identity = %self.identity, "Leadership lost");
+                    // Remove leader label FIRST to stop traffic immediately
+                    if let Err(e) = self.remove_leader_label().await {
+                        warn!(identity = %self.identity, error = %e, "Failed to remove leader label");
+                    }
                     self.is_leader.store(false, Ordering::SeqCst);
                     let _ = lost_tx.send(());
                     return;
                 }
             }
         }
+    }
+
+    /// Remove leader label from this pod
+    async fn remove_leader_label(&self) -> Result<(), LeaderElectionError> {
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+        // Use JSON patch to remove the label
+        let patch = json!({
+            "metadata": {
+                "labels": {
+                    LEADER_LABEL_KEY: null
+                }
+            }
+        });
+
+        api.patch(
+            &self.identity,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        info!(identity = %self.identity, "Leader label removed");
+        Ok(())
     }
 }
 
@@ -393,6 +426,14 @@ impl LeaderGuard {
 
         info!(pod = pod_name, "Leader label added, traffic claimed");
         Ok(())
+    }
+
+    /// Remove leader label from this pod (call before shutdown)
+    ///
+    /// This stops traffic to this pod immediately. Call this during graceful
+    /// shutdown before dropping the guard.
+    pub async fn release_traffic(&self) -> Result<(), LeaderElectionError> {
+        self.elector.remove_leader_label().await
     }
 }
 
