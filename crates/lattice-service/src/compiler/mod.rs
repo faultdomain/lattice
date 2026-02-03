@@ -29,7 +29,7 @@ use crate::crd::{LatticeService, ProviderType};
 use crate::graph::ServiceGraph;
 use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
 use crate::policy::{GeneratedPolicies, PolicyCompiler};
-use crate::workload::{GeneratedWorkloads, VolumeCompiler, WorkloadCompiler};
+use crate::workload::{GeneratedWorkloads, SecretsCompiler, VolumeCompiler, WorkloadCompiler};
 
 // Re-export types for convenience
 pub use crate::ingress::{Certificate, Gateway, HttpRoute};
@@ -45,6 +45,9 @@ pub enum CompileError {
     /// Invalid volume resource configuration
     #[error("invalid volume config: {0}")]
     InvalidVolume(String),
+    /// Invalid secret resource configuration
+    #[error("invalid secret config: {0}")]
+    InvalidSecret(String),
 }
 
 impl From<CompileError> for crate::Error {
@@ -159,6 +162,10 @@ impl<'a> ServiceCompiler<'a> {
         let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec)
             .map_err(CompileError::InvalidVolume)?;
 
+        // Compile secrets (ExternalSecrets for syncing from Vault via ESO)
+        let compiled_secrets = SecretsCompiler::compile(name, namespace, &service.spec)
+            .map_err(CompileError::InvalidSecret)?;
+
         // Delegate to specialized compilers
         let mut workloads = WorkloadCompiler::compile(
             name,
@@ -170,6 +177,10 @@ impl<'a> ServiceCompiler<'a> {
 
         // Add PVCs to workloads
         workloads.pvcs = compiled_volumes.pvcs;
+
+        // Add ExternalSecrets and secret refs to workloads
+        workloads.external_secrets = compiled_secrets.external_secrets;
+        workloads.secret_refs = compiled_secrets.secret_refs;
 
         let policy_compiler = PolicyCompiler::new(self.graph, &self.cluster_name);
         let mut policies = policy_compiler.compile(name, namespace);

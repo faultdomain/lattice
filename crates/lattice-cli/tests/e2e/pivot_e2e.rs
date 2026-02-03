@@ -3,13 +3,18 @@
 //! This test validates the complete Lattice lifecycle:
 //! 1. Set up cluster hierarchy (mgmt -> workload, optionally -> workload2)
 //! 2. Run mesh tests on workload cluster
-//! 3. Delete workload2 if enabled (unpivot to workload)
-//! 4. Delete workload (unpivot to mgmt)
-//! 5. Uninstall management cluster
+//! 3. Run secrets tests if Vault is reachable (via docker-compose)
+//! 4. Delete workload2 if enabled (unpivot to workload)
+//! 5. Delete workload (unpivot to mgmt)
+//! 6. Uninstall management cluster
 //!
 //! # Running
 //!
 //! ```bash
+//! # Start Vault first
+//! docker compose up -d
+//!
+//! # Run E2E tests
 //! cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
 //! ```
 //!
@@ -129,12 +134,12 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("SUCCESS: Cedar policy enforcement verified!");
 
     // =========================================================================
-    // Phase 7: Run mesh tests + delete workload2 (parallel, if workload2 exists)
+    // Phase 7: Run mesh + secrets tests + delete workload2 (parallel, if workload2 exists)
     // =========================================================================
     if ctx.has_workload2() {
-        info!("[Phase 7] Running mesh tests + deleting workload2...");
+        info!("[Phase 7] Running mesh/secrets tests + deleting workload2...");
     } else {
-        info!("[Phase 7] Running mesh tests (workload2 disabled)...");
+        info!("[Phase 7] Running mesh/secrets tests (workload2 disabled)...");
     }
 
     // Start mesh tests in background
@@ -142,6 +147,15 @@ async fn run_full_e2e() -> Result<(), String> {
         let is_docker = integration::mesh::is_docker_provider(&ctx);
         Some(integration::mesh::start_mesh_tests_async(&ctx, is_docker).await?)
     } else {
+        None
+    };
+
+    // Start secrets tests in background (if Vault is configured)
+    let secrets_handle = if integration::secrets::secrets_tests_enabled() {
+        info!("[Phase 7] Vault configured - starting secrets tests...");
+        Some(integration::secrets::start_secrets_tests_async(&ctx).await?)
+    } else {
+        info!("[Phase 7] Vault not configured - skipping secrets tests");
         None
     };
 
@@ -164,6 +178,15 @@ async fn run_full_e2e() -> Result<(), String> {
             .await
             .map_err(|e| format!("Mesh test task panicked: {}", e))??;
         info!("SUCCESS: Mesh tests complete!");
+    }
+
+    // Wait for secrets tests
+    if let Some(handle) = secrets_handle {
+        info!("[Phase 7] Waiting for secrets tests to complete...");
+        handle
+            .await
+            .map_err(|e| format!("Secrets test task panicked: {}", e))??;
+        info!("SUCCESS: Secrets tests complete!");
     }
 
     // Wait for workload2 deletion (if started)

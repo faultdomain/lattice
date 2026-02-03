@@ -239,23 +239,49 @@ pub fn ensure_docker_network() -> Result<(), String> {
 // Command Execution Helpers
 // =============================================================================
 
-/// Run a shell command and return output
+/// Run a shell command with 30s timeout
 #[cfg(feature = "provider-e2e")]
 pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(cmd)
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let timeout = Duration::from_secs(30);
+
+    let mut child = Command::new(cmd)
         .args(args)
-        .output()
-        .map_err(|e| format!("Failed to run {}: {}", cmd, e))?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {}: {}", cmd, e))?;
 
-    if !output.status.success() {
-        return Err(format!(
-            "{} failed: {}",
-            cmd,
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(ref mut out) = child.stdout {
+                    let _ = out.read_to_string(&mut stdout);
+                }
+                if let Some(ref mut err) = child.stderr {
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                if !status.success() {
+                    return Err(format!("{} failed: {}", cmd, stderr));
+                }
+                return Ok(stdout);
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("{} timed out after {:?}", cmd, timeout));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("Error waiting for {}: {}", cmd, e)),
+        }
     }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 // =============================================================================
@@ -1622,17 +1648,19 @@ pub struct ProxySession {
     kubeconfig: String,
     /// Fixed local port (deterministic based on kubeconfig)
     port: u16,
-    /// Localhost URL for the port-forward (e.g., "https://127.0.0.1:19123")
+    /// Proxy URL (localhost for Docker, LoadBalancer IP for cloud)
     pub url: String,
     /// SA token for authentication
     token: String,
-    /// Port-forward process
+    /// Port-forward process (only for Docker)
     port_forward: Option<std::process::Child>,
+    /// Whether to rewrite server URLs to localhost (Docker only)
+    use_localhost: bool,
 }
 
 #[cfg(feature = "provider-e2e")]
 impl ProxySession {
-    /// Start a proxy session to a cluster.
+    /// Start a proxy session for Docker (uses port-forward).
     ///
     /// Creates a port-forward to the lattice-cell service and obtains an SA token.
     /// Uses a deterministic port based on the kubeconfig path.
@@ -1647,21 +1675,41 @@ impl ProxySession {
             url,
             token,
             port_forward: Some(port_forward),
+            use_localhost: true,
         })
     }
 
-    /// Ensure the port-forward is alive, restarting if it died.
+    /// Start a proxy session for cloud providers (direct access to LoadBalancer).
+    ///
+    /// No port-forward needed - the LoadBalancer IP is directly accessible.
+    pub fn start_cloud(kubeconfig: &str, lb_url: &str) -> Result<Self, String> {
+        let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator")?;
+
+        Ok(Self {
+            kubeconfig: kubeconfig.to_string(),
+            port: 0, // Not used for cloud
+            url: lb_url.to_string(),
+            token,
+            port_forward: None,
+            use_localhost: false,
+        })
+    }
+
+    /// Ensure the port-forward is alive, restarting if it died (Docker only).
     ///
     /// This is useful when running with chaos monkey, which may kill operator
     /// pods and break the port-forward connection. Call this before making
     /// requests through the proxy to ensure the connection is healthy.
     ///
-    /// Since we use deterministic ports, the restarted port-forward uses the
-    /// same local port, so any previously generated kubeconfigs remain valid.
+    /// For cloud providers, this is a no-op since they don't use port-forward.
     pub fn ensure_alive(&mut self) -> Result<(), String> {
+        // Cloud providers don't use port-forward
+        if !self.use_localhost {
+            return Ok(());
+        }
+
         // Check and restart port-forward if needed
         if let Some(ref mut child) = self.port_forward {
-            // Check if process has exited
             if let Ok(Some(status)) = child.try_wait() {
                 info!(
                     "[ProxySession] Port-forward died (status: {}), restarting on port {}...",
@@ -1672,7 +1720,6 @@ impl ProxySession {
                 info!("[ProxySession] Port-forward restarted successfully");
             }
         } else {
-            // No port-forward exists, start one
             info!(
                 "[ProxySession] No port-forward exists, starting on port {}...",
                 self.port
@@ -1747,6 +1794,28 @@ impl ProxySession {
             .json()
             .await
             .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
+
+        // For Docker: replace server URLs to use localhost port-forward
+        // The endpoint returns LoadBalancer IPs which aren't accessible from localhost on Docker
+        // For cloud: keep the LoadBalancer IPs as they're directly accessible
+        if self.use_localhost {
+            if let Some(clusters) = kubeconfig["clusters"].as_array_mut() {
+                for cluster in clusters {
+                    if let Some(server) = cluster["cluster"]["server"].as_str() {
+                        // Replace the host:port with our localhost port-forward
+                        // e.g., https://172.18.255.10:8082/clusters/foo -> https://127.0.0.1:19123/clusters/foo
+                        if let Some(path_start) = server.find("/clusters/") {
+                            let new_server = format!(
+                                "https://127.0.0.1:{}{}",
+                                self.port,
+                                &server[path_start..]
+                            );
+                            cluster["cluster"]["server"] = serde_json::Value::String(new_server);
+                        }
+                    }
+                }
+            }
+        }
 
         // Set current-context to the requested cluster
         kubeconfig["current-context"] = serde_json::Value::String(cluster_name.to_string());

@@ -10,4 +10,8 @@ mod controller;
 mod eso;
 
 pub use controller::reconcile;
-pub use eso::ClusterSecretStore;
+pub use eso::{
+    ClusterSecretStore, ExternalSecret, ExternalSecretData, ExternalSecretDataFrom,
+    ExternalSecretExtract, ExternalSecretMetadata, ExternalSecretSpec, ExternalSecretTarget,
+    RemoteRef, SecretStoreRef,
+};

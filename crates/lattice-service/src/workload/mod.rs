@@ -12,9 +12,11 @@
 pub mod env;
 pub mod error;
 pub mod files;
+pub mod secrets;
 pub mod volume;
 
 pub use error::CompilationError;
+pub use secrets::{GeneratedSecrets, SecretRef, SecretsCompiler};
 pub use volume::{
     Affinity, GeneratedVolumes, PersistentVolumeClaim, PodAffinity, PodVolume, PvcVolumeSource,
     VolumeCompiler, VOLUME_OWNER_LABEL_PREFIX,
@@ -797,6 +799,10 @@ pub struct GeneratedWorkloads {
     pub files_secret: Option<Secret>,
     /// PersistentVolumeClaims for owned volumes
     pub pvcs: Vec<PersistentVolumeClaim>,
+    /// ExternalSecrets for syncing secrets from SecretsProvider (Vault)
+    pub external_secrets: Vec<lattice_secrets_provider::ExternalSecret>,
+    /// Secret references for template resolution (resource_name -> SecretRef)
+    pub secret_refs: std::collections::BTreeMap<String, SecretRef>,
 }
 
 impl GeneratedWorkloads {
@@ -816,6 +822,7 @@ impl GeneratedWorkloads {
             && self.files_config_map.is_none()
             && self.files_secret.is_none()
             && self.pvcs.is_empty()
+            && self.external_secrets.is_empty()
     }
 }
 

@@ -235,6 +235,9 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         // Apply workload resources (ServiceAccount, PVCs, Deployment, Service, HPA)
         self.collect_workload_futures(&mut futures, namespace, &params, compiled)?;
 
+        // Apply ExternalSecrets (ESO syncs secrets from Vault)
+        self.collect_secret_futures(&mut futures, namespace, &params, compiled)?;
+
         // Apply policy resources (Cilium and Istio policies)
         self.collect_policy_futures(&mut futures, namespace, &params, compiled)?;
 
@@ -356,6 +359,34 @@ impl ServiceKubeClientImpl {
             let params = params.clone();
             futures.push(Box::pin(async move {
                 debug!(name = %name, "applying HPA");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
+        Ok(())
+    }
+
+    /// Collect futures for ExternalSecret resources (ESO syncs secrets from Vault)
+    fn collect_secret_futures(
+        &self,
+        futures: &mut Vec<ApplyFuture>,
+        namespace: &str,
+        params: &PatchParams,
+        compiled: &CompiledService,
+    ) -> Result<(), Error> {
+        use kube::api::DynamicObject;
+        use lattice_secrets_provider::ExternalSecret;
+
+        let es_ar = ExternalSecret::api_resource();
+        for external_secret in &compiled.workloads.external_secrets {
+            let name = external_secret.metadata.name.clone();
+            let json = serialize_resource("ExternalSecret", external_secret)?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &es_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying ExternalSecret");
                 api.patch(&name, &params, &Patch::Apply(&json)).await?;
                 Ok(())
             }));

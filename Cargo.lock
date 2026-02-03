@@ -2548,6 +2548,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-infra",
+ "lattice-secrets-provider",
  "mockall",
  "parking_lot",
  "rstest",

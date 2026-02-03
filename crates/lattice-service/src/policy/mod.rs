@@ -969,18 +969,45 @@ mod tests {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
+        // api: allows inbound from gateway, calls external stripe
         let api_spec = make_service_spec(vec!["stripe"], vec!["gateway"]);
         graph.put_service(ns, "api", &api_spec);
 
+        // gateway: calls api (bilateral agreement with api's inbound)
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
+        // stripe: external service that allows api to call it
         graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
         let output = compiler.compile("api", "prod-ns");
 
-        assert_eq!(output.total_count(), 6);
+        // Verify specific policies are generated:
+        // 1. CiliumNetworkPolicy for api
+        assert_eq!(output.cilium_policies.len(), 1);
+        assert_eq!(output.cilium_policies[0].metadata.name, "policy-api");
+
+        // 2. AuthorizationPolicies:
+        //    - allow-to-api: allows callers with bilateral agreement to reach api
+        //    - allow-waypoint-to-api: allows waypoint proxy to reach api for L7 policy
+        //    - allow-api-to-stripe: allows api to call stripe external service
+        assert_eq!(output.authorization_policies.len(), 3);
+        let authz_names: Vec<_> = output
+            .authorization_policies
+            .iter()
+            .map(|p| p.metadata.name.as_str())
+            .collect();
+        assert!(authz_names.contains(&"allow-to-api"));
+        assert!(authz_names.contains(&"allow-waypoint-to-api"));
+        assert!(authz_names.contains(&"allow-api-to-stripe"));
+
+        // 3. ServiceEntry for stripe external service
+        assert_eq!(output.service_entries.len(), 1);
+        assert_eq!(output.service_entries[0].metadata.name, "stripe");
+
+        // Total: 1 Cilium + 3 AuthZ + 1 ServiceEntry = 5
+        assert_eq!(output.total_count(), 5);
     }
 
     #[test]

@@ -62,6 +62,8 @@ pub enum ResourceType {
     ExternalService,
     /// Persistent volume (Score-compatible)
     Volume,
+    /// Secret from SecretsProvider (ESO ExternalSecret)
+    Secret,
     /// Custom resource type (escape hatch for extensibility)
     /// Validated at parse time: lowercase alphanumeric with hyphens, starts with letter
     Custom(String),
@@ -73,13 +75,13 @@ impl JsonSchema for ResourceType {
     }
 
     fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        // Accept any string - built-in values are "service", "external-service", "volume"
+        // Accept any string - built-in values are "service", "external-service", "volume", "secret"
         // Custom types are validated at parse time
         schemars::schema::Schema::Object(schemars::schema::SchemaObject {
             instance_type: Some(schemars::schema::InstanceType::String.into()),
             metadata: Some(Box::new(schemars::schema::Metadata {
                 description: Some(
-                    "Resource type: 'service', 'external-service', 'volume', or custom type"
+                    "Resource type: 'service', 'external-service', 'volume', 'secret', or custom type"
                         .to_string(),
                 ),
                 ..Default::default()
@@ -105,6 +107,7 @@ impl ResourceType {
             Self::Service => "service",
             Self::ExternalService => "external-service",
             Self::Volume => "volume",
+            Self::Secret => "secret",
             Self::Custom(s) => s.as_str(),
         }
     }
@@ -117,6 +120,11 @@ impl ResourceType {
     /// Returns true if this is a volume resource
     pub fn is_volume(&self) -> bool {
         matches!(self, Self::Volume)
+    }
+
+    /// Returns true if this is a secret resource
+    pub fn is_secret(&self) -> bool {
+        matches!(self, Self::Secret)
     }
 
     /// Returns true if this is a custom resource type
@@ -142,6 +150,7 @@ impl<'de> Deserialize<'de> for ResourceType {
             "service" => Ok(Self::Service),
             "external-service" => Ok(Self::ExternalService),
             "volume" => Ok(Self::Volume),
+            "secret" => Ok(Self::Secret),
             _ => {
                 validate_custom_type(&s).map_err(serde::de::Error::custom)?;
                 Ok(Self::Custom(s))
@@ -344,6 +353,42 @@ pub enum VolumeAccessMode {
     ReadOnlyMany,
 }
 
+// =============================================================================
+// Secret Resource Configuration (parsed from Score params)
+// =============================================================================
+
+/// Parsed secret parameters from Score's generic `params` field
+///
+/// Secrets are synced from a SecretsProvider (Vault) via ESO ExternalSecret.
+/// The `id` field on ResourceSpec specifies the Vault path.
+///
+/// ```yaml
+/// resources:
+///   db-creds:
+///     type: secret
+///     id: database/prod/credentials  # Vault path
+///     params:
+///       provider: vault-prod         # SecretsProvider name
+///       keys:
+///         - username
+///         - password
+///       refreshInterval: 1h
+/// ```
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretParams {
+    /// SecretsProvider name (references a ClusterSecretStore)
+    pub provider: String,
+
+    /// Specific keys to sync from the secret (optional, syncs all if omitted)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+
+    /// Refresh interval for syncing the secret (e.g., "1h", "30m")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_interval: Option<String>,
+}
+
 impl ResourceSpec {
     /// Parse volume params from the generic Score `params` field
     ///
@@ -397,6 +442,55 @@ impl ResourceSpec {
             Some(id) => format!("vol-{id}"),
             None => format!("{service_name}-{resource_name}"),
         })
+    }
+
+    /// Returns true if this is a secret resource
+    pub fn is_secret(&self) -> bool {
+        self.type_.is_secret()
+    }
+
+    /// Parse secret params from the generic Score `params` field
+    ///
+    /// Returns:
+    /// - `Ok(None)` if this is not a secret resource
+    /// - `Ok(Some(params))` if params parsed successfully
+    /// - `Err(msg)` if JSON conversion failed or required fields missing
+    pub fn secret_params(&self) -> Result<Option<SecretParams>, String> {
+        if !self.type_.is_secret() {
+            return Ok(None);
+        }
+        match &self.params {
+            Some(params) => {
+                let value = serde_json::to_value(params)
+                    .map_err(|e| format!("failed to serialize secret params: {}", e))?;
+                let secret_params: SecretParams = serde_json::from_value(value)
+                    .map_err(|e| format!("invalid secret params: {}", e))?;
+
+                // Validate provider is specified
+                if secret_params.provider.is_empty() {
+                    return Err("secret resource requires 'provider' in params".to_string());
+                }
+
+                Ok(Some(secret_params))
+            }
+            None => Err("secret resource requires 'params' with 'provider'".to_string()),
+        }
+    }
+
+    /// Get the Vault path for this secret resource (from the id field)
+    pub fn secret_vault_path(&self) -> Option<&str> {
+        if !self.type_.is_secret() {
+            return None;
+        }
+        self.id.as_deref()
+    }
+
+    /// Get the K8s Secret name that will be created by ESO for this secret resource
+    pub fn secret_k8s_name(&self, service_name: &str, resource_name: &str) -> Option<String> {
+        if !self.type_.is_secret() {
+            return None;
+        }
+        Some(format!("{}-{}", service_name, resource_name))
     }
 }
 

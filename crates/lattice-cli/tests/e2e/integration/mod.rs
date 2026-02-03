@@ -27,4 +27,5 @@ pub mod mesh;
 pub mod pivot;
 pub mod proxy;
 pub mod scaling;
+pub mod secrets;
 pub mod setup;
