@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::http::HeaderMap;
 use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
 use kube::api::ListParams;
 use kube::{Api, Client};
@@ -530,39 +529,9 @@ impl Default for OidcValidator {
     }
 }
 
-/// Extract Bearer token from Authorization header
-pub fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_bearer_token() {
-        let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "Bearer abc123".parse().unwrap());
-
-        assert_eq!(extract_bearer_token(&headers), Some("abc123"));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_missing() {
-        let headers = HeaderMap::new();
-        assert_eq!(extract_bearer_token(&headers), None);
-    }
-
-    #[test]
-    fn test_extract_bearer_token_wrong_scheme() {
-        let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "Basic abc123".parse().unwrap());
-
-        assert_eq!(extract_bearer_token(&headers), None);
-    }
 
     #[test]
     fn test_groups_claim_none() {

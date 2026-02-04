@@ -2377,7 +2377,6 @@ mod tests {
                 parent_config: None,
                 environment: None,
                 region: None,
-                workload: None,
             },
             status: None,
         }
@@ -2935,7 +2934,6 @@ mod tests {
                     parent_config: None,
                     environment: None,
                     region: None,
-                    workload: None,
                 },
                 status: None,
             }

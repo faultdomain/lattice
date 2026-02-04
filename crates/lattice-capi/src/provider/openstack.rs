@@ -320,7 +320,6 @@ mod tests {
                 networking: None,
                 environment: None,
                 region: None,
-                workload: None,
             },
             status: None,
         }

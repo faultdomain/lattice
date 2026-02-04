@@ -522,6 +522,42 @@ async fn process_agent_message(
                     .await;
             }
         }
+        Some(Payload::ExecData(data)) => {
+            debug!(
+                cluster = %cluster_name,
+                request_id = %data.request_id,
+                stream_id = data.stream_id,
+                data_len = data.data.len(),
+                stream_end = data.stream_end,
+                "Exec data received"
+            );
+
+            // Route exec data to pending exec session handler
+            if let Some(sender) = registry.get_pending_exec_data(&data.request_id) {
+                if let Err(e) = sender.try_send(data.clone()) {
+                    warn!(
+                        cluster = %cluster_name,
+                        request_id = %data.request_id,
+                        error = %e,
+                        "Failed to deliver exec data"
+                    );
+                    if data.stream_end {
+                        registry.take_pending_exec_data(&data.request_id);
+                    }
+                }
+            } else {
+                debug!(
+                    cluster = %cluster_name,
+                    request_id = %data.request_id,
+                    "Received exec data for unknown session"
+                );
+            }
+
+            // Clean up on stream end
+            if data.stream_end {
+                registry.take_pending_exec_data(&data.request_id);
+            }
+        }
         None => {
             warn!(cluster = %cluster_name, "Received message with no payload");
         }
@@ -704,6 +740,7 @@ mod tests {
                         .await;
                 }
             }
+            Some(Payload::ExecData(_)) => {}
             None => {}
         }
     }

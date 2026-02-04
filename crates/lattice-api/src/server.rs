@@ -13,7 +13,7 @@ use crate::auth_chain::AuthChain;
 use crate::cedar::PolicyEngine;
 use crate::error::Error;
 use crate::kubeconfig::kubeconfig_handler;
-use crate::proxy::proxy_handler;
+use crate::proxy::{exec_handler, proxy_handler};
 
 // Re-export from lattice-cell for convenience
 pub use lattice_cell::subtree_registry::{ClusterInfo, RouteInfo, SubtreeRegistry};
@@ -104,6 +104,20 @@ pub async fn start_server_with_registry(
         .route("/kubeconfig", get(kubeconfig_handler))
         // Health check
         .route("/healthz", get(|| async { "ok" }))
+        // Exec/attach/portforward - WebSocket upgrade routes (must be before generic proxy)
+        // These match paths like /clusters/{cluster}/api/v1/namespaces/{ns}/pods/{pod}/exec
+        .route(
+            "/clusters/{cluster_name}/api/v1/namespaces/{ns}/pods/{pod}/exec",
+            get(exec_handler),
+        )
+        .route(
+            "/clusters/{cluster_name}/api/v1/namespaces/{ns}/pods/{pod}/attach",
+            get(exec_handler),
+        )
+        .route(
+            "/clusters/{cluster_name}/api/v1/namespaces/{ns}/pods/{pod}/portforward",
+            get(exec_handler),
+        )
         // K8s API proxy - route all cluster paths to the proxy handler
         .route("/clusters/{cluster_name}", any(proxy_handler))
         .route("/clusters/{cluster_name}/{*path}", any(proxy_handler))

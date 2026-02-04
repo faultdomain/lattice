@@ -3,18 +3,26 @@
 //! Supports both random single-cluster attacks and coordinated parent-child attacks
 //! that target critical phases like pivoting and unpivoting.
 //!
+//! # Deterministic Randomness
+//!
+//! All randomness is seeded from the run_id, making chaos events reproducible.
+//! If a test fails, rerun with the same run_id to get identical chaos timing.
+//!
 //! # Provider-Aware Configuration
 //!
 //! Use `ChaosConfig::for_provider()` to get appropriate settings:
-//! - Docker/kind: Fast intervals (30-90s) since no LB delays
+//! - Docker/kind: Fast intervals (60-120s) since no LB delays
 //! - AWS/cloud: Slow intervals (90-150s) to account for NLB target registration
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
 use kube::Api;
-use parking_lot::RwLock;
-use rand::Rng;
+use parking_lot::{Mutex, RwLock};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -23,6 +31,13 @@ use lattice_operator::crd::{ClusterPhase, LatticeCluster};
 
 use super::helpers::{client_from_kubeconfig, run_cmd, OPERATOR_LABEL};
 use super::providers::InfraProvider;
+
+/// Create a seeded RNG from a string (typically run_id).
+fn seeded_rng(seed_str: &str) -> StdRng {
+    let mut hasher = DefaultHasher::new();
+    seed_str.hash(&mut hasher);
+    StdRng::seed_from_u64(hasher.finish())
+}
 
 // =============================================================================
 // Configuration
@@ -139,13 +154,16 @@ impl ClusterContext {
 pub struct ChaosTargets {
     targets: RwLock<Vec<ClusterTarget>>,
     contexts: RwLock<std::collections::HashMap<String, ClusterContext>>,
+    rng: Mutex<StdRng>,
 }
 
 impl ChaosTargets {
-    pub fn new() -> Self {
+    /// Create new chaos targets with seeded RNG for reproducibility.
+    pub fn new(seed: &str) -> Self {
         Self {
             targets: RwLock::new(Vec::new()),
             contexts: RwLock::new(std::collections::HashMap::new()),
+            rng: Mutex::new(seeded_rng(seed)),
         }
     }
 
@@ -176,14 +194,24 @@ impl ChaosTargets {
         self.contexts.write().remove(name);
     }
 
-    /// Get a random target for single-cluster attacks
+    /// Get a random target for single-cluster attacks (uses seeded RNG)
     pub fn random(&self) -> Option<ClusterTarget> {
         let targets = self.targets.read();
         if targets.is_empty() {
             return None;
         }
-        let idx = rand::thread_rng().gen_range(0..targets.len());
+        let idx = self.rng.lock().gen_range(0..targets.len());
         Some(targets[idx].clone())
+    }
+
+    /// Generate a random delay within the given range (uses seeded RNG)
+    pub fn random_delay(&self, min: u64, max: u64) -> u64 {
+        self.rng.lock().gen_range(min..=max)
+    }
+
+    /// Generate a random probability check (uses seeded RNG)
+    pub fn random_probability(&self) -> f32 {
+        self.rng.lock().gen::<f32>()
     }
 
     /// Get all targets as a snapshot
@@ -381,7 +409,7 @@ async fn pod_chaos_loop(
     config: ChaosConfig,
 ) {
     loop {
-        let delay = rand::thread_rng().gen_range(config.pod_interval.0..=config.pod_interval.1);
+        let delay = targets.random_delay(config.pod_interval.0, config.pod_interval.1);
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
@@ -390,7 +418,7 @@ async fn pod_chaos_loop(
         // Try coordinated attack first if enabled
         if config.enable_coordinated {
             if let Some(attack) = targets.find_coordinated_attack() {
-                if rand::random::<f32>() < config.coordinated_probability {
+                if targets.random_probability() < config.coordinated_probability {
                     info!("[Chaos] Coordinated pod attack: {}", attack.description());
                     kill_pod(&attack.parent().name, &attack.parent().kubeconfig);
                     continue;
@@ -411,7 +439,7 @@ async fn net_chaos_loop(
     config: ChaosConfig,
 ) {
     loop {
-        let delay = rand::thread_rng().gen_range(config.net_interval.0..=config.net_interval.1);
+        let delay = targets.random_delay(config.net_interval.0, config.net_interval.1);
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
@@ -420,7 +448,7 @@ async fn net_chaos_loop(
         // Try coordinated attack first if enabled
         if config.enable_coordinated {
             if let Some(attack) = targets.find_coordinated_attack() {
-                if rand::random::<f32>() < config.coordinated_probability {
+                if targets.random_probability() < config.coordinated_probability {
                     info!("[Chaos] Coordinated net attack: {}", attack.description());
                     cut_network(
                         &attack.parent().name,
@@ -645,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_chaos_targets_add_remove() {
-        let targets = ChaosTargets::new();
+        let targets = ChaosTargets::new("test-seed");
 
         targets.add("cluster1", "/tmp/kc1", None);
         targets.add("cluster2", "/tmp/kc2", Some("/tmp/kc1"));
@@ -663,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_find_coordinated_attack() {
-        let targets = ChaosTargets::new();
+        let targets = ChaosTargets::new("test-seed");
 
         targets.add("parent", "/tmp/parent-kc", None);
         targets.add("child", "/tmp/child-kc", Some("/tmp/parent-kc"));
@@ -751,5 +779,30 @@ mod tests {
         let aws_coord = ChaosConfig::for_provider(InfraProvider::Aws).with_coordinated(0.5);
         assert!(aws_coord.enable_coordinated);
         assert_eq!(aws_coord.critical_blackout_secs, 20);
+    }
+
+    #[test]
+    fn test_seeded_rng_is_deterministic() {
+        // Same seed should produce same sequence
+        let targets1 = ChaosTargets::new("test-run-12345");
+        let targets2 = ChaosTargets::new("test-run-12345");
+
+        // Add same clusters to both
+        targets1.add("a", "/tmp/a", None);
+        targets1.add("b", "/tmp/b", None);
+        targets2.add("a", "/tmp/a", None);
+        targets2.add("b", "/tmp/b", None);
+
+        // Should produce identical sequences
+        let delays1: Vec<u64> = (0..5).map(|_| targets1.random_delay(60, 120)).collect();
+        let delays2: Vec<u64> = (0..5).map(|_| targets2.random_delay(60, 120)).collect();
+        assert_eq!(delays1, delays2, "Same seed should produce same delays");
+
+        // Different seed should produce different sequence
+        let targets3 = ChaosTargets::new("different-seed");
+        targets3.add("a", "/tmp/a", None);
+        targets3.add("b", "/tmp/b", None);
+        let delays3: Vec<u64> = (0..5).map(|_| targets3.random_delay(60, 120)).collect();
+        assert_ne!(delays1, delays3, "Different seed should produce different delays");
     }
 }

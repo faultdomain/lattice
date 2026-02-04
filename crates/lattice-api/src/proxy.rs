@@ -4,16 +4,20 @@
 //! Routes requests to local or child cluster K8s APIs.
 
 use axum::body::Body;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, State};
-use axum::http::{Method, Request};
-use axum::response::Response;
+use axum::http::Request;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use tracing::{debug, instrument};
 
-use crate::auth::extract_bearer_token;
+use crate::auth::authenticate_and_authorize;
 use crate::error::Error;
-use crate::router::route_to_cluster;
+use crate::exec_proxy::{handle_exec_websocket, has_websocket_upgrade_headers};
+use crate::k8s_forwarder::route_to_cluster;
+use crate::routing::{method_to_k8s_verb, strip_cluster_prefix};
 use crate::server::AppState;
+use lattice_proto::is_exec_path;
 
 /// Path parameters for proxy routes
 #[derive(Debug, Deserialize)]
@@ -25,10 +29,21 @@ pub struct ProxyPath {
     pub path: String,
 }
 
+/// Path parameters for exec/attach/portforward routes
+#[derive(Debug, Deserialize)]
+pub struct ExecPath {
+    /// Target cluster name
+    pub cluster_name: String,
+    /// Namespace
+    pub ns: String,
+    /// Pod name
+    pub pod: String,
+}
+
 /// Handle proxy requests to /clusters/{cluster_name}/api/* and /clusters/{cluster_name}/apis/*
 ///
 /// Flow:
-/// 1. Validate OIDC token
+/// 1. Validate token (OIDC or ServiceAccount)
 /// 2. Authorize with Cedar
 /// 3. Route to cluster (uses proxy's service account)
 #[instrument(
@@ -44,6 +59,8 @@ pub async fn proxy_handler(
 ) -> Result<Response<Body>, Error> {
     let cluster_name = &params.cluster_name;
     let method = request.method().clone();
+    let uri = request.uri().clone();
+    let path = uri.path();
 
     debug!(
         cluster = %cluster_name,
@@ -52,49 +69,78 @@ pub async fn proxy_handler(
         "Proxy request received"
     );
 
-    // 1. Extract and validate token (OIDC or ServiceAccount)
-    let token = extract_bearer_token(request.headers())
-        .ok_or_else(|| Error::Unauthorized("Missing Authorization header".into()))?;
+    // Check if this is an exec/attach/portforward request that needs WebSocket upgrade
+    if is_exec_path(path) && has_websocket_upgrade_headers(request.headers()) {
+        return Err(Error::Internal(
+            "WebSocket exec requests should use the exec handler route".into(),
+        ));
+    }
 
-    let identity = state.auth.validate(token).await?;
-
-    // 2. Map HTTP method to K8s verb for authorization
+    // Authenticate and authorize
     let action = method_to_k8s_verb(&method);
+    let identity = authenticate_and_authorize(
+        &state.auth,
+        &state.cedar,
+        request.headers(),
+        cluster_name,
+        action,
+    )
+    .await?;
 
-    // 3. Check Cedar authorization
-    state
-        .cedar
-        .authorize(&identity, cluster_name, action)
-        .await?;
-
-    // 4. Route to the target cluster (passing identity for downstream Cedar checks)
+    // Route to the target cluster
     route_to_cluster(&state, cluster_name, &identity, request).await
 }
 
-/// Map HTTP method to Kubernetes verb
-fn method_to_k8s_verb(method: &Method) -> &'static str {
-    match *method {
-        Method::GET => "get", // Could also be "list" or "watch" depending on path
-        Method::POST => "create",
-        Method::PUT => "update",
-        Method::PATCH => "patch",
-        Method::DELETE => "delete",
-        Method::HEAD => "get",
-        Method::OPTIONS => "get",
-        _ => "unknown",
-    }
-}
+/// Handle exec/attach/portforward requests with WebSocket upgrade
+///
+/// This is a separate handler because WebSocket upgrade requires a different extractor.
+#[instrument(
+    skip(state, ws, request),
+    fields(
+        otel.kind = "server"
+    )
+)]
+pub async fn exec_handler(
+    State(state): State<AppState>,
+    Path(params): Path<ExecPath>,
+    ws: WebSocketUpgrade,
+    request: Request<Body>,
+) -> Result<Response<Body>, Error> {
+    let cluster_name = &params.cluster_name;
+    let uri = request.uri().clone();
+    let path = uri.path();
+    let query = uri.query().unwrap_or("").to_string();
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    debug!(
+        cluster = %cluster_name,
+        namespace = %params.ns,
+        pod = %params.pod,
+        path = %path,
+        "Exec WebSocket request received"
+    );
 
-    #[test]
-    fn test_method_to_k8s_verb() {
-        assert_eq!(method_to_k8s_verb(&Method::GET), "get");
-        assert_eq!(method_to_k8s_verb(&Method::POST), "create");
-        assert_eq!(method_to_k8s_verb(&Method::PUT), "update");
-        assert_eq!(method_to_k8s_verb(&Method::PATCH), "patch");
-        assert_eq!(method_to_k8s_verb(&Method::DELETE), "delete");
-    }
+    // Authenticate and authorize (exec uses "create" verb like kubectl)
+    let identity = authenticate_and_authorize(
+        &state.auth,
+        &state.cedar,
+        request.headers(),
+        cluster_name,
+        "create",
+    )
+    .await?;
+
+    // Strip the /clusters/{cluster_name} prefix from the path
+    let api_path = strip_cluster_prefix(path, cluster_name);
+
+    // Handle WebSocket upgrade and bridge to gRPC
+    Ok(handle_exec_websocket(
+        ws,
+        state,
+        cluster_name.clone(),
+        identity,
+        api_path.to_string(),
+        query,
+    )
+    .await
+    .into_response())
 }

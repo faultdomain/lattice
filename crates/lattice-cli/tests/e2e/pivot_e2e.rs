@@ -80,11 +80,8 @@ async fn run_full_e2e() -> Result<(), String> {
     let mut setup_result = integration::setup::setup_full_hierarchy(&config).await?;
     let ctx = setup_result.ctx.clone();
 
-    // Stop chaos after setup - it's only useful during pivot operations
-    // Running it during proxy/mesh/secrets tests just adds noise
-    setup_result.stop_chaos().await;
-
-    // Ensure port-forwards are alive (may have died during setup)
+    // Chaos was stopped inside setup before proxy kubeconfig generation (Phase 7).
+    // Ensure port-forwards are alive before continuing.
     setup_result.ensure_proxies_alive()?;
 
     // =========================================================================

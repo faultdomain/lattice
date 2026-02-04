@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use lattice_proto::{AgentState, CellCommand, KubernetesResponse};
+use lattice_proto::{AgentState, CellCommand, ExecData, KubernetesResponse};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -116,6 +116,9 @@ pub struct PivotSourceManifests {
 /// Sender type for streaming K8s API responses
 pub type K8sResponseSender = mpsc::Sender<KubernetesResponse>;
 
+/// Sender type for streaming exec data (stdout/stderr from agent)
+pub type ExecDataSender = mpsc::Sender<ExecData>;
+
 /// Configuration for kubeconfig proxy patching
 ///
 /// Contains the URL and CA certificate needed to patch kubeconfig Secrets
@@ -145,6 +148,9 @@ pub struct AgentRegistry {
     /// Pending K8s API proxy responses keyed by request_id
     /// Uses mpsc::Sender to support streaming responses (watches)
     pending_k8s_responses: DashMap<String, K8sResponseSender>,
+    /// Pending exec data responses keyed by request_id
+    /// Routes stdout/stderr from agent exec sessions to proxy handlers
+    pending_exec_data: DashMap<String, ExecDataSender>,
     /// Proxy configuration for kubeconfig patching
     proxy_config: std::sync::RwLock<Option<KubeconfigProxyConfig>>,
 }
@@ -159,6 +165,7 @@ impl Default for AgentRegistry {
             pending_batch_acks: DashMap::new(),
             pending_complete_acks: DashMap::new(),
             pending_k8s_responses: DashMap::new(),
+            pending_exec_data: DashMap::new(),
             proxy_config: std::sync::RwLock::new(None),
         }
     }
@@ -409,6 +416,41 @@ impl AgentRegistry {
     /// Check if a K8s API request is pending
     pub fn has_pending_k8s_response(&self, request_id: &str) -> bool {
         self.pending_k8s_responses.contains_key(request_id)
+    }
+
+    // =========================================================================
+    // Exec data response tracking
+    // =========================================================================
+
+    /// Register a pending exec data channel
+    ///
+    /// The request_id should be the ExecRequest.request_id.
+    /// Routes stdout/stderr from agent to proxy handler.
+    pub fn register_pending_exec_data(&self, request_id: &str, sender: ExecDataSender) {
+        self.pending_exec_data
+            .insert(request_id.to_string(), sender);
+        debug!(request_id = %request_id, "Registered pending exec data");
+    }
+
+    /// Get the pending exec data sender (does not remove)
+    ///
+    /// Returns a clone of the sender for streaming responses.
+    pub fn get_pending_exec_data(&self, request_id: &str) -> Option<ExecDataSender> {
+        self.pending_exec_data.get(request_id).map(|r| r.clone())
+    }
+
+    /// Remove and return the pending exec data sender
+    ///
+    /// Use this when the stream ends or on cancellation.
+    pub fn take_pending_exec_data(&self, request_id: &str) -> Option<ExecDataSender> {
+        self.pending_exec_data
+            .remove(request_id)
+            .map(|(_, sender)| sender)
+    }
+
+    /// Check if an exec session is pending
+    pub fn has_pending_exec_data(&self, request_id: &str) -> bool {
+        self.pending_exec_data.contains_key(request_id)
     }
 }
 

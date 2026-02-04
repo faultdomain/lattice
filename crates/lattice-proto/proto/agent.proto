@@ -62,6 +62,8 @@ message AgentMessage {
     MoveCompleteAck move_complete_ack = 10;
     // Subtree state bubbling for routing
     SubtreeState subtree_state = 11;
+    // Exec/attach/portforward: stdout/stderr data from agent
+    ExecData exec_data = 12;
   }
 }
 
@@ -200,6 +202,12 @@ message CellCommand {
     MoveObjectBatch move_batch = 6;
     // Distributed move: all batches sent, unpause target
     MoveComplete move_complete = 7;
+    // Exec/attach/portforward: initiate exec session
+    ExecRequest exec_request = 8;
+    // Exec/attach/portforward: stdin data from client
+    ExecData exec_stdin = 9;
+    // Exec/attach/portforward: terminal resize
+    ExecResize exec_resize = 10;
   }
 }
 
@@ -482,4 +490,64 @@ message SubtreeService {
   bool removed = 4;
   // Labels for policy matching
   map<string, string> labels = 5;
+}
+
+// =============================================================================
+// Exec/Attach/PortForward Messages (HTTP upgrade over gRPC)
+// =============================================================================
+
+// Cell → Agent: Initiate an exec/attach/portforward session
+//
+// Exec, attach, and portforward require HTTP upgrade (SPDY/WebSocket) which
+// is fundamentally different from watch (chunked HTTP). This message initiates
+// a bidirectional streaming session over the gRPC tunnel.
+message ExecRequest {
+  // Unique session ID for correlation (UUID)
+  string request_id = 1;
+  // API path: /api/v1/namespaces/ns/pods/pod/exec
+  string path = 2;
+  // Query string: command=sh&stdin=true&stdout=true&tty=true
+  string query = 3;
+  // Target cluster for hierarchical routing
+  string target_cluster = 4;
+  // Source identity (preserved through routing chain for Cedar)
+  string source_user = 5;
+  repeated string source_groups = 6;
+}
+
+// Bidirectional: Multiplexed stream data
+//
+// Used in both directions:
+// - Cell → Agent: stdin data from client (ExecData in CellCommand.exec_stdin)
+// - Agent → Cell: stdout/stderr from container (ExecData in AgentMessage.exec_data)
+//
+// Stream IDs follow SPDY conventions:
+// - 0: stdin (client → container)
+// - 1: stdout (container → client)
+// - 2: stderr (container → client)
+// - 3: error (protocol errors)
+// - 255: resize (terminal size changes, prefer ExecResize)
+message ExecData {
+  // Session ID (correlates to ExecRequest.request_id)
+  string request_id = 1;
+  // Stream identifier (0=stdin, 1=stdout, 2=stderr, 3=error)
+  uint32 stream_id = 2;
+  // Raw data bytes
+  bytes data = 3;
+  // True if this is the final message for this stream
+  // When all streams are ended, the session is complete
+  bool stream_end = 4;
+}
+
+// Cell → Agent: Terminal resize event
+//
+// Sent when the client terminal is resized. The agent forwards this
+// to the container's PTY.
+message ExecResize {
+  // Session ID
+  string request_id = 1;
+  // New terminal width in columns
+  uint32 width = 2;
+  // New terminal height in rows
+  uint32 height = 3;
 }

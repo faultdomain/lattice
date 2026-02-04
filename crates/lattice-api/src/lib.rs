@@ -24,9 +24,11 @@ pub mod auth;
 pub mod auth_chain;
 pub mod cedar;
 pub mod error;
+pub mod exec_proxy;
+pub mod k8s_forwarder;
 pub mod kubeconfig;
 pub mod proxy;
-pub mod router;
+pub mod routing;
 pub mod sa_auth;
 pub mod server;
 

@@ -299,10 +299,11 @@ impl TestSession {
         self.restart_port_forwards()
     }
 
-    /// Restart port-forwards if they died.
+    /// Verify port-forwards are healthy.
     ///
-    /// Call this after any operation that might kill the operator pods,
-    /// such as rebuilding or chaos testing.
+    /// With ResilientPortForward, the watchdog thread handles automatic restarts,
+    /// so this method just verifies health. Useful for diagnostics or after operations
+    /// that might temporarily disrupt connectivity.
     pub fn restart_port_forwards(&mut self) -> Result<(), String> {
         if let Some(ref mut proxy) = self.mgmt_proxy {
             proxy.ensure_alive()?;

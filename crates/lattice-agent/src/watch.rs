@@ -2,16 +2,20 @@
 //!
 //! Handles streaming watch requests from the parent cell by streaming
 //! raw bytes from the K8s API. This is a pure L4 proxy approach.
+//!
+//! Uses `client.send()` with chunked transfer encoding (NOT HTTP upgrade)
+//! since K8s watch API returns streaming responses via chunked encoding.
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use futures::io::AsyncReadExt;
 use http::Request;
+use http_body_util::BodyExt;
+use kube::client::Body;
 use kube::Client;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::executor::build_url;
 use lattice_proto::{agent_message::Payload, AgentMessage, KubernetesRequest, KubernetesResponse};
@@ -110,6 +114,11 @@ impl WatchRegistry {
 ///
 /// This is a pure L4 proxy approach - we stream raw bytes from the K8s API
 /// without parsing them. Each chunk of data is forwarded as-is.
+///
+/// Uses `client.send()` with chunked transfer encoding. The K8s watch API
+/// returns streaming responses via HTTP/1.1 chunked encoding, NOT via
+/// HTTP upgrade (SPDY/WebSocket). This is different from exec/attach/port-forward
+/// which DO require upgrade.
 pub async fn execute_watch(
     client: Client,
     req: KubernetesRequest,
@@ -124,15 +133,15 @@ pub async fn execute_watch(
     debug!(
         request_id = %request_id,
         url = %url,
-        "Starting raw byte streaming watch"
+        "Starting watch stream"
     );
 
-    // Build raw HTTP request
+    // Build raw HTTP request with kube::client::Body
     let http_request = match Request::builder()
         .method(req.verb.as_str())
         .uri(&url)
         .header("Accept", &req.accept)
-        .body(Vec::new())
+        .body(Body::empty())
     {
         Ok(r) => r,
         Err(e) => {
@@ -149,16 +158,17 @@ pub async fn execute_watch(
         }
     };
 
-    // Execute streaming request
-    let stream = match client.request_stream(http_request).await {
-        Ok(s) => s,
+    // Execute request using client.send() - this handles chunked responses properly
+    // Unlike request_stream(), send() doesn't require HTTP upgrade
+    let response = match client.send(http_request).await {
+        Ok(r) => r,
         Err(e) => {
             send_error_response(
                 &message_tx,
                 &cluster_name,
                 &request_id,
                 500,
-                &format!("Failed to start stream: {}", e),
+                &format!("Failed to start watch: {}", e),
             )
             .await;
             registry.unregister(&request_id);
@@ -166,41 +176,82 @@ pub async fn execute_watch(
         }
     };
 
-    // Pin the stream for async reading
-    let mut stream = std::pin::pin!(stream);
+    // Check response status
+    let status = response.status();
+    if !status.is_success() {
+        // Try to read error body
+        let body = response.into_body();
+        let error_body = match body.collect().await {
+            Ok(collected) => String::from_utf8_lossy(&collected.to_bytes()).to_string(),
+            Err(_) => "unknown error".to_string(),
+        };
+        send_error_response(
+            &message_tx,
+            &cluster_name,
+            &request_id,
+            status.as_u16() as u32,
+            &error_body,
+        )
+        .await;
+        registry.unregister(&request_id);
+        return;
+    }
 
-    // Read chunks from the stream and forward them
-    let mut buf = vec![0u8; 8192]; // 8KB buffer
+    // Stream the response body
+    let mut body = response.into_body();
+    let mut chunk_count: u64 = 0;
+    let mut total_bytes: u64 = 0;
 
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
-                debug!(request_id = %request_id, "Watch cancelled");
+                debug!(
+                    request_id = %request_id,
+                    chunks = chunk_count,
+                    total_bytes = total_bytes,
+                    "Watch cancelled"
+                );
                 send_stream_end(&message_tx, &cluster_name, &request_id).await;
                 break;
             }
-            read_result = stream.read(&mut buf) => {
-                match read_result {
-                    Ok(0) => {
-                        // Stream ended
-                        debug!(request_id = %request_id, "Watch stream ended");
-                        send_stream_end(&message_tx, &cluster_name, &request_id).await;
-                        break;
-                    }
-                    Ok(n) => {
-                        debug!(
-                            request_id = %request_id,
-                            bytes = n,
-                            "Forwarding watch chunk"
-                        );
+            frame_result = body.frame() => {
+                match frame_result {
+                    Some(Ok(frame)) => {
+                        if let Some(data) = frame.data_ref() {
+                            let bytes = data.len();
+                            chunk_count += 1;
+                            total_bytes += bytes as u64;
 
-                        // Send the chunk as a streaming response
-                        let response = build_stream_chunk_response(&request_id, buf[..n].to_vec());
-                        if send_response(&message_tx, &cluster_name, response).await.is_err() {
-                            break;
+                            // Use trace for individual chunks to reduce log noise
+                            // Log summary every 100 chunks at debug level
+                            if chunk_count.is_multiple_of(100) {
+                                debug!(
+                                    request_id = %request_id,
+                                    chunks = chunk_count,
+                                    total_bytes = total_bytes,
+                                    "Watch progress"
+                                );
+                            } else {
+                                trace!(
+                                    request_id = %request_id,
+                                    bytes = bytes,
+                                    chunk = chunk_count,
+                                    "Forwarding watch chunk"
+                                );
+                            }
+
+                            // Send the chunk as a streaming response
+                            let response = build_stream_chunk_response(&request_id, data.to_vec());
+                            if send_response(&message_tx, &cluster_name, response).await.is_err() {
+                                debug!(
+                                    request_id = %request_id,
+                                    "Watch stream send failed, client disconnected"
+                                );
+                                break;
+                            }
                         }
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         error!(request_id = %request_id, error = %e, "Watch read error");
                         send_error_response(
                             &message_tx,
@@ -209,6 +260,17 @@ pub async fn execute_watch(
                             500,
                             &e.to_string(),
                         ).await;
+                        break;
+                    }
+                    None => {
+                        // Stream ended normally
+                        debug!(
+                            request_id = %request_id,
+                            chunks = chunk_count,
+                            total_bytes = total_bytes,
+                            "Watch stream ended"
+                        );
+                        send_stream_end(&message_tx, &cluster_name, &request_id).await;
                         break;
                     }
                 }

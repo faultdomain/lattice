@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub mod client;
+pub mod exec;
 pub mod executor;
 pub mod pivot;
 pub mod subtree;
@@ -44,6 +45,42 @@ pub trait K8sRequestForwarder: Send + Sync {
 
 /// Shared forwarder type used by the agent for hierarchical routing.
 pub type SharedK8sForwarder = Arc<dyn K8sRequestForwarder>;
+
+/// Handle for an exec session being forwarded to a child cluster.
+///
+/// This allows bidirectional communication with the child exec session.
+pub struct ForwardedExecSession {
+    /// Unique request ID for this session
+    pub request_id: String,
+    /// Sender for stdin data to the child session
+    pub stdin_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    /// Sender for resize events to the child session
+    pub resize_tx: tokio::sync::mpsc::Sender<(u16, u16)>,
+    /// Receiver for exec data (stdout/stderr) from the child session
+    pub data_rx: tokio::sync::mpsc::Receiver<ExecData>,
+}
+
+/// Trait for forwarding exec requests to child clusters.
+///
+/// When an agent receives an exec request with a target_cluster that differs
+/// from its local cluster name, it uses this forwarder to start a session
+/// on the child cluster via its own parent_servers.
+#[async_trait::async_trait]
+pub trait ExecRequestForwarder: Send + Sync {
+    /// Start an exec session on a target cluster in this agent's subtree.
+    ///
+    /// Returns a session handle for bidirectional communication, or an error if:
+    /// - The cluster is not in this agent's subtree
+    /// - The cluster's agent is not connected
+    async fn forward_exec(
+        &self,
+        target_cluster: &str,
+        request: ExecRequest,
+    ) -> Result<ForwardedExecSession, String>;
+}
+
+/// Shared exec forwarder type used by the agent for hierarchical exec routing.
+pub type SharedExecForwarder = Arc<dyn ExecRequestForwarder>;
 
 // =============================================================================
 // Error Response Builders
@@ -183,12 +220,13 @@ pub use pivot::{
 };
 pub use subtree::SubtreeSender;
 pub use watch::{execute_watch, WatchRegistry};
+pub use exec::{execute_exec, ExecRegistry};
 
 // Re-export proto types for convenience
 pub use lattice_proto::{
     agent_message, cell_command, AgentMessage, AgentReady, AgentState, BootstrapComplete,
-    CellCommand, ClusterDeleting, ClusterHealth, Heartbeat, KubernetesRequest, KubernetesResponse,
-    StatusResponse,
+    CellCommand, ClusterDeleting, ClusterHealth, ExecData, ExecRequest, Heartbeat,
+    KubernetesRequest, KubernetesResponse, StatusResponse,
 };
 
 // Re-export mTLS from infra

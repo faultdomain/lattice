@@ -151,7 +151,7 @@ async fn run_endurance_test() -> Result<(), String> {
     info!("[SETUP] Management cluster ready!");
 
     // Start coordinated chaos monkey on mgmt cluster
-    let chaos_targets = Arc::new(ChaosTargets::new());
+    let chaos_targets = Arc::new(ChaosTargets::new(run_id()));
     chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, None);
 
     info!("[CHAOS] Starting coordinated chaos monkey...");

@@ -140,6 +140,8 @@ pub struct AgentClient {
     subtree_watcher_handle: Option<tokio::task::JoinHandle<()>>,
     /// Registry for tracking active K8s API watches
     watch_registry: Arc<WatchRegistry>,
+    /// Registry for tracking active exec sessions
+    exec_registry: Arc<crate::exec::ExecRegistry>,
     /// Optional forwarder for routing K8s requests to child clusters.
     /// When None, requests targeting other clusters return 404.
     forwarder: Option<SharedK8sForwarder>,
@@ -161,6 +163,7 @@ impl AgentClient {
             deletion_watcher_handle: None,
             subtree_watcher_handle: None,
             watch_registry: Arc::new(WatchRegistry::new()),
+            exec_registry: Arc::new(crate::exec::ExecRegistry::new()),
             forwarder: None,
         }
     }
@@ -180,6 +183,7 @@ impl AgentClient {
             deletion_watcher_handle: None,
             subtree_watcher_handle: None,
             watch_registry: Arc::new(WatchRegistry::new()),
+            exec_registry: Arc::new(crate::exec::ExecRegistry::new()),
             forwarder: Some(forwarder),
         }
     }
@@ -477,6 +481,7 @@ impl AgentClient {
         let agent_state = self.agent_state.clone();
         let message_tx_clone = message_tx.clone();
         let watch_registry = self.watch_registry.clone();
+        let exec_registry = self.exec_registry.clone();
         let forwarder = self.forwarder.clone();
 
         // Spawn heartbeat task and store handle
@@ -544,7 +549,7 @@ impl AgentClient {
                     Some(result) = inbound.next() => {
                         match result {
                             Ok(command) => {
-                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry, forwarder.as_ref()).await;
+                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry, &exec_registry, forwarder.as_ref()).await;
                             }
                             Err(e) => {
                                 error!(error = %e, "Error receiving command");
@@ -560,8 +565,9 @@ impl AgentClient {
                 }
             }
 
-            // Cancel all active watches on disconnect
+            // Cancel all active sessions on disconnect
             watch_registry.cancel_all();
+            exec_registry.cancel_all();
 
             // Reset agent state if we were mid-pivot - allows retry on reconnect
             let current_agent_state = *agent_state.read().await;
@@ -919,6 +925,7 @@ impl AgentClient {
         message_tx: &mpsc::Sender<AgentMessage>,
         cluster_name: &str,
         watch_registry: &Arc<WatchRegistry>,
+        exec_registry: &Arc<crate::exec::ExecRegistry>,
         forwarder: Option<&SharedK8sForwarder>,
     ) {
         debug!(command_id = %command.command_id, "Received command");
@@ -1373,6 +1380,83 @@ impl AgentClient {
                         resources_created,
                     )
                     .await;
+                });
+            }
+            Some(Command::ExecRequest(req)) => {
+                let target = &req.target_cluster;
+                let is_local = target == cluster_name;
+
+                debug!(
+                    request_id = %req.request_id,
+                    path = %req.path,
+                    target_cluster = %target,
+                    is_local,
+                    "Received exec request"
+                );
+
+                if is_local {
+                    let client = match create_k8s_client().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!(error = %e, "Failed to create K8s client for exec");
+                            let response = lattice_proto::ExecData {
+                                request_id: req.request_id.clone(),
+                                stream_id: crate::exec::stream_id::ERROR,
+                                data: format!("Failed to create K8s client: {}", e).into_bytes(),
+                                stream_end: true,
+                            };
+                            let msg = AgentMessage {
+                                cluster_name: cluster_name.to_string(),
+                                payload: Some(Payload::ExecData(response)),
+                            };
+                            let _ = message_tx.send(msg).await;
+                            return;
+                        }
+                    };
+
+                    let cluster_name_clone = cluster_name.to_string();
+                    let message_tx = message_tx.clone();
+                    let req = req.clone();
+                    let registry = exec_registry.clone();
+
+                    tokio::spawn(async move {
+                        crate::exec::execute_exec(client, req, cluster_name_clone, message_tx, registry).await;
+                    });
+                } else {
+                    // Forward to child cluster - not yet implemented
+                    warn!(
+                        request_id = %req.request_id,
+                        target = %target,
+                        "Exec forwarding to child clusters not yet implemented"
+                    );
+                    let response = lattice_proto::ExecData {
+                        request_id: req.request_id.clone(),
+                        stream_id: crate::exec::stream_id::ERROR,
+                        data: b"exec forwarding not implemented".to_vec(),
+                        stream_end: true,
+                    };
+                    let msg = AgentMessage {
+                        cluster_name: cluster_name.to_string(),
+                        payload: Some(Payload::ExecData(response)),
+                    };
+                    let _ = message_tx.send(msg).await;
+                }
+            }
+            Some(Command::ExecStdin(data)) => {
+                let exec_registry = exec_registry.clone();
+                let request_id = data.request_id.clone();
+                let data_bytes = data.data.clone();
+                tokio::spawn(async move {
+                    exec_registry.send_stdin(&request_id, data_bytes).await;
+                });
+            }
+            Some(Command::ExecResize(resize)) => {
+                let exec_registry = exec_registry.clone();
+                let request_id = resize.request_id.clone();
+                let width = resize.width as u16;
+                let height = resize.height as u16;
+                tokio::spawn(async move {
+                    exec_registry.send_resize(&request_id, width, height).await;
                 });
             }
             None => {
@@ -1844,6 +1928,7 @@ mod tests {
             &tx,
             "test-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::exec::ExecRegistry::new()),
             None,
         )
         .await;
@@ -1868,6 +1953,7 @@ mod tests {
             &tx,
             "test-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::exec::ExecRegistry::new()),
             None,
         )
         .await;
@@ -1889,6 +1975,7 @@ mod tests {
             &tx,
             "test-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::exec::ExecRegistry::new()),
             None,
         )
         .await;
@@ -2216,6 +2303,7 @@ mod tests {
             &tx,
             "apply-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::exec::ExecRegistry::new()),
             None,
         )
         .await;
@@ -2245,6 +2333,7 @@ mod tests {
             &tx,
             "status-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::exec::ExecRegistry::new()),
             None,
         )
         .await;
@@ -2273,6 +2362,7 @@ mod tests {
             &tx,
             "robust-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::exec::ExecRegistry::new()),
             None,
         )
         .await;

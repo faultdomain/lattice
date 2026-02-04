@@ -38,6 +38,7 @@ prost-types = { workspace = true }
 # HTTP
 reqwest = { workspace = true }
 http = "1.0"
+http-body-util = "0.1"
 
 # Encoding
 base64 = { workspace = true }

@@ -1,15 +1,18 @@
 //! K8s request forwarder for hierarchical routing
 //!
-//! Implements the K8sRequestForwarder trait to enable agents to forward
-//! K8s API requests to their child clusters via the gRPC tunnel.
+//! Implements the K8sRequestForwarder and ExecRequestForwarder traits to enable
+//! agents to forward requests to their child clusters via the gRPC tunnel.
 
 use lattice_agent::{
-    build_k8s_status_response, K8sRequestForwarder, KubernetesRequest, KubernetesResponse,
+    build_k8s_status_response, ExecRequest, ExecRequestForwarder, ForwardedExecSession,
+    K8sRequestForwarder, KubernetesRequest, KubernetesResponse,
 };
 use lattice_cell::{
-    tunnel_request, K8sRequestParams, SharedAgentRegistry, SharedSubtreeRegistry, TunnelError,
+    start_exec_session, tunnel_request, ExecRequestParams, K8sRequestParams, SharedAgentRegistry,
+    SharedSubtreeRegistry, TunnelError,
 };
-use tracing::{debug, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, error, warn};
 
 /// Forwarder that routes K8s requests to child clusters via gRPC tunnel.
 ///
@@ -160,6 +163,98 @@ impl K8sRequestForwarder for SubtreeForwarder {
                 build_k8s_status_response(&request.request_id, status, &msg)
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecRequestForwarder for SubtreeForwarder {
+    async fn forward_exec(
+        &self,
+        target_cluster: &str,
+        request: ExecRequest,
+    ) -> Result<ForwardedExecSession, String> {
+        // Look up the route to the target cluster
+        let route_info = self
+            .subtree_registry
+            .get_route(target_cluster)
+            .await
+            .ok_or_else(|| {
+                format!("cluster '{}' not found in subtree", target_cluster)
+            })?;
+
+        // Get the agent ID to route through
+        let agent_id = route_info
+            .agent_id
+            .ok_or("internal routing error: missing agent_id")?;
+
+        // Get the agent connection
+        let agent = self
+            .agent_registry
+            .get(&agent_id)
+            .ok_or_else(|| format!("agent '{}' not connected", agent_id))?;
+
+        let command_tx = agent.command_tx.clone();
+        drop(agent);
+
+        debug!(
+            target = %target_cluster,
+            agent_id = %agent_id,
+            request_id = %request.request_id,
+            "Forwarding exec request to child cluster"
+        );
+
+        // Start the exec session through the tunnel
+        let exec_params = ExecRequestParams {
+            path: request.path.clone(),
+            query: request.query.clone(),
+            target_cluster: target_cluster.to_string(),
+            source_user: request.source_user.clone(),
+            source_groups: request.source_groups.clone(),
+        };
+
+        let (session, data_rx) = start_exec_session(
+            &self.agent_registry,
+            target_cluster,
+            command_tx,
+            exec_params,
+        )
+        .await
+        .map_err(|e| format!("failed to start exec session: {}", e))?;
+
+        // Create channels for stdin and resize
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
+
+        // Spawn a task to forward stdin and resize to the session
+        let session_for_relay = session;
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(data) = stdin_rx.recv() => {
+                        if let Err(e) = session_for_relay.send_stdin(data).await {
+                            error!(error = %e, "Failed to forward stdin to child exec session");
+                            break;
+                        }
+                    }
+                    Some((width, height)) = resize_rx.recv() => {
+                        if let Err(e) = session_for_relay.send_resize(width as u32, height as u32).await {
+                            error!(error = %e, "Failed to forward resize to child exec session");
+                            break;
+                        }
+                    }
+                    else => break,
+                }
+            }
+        });
+
+        // Convert ExecData receiver (from lattice_proto) to the format expected by ForwardedExecSession
+        // Both use the same ExecData type, so we can use it directly
+        Ok(ForwardedExecSession {
+            request_id: request.request_id,
+            stdin_tx,
+            resize_tx,
+            data_rx,
+        })
     }
 }
 

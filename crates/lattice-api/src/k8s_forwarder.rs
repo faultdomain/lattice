@@ -1,19 +1,22 @@
-//! Subtree routing logic
+//! K8s API request forwarding
 //!
-//! Determines how to reach a target cluster:
-//! - If it's the local cluster, proxy to local K8s API
-//! - If it's a child cluster, route via gRPC tunnel to agent
+//! Forwards K8s API requests to the appropriate destination:
+//! - Local cluster: proxies to the local K8s API server using ServiceAccount auth
+//! - Remote cluster: tunnels through gRPC to the child cluster's agent
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
+use futures::TryStreamExt;
 use std::sync::OnceLock;
 use tracing::debug;
 
 use crate::auth::UserIdentity;
 use crate::error::Error;
+use crate::routing::strip_cluster_prefix;
 use crate::server::AppState;
 use lattice_cell::{tunnel_request, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT};
+use lattice_proto::is_watch_query;
 
 /// Maximum request body size (10 MB - reasonable for K8s API)
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -23,13 +26,6 @@ const CA_CERT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 
 /// Shared HTTP client for local K8s API requests
 static K8S_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-/// Strip /clusters/{cluster_name} prefix from a path to get the K8s API path.
-/// e.g., /clusters/e2e-mgmt/api/v1/namespaces -> /api/v1/namespaces
-fn strip_cluster_prefix<'a>(full_path: &'a str, cluster_name: &str) -> &'a str {
-    let prefix = format!("/clusters/{}", cluster_name);
-    full_path.strip_prefix(&prefix).unwrap_or(full_path)
-}
 
 /// Route a request to the target cluster
 ///
@@ -84,6 +80,7 @@ async fn route_to_local_api(
     let uri = request.uri().clone();
     let path = strip_cluster_prefix(uri.path(), cluster_name);
     let query = uri.query();
+    let query_str = query.unwrap_or("");
 
     debug!(
         method = %method,
@@ -131,9 +128,48 @@ async fn route_to_local_api(
         .await
         .map_err(|e| Error::Proxy(format!("Failed to proxy to K8s API: {}", e)))?;
 
-    // Build response
+    // For streaming queries (watch=true, follow=true), stream the response
+    if is_watch_query(query_str) {
+        return build_streaming_response(response).await;
+    }
+
+    // For regular requests, buffer and return
+    build_buffered_response(response).await
+}
+
+/// Build a streaming response for watch/follow queries
+async fn build_streaming_response(response: reqwest::Response) -> Result<Response<Body>, Error> {
     let status = response.status();
-    let headers = response.headers().clone();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
+    debug!(status = %status, "Starting streaming response");
+
+    // Convert reqwest byte stream to axum body stream
+    let stream = response.bytes_stream().map_err(std::io::Error::other);
+
+    Response::builder()
+        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+        .header("Content-Type", content_type)
+        .header("Transfer-Encoding", "chunked")
+        .body(Body::from_stream(stream))
+        .map_err(|e| Error::Internal(format!("Failed to build streaming response: {}", e)))
+}
+
+/// Build a buffered response for regular (non-streaming) requests
+async fn build_buffered_response(response: reqwest::Response) -> Result<Response<Body>, Error> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
     let body_bytes = response
         .bytes()
         .await
@@ -145,14 +181,9 @@ async fn route_to_local_api(
         "Received response from local K8s API"
     );
 
-    let mut builder = Response::builder()
-        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
-
-    if let Some(ct) = headers.get("content-type") {
-        builder = builder.header("Content-Type", ct.to_str().unwrap_or("application/json"));
-    }
-
-    builder
+    Response::builder()
+        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+        .header("Content-Type", content_type)
         .body(Body::from(body_bytes.to_vec()))
         .map_err(|e| Error::Internal(format!("Failed to build response: {}", e)))
 }
@@ -274,33 +305,4 @@ async fn read_service_account_token() -> Result<String, Error> {
     tokio::fs::read_to_string(TOKEN_PATH)
         .await
         .map_err(|e| Error::Internal(format!("Failed to read ServiceAccount token: {}", e)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_strip_cluster_prefix() {
-        assert_eq!(
-            strip_cluster_prefix("/clusters/e2e-mgmt/api/v1/pods", "e2e-mgmt"),
-            "/api/v1/pods"
-        );
-    }
-
-    #[test]
-    fn test_strip_cluster_prefix_no_match() {
-        assert_eq!(
-            strip_cluster_prefix("/api/v1/pods", "e2e-mgmt"),
-            "/api/v1/pods"
-        );
-    }
-
-    #[test]
-    fn test_strip_cluster_prefix_root_path() {
-        assert_eq!(
-            strip_cluster_prefix("/clusters/test-cluster", "test-cluster"),
-            ""
-        );
-    }
 }

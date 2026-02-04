@@ -13,6 +13,7 @@ pub mod bootstrap;
 pub mod capi_proxy;
 pub mod cilium;
 pub mod connection;
+pub mod exec_tunnel;
 pub mod k8s_tunnel;
 pub mod kubeconfig;
 pub mod move_sender;
@@ -30,6 +31,10 @@ pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
 pub use connection::{
     AgentConnection, AgentRegistry, KubeconfigProxyConfig, PivotSourceManifests, SendError,
     SharedAgentRegistry, UnpivotManifests,
+};
+pub use exec_tunnel::{
+    start_exec_session, stream_id, ExecRequestParams, ExecSession, ExecTunnelError,
+    EXEC_CHANNEL_SIZE,
 };
 pub use k8s_tunnel::{tunnel_request, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT};
 pub use kubeconfig::patch_kubeconfig_for_proxy;

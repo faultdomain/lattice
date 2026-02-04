@@ -17,7 +17,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{extract_bearer_token, OidcConfig};
+use crate::auth::{authenticate, OidcConfig};
 use crate::error::Error;
 use crate::server::AppState;
 
@@ -132,11 +132,8 @@ pub async fn kubeconfig_handler(
     Query(params): Query<KubeconfigParams>,
     headers: HeaderMap,
 ) -> Result<Response, Error> {
-    // Extract and validate token (OIDC or ServiceAccount)
-    let token = extract_bearer_token(&headers)
-        .ok_or_else(|| Error::Unauthorized("Missing Authorization header".into()))?;
-
-    let identity = state.auth.validate(token).await?;
+    // Authenticate (no Cedar authorization - kubeconfig just lists accessible clusters)
+    let identity = authenticate(&state.auth, &headers).await?;
 
     // Get all clusters in subtree
     let subtree_clusters = state.subtree.all_clusters().await;

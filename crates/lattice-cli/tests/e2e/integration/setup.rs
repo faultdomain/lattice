@@ -151,7 +151,7 @@ impl SetupResult {
         }
     }
 
-    /// Ensure all proxy sessions are alive, restarting port-forwards if needed
+    /// Verify all proxy sessions are healthy (watchdog handles restarts automatically)
     pub fn ensure_proxies_alive(&mut self) -> Result<(), String> {
         if let Some(ref mut proxy) = self.mgmt_proxy {
             proxy.ensure_alive()?;
@@ -280,7 +280,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     // Start chaos monkey if configured (uses provider-appropriate intervals)
     let (chaos, chaos_targets) = if config.enable_chaos {
-        let targets = Arc::new(ChaosTargets::new());
+        let targets = Arc::new(ChaosTargets::new(super::super::helpers::run_id()));
         let config = ChaosConfig::for_provider(mgmt_provider);
         let monkey = ChaosMonkey::start_with_config(targets.clone(), config);
         (Some(monkey), Some(targets))
@@ -481,11 +481,17 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // =========================================================================
     // Phase 7: Generate Proxy Kubeconfigs
     // =========================================================================
+    // Stop chaos before proxy setup - chaos is only useful during pivot operations.
+    // The proxy setup needs stable operators to establish port-forwards.
+    // Caller can restart chaos for delete/uninstall phases using restart_chaos().
+    if let Some(c) = chaos {
+        info!("[Setup] Stopping chaos for proxy kubeconfig generation...");
+        c.stop().await;
+    }
     info!("[Setup/Phase 7] Generating proxy kubeconfigs...");
 
     // Wait for operators to be ready before trying to connect to their proxies
     // The operator includes the auth proxy server, so we need it running first
-    // Note: Caller should stop chaos after setup - it's only useful during pivot operations
     wait_for_operator_ready(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, Some(120)).await?;
     wait_for_operator_ready(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path, Some(120)).await?;
 
@@ -559,7 +565,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     Ok(SetupResult {
         ctx,
-        chaos,
+        chaos: None, // Stopped before Phase 7; caller can restart_chaos() for delete/uninstall
         chaos_targets,
         mgmt_proxy: Some(mgmt_proxy),
         workload_proxy,
@@ -588,7 +594,7 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
 
     // Start chaos monkey if configured (uses provider-appropriate intervals)
     let (chaos, chaos_targets) = if config.enable_chaos {
-        let targets = Arc::new(ChaosTargets::new());
+        let targets = Arc::new(ChaosTargets::new(super::super::helpers::run_id()));
         let config = ChaosConfig::for_provider(mgmt_provider);
         let monkey = ChaosMonkey::start_with_config(targets.clone(), config);
         (Some(monkey), Some(targets))
@@ -699,8 +705,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     }
 
     // Generate proxy kubeconfig for workload
-    // Note: Chaos can continue running - ProxySession uses deterministic ports
-    // and can self-heal via ensure_alive() if the port-forward dies.
+    // Note: Chaos can continue running - ProxySession auto-restarts port-forwards.
     info!("[Setup] Generating proxy kubeconfig for workload...");
 
     cedar::apply_e2e_default_policy(&result.ctx.mgmt_kubeconfig).await?;

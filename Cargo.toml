@@ -38,7 +38,7 @@ lattice-move = { path = "crates/lattice-move" }
 lattice-api = { path = "crates/lattice-api" }
 
 # Kubernetes
-kube = { version = "0.98", features = ["runtime", "derive", "client", "rustls-tls", "admission"] }
+kube = { version = "0.98", features = ["runtime", "derive", "client", "rustls-tls", "admission", "ws"] }
 k8s-openapi = { version = "0.24", features = ["v1_32"] }
 json-patch = "3"
 jsonptr = "0.6"

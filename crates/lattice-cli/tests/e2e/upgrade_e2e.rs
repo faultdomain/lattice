@@ -180,7 +180,7 @@ async fn run_upgrade_test() -> Result<(), String> {
 
     // Start chaos with coordinated attacks for upgrade stress testing
     info!("[Phase 4] Starting coordinated chaos monkey...");
-    let chaos_targets = Arc::new(ChaosTargets::new());
+    let chaos_targets = Arc::new(ChaosTargets::new(run_id()));
     chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig, None);
     chaos_targets.add(
         UPGRADE_WORKLOAD_CLUSTER_NAME,

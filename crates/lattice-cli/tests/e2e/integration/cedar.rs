@@ -488,6 +488,11 @@ pub async fn run_cedar_hierarchy_tests(
     // Run group policy test
     run_cedar_group_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
 
+    // Restore the default E2E policy after tests complete
+    // This is critical - subsequent tests (mesh, secrets) use the proxy kubeconfig
+    // and will fail without a Cedar policy allowing access
+    apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
+
     info!("[Integration/Cedar] All Cedar hierarchy tests passed!");
     Ok(())
 }

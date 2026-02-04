@@ -563,22 +563,27 @@ echo "=== {source} Traffic Tests ==="
 echo "Testing {num_targets} endpoints..."
 
 # Wait for blocked endpoints to NOT return 2xx (policy active or service not ready)
+# Increase timeout to 3 minutes (90 retries * 2 seconds) to handle slow policy propagation
 echo "Waiting for policies on {num_blocked} blocked endpoints..."
-MAX_RETRIES=30
+MAX_RETRIES=90
 RETRY=0
 while [ $RETRY -lt $MAX_RETRIES ]; do{endpoint_checks}
     if [ {all_blocked_check} ]; then
-        echo "Blocked endpoints not returning 2xx - policies likely active"
+        echo "Blocked endpoints not returning 2xx - policies active"
         sleep 2
         break
     fi
     RETRY=$((RETRY + 1))
-    echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES)"
+    if [ $((RETRY % 15)) -eq 0 ]; then
+        echo "Waiting for policies... (attempt $RETRY/$MAX_RETRIES)"
+    fi
     sleep 2
 done
 
 if [ $RETRY -eq $MAX_RETRIES ]; then
-    echo "Warning: Policy propagation wait timed out, proceeding anyway"
+    echo "ERROR: Policy propagation wait timed out after 3 minutes"
+    echo "Blocked endpoints are still returning 2xx - policies not enforced"
+    exit 1
 fi
 
 "#,
@@ -1376,8 +1381,15 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     wait_for_mesh_test_cycles(kubeconfig_path, 2).await?;
 
     let result = handle.stop_and_verify().await;
-    // Clean up immediately to free CPU resources
-    cleanup_mesh_test(kubeconfig_path);
+    // Only clean up on success - leave namespace for debugging on failure
+    if result.is_ok() {
+        cleanup_mesh_test(kubeconfig_path);
+    } else {
+        info!(
+            "[Mesh] Leaving namespace {} for debugging (test failed)",
+            TEST_SERVICES_NAMESPACE
+        );
+    }
     result
 }
 
@@ -2215,7 +2227,15 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     wait_for_random_mesh_test_cycles(kubeconfig_path, &traffic_generators, 2).await?;
 
     let result = handle.stop_and_verify().await;
-    cleanup_random_mesh_test(kubeconfig_path);
+    // Only clean up on success - leave namespace for debugging on failure
+    if result.is_ok() {
+        cleanup_random_mesh_test(kubeconfig_path);
+    } else {
+        info!(
+            "[Random Mesh] Leaving namespace {} for debugging (test failed)",
+            RANDOM_MESH_NAMESPACE
+        );
+    }
     result
 }
 
