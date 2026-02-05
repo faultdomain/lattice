@@ -179,7 +179,8 @@ async fn run_independence_test(
         &workload_cluster_name,
         &workload_bootstrap,
         &workload_kubeconfig,
-    )?;
+    )
+    .await?;
 
     let capi_check = run_cmd(
         "kubectl",

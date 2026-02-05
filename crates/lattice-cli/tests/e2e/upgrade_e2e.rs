@@ -167,7 +167,8 @@ async fn run_upgrade_test() -> Result<(), String> {
             UPGRADE_WORKLOAD_CLUSTER_NAME,
             &workload_bootstrap,
             &workload_kubeconfig_path,
-        )?;
+        )
+        .await?;
     }
 
     // Deploy mesh services
@@ -260,34 +261,36 @@ async fn run_upgrade_test() -> Result<(), String> {
 }
 
 async fn wait_for_cluster_deleted(kubeconfig: &str, name: &str) -> Result<(), String> {
-    loop {
-        // Use kubectl for resilience - handles retries/reconnection internally
-        let output = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig,
-                "get",
-                "latticecluster",
-                name,
-                "-o",
-                "name",
-            ],
-        );
+    use super::helpers::wait_for_condition;
 
-        match output {
-            Err(e) if e.contains("not found") || e.contains("NotFound") => return Ok(()),
-            Err(e) => {
-                // Log but continue - transient errors should not fail the wait
-                info!("[Upgrade] Error checking cluster deletion: {}", e);
+    // Use a generous timeout - cluster deletion can take a while with CAPI cleanup
+    wait_for_condition(
+        &format!("cluster {} to be deleted", name),
+        Duration::from_secs(600),
+        Duration::from_secs(5),
+        || async move {
+            match run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig,
+                    "get",
+                    "latticecluster",
+                    name,
+                    "-o",
+                    "name",
+                ],
+            ) {
+                Err(e) if e.contains("not found") || e.contains("NotFound") => Ok(true),
+                Err(e) => {
+                    info!("[Upgrade] Error checking cluster deletion: {}", e);
+                    Ok(false)
+                }
+                Ok(_) => Ok(false),
             }
-            Ok(_) => {
-                // Cluster still exists, keep waiting
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+        },
+    )
+    .await
 }
 
 async fn monitor_upgrade(

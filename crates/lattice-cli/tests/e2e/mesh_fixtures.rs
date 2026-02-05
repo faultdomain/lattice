@@ -1,0 +1,402 @@
+//! Service builders for mesh bilateral agreement tests
+//!
+//! Provides factory functions for creating LatticeService specs used in both
+//! the fixed 9-service mesh test and the randomized mesh test.
+
+#![cfg(feature = "provider-e2e")]
+
+use std::collections::BTreeMap;
+
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+use lattice_operator::crd::{
+    ContainerSpec, DependencyDirection, DeploySpec, LatticeService, LatticeServiceSpec, PortSpec,
+    ReplicaSpec, ResourceSpec, ResourceType, ServicePortsSpec,
+};
+
+use super::mesh_helpers::{generate_test_script, TestTarget};
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+pub const TEST_SERVICES_NAMESPACE: &str = "mesh-test";
+pub const TOTAL_SERVICES: usize = 10; // 9 original + 1 public-api (wildcard)
+
+// =============================================================================
+// Shared Builders
+// =============================================================================
+
+pub fn nginx_container() -> ContainerSpec {
+    ContainerSpec {
+        image: "nginx:alpine".to_string(),
+        command: None,
+        args: None,
+        variables: BTreeMap::new(),
+        files: BTreeMap::new(),
+        volumes: BTreeMap::new(),
+        resources: None,
+        liveness_probe: None,
+        readiness_probe: None,
+        startup_probe: None,
+        security: None,
+    }
+}
+
+pub fn curl_container(script: String) -> ContainerSpec {
+    ContainerSpec {
+        image: "curlimages/curl:latest".to_string(),
+        command: Some(vec!["/bin/sh".to_string()]),
+        args: Some(vec!["-c".to_string(), script]),
+        variables: BTreeMap::new(),
+        files: BTreeMap::new(),
+        volumes: BTreeMap::new(),
+        resources: None,
+        liveness_probe: None,
+        readiness_probe: None,
+        startup_probe: None,
+        security: None,
+    }
+}
+
+pub fn http_port() -> ServicePortsSpec {
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 80,
+            target_port: None,
+            protocol: None,
+        },
+    );
+    ServicePortsSpec { ports }
+}
+
+pub fn outbound_dep(name: &str) -> (String, ResourceSpec) {
+    (
+        name.to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        },
+    )
+}
+
+pub fn inbound_allow(name: &str) -> (String, ResourceSpec) {
+    (
+        name.to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Inbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        },
+    )
+}
+
+pub fn inbound_allow_all() -> (String, ResourceSpec) {
+    (
+        "any-caller".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Inbound,
+            id: Some("*".to_string()),
+            class: None,
+            metadata: None,
+            params: None,
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        },
+    )
+}
+
+pub fn external_outbound_dep(name: &str) -> (String, ResourceSpec) {
+    (
+        name.to_string(),
+        ResourceSpec {
+            type_: ResourceType::ExternalService,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        },
+    )
+}
+
+// =============================================================================
+// Generic Service Construction
+// =============================================================================
+
+/// Build a LatticeService from its component parts.
+///
+/// Used by both the fixed mesh test (via convenience wrappers below) and the
+/// random mesh generator to avoid duplicating the spec-assembly boilerplate.
+pub fn build_lattice_service(
+    name: &str,
+    namespace: &str,
+    resources: BTreeMap<String, ResourceSpec>,
+    has_port: bool,
+    container: ContainerSpec,
+) -> LatticeService {
+    let mut containers = BTreeMap::new();
+    containers.insert("main".to_string(), container);
+
+    let mut labels = BTreeMap::new();
+    labels.insert("lattice.dev/environment".to_string(), namespace.to_string());
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            containers,
+            resources,
+            service: if has_port { Some(http_port()) } else { None },
+            replicas: ReplicaSpec { min: 1, max: None },
+            deploy: DeploySpec::default(),
+            ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
+        },
+        status: None,
+    }
+}
+
+fn create_service(
+    name: &str,
+    outbound: Vec<&str>,
+    inbound: Vec<&str>,
+    allows_all_inbound: bool,
+    has_port: bool,
+    container: ContainerSpec,
+) -> LatticeService {
+    let mut resources: BTreeMap<String, ResourceSpec> =
+        outbound.iter().map(|s| outbound_dep(s)).collect();
+
+    if allows_all_inbound {
+        let (key, spec) = inbound_allow_all();
+        resources.insert(key, spec);
+    } else {
+        resources.extend(inbound.iter().map(|s| inbound_allow(s)));
+    }
+
+    build_lattice_service(
+        name,
+        TEST_SERVICES_NAMESPACE,
+        resources,
+        has_port,
+        container,
+    )
+}
+
+// =============================================================================
+// Fixed Mesh Service Factories
+// =============================================================================
+
+pub fn create_frontend_web() -> LatticeService {
+    let ns = TEST_SERVICES_NAMESPACE;
+    let targets = vec![
+        TestTarget::internal("api-gateway", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-users", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-orders", ns, false, "web not allowed by orders"),
+        TestTarget::internal("db-users", ns, false, "no direct DB access"),
+        TestTarget::internal("db-orders", ns, false, "no direct DB access"),
+        TestTarget::internal("cache", ns, false, "no direct cache access"),
+        TestTarget::internal("frontend-mobile", ns, false, "no peer access"),
+        TestTarget::internal("frontend-admin", ns, false, "no peer access"),
+        TestTarget::internal("public-api", ns, true, "wildcard allows all with outbound"),
+    ];
+
+    let script = generate_test_script("frontend-web", targets);
+
+    create_service(
+        "frontend-web",
+        vec![
+            "api-gateway",
+            "api-users",
+            "api-orders",
+            "db-users",
+            "db-orders",
+            "cache",
+            "frontend-mobile",
+            "frontend-admin",
+            "public-api",
+        ],
+        vec![],
+        false, // allows_all_inbound
+        false, // has_port
+        curl_container(script),
+    )
+}
+
+pub fn create_frontend_mobile() -> LatticeService {
+    let ns = TEST_SERVICES_NAMESPACE;
+    let targets = vec![
+        TestTarget::internal("api-gateway", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-users", ns, false, "mobile not allowed by users"),
+        TestTarget::internal("api-orders", ns, true, "bilateral agreement"),
+        TestTarget::internal("db-users", ns, false, "no direct DB access"),
+        TestTarget::internal("db-orders", ns, false, "no direct DB access"),
+        TestTarget::internal("cache", ns, false, "no direct cache access"),
+        TestTarget::internal("frontend-web", ns, false, "no peer access"),
+        TestTarget::internal("frontend-admin", ns, false, "no peer access"),
+        // Wildcard service - mobile does NOT declare outbound, should be BLOCKED
+        TestTarget::internal("public-api", ns, false, "no outbound declared to wildcard"),
+    ];
+
+    let script = generate_test_script("frontend-mobile", targets);
+
+    create_service(
+        "frontend-mobile",
+        vec![
+            "api-gateway",
+            "api-users",
+            "api-orders",
+            "db-users",
+            "db-orders",
+            "cache",
+            "frontend-web",
+            "frontend-admin",
+            // NOTE: Intentionally NOT including "public-api" to test wildcard still requires outbound
+        ],
+        vec![],
+        false, // allows_all_inbound
+        false, // has_port
+        curl_container(script),
+    )
+}
+
+pub fn create_frontend_admin() -> LatticeService {
+    let ns = TEST_SERVICES_NAMESPACE;
+    let targets = vec![
+        TestTarget::internal("api-gateway", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-users", ns, true, "bilateral agreement"),
+        TestTarget::internal("api-orders", ns, true, "bilateral agreement"),
+        TestTarget::internal("db-users", ns, false, "no direct DB access"),
+        TestTarget::internal("db-orders", ns, false, "no direct DB access"),
+        TestTarget::internal("cache", ns, false, "no direct cache access"),
+        TestTarget::internal("frontend-web", ns, false, "no peer access"),
+        TestTarget::internal("frontend-mobile", ns, false, "no peer access"),
+        TestTarget::internal("public-api", ns, true, "wildcard allows all with outbound"),
+    ];
+
+    let script = generate_test_script("frontend-admin", targets);
+
+    create_service(
+        "frontend-admin",
+        vec![
+            "api-gateway",
+            "api-users",
+            "api-orders",
+            "db-users",
+            "db-orders",
+            "cache",
+            "frontend-web",
+            "frontend-mobile",
+            "public-api",
+        ],
+        vec![],
+        false, // allows_all_inbound
+        false, // has_port
+        curl_container(script),
+    )
+}
+
+pub fn create_api_gateway() -> LatticeService {
+    create_service(
+        "api-gateway",
+        vec!["db-users", "db-orders", "cache"],
+        vec!["frontend-web", "frontend-mobile", "frontend-admin"],
+        false,
+        true,
+        nginx_container(),
+    )
+}
+
+pub fn create_api_users() -> LatticeService {
+    create_service(
+        "api-users",
+        vec!["db-users", "cache"],
+        vec!["frontend-web", "frontend-admin"],
+        false,
+        true,
+        nginx_container(),
+    )
+}
+
+pub fn create_api_orders() -> LatticeService {
+    create_service(
+        "api-orders",
+        vec!["db-orders", "cache"],
+        vec!["frontend-mobile", "frontend-admin"],
+        false,
+        true,
+        nginx_container(),
+    )
+}
+
+pub fn create_db_users() -> LatticeService {
+    create_service(
+        "db-users",
+        vec![],
+        vec!["api-gateway", "api-users"],
+        false,
+        true,
+        nginx_container(),
+    )
+}
+
+pub fn create_db_orders() -> LatticeService {
+    create_service(
+        "db-orders",
+        vec![],
+        vec!["api-gateway", "api-orders"],
+        false,
+        true,
+        nginx_container(),
+    )
+}
+
+pub fn create_cache() -> LatticeService {
+    create_service(
+        "cache",
+        vec![],
+        vec!["api-gateway", "api-users", "api-orders"],
+        false,
+        true,
+        nginx_container(),
+    )
+}
+
+pub fn create_public_api() -> LatticeService {
+    create_service(
+        "public-api",
+        vec![],
+        vec![],
+        true, // allows_all_inbound (wildcard)
+        true, // has_port
+        nginx_container(),
+    )
+}

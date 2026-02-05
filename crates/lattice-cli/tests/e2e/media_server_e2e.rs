@@ -16,7 +16,7 @@ use kube::api::{Api, PostParams};
 
 use lattice_operator::crd::LatticeService;
 
-use super::helpers::{client_from_kubeconfig, load_service_config, run_cmd};
+use super::helpers::{client_from_kubeconfig, load_service_config, run_cmd, wait_for_condition};
 
 const NAMESPACE: &str = "media";
 
@@ -81,63 +81,59 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
 async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
     info!("Waiting for deployments...");
 
-    let timeout = Duration::from_secs(300);
-    let poll_interval = Duration::from_secs(5);
-
     for name in ["jellyfin", "nzbget", "sonarr"] {
         info!("Waiting for {}...", name);
-        let start = std::time::Instant::now();
 
-        loop {
-            // Use kubectl for resilience - handles retries/reconnection internally
-            let output = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "get",
-                    "deployment",
-                    "-n",
-                    NAMESPACE,
-                    name,
-                    "-o",
-                    "jsonpath={.status.availableReplicas}/{.status.replicas}",
-                ],
-            );
+        wait_for_condition(
+            &format!("deployment {} to be available", name),
+            Duration::from_secs(300),
+            Duration::from_secs(5),
+            || async move {
+                let output = run_cmd(
+                    "kubectl",
+                    &[
+                        "--kubeconfig",
+                        kubeconfig_path,
+                        "get",
+                        "deployment",
+                        "-n",
+                        NAMESPACE,
+                        name,
+                        "-o",
+                        "jsonpath={.status.availableReplicas}/{.status.replicas}",
+                    ],
+                );
 
-            match output {
-                Ok(status) => {
-                    let parts: Vec<&str> = status.split('/').collect();
-                    if parts.len() == 2 {
-                        let available = parts[0].parse::<i32>().unwrap_or(0);
-                        let desired = parts[1].parse::<i32>().unwrap_or(0);
-                        if desired > 0 && available >= desired {
-                            info!("{} is available ({}/{})", name, available, desired);
-                            break;
+                match output {
+                    Ok(status) => {
+                        let parts: Vec<&str> = status.split('/').collect();
+                        if parts.len() == 2 {
+                            let available = parts[0].parse::<i32>().unwrap_or(0);
+                            let desired = parts[1].parse::<i32>().unwrap_or(0);
+                            if desired > 0 && available >= desired {
+                                info!("{} is available ({}/{})", name, available, desired);
+                                return Ok(true);
+                            }
+                            info!(
+                                "  {} not ready yet ({}/{} available), retrying...",
+                                name, available, desired
+                            );
+                        } else {
+                            info!("  {} status unclear: {}, retrying...", name, status);
                         }
-                        info!(
-                            "  {} not ready yet ({}/{} available), retrying...",
-                            name, available, desired
-                        );
-                    } else {
-                        info!("  {} status unclear: {}, retrying...", name, status);
+                    }
+                    Err(e) => {
+                        if e.contains("not found") || e.contains("NotFound") {
+                            info!("{} not found yet, retrying...", name);
+                        } else {
+                            info!("Error checking {}: {}, retrying...", name, e);
+                        }
                     }
                 }
-                Err(e) => {
-                    if e.contains("not found") || e.contains("NotFound") {
-                        info!("{} not found yet, retrying...", name);
-                    } else {
-                        info!("Error checking {}: {}, retrying...", name, e);
-                    }
-                }
-            }
-
-            if start.elapsed() > timeout {
-                return Err(format!("Timeout waiting for deployment {}", name));
-            }
-
-            sleep(poll_interval).await;
-        }
+                Ok(false)
+            },
+        )
+        .await?;
     }
 
     info!("All deployments available");
@@ -315,51 +311,46 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
 async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
     info!("Waiting for Istio waypoint...");
 
-    let timeout = Duration::from_secs(120);
-    let poll_interval = Duration::from_secs(5);
-    let start = std::time::Instant::now();
+    wait_for_condition(
+        "Istio waypoint to be ready",
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || async move {
+            let output = run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "get",
+                    "deployments",
+                    "-n",
+                    NAMESPACE,
+                    "-o",
+                    "jsonpath={range .items[*]}{.metadata.name}:{.status.availableReplicas}/{.status.replicas}{\"\\n\"}{end}",
+                ],
+            )
+            .unwrap_or_default();
 
-    loop {
-        // Look for waypoint deployment (name pattern: *-waypoint or media-waypoint)
-        // Use kubectl for resilience - handles retries/reconnection internally
-        let output = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "get",
-                "deployments",
-                "-n",
-                NAMESPACE,
-                "-o",
-                "jsonpath={range .items[*]}{.metadata.name}:{.status.availableReplicas}/{.status.replicas}{\"\\n\"}{end}",
-            ],
-        )
-        .unwrap_or_default();
-
-        // Find waypoint deployment and check if it's ready
-        for line in output.lines() {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() == 2 && parts[0].contains("waypoint") {
-                let name = parts[0];
-                let replicas: Vec<&str> = parts[1].split('/').collect();
-                if replicas.len() == 2 {
-                    let available = replicas[0].parse::<i32>().unwrap_or(0);
-                    let desired = replicas[1].parse::<i32>().unwrap_or(0);
-                    if available > 0 && available >= desired {
-                        info!("{} is ready ({}/{})", name, available, desired);
-                        return Ok(());
+            for line in output.lines() {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() == 2 && parts[0].contains("waypoint") {
+                    let name = parts[0];
+                    let replicas: Vec<&str> = parts[1].split('/').collect();
+                    if replicas.len() == 2 {
+                        let available = replicas[0].parse::<i32>().unwrap_or(0);
+                        let desired = replicas[1].parse::<i32>().unwrap_or(0);
+                        if available > 0 && available >= desired {
+                            info!("{} is ready ({}/{})", name, available, desired);
+                            return Ok(true);
+                        }
                     }
                 }
             }
-        }
 
-        if start.elapsed() > timeout {
-            return Err("Timeout waiting for Istio waypoint".into());
-        }
-
-        sleep(poll_interval).await;
-    }
+            Ok(false)
+        },
+    )
+    .await
 }
 
 async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {

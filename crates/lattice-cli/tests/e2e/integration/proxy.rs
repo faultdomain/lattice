@@ -23,7 +23,6 @@
 #![cfg(feature = "provider-e2e")]
 
 use std::time::Duration;
-use tokio::time::sleep;
 use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
@@ -56,51 +55,50 @@ pub async fn wait_for_agent_ready(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
 ) -> Result<(), String> {
+    use super::super::helpers::wait_for_condition;
+
     info!(
         "[Integration/Proxy] Checking cluster {} is ready for proxy access...",
         child_cluster_name
     );
 
-    for attempt in 1..=30 {
-        let phase_trimmed = match run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                parent_kubeconfig,
-                "get",
-                "latticecluster",
-                child_cluster_name,
-                "-o",
-                "jsonpath={.status.phase}",
-            ],
-        ) {
-            Ok(output) => output.trim().to_string(),
-            Err(_) => String::new(),
-        };
+    wait_for_condition(
+        &format!("cluster {} to reach Ready/Pivoted", child_cluster_name),
+        Duration::from_secs(150),
+        Duration::from_secs(5),
+        || async move {
+            let phase_trimmed = match run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    parent_kubeconfig,
+                    "get",
+                    "latticecluster",
+                    child_cluster_name,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ],
+            ) {
+                Ok(output) => output.trim().to_string(),
+                Err(_) => String::new(),
+            };
 
-        // Pivoted or Ready means the cluster is operational
-        // Pivoted specifically means the agent was connected (pivot requires agent)
-        if phase_trimmed == "Pivoted" || phase_trimmed == "Ready" {
+            if phase_trimmed == "Pivoted" || phase_trimmed == "Ready" {
+                info!(
+                    "[Integration/Proxy] Cluster {} is {} - ready for proxy access",
+                    child_cluster_name, phase_trimmed
+                );
+                return Ok(true);
+            }
+
             info!(
-                "[Integration/Proxy] Cluster {} is {} - ready for proxy access",
-                child_cluster_name, phase_trimmed
+                "[Integration/Proxy] Waiting for cluster to be ready (phase: {})...",
+                phase_trimmed
             );
-            return Ok(());
-        }
-
-        if attempt < 30 {
-            info!(
-                "[Integration/Proxy] Waiting for cluster to be ready (attempt {}/30, phase: {})...",
-                attempt, phase_trimmed
-            );
-            sleep(Duration::from_secs(5)).await;
-        }
-    }
-
-    Err(format!(
-        "Cluster {} did not reach Ready/Pivoted state within timeout",
-        child_cluster_name
-    ))
+            Ok(false)
+        },
+    )
+    .await
 }
 
 /// Test proxy access to a child cluster via the auth proxy.

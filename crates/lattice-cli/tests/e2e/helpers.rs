@@ -25,6 +25,49 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 // =============================================================================
+// Generic Polling Helper
+// =============================================================================
+
+/// Poll an async condition until it returns `true` or the timeout expires.
+///
+/// Replaces 15+ hand-rolled polling loops across the test suite with a single
+/// reusable helper. The `condition` closure returns `Ok(true)` when done,
+/// `Ok(false)` to keep polling, or `Err` to abort immediately.
+///
+/// # Arguments
+/// * `description` - Human-readable label for log messages
+/// * `timeout` - Maximum wall-clock time to poll
+/// * `poll_interval` - Sleep duration between polls
+/// * `condition` - Async closure checked each iteration
+#[cfg(feature = "provider-e2e")]
+pub async fn wait_for_condition<F, Fut>(
+    description: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+    condition: F,
+) -> Result<(), String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<bool, String>>,
+{
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout after {:?} waiting for: {}",
+                timeout, description
+            ));
+        }
+        match condition().await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(e) => return Err(e),
+        }
+        sleep(poll_interval).await;
+    }
+}
+
+// =============================================================================
 // Shared Constants
 // =============================================================================
 
@@ -409,6 +452,7 @@ pub fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpRes
 ///
 /// Does NOT retry on:
 /// - 4xx errors (401, 403, 404, etc.) - these are permanent failures
+///
 /// Retries on any non-success response until max attempts exhausted.
 #[cfg(feature = "provider-e2e")]
 pub async fn http_get_with_retry(
@@ -513,7 +557,7 @@ fn parse_lb_port(port_output: &str) -> Option<String> {
 /// * `Ok(())` on success
 /// * `Err(String)` with descriptive error on failure
 #[cfg(feature = "provider-e2e")]
-pub fn extract_docker_cluster_kubeconfig(
+pub async fn extract_docker_cluster_kubeconfig(
     cluster_name: &str,
     bootstrap: &BootstrapProvider,
     output_path: &str,
@@ -542,32 +586,21 @@ pub fn extract_docker_cluster_kubeconfig(
     let kubeconfig_container_path = get_kubeconfig_path_for_bootstrap(bootstrap);
     info!("Extracting kubeconfig from {}", kubeconfig_container_path);
 
-    let mut kubeconfig = String::new();
-    let max_retries = 60; // 5 minutes with 5s intervals
-    for attempt in 1..=max_retries {
-        match run_cmd(
-            "docker",
-            &["exec", cp_container, "cat", kubeconfig_container_path],
-        ) {
-            Ok(content) => {
-                kubeconfig = content;
-                break;
-            }
-            Err(e) => {
-                if attempt == max_retries {
-                    return Err(format!(
-                        "Failed to extract kubeconfig after {} attempts: {}",
-                        max_retries, e
-                    ));
-                }
-                info!(
-                    "Waiting for kubeconfig to be available (attempt {}/{})...",
-                    attempt, max_retries
-                );
-                std::thread::sleep(std::time::Duration::from_secs(5));
-            }
-        }
-    }
+    let cp = cp_container.to_string();
+    let kubeconfig = retry_with_backoff(
+        &RetryConfig {
+            max_attempts: 60,
+            initial_delay: Duration::from_secs(5),
+            max_delay: Duration::from_secs(5),
+            backoff_multiplier: 1.0,
+        },
+        "extract_kubeconfig",
+        || {
+            let cp = cp.clone();
+            async move { run_cmd("docker", &["exec", &cp, "cat", kubeconfig_container_path]) }
+        },
+    )
+    .await?;
 
     // Find the load balancer port mapping and patch the kubeconfig for localhost access
     let lb_container = format!("{}-lb", cluster_name);
@@ -617,60 +650,66 @@ pub async fn watch_cluster_phases(
 ) -> Result<(), String> {
     use kube::Api;
     use lattice_operator::crd::LatticeCluster;
+    use std::sync::Mutex;
 
     let api: Api<LatticeCluster> = Api::all(client.clone());
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(1800));
-    let mut last_phase: Option<ClusterPhase> = None;
+    let last_phase: Mutex<Option<ClusterPhase>> = Mutex::new(None);
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(format!(
-                "Timeout waiting for cluster {} to reach Ready state. Last phase: {:?}",
-                cluster_name, last_phase
-            ));
-        }
+    wait_for_condition(
+        &format!("cluster {} to reach Ready", cluster_name),
+        Duration::from_secs(timeout_secs.unwrap_or(1800)),
+        Duration::from_secs(10),
+        || {
+            let api = api.clone();
+            let last_phase = &last_phase;
+            async move {
+                match api.get(cluster_name).await {
+                    Ok(cluster) => {
+                        let current_phase = cluster
+                            .status
+                            .as_ref()
+                            .map(|s| s.phase.clone())
+                            .unwrap_or(ClusterPhase::Pending);
 
-        match api.get(cluster_name).await {
-            Ok(cluster) => {
-                let current_phase = cluster
-                    .status
-                    .as_ref()
-                    .map(|s| s.phase.clone())
-                    .unwrap_or(ClusterPhase::Pending);
+                        {
+                            let mut lp = last_phase.lock().unwrap();
+                            if lp.as_ref() != Some(&current_phase) {
+                                info!("Cluster {} phase: {:?}", cluster_name, current_phase);
+                                *lp = Some(current_phase.clone());
+                            }
+                        }
 
-                if last_phase.as_ref() != Some(&current_phase) {
-                    info!("Cluster {} phase: {:?}", cluster_name, current_phase);
-                    last_phase = Some(current_phase.clone());
-                }
+                        if matches!(current_phase, ClusterPhase::Ready | ClusterPhase::Pivoted) {
+                            info!(
+                                "Cluster {} is operational ({:?})!",
+                                cluster_name, current_phase
+                            );
+                            return Ok(true);
+                        }
 
-                if matches!(current_phase, ClusterPhase::Ready | ClusterPhase::Pivoted) {
-                    info!(
-                        "Cluster {} is operational ({:?})!",
-                        cluster_name, current_phase
-                    );
-                    return Ok(());
-                }
+                        if matches!(current_phase, ClusterPhase::Failed) {
+                            let msg = cluster
+                                .status
+                                .as_ref()
+                                .and_then(|s| s.message.as_deref())
+                                .unwrap_or("unknown error");
+                            return Err(format!("Cluster {} failed: {}", cluster_name, msg));
+                        }
 
-                if matches!(current_phase, ClusterPhase::Failed) {
-                    let msg = cluster
-                        .status
-                        .as_ref()
-                        .and_then(|s| s.message.as_deref())
-                        .unwrap_or("unknown error");
-                    return Err(format!("Cluster {} failed: {}", cluster_name, msg));
+                        Ok(false)
+                    }
+                    Err(e) => {
+                        info!(
+                            "Warning: failed to get cluster {} status: {}",
+                            cluster_name, e
+                        );
+                        Ok(false)
+                    }
                 }
             }
-            Err(e) => {
-                info!(
-                    "Warning: failed to get cluster {} status: {}",
-                    cluster_name, e
-                );
-            }
-        }
-
-        sleep(Duration::from_secs(10)).await;
-    }
+        },
+    )
+    .await
 }
 
 /// Count ready nodes from kubectl jsonpath output (lines of "True"/"False")
@@ -688,54 +727,57 @@ pub async fn watch_worker_scaling(
     cluster_name: &str,
     expected_workers: u32,
 ) -> Result<(), String> {
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(600); // 10 minutes for workers to scale
+    use std::sync::Mutex;
 
-    let mut last_count: Option<u32> = None;
+    let last_count: Mutex<Option<u32>> = Mutex::new(None);
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(format!(
-                "Timeout waiting for {} workers on cluster {}. Last count: {:?}",
-                expected_workers, cluster_name, last_count
-            ));
-        }
+    wait_for_condition(
+        &format!("{} workers on {}", expected_workers, cluster_name),
+        Duration::from_secs(600),
+        Duration::from_secs(15),
+        || {
+            let last_count = &last_count;
+            async move {
+                let output = run_cmd(
+                    "kubectl",
+                    &[
+                        "--kubeconfig",
+                        kubeconfig_path,
+                        "get",
+                        "nodes",
+                        "-l",
+                        "!node-role.kubernetes.io/control-plane",
+                        "-o",
+                        "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
+                    ],
+                )
+                .unwrap_or_default();
+                let ready_workers = count_ready_nodes(&output);
 
-        // Count ready worker nodes using label selector to exclude control-plane
-        let output = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "get",
-                "nodes",
-                "-l",
-                "!node-role.kubernetes.io/control-plane",
-                "-o",
-                "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
-            ],
-        )
-        .unwrap_or_default();
-        let ready_workers = count_ready_nodes(&output);
+                {
+                    let mut lc = last_count.lock().unwrap();
+                    if *lc != Some(ready_workers) {
+                        info!(
+                            "  {} ready workers on {} (target: {})",
+                            ready_workers, cluster_name, expected_workers
+                        );
+                        *lc = Some(ready_workers);
+                    }
+                }
 
-        if last_count != Some(ready_workers) {
-            info!(
-                "  {} ready workers on {} (target: {})",
-                ready_workers, cluster_name, expected_workers
-            );
-            last_count = Some(ready_workers);
-        }
+                if ready_workers >= expected_workers {
+                    info!(
+                        "  SUCCESS: {} has {} ready workers!",
+                        cluster_name, ready_workers
+                    );
+                    return Ok(true);
+                }
 
-        if ready_workers >= expected_workers {
-            info!(
-                "  SUCCESS: {} has {} ready workers!",
-                cluster_name, ready_workers
-            );
-            return Ok(());
-        }
-
-        sleep(Duration::from_secs(15)).await;
-    }
+                Ok(false)
+            }
+        },
+    )
+    .await
 }
 
 // =============================================================================
@@ -885,40 +927,35 @@ pub async fn wait_for_operator_ready(
     kubeconfig: &str,
     timeout_secs: Option<u64>,
 ) -> Result<(), String> {
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
-    let start = std::time::Instant::now();
-
     info!("[{}] Waiting for operator to be ready...", cluster_name);
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(format!(
-                "Timeout waiting for operator on {} to be ready",
-                cluster_name
-            ));
-        }
-
-        if let Ok(output) = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig,
-                "rollout",
-                "status",
-                "deployment/lattice-operator",
-                "-n",
-                LATTICE_SYSTEM_NAMESPACE,
-                "--timeout=10s",
-            ],
-        ) {
-            if output.contains("successfully rolled out") {
-                info!("[{}] Operator is ready", cluster_name);
-                return Ok(());
+    wait_for_condition(
+        &format!("operator on {} to be ready", cluster_name),
+        Duration::from_secs(timeout_secs.unwrap_or(300)),
+        Duration::from_secs(5),
+        || async move {
+            if let Ok(output) = run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig,
+                    "rollout",
+                    "status",
+                    "deployment/lattice-operator",
+                    "-n",
+                    LATTICE_SYSTEM_NAMESPACE,
+                    "--timeout=10s",
+                ],
+            ) {
+                if output.contains("successfully rolled out") {
+                    info!("[{}] Operator is ready", cluster_name);
+                    return Ok(true);
+                }
             }
-        }
-
-        sleep(Duration::from_secs(5)).await;
-    }
+            Ok(false)
+        },
+    )
+    .await
 }
 
 /// Load registry credentials from .env file or environment
@@ -1142,42 +1179,52 @@ pub fn proxy_service_exists(kubeconfig: &str) -> bool {
 /// Get the LoadBalancer URL for the proxy service (for cloud providers).
 ///
 /// Waits up to 2 minutes for the LoadBalancer to get an external IP.
-/// Returns None if the service doesn't have a LoadBalancer IP.
 #[cfg(feature = "provider-e2e")]
-pub fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> {
-    for attempt in 1..=24 {
-        let result = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig,
-                "get",
-                "svc",
-                PROXY_SERVICE_NAME,
-                "-n",
-                LATTICE_SYSTEM_NAMESPACE,
-                "-o",
-                "jsonpath={.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}",
-            ],
-        );
+pub async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> {
+    use std::sync::Mutex;
 
-        if let Ok(addr) = result {
-            let addr = addr.trim();
-            if !addr.is_empty() {
-                return Ok(format!("https://{}:{}", addr, PROXY_PORT));
+    let result_url: Mutex<Option<String>> = Mutex::new(None);
+
+    wait_for_condition(
+        "LoadBalancer IP to be assigned",
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || {
+            let result_url = &result_url;
+            async move {
+                let result = run_cmd(
+                    "kubectl",
+                    &[
+                        "--kubeconfig",
+                        kubeconfig,
+                        "get",
+                        "svc",
+                        PROXY_SERVICE_NAME,
+                        "-n",
+                        LATTICE_SYSTEM_NAMESPACE,
+                        "-o",
+                        "jsonpath={.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}",
+                    ],
+                );
+
+                if let Ok(addr) = result {
+                    let addr = addr.trim().to_string();
+                    if !addr.is_empty() {
+                        let url = format!("https://{}:{}", addr, PROXY_PORT);
+                        *result_url.lock().unwrap() = Some(url);
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             }
-        }
+        },
+    )
+    .await?;
 
-        if attempt % 6 == 0 {
-            info!(
-                "[Helpers] Waiting for LoadBalancer IP... (attempt {}/24)",
-                attempt
-            );
-        }
-        std::thread::sleep(Duration::from_secs(5));
-    }
-
-    Err("LoadBalancer IP not available after 2 minutes".to_string())
+    result_url
+        .into_inner()
+        .unwrap()
+        .ok_or_else(|| "LoadBalancer IP not available".to_string())
 }
 
 /// Base port for deterministic port allocation.
@@ -1573,64 +1620,50 @@ pub async fn delete_cluster_and_wait(
 
     // Wait for the LatticeCluster to be fully deleted from parent
     info!("Waiting for LatticeCluster to be deleted from parent...");
-    for attempt in 1..=60 {
-        sleep(Duration::from_secs(10)).await;
-
-        // If the command fails (not found) or returns empty, the resource is deleted
-        let deleted = match run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                parent_kubeconfig,
-                "get",
-                "latticecluster",
-                cluster_name,
-                "-o",
-                "name",
-            ],
-        ) {
-            Ok(output) => output.trim().is_empty(),
-            Err(_) => true, // Error means not found
-        };
-
-        if deleted {
-            info!("LatticeCluster deleted from parent");
-            break;
-        }
-
-        if attempt == 60 {
-            return Err(format!(
-                "Timeout waiting for {} deletion after 10 minutes",
-                cluster_name
-            ));
-        }
-
-        info!("Still waiting... (attempt {}/60)", attempt);
-    }
+    wait_for_condition(
+        &format!("{} CR deletion from parent", cluster_name),
+        Duration::from_secs(600),
+        Duration::from_secs(10),
+        || async move {
+            let deleted = match run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    parent_kubeconfig,
+                    "get",
+                    "latticecluster",
+                    cluster_name,
+                    "-o",
+                    "name",
+                ],
+            ) {
+                Ok(output) => output.trim().is_empty(),
+                Err(_) => true,
+            };
+            if deleted {
+                info!("LatticeCluster deleted from parent");
+            }
+            Ok(deleted)
+        },
+    )
+    .await?;
 
     // For Docker, verify containers are cleaned up
     if provider == InfraProvider::Docker {
         info!("Waiting for Docker containers to be cleaned up...");
-        for attempt in 1..=30 {
-            sleep(Duration::from_secs(5)).await;
-
-            if docker_containers_deleted(cluster_name) {
-                info!("Docker containers cleaned up by CAPI");
-                break;
-            }
-
-            if attempt == 30 {
-                return Err(format!(
-                    "Timeout waiting for {} containers to be deleted",
-                    cluster_name
-                ));
-            }
-
-            info!(
-                "Still waiting for container cleanup... (attempt {}/30)",
-                attempt
-            );
-        }
+        wait_for_condition(
+            &format!("{} Docker container cleanup", cluster_name),
+            Duration::from_secs(150),
+            Duration::from_secs(5),
+            || async move {
+                let deleted = docker_containers_deleted(cluster_name);
+                if deleted {
+                    info!("Docker containers cleaned up by CAPI");
+                }
+                Ok(deleted)
+            },
+        )
+        .await?;
     }
 
     Ok(())
@@ -1748,8 +1781,8 @@ impl ProxySession {
     }
 
     /// Start a proxy session for cloud providers (fetches LoadBalancer URL).
-    pub fn start_cloud(kubeconfig: &str) -> Result<Self, String> {
-        let lb_url = get_proxy_loadbalancer_url(kubeconfig)?;
+    pub async fn start_cloud(kubeconfig: &str) -> Result<Self, String> {
+        let lb_url = get_proxy_loadbalancer_url(kubeconfig).await?;
         let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator")?;
 
         Ok(Self {
@@ -1761,13 +1794,13 @@ impl ProxySession {
     }
 
     /// Start a proxy session, choosing port-forward or LoadBalancer based on provider.
-    pub fn start_for_provider(
+    pub async fn start_for_provider(
         kubeconfig: &str,
         provider: super::providers::InfraProvider,
     ) -> Result<Self, String> {
         match provider {
             super::providers::InfraProvider::Docker => Self::start(kubeconfig),
-            _ => Self::start_cloud(kubeconfig),
+            _ => Self::start_cloud(kubeconfig).await,
         }
     }
 
@@ -1857,104 +1890,107 @@ impl ProxySession {
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        // Retry until cluster appears in subtree (agent needs to connect first)
-        let timeout = Duration::from_secs(120);
-        let start = std::time::Instant::now();
-        let mut last_available: Vec<String> = vec![];
+        use std::sync::Mutex;
 
-        loop {
-            // Check timeout first
-            if start.elapsed() > timeout {
-                return Err(format!(
-                    "Timeout waiting for cluster '{}' to appear in subtree. Available: {:?}. \
-                     The agent may not have connected yet.",
-                    cluster_name, last_available
-                ));
-            }
+        let result_path: Mutex<Option<String>> = Mutex::new(None);
+        let uses_localhost = self.uses_localhost();
+        let local_port = self.local_port();
+        let token = self.token.clone();
 
-            // Make HTTP request, retrying on network errors
-            let response = match client.get(&url).bearer_auth(&self.token).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    // Network error - retry instead of failing immediately
-                    // This handles cases where port-forward is restarting
-                    warn!(
-                        "[ProxySession] Network error fetching kubeconfig: {}, retrying...",
-                        e
-                    );
-                    sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
-            };
+        wait_for_condition(
+            &format!("cluster '{}' to appear in subtree", cluster_name),
+            Duration::from_secs(120),
+            Duration::from_secs(5),
+            || {
+                let client = &client;
+                let url = &url;
+                let token = &token;
+                let result_path = &result_path;
+                async move {
+                    let response = match client.get(url.as_str()).bearer_auth(token).send().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(
+                                "[ProxySession] Network error fetching kubeconfig: {}, retrying...",
+                                e
+                            );
+                            return Ok(false);
+                        }
+                    };
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return Err(format!(
-                    "Failed to fetch kubeconfig: HTTP {} - {}",
-                    status, body
-                ));
-            }
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        return Err(format!(
+                            "Failed to fetch kubeconfig: HTTP {} - {}",
+                            status, body
+                        ));
+                    }
 
-            let mut kubeconfig: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
+                    let mut kubeconfig: serde_json::Value = response
+                        .json()
+                        .await
+                        .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
 
-            // For Docker: replace server URLs to use localhost port-forward
-            if self.uses_localhost() {
-                if let Some(clusters) = kubeconfig["clusters"].as_array_mut() {
-                    for cluster in clusters {
-                        if let Some(server) = cluster["cluster"]["server"].as_str() {
-                            if let Some(path_start) = server.find("/clusters/") {
-                                let new_server = format!(
-                                    "https://127.0.0.1:{}{}",
-                                    self.local_port(),
-                                    &server[path_start..]
-                                );
-                                cluster["cluster"]["server"] =
-                                    serde_json::Value::String(new_server);
+                    if uses_localhost {
+                        if let Some(clusters) = kubeconfig["clusters"].as_array_mut() {
+                            for cluster in clusters {
+                                if let Some(server) = cluster["cluster"]["server"].as_str() {
+                                    if let Some(path_start) = server.find("/clusters/") {
+                                        let new_server = format!(
+                                            "https://127.0.0.1:{}{}",
+                                            local_port,
+                                            &server[path_start..]
+                                        );
+                                        cluster["cluster"]["server"] =
+                                            serde_json::Value::String(new_server);
+                                    }
+                                }
                             }
                         }
                     }
+
+                    let available_contexts: Vec<String> = kubeconfig["contexts"]
+                        .as_array()
+                        .map(|contexts| {
+                            contexts
+                                .iter()
+                                .filter_map(|ctx| ctx["name"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    if available_contexts.contains(&cluster_name.to_string()) {
+                        kubeconfig["current-context"] =
+                            serde_json::Value::String(cluster_name.to_string());
+
+                        let kubeconfig_str = serde_json::to_string_pretty(&kubeconfig)
+                            .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?;
+
+                        let path =
+                            format!("/tmp/{}-proxy-kubeconfig-{}", cluster_name, run_id());
+                        std::fs::write(&path, &kubeconfig_str)
+                            .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
+
+                        info!("[ProxySession] Kubeconfig written to {}", path);
+                        *result_path.lock().unwrap() = Some(path);
+                        return Ok(true);
+                    }
+
+                    info!(
+                        "[ProxySession] Cluster '{}' not in subtree yet (available: {:?}), retrying...",
+                        cluster_name, available_contexts
+                    );
+                    Ok(false)
                 }
-            }
+            },
+        )
+        .await?;
 
-            // Check if requested cluster is available
-            let available_contexts: Vec<String> = kubeconfig["contexts"]
-                .as_array()
-                .map(|contexts| {
-                    contexts
-                        .iter()
-                        .filter_map(|ctx| ctx["name"].as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            if available_contexts.contains(&cluster_name.to_string()) {
-                // Found the cluster - finalize and return
-                kubeconfig["current-context"] = serde_json::Value::String(cluster_name.to_string());
-
-                let kubeconfig_str = serde_json::to_string_pretty(&kubeconfig)
-                    .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?;
-
-                let path = format!("/tmp/{}-proxy-kubeconfig-{}", cluster_name, run_id());
-                std::fs::write(&path, &kubeconfig_str)
-                    .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
-
-                info!("[ProxySession] Kubeconfig written to {}", path);
-                return Ok(path);
-            }
-
-            // Cluster not yet available
-            last_available = available_contexts;
-
-            info!(
-                "[ProxySession] Cluster '{}' not in subtree yet (available: {:?}), retrying...",
-                cluster_name, last_available
-            );
-            sleep(Duration::from_secs(5)).await;
-        }
+        result_path
+            .into_inner()
+            .unwrap()
+            .ok_or_else(|| format!("No kubeconfig path for cluster '{}'", cluster_name))
     }
 }
 
@@ -2008,62 +2044,52 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
         );
         delete_namespace(kubeconfig_path, namespace);
 
-        // Wait for namespace to be fully deleted
-        let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(120);
-
-        loop {
-            if start.elapsed() > timeout {
-                return Err(format!(
-                    "Timeout waiting for namespace {} to be deleted",
-                    namespace
-                ));
-            }
-
-            // If the command fails or returns empty, the namespace is deleted
-            let deleted = match run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "get",
-                    "namespace",
-                    namespace,
-                    "-o",
-                    "name",
-                ],
-            ) {
-                Ok(output) => output.trim().is_empty(),
-                Err(_) => true, // Error means not found
-            };
-
-            if deleted {
-                info!("[Namespace] Namespace {} fully deleted", namespace);
-                break;
-            }
-
-            // Check phase for logging
-            let phase = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "get",
-                    "namespace",
-                    namespace,
-                    "-o",
-                    "jsonpath={.status.phase}",
-                ],
-            )
-            .unwrap_or_default();
-            info!(
-                "[Namespace] Waiting for namespace {} deletion (phase: {})...",
-                namespace,
-                phase.trim()
-            );
-
-            sleep(Duration::from_secs(5)).await;
-        }
+        wait_for_condition(
+            &format!("namespace {} deletion", namespace),
+            Duration::from_secs(120),
+            Duration::from_secs(5),
+            || async move {
+                let deleted = match run_cmd(
+                    "kubectl",
+                    &[
+                        "--kubeconfig",
+                        kubeconfig_path,
+                        "get",
+                        "namespace",
+                        namespace,
+                        "-o",
+                        "name",
+                    ],
+                ) {
+                    Ok(output) => output.trim().is_empty(),
+                    Err(_) => true,
+                };
+                if deleted {
+                    info!("[Namespace] Namespace {} fully deleted", namespace);
+                } else {
+                    let phase = run_cmd(
+                        "kubectl",
+                        &[
+                            "--kubeconfig",
+                            kubeconfig_path,
+                            "get",
+                            "namespace",
+                            namespace,
+                            "-o",
+                            "jsonpath={.status.phase}",
+                        ],
+                    )
+                    .unwrap_or_default();
+                    info!(
+                        "[Namespace] Waiting for namespace {} deletion (phase: {})...",
+                        namespace,
+                        phase.trim()
+                    );
+                }
+                Ok(deleted)
+            },
+        )
+        .await?;
     }
 
     // Create fresh namespace with retry for transient connection failures

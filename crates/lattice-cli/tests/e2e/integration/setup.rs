@@ -385,7 +385,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     wait_for_operator_ready(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, Some(120)).await?;
     cedar::apply_e2e_default_policy(&mgmt_kubeconfig_path).await?;
 
-    let mgmt_proxy = ProxySession::start_for_provider(&mgmt_kubeconfig_path, mgmt_provider)?;
+    let mgmt_proxy = ProxySession::start_for_provider(&mgmt_kubeconfig_path, mgmt_provider).await?;
     let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME).await?;
 
     info!(
@@ -643,7 +643,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     wait_for_operator_ready(MGMT_CLUSTER_NAME, &result.ctx.mgmt_kubeconfig, Some(120)).await?;
     cedar::apply_e2e_default_policy(&result.ctx.mgmt_kubeconfig).await?;
     let mgmt_proxy =
-        ProxySession::start_for_provider(&result.ctx.mgmt_kubeconfig, result.ctx.provider)?;
+        ProxySession::start_for_provider(&result.ctx.mgmt_kubeconfig, result.ctx.provider).await?;
     let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME).await?;
 
     // Update context with proxy kubeconfig

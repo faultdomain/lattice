@@ -48,6 +48,9 @@ mod helpers;
 #[cfg(feature = "provider-e2e")]
 pub mod integration;
 mod media_server_e2e;
+mod mesh_fixtures;
+mod mesh_helpers;
+mod mesh_random;
 mod mesh_tests;
 mod providers;
 

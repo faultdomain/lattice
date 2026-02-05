@@ -232,6 +232,7 @@ async fn run_endurance_test() -> Result<(), String> {
             for name in &cluster_names {
                 let cluster_kc_path = kubeconfig_path(name);
                 if extract_docker_cluster_kubeconfig(name, &workload_bootstrap, &cluster_kc_path)
+                    .await
                     .is_ok()
                 {
                     chaos_targets.add(name, &cluster_kc_path, Some(&mgmt_kubeconfig_path));

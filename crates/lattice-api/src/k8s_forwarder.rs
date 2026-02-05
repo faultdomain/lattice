@@ -1004,7 +1004,8 @@ mod tests {
 
     #[test]
     fn test_tunnel_error_to_api_error_unknown_cluster() {
-        let err = tunnel_error_to_api_error(TunnelError::UnknownCluster("test-cluster".to_string()));
+        let err =
+            tunnel_error_to_api_error(TunnelError::UnknownCluster("test-cluster".to_string()));
         assert!(matches!(err, Error::ClusterNotFound(_)));
     }
 }
