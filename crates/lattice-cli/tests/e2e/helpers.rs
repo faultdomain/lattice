@@ -83,27 +83,28 @@ pub const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
 #[cfg(feature = "provider-e2e")]
 pub const WORKLOAD2_CLUSTER_NAME: &str = "e2e-workload2";
 
-/// Get management cluster name from env or use default
+/// Get a cluster name from an env var, falling back to a default.
+#[cfg(feature = "provider-e2e")]
+fn cluster_name_from_env(env_var: &str, default: &str) -> String {
+    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
+}
+
 #[cfg(feature = "provider-e2e")]
 pub fn get_mgmt_cluster_name() -> String {
-    std::env::var("LATTICE_MGMT_CLUSTER_NAME").unwrap_or_else(|_| MGMT_CLUSTER_NAME.to_string())
+    cluster_name_from_env("LATTICE_MGMT_CLUSTER_NAME", MGMT_CLUSTER_NAME)
 }
 
-/// Get workload cluster name from env or use default
 #[cfg(feature = "provider-e2e")]
 pub fn get_workload_cluster_name() -> String {
-    std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
-        .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string())
+    cluster_name_from_env("LATTICE_WORKLOAD_CLUSTER_NAME", WORKLOAD_CLUSTER_NAME)
 }
 
-/// Get workload2 cluster name from env or use default
 #[cfg(feature = "provider-e2e")]
 pub fn get_workload2_cluster_name() -> String {
-    std::env::var("LATTICE_WORKLOAD2_CLUSTER_NAME")
-        .unwrap_or_else(|_| WORKLOAD2_CLUSTER_NAME.to_string())
+    cluster_name_from_env("LATTICE_WORKLOAD2_CLUSTER_NAME", WORKLOAD2_CLUSTER_NAME)
 }
 
-/// Get child cluster name from env or use default (alias for workload)
+/// Get child cluster name (checks LATTICE_CHILD_CLUSTER_NAME, then falls back to workload name)
 #[cfg(feature = "provider-e2e")]
 pub fn get_child_cluster_name() -> String {
     std::env::var("LATTICE_CHILD_CLUSTER_NAME")
