@@ -31,7 +31,7 @@ const MACHINE_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(600);
 const CAPI_CRD_TIMEOUT: Duration = Duration::from_secs(300);
 const OPERATOR_READY_TIMEOUT: Duration = Duration::from_secs(300);
 const CAPI_CONTROLLERS_TIMEOUT: Duration = Duration::from_secs(300);
-const LATTICE_OPERATOR_TIMEOUT: Duration = Duration::from_secs(120);
+const LATTICE_OPERATOR_TIMEOUT: Duration = Duration::from_secs(300);
 const CRD_APPLY_TIMEOUT: Duration = Duration::from_secs(120);
 
 // Polling intervals

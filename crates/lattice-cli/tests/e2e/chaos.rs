@@ -321,23 +321,87 @@ impl CoordinatedAttack {
 }
 
 // =============================================================================
-// Network Policy
+// Network Blackout Job
 // =============================================================================
 
-const NETWORK_BLACKOUT_POLICY: &str = r#"apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
+/// Generate a Job manifest that applies a network blackout policy, waits, then deletes it.
+///
+/// The Job runs inside the cluster with direct API access, so cleanup succeeds even
+/// when the blackout breaks external connectivity (e.g. proxy tunnels). The blackout
+/// policy only targets `app: lattice-operator` pods, so the Job pod is unaffected.
+fn network_blackout_job_manifest(blackout_secs: u64) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: chaos-blackout
+  namespace: lattice-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chaos-blackout
+rules:
+- apiGroups: ["cilium.io"]
+  resources: ["ciliumnetworkpolicies"]
+  verbs: ["create", "delete", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: chaos-blackout
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: chaos-blackout
+subjects:
+- kind: ServiceAccount
+  name: chaos-blackout
+  namespace: lattice-system
+---
+apiVersion: batch/v1
+kind: Job
 metadata:
   name: chaos-blackout
   namespace: lattice-system
 spec:
-  endpointSelector:
-    matchLabels:
-      app: lattice-operator
-  ingressDeny:
-    - fromEntities: [all]
-  egressDeny:
-    - toEntities: [all]
-"#;
+  ttlSecondsAfterFinished: 30
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: chaos-blackout
+      restartPolicy: Never
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: blackout
+        image: bitnami/kubectl:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          cat <<'POLICY' | kubectl apply -f -
+          apiVersion: cilium.io/v2
+          kind: CiliumNetworkPolicy
+          metadata:
+            name: chaos-blackout
+            namespace: lattice-system
+          spec:
+            endpointSelector:
+              matchLabels:
+                app: lattice-operator
+            ingressDeny:
+            - fromEntities: [all]
+            egressDeny:
+            - toEntities: [all]
+          POLICY
+          echo "Blackout applied, sleeping {secs}s..."
+          sleep {secs}
+          kubectl delete ciliumnetworkpolicy chaos-blackout -n lattice-system --ignore-not-found
+          echo "Blackout removed"
+"#,
+        secs = blackout_secs,
+    )
+}
 
 // =============================================================================
 // Chaos Monkey
@@ -544,98 +608,57 @@ fn kill_pod(cluster: &str, kubeconfig: &str) {
 async fn cut_network(
     cluster: &str,
     kubeconfig: &str,
-    cancel: &CancellationToken,
+    _cancel: &CancellationToken,
     blackout_secs: u64,
 ) {
-    let policy_file = format!("/tmp/chaos-{}.yaml", cluster);
+    let job_file = format!("/tmp/chaos-job-{}.yaml", cluster);
+    let manifest = network_blackout_job_manifest(blackout_secs);
 
-    if std::fs::write(&policy_file, NETWORK_BLACKOUT_POLICY).is_err() {
+    if std::fs::write(&job_file, &manifest).is_err() {
         return;
     }
 
-    let (policy_applied, status) = match run_cmd(
+    // Delete any previous job first (in case ttl hasn't cleaned it up yet)
+    let _ = run_cmd(
         "kubectl",
-        &["--kubeconfig", kubeconfig, "apply", "-f", &policy_file],
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            "job",
+            "chaos-blackout",
+            "-n",
+            LATTICE_SYSTEM_NAMESPACE,
+            "--ignore-not-found",
+        ],
+    );
+
+    // Deploy the self-cleaning blackout job
+    match run_cmd(
+        "kubectl",
+        &["--kubeconfig", kubeconfig, "apply", "-f", &job_file],
     ) {
-        Ok(output) if output.contains("created") => (true, "blackout policy created"),
-        Ok(output) if output.contains("unchanged") => {
-            (true, "blackout applied (clearing stale policy)")
+        Ok(_) => {
+            info!(
+                "[Chaos] Network cut on {}: blackout job deployed for {}s",
+                cluster, blackout_secs
+            );
         }
-        Ok(output) if output.contains("configured") => (true, "blackout policy configured"),
-        Ok(_) => (true, "blackout policy applied"),
         Err(e) if is_unreachable(&e) => {
-            let _ = std::fs::remove_file(&policy_file);
             info!(
                 "[Chaos] Network cut on {} failed: cluster unreachable",
                 cluster
             );
-            return;
         }
         Err(_) => {
-            let _ = std::fs::remove_file(&policy_file);
             info!(
-                "[Chaos] Network cut on {} failed: policy apply failed",
+                "[Chaos] Network cut on {} failed: job deploy failed",
                 cluster
             );
-            return;
-        }
-    };
-
-    if !policy_applied {
-        let _ = std::fs::remove_file(&policy_file);
-        return;
-    }
-
-    info!(
-        "[Chaos] Network cut on {}: {} for {}s",
-        cluster, status, blackout_secs
-    );
-
-    tokio::select! {
-        _ = cancel.cancelled() => {}
-        _ = tokio::time::sleep(Duration::from_secs(blackout_secs)) => {}
-    }
-
-    // Restore network with retries
-    for attempt in 1..=5 {
-        match run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig,
-                "delete",
-                "-f",
-                &policy_file,
-                "--ignore-not-found",
-            ],
-        ) {
-            Ok(_) => break,
-            Err(e) if is_unreachable(&e) && attempt < 5 => {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-            Err(e) if is_unreachable(&e) => {
-                info!(
-                    "[Chaos] Network restore on {} failed: cluster unreachable",
-                    cluster
-                );
-                break;
-            }
-            Err(_) => {
-                info!(
-                    "[Chaos] Network restore on {} failed: delete failed",
-                    cluster
-                );
-                break;
-            }
         }
     }
 
-    let _ = std::fs::remove_file(&policy_file);
-    info!(
-        "[Chaos] Network restore on {}: blackout policy removed",
-        cluster
-    );
+    let _ = std::fs::remove_file(&job_file);
 }
 
 fn is_unreachable(output: &str) -> bool {
