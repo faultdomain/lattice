@@ -14,6 +14,7 @@
   <a href="#service-networking">Service Mesh</a> &bull;
   <a href="#cedar-policies">Cedar Policies</a> &bull;
   <a href="#secrets">Secrets</a> &bull;
+  <a href="#k8s-api-proxy">Proxy</a> &bull;
   <a href="#how-it-works">Architecture</a> &bull;
   <a href="#development">Development</a>
 </p>
@@ -973,6 +974,130 @@ ingress:
 ```
 
 Lattice generates a `Gateway`, `HTTPRoute`, and optionally a cert-manager `Certificate`. Set `tls.mode: manual` and provide a `secretName` if you manage certificates yourself.
+
+---
+
+## K8s API Proxy
+
+Lattice provides a built-in Kubernetes API proxy that lets you access any cluster in your hierarchy from a single entry point. No VPN, no firewall rules, no inbound ports on workload clusters — requests travel through the existing outbound gRPC streams.
+
+### How It Works
+
+```
+                    ┌──────────────────────────────────────────────────────┐
+                    │                  Parent Cluster                      │
+ kubectl ──────────▶│  Auth Proxy (:8082)                                 │
+ GET /clusters/     │  1. Validate bearer token (OIDC or ServiceAccount)  │
+   prod/api/v1/pods │  2. Cedar policy check: can user access "prod"?     │
+                    │  3. Route request through gRPC tunnel to agent      │
+                    └──────────────────────────┬───────────────────────────┘
+                                               │ gRPC (outbound from child)
+                                               │
+                    ┌──────────────────────────┴───────────────────────────┐
+                    │                  Child Cluster ("prod")              │
+                    │  Agent receives KubernetesRequest                    │
+                    │  Executes against local K8s API                      │
+                    │  Returns response through tunnel                     │
+                    └──────────────────────────────────────────────────────┘
+```
+
+All requests use **path-based routing**: `/clusters/{name}/api/...`. The proxy strips the cluster prefix and forwards the raw K8s API path to the target cluster. The response flows back through the same tunnel.
+
+### Getting a Kubeconfig
+
+The `lattice kubeconfig` command discovers all accessible clusters and generates a multi-context kubeconfig that routes through the proxy:
+
+```bash
+# Generate a kubeconfig with all clusters you can access
+lattice kubeconfig --kubeconfig ~/.kube/mgmt.yaml -o ~/.kube/fleet.yaml
+
+# Use it with kubectl — context per cluster
+export KUBECONFIG=~/.kube/fleet.yaml
+kubectl get pods --context prod
+kubectl get nodes --context staging
+kubectl logs -f deploy/api --context edge
+```
+
+Every cluster entry in the generated kubeconfig points to the same proxy endpoint with a different path:
+
+```yaml
+clusters:
+- name: prod
+  cluster:
+    server: https://lattice.example.com/clusters/prod
+    certificate-authority-data: <proxy-ca>
+- name: staging
+  cluster:
+    server: https://lattice.example.com/clusters/staging
+    certificate-authority-data: <proxy-ca>
+```
+
+Tokens auto-refresh via the `lattice token` exec credential plugin — no manual rotation needed. See [`lattice kubeconfig`](#lattice-kubeconfig--fetch-multi-cluster-kubeconfig) and [`lattice token`](#lattice-token--serviceaccount-token-exec-credential-plugin) in the CLI reference.
+
+### Authentication and Authorization
+
+Every proxy request goes through two layers:
+
+1. **Token validation** — The bearer token is validated via OIDC (for human users) or Kubernetes TokenReview (for ServiceAccounts). This produces a `UserIdentity` with a username and groups.
+
+2. **Cedar policy evaluation** — The Cedar engine checks whether the authenticated identity is allowed to access the target cluster. Cluster labels are available as attributes for policy matching. See [Cedar Policies](#cedar-policies) for examples.
+
+If either layer rejects the request, the proxy returns `401 Unauthorized` or `403 Forbidden` before the request reaches any cluster.
+
+### User Impersonation
+
+The proxy authenticates to each child's K8s API using its own ServiceAccount, then adds [impersonation headers](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#user-impersonation) so the request appears as the original user:
+
+```
+Impersonate-User: alice@example.com
+Impersonate-Group: platform-team
+Impersonate-Group: system:authenticated
+```
+
+This means standard Kubernetes RBAC applies on the target cluster — the proxy does not bypass any K8s permissions. Audit logs show the real user, not the proxy ServiceAccount. User-supplied impersonation headers are stripped to prevent privilege escalation.
+
+### Multi-Hop Routing
+
+The proxy supports hierarchical routing through intermediate clusters. If a cluster is a grandchild (or deeper), the request hops through each intermediate agent automatically:
+
+```
+                mgmt                    workload                 workload2
+            ┌───────────┐          ┌───────────────┐          ┌───────────┐
+ kubectl ──▶│ Auth Proxy │──gRPC──▶│ Agent/Forward │──gRPC──▶│  Agent    │
+ /clusters/ │ Cedar auth │         │ target ≠ self  │         │ target =  │
+ workload2/ │ route via  │         │ forward to     │         │ self →    │
+ api/v1/... │ workload   │         │ workload2      │         │ execute   │
+            └───────────┘          └───────────────┘          └───────────┘
+```
+
+1. **mgmt proxy** authenticates the request, checks Cedar, and routes to workload's agent (the next hop toward workload2)
+2. **workload agent** sees `target_cluster = "workload2"` which is not itself — forwards through its own gRPC tunnel to workload2's agent
+3. **workload2 agent** sees `target_cluster = "workload2"` which matches — executes against local K8s API and returns the response
+
+The original user identity (`source_user`, `source_groups`) is preserved through every hop for Cedar evaluation and K8s impersonation at the final destination.
+
+Each cluster maintains a **subtree registry** that tracks all clusters reachable through its children. When a child connects, it advertises its full subtree. This state bubbles up through the hierarchy so every parent knows how to route to any descendant.
+
+### Watch Streaming
+
+The proxy supports Kubernetes watch requests (`?watch=true`). Watch events stream back through the gRPC tunnel as individual messages, each containing one or more newline-delimited JSON events:
+
+```bash
+# Watch pods on a child cluster — works exactly like direct kubectl
+kubectl get pods --context prod --watch
+```
+
+Watches are multiplexed over the existing gRPC stream alongside regular requests. Each watch gets a unique request ID for cancellation when the client disconnects.
+
+### Pre-Pivot CAPI Proxy
+
+During cluster provisioning (before pivot), the parent needs to read the child's K8s API for CAPI reconciliation. A separate read-only proxy on port `8081` handles this:
+
+- Only allows `GET`, `HEAD`, and `OPTIONS` methods
+- Automatically patches the child's kubeconfig to route through the proxy
+- Returns `410 Gone` after pivot completes (child is now self-managing)
+
+This is internal to the operator — users interact with the auth proxy on port `8082`.
 
 ---
 

@@ -212,13 +212,16 @@ fn parse_forwarded_port(child: &mut Child) -> Result<u16> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        let mut sent = false;
         for line in reader.lines().map_while(std::result::Result::ok) {
-            if line.contains("Forwarding from") {
+            if !sent && line.contains("Forwarding from") {
                 let _ = tx.send(line);
-                return;
+                sent = true;
             }
         }
-        // Pipe closed without finding the line
+        // Keep reading (draining) stdout until kubectl exits. Returning early
+        // would drop the pipe and SIGPIPE kubectl when it writes its second
+        // "Forwarding from [::1]:..." line.
     });
 
     let line = rx.recv_timeout(PORT_PARSE_TIMEOUT).map_err(|_| {
