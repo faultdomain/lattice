@@ -186,6 +186,8 @@ pub struct ClusterRegistration {
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)
     pub autoscaling_enabled: bool,
+    /// Whether LatticeService support is enabled (Istio + mesh policies)
+    pub services_enabled: bool,
 }
 
 /// Bootstrap manifest generator
@@ -340,6 +342,8 @@ pub struct BootstrapBundleConfig<'a> {
     pub relax_fips: bool,
     /// Whether cluster has autoscaling-enabled pools
     pub autoscaling_enabled: bool,
+    /// Whether LatticeService support is enabled (Istio + mesh policies)
+    pub services_enabled: bool,
     /// The LatticeCluster manifest (JSON or YAML) to include
     pub cluster_manifest: &'a str,
 }
@@ -382,6 +386,7 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
         bootstrap: config.bootstrap.clone(),
         cluster_name: config.cluster_name.to_string(),
         skip_cilium_policies: false,
+        skip_service_mesh: !config.services_enabled,
         parent_host: config.parent_host.map(|s| s.to_string()),
         parent_grpc_port: config.parent_grpc_port,
     };
@@ -784,6 +789,8 @@ pub struct ClusterBootstrapInfo {
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)
     pub autoscaling_enabled: bool,
+    /// Whether LatticeService support is enabled (Istio + mesh policies)
+    pub services_enabled: bool,
 }
 
 /// Bootstrap endpoint state
@@ -909,6 +916,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             bootstrap: registration.bootstrap,
             k8s_version: registration.k8s_version,
             autoscaling_enabled: registration.autoscaling_enabled,
+            services_enabled: registration.services_enabled,
         };
 
         self.clusters.insert(cluster_id, info);
@@ -1034,6 +1042,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
             autoscaling_enabled: info.autoscaling_enabled,
+            services_enabled: info.services_enabled,
             cluster_manifest: &info.cluster_manifest,
         };
         let mut manifests =
@@ -1386,6 +1395,7 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::default(),
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
+                services_enabled: true,
             })
             .await
     }
@@ -2520,6 +2530,7 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
+                services_enabled: true,
             },
         );
 
@@ -2576,6 +2587,7 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Rke2,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
+                services_enabled: true,
             },
         );
 
@@ -2645,6 +2657,7 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
+                services_enabled: true,
             },
         );
 
@@ -2708,6 +2721,7 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
+                services_enabled: true,
             },
         );
 

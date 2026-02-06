@@ -35,6 +35,8 @@ pub struct InfrastructureConfig {
     pub cluster_name: String,
     /// Skip Cilium policies (true for kind/bootstrap clusters without Cilium)
     pub skip_cilium_policies: bool,
+    /// Skip Istio, Gateway API CRDs, and mesh-related Cilium policies
+    pub skip_service_mesh: bool,
     /// Parent cell hostname (None for root/management clusters)
     pub parent_host: Option<String>,
     /// Parent cell gRPC port (used with parent_host)
@@ -54,6 +56,7 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             cluster_name: cluster.name_any(),
             skip_cilium_policies: false,
+            skip_service_mesh: !cluster.spec.services_enabled,
             parent_host: None,
             parent_grpc_port: DEFAULT_GRPC_PORT,
         }
@@ -68,13 +71,15 @@ impl From<&LatticeCluster> for InfrastructureConfig {
 pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     let mut manifests = Vec::new();
 
-    // Istio ambient + Cilium policies
-    manifests.extend(generate_istio(config).await?);
+    if !config.skip_service_mesh {
+        // Istio ambient + Cilium policies
+        manifests.extend(generate_istio(config).await?);
 
-    // Gateway API CRDs (required for Istio Gateway and waypoints)
-    let gw_api = generate_gateway_api_crds()?;
-    debug!(count = gw_api.len(), "generated Gateway API CRDs");
-    manifests.extend(gw_api);
+        // Gateway API CRDs (required for Istio Gateway and waypoints)
+        let gw_api = generate_gateway_api_crds()?;
+        debug!(count = gw_api.len(), "generated Gateway API CRDs");
+        manifests.extend(gw_api);
+    }
 
     // External Secrets Operator (for Vault integration)
     manifests.extend(eso::generate_eso().await?.iter().cloned());

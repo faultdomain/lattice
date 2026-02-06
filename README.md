@@ -409,37 +409,308 @@ spec:
 
 ---
 
-## Service Networking
+## LatticeService — Define, Connect, and Protect
 
-Services declare their dependencies. Lattice compiles them into enforced network policy at two layers simultaneously.
+A `LatticeService` is a single CRD that replaces a pile of Kubernetes manifests. Define your containers, declare your dependencies, and Lattice compiles it into a Deployment, Service, NetworkPolicies, PVCs, ExternalSecrets, and Gateway API routes — all wired together and locked down by default.
+
+The spec is **[Score](https://score.dev)-compatible**: same `containers`, `resources`, and `${...}` template syntax. Lattice extends it with bilateral mesh agreements, L7 traffic policies, and ESO-backed secrets.
+
+### Full Example
 
 ```yaml
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
 metadata:
   name: api-gateway
+  namespace: platform
 spec:
   containers:
     main:
-      image: myorg/api:v1.2.3
+      image: myorg/api:v2.1.0
+      variables:
+        # Dependency URLs injected automatically via ${resources.*}
+        AUTH_URL: ${resources.auth-service.url}       # → http://auth-service.platform.svc.cluster.local:8080
+        AUTH_HOST: ${resources.auth-service.host}      # → auth-service.platform.svc.cluster.local
+        CACHE_HOST: ${resources.redis.host}            # → redis.platform.svc.cluster.local
+        CACHE_PORT: ${resources.redis.port}            # → 6379
+        STRIPE_URL: ${resources.stripe-api.url}        # → https://api.stripe.com:443
+        DB_USER: ${resources.db-creds.username}        # → from Vault via ESO
+        DB_PASS: ${resources.db-creds.password}        # → from Vault via ESO
+      files:
+        /etc/api/config.yaml:
+          content: |
+            upstream: ${resources.auth-service.url}    # Templates work in files too
+            timeout: 30s
+      volumes:
+        /data/cache:
+          source: ${resources.local-cache}
+        /data/shared:
+          source: ${resources.shared-assets}
+          path: api                                    # Sub-path within the volume
+          readOnly: true
+      resources:
+        requests:
+          cpu: 200m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+
   service:
     ports:
       http:
         port: 8080
+      metrics:
+        port: 9090
+
   resources:
+    # ── Service Dependencies (bilateral mesh) ──────────────────────
     auth-service:
       type: service
-      direction: outbound        # "I call auth-service"
+      direction: outbound                              # "I call auth-service"
+      outbound:
+        retries:
+          attempts: 3
+          perTryTimeout: 5s
+          retryOn: ["5xx", "connect-failure"]
+        timeout:
+          request: 30s
+
+    redis:
+      type: service
+      direction: outbound
+
     web-frontend:
       type: service
-      direction: inbound         # "web-frontend can call me"
+      direction: inbound                               # "web-frontend can call me"
+      inbound:
+        rateLimit:
+          requestsPerInterval: 1000
+          intervalSeconds: 60
+
+    # ── External Services (controlled egress) ──────────────────────
+    stripe-api:
+      type: external-service
+      direction: outbound
+
+    # ── Volumes (owned and shared) ─────────────────────────────────
+    local-cache:
+      type: volume
+      params:
+        size: 10Gi                                     # Has size → this service owns the PVC
+        storageClass: fast-ssd
+        accessMode: ReadWriteOnce
+
+    shared-assets:
+      type: volume
+      id: shared-assets                                # No size → references an existing shared PVC
+      params:
+        accessMode: ReadWriteMany
+
+    # ── Secrets (ESO + Vault) ──────────────────────────────────────
+    db-creds:
+      type: secret
+      id: database/prod/api-gateway                    # Vault path
+      params:
+        provider: vault-prod                           # ClusterSecretStore name
+        keys: [username, password]
+        refreshInterval: 1h
+
+  ingress:
+    hosts: ["api.example.com"]
+    tls:
+      mode: auto
+      issuerRef:
+        name: letsencrypt-prod
+
+  replicas:
+    min: 2
+    max: 10
+
+  deploy:
+    strategy: rolling
 ```
 
-Both sides must agree. If `auth-service` doesn't declare `api-gateway` as an allowed caller, the connection is denied at **L4 (Cilium eBPF)** and **L7 (Istio mTLS)**.
+### What Lattice Generates From This
+
+One `LatticeService` compiles into all of the following — you never write them by hand:
+
+| Generated Resource | Purpose |
+|---|---|
+| `Deployment` | Containers, probes, volumes, env vars with all `${...}` templates resolved |
+| `Service` | ClusterIP with your declared ports |
+| `HorizontalPodAutoscaler` | Scales between `replicas.min` and `replicas.max` |
+| `PersistentVolumeClaim` | One per owned volume (has `size`). Shared volumes reference existing PVCs |
+| `ExternalSecret` | ESO resource that syncs secrets from Vault into a K8s Secret |
+| `CiliumNetworkPolicy` | L4 eBPF rules — only declared dependencies can connect |
+| `AuthorizationPolicy` | Istio L7 mTLS identity rules — same bilateral enforcement |
+| `Gateway` + `HTTPRoute` | Gateway API ingress with auto-TLS via cert-manager |
+| `ServiceAccount` | Pod identity for Istio mTLS and RBAC |
+
+---
+
+### Dependency URL Injection
+
+Every service dependency is automatically resolved and injected into your containers through Score-compatible `${...}` templates. No hardcoded URLs, no ConfigMaps to maintain.
+
+```yaml
+variables:
+  # ${resources.<name>.host} → Kubernetes FQDN
+  DB_HOST: ${resources.postgres.host}       # → postgres.db.svc.cluster.local
+
+  # ${resources.<name>.port} → Service port
+  DB_PORT: ${resources.postgres.port}       # → 5432
+
+  # ${resources.<name>.url}  → Full URL
+  API_URL: ${resources.auth-service.url}    # → http://auth-service.platform.svc.cluster.local:8080
+```
+
+Templates work everywhere — `variables`, `files.*.content`, and `volumes.*.source`. Escape with `$${...}` to produce a literal `${...}` in the output.
+
+| Resource Type | Available Outputs |
+|---|---|
+| `service` | `host`, `port`, `url` |
+| `external-service` | `host`, `port`, `url` |
+| `volume` | `claim_name` |
+| `secret` | Each key from `params.keys` (e.g., `${resources.db-creds.username}`) |
+
+---
+
+### Bilateral Service Mesh
+
+Traffic only flows when **both sides agree**. This is the core security model.
+
+```
+ api-gateway                        auth-service
+ ┌─────────────────┐                ┌─────────────────┐
+ │ resources:       │                │ resources:       │
+ │   auth-service:  │───────────────▶│   api-gateway:   │
+ │     direction:   │   ALLOWED      │     direction:   │
+ │       outbound   │                │       inbound    │
+ └─────────────────┘                └─────────────────┘
+
+ api-gateway                        payment-service
+ ┌─────────────────┐                ┌─────────────────┐
+ │ resources:       │                │ (no declaration  │
+ │   payment-svc:   │───────X───────▶│  for api-gateway)│
+ │     direction:   │   DENIED       │                  │
+ │       outbound   │                │                  │
+ └─────────────────┘                └─────────────────┘
+```
+
+One-sided declarations are not enough. Both the caller and callee must declare the relationship. This compiles down to two enforcement layers simultaneously:
+
+- **Cilium CiliumNetworkPolicy** — L4 eBPF packet filtering at the kernel level
+- **Istio AuthorizationPolicy** — L7 mTLS identity-based verification
+
+Remove either service's declaration and traffic stops immediately. No stale allow rules.
+
+#### L7 Traffic Policies
+
+Outbound dependencies support retries and timeouts. Inbound dependencies support rate limiting.
+
+```yaml
+resources:
+  auth-service:
+    type: service
+    direction: outbound
+    outbound:
+      retries:
+        attempts: 3
+        perTryTimeout: 5s
+        retryOn: ["5xx", "connect-failure"]
+      timeout:
+        request: 30s
+
+  web-frontend:
+    type: service
+    direction: inbound
+    inbound:
+      rateLimit:
+        requestsPerInterval: 500
+        intervalSeconds: 60
+```
+
+---
+
+### Shared Storage
+
+Volumes use Score-compatible resource declarations. Ownership is determined by whether you specify a `size`:
+
+```yaml
+resources:
+  # ── Owned volume: this service creates and owns the PVC ──
+  config:
+    type: volume
+    params:
+      size: 5Gi
+      storageClass: local-path
+      accessMode: ReadWriteOnce
+
+  # ── Shared volume: references an existing PVC by id ───────
+  media-library:
+    type: volume
+    id: media-library              # Multiple services can reference the same id
+    params:
+      accessMode: ReadWriteMany    # RWX for multi-service access
+```
+
+Mount them in containers with `${resources.<name>}`:
+
+```yaml
+containers:
+  main:
+    volumes:
+      /data/config:
+        source: ${resources.config}
+      /data/media:
+        source: ${resources.media-library}
+        path: videos                # Optional sub-path within the volume
+        readOnly: true
+```
+
+Any service that declares a volume with the same `id` shares the same underlying PVC. The service that specifies `size` owns it; all others get a reference.
+
+---
+
+### Secrets via External Secrets Operator
+
+Lattice integrates with [ESO](https://external-secrets.io) to sync secrets from external stores (Vault, AWS Secrets Manager, etc.) into your pods. Declare a `secret` resource and reference its keys in templates — Lattice generates the `ExternalSecret` and wires everything up.
+
+```yaml
+resources:
+  db-creds:
+    type: secret
+    id: database/prod/credentials       # Path in your secret store (e.g., Vault path)
+    params:
+      provider: vault-prod              # References a ClusterSecretStore
+      keys: [username, password]        # Specific keys to sync
+      refreshInterval: 1h              # How often ESO re-syncs
+
+containers:
+  main:
+    variables:
+      DB_USER: ${resources.db-creds.username}
+      DB_PASS: ${resources.db-creds.password}
+    files:
+      /etc/db/connection.conf:
+        content: |
+          host=${resources.postgres.host}
+          user=${resources.db-creds.username}
+          password=${resources.db-creds.password}
+```
+
+Lattice generates an `ExternalSecret` that points at your `ClusterSecretStore`, syncs the specified keys into a Kubernetes `Secret`, and injects them into your container via the template system. Secrets auto-rotate on the `refreshInterval` cadence — no manual rotation, no restart required.
+
+---
 
 ### External Services
 
-Control egress to third-party APIs with the same bilateral model:
+Control egress to third-party APIs. External services get the same bilateral enforcement — only services listed in `allowed_requesters` can reach the endpoint.
 
 ```yaml
 apiVersion: lattice.dev/v1alpha1
@@ -450,8 +721,38 @@ spec:
   endpoints:
     api: "https://api.stripe.com:443"
   allowed_requesters:
-    - payment-service
+    - payment-service                   # Only payment-service can reach Stripe
+  resolution: dns                       # dns (default) or static
+  description: "Stripe payment processing API"
 ```
+
+Endpoints support multiple protocols: `https://`, `http://`, `tcp://`, `grpc://`, and bare `host:port` format. The resolved `host`, `port`, and `url` are available as `${resources.stripe-api.*}` in any service that declares the dependency.
+
+---
+
+### Ingress
+
+Expose services externally via Gateway API with optional auto-TLS:
+
+```yaml
+ingress:
+  hosts: ["api.example.com", "api.internal.example.com"]
+  paths:
+    - path: /v2
+      pathType: PathPrefix
+  tls:
+    mode: auto                          # cert-manager handles certificates
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+  rateLimit:
+    requestsPerInterval: 100
+    intervalSeconds: 60
+    burst: 150
+  gatewayClass: eg                      # Envoy Gateway (default)
+```
+
+Lattice generates a `Gateway`, `HTTPRoute`, and optionally a cert-manager `Certificate`. Set `tls.mode: manual` and provide a `secretName` if you manage certificates yourself.
 
 ---
 

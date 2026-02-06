@@ -55,13 +55,14 @@ pub struct LatticeClusterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_config: Option<EndpointsSpec>,
 
-    /// Environment identifier (e.g., prod, staging, dev)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<String>,
+    /// Enable LatticeService support (Istio ambient mesh + bilateral agreements).
+    /// Defaults to true for backwards compatibility.
+    #[serde(default = "default_true")]
+    pub services_enabled: bool,
+}
 
-    /// Region identifier
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
+fn default_true() -> bool {
+    true
 }
 
 impl LatticeClusterSpec {
@@ -307,8 +308,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: Some(endpoints_spec()),
-            environment: None,
-            region: None,
+            services_enabled: true,
         };
 
         assert!(spec.is_parent(), "Should be recognized as a parent");
@@ -326,8 +326,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: None,
-            environment: Some("prod".to_string()),
-            region: Some("us-west".to_string()),
+            services_enabled: true,
         };
 
         assert!(!spec.is_parent(), "Leaf cluster cannot have children");
@@ -350,8 +349,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: Some(endpoints_spec()),
-            environment: None,
-            region: None,
+            services_enabled: true,
         };
 
         assert!(
@@ -371,8 +369,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: None,
-            environment: None,
-            region: None,
+            services_enabled: true,
         };
 
         assert!(
@@ -401,8 +398,7 @@ mod tests {
             },
             networking: None,
             parent_config: None,
-            environment: None,
-            region: None,
+            services_enabled: true,
         };
 
         assert!(
@@ -422,8 +418,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: None,
-            environment: None,
-            region: None,
+            services_enabled: true,
         };
 
         assert!(
@@ -557,15 +552,14 @@ parentConfig:
         );
     }
 
-    /// Story: User defines leaf cluster with environment metadata in YAML
+    /// Story: User defines leaf cluster in YAML manifest
     ///
-    /// Application teams define leaf clusters with environment and region metadata.
+    /// Application teams define leaf clusters for running workloads.
+    /// Environment/region metadata belongs in metadata.labels, not in the spec.
     #[test]
     fn story_yaml_manifest_defines_leaf_cluster() {
         let yaml = r#"
 providerRef: aws-prod
-environment: prod
-region: us-west
 provider:
   kubernetes:
     version: "1.32.0"
@@ -584,8 +578,6 @@ nodes:
             serde_json::from_value(value).expect("leaf cluster YAML should parse successfully");
 
         assert!(!spec.is_parent(), "Should be leaf cluster");
-        assert_eq!(spec.environment.as_deref(), Some("prod"));
-        assert_eq!(spec.region.as_deref(), Some("us-west"));
         assert_eq!(spec.nodes.total_workers(), 3);
     }
 
@@ -601,8 +593,7 @@ nodes:
             nodes: sample_node_spec(),
             networking: None,
             parent_config: None,
-            environment: Some("staging".to_string()),
-            region: None,
+            services_enabled: true,
         };
 
         let json =
@@ -633,8 +624,7 @@ nodes:
                 nodes: sample_node_spec(),
                 networking: None,
                 parent_config: None,
-                environment: None,
-                region: None,
+                services_enabled: true,
             },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };

@@ -410,8 +410,7 @@ mod tests {
                 },
                 parent_config: None,
                 networking: None,
-                environment: None,
-                region: None,
+                services_enabled: true,
             },
             status: None,
         }

@@ -5,6 +5,9 @@ apiVersion: lattice.dev/v1alpha1
 kind: LatticeCluster
 metadata:
   name: e2e-workload2
+  labels:
+    lattice.dev/environment: e2e-test
+    lattice.dev/region: local
 spec:
   providerRef: docker
   provider:
@@ -27,5 +30,3 @@ spec:
         replicas: 1
         labels:
           workload-type: compute
-  environment: e2e-test
-  region: local

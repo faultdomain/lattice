@@ -436,8 +436,7 @@ mod tests {
                 },
                 networking: None,
                 parent_config: None,
-                environment: None,
-                region: None,
+                services_enabled: true,
             },
             status: None,
         }

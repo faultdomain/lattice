@@ -3,6 +3,9 @@ apiVersion: lattice.dev/v1alpha1
 kind: LatticeCluster
 metadata:
   name: e2e-workload
+  labels:
+    lattice.dev/environment: e2e-test
+    lattice.dev/region: proxmox
 spec:
   providerRef: proxmox
   provider:
@@ -37,5 +40,3 @@ spec:
     workerPools:
       default:
         replicas: 2
-  environment: e2e-test
-  region: proxmox

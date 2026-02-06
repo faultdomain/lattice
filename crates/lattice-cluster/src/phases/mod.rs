@@ -339,6 +339,7 @@ async fn get_or_create_bootstrap_token(
         bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         k8s_version: cluster.spec.provider.kubernetes.version.clone(),
         autoscaling_enabled,
+        services_enabled: cluster.spec.services_enabled,
     };
     let new_token = bootstrap_state.register_cluster(registration).await;
     let token_str = new_token.as_str().to_string();

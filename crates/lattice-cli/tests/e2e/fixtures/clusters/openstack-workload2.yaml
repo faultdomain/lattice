@@ -4,6 +4,9 @@ apiVersion: lattice.dev/v1alpha1
 kind: LatticeCluster
 metadata:
   name: e2e-workload2
+  labels:
+    lattice.dev/environment: e2e-test
+    lattice.dev/region: local
 spec:
   providerRef: openstack
   provider:
@@ -44,5 +47,3 @@ spec:
     bootstrapPort: 8443
     service:
       type: LoadBalancer
-  environment: e2e-test
-  region: local
