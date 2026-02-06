@@ -2,6 +2,10 @@
 //!
 //! Implements the K8sRequestForwarder and ExecRequestForwarder traits to enable
 //! agents to forward requests to their child clusters via the gRPC tunnel.
+//!
+//! Uses `AgentRegistry::wait_for_connection()` to wait for child agents that
+//! haven't connected yet (e.g., clusters still provisioning), matching the
+//! resilient tunnel behavior used by the HTTP proxy path.
 
 use lattice_agent::{
     build_k8s_status_response, ExecRequest, ExecRequestForwarder, ForwardedExecSession,
@@ -9,7 +13,7 @@ use lattice_agent::{
 };
 use lattice_cell::{
     start_exec_session, tunnel_request_streaming, ExecRequestParams, K8sRequestParams,
-    SharedAgentRegistry, SharedSubtreeRegistry, TunnelError,
+    SharedAgentRegistry, SharedSubtreeRegistry, TunnelError, RECONNECT_TIMEOUT,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -42,9 +46,11 @@ impl SubtreeForwarder {
         }
     }
 
-    /// Resolve the route to a target cluster, returning the agent connection.
+    /// Resolve the route to a target cluster, waiting for agent connection if needed.
+    ///
+    /// Checks the subtree registry for routing info, then waits up to 30 seconds
+    /// for the agent to be connected (handles clusters still provisioning).
     async fn resolve_route(&self, target_cluster: &str) -> Result<ResolvedRoute, (u32, String)> {
-        // Look up the route to the target cluster
         let route_info = self
             .subtree_registry
             .get_route(target_cluster)
@@ -56,18 +62,26 @@ impl SubtreeForwarder {
                 )
             })?;
 
-        // Get the agent ID to route through
         let agent_id = route_info
             .agent_id
             .ok_or((502, "internal routing error: missing agent_id".to_string()))?;
 
-        // Get the agent's command channel
+        // Wait for the agent to connect (up to 30s), handling both
+        // never-connected agents and temporarily disconnected ones
         let command_tx = self
             .agent_registry
-            .get(&agent_id)
-            .ok_or_else(|| (502, format!("agent '{}' not connected", agent_id)))?
-            .command_tx
-            .clone();
+            .wait_for_connection(&agent_id, RECONNECT_TIMEOUT)
+            .await
+            .ok_or_else(|| {
+                (
+                    504,
+                    format!(
+                        "agent '{}' did not connect within {}s",
+                        agent_id,
+                        RECONNECT_TIMEOUT.as_secs()
+                    ),
+                )
+            })?;
 
         Ok(ResolvedRoute {
             agent_id,
@@ -117,7 +131,6 @@ impl K8sRequestForwarder for SubtreeForwarder {
 
         let params = Self::build_params(target_cluster, request);
 
-        // Use streaming tunnel but collect the full response for non-watch requests
         let mut rx = match tunnel_request_streaming(
             &self.agent_registry,
             target_cluster,
@@ -133,7 +146,6 @@ impl K8sRequestForwarder for SubtreeForwarder {
             }
         };
 
-        // For non-watch, we expect a single response
         match rx.recv().await {
             Some(response) => response,
             None => build_k8s_status_response(&request_id, 502, "no response received from agent"),
@@ -213,12 +225,10 @@ impl ExecRequestForwarder for SubtreeForwarder {
         .await
         .map_err(|e| format!("failed to start exec session: {}", e))?;
 
-        // Create channels for stdin and resize
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
         let cancel_token = CancellationToken::new();
 
-        // Spawn relay task
         let cancel_token_relay = cancel_token.clone();
         tokio::spawn(async move {
             loop {
@@ -251,16 +261,12 @@ impl ExecRequestForwarder for SubtreeForwarder {
     }
 }
 
-/// Convert TunnelError to HTTP status code and message
+/// Convert TunnelError to HTTP status code and message.
+///
+/// Delegates to `TunnelError::status_code()` and `Display` to stay in sync
+/// with the canonical error definitions.
 fn tunnel_error_to_status(e: &TunnelError) -> (u32, String) {
-    match e {
-        TunnelError::SendFailed(m) => (502, format!("send failed: {}", m)),
-        TunnelError::ChannelClosed => (502, "agent disconnected".to_string()),
-        TunnelError::UnknownCluster(name) => (404, format!("unknown cluster: {}", name)),
-        TunnelError::Timeout => (504, "request timed out".to_string()),
-        TunnelError::AgentError(m) => (502, format!("agent error: {}", m)),
-        TunnelError::ResponseBuild(m) => (500, format!("response build error: {}", m)),
-    }
+    (e.status_code().as_u16() as u32, e.to_string())
 }
 
 #[cfg(test)]
@@ -277,17 +283,16 @@ mod tests {
 
     #[test]
     fn test_tunnel_error_to_status() {
-        assert_eq!(
-            tunnel_error_to_status(&TunnelError::Timeout),
-            (504, "request timed out".to_string())
-        );
-        assert_eq!(
-            tunnel_error_to_status(&TunnelError::ChannelClosed),
-            (502, "agent disconnected".to_string())
-        );
-        assert_eq!(
-            tunnel_error_to_status(&TunnelError::UnknownCluster("test".to_string())),
-            (404, "unknown cluster: test".to_string())
-        );
+        let (status, msg) = tunnel_error_to_status(&TunnelError::Timeout);
+        assert_eq!(status, 504);
+        assert!(msg.contains("timed out"));
+
+        let (status, msg) = tunnel_error_to_status(&TunnelError::ChannelClosed);
+        assert_eq!(status, 502);
+        assert!(msg.contains("disconnected"));
+
+        let (status, msg) = tunnel_error_to_status(&TunnelError::UnknownCluster("test".into()));
+        assert_eq!(status, 404);
+        assert!(msg.contains("test"));
     }
 }

@@ -21,7 +21,6 @@
 
 use clap::Args;
 use serde::Serialize;
-use std::process::Command;
 
 use crate::{Error, Result};
 
@@ -74,7 +73,7 @@ impl ExecCredential {
 /// Creates a fresh ServiceAccount token using kubectl and outputs it
 /// in ExecCredential format for use as a kubeconfig exec plugin.
 pub async fn run(args: TokenArgs) -> Result<()> {
-    let token = create_sa_token(
+    let token = super::create_sa_token(
         &args.kubeconfig,
         &args.namespace,
         &args.service_account,
@@ -89,43 +88,6 @@ pub async fn run(args: TokenArgs) -> Result<()> {
     println!("{}", json);
 
     Ok(())
-}
-
-/// Create a ServiceAccount token using kubectl
-fn create_sa_token(
-    kubeconfig: &str,
-    namespace: &str,
-    service_account: &str,
-    duration: &str,
-) -> Result<String> {
-    let output = Command::new("kubectl")
-        .args([
-            "--kubeconfig",
-            kubeconfig,
-            "create",
-            "token",
-            service_account,
-            "-n",
-            namespace,
-            &format!("--duration={}", duration),
-        ])
-        .output()
-        .map_err(|e| Error::command_failed(format!("Failed to run kubectl: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::command_failed(format!(
-            "kubectl create token failed: {}",
-            stderr
-        )));
-    }
-
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if token.is_empty() {
-        return Err(Error::command_failed("kubectl returned empty token"));
-    }
-
-    Ok(token)
 }
 
 #[cfg(test)]

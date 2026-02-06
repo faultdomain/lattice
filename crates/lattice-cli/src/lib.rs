@@ -24,6 +24,10 @@ pub enum Commands {
     Uninstall(commands::uninstall::UninstallArgs),
     /// Get a ServiceAccount token (exec credential plugin for kubeconfig)
     Token(commands::token::TokenArgs),
+    /// Fetch a kubeconfig from the Lattice proxy
+    Kubeconfig(commands::kubeconfig::KubeconfigArgs),
+    /// Get Lattice resources (clusters, services, hierarchy)
+    Get(commands::get::GetArgs),
 }
 
 impl Cli {
@@ -33,6 +37,8 @@ impl Cli {
             Commands::Install(args) => commands::install::run(args).await,
             Commands::Uninstall(args) => commands::uninstall::run(args).await,
             Commands::Token(args) => commands::token::run(args).await,
+            Commands::Kubeconfig(args) => commands::kubeconfig::run(args).await,
+            Commands::Get(args) => commands::get::run(args).await,
         }
     }
 }

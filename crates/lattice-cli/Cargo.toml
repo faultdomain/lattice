@@ -39,6 +39,12 @@ tracing-subscriber.workspace = true
 kube.workspace = true
 k8s-openapi.workspace = true
 
+# HTTP
+reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+
+# Time
+chrono.workspace = true
+
 # TLS (FIPS-validated crypto)
 rustls.workspace = true
 aws-lc-rs.workspace = true

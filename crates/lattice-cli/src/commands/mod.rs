@@ -2,15 +2,20 @@
 
 use std::fmt::Display;
 use std::future::Future;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
+use kube::config::{KubeConfigOptions, Kubeconfig};
+use kube::{Client, Config};
 use lattice_operator::crd::ProviderType;
 use tracing::{debug, warn};
 
 use crate::{Error, Result};
 
+pub mod get;
 pub mod install;
 pub mod kind_utils;
+pub mod kubeconfig;
 pub mod token;
 pub mod uninstall;
 
@@ -197,4 +202,74 @@ where
             }
         }
     }
+}
+
+/// Build a kube [`Client`] from an optional kubeconfig path.
+///
+/// If a path is provided, reads that file and uses its default context.
+/// Otherwise falls back to default resolution ($KUBECONFIG, ~/.kube/config, in-cluster).
+pub async fn kube_client(kubeconfig_path: Option<&str>) -> Result<Client> {
+    match kubeconfig_path {
+        Some(path) => kube_client_from_path(path).await,
+        None => Client::try_default().await.cmd_err(),
+    }
+}
+
+/// Build a kube [`Client`] from a kubeconfig file path (default context).
+pub async fn kube_client_from_path(path: &str) -> Result<Client> {
+    let kubeconfig = Kubeconfig::read_from(path)
+        .map_err(|e| Error::command_failed(format!("failed to read kubeconfig {}: {}", path, e)))?;
+    kube_client_from_kubeconfig(kubeconfig, &KubeConfigOptions::default()).await
+}
+
+/// Build a kube [`Client`] from an already-loaded [`Kubeconfig`] with options.
+pub async fn kube_client_from_kubeconfig(
+    kubeconfig: Kubeconfig,
+    options: &KubeConfigOptions,
+) -> Result<Client> {
+    let config = Config::from_custom_kubeconfig(kubeconfig, options)
+        .await
+        .cmd_err()?;
+    Client::try_from(config).cmd_err()
+}
+
+/// Create a ServiceAccount token using kubectl.
+///
+/// Shells out to `kubectl create token` to generate a short-lived token
+/// for the given ServiceAccount. Used by both `lattice token` and
+/// `lattice kubeconfig` commands.
+pub fn create_sa_token(
+    kubeconfig: &str,
+    namespace: &str,
+    service_account: &str,
+    duration: &str,
+) -> Result<String> {
+    let output = Command::new("kubectl")
+        .args([
+            "--kubeconfig",
+            kubeconfig,
+            "create",
+            "token",
+            service_account,
+            "-n",
+            namespace,
+            &format!("--duration={}", duration),
+        ])
+        .output()
+        .map_err(|e| Error::command_failed(format!("failed to run kubectl: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::command_failed(format!(
+            "kubectl create token failed: {}",
+            stderr
+        )));
+    }
+
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if token.is_empty() {
+        return Err(Error::command_failed("kubectl returned empty token"));
+    }
+
+    Ok(token)
 }

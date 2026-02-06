@@ -1,9 +1,12 @@
 //! Resilient K8s API tunneling with automatic reconnection
 //!
 //! Wraps the basic k8s_tunnel functionality to provide:
-//! - Automatic retry on agent reconnection
+//! - Automatic retry on agent connection/reconnection
 //! - Client connection buffering during brief disconnections
 //! - Watch resumption using resourceVersion
+//!
+//! Uses `AgentRegistry::wait_for_connection()` as the single mechanism for
+//! waiting on agent availability — both for never-connected and disconnected agents.
 
 use std::time::Duration;
 
@@ -15,21 +18,21 @@ use tracing::{debug, info, warn};
 
 use lattice_proto::KubernetesResponse;
 
-use crate::connection::{ReconnectionNotifier, SharedAgentRegistry};
+use crate::connection::SharedAgentRegistry;
 use crate::k8s_tunnel::{
     build_http_response, tunnel_request_streaming, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT,
     RESPONSE_CHANNEL_SIZE,
 };
 
-/// Default timeout for waiting for agent reconnection
+/// Default timeout for waiting for agent connection
 pub const RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configuration for resilient tunneling
 #[derive(Clone, Debug)]
 pub struct ResilientTunnelConfig {
-    /// How long to wait for agent reconnection before giving up
+    /// How long to wait for agent connection before giving up
     pub reconnect_timeout: Duration,
-    /// Whether to enable resilient mode (wait for reconnect vs fail fast)
+    /// Whether to enable resilient mode (wait for connection vs fail fast)
     pub enabled: bool,
 }
 
@@ -42,10 +45,10 @@ impl Default for ResilientTunnelConfig {
     }
 }
 
-/// Send a K8s request with automatic retry on agent reconnection.
+/// Send a K8s request with automatic retry on agent connection.
 ///
 /// For watch requests: Returns a streaming response that survives brief disconnections.
-/// For regular requests: Retries once if agent reconnects within timeout.
+/// For regular requests: Retries once if agent connects within timeout.
 ///
 /// This provides a better user experience by buffering the client connection
 /// during temporary agent disconnections instead of immediately failing.
@@ -55,68 +58,54 @@ pub async fn tunnel_request_resilient(
     params: K8sRequestParams,
     config: &ResilientTunnelConfig,
 ) -> Result<Response<Body>, TunnelError> {
-    let is_watch = lattice_proto::is_watch_query(&params.query);
-
-    if is_watch {
+    if lattice_proto::is_watch_query(&params.query) {
         tunnel_watch_resilient(registry, cluster_name, params, config).await
     } else {
         tunnel_single_resilient(registry, cluster_name, params, config).await
     }
 }
 
-/// Handle a single (non-watch) request with reconnection retry
+/// Handle a single (non-watch) request with connection retry
 async fn tunnel_single_resilient(
     registry: &SharedAgentRegistry,
     cluster_name: &str,
     params: K8sRequestParams,
     config: &ResilientTunnelConfig,
 ) -> Result<Response<Body>, TunnelError> {
-    // First attempt - handle both missing agent and request failure
-    let first_attempt_result = match get_command_tx(registry, cluster_name) {
-        Ok(command_tx) => tunnel_and_receive(registry, cluster_name, command_tx, &params).await,
-        Err(e) => Err(e),
+    let timeout = if config.enabled {
+        config.reconnect_timeout
+    } else {
+        Duration::ZERO
     };
 
-    match first_attempt_result {
-        Ok(response) => return Ok(response),
-        Err(e) if !config.enabled || !is_retryable(&e) => return Err(e),
-        Err(e) => {
+    // Get command channel (waits for agent if not yet connected)
+    let command_tx = registry
+        .wait_for_connection(cluster_name, timeout)
+        .await
+        .ok_or(TunnelError::Timeout)?;
+
+    // First attempt
+    let result = tunnel_and_receive(registry, cluster_name, command_tx, &params).await;
+
+    match result {
+        Ok(response) => Ok(response),
+        Err(e) if config.enabled && is_retryable(&e) => {
             debug!(
                 cluster = %cluster_name,
                 error = %e,
-                "Request failed, waiting for reconnection"
+                "Request failed, waiting for agent reconnection"
             );
-        }
-    }
 
-    // Wait for reconnection and retry
-    let mut reconnect_rx = registry.subscribe_reconnections();
-    let deadline = tokio::time::Instant::now() + config.reconnect_timeout;
+            // Agent disconnected mid-request — wait for reconnection and retry once
+            let command_tx = registry
+                .wait_for_connection(cluster_name, config.reconnect_timeout)
+                .await
+                .ok_or(TunnelError::Timeout)?;
 
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {
-                warn!(cluster = %cluster_name, "Reconnection timeout exceeded");
-                return Err(TunnelError::Timeout);
-            }
-            result = reconnect_rx.recv() => {
-                match result {
-                    Ok(notification) if notification.cluster_name == cluster_name => {
-                        info!(cluster = %cluster_name, "Agent reconnected, retrying request");
-                        return tunnel_and_receive(
-                            registry,
-                            cluster_name,
-                            notification.command_tx,
-                            &params,
-                        ).await;
-                    }
-                    Ok(_) => continue, // Different cluster
-                    Err(_) => {
-                        return Err(TunnelError::ChannelClosed);
-                    }
-                }
-            }
+            info!(cluster = %cluster_name, "Agent reconnected, retrying request");
+            tunnel_and_receive(registry, cluster_name, command_tx, &params).await
         }
+        Err(e) => Err(e),
     }
 }
 
@@ -124,7 +113,7 @@ async fn tunnel_single_resilient(
 ///
 /// Creates a streaming response that survives brief disconnections by:
 /// 1. Extracting resourceVersion from each event
-/// 2. On disconnect, waiting for reconnect
+/// 2. On disconnect, waiting for reconnect via `wait_for_connection`
 /// 3. Re-establishing watch from last known resourceVersion
 async fn tunnel_watch_resilient(
     registry: &SharedAgentRegistry,
@@ -135,7 +124,6 @@ async fn tunnel_watch_resilient(
     let (body_tx, body_rx) =
         mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(RESPONSE_CHANNEL_SIZE);
 
-    // Clone what we need for the spawned task
     let registry = registry.clone();
     let cluster_name = cluster_name.to_string();
     let reconnect_timeout = config.reconnect_timeout;
@@ -145,16 +133,15 @@ async fn tunnel_watch_resilient(
         let mut current_params = params;
 
         loop {
-            // Get command channel for current connection
-            let command_tx = match get_command_tx(&registry, &cluster_name) {
-                Ok(tx) => tx,
-                Err(_) if !resilient_enabled => break,
-                Err(_) => {
-                    // Wait for reconnection
-                    if !wait_for_reconnect(&registry, &cluster_name, reconnect_timeout).await {
-                        break;
-                    }
-                    continue;
+            // Get command channel (waits for agent if not yet connected)
+            let command_tx = match registry
+                .wait_for_connection(&cluster_name, reconnect_timeout)
+                .await
+            {
+                Some(tx) => tx,
+                None => {
+                    warn!(cluster = %cluster_name, "Agent connection timeout, ending watch");
+                    break;
                 }
             };
 
@@ -173,35 +160,25 @@ async fn tunnel_watch_resilient(
                     debug!(
                         cluster = %cluster_name,
                         error = %e,
-                        "Watch request failed, waiting for reconnection"
+                        "Watch request failed, waiting for agent reconnection"
                     );
-                    if !wait_for_reconnect(&registry, &cluster_name, reconnect_timeout).await {
-                        break;
-                    }
-                    continue;
+                    continue; // Loop back to wait_for_connection
                 }
             };
 
             // Stream responses to client, tracking resourceVersion
-            let disconnect =
+            let disconnected =
                 stream_watch_responses(response_rx, &body_tx, &mut current_params).await;
 
-            if !disconnect || !resilient_enabled {
+            if !disconnected || !resilient_enabled {
                 break;
             }
 
-            // Agent disconnected - wait for reconnect
             info!(
                 cluster = %cluster_name,
-                "Watch stream interrupted, waiting for reconnection"
+                "Watch stream interrupted, waiting for agent reconnection"
             );
-            if !wait_for_reconnect(&registry, &cluster_name, reconnect_timeout).await {
-                break;
-            }
-            info!(
-                cluster = %cluster_name,
-                "Resuming watch after reconnection"
-            );
+            // Loop back to wait_for_connection
         }
     });
 
@@ -213,23 +190,6 @@ async fn tunnel_watch_resilient(
         .header("Transfer-Encoding", "chunked")
         .body(body)
         .map_err(|e| TunnelError::ResponseBuild(e.to_string()))
-}
-
-/// Get command channel for a cluster
-///
-/// Returns:
-/// - Ok(sender) if agent is connected
-/// - Err(ChannelClosed) if agent is known but disconnected (retryable)
-/// - Err(UnknownCluster) if agent has never connected (not retryable)
-fn get_command_tx(
-    registry: &SharedAgentRegistry,
-    cluster_name: &str,
-) -> Result<mpsc::Sender<lattice_proto::CellCommand>, TunnelError> {
-    match registry.get(cluster_name) {
-        Some(agent) if agent.connected => Ok(agent.command_tx.clone()),
-        Some(_) => Err(TunnelError::ChannelClosed), // Known but disconnected
-        None => Err(TunnelError::UnknownCluster(cluster_name.to_string())),
-    }
 }
 
 /// Execute tunnel request and receive single response
@@ -249,42 +209,9 @@ async fn tunnel_and_receive(
     }
 }
 
-/// Check if an error is retryable (worth waiting for reconnect)
-///
-/// Retryable errors indicate the agent was known but is temporarily disconnected.
-/// Non-retryable errors (UnknownCluster, Timeout, AgentError) should fail fast.
+/// Check if an error is retryable (agent disconnected mid-request)
 fn is_retryable(e: &TunnelError) -> bool {
     matches!(e, TunnelError::ChannelClosed | TunnelError::SendFailed(_))
-}
-
-/// Wait for agent reconnection
-///
-/// Returns true if reconnected, false if timeout or should stop
-async fn wait_for_reconnect(
-    registry: &SharedAgentRegistry,
-    cluster_name: &str,
-    timeout: Duration,
-) -> bool {
-    let mut reconnect_rx = registry.subscribe_reconnections();
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {
-                warn!(cluster = %cluster_name, "Reconnection timeout exceeded");
-                return false;
-            }
-            result = reconnect_rx.recv() => {
-                match result {
-                    Ok(notification) if notification.cluster_name == cluster_name => {
-                        return true;
-                    }
-                    Ok(_) => continue, // Different cluster
-                    Err(_) => return false,
-                }
-            }
-        }
-    }
 }
 
 /// Stream watch responses to client, tracking resourceVersion
@@ -329,20 +256,15 @@ async fn stream_watch_responses(
 ///
 /// Watch events look like: {"type":"ADDED","object":{"metadata":{"resourceVersion":"12345",...},...}}
 fn extract_resource_version(body: &[u8]) -> Option<String> {
-    // Simple JSON parsing - look for "resourceVersion":"<value>"
     let s = std::str::from_utf8(body).ok()?;
-
-    // Find resourceVersion in the object's metadata
     let rv_key = "\"resourceVersion\":\"";
     let start = s.find(rv_key)? + rv_key.len();
     let end = s[start..].find('"')? + start;
-
     Some(s[start..end].to_string())
 }
 
 /// Update resourceVersion in query string for watch resume
 fn update_resource_version_in_query(query: &mut String, resource_version: &str) {
-    // Parse query params
     let mut params: Vec<(String, String)> = query
         .split('&')
         .filter(|s| !s.is_empty())
@@ -352,7 +274,6 @@ fn update_resource_version_in_query(query: &mut String, resource_version: &str) 
         })
         .collect();
 
-    // Update or add resourceVersion
     let mut found = false;
     for (k, v) in &mut params {
         if k == "resourceVersion" {
@@ -365,7 +286,6 @@ fn update_resource_version_in_query(query: &mut String, resource_version: &str) 
         params.push(("resourceVersion".to_string(), resource_version.to_string()));
     }
 
-    // Rebuild query string
     *query = params
         .iter()
         .map(|(k, v)| format!("{}={}", k, v))
@@ -415,11 +335,8 @@ mod tests {
 
     #[test]
     fn test_is_retryable() {
-        // Retryable: known agent that disconnected
         assert!(is_retryable(&TunnelError::ChannelClosed));
         assert!(is_retryable(&TunnelError::SendFailed("test".into())));
-
-        // Not retryable: unknown cluster or other errors
         assert!(!is_retryable(&TunnelError::UnknownCluster("test".into())));
         assert!(!is_retryable(&TunnelError::Timeout));
         assert!(!is_retryable(&TunnelError::AgentError("test".into())));

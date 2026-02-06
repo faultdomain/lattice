@@ -17,6 +17,7 @@ use lattice_proto::{
 };
 
 use crate::connection::{K8sResponseRegistry, SharedAgentRegistry};
+use crate::resilient_tunnel::RECONNECT_TIMEOUT;
 
 /// Default timeout for non-watch requests
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -123,14 +124,38 @@ async fn send_request(
     };
 
     if let Err(e) = command_tx.send(command).await {
-        registry.take_pending_k8s_response(&request_id);
-        error!(
+        // Channel is stale — wait for the agent to reconnect and retry once
+        warn!(
             cluster = %cluster_name,
             request_id = %request_id,
-            error = %e,
-            "Failed to send K8s request to agent"
+            "Send failed on stale channel, waiting for agent reconnection"
         );
-        return Err(TunnelError::SendFailed(e.to_string()));
+
+        let command = e.0; // recover the unsent command
+        let new_tx = registry
+            .wait_for_connection(cluster_name, RECONNECT_TIMEOUT)
+            .await
+            .ok_or_else(|| {
+                registry.take_pending_k8s_response(&request_id);
+                TunnelError::SendFailed("agent did not reconnect".to_string())
+            })?;
+
+        if let Err(e) = new_tx.send(command).await {
+            registry.take_pending_k8s_response(&request_id);
+            error!(
+                cluster = %cluster_name,
+                request_id = %request_id,
+                error = %e,
+                "Failed to send K8s request after reconnection"
+            );
+            return Err(TunnelError::SendFailed(e.to_string()));
+        }
+
+        debug!(
+            cluster = %cluster_name,
+            request_id = %request_id,
+            "Successfully sent K8s request after agent reconnection"
+        );
     }
 
     debug!(

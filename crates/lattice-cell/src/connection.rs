@@ -1,11 +1,10 @@
 //! Agent connection tracking
 //!
 //! Manages the registry of connected agents and their state.
-//! Includes reconnection notification for resilient request handling.
+//! Includes connection notification for resilient request handling.
 //!
 //! # Traits
 //!
-//! For testability, key operations are exposed via traits:
 //! - `K8sResponseRegistry`: Pending K8s API response tracking (for tunnel tests)
 
 use std::sync::Arc;
@@ -40,33 +39,12 @@ pub trait K8sResponseRegistry: Send + Sync {
     fn has_pending_k8s_response(&self, request_id: &str) -> bool;
 }
 
-/// Trait for subscribing to agent reconnection events
-///
-/// Extracted for testing resilient tunnel logic.
-#[cfg_attr(test, mockall::automock)]
-pub trait ReconnectionNotifier: Send + Sync {
-    /// Subscribe to agent reconnection notifications
-    fn subscribe_reconnections(&self) -> broadcast::Receiver<ReconnectNotification>;
-}
-
-/// Trait for checking agent connectivity
-///
-/// Extracted for testability in routing logic.
-#[cfg_attr(test, mockall::automock)]
-pub trait AgentConnectivity: Send + Sync {
-    /// Check if an agent is connected
-    fn is_connected(&self, cluster_name: &str) -> bool;
-
-    /// Get command channel for a cluster (returns None if not connected)
-    fn get_command_tx(&self, cluster_name: &str) -> Option<mpsc::Sender<CellCommand>>;
-}
-
-/// Notification sent when an agent reconnects
+/// Notification sent when an agent connects (new or reconnection)
 #[derive(Clone, Debug)]
-pub struct ReconnectNotification {
-    /// The cluster that reconnected
+pub struct ConnectionNotification {
+    /// The cluster that connected
     pub cluster_name: String,
-    /// New command channel for the reconnected agent
+    /// Command channel for the connected agent
     pub command_tx: mpsc::Sender<CellCommand>,
 }
 
@@ -223,15 +201,15 @@ pub struct AgentRegistry {
     proxy_config: std::sync::RwLock<Option<KubeconfigProxyConfig>>,
     /// Broadcast channel for agent reconnection notifications
     /// Allows waiting requests to retry when an agent reconnects
-    reconnect_tx: broadcast::Sender<ReconnectNotification>,
+    connection_tx: broadcast::Sender<ConnectionNotification>,
 }
 
-/// Channel capacity for reconnection notifications
-const RECONNECT_CHANNEL_CAPACITY: usize = 64;
+/// Channel capacity for connection notifications
+const CONNECTION_CHANNEL_CAPACITY: usize = 64;
 
 impl Default for AgentRegistry {
     fn default() -> Self {
-        let (reconnect_tx, _) = broadcast::channel(RECONNECT_CHANNEL_CAPACITY);
+        let (connection_tx, _) = broadcast::channel(CONNECTION_CHANNEL_CAPACITY);
         Self {
             agents: DashMap::new(),
             unpivot_manifests: DashMap::new(),
@@ -242,7 +220,7 @@ impl Default for AgentRegistry {
             pending_k8s_responses: DashMap::new(),
             pending_exec_data: DashMap::new(),
             proxy_config: std::sync::RwLock::new(None),
-            reconnect_tx,
+            connection_tx,
         }
     }
 }
@@ -265,16 +243,14 @@ impl AgentRegistry {
         self.proxy_config.read().ok().and_then(|g| g.clone())
     }
 
-    /// Register a new agent connection
+    /// Register an agent connection (new or reconnection)
     ///
-    /// If an agent was previously registered with the same cluster name,
-    /// this is treated as a reconnection and waiting requests are notified.
+    /// Always notifies waiting requests via the connection broadcast channel,
+    /// so both the resilient tunnel and SubtreeForwarder can pick up new agents.
     pub fn register(&self, mut connection: AgentConnection) {
         let cluster_name = connection.cluster_name.clone();
         let command_tx = connection.command_tx.clone();
-
-        // Check if this cluster was previously registered (even if disconnected)
-        let was_reconnect = self.agents.contains_key(&cluster_name);
+        let is_reconnect = self.agents.contains_key(&cluster_name);
 
         // Preserve pivot_complete status across reconnections
         if let Some(existing) = self.agents.get(&cluster_name) {
@@ -283,20 +259,21 @@ impl AgentRegistry {
             }
         }
 
-        // Ensure connected flag is set
         connection.connected = true;
         self.agents.insert(cluster_name.clone(), connection);
 
-        if was_reconnect {
+        if is_reconnect {
             info!(cluster = %cluster_name, "Agent reconnected");
-            // Notify waiting requests - ignore send errors (no receivers)
-            let _ = self.reconnect_tx.send(ReconnectNotification {
-                cluster_name,
-                command_tx,
-            });
         } else {
-            info!(cluster = %cluster_name, "Agent registered (first connection)");
+            info!(cluster = %cluster_name, "Agent connected (first time)");
         }
+
+        // Always notify waiting requests — handles both initial connections
+        // and reconnections. Ignore send errors (no receivers is fine).
+        let _ = self.connection_tx.send(ConnectionNotification {
+            cluster_name,
+            command_tx,
+        });
     }
 
     /// Mark an agent as disconnected
@@ -350,12 +327,55 @@ impl AgentRegistry {
     }
 
     /// Check if a cluster is known (has connected at least once)
-    ///
-    /// This is used by resilient tunnels to distinguish between:
-    /// - Unknown cluster (fail fast)
-    /// - Known but disconnected cluster (wait for reconnect)
     pub fn is_known(&self, cluster_name: &str) -> bool {
         self.agents.contains_key(cluster_name)
+    }
+
+    /// Wait for an agent to be connected, returning its command channel.
+    ///
+    /// If the agent is already connected, returns immediately.
+    /// Otherwise, subscribes to connection notifications and waits up to `timeout`.
+    /// Works for both never-connected agents and disconnected agents.
+    pub async fn wait_for_connection(
+        &self,
+        cluster_name: &str,
+        timeout: std::time::Duration,
+    ) -> Option<mpsc::Sender<CellCommand>> {
+        // Fast path: already connected with a live channel
+        if let Some(agent) = self.get(cluster_name) {
+            if agent.connected && !agent.command_tx.is_closed() {
+                return Some(agent.command_tx.clone());
+            }
+        }
+
+        // Subscribe before checking again (avoid race between check and subscribe)
+        let mut rx = self.subscribe_connections();
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        // Check again after subscribing (agent may have connected between our check and subscribe)
+        if let Some(agent) = self.get(cluster_name) {
+            if agent.connected && !agent.command_tx.is_closed() {
+                return Some(agent.command_tx.clone());
+            }
+        }
+
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    warn!(cluster = %cluster_name, "Timed out waiting for agent connection");
+                    return None;
+                }
+                result = rx.recv() => {
+                    match result {
+                        Ok(notification) if notification.cluster_name == cluster_name => {
+                            return Some(notification.command_tx);
+                        }
+                        Ok(_) => continue,
+                        Err(_) => return None,
+                    }
+                }
+            }
+        }
     }
 
     /// Update agent state
@@ -562,25 +582,18 @@ impl K8sResponseRegistry for AgentRegistry {
     }
 }
 
-impl ReconnectionNotifier for AgentRegistry {
-    fn subscribe_reconnections(&self) -> broadcast::Receiver<ReconnectNotification> {
-        self.reconnect_tx.subscribe()
+impl AgentRegistry {
+    /// Subscribe to agent connection notifications (both new and reconnections)
+    pub fn subscribe_connections(&self) -> broadcast::Receiver<ConnectionNotification> {
+        self.connection_tx.subscribe()
     }
-}
 
-impl AgentConnectivity for AgentRegistry {
-    fn is_connected(&self, cluster_name: &str) -> bool {
+    /// Check if an agent is connected
+    pub fn is_connected(&self, cluster_name: &str) -> bool {
         self.agents
             .get(cluster_name)
             .map(|a| a.connected)
             .unwrap_or(false)
-    }
-
-    fn get_command_tx(&self, cluster_name: &str) -> Option<mpsc::Sender<CellCommand>> {
-        self.agents
-            .get(cluster_name)
-            .filter(|a| a.connected)
-            .map(|a| a.command_tx.clone())
     }
 }
 
@@ -1052,35 +1065,31 @@ mod tests {
     }
 
     #[test]
-    fn test_reconnection_detection() {
-        // Verify that reconnection is detected after an agent disconnects.
-        // Agents stay in the registry with connected=false, so reconnection
-        // is simply detected by checking if the cluster already exists.
+    fn test_connection_notification() {
         let registry = AgentRegistry::new();
+        let mut rx = registry.subscribe_connections();
 
-        // Subscribe to reconnections before any registration
-        let mut reconnect_rx = registry.subscribe_reconnections();
-
-        // First registration - not a reconnect
+        // First connection — broadcasts notification
         let (conn1, _rx1) = create_test_connection("test-cluster");
         registry.register(conn1);
-        assert!(reconnect_rx.try_recv().is_err()); // No notification
+        let notification = rx
+            .try_recv()
+            .expect("should receive notification on first connection");
+        assert_eq!(notification.cluster_name, "test-cluster");
         assert!(registry.is_connected("test-cluster"));
         assert!(registry.is_known("test-cluster"));
 
-        // Unregister (simulates agent disconnect)
+        // Disconnect
         registry.unregister("test-cluster");
         assert!(!registry.is_connected("test-cluster"));
-        assert!(registry.is_known("test-cluster")); // Still known
+        assert!(registry.is_known("test-cluster"));
 
-        // Re-register (simulates agent reconnect) - detected as reconnect
+        // Reconnection — also broadcasts notification
         let (conn2, _rx2) = create_test_connection("test-cluster");
         registry.register(conn2);
-
-        // Should receive reconnection notification
-        let notification = reconnect_rx
+        let notification = rx
             .try_recv()
-            .expect("should receive reconnection notification");
+            .expect("should receive notification on reconnection");
         assert_eq!(notification.cluster_name, "test-cluster");
         assert!(registry.is_connected("test-cluster"));
     }

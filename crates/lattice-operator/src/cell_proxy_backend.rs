@@ -17,6 +17,7 @@ use lattice_api::backend::{
 use lattice_cell::{
     start_exec_session, tunnel_request_resilient, ExecRequestParams, ExecSession, K8sRequestParams,
     ResilientTunnelConfig, SharedAgentRegistry, SharedSubtreeRegistry, TunnelError,
+    RECONNECT_TIMEOUT,
 };
 use lattice_proto::ExecData;
 
@@ -88,10 +89,9 @@ impl ProxyBackend for CellProxyBackend {
     ) -> Result<(Box<dyn ExecSessionHandle>, mpsc::Receiver<ExecData>), ProxyError> {
         let command_tx = self
             .agent_registry
-            .get(agent_id)
-            .ok_or(ProxyError::AgentDisconnected)?
-            .command_tx
-            .clone();
+            .wait_for_connection(agent_id, RECONNECT_TIMEOUT)
+            .await
+            .ok_or(ProxyError::AgentDisconnected)?;
 
         let params = ExecRequestParams {
             path: request.path,

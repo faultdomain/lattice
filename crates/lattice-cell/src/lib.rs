@@ -5,7 +5,7 @@
 //! - **gRPC Server**: Accepts agent connections from child clusters
 //! - **Bootstrap Server**: HTTP endpoints for kubeadm callbacks and CSR signing
 //! - **K8s API Proxy**: Read-only proxy for CAPI controller access to children
-//! - **Connection Registry**: Tracks connected agents with reconnection notifications
+//! - **Connection Registry**: Tracks connected agents with connection notifications
 //! - **Resource Distribution**: Fetching resources to sync to children
 //! - **Move Sender**: gRPC-based move command sender for distributed pivot
 //! - **Resilient Tunnel**: K8s API tunneling with automatic reconnection
@@ -31,9 +31,8 @@ pub use bootstrap::{
 };
 pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
 pub use connection::{
-    AgentConnection, AgentConnectivity, AgentRegistry, K8sResponseRegistry, KubeconfigProxyConfig,
-    PivotSourceManifests, ReconnectNotification, ReconnectionNotifier, SendError,
-    SharedAgentRegistry, UnpivotManifests,
+    AgentConnection, AgentRegistry, ConnectionNotification, K8sResponseRegistry,
+    KubeconfigProxyConfig, PivotSourceManifests, SendError, SharedAgentRegistry, UnpivotManifests,
 };
 pub use exec_tunnel::{
     start_exec_session, stream_id, ExecRequestParams, ExecSession, ExecTunnelError,

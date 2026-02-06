@@ -1,70 +1,78 @@
-# Lattice
+<p align="center">
+  <img src="docs/lattice.svg" alt="Lattice" width="720"/>
+</p>
 
-Kubernetes multi-cluster management with zero-trust service networking.
+<h3 align="center">Multi-cluster Kubernetes management with zero-trust networking</h3>
 
-## The Problem
+<p align="center">
+  Lattice provisions fully self-managing Kubernetes clusters and enforces bilateral service agreements across your fleet.
+</p>
 
-Managing Kubernetes at scale has two hard problems:
+---
 
-1. **Cluster lifecycle** - Management clusters become single points of failure. If the parent dies, child clusters can't scale or heal.
+## What is Lattice?
 
-2. **Service networking** - Default-allow policies require constant vigilance. One misconfigured service exposes your network.
+Lattice is a Kubernetes operator and CLI that solves two problems at once:
 
-## How Lattice Solves It
+**1. Clusters that survive their parent.** Traditional management clusters are a single point of failure. Lattice pivots CAPI resources into each workload cluster after provisioning so every cluster owns its own lifecycle. Delete the parent — child clusters keep running, scaling, and healing.
 
-### Self-Managing Clusters
+**2. Networking that requires mutual consent.** Default-allow network policies are a liability. Lattice enforces bilateral service agreements: traffic only flows when both the caller and callee explicitly declare the dependency. Remove either side and traffic stops immediately. No forgotten allow rules.
 
-Lattice provisions clusters that own their own lifecycle. After provisioning, CAPI resources pivot into the workload cluster itself. The parent can be deleted - the cluster keeps running and can scale, upgrade, and heal independently.
+## Key Features
 
-```
-Parent Cluster                    Workload Cluster
-┌─────────────┐                  ┌─────────────┐
-│  CAPI       │ ── provision ──> │             │
-│  Resources  │                  │             │
-│             │ ── pivot ──────> │  CAPI       │
-│  (deleted)  │                  │  Resources  │
-└─────────────┘                  └─────────────┘
-                                       │
-                                 self-managing
-```
-
-Child clusters connect to parents via outbound gRPC only - no inbound ports, no attack surface.
-
-### Bilateral Service Agreements
-
-Traffic only flows when **both sides agree**:
-
-```yaml
-# api-gateway declares: "I call auth-service"
-resources:
-  auth-service:
-    type: service
-    direction: outbound
-
-# auth-service declares: "api-gateway can call me"
-resources:
-  api-gateway:
-    type: service
-    direction: inbound
-```
-
-If either side removes their declaration, traffic stops. This compiles to:
-- **CiliumNetworkPolicy** - L4 eBPF enforcement
-- **Istio AuthorizationPolicy** - L7 mTLS identity enforcement
-
-No YAML sprawl. No forgotten allow rules. The service graph is the policy.
+- **Self-managing clusters** — CAPI resources pivot into the workload cluster. Scale, upgrade, and heal independently of any parent.
+- **Outbound-only architecture** — Child clusters never accept inbound connections. All communication is outbound gRPC to the parent. Zero attack surface.
+- **Bilateral service mesh** — Mutual dependency declarations compile to CiliumNetworkPolicy (L4 eBPF) and Istio AuthorizationPolicy (L7 mTLS).
+- **Multi-provider** — Docker, Proxmox, AWS, OpenStack. Same workflow everywhere.
+- **FIPS 140-2 cryptography** — All TLS and signing uses AWS-LC via rustls. RKE2 bootstrap available for FIPS Kubernetes.
+- **CLI-first workflow** — Install, inspect, and manage entire cluster hierarchies from the terminal.
 
 ## Quick Start
 
 ```bash
-# Build
-cargo build --release
-
-# Install a self-managing cluster
+# Provision a self-managing cluster
 lattice install -f cluster.yaml
 ```
 
-The installer creates a temporary kind cluster, provisions your cluster via CAPI, pivots the resources in, then deletes kind. Your cluster is now self-managing.
+That's it. Lattice creates a temporary bootstrap cluster, provisions your infrastructure via CAPI, pivots the resources in, and tears down the bootstrap. Your cluster is fully self-managing.
+
+## Manage Your Fleet
+
+```bash
+$ lattice get clusters
+
+NAME       PHASE   PROVIDER  K8S     CP   WORKERS  ROLE    AGE
+mgmt       Ready   aws       1.32.0  3/3  10/10    parent  45d
+prod       Ready   aws       1.32.0  3/3  20/20    parent  30d
+staging    Ready   proxmox   1.32.0  1/1  5/5      parent  15d
+edge       Ready   docker    1.32.0  1/1  2/2      leaf    7d
+```
+
+```bash
+$ lattice get hierarchy
+
+Cluster Hierarchy:
+
+mgmt  [Ready] (parent)
+├── prod  [Ready] (parent)
+│   ├── us-east  [Ready]
+│   └── us-west  [Ready]
+├── edge  [Ready]
+└── staging  [Ready] (parent)
+    ├── dev-1  [Ready]
+    └── dev-2  [Ready]
+```
+
+```bash
+$ lattice get services
+
+NAMESPACE   NAME          PHASE  INBOUND  OUTBOUND  AGE
+default     api-gateway   Ready  1        2         30d
+default     auth-service  Ready  1        1         30d
+payments    stripe-proxy  Ready  0        1         15d
+```
+
+> All `get` commands support `-o table` (default) and `-o json`.
 
 ## Cluster Definition
 
@@ -74,32 +82,44 @@ kind: LatticeCluster
 metadata:
   name: production
 spec:
+  providerRef: aws-prod
   provider:
     kubernetes:
       version: "1.32.0"
-      bootstrap: kubeadm  # or rke2 for FIPS
+      bootstrap: kubeadm         # or rke2 for FIPS
     config:
-      proxmox:
-        templateId: 9000
-        cpCores: 4
-        cpMemoryMib: 8192
+      aws:
+        region: us-west-2
+        cpInstanceType: m5.xlarge
+        workerInstanceType: m5.large
+        sshKeyName: lattice-key
   nodes:
     controlPlane: 3
     workerPools:
-      default:
+      general:
         replicas: 10
+      gpu:
+        replicas: 2
+        nodeClass: p3.2xlarge
+        min: 1                   # Cluster autoscaler
+        max: 8
+  parentConfig:                  # Enables this cluster to provision children
+    service:
+      type: LoadBalancer
 ```
 
 ### Supported Providers
 
-| Provider | Use Case |
-|----------|----------|
-| Docker | Local development (CAPD) |
-| Proxmox | On-premises with kube-vip HA |
-| AWS | Cloud via CAPA |
-| OpenStack | Private cloud via CAPO |
+| Provider | Infrastructure | Use Case |
+|----------|---------------|----------|
+| **Docker** | CAPD / kind | Local development and CI |
+| **Proxmox** | CAPMOX + kube-vip | On-premises bare metal |
+| **AWS** | CAPA + NLB | Public cloud |
+| **OpenStack** | CAPO | Private cloud |
 
-## Service Definition
+## Service Networking
+
+Services declare their dependencies. Lattice compiles them into enforced network policy.
 
 ```yaml
 apiVersion: lattice.dev/v1alpha1
@@ -110,31 +130,24 @@ spec:
   containers:
     main:
       image: myorg/api:v1.2.3
-      resources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
   service:
     ports:
       http:
         port: 8080
   resources:
-    # Outbound: I call these services
     auth-service:
       type: service
-      direction: outbound
-    postgres:
-      type: service
-      direction: outbound
-    # Inbound: These services call me
+      direction: outbound        # "I call auth-service"
     web-frontend:
       type: service
-      direction: inbound
+      direction: inbound         # "web-frontend can call me"
 ```
+
+Both sides must agree. If `auth-service` doesn't declare `api-gateway` as an allowed caller, the connection is denied at L4 **and** L7.
 
 ### External Services
 
-Control egress to external APIs:
+Control egress to third-party APIs:
 
 ```yaml
 apiVersion: lattice.dev/v1alpha1
@@ -148,81 +161,77 @@ spec:
     - payment-service
 ```
 
-### Shared Volumes
+## How It Works
 
-Services can share volumes with automatic pod co-location:
-
-```yaml
-# Owner declares the volume with size
-resources:
-  media-storage:
-    type: volume
-    id: shared-media
-    params:
-      size: 1Ti
-
-# Consumer references without size (gets co-located)
-resources:
-  media-storage:
-    type: volume
-    id: shared-media
-```
-
-## Architecture
+### Pivot Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Lattice Operator                         │
-├─────────────────────────────────────────────────────────────┤
-│  ClusterController    - Provisions clusters via CAPI       │
-│  ServiceController    - Compiles service graph to policies │
-│  AgentServer          - Accepts gRPC from child clusters   │
-│  BootstrapWebhook     - Handles kubeadm postKubeadmCommands│
-└─────────────────────────────────────────────────────────────┘
-         │                              │
-         ▼                              ▼
-┌─────────────────┐           ┌─────────────────┐
-│  Cilium         │           │  Istio Ambient  │
-│  L4 eBPF        │           │  L7 mTLS        │
-└─────────────────┘           └─────────────────┘
+1. lattice install creates a temporary kind bootstrap cluster
+2. CAPI provisions the target infrastructure
+3. Nodes call back to the parent's bootstrap webhook
+4. Lattice agent installed, establishes outbound gRPC stream
+5. CAPI resources pivot into the new cluster via clusterctl move
+6. Bootstrap cluster deleted — target is now self-managing
 ```
 
-## FIPS Compliance
+After pivot, the cluster owns its CAPI resources and operates independently. The parent can be deleted without affecting any child cluster.
 
-All cryptography uses FIPS 140-2 validated implementations via AWS-LC:
+### Architecture Overview
 
-- TLS: rustls with aws-lc-rs backend
-- Hashing: SHA-256/384/512
-- Signatures: ECDSA P-256/P-384, RSA 2048+
+```
+                    ┌──────────────────────────────────────┐
+                    │          Lattice Operator             │
+                    ├──────────────────────────────────────┤
+                    │  ClusterController   CAPI lifecycle   │
+                    │  ServiceController   Policy compiler  │
+                    │  AgentServer         gRPC streams     │
+                    │  BootstrapWebhook    Node bootstrap   │
+                    │  K8s API Proxy       Child visibility │
+                    └──────────┬───────────────┬───────────┘
+                               │               │
+                       ┌───────▼───┐    ┌──────▼──────┐
+                       │  Cilium   │    │Istio Ambient│
+                       │  L4 eBPF  │    │  L7 mTLS    │
+                       └───────────┘    └─────────────┘
+```
 
-For full FIPS compliance, use RKE2 bootstrap which provides FIPS-validated Kubernetes components.
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `lattice install -f <file>` | Provision a self-managing cluster |
+| `lattice uninstall -k <kubeconfig>` | Reverse pivot and tear down a cluster |
+| `lattice get clusters` | List all clusters across kubeconfig contexts |
+| `lattice get cluster <name>` | Detailed view of a single cluster |
+| `lattice get services [-n <ns>]` | List LatticeService resources |
+| `lattice get hierarchy` | ASCII tree of the cluster hierarchy |
+| `lattice token` | ServiceAccount token (exec credential plugin) |
 
 ## Development
 
 ```bash
-cargo build
-cargo test
-cargo clippy
+cargo build              # Build all crates
+cargo test               # Unit tests
+cargo clippy             # Lint
+cargo fmt -- --check     # Format check
 
-# Run E2E tests (requires Docker)
+# E2E tests (requires Docker)
 cargo test --features provider-e2e --test e2e
 ```
 
-## Project Structure
+### Project Structure
 
 ```
 crates/
-├── lattice-operator/   # Kubernetes operator (controllers, gRPC server)
-├── lattice-cli/        # CLI (install, uninstall commands)
-├── lattice-common/     # Shared CRD definitions
-├── lattice-service/    # Service compilation (policies, workloads)
-├── lattice-cluster/    # Cluster provisioning
-└── lattice-proto/      # gRPC protocol definitions
+├── lattice-cli/        CLI (install, uninstall, get)
+├── lattice-operator/   Kubernetes operator and controllers
+├── lattice-common/     Shared CRDs and utilities
+├── lattice-service/    Service policy compilation
+├── lattice-cluster/    Cluster provisioning
+├── lattice-agent/      Child cluster agent
+├── lattice-cell/       Parent cluster cell server
+└── lattice-proto/      gRPC protocol definitions
 ```
-
-## Status
-
-Pre-release. APIs may change.
 
 ## License
 

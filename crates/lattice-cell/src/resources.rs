@@ -95,11 +95,7 @@ pub async fn fetch_distributable_resources(
             .iter()
             .filter(|p| p.spec.enabled && p.spec.propagate)
         {
-            cedar_policies.push(serialize_inherited_resource(
-                policy,
-                cluster_name,
-                "CedarPolicy",
-            )?);
+            cedar_policies.push(serialize_inherited_resource(policy, cluster_name)?);
         }
     }
 
@@ -108,11 +104,7 @@ pub async fn fetch_distributable_resources(
     let mut oidc_providers = Vec::new();
     if let Some(oidc_list) = list_crd_optional(&oidc_api, &lp, "OIDCProvider").await? {
         for provider in oidc_list.items.iter().filter(|p| p.spec.propagate) {
-            oidc_providers.push(serialize_inherited_resource(
-                provider,
-                cluster_name,
-                "OIDCProvider",
-            )?);
+            oidc_providers.push(serialize_inherited_resource(provider, cluster_name)?);
             if let Some(ref secret_ref) = provider.spec.client_secret {
                 secret_names.insert(secret_ref.name.clone());
             }
@@ -189,7 +181,6 @@ where
 fn serialize_inherited_resource<T>(
     resource: &T,
     cluster_name: &str,
-    _resource_type: &str,
 ) -> Result<Vec<u8>, ResourceError>
 where
     T: serde::Serialize + Clone + Resource<DynamicType = ()>,
@@ -438,7 +429,7 @@ mod tests {
     #[test]
     fn test_serialize_inherited_resource_prefixes_name() {
         let policy = sample_cedar_policy();
-        let result = serialize_inherited_resource(&policy, "global-root", "CedarPolicy").unwrap();
+        let result = serialize_inherited_resource(&policy, "global-root").unwrap();
         let json = String::from_utf8(result).unwrap();
 
         assert!(json.contains("global-root--admin-access"));
@@ -448,7 +439,7 @@ mod tests {
     #[test]
     fn test_serialize_inherited_resource_adds_origin_labels() {
         let policy = sample_cedar_policy();
-        let result = serialize_inherited_resource(&policy, "global-root", "CedarPolicy").unwrap();
+        let result = serialize_inherited_resource(&policy, "global-root").unwrap();
         let json = String::from_utf8(result).unwrap();
 
         assert!(json.contains(ORIGIN_CLUSTER_LABEL));
@@ -461,7 +452,7 @@ mod tests {
     #[test]
     fn test_serialize_inherited_resource_strips_metadata() {
         let policy = sample_cedar_policy();
-        let result = serialize_inherited_resource(&policy, "global-root", "CedarPolicy").unwrap();
+        let result = serialize_inherited_resource(&policy, "global-root").unwrap();
         let json = String::from_utf8(result).unwrap();
 
         assert!(!json.contains("policy-uid-12345"));
@@ -470,8 +461,7 @@ mod tests {
     #[test]
     fn test_serialize_inherited_resource_works_for_oidc_provider() {
         let provider = sample_oidc_provider();
-        let result =
-            serialize_inherited_resource(&provider, "global-root", "OIDCProvider").unwrap();
+        let result = serialize_inherited_resource(&provider, "global-root").unwrap();
         let json = String::from_utf8(result).unwrap();
 
         assert!(json.contains("global-root--corporate-idp"));

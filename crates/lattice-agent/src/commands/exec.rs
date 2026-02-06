@@ -93,7 +93,12 @@ async fn handle_forwarded_exec(req: &ExecRequest, ctx: &CommandContext) {
                         );
 
                         // Relay data from child back to parent
-                        while let Some(data) = data_rx.recv().await {
+                        while let Some(mut data) = data_rx.recv().await {
+                            // Rewrite request_id to match the original command_id.
+                            // When forwarding through child clusters, the inner tunnel
+                            // generates a new request_id. The parent cell is waiting
+                            // for the original one.
+                            data.request_id = request_id.clone();
                             let msg = AgentMessage {
                                 cluster_name: cluster_name.clone(),
                                 payload: Some(Payload::ExecData(data)),
