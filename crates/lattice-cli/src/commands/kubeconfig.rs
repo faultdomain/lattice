@@ -16,6 +16,9 @@
 //! # Direct mode with explicit server + token (no cluster access needed)
 //! lattice kubeconfig --server https://lattice.example.com --token <token>
 //!
+//! # Force port-forward (useful for Docker/kind clusters)
+//! lattice kubeconfig --kubeconfig /path/to/mgmt --port-forward
+//!
 //! # Save to file
 //! lattice kubeconfig --kubeconfig /path/to/mgmt -o /tmp/lattice-kubeconfig
 //! ```
@@ -24,7 +27,7 @@ use clap::Args;
 use kube::api::ListParams;
 use kube::Api;
 use lattice_operator::crd::LatticeCluster;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::{Error, Result};
 
@@ -59,11 +62,17 @@ pub struct KubeconfigArgs {
     /// Skip TLS certificate verification (for development)
     #[arg(long, default_value = "false")]
     pub insecure: bool,
+
+    /// Use kubectl port-forward instead of connecting to the proxy directly.
+    /// Enabled automatically for Docker/kind clusters where the proxy IP
+    /// is only reachable from inside the Docker network.
+    #[arg(long, default_value = "false")]
+    pub port_forward: bool,
 }
 
 /// Run the kubeconfig command
 pub async fn run(args: KubeconfigArgs) -> Result<()> {
-    let (server, token) = resolve_server_and_token(&args).await?;
+    let (server, token, _port_forward) = resolve_server_and_token(&args).await?;
     let kubeconfig_json = fetch_kubeconfig(&server, &token, args.insecure).await?;
 
     match &args.output {
@@ -83,14 +92,20 @@ pub async fn run(args: KubeconfigArgs) -> Result<()> {
 
 /// Resolve the proxy server URL and bearer token.
 ///
+/// Returns `(server_url, token, Option<PortForward>)`. The `PortForward` is kept
+/// alive as long as the caller holds it - dropping it kills the kubectl process.
+///
 /// Priority:
 /// - `--server` overrides auto-discovered proxy URL
 /// - `--token` overrides auto-generated SA token
 /// - `--kubeconfig` provides both via cluster introspection
-async fn resolve_server_and_token(args: &KubeconfigArgs) -> Result<(String, String)> {
+/// - `--port-forward` forces a kubectl port-forward instead of direct access
+async fn resolve_server_and_token(
+    args: &KubeconfigArgs,
+) -> Result<(String, String, Option<super::port_forward::PortForward>)> {
     // If both server and token are explicit, no cluster access needed
     if let (Some(server), Some(token)) = (&args.server, &args.token) {
-        return Ok((server.clone(), token.clone()));
+        return Ok((server.clone(), token.clone(), None));
     }
 
     // We need a kubeconfig to discover server and/or create a token
@@ -101,11 +116,30 @@ async fn resolve_server_and_token(args: &KubeconfigArgs) -> Result<(String, Stri
     })?;
 
     // Auto-discover proxy URL from the cluster if not provided
-    let server = match &args.server {
-        Some(s) => s.clone(),
+    let (server, port_forward) = match &args.server {
+        Some(s) => (s.clone(), None),
         None => {
             debug!("Discovering proxy endpoint from cluster");
-            discover_proxy_endpoint(kubeconfig_path).await?
+            let endpoint = discover_proxy_endpoint(kubeconfig_path).await?;
+
+            // If --port-forward is set, or the endpoint is a Docker-internal IP
+            // (172.18.x.x), start a port-forward so we can reach it from the host.
+            if args.port_forward || is_docker_internal_ip(&endpoint) {
+                if is_docker_internal_ip(&endpoint) {
+                    info!(
+                        "Detected Docker-internal IP in endpoint ({}), using port-forward",
+                        endpoint
+                    );
+                }
+                let pf = super::port_forward::PortForward::start(
+                    kubeconfig_path,
+                    lattice_common::DEFAULT_AUTH_PROXY_PORT,
+                )?;
+                let url = pf.url.clone();
+                (url, Some(pf))
+            } else {
+                (endpoint, None)
+            }
         }
     };
 
@@ -126,13 +160,13 @@ async fn resolve_server_and_token(args: &KubeconfigArgs) -> Result<(String, Stri
         }
     };
 
-    Ok((server, token))
+    Ok((server, token, port_forward))
 }
 
-/// Discover the proxy endpoint from a parent cluster's LatticeCluster CRD.
+/// Discover the auth proxy endpoint from a parent cluster's LatticeCluster CRD.
 ///
-/// Connects to the cluster, finds the self LatticeCluster (the one with
-/// `parent_config`), and returns its `proxy_endpoint()`.
+/// Connects to the cluster, finds the parent LatticeCluster (the one with
+/// `parent_config`), and returns its `auth_proxy_endpoint()` (port 8082).
 async fn discover_proxy_endpoint(kubeconfig_path: &str) -> Result<String> {
     let client = super::kube_client_from_path(kubeconfig_path).await?;
 
@@ -158,13 +192,28 @@ async fn discover_proxy_endpoint(kubeconfig_path: &str) -> Result<String> {
         .spec
         .parent_config
         .as_ref()
-        .and_then(|e| e.proxy_endpoint())
+        .and_then(|e| e.auth_proxy_endpoint())
         .ok_or_else(|| {
             Error::command_failed(
                 "parent cluster has no proxy endpoint (host not set). \
                  Use --server to specify the proxy URL manually.",
             )
         })
+}
+
+/// Check if a URL contains a Docker-internal IP (172.18.x.x subnet).
+///
+/// Docker/kind clusters expose services on the Docker bridge network which
+/// is not routable from the host. We detect this and auto-enable port-forward.
+fn is_docker_internal_ip(url: &str) -> bool {
+    // Extract the host from the URL (strip scheme and port)
+    let host = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = host.split(':').next().unwrap_or(host);
+
+    host.starts_with("172.18.")
 }
 
 /// Fetch kubeconfig JSON from the proxy's /kubeconfig endpoint
@@ -208,4 +257,22 @@ async fn fetch_kubeconfig(server: &str, token: &str, insecure: bool) -> Result<S
         .map_err(|e| Error::command_failed(format!("proxy returned invalid JSON: {}", e)))?;
 
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_docker_internal_ip() {
+        assert!(is_docker_internal_ip("https://172.18.255.1:8082"));
+        assert!(is_docker_internal_ip("https://172.18.0.2:8082"));
+        assert!(is_docker_internal_ip("http://172.18.1.1:8082"));
+        assert!(is_docker_internal_ip("172.18.100.5"));
+
+        assert!(!is_docker_internal_ip("https://10.0.0.1:8082"));
+        assert!(!is_docker_internal_ip("https://192.168.1.1:8082"));
+        assert!(!is_docker_internal_ip("https://lattice.example.com:8082"));
+        assert!(!is_docker_internal_ip("https://172.19.0.1:8082"));
+    }
 }

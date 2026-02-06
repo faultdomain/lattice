@@ -1072,35 +1072,6 @@ pub async fn get_machine_phases(client: &Client, namespace: &str) -> Result<Vec<
     Ok(phases)
 }
 
-/// Get count of ready worker nodes (excludes control-plane)
-pub async fn get_ready_worker_count(client: &Client) -> Result<usize, Error> {
-    let nodes: Api<Node> = Api::all(client.clone());
-    let node_list = nodes.list(&ListParams::default()).await.map_err(|e| {
-        Error::internal_with_context(
-            "get_ready_worker_count",
-            format!("Failed to list nodes: {}", e),
-        )
-    })?;
-
-    let ready_workers = node_list.items.iter().filter(|node| {
-        // Check if it's a worker (no control-plane label)
-        let is_worker = node
-            .metadata
-            .labels
-            .as_ref()
-            .map(|labels| !labels.contains_key("node-role.kubernetes.io/control-plane"))
-            .unwrap_or(true);
-
-        // Check if Ready using the has_condition helper
-        let conditions = node.status.as_ref().and_then(|s| s.conditions.as_ref());
-        let is_ready = has_condition(conditions.map(|c| c.as_slice()), CONDITION_READY);
-
-        is_worker && is_ready
-    });
-
-    Ok(ready_workers.count())
-}
-
 /// Known Kubernetes/CAPI resource pluralizations
 const KIND_PLURALS: &[(&str, &str)] = &[
     // Core CAPI types

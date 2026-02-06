@@ -1,7 +1,10 @@
-//! WebSocket proxy for exec/attach/portforward
+//! WebSocket proxy for exec/attach
 //!
-//! Handles WebSocket upgrade for kubectl exec/attach/portforward requests
+//! Handles WebSocket upgrade for kubectl exec/attach requests
 //! and bridges them to the gRPC tunnel or local K8s API.
+//!
+//! Portforward is handled separately by the `portforward` module using
+//! transparent HTTP upgrade proxying.
 
 mod handlers;
 mod websocket;

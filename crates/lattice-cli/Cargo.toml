@@ -40,7 +40,7 @@ kube.workspace = true
 k8s-openapi.workspace = true
 
 # HTTP
-reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+reqwest = { workspace = true, features = ["rustls-tls", "json", "blocking"] }
 
 # Time
 chrono.workspace = true

@@ -49,10 +49,10 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 const DEFAULT_CONTENT_TYPE: &str = "application/json";
 
 /// Path to the in-cluster CA certificate
-const CA_CERT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+pub(crate) const CA_CERT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 
 /// Path to the ServiceAccount token
-const TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+pub(crate) const TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
 /// Impersonation header names that must be stripped from incoming requests
 const IMPERSONATION_HEADERS: &[&str] = &[
@@ -501,7 +501,7 @@ fn build_buffered_response(response: HttpResponse) -> Result<Response<Body>, Err
 // ============================================================================
 
 /// Strip any user-supplied impersonation headers to prevent privilege escalation
-fn strip_impersonation_headers(request: Request<Body>) -> Request<Body> {
+pub(crate) fn strip_impersonation_headers(request: Request<Body>) -> Request<Body> {
     let (mut parts, body) = request.into_parts();
 
     for header in IMPERSONATION_HEADERS {

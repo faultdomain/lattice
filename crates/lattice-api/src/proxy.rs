@@ -32,7 +32,7 @@ pub struct ProxyPath {
 
 /// Path parameters for exec/attach/portforward routes
 #[derive(Debug, Deserialize)]
-pub struct ExecPath {
+pub(crate) struct ExecPath {
     /// Target cluster name
     pub cluster_name: String,
     /// Namespace
@@ -42,7 +42,7 @@ pub struct ExecPath {
 }
 
 /// Look up cluster attributes from the backend for Cedar authorization
-async fn cluster_attrs(state: &AppState, cluster_name: &str) -> ClusterAttributes {
+pub(crate) async fn cluster_attrs(state: &AppState, cluster_name: &str) -> ClusterAttributes {
     match state.backend.get_route(cluster_name).await {
         Some(route) => ClusterAttributes::from_labels(&route.labels),
         None => ClusterAttributes::default(),
@@ -61,7 +61,7 @@ async fn cluster_attrs(state: &AppState, cluster_name: &str) -> ClusterAttribute
         otel.kind = "server"
     )
 )]
-pub async fn proxy_handler(
+pub(crate) async fn proxy_handler(
     State(state): State<AppState>,
     Path(params): Path<ProxyPath>,
     request: Request<Body>,
@@ -107,7 +107,7 @@ pub async fn proxy_handler(
         otel.kind = "server"
     )
 )]
-pub async fn exec_handler(
+pub(crate) async fn exec_handler(
     State(state): State<AppState>,
     Path(params): Path<ExecPath>,
     ws: WebSocketUpgrade,

@@ -35,6 +35,13 @@ use crate::phases::{
     handle_pending, handle_pivoting, handle_provisioning, handle_ready, update_status,
 };
 
+/// Ready node counts returned by [`KubeClient::get_ready_node_counts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeCounts {
+    pub ready_control_plane: u32,
+    pub ready_workers: u32,
+}
+
 /// Helper function to get a Kubernetes resource by name, returning None if not found.
 ///
 /// This reduces boilerplate for the common pattern of handling 404 errors when
@@ -65,10 +72,10 @@ pub trait KubeClient: Send + Sync {
     /// * `status` - New status to apply
     async fn patch_status(&self, name: &str, status: &LatticeClusterStatus) -> Result<(), Error>;
 
-    /// Get the count of ready worker nodes
+    /// Get ready node counts (control plane and workers) in a single API call.
     ///
-    /// Worker nodes are nodes without the control-plane role label.
-    async fn get_ready_worker_count(&self) -> Result<u32, Error>;
+    /// Returns `(ready_control_plane, ready_workers)`.
+    async fn get_ready_node_counts(&self) -> Result<NodeCounts, Error>;
 
     /// Check if control plane nodes have the NoSchedule taint
     async fn are_control_plane_nodes_tainted(&self) -> Result<bool, Error>;
@@ -184,19 +191,29 @@ impl KubeClient for KubeClientImpl {
         Ok(())
     }
 
-    async fn get_ready_worker_count(&self) -> Result<u32, Error> {
+    async fn get_ready_node_counts(&self) -> Result<NodeCounts, Error> {
         use k8s_openapi::api::core::v1::Node;
 
         let api: Api<Node> = Api::all(self.client.clone());
         let nodes = api.list(&Default::default()).await?;
 
-        let ready_workers = nodes
-            .items
-            .iter()
-            .filter(|node| is_ready_worker_node(node))
-            .count() as u32;
+        let mut ready_control_plane = 0u32;
+        let mut ready_workers = 0u32;
 
-        Ok(ready_workers)
+        for node in &nodes.items {
+            if is_node_ready(node) {
+                if is_control_plane_node(node) {
+                    ready_control_plane += 1;
+                } else {
+                    ready_workers += 1;
+                }
+            }
+        }
+
+        Ok(NodeCounts {
+            ready_control_plane,
+            ready_workers,
+        })
     }
 
     async fn are_control_plane_nodes_tainted(&self) -> Result<bool, Error> {
@@ -667,13 +684,6 @@ pub(crate) fn is_node_ready(node: &k8s_openapi::api::core::v1::Node) -> bool {
                 .any(|c| c.type_ == "Ready" && c.status == "True")
         })
         .unwrap_or(false)
-}
-
-/// Check if a node is a ready worker (not control plane and Ready).
-///
-/// This is used to count ready workers for scaling decisions.
-pub(crate) fn is_ready_worker_node(node: &k8s_openapi::api::core::v1::Node) -> bool {
-    !is_control_plane_node(node) && is_node_ready(node)
 }
 
 /// Check if a control plane node has the NoSchedule taint.
@@ -1806,7 +1816,12 @@ mod tests {
             let mut mock = MockKubeClient::new();
             // Default expectations for node operations (Ready phase)
             // Return 2 workers to match sample_cluster spec (so we get 60s requeue)
-            mock.expect_get_ready_worker_count().returning(|| Ok(2));
+            mock.expect_get_ready_node_counts().returning(|| {
+                Ok(NodeCounts {
+                    ready_control_plane: 1,
+                    ready_workers: 2,
+                })
+            });
             mock.expect_are_control_plane_nodes_tainted()
                 .returning(|| Ok(true));
             mock.expect_taint_control_plane_nodes().returning(|| Ok(()));
@@ -2791,17 +2806,6 @@ mod tests {
 
             assert!(is_node_ready(&ready_node));
             assert!(!is_node_ready(&not_ready));
-        }
-
-        #[test]
-        fn is_ready_worker_node_excludes_control_plane() {
-            let ready_worker = make_node("worker", false, true, false);
-            let ready_cp = make_node("cp", true, true, true);
-            let not_ready_worker = make_node("worker-sick", false, false, false);
-
-            assert!(is_ready_worker_node(&ready_worker));
-            assert!(!is_ready_worker_node(&ready_cp)); // Control plane excluded
-            assert!(!is_ready_worker_node(&not_ready_worker)); // Not ready excluded
         }
 
         #[test]

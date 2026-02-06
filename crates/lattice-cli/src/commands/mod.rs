@@ -16,6 +16,7 @@ pub mod get;
 pub mod install;
 pub mod kind_utils;
 pub mod kubeconfig;
+pub mod port_forward;
 pub mod token;
 pub mod uninstall;
 

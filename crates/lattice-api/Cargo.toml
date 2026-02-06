@@ -27,6 +27,8 @@ async-trait = { workspace = true }
 # HTTP
 axum = { workspace = true, features = ["ws"] }
 axum-server = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 reqwest = { workspace = true }
 
 # Auth

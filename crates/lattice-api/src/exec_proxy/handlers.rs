@@ -1,7 +1,10 @@
-//! WebSocket handlers for exec/attach/portforward
+//! WebSocket handlers for exec/attach
 //!
-//! Handles WebSocket upgrade for kubectl exec/attach/portforward requests
+//! Handles WebSocket upgrade for kubectl exec/attach requests
 //! and bridges them to the gRPC tunnel or local K8s API.
+//!
+//! Portforward is handled separately by the `portforward` module using
+//! transparent HTTP upgrade proxying.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
@@ -12,9 +15,7 @@ use kube::Client;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
-use lattice_proto::{
-    parse_exec_command, parse_exec_params, parse_exec_path, parse_portforward_ports, stream_id,
-};
+use lattice_proto::{parse_exec_command, parse_exec_params, parse_exec_path, stream_id};
 
 use crate::backend::ExecTunnelRequest;
 
@@ -155,12 +156,6 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
     };
 
     let pods: Api<Pod> = Api::namespaced(client, namespace);
-
-    // Handle portforward separately - it uses a different API
-    if subresource == "portforward" {
-        handle_local_portforward(ws_sender, ws_receiver, pods, pod_name, &query).await;
-        return;
-    }
 
     let attach_params = to_attach_params(parse_exec_params(&query));
     let commands = parse_exec_command(&query);
@@ -310,108 +305,6 @@ async fn forward_reader_to_channel<R, T, F>(
             Err(_) => break,
         }
     }
-}
-
-/// Handle portforward for the local cluster
-async fn handle_local_portforward(
-    mut ws_sender: futures::stream::SplitSink<WebSocket, Message>,
-    mut ws_receiver: futures::stream::SplitStream<WebSocket>,
-    pods: Api<Pod>,
-    pod_name: &str,
-    query: &str,
-) {
-    let ports = parse_portforward_ports(query);
-
-    if ports.is_empty() {
-        send_k8s_error_and_close(&mut ws_sender, "No ports specified").await;
-        return;
-    }
-
-    // Support single port for now
-    let port = ports[0];
-
-    info!(pod = %pod_name, port, "Starting local portforward session");
-
-    // Start portforwarder
-    let mut pf = match pods.portforward(pod_name, &[port]).await {
-        Ok(pf) => pf,
-        Err(e) => {
-            error!(error = %e, "Failed to start portforward");
-            send_k8s_error_and_close(&mut ws_sender, format!("portforward failed: {}", e)).await;
-            return;
-        }
-    };
-
-    // Get the stream for the port
-    let stream = match pf.take_stream(port) {
-        Some(s) => s,
-        None => {
-            error!(port, "Failed to get stream for port");
-            send_k8s_error_and_close(
-                &mut ws_sender,
-                format!("Failed to get stream for port {}", port),
-            )
-            .await;
-            return;
-        }
-    };
-
-    info!(pod = %pod_name, port, "Local portforward session established");
-
-    let (reader, mut writer) = tokio::io::split(stream);
-
-    // Create channel for forwarding data from pod to WebSocket
-    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-
-    // Spawn reader task using shared forwarder
-    let reader_handle = tokio::spawn(async move {
-        forward_reader_to_channel(reader, output_tx, |data| data).await;
-    });
-
-    // Handle bidirectional communication
-    loop {
-        tokio::select! {
-            ws_msg = ws_receiver.next() => {
-                match ws_msg {
-                    Some(Ok(Message::Binary(data))) => {
-                        // For portforward, data is sent raw (no channel prefix)
-                        if writer.write_all(&data).await.is_err() {
-                            break;
-                        }
-                        let _ = writer.flush().await;
-                    }
-                    Some(Ok(Message::Text(text))) => {
-                        if writer.write_all(text.as_bytes()).await.is_err() {
-                            break;
-                        }
-                        let _ = writer.flush().await;
-                    }
-                    Some(Ok(Message::Close(_))) => break,
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = ws_sender.send(Message::Pong(data)).await;
-                    }
-                    Some(Ok(Message::Pong(_))) => {}
-                    Some(Err(_)) | None => break,
-                }
-            }
-
-            output = output_rx.recv() => {
-                match output {
-                    Some(data) => {
-                        if ws_sender.send(Message::Binary(data.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-
-    let _ = reader_handle.await;
-
-    send_close_normal(&mut ws_sender, "Portforward session ended").await;
-    info!(pod = %pod_name, port, "Local portforward session closed");
 }
 
 /// Handle exec for remote clusters through backend tunnel

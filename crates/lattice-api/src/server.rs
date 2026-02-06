@@ -14,6 +14,7 @@ use crate::backend::ProxyBackend;
 use crate::cedar::PolicyEngine;
 use crate::error::Error;
 use crate::kubeconfig::kubeconfig_handler;
+use crate::portforward::portforward_handler;
 use crate::proxy::{exec_handler, proxy_handler};
 
 /// Server configuration
@@ -100,7 +101,7 @@ pub async fn start_server(
         )
         .route(
             "/clusters/{cluster_name}/api/v1/namespaces/{ns}/pods/{pod}/portforward",
-            any(exec_handler),
+            any(portforward_handler),
         )
         // K8s API proxy - route all cluster paths to the proxy handler
         .route("/clusters/{cluster_name}", any(proxy_handler))

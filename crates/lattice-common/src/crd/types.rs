@@ -582,6 +582,14 @@ impl EndpointsSpec {
             .as_ref()
             .map(|h| format!("https://{}:{}", h, self.proxy_port))
     }
+
+    /// Get the authenticated proxy endpoint URL for user/service access (Cedar-authorized)
+    /// Returns None if host is not set
+    pub fn auth_proxy_endpoint(&self) -> Option<String> {
+        self.host
+            .as_ref()
+            .map(|h| format!("https://{}:{}", h, crate::DEFAULT_AUTH_PROXY_PORT))
+    }
 }
 
 /// Service exposure specification

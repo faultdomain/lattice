@@ -1228,144 +1228,11 @@ pub async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, Stri
         .ok_or_else(|| "LoadBalancer IP not available".to_string())
 }
 
-/// Base port for deterministic port allocation.
+/// Re-export the shared PortForward as ResilientPortForward for backwards compatibility.
+/// The shared module provides zombie cleanup, active health checking, exponential backoff,
+/// and restart counting in addition to the basic watchdog.
 #[cfg(feature = "provider-e2e")]
-const PROXY_PORT_BASE: u16 = 19000;
-/// Range of ports for deterministic allocation (19000-28999).
-#[cfg(feature = "provider-e2e")]
-const PROXY_PORT_RANGE: u16 = 10000;
-
-/// Get a deterministic port based on kubeconfig path.
-///
-/// This ensures that if a port-forward dies and restarts, it uses the same
-/// local port, keeping any generated kubeconfigs valid.
-#[cfg(feature = "provider-e2e")]
-pub fn deterministic_port(kubeconfig: &str) -> u16 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    kubeconfig.hash(&mut hasher);
-    PROXY_PORT_BASE + ((hasher.finish() % PROXY_PORT_RANGE as u64) as u16)
-}
-
-/// Check if a proxy URL is healthy by hitting its /healthz endpoint.
-#[cfg(feature = "provider-e2e")]
-fn check_proxy_health(url: &str, timeout_secs: u32) -> bool {
-    let health_url = format!("{}/healthz", url);
-    matches!(
-        run_cmd(
-            "curl",
-            &[
-                "-s",
-                "-o",
-                "/dev/null",
-                "-w",
-                "%{http_code}",
-                "--insecure",
-                "--max-time",
-                &timeout_secs.to_string(),
-                &health_url,
-            ],
-        ),
-        Ok(output) if output.trim() == "200"
-    )
-}
-
-/// Spawn a kubectl port-forward process to the proxy service.
-#[cfg(feature = "provider-e2e")]
-fn spawn_port_forward(kubeconfig: &str, local_port: u16) -> Result<std::process::Child, String> {
-    use std::process::{Command, Stdio};
-
-    Command::new("kubectl")
-        .args([
-            "--kubeconfig",
-            kubeconfig,
-            "port-forward",
-            &format!("svc/{}", PROXY_SERVICE_NAME),
-            &format!("{}:{}", local_port, PROXY_PORT),
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn port-forward: {}", e))
-}
-
-/// Start a port-forward to the proxy service and wait until it's healthy.
-///
-/// Internal function used by ResilientPortForward.
-/// Retries automatically if the auth proxy isn't ready yet.
-#[cfg(feature = "provider-e2e")]
-fn start_proxy_port_forward(
-    kubeconfig: &str,
-    local_port: u16,
-) -> Result<(String, std::process::Child), String> {
-    if !proxy_service_exists(kubeconfig) {
-        return Err(format!(
-            "{} service not found - proxy may not be deployed",
-            PROXY_SERVICE_NAME
-        ));
-    }
-
-    info!(
-        "[Helpers] Starting port-forward to {}:{} on localhost:{}",
-        PROXY_SERVICE_NAME, PROXY_PORT, local_port
-    );
-
-    let url = format!("https://127.0.0.1:{}", local_port);
-    let max_attempts = 90;
-
-    for attempt in 1..=max_attempts {
-        // Start port-forward
-        let mut child = match spawn_port_forward(kubeconfig, local_port) {
-            Ok(c) => c,
-            Err(e) => {
-                if attempt == max_attempts {
-                    return Err(e);
-                }
-                std::thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-        };
-
-        // Wait for port-forward to become ready (or die)
-        for _ in 0..10 {
-            // Check if process died (auth proxy not listening yet)
-            if let Ok(Some(_)) = child.try_wait() {
-                break;
-            }
-
-            // Check if healthy
-            if check_proxy_health(&url, 2) {
-                info!(
-                    "[Helpers] Port-forward ready at {} (attempt {})",
-                    url, attempt
-                );
-                return Ok((url, child));
-            }
-
-            std::thread::sleep(Duration::from_secs(1));
-        }
-
-        // Process died or timed out - kill it and retry
-        let _ = child.kill();
-        let _ = child.wait();
-
-        if attempt % 10 == 0 {
-            info!(
-                "[Helpers] Port-forward not ready, retrying... (attempt {}/{})",
-                attempt, max_attempts
-            );
-        }
-    }
-
-    Err(format!(
-        "Port-forward failed to become ready after {} seconds",
-        max_attempts
-    ))
-}
+pub use lattice_cli::commands::port_forward::PortForward as ResilientPortForward;
 
 /// Get proxy URL, creating a resilient port-forward if necessary.
 ///
@@ -1376,175 +1243,19 @@ pub fn get_or_create_proxy(
     kubeconfig: &str,
     existing_url: Option<&str>,
 ) -> Result<(String, Option<ResilientPortForward>), String> {
+    use lattice_cli::commands::port_forward::check_health;
+
     if let Some(url) = existing_url {
-        if check_proxy_health(url, 5) {
+        if check_health(url, Duration::from_secs(5)) {
             info!("[Helpers] Using existing proxy URL: {}", url);
             return Ok((url.to_string(), None));
         }
         info!("[Helpers] Existing proxy URL unhealthy, creating fresh port-forward...");
     }
 
-    let pf = ResilientPortForward::start(kubeconfig)?;
+    let pf = ResilientPortForward::start(kubeconfig, PROXY_PORT).map_err(|e| e.to_string())?;
     let url = pf.url.clone();
     Ok((url, Some(pf)))
-}
-
-/// A resilient port-forward that automatically restarts when it dies.
-///
-/// Spawns a background watchdog thread that monitors the port-forward process
-/// and restarts it automatically when it terminates. This is essential for
-/// long-running E2E tests where the operator pod may be restarted (e.g., by
-/// chaos monkey or during upgrades).
-///
-/// The watchdog checks every 2 seconds and restarts the port-forward if needed.
-/// Uses deterministic ports so kubeconfigs remain valid across restarts.
-#[cfg(feature = "provider-e2e")]
-pub struct ResilientPortForward {
-    port: u16,
-    pub url: String,
-    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    watchdog_handle: Option<std::thread::JoinHandle<()>>,
-}
-
-#[cfg(feature = "provider-e2e")]
-impl ResilientPortForward {
-    /// Start a resilient port-forward with automatic restart.
-    ///
-    /// The port-forward will be monitored by a background watchdog thread that
-    /// restarts it automatically when it dies.
-    pub fn start(kubeconfig: &str) -> Result<Self, String> {
-        let port = deterministic_port(kubeconfig);
-        let url = format!("https://127.0.0.1:{}", port);
-
-        // Start initial port-forward
-        let (_, initial_child) = start_proxy_port_forward(kubeconfig, port)?;
-
-        let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_flag_clone = stop_flag.clone();
-        let kubeconfig_clone = kubeconfig.to_string();
-        let url_clone = url.clone();
-
-        // Spawn watchdog thread
-        let watchdog_handle = std::thread::spawn(move || {
-            Self::watchdog_loop(
-                initial_child,
-                kubeconfig_clone,
-                port,
-                url_clone,
-                stop_flag_clone,
-            );
-        });
-
-        info!(
-            "[ResilientPortForward] Started with watchdog on port {}",
-            port
-        );
-
-        Ok(Self {
-            port,
-            url,
-            stop_flag,
-            watchdog_handle: Some(watchdog_handle),
-        })
-    }
-
-    /// The watchdog loop that monitors and restarts the port-forward.
-    fn watchdog_loop(
-        mut child: std::process::Child,
-        kubeconfig: String,
-        port: u16,
-        url: String,
-        stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) {
-        loop {
-            // Check if we should stop
-            if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                info!("[ResilientPortForward] Watchdog stopping, killing port-forward");
-                let _ = child.kill();
-                let _ = child.wait();
-                return;
-            }
-
-            // Check if process is still alive
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    // Process died, restart it
-                    info!(
-                        "[ResilientPortForward] Port-forward died (status: {}), restarting on port {}...",
-                        status, port
-                    );
-
-                    // Try to restart with retries
-                    let mut restart_attempts = 0;
-                    loop {
-                        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                            return;
-                        }
-
-                        restart_attempts += 1;
-                        match start_proxy_port_forward(&kubeconfig, port) {
-                            Ok((_, new_child)) => {
-                                child = new_child;
-                                info!(
-                                    "[ResilientPortForward] Port-forward restarted successfully at {}",
-                                    url
-                                );
-                                break;
-                            }
-                            Err(e) => {
-                                if restart_attempts % 10 == 0 {
-                                    warn!(
-                                        "[ResilientPortForward] Failed to restart port-forward (attempt {}): {}",
-                                        restart_attempts, e
-                                    );
-                                }
-                                std::thread::sleep(Duration::from_secs(2));
-                            }
-                        }
-                    }
-                }
-                Ok(None) => {
-                    // Process still running, all good
-                }
-                Err(e) => {
-                    warn!(
-                        "[ResilientPortForward] Error checking port-forward status: {}",
-                        e
-                    );
-                }
-            }
-
-            // Sleep before next check
-            std::thread::sleep(Duration::from_secs(2));
-        }
-    }
-
-    /// Get the local port being used.
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
-    /// Check if the port-forward is currently healthy.
-    pub fn is_healthy(&self) -> bool {
-        check_proxy_health(&self.url, 2)
-    }
-}
-
-#[cfg(feature = "provider-e2e")]
-impl Drop for ResilientPortForward {
-    fn drop(&mut self) {
-        info!(
-            "[ResilientPortForward] Stopping watchdog on port {}",
-            self.port
-        );
-        // Signal watchdog to stop
-        self.stop_flag
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        // Wait for watchdog thread to finish
-        if let Some(handle) = self.watchdog_handle.take() {
-            let _ = handle.join();
-        }
-    }
 }
 
 // =============================================================================
@@ -1760,7 +1471,7 @@ pub struct ProxySession {
     /// SA token for authentication
     token: String,
     /// Resilient port-forward with automatic restart (Docker only, None for cloud)
-    resilient_port_forward: Option<ResilientPortForward>,
+    port_forward: Option<ResilientPortForward>,
 }
 
 #[cfg(feature = "provider-e2e")]
@@ -1769,15 +1480,15 @@ impl ProxySession {
     ///
     /// For cloud providers with LoadBalancer, use `start_cloud` instead.
     pub fn start(kubeconfig: &str) -> Result<Self, String> {
-        let resilient_pf = ResilientPortForward::start(kubeconfig)?;
-        let url = resilient_pf.url.clone();
+        let pf = ResilientPortForward::start(kubeconfig, PROXY_PORT).map_err(|e| e.to_string())?;
+        let url = pf.url.clone();
         let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator")?;
 
         Ok(Self {
             kubeconfig: kubeconfig.to_string(),
             url,
             token,
-            resilient_port_forward: Some(resilient_pf),
+            port_forward: Some(pf),
         })
     }
 
@@ -1790,7 +1501,7 @@ impl ProxySession {
             kubeconfig: kubeconfig.to_string(),
             url: lb_url,
             token,
-            resilient_port_forward: None,
+            port_forward: None,
         })
     }
 
@@ -1810,36 +1521,22 @@ impl ProxySession {
     /// The watchdog handles automatic restarts, but this method waits until
     /// the proxy is actually responding. Returns Ok immediately for cloud providers.
     pub fn ensure_alive(&mut self) -> Result<(), String> {
-        let Some(ref pf) = self.resilient_port_forward else {
+        let Some(ref pf) = self.port_forward else {
             return Ok(()); // Cloud providers don't use port-forward
         };
 
-        if pf.is_healthy() {
-            return Ok(());
-        }
-
-        // Give the watchdog time to restart
-        info!("[ProxySession] Waiting for watchdog to restart port-forward...");
-        std::thread::sleep(Duration::from_secs(3));
-
-        if pf.is_healthy() {
-            Ok(())
-        } else {
-            Err("Port-forward unhealthy after waiting for watchdog".to_string())
-        }
+        pf.wait_until_healthy(Duration::from_secs(10))
+            .map_err(|e| e.to_string())
     }
 
     /// Returns true if using localhost port-forward (Docker), false for cloud.
     fn uses_localhost(&self) -> bool {
-        self.resilient_port_forward.is_some()
+        self.port_forward.is_some()
     }
 
     /// Get the local port (only valid for Docker).
     fn local_port(&self) -> u16 {
-        self.resilient_port_forward
-            .as_ref()
-            .map(|pf| pf.port())
-            .unwrap_or(0)
+        self.port_forward.as_ref().map(|pf| pf.port()).unwrap_or(0)
     }
 
     /// Refresh the ServiceAccount token.
@@ -1995,7 +1692,7 @@ impl ProxySession {
     }
 }
 
-// Note: No explicit Drop needed for ProxySession - ResilientPortForward handles its own cleanup
+// Note: No explicit Drop needed for ProxySession - PortForward handles its own cleanup
 
 // =============================================================================
 // Namespace Helpers

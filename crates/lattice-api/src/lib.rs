@@ -29,6 +29,7 @@ pub mod error;
 pub mod exec_proxy;
 pub mod k8s_forwarder;
 pub mod kubeconfig;
+pub(crate) mod portforward;
 pub mod proxy;
 pub mod routing;
 pub mod sa_auth;

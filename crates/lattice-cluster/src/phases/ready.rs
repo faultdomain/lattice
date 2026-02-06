@@ -12,7 +12,9 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{LatticeCluster, LatticeClusterStatus, WorkerPoolStatus};
 use lattice_common::{capi_namespace, Error};
 
-use crate::controller::{autoscaling_warning, determine_scaling_action, Context, ScalingAction};
+use crate::controller::{
+    autoscaling_warning, determine_scaling_action, Context, NodeCounts, ScalingAction,
+};
 use crate::phases::reconcile_infrastructure;
 
 /// Handle a cluster in the Ready phase.
@@ -41,30 +43,34 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
     let (total_desired, pool_statuses) =
         reconcile_worker_pools(cluster, ctx, &name, &capi_namespace).await?;
 
-    // Get current ready worker count
-    let ready_workers = ctx.kube.get_ready_worker_count().await.unwrap_or_else(|e| {
-        warn!(error = %e, "Failed to get ready worker count, assuming 0");
-        0
+    // Get ready node counts (CP + workers in one API call)
+    let counts = ctx.kube.get_ready_node_counts().await.unwrap_or_else(|e| {
+        warn!(error = %e, "Failed to get ready node counts, assuming 0");
+        NodeCounts {
+            ready_control_plane: 0,
+            ready_workers: 0,
+        }
     });
 
-    // Update status with worker pool information
-    update_worker_status(cluster, ctx, &name, pool_statuses, ready_workers).await;
+    // Update status with node counts and worker pool information
+    update_node_status(cluster, ctx, &name, pool_statuses, counts).await;
 
     debug!(
         desired = total_desired,
-        ready = ready_workers,
-        "worker node status"
+        ready_workers = counts.ready_workers,
+        ready_cp = counts.ready_control_plane,
+        "node status"
     );
 
     // Ensure control plane is tainted when workers are ready
-    if ready_workers >= total_desired {
-        ensure_control_plane_tainted(ctx, ready_workers).await;
+    if counts.ready_workers >= total_desired {
+        ensure_control_plane_tainted(ctx, counts.ready_workers).await;
         Ok(Action::requeue(Duration::from_secs(60)))
     } else {
         // Workers not ready yet, poll faster
         debug!(
             desired = total_desired,
-            ready = ready_workers,
+            ready = counts.ready_workers,
             "waiting for workers to be provisioned by CAPI"
         );
         Ok(Action::requeue(Duration::from_secs(10)))
@@ -164,18 +170,18 @@ async fn execute_scaling_action(
     }
 }
 
-/// Update cluster status with worker pool information.
-async fn update_worker_status(
+/// Update cluster status with node counts and worker pool information.
+async fn update_node_status(
     cluster: &LatticeCluster,
     ctx: &Context,
     name: &str,
     mut pool_statuses: BTreeMap<String, WorkerPoolStatus>,
-    ready_workers: u32,
+    counts: NodeCounts,
 ) {
     // For single-pool clusters, set ready_replicas on the pool
     if pool_statuses.len() == 1 {
         if let Some(pool_status) = pool_statuses.values_mut().next() {
-            pool_status.ready_replicas = ready_workers;
+            pool_status.ready_replicas = counts.ready_workers;
         }
     }
 
@@ -183,12 +189,13 @@ async fn update_worker_status(
     let current_status = cluster.status.clone().unwrap_or_default();
     let updated_status = LatticeClusterStatus {
         worker_pools: pool_statuses,
-        ready_workers: Some(ready_workers),
+        ready_workers: Some(counts.ready_workers),
+        ready_control_plane: Some(counts.ready_control_plane),
         ..current_status
     };
 
     if let Err(e) = ctx.kube.patch_status(name, &updated_status).await {
-        warn!(error = %e, "Failed to update worker pool status");
+        warn!(error = %e, "Failed to update node status");
     }
 }
 
