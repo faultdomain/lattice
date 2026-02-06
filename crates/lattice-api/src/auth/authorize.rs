@@ -42,7 +42,14 @@ pub async fn authenticate_and_authorize(
         "Checking authorization"
     );
 
-    cedar.authorize(&identity, cluster, attrs).await?;
+    cedar
+        .authorize_cluster(&identity.username, &identity.groups, cluster, attrs, None)
+        .await
+        .map_err(|e| match e {
+            lattice_cedar::Error::Forbidden(msg) => Error::Forbidden(msg),
+            lattice_cedar::Error::Config(msg) => Error::Config(msg),
+            other => Error::Internal(other.to_string()),
+        })?;
 
     Ok(identity)
 }

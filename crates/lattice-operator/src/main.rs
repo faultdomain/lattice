@@ -193,6 +193,18 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
     let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
+    // Create shared Cedar policy engine (used by both auth proxy and service controller)
+    let cedar = match PolicyEngine::from_crds(&client).await {
+        Ok(engine) => Arc::new(engine),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load Cedar policies, using default-deny");
+            Arc::new(PolicyEngine::new())
+        }
+    };
+
+    // Start Cedar policy watcher to reload policies when CRDs change
+    start_cedar_policy_watcher(client.clone(), cedar.clone());
+
     // Cell infrastructure (only for Cluster and All modes)
     let parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>;
     let agent_token = tokio_util::sync::CancellationToken::new();
@@ -233,8 +245,14 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         tracing::info!("Cell servers started");
 
         // Start auth proxy server (for authenticated access with Cedar authorization)
-        auth_proxy_handle =
-            start_auth_proxy(&client, servers.clone(), &self_cluster_name, &extra_sans).await;
+        auth_proxy_handle = start_auth_proxy(
+            &client,
+            servers.clone(),
+            &self_cluster_name,
+            &extra_sans,
+            cedar.clone(),
+        )
+        .await;
 
         // Start CA rotation background task
         start_ca_rotation(servers.clone());
@@ -261,7 +279,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     };
 
     tokio::select! {
-        _ = controller_runner::run_controllers(client, mode, self_cluster_name, parent_servers.clone()) => {
+        _ = controller_runner::run_controllers(client, mode, self_cluster_name, parent_servers.clone(), cedar) => {
             tracing::info!("Controllers exited");
         }
         _ = guard.lost() => {
@@ -349,6 +367,7 @@ async fn start_auth_proxy(
     parent_servers: Arc<ParentServers<DefaultManifestGenerator>>,
     cluster_name: &Option<String>,
     extra_sans: &[String],
+    cedar: Arc<PolicyEngine>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     // Get cluster name (default to "unknown")
     let cluster_name = cluster_name
@@ -360,18 +379,6 @@ async fn start_auth_proxy(
 
     // Create auth chain (SA auth only for now, OIDC can be added later)
     let auth_chain = Arc::new(AuthChain::sa_only(sa_validator));
-
-    // Create Cedar policy engine (loads policies from CRDs)
-    let cedar = match PolicyEngine::from_crds(client).await {
-        Ok(engine) => Arc::new(engine),
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to load Cedar policies, using default-deny");
-            Arc::new(PolicyEngine::new())
-        }
-    };
-
-    // Start Cedar policy watcher to reload policies when CRDs change
-    start_cedar_policy_watcher(client.clone(), cedar.clone());
 
     // Generate server certificate and get CA cert for kubeconfig generation
     // Include LB address in SANs if available (for external access)

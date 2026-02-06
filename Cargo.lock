@@ -2197,6 +2197,7 @@ dependencies = [
  "jsonwebtoken",
  "k8s-openapi",
  "kube",
+ "lattice-cedar",
  "lattice-common",
  "lattice-proto",
  "mockall",
@@ -2230,6 +2231,19 @@ dependencies = [
  "tokio",
  "tokio-test",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-cedar"
+version = "0.1.0"
+dependencies = [
+ "cedar-policy",
+ "kube",
+ "lattice-common",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-test",
  "tracing",
 ]
 
@@ -2558,6 +2572,7 @@ dependencies = [
  "jsonptr",
  "k8s-openapi",
  "kube",
+ "lattice-cedar",
  "lattice-common",
  "lattice-infra",
  "lattice-secrets-provider",

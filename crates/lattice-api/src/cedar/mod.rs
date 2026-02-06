@@ -1,8 +1,7 @@
 //! Cedar policy authorization
 //!
-//! Provides fine-grained access control to clusters using Cedar policies.
+//! Re-exports from `lattice-cedar` and provides the validation controller.
 
-mod policy_engine;
 pub mod validation;
 
-pub use policy_engine::{ClusterAttributes, PolicyEngine};
+pub use lattice_cedar::{ClusterAttributes, PolicyEngine};

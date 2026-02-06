@@ -12,6 +12,7 @@ fips = ["lattice-common/fips", "lattice-infra/fips"]
 [dependencies]
 # Internal
 lattice-common = { workspace = true }
+lattice-cedar = { workspace = true }
 lattice-infra = { workspace = true }
 lattice-secrets-provider = { workspace = true }
 

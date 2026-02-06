@@ -1,0 +1,32 @@
+[package]
+name = "lattice-cedar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cedar policy engine for Lattice authorization"
+
+[features]
+default = []
+fips = ["lattice-common/fips"]
+
+[dependencies]
+# Internal
+lattice-common = { workspace = true }
+
+# Cedar
+cedar-policy = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

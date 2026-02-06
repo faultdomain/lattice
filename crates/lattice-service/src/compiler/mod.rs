@@ -14,8 +14,9 @@
 //!
 //! ```text
 //! let graph = ServiceGraph::new();
-//! let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker);
-//! let output = compiler.compile(&lattice_service);
+//! let cedar = PolicyEngine::new();
+//! let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+//! let output = compiler.compile(&lattice_service).await;
 //! // output.workloads, output.policies
 //! ```
 //!
@@ -24,6 +25,8 @@
 //! The compiler determines the environment from the LatticeService in this order:
 //! 1. Label `lattice.dev/environment` on the service
 //! 2. Falls back to namespace
+
+use lattice_cedar::{PolicyEngine, SecretAuthzRequest};
 
 use crate::crd::{LatticeService, ProviderType};
 use crate::graph::ServiceGraph;
@@ -48,6 +51,9 @@ pub enum CompileError {
     /// Invalid secret resource configuration
     #[error("invalid secret config: {0}")]
     InvalidSecret(String),
+    /// Cedar policy denied secret access
+    #[error("secret access denied: {0}")]
+    SecretAccessDenied(String),
 }
 
 impl From<CompileError> for crate::Error {
@@ -108,10 +114,12 @@ impl CompiledService {
 /// LatticeService by delegating to specialized compilers:
 /// - WorkloadCompiler for Deployment, Service, ServiceAccount, HPA
 /// - PolicyCompiler for AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
+/// - Cedar PolicyEngine for secret access authorization
 pub struct ServiceCompiler<'a> {
     graph: &'a ServiceGraph,
     cluster_name: String,
     provider_type: ProviderType,
+    cedar: &'a PolicyEngine,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -121,15 +129,18 @@ impl<'a> ServiceCompiler<'a> {
     /// * `graph` - The service graph for policy generation (bilateral agreement checks)
     /// * `cluster_name` - Cluster name used in trust domain (lattice.{cluster}.local)
     /// * `provider_type` - Infrastructure provider for topology-aware scheduling
+    /// * `cedar` - Cedar policy engine for secret access authorization
     pub fn new(
         graph: &'a ServiceGraph,
         cluster_name: impl Into<String>,
         provider_type: ProviderType,
+        cedar: &'a PolicyEngine,
     ) -> Self {
         Self {
             graph,
             cluster_name: cluster_name.into(),
             provider_type,
+            cedar,
         }
     }
 
@@ -143,10 +154,14 @@ impl<'a> ServiceCompiler<'a> {
     ///
     /// The namespace comes from the CRD's metadata (LatticeService is namespace-scoped).
     ///
+    /// Secret resources are authorized via Cedar policies before ESO generation.
+    /// Default-deny: services with secrets require an explicit `permit` policy.
+    ///
     /// # Errors
     ///
     /// Returns `CompileError::MissingMetadata` if the service is missing name or namespace.
-    pub fn compile(&self, service: &LatticeService) -> Result<CompiledService, CompileError> {
+    /// Returns `CompileError::SecretAccessDenied` if Cedar denies access to any secret path.
+    pub async fn compile(&self, service: &LatticeService) -> Result<CompiledService, CompileError> {
         let name = service
             .metadata
             .name
@@ -165,6 +180,10 @@ impl<'a> ServiceCompiler<'a> {
         // Compile secrets (ExternalSecrets for syncing from Vault via ESO)
         let compiled_secrets = SecretsCompiler::compile(name, namespace, &service.spec)
             .map_err(CompileError::InvalidSecret)?;
+
+        // Authorize secret access via Cedar — default-deny
+        self.authorize_secrets(name, namespace, &service.spec)
+            .await?;
 
         // Delegate to specialized compilers
         let mut workloads = WorkloadCompiler::compile(
@@ -224,6 +243,54 @@ impl<'a> ServiceCompiler<'a> {
             ingress,
             waypoint,
         })
+    }
+
+    /// Authorize secret access via Cedar policies.
+    ///
+    /// Collects all secret resources from the spec, builds a batch authorization
+    /// request, and evaluates it. Returns an error if any path is denied.
+    /// No-ops if the service has no secret resources.
+    async fn authorize_secrets(
+        &self,
+        name: &str,
+        namespace: &str,
+        spec: &crate::crd::LatticeServiceSpec,
+    ) -> Result<(), CompileError> {
+        let secret_paths: Vec<_> = spec
+            .resources
+            .iter()
+            .filter(|(_, r)| r.is_secret())
+            .filter_map(|(resource_name, r)| {
+                let vault_path = r.secret_vault_path()?.to_string();
+                let provider = r.secret_params().ok()??.provider;
+                Some((resource_name.clone(), vault_path, provider))
+            })
+            .collect();
+
+        if secret_paths.is_empty() {
+            return Ok(());
+        }
+
+        let result = self
+            .cedar
+            .authorize_secrets(&SecretAuthzRequest {
+                service_name: name.to_string(),
+                namespace: namespace.to_string(),
+                secret_paths,
+            })
+            .await;
+
+        if !result.is_allowed() {
+            let details = result
+                .denied
+                .iter()
+                .map(|d| format!("'{}': {}", d.resource_name, d.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(CompileError::SecretAccessDenied(details));
+        }
+
+        Ok(())
     }
 }
 
@@ -394,9 +461,10 @@ mod tests {
     // Story: Unified Compilation Delegates to Specialized Compilers
     // =========================================================================
 
-    #[test]
-    fn story_compile_delegates_to_both_compilers() {
+    #[tokio::test]
+    async fn story_compile_delegates_to_both_compilers() {
         let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
         let env = "prod";
 
         // api allows gateway
@@ -410,8 +478,8 @@ mod tests {
         // Create LatticeService for api
         let service = make_service("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker);
-        let output = compiler.compile(&service).unwrap();
+        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
 
         // Should have workloads (from WorkloadCompiler)
         assert!(output.workloads.deployment.is_some());
@@ -427,9 +495,10 @@ mod tests {
     // Story: Environment Resolution
     // =========================================================================
 
-    #[test]
-    fn story_environment_from_label() {
+    #[tokio::test]
+    async fn story_environment_from_label() {
         let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
 
         // Put service in "staging" environment
         let spec = make_service_spec_for_graph(vec![], vec![]);
@@ -438,16 +507,17 @@ mod tests {
         // Create LatticeService with staging label
         let service = make_service("my-app", "staging");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker);
-        let output = compiler.compile(&service).unwrap();
+        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
 
         // Should find service in graph and generate cilium policy
         assert!(!output.policies.cilium_policies.is_empty());
     }
 
-    #[test]
-    fn story_environment_falls_back_to_namespace() {
+    #[tokio::test]
+    async fn story_environment_falls_back_to_namespace() {
         let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
 
         // Put service in "prod-ns" environment (same as namespace)
         let spec = make_service_spec_for_graph(vec![], vec![]);
@@ -456,8 +526,8 @@ mod tests {
         // Create LatticeService without env label
         let service = make_service("my-app", "prod-ns");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker);
-        let output = compiler.compile(&service).unwrap();
+        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
 
         // Should find service using namespace as env
         assert!(!output.policies.cilium_policies.is_empty());
@@ -467,15 +537,16 @@ mod tests {
     // Story: Workloads Generated Even Without Graph Entry
     // =========================================================================
 
-    #[test]
-    fn story_workloads_without_graph_entry() {
+    #[tokio::test]
+    async fn story_workloads_without_graph_entry() {
         let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
         // Don't add service to graph
 
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker);
-        let output = compiler.compile(&service).unwrap();
+        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
 
         // Should still have workloads
         assert!(output.workloads.deployment.is_some());
@@ -489,16 +560,17 @@ mod tests {
     // Story: Resource Count
     // =========================================================================
 
-    #[test]
-    fn story_resource_count() {
+    #[tokio::test]
+    async fn story_resource_count() {
         let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("default", "my-app", &spec);
 
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker);
-        let output = compiler.compile(&service).unwrap();
+        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
 
         // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointAuthPolicy = 6
         // (VirtualService is generated per dependency, not per service)
@@ -509,16 +581,17 @@ mod tests {
     // Story: CompiledService Utility Methods
     // =========================================================================
 
-    #[test]
-    fn story_compiled_service_is_empty() {
+    #[tokio::test]
+    async fn story_compiled_service_is_empty() {
         let empty = CompiledService::new();
         assert!(empty.is_empty());
 
         let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker);
-        let output = compiler.compile(&service).unwrap();
+        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
         assert!(!output.is_empty());
     }
 
@@ -526,16 +599,17 @@ mod tests {
     // Story: Ingress Integration
     // =========================================================================
 
-    #[test]
-    fn story_service_with_ingress_generates_gateway_resources() {
+    #[tokio::test]
+    async fn story_service_with_ingress_generates_gateway_resources() {
         let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker);
-        let output = compiler.compile(&service).unwrap();
+        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
 
         // Should have ingress resources
         assert!(output.ingress.gateway.is_some());
@@ -565,16 +639,17 @@ mod tests {
         assert_eq!(gateway_policies.len(), 1);
     }
 
-    #[test]
-    fn story_service_without_ingress_has_no_gateway_resources() {
+    #[tokio::test]
+    async fn story_service_without_ingress_has_no_gateway_resources() {
         let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
 
         let service = make_service("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker);
-        let output = compiler.compile(&service).unwrap();
+        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
 
         // Should NOT have ingress resources
         assert!(output.ingress.is_empty());
@@ -583,16 +658,17 @@ mod tests {
         assert!(output.ingress.certificate.is_none());
     }
 
-    #[test]
-    fn story_resource_count_includes_ingress() {
+    #[tokio::test]
+    async fn story_resource_count_includes_ingress() {
         let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker);
-        let output = compiler.compile(&service).unwrap();
+        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
 
         // Should include: Deployment + Service + ServiceAccount + CiliumPolicy +
         //                 Gateway + HTTPRoute + Certificate + GatewayAllowPolicy

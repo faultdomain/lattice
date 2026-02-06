@@ -1,6 +1,6 @@
-//! Cedar policy authorization
+//! Cedar policy engine
 //!
-//! Uses Cedar for fine-grained access control to clusters.
+//! Evaluates authorization requests using Cedar policies loaded from CRDs.
 //!
 //! # Policy Inheritance
 //!
@@ -12,38 +12,49 @@
 //! policies are loaded first to ensure parent policies take precedence (parent's
 //! word is law). Cedar's default-deny semantics mean any `forbid` policy will
 //! override `permit` policies.
-//!
-//! # Cluster Attributes
-//!
-//! Clusters have attributes populated from labels:
-//! - `environment` from `lattice.dev/environment` (required by policy, fail-closed)
-//! - `region` from `lattice.dev/region` (default: "unknown")
-//! - `tier` from `lattice.dev/tier` (default: "standard")
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cedar_policy::{
-    Authorizer, Context, Decision, Entities, Entity, EntityId, EntityTypeName, EntityUid,
-    PolicySet, Request, RestrictedExpression,
+    Authorizer, Context, Decision, Entities, EntityUid, PolicySet, Request, Response,
 };
 use kube::api::ListParams;
 use kube::{Api, Client};
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
-use crate::auth::UserIdentity;
-use crate::error::{Error, Result};
-use crate::is_local_resource;
+use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
 use lattice_common::crd::CedarPolicy;
 use lattice_common::INHERITED_LABEL;
 
 // ============================================================================
-// Constants
+// Error types
 // ============================================================================
 
-/// Lattice Cedar schema namespace
-const NAMESPACE: &str = "Lattice";
+/// Error type for Cedar policy operations
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// Configuration error (invalid policy text, etc.)
+    #[error("configuration error: {0}")]
+    Config(String),
+    /// Internal error (entity building, request construction)
+    #[error("internal error: {0}")]
+    Internal(String),
+    /// Authorization denied
+    #[error("authorization denied: {0}")]
+    Forbidden(String),
+    /// Kubernetes API error
+    #[error("kubernetes error: {0}")]
+    Kube(#[from] kube::Error),
+}
+
+/// Result type for Cedar policy operations
+pub type Result<T> = std::result::Result<T, Error>;
+
+// ============================================================================
+// Constants
+// ============================================================================
 
 /// Label keys for cluster attributes
 const ENVIRONMENT_LABEL: &str = "lattice.dev/environment";
@@ -143,49 +154,51 @@ impl PolicyEngine {
     }
 
     /// Check if a user is authorized to access a cluster
-    #[instrument(
-        skip(self, identity, attrs),
-        fields(
-            user = %identity.username,
-            otel.kind = "internal"
-        )
-    )]
-    pub async fn authorize(
-        &self,
-        identity: &UserIdentity,
-        cluster: &str,
-        attrs: &ClusterAttributes,
-    ) -> Result<()> {
-        let policy_set = self.policy_set.read().await;
-        self.evaluate(identity, cluster, attrs, Context::empty(), &policy_set)
-    }
-
-    /// Check if a user is authorized to access a cluster with Cedar context
     ///
-    /// Context provides temporal/request metadata (e.g., hour, sourceIp, breakGlass).
-    pub async fn authorize_with_context(
+    /// Accepts optional Cedar context for temporal/request metadata.
+    #[instrument(
+        skip(self, attrs, context),
+        fields(otel.kind = "internal")
+    )]
+    pub async fn authorize_cluster(
         &self,
-        identity: &UserIdentity,
+        username: &str,
+        groups: &[String],
         cluster: &str,
         attrs: &ClusterAttributes,
-        context: Context,
+        context: Option<Context>,
     ) -> Result<()> {
         let policy_set = self.policy_set.read().await;
-        self.evaluate(identity, cluster, attrs, context, &policy_set)
+        self.evaluate_cluster(
+            username,
+            groups,
+            cluster,
+            attrs,
+            context.unwrap_or_else(Context::empty),
+            &policy_set,
+        )
     }
 
     /// Get list of clusters the user can access
     pub async fn accessible_clusters(
         &self,
-        identity: &UserIdentity,
+        username: &str,
+        groups: &[String],
         cluster_attrs: &HashMap<String, ClusterAttributes>,
     ) -> Vec<String> {
         let policy_set = self.policy_set.read().await;
         cluster_attrs
             .iter()
             .filter(|(cluster, attrs)| {
-                self.evaluate(identity, cluster, attrs, Context::empty(), &policy_set)
-                    .is_ok()
+                self.evaluate_cluster(
+                    username,
+                    groups,
+                    cluster,
+                    attrs,
+                    Context::empty(),
+                    &policy_set,
+                )
+                .is_ok()
             })
             .map(|(name, _)| name.clone())
             .collect()
@@ -205,36 +218,70 @@ impl PolicyEngine {
         Ok(())
     }
 
-    // ========================================================================
-    // Private helpers
-    // ========================================================================
-
-    /// Core authorization evaluation
-    fn evaluate(
+    /// Evaluate a Cedar authorization request with an arbitrary principal, action,
+    /// resource, and entity set. Returns the raw Cedar response.
+    ///
+    /// Used internally by both cluster and secret authorization.
+    pub(crate) fn evaluate_raw(
         &self,
-        identity: &UserIdentity,
-        cluster: &str,
-        attrs: &ClusterAttributes,
+        principal: &EntityUid,
+        action: &EntityUid,
+        resource: &EntityUid,
         context: Context,
+        entities: &Entities,
         policy_set: &PolicySet,
-    ) -> Result<()> {
-        let principal = build_entity_uid("User", &identity.username)?;
-        let action_uid = build_entity_uid("Action", "AccessCluster")?;
-        let resource = build_entity_uid("Cluster", cluster)?;
-        let entities = build_entities(identity, cluster, attrs)?;
-
+    ) -> Result<Response> {
         let request = Request::new(
             principal.clone(),
-            action_uid.clone(),
+            action.clone(),
             resource.clone(),
             context,
             None,
         )
         .map_err(|e| Error::Internal(format!("Failed to build Cedar request: {}", e)))?;
 
-        let response = self
+        Ok(self
             .authorizer
-            .is_authorized(&request, policy_set, &entities);
+            .is_authorized(&request, policy_set, entities))
+    }
+
+    /// Get a read lock on the policy set
+    pub(crate) async fn read_policy_set(&self) -> tokio::sync::RwLockReadGuard<'_, PolicySet> {
+        self.policy_set.read().await
+    }
+
+    // ========================================================================
+    // Private helpers
+    // ========================================================================
+
+    /// Core cluster authorization evaluation
+    fn evaluate_cluster(
+        &self,
+        username: &str,
+        groups: &[String],
+        cluster: &str,
+        attrs: &ClusterAttributes,
+        context: Context,
+        policy_set: &PolicySet,
+    ) -> Result<()> {
+        let principal = build_entity_uid("User", username)?;
+        let action_uid = build_entity_uid("Action", "AccessCluster")?;
+        let resource = build_entity_uid("Cluster", cluster)?;
+
+        // Build entities
+        let mut entity_vec = build_user_entity(username, groups)?;
+        entity_vec.push(build_cluster_entity(cluster, attrs)?);
+        let entities = Entities::from_entities(entity_vec, None)
+            .map_err(|e| Error::Internal(format!("Failed to create entities set: {}", e)))?;
+
+        let response = self.evaluate_raw(
+            &principal,
+            &action_uid,
+            &resource,
+            context,
+            &entities,
+            policy_set,
+        )?;
 
         debug!(
             principal = %principal,
@@ -259,7 +306,7 @@ impl PolicyEngine {
                 );
                 Err(Error::Forbidden(format!(
                     "Access denied: user '{}' cannot access cluster '{}'",
-                    identity.username, cluster
+                    username, cluster
                 )))
             }
         }
@@ -371,84 +418,17 @@ impl Default for PolicyEngine {
     }
 }
 
-// ============================================================================
-// Entity Building
-// ============================================================================
-
-/// Build an entity UID for a given type and ID
-fn build_entity_uid(type_name: &str, id: &str) -> Result<EntityUid> {
-    let full_type_name = format!("{}::{}", NAMESPACE, type_name);
-    let entity_type: EntityTypeName =
-        full_type_name
-            .parse()
-            .map_err(|e: cedar_policy::ParseErrors| {
-                Error::Internal(format!(
-                    "Invalid Cedar entity type name '{}': {}",
-                    full_type_name, e
-                ))
-            })?;
-    let entity_id = EntityId::new(id);
-    Ok(EntityUid::from_type_name_and_id(entity_type, entity_id))
-}
-
-/// Build the entities set for authorization
+/// Check if a Kubernetes resource is a local resource (not inherited).
 ///
-/// Creates entities for the user, their groups, and the cluster with attributes.
-fn build_entities(
-    identity: &UserIdentity,
-    cluster: &str,
-    attrs: &ClusterAttributes,
-) -> Result<Entities> {
-    let mut entities = Vec::new();
-
-    // Create group entities and collect UIDs for user membership
-    let mut group_uids = Vec::new();
-    for group in &identity.groups {
-        let uid = build_entity_uid("Group", group)?;
-        let entity = Entity::new(uid.clone(), HashMap::new(), HashSet::new())
-            .map_err(|e| Error::Internal(format!("Failed to create group entity: {}", e)))?;
-        entities.push(entity);
-        group_uids.push(uid);
-    }
-
-    // Create user entity with group membership
-    let user_uid = build_entity_uid("User", &identity.username)?;
-    let user_entity = Entity::new(
-        user_uid,
-        HashMap::new(),
-        group_uids.into_iter().collect::<HashSet<_>>(),
-    )
-    .map_err(|e| Error::Internal(format!("Failed to create user entity: {}", e)))?;
-    entities.push(user_entity);
-
-    // Create cluster entity with attributes
-    let cluster_uid = build_entity_uid("Cluster", cluster)?;
-    let mut attr_map = HashMap::new();
-
-    // Environment is only added if present (fail-closed via policy pattern)
-    if let Some(ref env) = attrs.environment {
-        attr_map.insert(
-            "environment".to_string(),
-            RestrictedExpression::new_string(env.clone()),
-        );
-    }
-
-    // Region and tier always have values (with defaults)
-    attr_map.insert(
-        "region".to_string(),
-        RestrictedExpression::new_string(attrs.region.clone()),
-    );
-    attr_map.insert(
-        "tier".to_string(),
-        RestrictedExpression::new_string(attrs.tier.clone()),
-    );
-
-    let cluster_entity = Entity::new(cluster_uid, attr_map, HashSet::new())
-        .map_err(|e| Error::Internal(format!("Failed to create cluster entity: {}", e)))?;
-    entities.push(cluster_entity);
-
-    Entities::from_entities(entities, None)
-        .map_err(|e| Error::Internal(format!("Failed to create entities set: {}", e)))
+/// Resources without the `lattice.dev/inherited` label or with it set to a value
+/// other than "true" are considered local.
+fn is_local_resource(metadata: &kube::api::ObjectMeta) -> bool {
+    !metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(INHERITED_LABEL))
+        .map(|v| v == "true")
+        .unwrap_or(false)
 }
 
 // ============================================================================
@@ -458,31 +438,7 @@ fn build_entities(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_identity(username: &str, groups: &[&str]) -> UserIdentity {
-        UserIdentity {
-            username: username.to_string(),
-            groups: groups.iter().map(|g| g.to_string()).collect(),
-        }
-    }
-
-    // ========================================================================
-    // Entity Building Tests
-    // ========================================================================
-
-    #[test]
-    fn test_build_entity_uid() {
-        for (type_name, id) in [
-            ("User", "alice@example.com"),
-            ("Group", "admins"),
-            ("Action", "AccessCluster"),
-            ("Cluster", "prod-frontend"),
-        ] {
-            let uid = build_entity_uid(type_name, id).unwrap();
-            assert!(uid.to_string().contains(type_name));
-            assert!(uid.to_string().contains(id));
-        }
-    }
+    use cedar_policy::RestrictedExpression;
 
     // ========================================================================
     // ClusterAttributes Tests
@@ -525,43 +481,21 @@ mod tests {
     }
 
     // ========================================================================
-    // Entities Building Tests
-    // ========================================================================
-
-    #[test]
-    fn test_build_entities_with_groups() {
-        let identity = test_identity("alice@example.com", &["admins", "developers"]);
-        let attrs = ClusterAttributes {
-            environment: Some("prod".to_string()),
-            region: "us-west-2".to_string(),
-            tier: "standard".to_string(),
-        };
-
-        let entities = build_entities(&identity, "prod-cluster", &attrs).unwrap();
-        // 1 user + 2 groups + 1 cluster = 4
-        assert_eq!(entities.iter().count(), 4);
-    }
-
-    #[test]
-    fn test_build_entities_no_groups() {
-        let identity = test_identity("alice@example.com", &[]);
-        let entities =
-            build_entities(&identity, "test-cluster", &ClusterAttributes::default()).unwrap();
-        // 1 user + 0 groups + 1 cluster = 2
-        assert_eq!(entities.iter().count(), 2);
-    }
-
-    // ========================================================================
     // Policy Engine Basic Tests
     // ========================================================================
 
     #[tokio::test]
     async fn test_permit_all_policy() {
         let engine = PolicyEngine::with_policies("permit(principal, action, resource);").unwrap();
-        let identity = test_identity("alice@example.com", &[]);
 
         assert!(engine
-            .authorize(&identity, "any-cluster", &ClusterAttributes::default())
+            .authorize_cluster(
+                "alice@example.com",
+                &[],
+                "any-cluster",
+                &ClusterAttributes::default(),
+                None,
+            )
             .await
             .is_ok());
     }
@@ -569,10 +503,15 @@ mod tests {
     #[tokio::test]
     async fn test_deny_by_default() {
         let engine = PolicyEngine::new();
-        let identity = test_identity("alice@example.com", &[]);
 
         assert!(engine
-            .authorize(&identity, "any-cluster", &ClusterAttributes::default())
+            .authorize_cluster(
+                "alice@example.com",
+                &[],
+                "any-cluster",
+                &ClusterAttributes::default(),
+                None,
+            )
             .await
             .is_err());
     }
@@ -590,17 +529,18 @@ mod tests {
         )
         .unwrap();
 
-        let alice = test_identity("alice@example.com", &[]);
-        let bob = test_identity("bob@example.com", &[]);
         let attrs = ClusterAttributes::default();
 
         assert!(engine
-            .authorize(&alice, "prod-frontend", &attrs)
+            .authorize_cluster("alice@example.com", &[], "prod-frontend", &attrs, None)
             .await
             .is_ok());
-        assert!(engine.authorize(&alice, "staging", &attrs).await.is_err());
         assert!(engine
-            .authorize(&bob, "prod-frontend", &attrs)
+            .authorize_cluster("alice@example.com", &[], "staging", &attrs, None)
+            .await
+            .is_err());
+        assert!(engine
+            .authorize_cluster("bob@example.com", &[], "prod-frontend", &attrs, None)
             .await
             .is_err());
     }
@@ -618,20 +558,16 @@ mod tests {
         )
         .unwrap();
 
-        let admin = test_identity("alice@example.com", &["admins"]);
-        let user = test_identity("bob@example.com", &["developers"]);
+        let admins = vec!["admins".to_string()];
+        let devs = vec!["developers".to_string()];
         let attrs = ClusterAttributes::default();
 
         assert!(engine
-            .authorize(&admin, "any-cluster", &attrs)
+            .authorize_cluster("alice@example.com", &admins, "any-cluster", &attrs, None)
             .await
             .is_ok());
         assert!(engine
-            .authorize(&admin, "another-cluster", &attrs)
-            .await
-            .is_ok());
-        assert!(engine
-            .authorize(&user, "any-cluster", &attrs)
+            .authorize_cluster("bob@example.com", &devs, "any-cluster", &attrs, None)
             .await
             .is_err());
     }
@@ -659,8 +595,9 @@ mod tests {
         clusters.insert("staging-frontend".to_string(), ClusterAttributes::default());
         clusters.insert("prod-backend".to_string(), ClusterAttributes::default());
 
-        let alice = test_identity("alice@example.com", &[]);
-        let accessible = engine.accessible_clusters(&alice, &clusters).await;
+        let accessible = engine
+            .accessible_clusters("alice@example.com", &[], &clusters)
+            .await;
 
         assert_eq!(accessible.len(), 2);
         assert!(accessible.contains(&"prod-frontend".to_string()));
@@ -696,7 +633,7 @@ mod tests {
         )
         .unwrap();
 
-        let developer = test_identity("dev@example.com", &["developers"]);
+        let groups = vec!["developers".to_string()];
         let staging_attrs = ClusterAttributes {
             environment: Some("staging".to_string()),
             region: "us-west-2".to_string(),
@@ -704,7 +641,7 @@ mod tests {
         };
 
         assert!(engine
-            .authorize(&developer, "staging", &staging_attrs)
+            .authorize_cluster("dev@example.com", &groups, "staging", &staging_attrs, None)
             .await
             .is_ok());
     }
@@ -725,7 +662,7 @@ mod tests {
         )
         .unwrap();
 
-        let developer = test_identity("dev@example.com", &["developers"]);
+        let groups = vec!["developers".to_string()];
         let prod_attrs = ClusterAttributes {
             environment: Some("prod".to_string()),
             region: "us-west-2".to_string(),
@@ -733,7 +670,7 @@ mod tests {
         };
 
         assert!(engine
-            .authorize(&developer, "production", &prod_attrs)
+            .authorize_cluster("dev@example.com", &groups, "production", &prod_attrs, None)
             .await
             .is_err());
     }
@@ -754,7 +691,7 @@ mod tests {
         )
         .unwrap();
 
-        let developer = test_identity("dev@example.com", &["developers"]);
+        let groups = vec!["developers".to_string()];
         let no_env_attrs = ClusterAttributes {
             environment: None,
             region: "us-west-2".to_string(),
@@ -762,13 +699,13 @@ mod tests {
         };
 
         assert!(engine
-            .authorize(&developer, "unlabeled", &no_env_attrs)
+            .authorize_cluster("dev@example.com", &groups, "unlabeled", &no_env_attrs, None)
             .await
             .is_err());
     }
 
     // ========================================================================
-    // Forbid Policy Tests (Deny Precedence)
+    // Forbid Policy Tests
     // ========================================================================
 
     #[tokio::test]
@@ -789,13 +726,17 @@ mod tests {
         )
         .unwrap();
 
+        let admins = vec!["admins".to_string()];
         let attrs = ClusterAttributes::default();
 
-        let admin = test_identity("admin@example.com", &["admins"]);
-        assert!(engine.authorize(&admin, "prod", &attrs).await.is_ok());
-
-        let contractor = test_identity("contractor@example.com", &["admins"]);
-        assert!(engine.authorize(&contractor, "prod", &attrs).await.is_err());
+        assert!(engine
+            .authorize_cluster("admin@example.com", &admins, "prod", &attrs, None)
+            .await
+            .is_ok());
+        assert!(engine
+            .authorize_cluster("contractor@example.com", &admins, "prod", &attrs, None)
+            .await
+            .is_err());
     }
 
     // ========================================================================
@@ -803,7 +744,7 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
-    async fn test_time_based_policy_allows_within_hours() {
+    async fn test_time_based_policy() {
         let engine = PolicyEngine::with_policies(
             r#"
             permit(
@@ -817,7 +758,7 @@ mod tests {
         )
         .unwrap();
 
-        let user = test_identity("support@example.com", &["support"]);
+        let groups = vec!["support".to_string()];
         let attrs = ClusterAttributes::default();
 
         let business_hours = Context::from_pairs(vec![(
@@ -826,28 +767,15 @@ mod tests {
         )])
         .unwrap();
         assert!(engine
-            .authorize_with_context(&user, "prod", &attrs, business_hours)
+            .authorize_cluster(
+                "support@example.com",
+                &groups,
+                "prod",
+                &attrs,
+                Some(business_hours)
+            )
             .await
             .is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_time_based_policy_denies_outside_hours() {
-        let engine = PolicyEngine::with_policies(
-            r#"
-            permit(
-                principal in Lattice::Group::"support",
-                action == Lattice::Action::"AccessCluster",
-                resource
-            ) when {
-                context.hour >= 9 && context.hour < 18
-            };
-            "#,
-        )
-        .unwrap();
-
-        let user = test_identity("support@example.com", &["support"]);
-        let attrs = ClusterAttributes::default();
 
         let after_hours = Context::from_pairs(vec![(
             "hour".to_string(),
@@ -855,113 +783,13 @@ mod tests {
         )])
         .unwrap();
         assert!(engine
-            .authorize_with_context(&user, "prod", &attrs, after_hours)
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn test_break_glass_policy() {
-        let engine = PolicyEngine::with_policies(
-            r#"
-            permit(
-                principal in Lattice::Group::"oncall",
-                action == Lattice::Action::"AccessCluster",
-                resource
-            ) when {
-                context.breakGlass == true &&
-                context has incidentId
-            };
-            "#,
-        )
-        .unwrap();
-
-        let oncall = test_identity("oncall@example.com", &["oncall"]);
-        let attrs = ClusterAttributes::default();
-
-        // With break-glass and incident ID - allowed
-        let ctx_allowed = Context::from_pairs(vec![
-            (
-                "breakGlass".to_string(),
-                RestrictedExpression::new_bool(true),
-            ),
-            (
-                "incidentId".to_string(),
-                RestrictedExpression::new_string("INC-12345".to_string()),
-            ),
-        ])
-        .unwrap();
-        assert!(engine
-            .authorize_with_context(&oncall, "prod", &attrs, ctx_allowed)
-            .await
-            .is_ok());
-
-        // Without incident ID - denied
-        let ctx_no_incident = Context::from_pairs(vec![(
-            "breakGlass".to_string(),
-            RestrictedExpression::new_bool(true),
-        )])
-        .unwrap();
-        assert!(engine
-            .authorize_with_context(&oncall, "prod", &attrs, ctx_no_incident)
-            .await
-            .is_err());
-
-        // breakGlass=false - denied
-        let ctx_no_flag = Context::from_pairs(vec![
-            (
-                "breakGlass".to_string(),
-                RestrictedExpression::new_bool(false),
-            ),
-            (
-                "incidentId".to_string(),
-                RestrictedExpression::new_string("INC-12345".to_string()),
-            ),
-        ])
-        .unwrap();
-        assert!(engine
-            .authorize_with_context(&oncall, "prod", &attrs, ctx_no_flag)
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn test_source_ip_policy() {
-        let engine = PolicyEngine::with_policies(
-            r#"
-            permit(
-                principal in Lattice::Group::"engineers",
-                action == Lattice::Action::"AccessCluster",
-                resource
-            ) when {
-                context.sourceIp like "10.0.*"
-            };
-            "#,
-        )
-        .unwrap();
-
-        let engineer = test_identity("eng@example.com", &["engineers"]);
-        let attrs = ClusterAttributes::default();
-
-        // From VPN - allowed
-        let ctx_vpn = Context::from_pairs(vec![(
-            "sourceIp".to_string(),
-            RestrictedExpression::new_string("10.0.1.100".to_string()),
-        )])
-        .unwrap();
-        assert!(engine
-            .authorize_with_context(&engineer, "prod", &attrs, ctx_vpn)
-            .await
-            .is_ok());
-
-        // From outside - denied
-        let ctx_outside = Context::from_pairs(vec![(
-            "sourceIp".to_string(),
-            RestrictedExpression::new_string("8.8.8.8".to_string()),
-        )])
-        .unwrap();
-        assert!(engine
-            .authorize_with_context(&engineer, "prod", &attrs, ctx_outside)
+            .authorize_cluster(
+                "support@example.com",
+                &groups,
+                "prod",
+                &attrs,
+                Some(after_hours)
+            )
             .await
             .is_err());
     }

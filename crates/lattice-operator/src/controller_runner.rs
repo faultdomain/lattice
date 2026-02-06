@@ -12,6 +12,7 @@ use kube::runtime::Controller;
 use kube::{Api, Client};
 
 use lattice_api::cedar::validation as cedar_validation_ctrl;
+use lattice_api::PolicyEngine;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
 use lattice_operator::cloud_provider::{self as cloud_provider_ctrl, ControllerContext};
 use lattice_operator::controller::{
@@ -33,6 +34,7 @@ pub async fn run_controllers(
     mode: ControllerMode,
     self_cluster_name: Option<String>,
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
+    cedar: Arc<PolicyEngine>,
 ) {
     let run_cluster = matches!(mode, ControllerMode::All | ControllerMode::Cluster);
     let run_service = matches!(mode, ControllerMode::All | ControllerMode::Service);
@@ -78,6 +80,7 @@ pub async fn run_controllers(
             client.clone(),
             cluster_name_for_service,
             provider_type,
+            cedar,
         ));
         create_service_controllers(client.clone(), service_ctx)
     } else {

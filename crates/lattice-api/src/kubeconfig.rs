@@ -146,7 +146,7 @@ pub async fn kubeconfig_handler(
         .collect();
     let accessible_clusters = state
         .cedar
-        .accessible_clusters(&identity, &cluster_attrs)
+        .accessible_clusters(&identity.username, &identity.groups, &cluster_attrs)
         .await;
 
     if accessible_clusters.is_empty() {

@@ -23,6 +23,8 @@ use mockall::automock;
 use lattice_common::kube_utils::HasApiResource;
 use lattice_common::policy::{AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry};
 
+use lattice_cedar::PolicyEngine;
+
 use crate::compiler::{CompiledService, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
@@ -587,6 +589,8 @@ pub struct ServiceContext {
     pub cluster_name: String,
     /// Provider type for topology-aware scheduling (zone for cloud, hostname for on-prem)
     pub provider_type: ProviderType,
+    /// Cedar policy engine for secret access authorization
+    pub cedar: Arc<PolicyEngine>,
 }
 
 impl ServiceContext {
@@ -596,33 +600,40 @@ impl ServiceContext {
         graph: Arc<ServiceGraph>,
         cluster_name: impl Into<String>,
         provider_type: ProviderType,
+        cedar: Arc<PolicyEngine>,
     ) -> Self {
         Self {
             kube,
             graph,
             cluster_name: cluster_name.into(),
             provider_type,
+            cedar,
         }
     }
 
     /// Create a new ServiceContext from a Kubernetes client
     ///
-    /// This creates a new ServiceGraph. For shared state, create the graph
-    /// externally and pass it to the constructor.
+    /// This creates a new ServiceGraph and default-deny PolicyEngine.
+    /// For shared state, create dependencies externally and use the constructor.
     pub fn from_client(
         client: Client,
         cluster_name: impl Into<String>,
         provider_type: ProviderType,
+        cedar: Arc<PolicyEngine>,
     ) -> Self {
         Self {
             kube: Arc::new(ServiceKubeClientImpl::new(client)),
             graph: Arc::new(ServiceGraph::new()),
             cluster_name: cluster_name.into(),
             provider_type,
+            cedar,
         }
     }
 
     /// Create a context for testing with mock clients
+    ///
+    /// Uses a default-deny PolicyEngine. To test with policies, construct
+    /// `ServiceContext` directly with a configured `PolicyEngine`.
     #[cfg(test)]
     pub fn for_testing(kube: Arc<dyn ServiceKubeClient>) -> Self {
         Self {
@@ -630,6 +641,7 @@ impl ServiceContext {
             graph: Arc::new(ServiceGraph::new()),
             cluster_name: "test-cluster".to_string(),
             provider_type: ProviderType::Docker,
+            cedar: Arc::new(PolicyEngine::new()),
         }
     }
 }
@@ -718,8 +730,9 @@ pub async fn reconcile(
             );
 
             // Compile workloads and policies
-            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type);
-            let compiled = compiler.compile(&service)?;
+            let compiler =
+                ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type, &ctx.cedar);
+            let compiled = compiler.compile(&service).await?;
 
             // Apply compiled resources to the cluster
             info!(
@@ -755,8 +768,9 @@ pub async fn reconcile(
             // This is necessary because when a new service is added that depends on us,
             // or when a service we depend on changes its allowed callers, we need to
             // update our ingress/egress policies to reflect the new bilateral agreements.
-            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type);
-            let compiled = compiler.compile(&service)?;
+            let compiler =
+                ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type, &ctx.cedar);
+            let compiled = compiler.compile(&service).await?;
 
             debug!(
                 resources = compiled.resource_count(),
@@ -1541,18 +1555,21 @@ mod tests {
         let mock_kube1 = Arc::new(mock_kube_success());
         let mock_kube2 = Arc::new(mock_kube_success());
         let shared_graph = Arc::new(ServiceGraph::new());
+        let cedar = Arc::new(PolicyEngine::new());
 
         let ctx1 = ServiceContext::new(
             mock_kube1,
             Arc::clone(&shared_graph),
             "test-cluster",
             ProviderType::Docker,
+            Arc::clone(&cedar),
         );
         let ctx2 = ServiceContext::new(
             mock_kube2,
             Arc::clone(&shared_graph),
             "test-cluster",
             ProviderType::Docker,
+            Arc::clone(&cedar),
         );
 
         // Add service via ctx1

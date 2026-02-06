@@ -33,6 +33,7 @@ reqwest = { workspace = true }
 
 # Auth
 jsonwebtoken = { workspace = true }
+lattice-cedar = { workspace = true }
 cedar-policy = { workspace = true }
 
 # Time
