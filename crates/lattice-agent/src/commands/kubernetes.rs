@@ -47,7 +47,11 @@ pub async fn handle(req: &KubernetesRequest, ctx: &CommandContext) {
         };
 
         // Non-watch requests return a response to send
-        if let Some(response) = response {
+        if let Some(mut response) = response {
+            // Rewrite the request_id to match the original command_id.
+            // When forwarding through child clusters, the inner tunnel generates
+            // a new request_id. The parent cell is waiting for the original one.
+            response.request_id = request_id.clone();
             let msg = AgentMessage {
                 cluster_name,
                 payload: Some(Payload::KubernetesResponse(response)),
@@ -152,15 +156,18 @@ async fn execute_forwarded_request(
 
         match f.forward_watch(target, req.clone()).await {
             Ok(mut rx) => {
-                while let Some(response) = rx.recv().await {
+                while let Some(mut response) = rx.recv().await {
+                    // Rewrite request_id to match the original command_id
+                    response.request_id = request_id.to_string();
+                    let is_end = response.stream_end;
                     let msg = AgentMessage {
                         cluster_name: cluster_name.to_string(),
-                        payload: Some(Payload::KubernetesResponse(response.clone())),
+                        payload: Some(Payload::KubernetesResponse(response)),
                     };
                     if message_tx.send(msg).await.is_err() {
                         break;
                     }
-                    if response.stream_end {
+                    if is_end {
                         break;
                     }
                 }
