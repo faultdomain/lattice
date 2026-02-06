@@ -10,14 +10,11 @@ use tracing::info;
 
 use crate::auth::OidcConfig;
 use crate::auth_chain::AuthChain;
+use crate::backend::ProxyBackend;
 use crate::cedar::PolicyEngine;
 use crate::error::Error;
 use crate::kubeconfig::kubeconfig_handler;
 use crate::proxy::{exec_handler, proxy_handler};
-
-// Re-export from lattice-cell for convenience
-pub use lattice_cell::subtree_registry::{ClusterInfo, RouteInfo, SubtreeRegistry};
-pub use lattice_cell::SharedAgentRegistry;
 
 /// Server configuration
 #[derive(Clone)]
@@ -49,10 +46,8 @@ pub struct AppState {
     pub k8s_api_url: String,
     /// This cluster's name
     pub cluster_name: String,
-    /// Subtree registry (clusters we can route to)
-    pub subtree: Arc<SubtreeRegistry>,
-    /// Agent registry for routing to child clusters (optional)
-    pub agent_registry: Option<SharedAgentRegistry>,
+    /// Proxy backend for cluster routing and tunneling
+    pub backend: Arc<dyn ProxyBackend>,
     /// Base URL for kubeconfig generation
     pub base_url: String,
     /// OIDC configuration for kubeconfig exec plugin
@@ -66,18 +61,7 @@ pub async fn start_server(
     config: ServerConfig,
     auth: Arc<AuthChain>,
     cedar: Arc<PolicyEngine>,
-    subtree: Arc<SubtreeRegistry>,
-) -> Result<(), Error> {
-    start_server_with_registry(config, auth, cedar, subtree, None).await
-}
-
-/// Start the auth proxy server with optional agent registry for child cluster routing
-pub async fn start_server_with_registry(
-    config: ServerConfig,
-    auth: Arc<AuthChain>,
-    cedar: Arc<PolicyEngine>,
-    subtree: Arc<SubtreeRegistry>,
-    agent_registry: Option<SharedAgentRegistry>,
+    backend: Arc<dyn ProxyBackend>,
 ) -> Result<(), Error> {
     use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -92,8 +76,7 @@ pub async fn start_server_with_registry(
         cedar,
         k8s_api_url: config.k8s_api_url.clone(),
         cluster_name: config.cluster_name.clone(),
-        subtree,
-        agent_registry,
+        backend,
         base_url: config.base_url.clone(),
         oidc_config,
         ca_cert_base64,

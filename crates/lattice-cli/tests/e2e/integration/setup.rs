@@ -175,7 +175,6 @@ impl SetupResult {
             targets.add(cluster_name, kubeconfig, parent_kubeconfig);
         }
     }
-
 }
 
 // =============================================================================

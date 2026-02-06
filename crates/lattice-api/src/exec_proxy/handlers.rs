@@ -12,10 +12,11 @@ use kube::Client;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
-use lattice_cell::{start_exec_session, ExecRequestParams};
 use lattice_proto::{
     parse_exec_command, parse_exec_params, parse_exec_path, parse_portforward_ports, stream_id,
 };
+
+use crate::backend::ExecTunnelRequest;
 
 use super::websocket::{
     build_k8s_message, channel, parse_k8s_message, send_close_normal, send_k8s_error_and_close,
@@ -98,17 +99,17 @@ async fn handle_websocket_connection(
     );
 
     // Check if this is a local cluster request
-    let route_info = match state.subtree.get_route(&cluster_name).await {
+    let route_info = match state.backend.get_route(&cluster_name).await {
         Some(ri) => ri,
         None => {
             let (mut ws_sender, _) = socket.split();
-            error!(cluster = %cluster_name, "Cluster not found in subtree");
+            error!(cluster = %cluster_name, "Cluster not found in backend");
             send_k8s_error_and_close(&mut ws_sender, "Cluster not found").await;
             return;
         }
     };
 
-    // Route to local K8s API or through gRPC tunnel
+    // Route to local K8s API or through backend tunnel
     if route_info.is_self {
         handle_local_exec(socket, path, query).await;
     } else {
@@ -413,7 +414,7 @@ async fn handle_local_portforward(
     info!(pod = %pod_name, port, "Local portforward session closed");
 }
 
-/// Handle exec for remote clusters through gRPC tunnel
+/// Handle exec for remote clusters through backend tunnel
 async fn handle_remote_exec(
     socket: WebSocket,
     state: AppState,
@@ -421,15 +422,9 @@ async fn handle_remote_exec(
     identity: UserIdentity,
     path: String,
     query: String,
-    route_info: lattice_cell::RouteInfo,
+    route_info: crate::backend::ProxyRouteInfo,
 ) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
-
-    let Some(agent_registry) = state.agent_registry.as_ref() else {
-        error!("Agent registry not configured");
-        send_k8s_error_and_close(&mut ws_sender, "Agent registry not configured").await;
-        return;
-    };
 
     let agent_id = match route_info.agent_id {
         Some(id) => id,
@@ -440,16 +435,7 @@ async fn handle_remote_exec(
         }
     };
 
-    let command_tx = match agent_registry.get(&agent_id) {
-        Some(agent) => agent.command_tx.clone(),
-        None => {
-            error!(agent = %agent_id, "Agent not connected");
-            send_k8s_error_and_close(&mut ws_sender, "Agent not connected").await;
-            return;
-        }
-    };
-
-    let exec_params = ExecRequestParams {
+    let exec_request = ExecTunnelRequest {
         path,
         query,
         target_cluster: cluster_name.clone(),
@@ -457,21 +443,24 @@ async fn handle_remote_exec(
         source_groups: identity.groups.clone(),
     };
 
-    let (exec_session, mut data_rx) =
-        match start_exec_session(agent_registry, &agent_id, command_tx, exec_params).await {
-            Ok(session) => session,
-            Err(e) => {
-                error!(error = %e, "Failed to start exec session");
-                send_k8s_error_and_close(
-                    &mut ws_sender,
-                    format!("Failed to start exec session: {}", e),
-                )
-                .await;
-                return;
-            }
-        };
+    let (exec_session, mut data_rx) = match state
+        .backend
+        .start_exec_session(&agent_id, exec_request)
+        .await
+    {
+        Ok(session) => session,
+        Err(e) => {
+            error!(error = %e, "Failed to start exec session");
+            send_k8s_error_and_close(
+                &mut ws_sender,
+                format!("Failed to start exec session: {}", e),
+            )
+            .await;
+            return;
+        }
+    };
 
-    let request_id = exec_session.request_id.clone();
+    let request_id = exec_session.request_id().to_string();
     info!(request_id = %request_id, "Remote exec session started");
 
     loop {

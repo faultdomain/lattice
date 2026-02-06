@@ -93,10 +93,13 @@ impl SubtreeRegistry {
         routes.get(cluster_name).cloned()
     }
 
-    /// Get all clusters in the subtree
-    pub async fn all_clusters(&self) -> Vec<String> {
+    /// Get all clusters with their labels (for Cedar policy attribute matching)
+    pub async fn all_clusters(&self) -> Vec<(String, HashMap<String, String>)> {
         let routes = self.routes.read().await;
-        routes.keys().cloned().collect()
+        routes
+            .iter()
+            .map(|(name, info)| (name.clone(), info.cluster.labels.clone()))
+            .collect()
     }
 
     /// Get all clusters accessible via a specific agent
@@ -438,6 +441,35 @@ mod tests {
         assert_eq!(via_agent.len(), 2);
         assert!(via_agent.contains(&"child-1".to_string()));
         assert!(via_agent.contains(&"child-2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_all_clusters() {
+        let registry = SubtreeRegistry::new("parent".to_string());
+
+        let mut labels = HashMap::new();
+        labels.insert("lattice.dev/environment".to_string(), "prod".to_string());
+        labels.insert("lattice.dev/region".to_string(), "us-west-2".to_string());
+
+        let clusters = vec![ClusterInfo {
+            name: "child-1".to_string(),
+            parent: "parent".to_string(),
+            phase: "Ready".to_string(),
+            labels: labels.clone(),
+        }];
+
+        registry.handle_full_sync("agent-1", clusters).await;
+
+        let result = registry.all_clusters().await;
+        assert_eq!(result.len(), 2); // parent + child
+
+        let child = result.iter().find(|(n, _)| n == "child-1").unwrap();
+        assert_eq!(child.1.get("lattice.dev/environment").unwrap(), "prod");
+        assert_eq!(child.1.get("lattice.dev/region").unwrap(), "us-west-2");
+
+        // Self (parent) has empty labels
+        let parent = result.iter().find(|(n, _)| n == "parent").unwrap();
+        assert!(parent.1.is_empty());
     }
 
     #[tokio::test]

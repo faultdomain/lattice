@@ -11,6 +11,7 @@ use kube::runtime::watcher::Config as WatcherConfig;
 use kube::runtime::Controller;
 use kube::{Api, Client};
 
+use lattice_api::cedar::validation as cedar_validation_ctrl;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
 use lattice_operator::cloud_provider::{self as cloud_provider_ctrl, ControllerContext};
 use lattice_operator::controller::{
@@ -18,8 +19,8 @@ use lattice_operator::controller::{
     service_reconcile, Context, ServiceContext,
 };
 use lattice_operator::crd::{
-    CloudProvider, LatticeCluster, LatticeExternalService, LatticeService, ProviderType,
-    SecretsProvider,
+    CedarPolicy, CloudProvider, LatticeCluster, LatticeExternalService, LatticeService,
+    ProviderType, SecretsProvider,
 };
 use lattice_operator::parent::ParentServers;
 use lattice_operator::secrets_provider as secrets_provider_ctrl;
@@ -84,19 +85,22 @@ pub async fn run_controllers(
     };
 
     // Build provider controllers (only if needed)
-    let (cloud_provider_controller, secrets_provider_controller) = if run_provider {
-        (
-            create_cloud_provider_controller(client.clone()),
-            create_secrets_provider_controller(client),
-        )
-    } else {
-        (None, None)
-    };
+    let (cloud_provider_controller, secrets_provider_controller, cedar_policy_controller) =
+        if run_provider {
+            (
+                create_cloud_provider_controller(client.clone()),
+                create_secrets_provider_controller(client.clone()),
+                create_cedar_policy_controller(client),
+            )
+        } else {
+            (None, None, None)
+        };
 
     // Run all controllers until one exits
     tokio::select! {
         _ = run_optional_controller(cloud_provider_controller) => tracing::info!("CloudProvider controller completed"),
         _ = run_optional_controller(secrets_provider_controller) => tracing::info!("SecretsProvider controller completed"),
+        _ = run_optional_controller(cedar_policy_controller) => tracing::info!("CedarPolicy controller completed"),
         _ = run_optional_controller(cluster_controller) => tracing::info!("Cluster controller completed"),
         _ = run_optional_controller(service_controller) => tracing::info!("Service controller completed"),
         _ = run_optional_controller(external_controller) => tracing::info!("External service controller completed"),
@@ -127,6 +131,7 @@ fn log_enabled_controllers(run_cluster: bool, run_service: bool, run_provider: b
     if run_provider {
         tracing::info!("- CloudProvider controller");
         tracing::info!("- SecretsProvider controller");
+        tracing::info!("- CedarPolicy controller");
     }
 }
 
@@ -252,6 +257,25 @@ fn create_secrets_provider_controller(
             ctx,
         )
         .for_each(log_reconcile_result("SecretsProvider")),
+    )
+}
+
+fn create_cedar_policy_controller(client: Client) -> Option<impl std::future::Future<Output = ()>> {
+    let cedar_policies: Api<CedarPolicy> = Api::all(client.clone());
+    let ctx = Arc::new(ControllerContext::new(client));
+
+    Some(
+        Controller::new(
+            cedar_policies,
+            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        )
+        .shutdown_on_signal()
+        .run(
+            cedar_validation_ctrl::reconcile,
+            lattice_common::default_error_policy,
+            ctx,
+        )
+        .for_each(log_reconcile_result("CedarPolicy")),
     )
 }
 

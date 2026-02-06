@@ -4,6 +4,7 @@
 
 // Startup and agent modules for main.rs
 pub mod agent;
+pub mod cell_proxy_backend;
 pub mod forwarder;
 pub mod startup;
 

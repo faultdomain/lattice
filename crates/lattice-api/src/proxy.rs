@@ -12,6 +12,7 @@ use serde::Deserialize;
 use tracing::{debug, instrument};
 
 use crate::auth::authenticate_and_authorize;
+use crate::cedar::ClusterAttributes;
 use crate::error::Error;
 use crate::exec_proxy::{handle_exec_websocket, has_websocket_upgrade_headers};
 use crate::k8s_forwarder::route_to_cluster;
@@ -38,6 +39,14 @@ pub struct ExecPath {
     pub ns: String,
     /// Pod name
     pub pod: String,
+}
+
+/// Look up cluster attributes from the backend for Cedar authorization
+async fn cluster_attrs(state: &AppState, cluster_name: &str) -> ClusterAttributes {
+    match state.backend.get_route(cluster_name).await {
+        Some(route) => ClusterAttributes::from_labels(&route.labels),
+        None => ClusterAttributes::default(),
+    }
 }
 
 /// Handle proxy requests to /clusters/{cluster_name}/api/* and /clusters/{cluster_name}/apis/*
@@ -76,12 +85,16 @@ pub async fn proxy_handler(
         ));
     }
 
-    // Authenticate and authorize
-    let identity =
-        authenticate_and_authorize(&state.auth, &state.cedar, request.headers(), cluster_name)
-            .await?;
+    let attrs = cluster_attrs(&state, cluster_name).await;
+    let identity = authenticate_and_authorize(
+        &state.auth,
+        &state.cedar,
+        request.headers(),
+        cluster_name,
+        &attrs,
+    )
+    .await?;
 
-    // Route to the target cluster
     route_to_cluster(&state, cluster_name, &identity, request).await
 }
 
@@ -113,10 +126,15 @@ pub async fn exec_handler(
         "Exec WebSocket request received"
     );
 
-    // Authenticate and authorize
-    let identity =
-        authenticate_and_authorize(&state.auth, &state.cedar, request.headers(), cluster_name)
-            .await?;
+    let attrs = cluster_attrs(&state, cluster_name).await;
+    let identity = authenticate_and_authorize(
+        &state.auth,
+        &state.cedar,
+        request.headers(),
+        cluster_name,
+        &attrs,
+    )
+    .await?;
 
     // Strip the /clusters/{cluster_name} prefix from the path
     let api_path = strip_cluster_prefix(path, cluster_name);

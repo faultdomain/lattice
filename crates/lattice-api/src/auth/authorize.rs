@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::auth::UserIdentity;
 use crate::auth_chain::AuthChain;
-use crate::cedar::PolicyEngine;
+use crate::cedar::{ClusterAttributes, PolicyEngine};
 use crate::error::{Error, Result};
 
 /// Extract bearer token from Authorization header
@@ -23,27 +23,13 @@ pub fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
 
 /// Authenticate and authorize a request in one call
 ///
-/// This is a convenience function that combines token validation and
-/// Cedar policy evaluation. Use this in handlers to reduce boilerplate.
-///
-/// # Arguments
-///
-/// * `auth` - Authentication chain for token validation
-/// * `cedar` - Cedar policy engine for authorization
-/// * `headers` - Request headers (must contain Authorization header)
-/// * `cluster` - Target cluster name for authorization
-///
-/// # Returns
-///
-/// The authenticated user identity if successful, or an error if:
-/// - No Authorization header is present
-/// - The token is invalid or expired
-/// - The user is not authorized to access the cluster
+/// Combines token validation and Cedar policy evaluation.
 pub async fn authenticate_and_authorize(
     auth: &Arc<AuthChain>,
     cedar: &Arc<PolicyEngine>,
     headers: &HeaderMap,
     cluster: &str,
+    attrs: &ClusterAttributes,
 ) -> Result<UserIdentity> {
     let token = extract_bearer_token(headers)
         .ok_or_else(|| Error::Unauthorized("Missing Authorization header".into()))?;
@@ -56,7 +42,7 @@ pub async fn authenticate_and_authorize(
         "Checking authorization"
     );
 
-    cedar.authorize(&identity, cluster).await?;
+    cedar.authorize(&identity, cluster, attrs).await?;
 
     Ok(identity)
 }

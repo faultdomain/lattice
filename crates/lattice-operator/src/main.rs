@@ -30,6 +30,7 @@ use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
     DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
 };
+use lattice_operator::cell_proxy_backend::CellProxyBackend;
 
 /// Global Prometheus handle for metrics endpoint
 static PROMETHEUS_HANDLE: OnceCell<PrometheusHandle> = OnceCell::new();
@@ -413,23 +414,16 @@ async fn start_auth_proxy(
         base_url,
     };
 
-    // Get shared registries from parent servers
+    // Create backend from cell registries
     let subtree = parent_servers.subtree_registry();
-    let agent_registry = Some(parent_servers.agent_registry());
+    let agent_registry = parent_servers.agent_registry();
+    let backend = Arc::new(CellProxyBackend::new(subtree, agent_registry));
 
     tracing::info!(addr = %addr, cluster = %cluster_name, "Starting auth proxy server");
 
     // Start in background task
     let handle = tokio::spawn(async move {
-        if let Err(e) = lattice_api::start_server_with_registry(
-            config,
-            auth_chain,
-            cedar,
-            subtree,
-            agent_registry,
-        )
-        .await
-        {
+        if let Err(e) = lattice_api::start_server(config, auth_chain, cedar, backend).await {
             tracing::error!(error = %e, "Auth proxy server error");
         }
     });

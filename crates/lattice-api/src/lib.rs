@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! ```text
-//! kubectl ──► Auth Proxy ──► Cedar ──► K8s API Server
+//! kubectl --► Auth Proxy --► Cedar --► K8s API Server
 //!             (OIDC/SA)      (authz)     (private)
 //! ```
 //!
@@ -23,6 +23,7 @@
 pub mod auth;
 pub mod auth_chain;
 pub mod auth_context;
+pub mod backend;
 pub mod cedar;
 pub mod error;
 pub mod exec_proxy;
@@ -59,10 +60,11 @@ pub fn is_local_resource(metadata: &ObjectMeta) -> bool {
 pub use auth::{OidcConfig, OidcValidator, UserIdentity};
 pub use auth_chain::AuthChain;
 pub use auth_context::AuthContext;
+pub use backend::{
+    ExecSessionHandle, ExecTunnelRequest, K8sTunnelRequest, ProxyBackend, ProxyError,
+    ProxyRouteInfo,
+};
 pub use cedar::PolicyEngine;
 pub use error::{Error, Result};
 pub use sa_auth::SaValidator;
-pub use server::{
-    start_server, start_server_with_registry, AppState, ClusterInfo, RouteInfo, ServerConfig,
-    SharedAgentRegistry, SubtreeRegistry,
-};
+pub use server::{start_server, AppState, ServerConfig};

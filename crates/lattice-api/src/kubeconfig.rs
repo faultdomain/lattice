@@ -17,7 +17,10 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
+
 use crate::auth::{authenticate, OidcConfig};
+use crate::cedar::ClusterAttributes;
 use crate::error::Error;
 use crate::server::AppState;
 
@@ -135,15 +138,16 @@ pub async fn kubeconfig_handler(
     // Authenticate (no Cedar authorization - kubeconfig just lists accessible clusters)
     let identity = authenticate(&state.auth, &headers).await?;
 
-    // Get all clusters in subtree
-    let subtree_clusters = state.subtree.all_clusters().await;
-
-    // Update Cedar's known clusters and filter by authorization
-    state
+    // Get all clusters with labels and check Cedar access for each
+    let clusters = state.backend.all_clusters().await;
+    let cluster_attrs: HashMap<String, ClusterAttributes> = clusters
+        .into_iter()
+        .map(|(name, labels)| (name, ClusterAttributes::from_labels(&labels)))
+        .collect();
+    let accessible_clusters = state
         .cedar
-        .set_known_clusters(subtree_clusters.clone())
+        .accessible_clusters(&identity, &cluster_attrs)
         .await;
-    let accessible_clusters = state.cedar.accessible_clusters(&identity).await;
 
     if accessible_clusters.is_empty() {
         return Err(Error::Forbidden("No accessible clusters".into()));
@@ -159,7 +163,6 @@ pub async fn kubeconfig_handler(
         &params,
     );
 
-    // Return as JSON - kubectl accepts both JSON and YAML kubeconfigs
     let json = serde_json::to_string_pretty(&kubeconfig)
         .map_err(|e| Error::Internal(format!("Failed to serialize kubeconfig: {}", e)))?;
 

@@ -29,13 +29,14 @@ use std::sync::{Arc, OnceLock};
 use tracing::debug;
 
 use crate::auth::UserIdentity;
+use crate::backend::{K8sTunnelRequest, ProxyError};
 use crate::error::Error;
 use crate::routing::strip_cluster_prefix;
 use crate::server::AppState;
-use lattice_cell::{
-    tunnel_request_resilient, K8sRequestParams, ResilientTunnelConfig, TunnelError, DEFAULT_TIMEOUT,
-};
 use lattice_proto::is_watch_query;
+
+/// Default timeout for local K8s API requests (30 seconds)
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // ============================================================================
 // Constants
@@ -43,6 +44,9 @@ use lattice_proto::is_watch_query;
 
 /// Maximum request body size (10 MB - reasonable for K8s API)
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+/// Default content type for K8s API requests/responses
+const DEFAULT_CONTENT_TYPE: &str = "application/json";
 
 /// Path to the in-cluster CA certificate
 const CA_CERT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
@@ -231,7 +235,7 @@ fn extract_content_type(response: &reqwest::Response) -> String {
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
+        .unwrap_or(DEFAULT_CONTENT_TYPE)
         .to_string()
 }
 
@@ -319,9 +323,9 @@ pub async fn route_to_cluster_with_deps(
         return forward_to_k8s_api(&state.k8s_api_url, cluster_name, identity, request, deps).await;
     }
 
-    // Check if the cluster is in our subtree
+    // Check if the cluster is in our backend
     let route_info = state
-        .subtree
+        .backend
         .get_route(cluster_name)
         .await
         .ok_or_else(|| Error::ClusterNotFound(cluster_name.to_string()))?;
@@ -412,7 +416,7 @@ async fn forward_to_k8s_api(
 // Remote Cluster Forwarding
 // ============================================================================
 
-/// Route request to child cluster via gRPC tunnel
+/// Route request to child cluster via backend tunnel
 async fn route_to_child_cluster(
     state: &AppState,
     cluster_name: &str,
@@ -420,15 +424,6 @@ async fn route_to_child_cluster(
     identity: &UserIdentity,
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
-    let agent_registry = state
-        .agent_registry
-        .as_ref()
-        .ok_or_else(|| Error::Internal("Agent registry not configured".into()))?;
-
-    // Don't check is_connected here - let tunnel_request_resilient handle it.
-    // The resilient tunnel will wait up to 30s for the agent to reconnect,
-    // providing seamless handling of brief disconnections during chaos testing.
-
     let method = request.method().to_string();
     let uri = request.uri().clone();
     let path = strip_cluster_prefix(uri.path(), cluster_name).to_string();
@@ -437,37 +432,37 @@ async fn route_to_child_cluster(
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
+        .unwrap_or(DEFAULT_CONTENT_TYPE)
         .to_string();
     let accept = request
         .headers()
         .get("accept")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
+        .unwrap_or(DEFAULT_CONTENT_TYPE)
         .to_string();
 
     let body = axum::body::to_bytes(request.into_body(), MAX_BODY_SIZE)
         .await
         .map_err(|e| Error::Internal(format!("Failed to read request body: {}", e)))?;
 
-    tunnel_request_resilient(
-        agent_registry,
-        agent_id,
-        K8sRequestParams {
-            method,
-            path,
-            query,
-            body: body.to_vec(),
-            content_type,
-            accept,
-            target_cluster: cluster_name.to_string(),
-            source_user: identity.username.clone(),
-            source_groups: identity.groups.clone(),
-        },
-        &ResilientTunnelConfig::default(),
-    )
-    .await
-    .map_err(tunnel_error_to_api_error)
+    state
+        .backend
+        .tunnel_request(
+            agent_id,
+            K8sTunnelRequest {
+                method,
+                path,
+                query,
+                body: body.to_vec(),
+                content_type,
+                accept,
+                target_cluster: cluster_name.to_string(),
+                source_user: identity.username.clone(),
+                source_groups: identity.groups.clone(),
+            },
+        )
+        .await
+        .map_err(proxy_error_to_api_error)
 }
 
 // ============================================================================
@@ -532,15 +527,16 @@ fn strip_impersonation_headers(request: Request<Body>) -> Request<Body> {
 // Error Conversion
 // ============================================================================
 
-/// Convert TunnelError to API Error
-fn tunnel_error_to_api_error(e: TunnelError) -> Error {
+/// Convert ProxyError to API Error
+fn proxy_error_to_api_error(e: ProxyError) -> Error {
     match e {
-        TunnelError::SendFailed(msg) => Error::Proxy(msg),
-        TunnelError::ChannelClosed => Error::Proxy("Agent disconnected".into()),
-        TunnelError::UnknownCluster(name) => Error::ClusterNotFound(name),
-        TunnelError::Timeout => Error::Proxy("Request timed out".into()),
-        TunnelError::AgentError(msg) => Error::Proxy(msg),
-        TunnelError::ResponseBuild(msg) => Error::Internal(msg),
+        ProxyError::ClusterNotFound(name) => Error::ClusterNotFound(name),
+        ProxyError::AgentDisconnected => Error::Proxy("Agent disconnected".into()),
+        ProxyError::Timeout => Error::Proxy("Request timed out".into()),
+        ProxyError::SendFailed(msg) => Error::Proxy(msg),
+        ProxyError::AgentError(msg) => Error::Proxy(msg),
+        ProxyError::ResponseBuild(msg) => Error::Internal(msg),
+        ProxyError::NotConfigured => Error::Internal("Backend not configured".into()),
     }
 }
 
@@ -973,39 +969,38 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_tunnel_error_to_api_error_send_failed() {
-        let err = tunnel_error_to_api_error(TunnelError::SendFailed("channel full".to_string()));
+    fn test_proxy_error_to_api_error_send_failed() {
+        let err = proxy_error_to_api_error(ProxyError::SendFailed("channel full".to_string()));
         assert!(matches!(err, Error::Proxy(_)));
     }
 
     #[test]
-    fn test_tunnel_error_to_api_error_channel_closed() {
-        let err = tunnel_error_to_api_error(TunnelError::ChannelClosed);
+    fn test_proxy_error_to_api_error_agent_disconnected() {
+        let err = proxy_error_to_api_error(ProxyError::AgentDisconnected);
         assert!(matches!(err, Error::Proxy(_)));
     }
 
     #[test]
-    fn test_tunnel_error_to_api_error_timeout() {
-        let err = tunnel_error_to_api_error(TunnelError::Timeout);
+    fn test_proxy_error_to_api_error_timeout() {
+        let err = proxy_error_to_api_error(ProxyError::Timeout);
         assert!(matches!(err, Error::Proxy(_)));
     }
 
     #[test]
-    fn test_tunnel_error_to_api_error_agent_error() {
-        let err = tunnel_error_to_api_error(TunnelError::AgentError("bad request".to_string()));
+    fn test_proxy_error_to_api_error_agent_error() {
+        let err = proxy_error_to_api_error(ProxyError::AgentError("bad request".to_string()));
         assert!(matches!(err, Error::Proxy(_)));
     }
 
     #[test]
-    fn test_tunnel_error_to_api_error_response_build() {
-        let err = tunnel_error_to_api_error(TunnelError::ResponseBuild("invalid".to_string()));
+    fn test_proxy_error_to_api_error_response_build() {
+        let err = proxy_error_to_api_error(ProxyError::ResponseBuild("invalid".to_string()));
         assert!(matches!(err, Error::Internal(_)));
     }
 
     #[test]
-    fn test_tunnel_error_to_api_error_unknown_cluster() {
-        let err =
-            tunnel_error_to_api_error(TunnelError::UnknownCluster("test-cluster".to_string()));
+    fn test_proxy_error_to_api_error_cluster_not_found() {
+        let err = proxy_error_to_api_error(ProxyError::ClusterNotFound("test-cluster".to_string()));
         assert!(matches!(err, Error::ClusterNotFound(_)));
     }
 }

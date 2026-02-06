@@ -2195,7 +2195,6 @@ dependencies = [
  "jsonwebtoken",
  "k8s-openapi",
  "kube",
- "lattice-cell",
  "lattice-common",
  "lattice-proto",
  "mockall",
