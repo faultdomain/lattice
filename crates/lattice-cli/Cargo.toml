@@ -45,6 +45,9 @@ reqwest = { workspace = true, features = ["rustls-tls", "json", "blocking"] }
 # Time
 chrono.workspace = true
 
+# Config
+dirs.workspace = true
+
 # TLS (FIPS-validated crypto)
 rustls.workspace = true
 aws-lc-rs.workspace = true

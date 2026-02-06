@@ -8,7 +8,6 @@ use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
 use tracing::info;
 
-use crate::auth::OidcConfig;
 use crate::auth_chain::AuthChain;
 use crate::backend::ProxyBackend;
 use crate::cedar::PolicyEngine;
@@ -51,8 +50,6 @@ pub struct AppState {
     pub backend: Arc<dyn ProxyBackend>,
     /// Base URL for kubeconfig generation
     pub base_url: String,
-    /// OIDC configuration for kubeconfig exec plugin
-    pub oidc_config: Option<OidcConfig>,
     /// CA certificate (base64 encoded) for kubeconfig generation
     pub ca_cert_base64: String,
 }
@@ -66,9 +63,6 @@ pub async fn start_server(
 ) -> Result<(), Error> {
     use base64::{engine::general_purpose::STANDARD, Engine};
 
-    // Get OIDC config for kubeconfig generation
-    let oidc_config = auth.oidc_config().cloned();
-
     // Base64 encode CA cert for kubeconfig
     let ca_cert_base64 = STANDARD.encode(&config.ca_cert_pem);
 
@@ -79,7 +73,6 @@ pub async fn start_server(
         cluster_name: config.cluster_name.clone(),
         backend,
         base_url: config.base_url.clone(),
-        oidc_config,
         ca_cert_base64,
     };
 

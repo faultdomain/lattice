@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
+use lattice_common::metrics::{ProxyStatus, ProxyTimer};
 use lattice_proto::{
     cell_command, is_watch_query, CellCommand, KubernetesRequest, KubernetesResponse,
 };
@@ -72,14 +73,30 @@ pub async fn tunnel_request(
     command_tx: mpsc::Sender<CellCommand>,
     params: K8sRequestParams,
 ) -> Result<Response<Body>, TunnelError> {
+    let timer = ProxyTimer::start(cluster_name, &params.method);
     let is_watch = is_watch_query(&params.query);
     let response_rx = send_request(registry, cluster_name, command_tx, params, is_watch).await?;
 
-    if is_watch {
+    let result = if is_watch {
         build_streaming_http_response(response_rx)
     } else {
         receive_single_response(cluster_name, response_rx).await
+    };
+
+    match &result {
+        Ok(response) => {
+            timer.complete(ProxyStatus::from_status_code(response.status().as_u16()));
+        }
+        Err(e) => {
+            let status = match e {
+                TunnelError::Timeout => ProxyStatus::ServerError,
+                _ => ProxyStatus::ServerError,
+            };
+            timer.complete(status);
+        }
     }
+
+    result
 }
 
 /// Send request to agent and return response channel

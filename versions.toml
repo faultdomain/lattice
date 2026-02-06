@@ -71,6 +71,12 @@ repo = "https://charts.external-secrets.io"
 chart = "external-secrets/external-secrets"
 filename = "external-secrets-{version}.tgz"
 
+[charts.velero]
+version = "8.5.0"
+repo = "https://vmware-tanzu.github.io/helm-charts"
+chart = "vmware-tanzu/velero"
+filename = "velero-{version}.tgz"
+
 # =============================================================================
 # Gateway API CRDs (YAML download, not a Helm chart)
 # =============================================================================

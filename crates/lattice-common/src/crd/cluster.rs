@@ -58,7 +58,7 @@ pub struct LatticeClusterSpec {
     /// Enable LatticeService support (Istio ambient mesh + bilateral agreements).
     /// Defaults to true for backwards compatibility.
     #[serde(default = "default_true")]
-    pub services_enabled: bool,
+    pub services: bool,
 }
 
 fn default_true() -> bool {
@@ -83,6 +83,32 @@ impl LatticeClusterSpec {
 
         Ok(())
     }
+}
+
+/// Health of a child cluster connected via agent
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildClusterHealth {
+    /// Child cluster name
+    pub name: String,
+    /// Number of ready nodes
+    #[serde(default)]
+    pub ready_nodes: u32,
+    /// Total number of nodes
+    #[serde(default)]
+    pub total_nodes: u32,
+    /// Number of ready control plane nodes
+    #[serde(default)]
+    pub ready_control_plane: u32,
+    /// Total number of control plane nodes
+    #[serde(default)]
+    pub total_control_plane: u32,
+    /// Current agent state (e.g., "Ready", "Provisioning")
+    #[serde(default)]
+    pub agent_state: String,
+    /// Last heartbeat timestamp (ISO 8601)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat: Option<String>,
 }
 
 /// Status for a worker pool
@@ -182,6 +208,14 @@ pub struct LatticeClusterStatus {
     /// requests from new clusters. Moves with the LatticeCluster during pivot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_token: Option<String>,
+
+    /// Health of child clusters connected via agent
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children_health: Vec<ChildClusterHealth>,
+
+    /// Last heartbeat timestamp from agent (if this cluster has a parent)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -308,7 +342,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: Some(endpoints_spec()),
-            services_enabled: true,
+            services: true,
         };
 
         assert!(spec.is_parent(), "Should be recognized as a parent");
@@ -326,7 +360,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: None,
-            services_enabled: true,
+            services: true,
         };
 
         assert!(!spec.is_parent(), "Leaf cluster cannot have children");
@@ -349,7 +383,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: Some(endpoints_spec()),
-            services_enabled: true,
+            services: true,
         };
 
         assert!(
@@ -369,7 +403,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: None,
-            services_enabled: true,
+            services: true,
         };
 
         assert!(
@@ -398,7 +432,7 @@ mod tests {
             },
             networking: None,
             parent_config: None,
-            services_enabled: true,
+            services: true,
         };
 
         assert!(
@@ -418,7 +452,7 @@ mod tests {
             nodes: sample_node_spec(),
             networking: None,
             parent_config: None,
-            services_enabled: true,
+            services: true,
         };
 
         assert!(
@@ -593,7 +627,7 @@ nodes:
             nodes: sample_node_spec(),
             networking: None,
             parent_config: None,
-            services_enabled: true,
+            services: true,
         };
 
         let json =
@@ -624,7 +658,7 @@ nodes:
                 nodes: sample_node_spec(),
                 networking: None,
                 parent_config: None,
-                services_enabled: true,
+                services: true,
             },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };

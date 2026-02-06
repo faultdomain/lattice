@@ -9,6 +9,7 @@
 pub mod cilium;
 pub mod eso;
 pub mod istio;
+pub mod velero;
 
 use kube::ResourceExt;
 use tokio::process::Command;
@@ -56,7 +57,7 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             cluster_name: cluster.name_any(),
             skip_cilium_policies: false,
-            skip_service_mesh: !cluster.spec.services_enabled,
+            skip_service_mesh: !cluster.spec.services,
             parent_host: None,
             parent_grpc_port: DEFAULT_GRPC_PORT,
         }
@@ -83,6 +84,9 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
 
     // External Secrets Operator (for Vault integration)
     manifests.extend(eso::generate_eso().await?.iter().cloned());
+
+    // Velero (for backup and restore)
+    manifests.extend(velero::generate_velero().await?.iter().cloned());
 
     Ok(manifests)
 }

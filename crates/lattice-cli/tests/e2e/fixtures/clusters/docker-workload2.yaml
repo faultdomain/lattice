@@ -1,5 +1,5 @@
 # Docker second-tier workload cluster for E2E testing
-# Used to test deep hierarchy, unpivot flow, and multi-pool support
+# Used to test deep hierarchy and unpivot flow
 # This is a leaf cluster (no endpoints) - child of e2e-workload
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeCluster
@@ -22,11 +22,5 @@ spec:
   nodes:
     controlPlane: 1
     workerPools:
-      general:
+      default:
         replicas: 1
-        labels:
-          workload-type: general
-      compute:
-        replicas: 1
-        labels:
-          workload-type: compute

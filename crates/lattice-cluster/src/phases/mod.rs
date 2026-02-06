@@ -147,6 +147,8 @@ pub async fn update_status(
         unpivot_import_complete: current_status.unpivot_import_complete,
         observed_generation: current_status.observed_generation,
         bootstrap_token: current_status.bootstrap_token,
+        children_health: current_status.children_health,
+        last_heartbeat: current_status.last_heartbeat,
     };
 
     // Set pivot_complete if requested (persists pivot completion across restarts)
@@ -359,7 +361,7 @@ async fn get_or_create_bootstrap_token(
         bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         k8s_version: cluster.spec.provider.kubernetes.version.clone(),
         autoscaling_enabled,
-        services_enabled: cluster.spec.services_enabled,
+        services: cluster.spec.services,
     };
     let new_token = bootstrap_state.register_cluster(registration).await;
     let token_str = new_token.as_str().to_string();

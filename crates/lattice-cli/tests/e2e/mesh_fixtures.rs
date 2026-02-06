@@ -179,6 +179,7 @@ pub fn build_lattice_service(
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            backup: None,
         },
         status: None,
     }

@@ -2,11 +2,13 @@
 //!
 //! Provides functions for recovering state after operator restarts.
 
+use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kube::api::ListParams;
 use kube::{Api, Client};
+use serde::de::DeserializeOwned;
 
 use crate::bootstrap::{BootstrapState, ClusterRegistration, ManifestGenerator};
 use crate::crd::{ClusterPhase, LatticeCluster};
@@ -15,24 +17,30 @@ use crate::parent::ParentServers;
 use super::cell::discover_cell_host;
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL};
 
-/// Wait for the API server to be responsive after infrastructure installation
+/// Wait for the API server to be responsive for a specific CRD type
 ///
-/// After installing CRDs, Istio, and CAPI, the API server needs time to:
-/// - Register webhooks
-/// - Process CRD schemas
-/// - Settle etcd writes
-///
-/// This function does a quick health check by listing our CRD and verifying
-/// the response time is reasonable. This prevents race conditions where
-/// controllers start before the API server is ready.
-pub async fn wait_for_api_ready(client: &Client) -> anyhow::Result<()> {
-    let api: Api<LatticeCluster> = Api::all(client.clone());
+/// After installing CRDs, the API server needs time to register schemas and settle.
+/// This does a health check by listing the given CRD type and verifying the response
+/// time is reasonable. Prevents race conditions where controllers start before
+/// the API server is ready.
+pub async fn wait_for_api_ready_for<K>(client: &Client) -> anyhow::Result<()>
+where
+    K: kube::Resource<DynamicType = ()> + Clone + Debug + DeserializeOwned + 'static,
+{
+    let api: Api<K> = Api::all(client.clone());
     let max_wait = Duration::from_secs(30);
+    let type_name = std::any::type_name::<K>()
+        .rsplit("::")
+        .next()
+        .unwrap_or("unknown");
 
-    tracing::info!("Waiting for API server to be ready...");
+    tracing::info!(
+        crd_type = type_name,
+        "Waiting for API server to be ready..."
+    );
 
     let result = wait_for_resource(
-        "API server readiness",
+        &format!("API server readiness ({})", type_name),
         max_wait,
         DEFAULT_POLL_INTERVAL,
         || {
@@ -73,7 +81,10 @@ pub async fn wait_for_api_ready(client: &Client) -> anyhow::Result<()> {
     .await;
 
     if result.is_err() {
-        tracing::warn!("API server still slow after 30s, proceeding anyway");
+        tracing::warn!(
+            crd_type = type_name,
+            "API server still slow after 30s, proceeding anyway"
+        );
     }
 
     Ok(())
@@ -212,7 +223,7 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             k8s_version: cluster.spec.provider.kubernetes.version.clone(),
             autoscaling_enabled,
-            services_enabled: cluster.spec.services_enabled,
+            services: cluster.spec.services,
         };
 
         // Use token from LatticeCluster.status if available (source of truth)

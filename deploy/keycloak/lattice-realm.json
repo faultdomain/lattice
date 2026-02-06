@@ -1,0 +1,145 @@
+{
+  "realm": "lattice",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "admin",
+        "description": "Lattice administrator"
+      },
+      {
+        "name": "developer",
+        "description": "Lattice developer"
+      },
+      {
+        "name": "viewer",
+        "description": "Lattice viewer (read-only)"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "lattice-admins",
+      "path": "/lattice-admins"
+    },
+    {
+      "name": "lattice-developers",
+      "path": "/lattice-developers"
+    },
+    {
+      "name": "lattice-viewers",
+      "path": "/lattice-viewers"
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "lattice",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://localhost:8000/*",
+        "http://localhost:18000/*",
+        "http://127.0.0.1:8000/*"
+      ],
+      "webOrigins": [
+        "+"
+      ],
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "email",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "email",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "email",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin@lattice.dev",
+      "email": "admin@lattice.dev",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Admin",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/lattice-admins"
+      ]
+    },
+    {
+      "username": "developer@lattice.dev",
+      "email": "developer@lattice.dev",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Developer",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "developer",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/lattice-developers"
+      ]
+    },
+    {
+      "username": "viewer@lattice.dev",
+      "email": "viewer@lattice.dev",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Viewer",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "viewer",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/lattice-viewers"
+      ]
+    }
+  ]
+}

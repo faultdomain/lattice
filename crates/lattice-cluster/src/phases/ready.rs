@@ -54,8 +54,19 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
         }
     });
 
-    // Update status with node counts and worker pool information
-    update_node_status(cluster, ctx, &name, pool_statuses, counts).await;
+    // Collect children health from agent registry (parent clusters only)
+    let children_health = if let Some(ref parent_servers) = ctx.parent_servers {
+        if parent_servers.is_running() {
+            parent_servers.agent_registry().collect_children_health()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Update status with node counts, worker pool information, and children health
+    update_node_status(cluster, ctx, &name, pool_statuses, counts, children_health).await;
 
     debug!(
         desired = total_desired,
@@ -185,13 +196,14 @@ async fn execute_scaling_action(
     }
 }
 
-/// Update cluster status with node counts and worker pool information.
+/// Update cluster status with node counts, worker pool information, and children health.
 async fn update_node_status(
     cluster: &LatticeCluster,
     ctx: &Context,
     name: &str,
     mut pool_statuses: BTreeMap<String, WorkerPoolStatus>,
     counts: NodeCounts,
+    children_health: Vec<lattice_common::crd::ChildClusterHealth>,
 ) {
     // For single-pool clusters, set ready_replicas on the pool
     if pool_statuses.len() == 1 {
@@ -200,12 +212,13 @@ async fn update_node_status(
         }
     }
 
-    // Preserve existing status fields
+    // Preserve existing status fields (spread operator preserves last_heartbeat, etc.)
     let current_status = cluster.status.clone().unwrap_or_default();
     let updated_status = LatticeClusterStatus {
         worker_pools: pool_statuses,
         ready_workers: Some(counts.ready_workers),
         ready_control_plane: Some(counts.ready_control_plane),
+        children_health,
         ..current_status
     };
 

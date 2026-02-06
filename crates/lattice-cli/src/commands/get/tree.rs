@@ -3,6 +3,10 @@
 //! Reads all contexts from the kubeconfig, connects to each, lists LatticeCluster
 //! CRDs, and builds a tree based on which clusters have `parent_config` (are parents)
 //! and which child CRDs exist on parent clusters.
+//!
+//! For proxy kubeconfigs (server URLs with `/clusters/` path on localhost), the
+//! discovery automatically starts a `kubectl port-forward` if the proxy is
+//! unreachable.
 
 use std::collections::HashMap;
 
@@ -14,6 +18,7 @@ use lattice_operator::crd::{LatticeCluster, LatticeClusterStatus};
 use serde::Serialize;
 use tracing::{debug, warn};
 
+use crate::commands::port_forward::PortForward;
 use crate::{Error, Result};
 
 /// A discovered cluster with its metadata
@@ -72,7 +77,7 @@ impl ClusterTree {
     /// Compute the depth of a cluster in the tree (0 = root)
     pub fn depth(&self, name: &str) -> usize {
         for (parent, kids) in &self.children {
-            if kids.contains(&name.to_string()) {
+            if kids.iter().any(|k| k == name) {
                 return 1 + self.depth(parent);
             }
         }
@@ -91,16 +96,16 @@ impl ClusterTree {
 /// by identifying which clusters are parents (have children CRDs on them) vs
 /// leaf clusters.
 ///
-/// If `kubeconfig_path` is provided, reads that file. Otherwise uses the
-/// default resolution ($KUBECONFIG env var, then ~/.kube/config).
-pub async fn discover_tree(kubeconfig_path: Option<&str>) -> Result<ClusterTree> {
-    let kubeconfig = match kubeconfig_path {
-        Some(path) => Kubeconfig::read_from(path).map_err(|e| {
-            Error::command_failed(format!("failed to read kubeconfig {}: {}", path, e))
-        })?,
-        None => Kubeconfig::read()
-            .map_err(|e| Error::command_failed(format!("failed to read kubeconfig: {}", e)))?,
-    };
+/// Uses the kubeconfig resolution chain (explicit path > `LATTICE_KUBECONFIG` >
+/// `~/.lattice/kubeconfig` > kube defaults).
+///
+/// Returns `(tree, Option<PortForward>)`. If a proxy kubeconfig is detected
+/// and the proxy is unreachable, a port-forward is automatically started and
+/// returned. The caller must hold this guard to keep the port-forward alive.
+pub async fn discover_tree(
+    explicit_kubeconfig: Option<&str>,
+) -> Result<(ClusterTree, Option<PortForward>)> {
+    let (kubeconfig, port_forward) = crate::commands::load_kubeconfig(explicit_kubeconfig).await?;
 
     let contexts: Vec<String> = kubeconfig
         .contexts
@@ -254,14 +259,17 @@ pub async fn discover_tree(kubeconfig_path: Option<&str>) -> Result<ClusterTree>
         .cloned()
         .collect();
 
-    Ok(ClusterTree {
-        clusters: all_clusters,
-        children,
-        roots,
-    })
+    Ok((
+        ClusterTree {
+            clusters: all_clusters,
+            children,
+            roots,
+        },
+        port_forward,
+    ))
 }
 
-/// Build a kube Client for a specific kubeconfig context
+/// Build a kube Client for a specific kubeconfig context.
 async fn client_for_context(kubeconfig: &Kubeconfig, context: &str) -> Result<kube::Client> {
     let options = KubeConfigOptions {
         context: Some(context.to_string()),

@@ -7,7 +7,7 @@ use super::tree::discover_tree;
 use super::OutputFormat;
 
 pub async fn run(kubeconfig: Option<&str>, name: &str, output: &OutputFormat) -> Result<()> {
-    let tree = discover_tree(kubeconfig).await?;
+    let (tree, _port_forward) = discover_tree(kubeconfig).await?;
 
     let info = tree.clusters.get(name).ok_or_else(|| {
         Error::command_failed(format!(

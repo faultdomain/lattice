@@ -339,7 +339,7 @@ mod tests {
                 },
                 parent_config: None,
                 networking: None,
-                services_enabled: true,
+                services: true,
             },
             status: None,
         }

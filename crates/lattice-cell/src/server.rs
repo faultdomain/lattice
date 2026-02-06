@@ -353,14 +353,28 @@ async fn process_agent_message(
                 "Heartbeat received"
             );
             registry.update_state(cluster_name, hb.state());
+            if let Some(ref health) = hb.health {
+                debug!(
+                    cluster = %cluster_name,
+                    ready_nodes = health.ready_nodes,
+                    total_nodes = health.total_nodes,
+                    "Health update from heartbeat"
+                );
+                registry.update_health(cluster_name, health.clone());
+            }
+            if let Some(age) = registry.heartbeat_age_seconds(cluster_name) {
+                lattice_common::metrics::set_agent_heartbeat_age(cluster_name, age);
+            }
         }
         Some(Payload::ClusterHealth(health)) => {
+            // Legacy standalone health message — persist to registry
             debug!(
                 cluster = %cluster_name,
                 ready_nodes = health.ready_nodes,
                 total_nodes = health.total_nodes,
-                "Health update"
+                "Health update (standalone)"
             );
+            registry.update_health(cluster_name, health.clone());
         }
         Some(Payload::StatusResponse(sr)) => {
             debug!(
@@ -586,6 +600,20 @@ async fn process_agent_message(
                 registry.take_pending_exec_data(&data.request_id);
             }
         }
+        Some(Payload::Event(event)) => {
+            info!(
+                cluster = %cluster_name,
+                reason = %event.reason,
+                source = %event.source_cluster,
+                severity = %event.severity,
+                "Forwarded lifecycle event from child: {}",
+                event.message
+            );
+            // The event is logged and available through the registry.
+            // The cluster controller will see these events when it reconciles
+            // and can emit them as K8s Events on the parent's LatticeCluster CRD
+            // if needed in the future.
+        }
         None => {
             warn!(cluster = %cluster_name, "Received message with no payload");
         }
@@ -771,6 +799,7 @@ mod tests {
                 }
             }
             Some(Payload::ExecData(_)) => {}
+            Some(Payload::Event(_)) => {}
             None => {}
         }
     }
@@ -843,6 +872,7 @@ mod tests {
                 state: state.into(),
                 timestamp: None,
                 uptime_seconds: 3600,
+                health: None,
             })),
         }
     }

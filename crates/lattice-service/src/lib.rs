@@ -12,6 +12,7 @@ pub mod compiler;
 pub mod controller;
 pub mod ingress;
 pub mod policy;
+pub mod policy_controller;
 pub mod workload;
 
 // Re-export key types

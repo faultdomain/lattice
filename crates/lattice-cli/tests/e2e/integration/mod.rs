@@ -26,6 +26,7 @@ pub mod cedar_secrets;
 pub mod kubeconfig;
 pub mod mesh;
 pub mod multi_hop;
+pub mod oidc;
 pub mod pivot;
 pub mod proxy;
 pub mod scaling;

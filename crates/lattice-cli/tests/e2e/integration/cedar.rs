@@ -27,8 +27,9 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
-    apply_yaml_with_retry, get_child_cluster_name, get_or_create_proxy, get_sa_token,
-    http_get_with_retry, proxy_service_exists, run_cmd,
+    apply_cedar_policy_crd, apply_yaml_with_retry, delete_cedar_policies_by_label,
+    get_child_cluster_name, get_or_create_proxy, get_sa_token, http_get_with_retry,
+    proxy_service_exists, run_cmd,
 };
 
 // =============================================================================
@@ -97,36 +98,16 @@ pub async fn apply_cedar_policy_allow_sa(
     cluster_name: &str,
 ) -> Result<(), String> {
     let full_sa_name = format!("system:serviceaccount:{}:{}", sa_namespace, sa_name);
-
-    let policy_yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: CedarPolicy
-metadata:
-  name: {}
-  namespace: lattice-system
-  labels:
-    lattice.dev/test: cedar
-spec:
-  enabled: true
-  priority: 100
-  policies: |
-    permit(
-      principal == Lattice::User::"{}",
-      action,
-      resource == Lattice::Cluster::"{}"
-    );"#,
-        policy_name, full_sa_name, cluster_name
+    let cedar = format!(
+        r#"permit(
+  principal == Lattice::User::"{sa}",
+  action,
+  resource == Lattice::Cluster::"{cluster}"
+);"#,
+        sa = full_sa_name,
+        cluster = cluster_name,
     );
-
-    apply_yaml_with_retry(kubeconfig, &policy_yaml).await?;
-    info!(
-        "[Integration/Cedar] Applied CedarPolicy allowing {} on {}",
-        full_sa_name, cluster_name
-    );
-
-    // Wait for policy to be loaded
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    Ok(())
+    apply_cedar_policy_crd(kubeconfig, policy_name, "cedar", 100, &cedar).await
 }
 
 /// Apply a CedarPolicy that allows a group of ServiceAccounts
@@ -136,34 +117,16 @@ pub async fn apply_cedar_policy_allow_group(
     group_name: &str,
     cluster_name: &str,
 ) -> Result<(), String> {
-    let policy_yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: CedarPolicy
-metadata:
-  name: {}
-  namespace: lattice-system
-  labels:
-    lattice.dev/test: cedar
-spec:
-  enabled: true
-  priority: 100
-  policies: |
-    permit(
-      principal in Lattice::Group::"{}",
-      action,
-      resource == Lattice::Cluster::"{}"
-    );"#,
-        policy_name, group_name, cluster_name
+    let cedar = format!(
+        r#"permit(
+  principal in Lattice::Group::"{group}",
+  action,
+  resource == Lattice::Cluster::"{cluster}"
+);"#,
+        group = group_name,
+        cluster = cluster_name,
     );
-
-    apply_yaml_with_retry(kubeconfig, &policy_yaml).await?;
-    info!(
-        "[Integration/Cedar] Applied CedarPolicy allowing group {} on {}",
-        group_name, cluster_name
-    );
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    Ok(())
+    apply_cedar_policy_crd(kubeconfig, policy_name, "cedar", 100, &cedar).await
 }
 
 /// Delete a CedarPolicy
@@ -188,24 +151,9 @@ pub fn delete_cedar_policy(kubeconfig: &str, policy_name: &str) -> Result<(), St
 /// Clean up test resources (policies only, namespace persists for subsequent tests)
 pub fn cleanup_cedar_test_resources(kubeconfig: &str) {
     info!("[Integration/Cedar] Cleaning up test resources...");
-
     // Delete test policies only - namespace persists to avoid race conditions
     // between consecutive tests. Namespace gets cleaned up with cluster deletion.
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "cedarpolicy",
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "-l",
-            "lattice.dev/test=cedar",
-            "--ignore-not-found",
-        ],
-    );
-
+    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=cedar");
     info!("[Integration/Cedar] Cleanup complete");
 }
 
@@ -218,29 +166,13 @@ pub const E2E_DEFAULT_POLICY_NAME: &str = "e2e-allow-all";
 /// It should be applied during E2E setup and removed during cleanup.
 pub async fn apply_e2e_default_policy(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/Cedar] Applying default E2E policy (permit all authenticated)...");
-
-    let policy_yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: CedarPolicy
-metadata:
-  name: {}
-  namespace: lattice-system
-  labels:
-    lattice.dev/e2e: "true"
-spec:
-  enabled: true
-  priority: 1000
-  policies: |
-    // E2E test policy - permit all authenticated users to access all clusters
-    permit(principal, action, resource);"#,
-        E2E_DEFAULT_POLICY_NAME
-    );
-
-    apply_yaml_with_retry(kubeconfig, &policy_yaml).await?;
-
-    // Wait for policy to be loaded by the operator
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
+    apply_cedar_policy_crd(
+        kubeconfig,
+        E2E_DEFAULT_POLICY_NAME,
+        "e2e",
+        1000,
+        "// E2E test policy - permit all authenticated users to access all clusters\n// Scoped to AccessCluster only — must NOT permit AccessSecret (Cedar secrets tests rely on default-deny)\npermit(principal, action == Lattice::Action::\"AccessCluster\", resource);",
+    ).await?;
     info!("[Integration/Cedar] Default E2E policy applied");
     Ok(())
 }

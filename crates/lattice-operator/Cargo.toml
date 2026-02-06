@@ -7,7 +7,7 @@ description = "Lattice Kubernetes operator for multi-cluster lifecycle managemen
 
 [features]
 default = []
-fips = ["lattice-common/fips", "lattice-infra/fips", "lattice-cluster/fips", "lattice-service/fips"]
+fips = ["lattice-common/fips", "lattice-infra/fips", "lattice-cluster/fips", "lattice-service/fips", "lattice-backup/fips"]
 e2e = []
 aws-e2e = []
 provider-e2e = []
@@ -24,6 +24,7 @@ lattice-service.workspace = true
 lattice-cloud-provider.workspace = true
 lattice-secrets-provider.workspace = true
 lattice-api.workspace = true
+lattice-backup.workspace = true
 
 kube.workspace = true
 k8s-openapi.workspace = true

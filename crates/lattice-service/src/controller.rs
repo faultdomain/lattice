@@ -21,6 +21,7 @@ use tracing::{debug, error, info, instrument, warn};
 #[cfg(test)]
 use mockall::automock;
 
+use kube::discovery::ApiResource;
 use lattice_common::kube_utils::HasApiResource;
 use lattice_common::policy::{AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry};
 
@@ -39,6 +40,112 @@ use crate::graph::ServiceGraph;
 use crate::ingress::{Certificate, Gateway, HttpRoute};
 use crate::Error;
 use lattice_common::mesh;
+
+// =============================================================================
+// Discovered CRD versions
+// =============================================================================
+
+/// Cache of discovered API versions for third-party CRDs.
+///
+/// At operator startup, we discover which CRDs are installed and their API versions
+/// via Kubernetes API discovery. This avoids hardcoding versions like `v1beta1` that
+/// may differ from what's actually installed (e.g., the cluster has `v1` only).
+///
+/// If a CRD isn't installed, its field is `None` and resources of that type are
+/// skipped with a warning during apply.
+pub struct DiscoveredCrds {
+    pub external_secret: Option<ApiResource>,
+    pub cilium_network_policy: Option<ApiResource>,
+    pub authorization_policy: Option<ApiResource>,
+    pub service_entry: Option<ApiResource>,
+    pub gateway: Option<ApiResource>,
+    pub http_route: Option<ApiResource>,
+    pub certificate: Option<ApiResource>,
+}
+
+impl DiscoveredCrds {
+    /// Discover installed CRD versions from the API server.
+    ///
+    /// Runs a single API discovery and looks up each third-party CRD.
+    /// Missing CRDs result in `None` (not an error).
+    pub async fn discover(client: &Client) -> Self {
+        use kube::discovery::Discovery;
+
+        let discovery = match Discovery::new(client.clone()).run().await {
+            Ok(d) => Some(d),
+            Err(e) => {
+                warn!(error = %e, "API discovery failed, falling back to hardcoded CRD versions");
+                return Self::hardcoded_defaults();
+            }
+        };
+        let discovery = discovery.unwrap();
+
+        Self {
+            external_secret: Self::find_resource(
+                &discovery,
+                "external-secrets.io",
+                "ExternalSecret",
+            ),
+            cilium_network_policy: Self::find_resource(
+                &discovery,
+                "cilium.io",
+                "CiliumNetworkPolicy",
+            ),
+            authorization_policy: Self::find_resource(
+                &discovery,
+                "security.istio.io",
+                "AuthorizationPolicy",
+            ),
+            service_entry: Self::find_resource(&discovery, "networking.istio.io", "ServiceEntry"),
+            gateway: Self::find_resource(&discovery, "gateway.networking.k8s.io", "Gateway"),
+            http_route: Self::find_resource(&discovery, "gateway.networking.k8s.io", "HTTPRoute"),
+            certificate: Self::find_resource(&discovery, "cert-manager.io", "Certificate"),
+        }
+    }
+
+    /// Look up a single resource in the discovery results.
+    fn find_resource(
+        discovery: &kube::discovery::Discovery,
+        group: &str,
+        kind: &str,
+    ) -> Option<ApiResource> {
+        for api_group in discovery.groups() {
+            if api_group.name() != group {
+                continue;
+            }
+            for (ar, _caps) in api_group.resources_by_stability() {
+                if ar.kind == kind {
+                    info!(
+                        group = %group,
+                        kind = %kind,
+                        api_version = %ar.api_version,
+                        "discovered CRD version"
+                    );
+                    return Some(ar);
+                }
+            }
+        }
+        warn!(group = %group, kind = %kind, "CRD not found in API discovery");
+        None
+    }
+
+    /// Fall back to hardcoded `HasApiResource` defaults.
+    ///
+    /// Used when API discovery fails entirely, and in tests.
+    pub fn hardcoded_defaults() -> Self {
+        use lattice_secrets_provider::ExternalSecret;
+
+        Self {
+            external_secret: Some(ExternalSecret::api_resource()),
+            cilium_network_policy: Some(CiliumNetworkPolicy::api_resource()),
+            authorization_policy: Some(AuthorizationPolicy::api_resource()),
+            service_entry: Some(ServiceEntry::api_resource()),
+            gateway: Some(Gateway::api_resource()),
+            http_route: Some(HttpRoute::api_resource()),
+            certificate: Some(Certificate::api_resource()),
+        }
+    }
+}
 
 // =============================================================================
 // Traits for dependency injection and testability
@@ -99,12 +206,13 @@ pub trait ServiceKubeClient: Send + Sync {
 /// Real Kubernetes client implementation
 pub struct ServiceKubeClientImpl {
     client: Client,
+    crds: Arc<DiscoveredCrds>,
 }
 
 impl ServiceKubeClientImpl {
-    /// Create a new ServiceKubeClientImpl wrapping the given client
-    pub fn new(client: Client) -> Self {
-        Self { client }
+    /// Create a new ServiceKubeClientImpl wrapping the given client and discovered CRDs
+    pub fn new(client: Client, crds: Arc<DiscoveredCrds>) -> Self {
+        Self { client, crds }
     }
 
     /// Ensure a namespace exists with ambient mode labels for Istio traffic routing.
@@ -383,9 +491,22 @@ impl ServiceKubeClientImpl {
         compiled: &CompiledService,
     ) -> Result<(), Error> {
         use kube::api::DynamicObject;
-        use lattice_secrets_provider::ExternalSecret;
 
-        let es_ar = ExternalSecret::api_resource();
+        if compiled.workloads.external_secrets.is_empty() {
+            return Ok(());
+        }
+
+        let es_ar = match &self.crds.external_secret {
+            Some(ar) => ar.clone(),
+            None => {
+                warn!(
+                    "ExternalSecret CRD not installed, skipping {} ExternalSecret resource(s)",
+                    compiled.workloads.external_secrets.len()
+                );
+                return Ok(());
+            }
+        };
+
         for external_secret in &compiled.workloads.external_secrets {
             let name = external_secret.metadata.name.clone();
             let json = serialize_resource("ExternalSecret", external_secret)?;
@@ -413,48 +534,81 @@ impl ServiceKubeClientImpl {
         use kube::api::DynamicObject;
 
         // CiliumNetworkPolicies
-        let cnp_ar = CiliumNetworkPolicy::api_resource();
-        for cnp in &compiled.policies.cilium_policies {
-            let name = cnp.metadata.name.clone();
-            let json = serialize_resource("CiliumNetworkPolicy", cnp)?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &cnp_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying CiliumNetworkPolicy");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+        if !compiled.policies.cilium_policies.is_empty() {
+            match &self.crds.cilium_network_policy {
+                Some(cnp_ar) => {
+                    for cnp in &compiled.policies.cilium_policies {
+                        let name = cnp.metadata.name.clone();
+                        let json = serialize_resource("CiliumNetworkPolicy", cnp)?;
+                        let api: Api<DynamicObject> =
+                            Api::namespaced_with(self.client.clone(), namespace, cnp_ar);
+                        let params = params.clone();
+                        futures.push(Box::pin(async move {
+                            debug!(name = %name, "applying CiliumNetworkPolicy");
+                            api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                            Ok(())
+                        }));
+                    }
+                }
+                None => {
+                    warn!(
+                        "CiliumNetworkPolicy CRD not installed, skipping {} policy resource(s)",
+                        compiled.policies.cilium_policies.len()
+                    );
+                }
+            }
         }
 
         // AuthorizationPolicies
-        let authz_ar = AuthorizationPolicy::api_resource();
-        for authz in &compiled.policies.authorization_policies {
-            let name = authz.metadata.name.clone();
-            let json = serialize_resource("AuthorizationPolicy", authz)?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &authz_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying AuthorizationPolicy");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+        if !compiled.policies.authorization_policies.is_empty() {
+            match &self.crds.authorization_policy {
+                Some(authz_ar) => {
+                    for authz in &compiled.policies.authorization_policies {
+                        let name = authz.metadata.name.clone();
+                        let json = serialize_resource("AuthorizationPolicy", authz)?;
+                        let api: Api<DynamicObject> =
+                            Api::namespaced_with(self.client.clone(), namespace, authz_ar);
+                        let params = params.clone();
+                        futures.push(Box::pin(async move {
+                            debug!(name = %name, "applying AuthorizationPolicy");
+                            api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                            Ok(())
+                        }));
+                    }
+                }
+                None => {
+                    warn!(
+                        "AuthorizationPolicy CRD not installed, skipping {} policy resource(s)",
+                        compiled.policies.authorization_policies.len()
+                    );
+                }
+            }
         }
 
         // ServiceEntries
-        let se_ar = ServiceEntry::api_resource();
-        for entry in &compiled.policies.service_entries {
-            let name = entry.metadata.name.clone();
-            let json = serialize_resource("ServiceEntry", entry)?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &se_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying ServiceEntry");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+        if !compiled.policies.service_entries.is_empty() {
+            match &self.crds.service_entry {
+                Some(se_ar) => {
+                    for entry in &compiled.policies.service_entries {
+                        let name = entry.metadata.name.clone();
+                        let json = serialize_resource("ServiceEntry", entry)?;
+                        let api: Api<DynamicObject> =
+                            Api::namespaced_with(self.client.clone(), namespace, se_ar);
+                        let params = params.clone();
+                        futures.push(Box::pin(async move {
+                            debug!(name = %name, "applying ServiceEntry");
+                            api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                            Ok(())
+                        }));
+                    }
+                }
+                None => {
+                    warn!(
+                        "ServiceEntry CRD not installed, skipping {} service entry resource(s)",
+                        compiled.policies.service_entries.len()
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -471,48 +625,66 @@ impl ServiceKubeClientImpl {
         use kube::api::DynamicObject;
 
         // Gateway
-        let gw_ar = Gateway::api_resource();
         if let Some(ref gateway) = compiled.ingress.gateway {
-            let name = gateway.metadata.name.clone();
-            let json = serialize_resource("Gateway", gateway)?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &gw_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying Gateway");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+            match &self.crds.gateway {
+                Some(gw_ar) => {
+                    let name = gateway.metadata.name.clone();
+                    let json = serialize_resource("Gateway", gateway)?;
+                    let api: Api<DynamicObject> =
+                        Api::namespaced_with(self.client.clone(), namespace, gw_ar);
+                    let params = params.clone();
+                    futures.push(Box::pin(async move {
+                        debug!(name = %name, "applying Gateway");
+                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                        Ok(())
+                    }));
+                }
+                None => {
+                    warn!("Gateway CRD not installed, skipping ingress Gateway");
+                }
+            }
         }
 
         // HTTPRoute
-        let route_ar = HttpRoute::api_resource();
         if let Some(ref route) = compiled.ingress.http_route {
-            let name = route.metadata.name.clone();
-            let json = serialize_resource("HTTPRoute", route)?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &route_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying HTTPRoute");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+            match &self.crds.http_route {
+                Some(route_ar) => {
+                    let name = route.metadata.name.clone();
+                    let json = serialize_resource("HTTPRoute", route)?;
+                    let api: Api<DynamicObject> =
+                        Api::namespaced_with(self.client.clone(), namespace, route_ar);
+                    let params = params.clone();
+                    futures.push(Box::pin(async move {
+                        debug!(name = %name, "applying HTTPRoute");
+                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                        Ok(())
+                    }));
+                }
+                None => {
+                    warn!("HTTPRoute CRD not installed, skipping ingress HTTPRoute");
+                }
+            }
         }
 
         // Certificate
-        let cert_ar = Certificate::api_resource();
         if let Some(ref cert) = compiled.ingress.certificate {
-            let name = cert.metadata.name.clone();
-            let json = serialize_resource("Certificate", cert)?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &cert_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying Certificate");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+            match &self.crds.certificate {
+                Some(cert_ar) => {
+                    let name = cert.metadata.name.clone();
+                    let json = serialize_resource("Certificate", cert)?;
+                    let api: Api<DynamicObject> =
+                        Api::namespaced_with(self.client.clone(), namespace, cert_ar);
+                    let params = params.clone();
+                    futures.push(Box::pin(async move {
+                        debug!(name = %name, "applying Certificate");
+                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                        Ok(())
+                    }));
+                }
+                None => {
+                    warn!("Certificate CRD not installed, skipping ingress Certificate");
+                }
+            }
         }
 
         Ok(())
@@ -528,37 +700,48 @@ impl ServiceKubeClientImpl {
     ) -> Result<(), Error> {
         use kube::api::DynamicObject;
 
-        let gw_ar = Gateway::api_resource();
-        let authz_ar = AuthorizationPolicy::api_resource();
-
         // Waypoint Gateway (for east-west L7 policies via Istio ambient mesh)
         if let Some(ref gateway) = compiled.waypoint.gateway {
-            let name = gateway.metadata.name.clone();
-            let json = serialize_resource("Waypoint Gateway", gateway)?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &gw_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying waypoint Gateway");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+            match &self.crds.gateway {
+                Some(gw_ar) => {
+                    let name = gateway.metadata.name.clone();
+                    let json = serialize_resource("Waypoint Gateway", gateway)?;
+                    let api: Api<DynamicObject> =
+                        Api::namespaced_with(self.client.clone(), namespace, gw_ar);
+                    let params = params.clone();
+                    futures.push(Box::pin(async move {
+                        debug!(name = %name, "applying waypoint Gateway");
+                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                        Ok(())
+                    }));
+                }
+                None => {
+                    warn!("Gateway CRD not installed, skipping waypoint Gateway");
+                }
+            }
         }
 
         // Waypoint allow-to-waypoint AuthorizationPolicy
         // This allows any authenticated traffic to reach the waypoint on port 15008 (HBONE)
         // Without this, mesh-default-deny blocks traffic before it reaches the waypoint
         if let Some(ref policy) = compiled.waypoint.allow_to_waypoint_policy {
-            let name = policy.metadata.name.clone();
-            let json = serialize_resource("Waypoint AuthorizationPolicy", policy)?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &authz_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying waypoint AuthorizationPolicy");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+            match &self.crds.authorization_policy {
+                Some(authz_ar) => {
+                    let name = policy.metadata.name.clone();
+                    let json = serialize_resource("Waypoint AuthorizationPolicy", policy)?;
+                    let api: Api<DynamicObject> =
+                        Api::namespaced_with(self.client.clone(), namespace, authz_ar);
+                    let params = params.clone();
+                    futures.push(Box::pin(async move {
+                        debug!(name = %name, "applying waypoint AuthorizationPolicy");
+                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                        Ok(())
+                    }));
+                }
+                None => {
+                    warn!("AuthorizationPolicy CRD not installed, skipping waypoint AuthorizationPolicy");
+                }
+            }
         }
 
         Ok(())
@@ -620,7 +803,7 @@ impl ServiceContext {
         }
     }
 
-    /// Create a new ServiceContext from a Kubernetes client
+    /// Create a new ServiceContext from a Kubernetes client with discovered CRDs
     ///
     /// This creates a new ServiceGraph and default-deny PolicyEngine.
     /// For shared state, create dependencies externally and use the constructor.
@@ -629,13 +812,14 @@ impl ServiceContext {
         cluster_name: impl Into<String>,
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
+        crds: Arc<DiscoveredCrds>,
     ) -> Self {
         let events = Arc::new(KubeEventPublisher::new(
             client.clone(),
             "lattice-service-controller",
         ));
         Self {
-            kube: Arc::new(ServiceKubeClientImpl::new(client)),
+            kube: Arc::new(ServiceKubeClientImpl::new(client, crds)),
             graph: Arc::new(ServiceGraph::new()),
             cluster_name: cluster_name.into(),
             provider_type,
@@ -730,136 +914,47 @@ pub async fn reconcile(
 
             if !missing_deps.is_empty() {
                 debug!(?missing_deps, "waiting for dependencies");
-                // Dependencies not yet available, requeue
                 return Ok(Action::requeue(Duration::from_secs(10)));
             }
 
-            // All dependencies exist, check for bilateral agreements (active edges)
             let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
             let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
-
             debug!(
                 active_inbound = active_in.len(),
                 active_outbound = active_out.len(),
                 "edge status"
             );
 
-            // Compile workloads and policies
-            let compiler =
-                ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type, &ctx.cedar);
-            let compiled = match compiler.compile(&service).await {
-                Ok(compiled) => compiled,
-                Err(e) => {
-                    let event_reason = match &e {
-                        CompileError::SecretAccessDenied(_) => reasons::SECRET_ACCESS_DENIED,
-                        _ => reasons::COMPILATION_FAILED,
-                    };
-                    let msg = e.to_string();
-                    ctx.events
-                        .publish(
-                            &service.object_ref(&()),
-                            EventType::Warning,
-                            event_reason,
-                            actions::COMPILE,
-                            Some(msg.clone()),
-                        )
-                        .await;
-                    warn!(error = %msg, "compilation failed");
-                    update_service_status_failed(&service, &ctx, &msg).await?;
-                    return Ok(Action::requeue(Duration::from_secs(30)));
-                }
-            };
-
-            // Apply compiled resources to the cluster
-            info!(
-                resources = compiled.resource_count(),
-                "applying compiled resources"
-            );
-            ctx.events
-                .publish(
-                    &service.object_ref(&()),
-                    EventType::Normal,
-                    reasons::COMPILATION_SUCCESS,
-                    actions::COMPILE,
-                    Some(format!("Generated {} resources", compiled.resource_count())),
-                )
-                .await;
-            if let Err(e) = ctx
-                .kube
-                .apply_compiled_service(&name, namespace, &compiled)
-                .await
-            {
-                error!(error = %e, "failed to apply compiled resources");
-                update_service_status_failed(&service, &ctx, &e.to_string()).await?;
-                return Err(e);
-            }
-
-            // Transition to Ready
+            compile_and_apply(&service, &name, namespace, &ctx).await?;
             info!("service ready");
             update_service_status_ready(&service, &ctx).await?;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         ServicePhase::Ready => {
-            // Check for any issues that would cause degradation
             let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
             if !missing_deps.is_empty() {
                 warn!(?missing_deps, "dependencies no longer available");
-                // Transition back to Compiling to wait for deps
                 update_service_status_compiling(&service, &ctx).await?;
                 return Ok(Action::requeue(Duration::from_secs(10)));
             }
 
-            // Recompile and apply policies to handle changes in dependent services
-            // This is necessary because when a new service is added that depends on us,
-            // or when a service we depend on changes its allowed callers, we need to
-            // update our ingress/egress policies to reflect the new bilateral agreements.
-            let compiler =
-                ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type, &ctx.cedar);
-            let compiled = match compiler.compile(&service).await {
-                Ok(compiled) => compiled,
-                Err(e) => {
-                    let event_reason = match &e {
-                        CompileError::SecretAccessDenied(_) => reasons::SECRET_ACCESS_DENIED,
-                        _ => reasons::COMPILATION_FAILED,
-                    };
-                    let msg = e.to_string();
-                    ctx.events
-                        .publish(
-                            &service.object_ref(&()),
-                            EventType::Warning,
-                            event_reason,
-                            actions::COMPILE,
-                            Some(msg.clone()),
-                        )
-                        .await;
-                    warn!(error = %msg, "compilation failed");
-                    update_service_status_failed(&service, &ctx, &msg).await?;
-                    return Ok(Action::requeue(Duration::from_secs(30)));
-                }
-            };
-
-            debug!(
-                resources = compiled.resource_count(),
-                "reapplying compiled resources for policy drift"
-            );
-            if let Err(e) = ctx
-                .kube
-                .apply_compiled_service(&name, namespace, &compiled)
-                .await
-            {
-                error!(error = %e, "failed to reapply compiled resources");
-                update_service_status_failed(&service, &ctx, &e.to_string()).await?;
-                return Err(e);
-            }
-
-            // Steady state - requeue periodically to check for drift
+            compile_and_apply(&service, &name, namespace, &ctx).await?;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         ServicePhase::Failed => {
-            // Retry failed services periodically - failure may have been transient
-            // (e.g., webhook not ready yet, temporary network issue)
-            warn!("service is in Failed state, will retry");
-            Ok(Action::requeue(Duration::from_secs(30)))
+            // Re-attempt compilation without changing phase.
+            // If it succeeds, transition to Ready. If it still fails, stay Failed.
+            match compile_and_apply(&service, &name, namespace, &ctx).await {
+                Ok(()) => {
+                    info!("previously failed service now compiles");
+                    update_service_status_ready(&service, &ctx).await?;
+                    Ok(Action::requeue(Duration::from_secs(60)))
+                }
+                Err(_) => {
+                    debug!("service still failing, will retry");
+                    Ok(Action::requeue(Duration::from_secs(30)))
+                }
+            }
         }
     }
 }
@@ -917,6 +1012,58 @@ fn check_missing_dependencies(
             }
         })
         .collect()
+}
+
+/// Compile a service and apply the resulting resources to the cluster.
+///
+/// On compile failure, publishes a warning event and sets the service to Failed.
+/// On apply failure, sets the service to Failed and returns the error.
+async fn compile_and_apply(
+    service: &LatticeService,
+    name: &str,
+    namespace: &str,
+    ctx: &ServiceContext,
+) -> Result<(), Error> {
+    let compiler =
+        ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type, &ctx.cedar);
+    let compiled = match compiler.compile(service).await {
+        Ok(compiled) => compiled,
+        Err(e) => {
+            let event_reason = match &e {
+                CompileError::SecretAccessDenied(_) => reasons::SECRET_ACCESS_DENIED,
+                _ => reasons::COMPILATION_FAILED,
+            };
+            let msg = e.to_string();
+            ctx.events
+                .publish(
+                    &service.object_ref(&()),
+                    EventType::Warning,
+                    event_reason,
+                    actions::COMPILE,
+                    Some(msg.clone()),
+                )
+                .await;
+            warn!(error = %msg, "compilation failed");
+            update_service_status_failed(service, ctx, &msg).await?;
+            return Err(Error::internal_with_context("compiler", msg));
+        }
+    };
+
+    debug!(
+        resources = compiled.resource_count(),
+        "applying compiled resources"
+    );
+    if let Err(e) = ctx
+        .kube
+        .apply_compiled_service(name, namespace, &compiled)
+        .await
+    {
+        error!(error = %e, "failed to apply compiled resources");
+        update_service_status_failed(service, ctx, &e.to_string()).await?;
+        return Err(e);
+    }
+
+    Ok(())
 }
 
 // =============================================================================
@@ -1252,6 +1399,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            backup: None,
         }
     }
 

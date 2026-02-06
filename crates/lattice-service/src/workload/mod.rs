@@ -9,6 +9,7 @@
 //!
 //! For workload generation, use [`crate::compiler::ServiceCompiler`].
 
+pub mod backup;
 pub mod env;
 pub mod error;
 pub mod files;
@@ -1444,6 +1445,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
+                backup: None,
             },
             status: None,
         }

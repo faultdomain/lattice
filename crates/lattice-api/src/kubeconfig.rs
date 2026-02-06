@@ -153,12 +153,15 @@ pub async fn kubeconfig_handler(
         return Err(Error::Forbidden("No accessible clusters".into()));
     }
 
+    // Get OIDC config dynamically from auth chain (reloads when OIDCProvider changes)
+    let oidc_config = state.auth.oidc_config().await;
+
     // Build kubeconfig
     let kubeconfig = build_kubeconfig(
         &accessible_clusters,
         &identity.username,
         &state.base_url,
-        state.oidc_config.as_ref(),
+        oidc_config.as_ref(),
         &state.ca_cert_base64,
         &params,
     );

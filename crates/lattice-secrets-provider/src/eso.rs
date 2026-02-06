@@ -33,7 +33,7 @@ pub struct ClusterSecretStore {
 }
 
 impl HasApiResource for ClusterSecretStore {
-    const API_VERSION: &'static str = "external-secrets.io/v1beta1";
+    const API_VERSION: &'static str = "external-secrets.io/v1";
     const KIND: &'static str = "ClusterSecretStore";
 }
 
@@ -197,7 +197,7 @@ pub struct ExternalSecret {
 }
 
 impl HasApiResource for ExternalSecret {
-    const API_VERSION: &'static str = "external-secrets.io/v1beta1";
+    const API_VERSION: &'static str = "external-secrets.io/v1";
     const KIND: &'static str = "ExternalSecret";
 }
 
@@ -426,7 +426,7 @@ mod tests {
         );
 
         let json = serde_json::to_string_pretty(&secret).unwrap();
-        assert!(json.contains("external-secrets.io/v1beta1"));
+        assert!(json.contains("external-secrets.io/v1"));
         assert!(json.contains("ExternalSecret"));
         assert!(json.contains("vault-prod"));
         assert!(json.contains("ClusterSecretStore"));

@@ -243,6 +243,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            backup: None,
         }
     }
 
@@ -425,6 +426,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            backup: None,
         };
 
         let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();

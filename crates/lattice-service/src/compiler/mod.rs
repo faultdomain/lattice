@@ -201,6 +201,20 @@ impl<'a> ServiceCompiler<'a> {
         workloads.external_secrets = compiled_secrets.external_secrets;
         workloads.secret_refs = compiled_secrets.secret_refs;
 
+        // Inject Velero backup annotations into pod template if backup is configured
+        if let Some(ref backup_spec) = service.spec.backup {
+            let backup_annotations =
+                crate::workload::backup::compile_backup_annotations(backup_spec);
+            if let Some(ref mut deployment) = workloads.deployment {
+                deployment
+                    .spec
+                    .template
+                    .metadata
+                    .annotations
+                    .extend(backup_annotations);
+            }
+        }
+
         let policy_compiler = PolicyCompiler::new(self.graph, &self.cluster_name);
         let mut policies = policy_compiler.compile(name, namespace);
 
@@ -353,6 +367,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
+                backup: None,
             },
             status: None,
         }
@@ -454,6 +469,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            backup: None,
         }
     }
 
@@ -674,5 +690,82 @@ mod tests {
         //                 Gateway + HTTPRoute + Certificate + GatewayAllowPolicy
         // = 3 workloads + 2 policies + 3 ingress = at least 8
         assert!(output.resource_count() >= 6);
+    }
+
+    // =========================================================================
+    // Story: Backup Annotations Injected into Deployment
+    // =========================================================================
+
+    #[tokio::test]
+    async fn story_backup_annotations_injected() {
+        use crate::crd::{
+            BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
+            VolumeBackupSpec,
+        };
+
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
+
+        let mut service = make_service("my-db", "prod");
+        service.spec.backup = Some(ServiceBackupSpec {
+            hooks: Some(BackupHooksSpec {
+                pre: vec![BackupHook {
+                    name: "freeze".to_string(),
+                    container: "main".to_string(),
+                    command: vec![
+                        "/bin/sh".to_string(),
+                        "-c".to_string(),
+                        "pg_dump".to_string(),
+                    ],
+                    timeout: Some("600s".to_string()),
+                    on_error: HookErrorAction::Fail,
+                }],
+                post: vec![],
+            }),
+            volumes: Some(VolumeBackupSpec {
+                include: vec!["data".to_string()],
+                exclude: vec![],
+                default_policy: VolumeBackupDefault::OptIn,
+            }),
+        });
+
+        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
+
+        let deployment = output.workloads.deployment.expect("should have deployment");
+        let annotations = &deployment.spec.template.metadata.annotations;
+
+        assert_eq!(
+            annotations.get("pre.hook.backup.velero.io/container"),
+            Some(&"main".to_string())
+        );
+        assert_eq!(
+            annotations.get("pre.hook.backup.velero.io/timeout"),
+            Some(&"600s".to_string())
+        );
+        assert_eq!(
+            annotations.get("pre.hook.backup.velero.io/on-error"),
+            Some(&"Fail".to_string())
+        );
+        assert_eq!(
+            annotations.get("backup.velero.io/backup-volumes"),
+            Some(&"data".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn story_no_backup_no_annotations() {
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
+        let service = make_service("my-app", "default");
+
+        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
+
+        let deployment = output.workloads.deployment.expect("should have deployment");
+        let annotations = &deployment.spec.template.metadata.annotations;
+
+        // No backup-related annotations
+        assert!(annotations.keys().all(|k| !k.contains("velero")));
     }
 }

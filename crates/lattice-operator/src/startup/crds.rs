@@ -1,14 +1,16 @@
 //! CRD installation utilities
 //!
 //! Provides functions for installing Lattice CRDs on startup using server-side apply.
+//! CRDs are organized into per-mode sets so each ControllerMode only installs
+//! the CRDs it needs.
 
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{Api, Patch, PatchParams};
 use kube::{Client, CustomResourceExt};
 
 use crate::crd::{
-    CedarPolicy, CloudProvider, LatticeCluster, LatticeExternalService, LatticeService,
-    OIDCProvider, SecretsProvider,
+    CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
+    LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider, SecretsProvider,
 };
 
 /// CRD definition with name and resource
@@ -17,20 +19,13 @@ struct CrdDef {
     crd: CustomResourceDefinition,
 }
 
-/// Get all Lattice CRD definitions
-fn all_crds() -> Vec<CrdDef> {
+/// CRDs needed by Cluster mode:
+/// LatticeCluster, CloudProvider, SecretsProvider, CedarPolicy, OIDCProvider
+fn cluster_crds() -> Vec<CrdDef> {
     vec![
         CrdDef {
             name: "latticeclusters.lattice.dev",
             crd: LatticeCluster::crd(),
-        },
-        CrdDef {
-            name: "latticeservices.lattice.dev",
-            crd: LatticeService::crd(),
-        },
-        CrdDef {
-            name: "latticeexternalservices.lattice.dev",
-            crd: LatticeExternalService::crd(),
         },
         CrdDef {
             name: "cloudproviders.lattice.dev",
@@ -51,21 +46,96 @@ fn all_crds() -> Vec<CrdDef> {
     ]
 }
 
-/// Ensure all Lattice CRDs are installed
-///
-/// The operator installs its own CRDs on startup using server-side apply.
-/// This ensures the CRD versions always match the operator version.
-pub async fn ensure_crds_installed(client: &Client) -> anyhow::Result<()> {
+/// CRDs needed by Service mode:
+/// LatticeService, LatticeExternalService, LatticeServicePolicy,
+/// LatticeBackupPolicy, LatticeRestore, CedarPolicy
+fn service_crds() -> Vec<CrdDef> {
+    vec![
+        CrdDef {
+            name: "latticeservices.lattice.dev",
+            crd: LatticeService::crd(),
+        },
+        CrdDef {
+            name: "latticeexternalservices.lattice.dev",
+            crd: LatticeExternalService::crd(),
+        },
+        CrdDef {
+            name: "latticeservicepolicies.lattice.dev",
+            crd: LatticeServicePolicy::crd(),
+        },
+        CrdDef {
+            name: "latticebackuppolicies.lattice.dev",
+            crd: LatticeBackupPolicy::crd(),
+        },
+        CrdDef {
+            name: "latticerestores.lattice.dev",
+            crd: LatticeRestore::crd(),
+        },
+        CrdDef {
+            name: "cedarpolicies.lattice.dev",
+            crd: CedarPolicy::crd(),
+        },
+    ]
+}
+
+/// CRDs needed by Provider mode:
+/// CloudProvider, SecretsProvider, CedarPolicy, OIDCProvider
+fn provider_crds() -> Vec<CrdDef> {
+    vec![
+        CrdDef {
+            name: "cloudproviders.lattice.dev",
+            crd: CloudProvider::crd(),
+        },
+        CrdDef {
+            name: "secretsproviders.lattice.dev",
+            crd: SecretsProvider::crd(),
+        },
+        CrdDef {
+            name: "cedarpolicies.lattice.dev",
+            crd: CedarPolicy::crd(),
+        },
+        CrdDef {
+            name: "oidcproviders.lattice.dev",
+            crd: OIDCProvider::crd(),
+        },
+    ]
+}
+
+/// Install a set of CRDs using server-side apply
+async fn install_crds(client: &Client, crds_to_install: Vec<CrdDef>) -> anyhow::Result<()> {
     let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
     let params = PatchParams::apply("lattice-controller").force();
 
-    for def in all_crds() {
+    for def in crds_to_install {
         tracing::info!("Installing {} CRD...", def.name);
         crds.patch(def.name, &params, &Patch::Apply(&def.crd))
             .await
             .map_err(|e| anyhow::anyhow!("failed to install {} CRD: {}", def.name, e))?;
     }
 
-    tracing::info!("All Lattice CRDs installed/updated");
+    Ok(())
+}
+
+/// Ensure CRDs needed by Cluster mode are installed
+pub async fn ensure_cluster_crds(client: &Client) -> anyhow::Result<()> {
+    tracing::info!("Installing Cluster mode CRDs...");
+    install_crds(client, cluster_crds()).await?;
+    tracing::info!("Cluster mode CRDs installed/updated");
+    Ok(())
+}
+
+/// Ensure CRDs needed by Service mode are installed
+pub async fn ensure_service_crds(client: &Client) -> anyhow::Result<()> {
+    tracing::info!("Installing Service mode CRDs...");
+    install_crds(client, service_crds()).await?;
+    tracing::info!("Service mode CRDs installed/updated");
+    Ok(())
+}
+
+/// Ensure CRDs needed by Provider mode are installed
+pub async fn ensure_provider_crds(client: &Client) -> anyhow::Result<()> {
+    tracing::info!("Installing Provider mode CRDs...");
+    install_crds(client, provider_crds()).await?;
+    tracing::info!("Provider mode CRDs installed/updated");
     Ok(())
 }

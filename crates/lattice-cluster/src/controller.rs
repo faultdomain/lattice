@@ -24,6 +24,7 @@ use kube::runtime::events::EventType;
 use lattice_common::crd::{ClusterPhase, LatticeCluster, LatticeClusterStatus, WorkerPoolSpec};
 
 use lattice_common::events::{actions, reasons, EventPublisher};
+use lattice_common::metrics::{self, ReconcileTimer};
 use lattice_common::{
     capi_namespace, Error, KubeEventPublisher, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE,
     PARENT_CONFIG_SECRET,
@@ -1090,6 +1091,7 @@ pub const CLUSTER_FINALIZER: &str = "lattice.dev/unpivot";
 )]
 pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Result<Action, Error> {
     let name = cluster.name_any();
+    let timer = ReconcileTimer::start(&name);
     info!("reconciling cluster");
 
     // Check if we're reconciling our own cluster (the one we're running on)
@@ -1099,7 +1101,12 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // Root/management clusters cannot be unpivoted (they have nowhere to unpivot to)
     // Only self-managed workload clusters need unpivot handling
     if cluster.metadata.deletion_timestamp.is_some() {
-        return handle_deletion(&cluster, &ctx, is_self).await;
+        let result = handle_deletion(&cluster, &ctx, is_self).await;
+        match &result {
+            Ok(_) => timer.success(),
+            Err(_) => timer.error("transient"),
+        }
+        return result;
     }
 
     // Ensure finalizer is present for clusters that need cleanup on deletion
@@ -1118,12 +1125,14 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             if has_parent {
                 info!("Adding finalizer (self cluster with parent - needs unpivot)");
                 add_finalizer(&cluster, &ctx).await?;
+                timer.success();
                 return Ok(Action::requeue(Duration::from_secs(1)));
             }
         } else {
             // Non-self cluster (we're the parent) - add finalizer for CAPI cleanup
             info!("Adding finalizer (child cluster - needs CAPI cleanup on deletion)");
             add_finalizer(&cluster, &ctx).await?;
+            timer.success();
             return Ok(Action::requeue(Duration::from_secs(1)));
         }
     }
@@ -1148,6 +1157,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             false,
         )
         .await?;
+        timer.error("permanent");
         // Don't requeue for validation errors - they require spec changes
         return Ok(Action::await_change());
     }
@@ -1162,13 +1172,33 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     debug!(?current_phase, is_self, "current cluster phase");
 
     // State machine: dispatch to phase handlers
-    match current_phase {
+    let result = match current_phase {
         ClusterPhase::Pending => handle_pending(&cluster, &ctx, is_self).await,
         ClusterPhase::Provisioning => handle_provisioning(&cluster, &ctx).await,
         ClusterPhase::Pivoting => handle_pivoting(&cluster, &ctx, is_self).await,
         ClusterPhase::Pivoted => {
-            // Child cluster is self-managing after pivot, just monitor
+            // Child cluster is self-managing after pivot — update status
+            // from agent heartbeat health data if available
             debug!("child cluster is self-managing (pivoted), monitoring");
+            if let Some(ref parent_servers) = ctx.parent_servers {
+                if parent_servers.is_running() {
+                    let registry = parent_servers.agent_registry();
+                    if let Some(health) = registry.get_health(&name) {
+                        let ready_cp = health.ready_control_plane as u32;
+                        let ready_workers =
+                            (health.ready_nodes - health.ready_control_plane).max(0) as u32;
+                        let current_status = cluster.status.clone().unwrap_or_default();
+                        let updated_status = LatticeClusterStatus {
+                            ready_control_plane: Some(ready_cp),
+                            ready_workers: Some(ready_workers),
+                            ..current_status
+                        };
+                        if let Err(e) = ctx.kube.patch_status(&name, &updated_status).await {
+                            warn!(error = %e, "Failed to update pivoted cluster status from heartbeat");
+                        }
+                    }
+                }
+            }
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         ClusterPhase::Ready => handle_ready(&cluster, &ctx).await,
@@ -1187,7 +1217,29 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             warn!("cluster is in Failed state, awaiting spec change");
             Ok(Action::await_change())
         }
+    };
+
+    // Record reconcile metrics and update phase gauge
+    match &result {
+        Ok(_) => {
+            timer.success();
+            // Update cluster phase gauge with current phase
+            let phase_label = match current_phase {
+                ClusterPhase::Pending => metrics::ClusterPhase::Pending,
+                ClusterPhase::Provisioning => metrics::ClusterPhase::Provisioning,
+                ClusterPhase::Pivoting | ClusterPhase::Pivoted => metrics::ClusterPhase::Pivoting,
+                ClusterPhase::Ready => metrics::ClusterPhase::Ready,
+                ClusterPhase::Failed => metrics::ClusterPhase::Failed,
+                ClusterPhase::Deleting | ClusterPhase::Unpivoting => {
+                    metrics::ClusterPhase::Deleting
+                }
+            };
+            metrics::set_cluster_phase_count(phase_label, 1);
+        }
+        Err(_) => timer.error("transient"),
     }
+
+    result
 }
 
 /// Error policy for the controller
@@ -1660,7 +1712,7 @@ mod tests {
                 },
                 networking: None,
                 parent_config: None,
-                services_enabled: true,
+                services: true,
             },
             status: None,
         }
@@ -2221,7 +2273,7 @@ mod tests {
                     },
                     networking: None,
                     parent_config: None,
-                    services_enabled: true,
+                    services: true,
                 },
                 status: None,
             }

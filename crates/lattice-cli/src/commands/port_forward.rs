@@ -4,7 +4,9 @@
 //! restarts when the underlying process dies, detects stale connections via
 //! active health checking, and uses OS-assigned ports to avoid conflicts.
 //!
-//! Used by both the CLI (`lattice kubeconfig`) and E2E tests.
+//! Also provides proxy kubeconfig detection: when a kubeconfig has server URLs
+//! like `https://127.0.0.1:PORT/clusters/NAME` and the port is dead, we
+//! automatically restart a port-forward and rewrite the URLs.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -12,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use kube::config::Kubeconfig;
 use tracing::{debug, info, warn};
 
 use crate::{Error, Result};
@@ -34,6 +37,16 @@ const PORT_PARSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Maximum time to wait for initial port-forward startup (spawn + health).
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Maximum number of health probes during cold startup.
+const STARTUP_MAX_PROBES: u32 = 15;
+
+/// Maximum time to wait for a warm restart (watchdog-initiated).
+/// Shorter than cold startup because the service is already running.
+const WARM_RESTART_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum number of health probes during warm restart.
+const WARM_RESTART_MAX_PROBES: u32 = 10;
 
 /// How long to wait per health check probe during startup.
 const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -63,6 +76,10 @@ pub struct PortForward {
     pub url: String,
     stop_flag: Arc<AtomicBool>,
     restart_count: Arc<AtomicU64>,
+    /// Set `false` by watchdog before restart, `true` after successful restart.
+    healthy: Arc<AtomicBool>,
+    /// Wakes callers blocked in `wait_for_ready()` when the port-forward becomes healthy.
+    ready_notify: Arc<tokio::sync::Notify>,
     watchdog_handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -72,14 +89,29 @@ impl PortForward {
     /// The OS picks a free local port. The watchdog thread monitors the process
     /// and restarts it (on the same port) if it dies or becomes unhealthy.
     pub async fn start(kubeconfig: &str, remote_port: u16) -> Result<Self> {
-        // Initial spawn: let the OS pick a free port
-        let (port, initial_child) = start_port_forward(kubeconfig, None, remote_port).await?;
+        // Use LATTICE_PROXY_PORT if set, so callers can reuse old kubeconfigs
+        // that have a hardcoded port baked in. Otherwise let the OS pick.
+        let fixed_port = std::env::var("LATTICE_PROXY_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok());
+        let (port, initial_child) = start_port_forward(
+            kubeconfig,
+            fixed_port,
+            remote_port,
+            STARTUP_TIMEOUT,
+            STARTUP_MAX_PROBES,
+        )
+        .await?;
         let url = format!("https://127.0.0.1:{}", port);
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let restart_count = Arc::new(AtomicU64::new(0));
+        let healthy = Arc::new(AtomicBool::new(true));
+        let ready_notify = Arc::new(tokio::sync::Notify::new());
         let stop_clone = stop_flag.clone();
         let restart_clone = restart_count.clone();
+        let healthy_clone = healthy.clone();
+        let notify_clone = ready_notify.clone();
         let kc = kubeconfig.to_string();
         let url_clone = url.clone();
 
@@ -94,6 +126,8 @@ impl PortForward {
                 url: url_clone,
                 stop_flag: stop_clone,
                 restart_count: restart_clone,
+                healthy: healthy_clone,
+                ready_notify: notify_clone,
                 handle,
             };
             watchdog_loop(initial_child, &cfg);
@@ -106,6 +140,8 @@ impl PortForward {
             url,
             stop_flag,
             restart_count,
+            healthy,
+            ready_notify,
             watchdog_handle: Some(watchdog_handle),
         })
     }
@@ -115,9 +151,17 @@ impl PortForward {
         self.port
     }
 
-    /// Check if the port-forward is currently healthy.
+    /// Check if the port-forward is currently healthy (makes a network call).
     pub async fn is_healthy(&self) -> bool {
         check_health(&self.url, WATCHDOG_PROBE_TIMEOUT).await
+    }
+
+    /// Check if the watchdog considers the port-forward healthy.
+    ///
+    /// This is a cheap atomic read with no network call. Returns `false` while
+    /// the watchdog is restarting the underlying kubectl process.
+    pub fn is_known_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
     }
 
     /// How many times the watchdog has restarted the port-forward.
@@ -127,19 +171,28 @@ impl PortForward {
 
     /// Wait until the port-forward is healthy or timeout expires.
     ///
-    /// The watchdog handles the actual restart; this just waits for it to finish.
-    pub async fn wait_until_healthy(&self, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if self.is_healthy().await {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+    /// If the watchdog has marked the port-forward healthy, returns immediately.
+    /// Otherwise waits on a notification from the watchdog (no polling).
+    pub async fn wait_for_ready(&self, timeout: Duration) -> Result<()> {
+        if self.healthy.load(Ordering::Acquire) {
+            return Ok(());
         }
-        Err(Error::command_failed(format!(
-            "port-forward on port {} not healthy after {:?}",
-            self.port, timeout
-        )))
+
+        info!(
+            "[PortForward] Port {} unhealthy, waiting for watchdog restart...",
+            self.port
+        );
+
+        match tokio::time::timeout(timeout, self.ready_notify.notified()).await {
+            Ok(()) => {
+                info!("[PortForward] Port {} healthy again", self.port);
+                Ok(())
+            }
+            Err(_) => Err(Error::command_failed(format!(
+                "port-forward on port {} not healthy after {:?}",
+                self.port, timeout
+            ))),
+        }
     }
 }
 
@@ -253,12 +306,17 @@ fn parse_forwarded_port(child: &mut Child) -> Result<u16> {
 /// Spawn a port-forward, parse the assigned port, and wait for it to become healthy.
 ///
 /// Returns `(local_port, child)` on success.
+///
+/// `timeout` and `max_probes` are parameterised so that cold starts (90s, 15 probes)
+/// and warm restarts (30s, 10 probes) can use different budgets.
 async fn start_port_forward(
     kubeconfig: &str,
     local_port: Option<u16>,
     remote_port: u16,
+    timeout: Duration,
+    max_probes: u32,
 ) -> Result<(u16, Child)> {
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let mut attempt = 0u32;
 
     while Instant::now() < deadline {
@@ -297,7 +355,7 @@ async fn start_port_forward(
         let url = format!("https://127.0.0.1:{}", port);
 
         // Wait for the health check to pass
-        for probe in 0..15 {
+        for probe in 0..max_probes {
             if let Ok(Some(status)) = child.try_wait() {
                 debug!(
                     "[PortForward] kubectl exited with {} on attempt {} probe {}",
@@ -333,7 +391,7 @@ async fn start_port_forward(
 
     Err(Error::command_failed(format!(
         "port-forward failed to become ready after {:?}",
-        STARTUP_TIMEOUT
+        timeout
     )))
 }
 
@@ -345,6 +403,8 @@ struct WatchdogConfig {
     url: String,
     stop_flag: Arc<AtomicBool>,
     restart_count: Arc<AtomicU64>,
+    healthy: Arc<AtomicBool>,
+    ready_notify: Arc<tokio::sync::Notify>,
     handle: tokio::runtime::Handle,
 }
 
@@ -417,6 +477,10 @@ fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
                 cfg.local_port, reason
             );
 
+            // Mark unhealthy so callers know not to use the port
+            cfg.healthy.store(false, Ordering::Release);
+            info!("[PortForward] Marked unhealthy on port {}", cfg.local_port);
+
             let _ = child.kill();
             let _ = child.wait();
 
@@ -432,18 +496,25 @@ fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
 
                 restart_attempts += 1;
                 // Re-use the same local port (free because kubectl just died)
+                // Use warm restart budget (shorter timeout, fewer probes)
                 match cfg.handle.block_on(start_port_forward(
                     &cfg.kubeconfig,
                     Some(cfg.local_port),
                     cfg.remote_port,
+                    WARM_RESTART_TIMEOUT,
+                    WARM_RESTART_MAX_PROBES,
                 )) {
                     Ok((_, new_child)) => {
                         child = new_child;
                         let count = cfg.restart_count.fetch_add(1, Ordering::Relaxed) + 1;
                         consecutive_health_failures = 0;
                         last_health_check = Instant::now();
+
+                        // Mark healthy and wake any callers waiting in wait_for_ready()
+                        cfg.healthy.store(true, Ordering::Release);
+                        cfg.ready_notify.notify_waiters();
                         info!(
-                            "[PortForward] Restarted at {} (total restarts: {})",
+                            "[PortForward] Restarted and healthy at {} (total restarts: {})",
                             cfg.url, count
                         );
                         break;
@@ -461,5 +532,110 @@ fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
         }
 
         std::thread::sleep(WATCHDOG_POLL_INTERVAL);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proxy kubeconfig helpers
+// ---------------------------------------------------------------------------
+
+/// Detect a proxy kubeconfig and start a port-forward if the proxy is unreachable.
+///
+/// A proxy kubeconfig has server URLs like `https://127.0.0.1:PORT/clusters/NAME`.
+/// When the port is dead (e.g. the generating process exited), we extract the
+/// management kubeconfig path from the exec credential args, start a new
+/// port-forward, and rewrite the server URLs in place.
+pub(crate) async fn ensure_proxy_reachable(kubeconfig: &mut Kubeconfig) -> Option<PortForward> {
+    let proxy_base = find_proxy_base_url(kubeconfig)?;
+
+    if check_health(&proxy_base, Duration::from_secs(2)).await {
+        debug!(
+            "Proxy at {} is reachable, no port-forward needed",
+            proxy_base
+        );
+        return None;
+    }
+
+    info!(
+        "Proxy at {} is unreachable, attempting auto port-forward",
+        proxy_base
+    );
+
+    let mgmt_kubeconfig = extract_mgmt_kubeconfig(kubeconfig)?;
+
+    let pf =
+        match PortForward::start(&mgmt_kubeconfig, lattice_common::DEFAULT_AUTH_PROXY_PORT).await {
+            Ok(pf) => pf,
+            Err(e) => {
+                warn!("Failed to auto-start port-forward: {}", e);
+                return None;
+            }
+        };
+
+    let new_base = &pf.url;
+    rewrite_proxy_urls(kubeconfig, &proxy_base, new_base);
+    info!("Rewrote proxy URLs from {} to {}", proxy_base, new_base);
+
+    Some(pf)
+}
+
+/// Find the common proxy base URL (e.g. `https://127.0.0.1:49284`) from a kubeconfig.
+///
+/// Returns `Some(base_url)` if any cluster server URL matches the proxy pattern
+/// (localhost with `/clusters/` path). Returns `None` for normal kubeconfigs.
+fn find_proxy_base_url(kubeconfig: &Kubeconfig) -> Option<String> {
+    for named_cluster in &kubeconfig.clusters {
+        if let Some(ref cluster) = named_cluster.cluster {
+            if let Some(ref server) = cluster.server {
+                if let Some(path_start) = server.find("/clusters/") {
+                    let base = &server[..path_start];
+                    if base.contains("127.0.0.1")
+                        || base.contains("localhost")
+                        || base.contains("[::1]")
+                    {
+                        return Some(base.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the management kubeconfig path from exec credential args.
+///
+/// The proxy kubeconfig uses `lattice token --kubeconfig=<path>` as the exec
+/// credential plugin. We parse the `--kubeconfig=` arg to find the management
+/// cluster's kubeconfig.
+fn extract_mgmt_kubeconfig(kubeconfig: &Kubeconfig) -> Option<String> {
+    for auth in &kubeconfig.auth_infos {
+        if let Some(ref info) = auth.auth_info {
+            if let Some(ref exec) = info.exec {
+                if let Some(ref args) = exec.args {
+                    for arg in args {
+                        if let Some(path) = arg.strip_prefix("--kubeconfig=") {
+                            return Some(path.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Rewrite proxy server URLs from the old base to the new base.
+///
+/// E.g. `https://127.0.0.1:49284/clusters/foo` -> `https://127.0.0.1:55555/clusters/foo`
+fn rewrite_proxy_urls(kubeconfig: &mut Kubeconfig, old_base: &str, new_base: &str) {
+    for named_cluster in &mut kubeconfig.clusters {
+        if let Some(ref mut cluster) = named_cluster.cluster {
+            if let Some(ref mut server) = cluster.server {
+                if server.starts_with(old_base) {
+                    let path = &server[old_base.len()..];
+                    *server = format!("{}{}", new_base, path);
+                }
+            }
+        }
     }
 }

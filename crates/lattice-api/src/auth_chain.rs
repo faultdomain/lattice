@@ -11,6 +11,12 @@
 //! 2. If OIDC fails or is not configured, try ServiceAccount validation
 //! 3. Return the first successful result, or the last error
 //!
+//! # Dynamic Reload
+//!
+//! The OIDC validator can be swapped at runtime when OIDCProvider CRDs change.
+//! The `set_oidc()` method replaces the validator under a write lock, and
+//! `validate()` snapshots the Arc under a read lock before validation.
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -25,10 +31,14 @@
 //!
 //! // Validate a token
 //! let identity = chain.validate(token).await?;
+//!
+//! // Dynamic reload (from OIDCProvider watcher)
+//! chain.set_oidc(Some(Arc::new(new_validator))).await;
 //! ```
 
 use std::sync::Arc;
 
+use tokio::sync::RwLock;
 use tracing::debug;
 
 use crate::auth::{OidcConfig, OidcValidator, UserIdentity};
@@ -37,8 +47,8 @@ use crate::sa_auth::SaValidator;
 
 /// Authentication chain that tries multiple validators
 pub struct AuthChain {
-    /// Optional OIDC validator (for human users)
-    oidc: Option<Arc<OidcValidator>>,
+    /// Optional OIDC validator (for human users), swappable at runtime
+    oidc: Arc<RwLock<Option<Arc<OidcValidator>>>>,
     /// Optional ServiceAccount validator (for pods/services)
     sa: Option<Arc<SaValidator>>,
 }
@@ -49,7 +59,7 @@ impl AuthChain {
     /// OIDC is tried first, with SA as fallback.
     pub fn new(oidc: Arc<OidcValidator>, sa: Arc<SaValidator>) -> Self {
         Self {
-            oidc: Some(oidc),
+            oidc: Arc::new(RwLock::new(Some(oidc))),
             sa: Some(sa),
         }
     }
@@ -59,7 +69,7 @@ impl AuthChain {
     /// Use this for backwards compatibility or when SA auth is not needed.
     pub fn oidc_only(oidc: Arc<OidcValidator>) -> Self {
         Self {
-            oidc: Some(oidc),
+            oidc: Arc::new(RwLock::new(Some(oidc))),
             sa: None,
         }
     }
@@ -69,7 +79,7 @@ impl AuthChain {
     /// Use this for testing or when OIDC is not configured.
     pub fn sa_only(sa: Arc<SaValidator>) -> Self {
         Self {
-            oidc: None,
+            oidc: Arc::new(RwLock::new(None)),
             sa: Some(sa),
         }
     }
@@ -79,25 +89,24 @@ impl AuthChain {
     /// This will reject all tokens.
     pub fn none() -> Self {
         Self {
-            oidc: None,
+            oidc: Arc::new(RwLock::new(None)),
             sa: None,
         }
     }
 
-    /// Check if OIDC is configured and has a non-empty issuer
-    fn has_configured_oidc(&self) -> bool {
-        self.oidc
-            .as_ref()
-            .map(|o| !o.config().issuer_url.is_empty())
-            .unwrap_or(false)
+    /// Swap the OIDC validator at runtime (called by OIDCProvider watcher)
+    pub async fn set_oidc(&self, oidc: Option<Arc<OidcValidator>>) {
+        let mut guard = self.oidc.write().await;
+        *guard = oidc;
     }
 
-    /// Get the OIDC configuration if available
-    pub fn oidc_config(&self) -> Option<&OidcConfig> {
-        self.oidc
+    /// Get a clone of the OIDC configuration if available
+    pub async fn oidc_config(&self) -> Option<OidcConfig> {
+        let guard = self.oidc.read().await;
+        guard
             .as_ref()
             .filter(|o| !o.config().issuer_url.is_empty())
-            .map(|o| o.config())
+            .map(|o| o.config().clone())
     }
 
     /// Validate a token using the authentication chain
@@ -110,9 +119,15 @@ impl AuthChain {
     pub async fn validate(&self, token: &str) -> Result<UserIdentity> {
         let mut last_error: Option<Error> = None;
 
+        // Snapshot the OIDC validator under read lock, then release
+        let oidc_snapshot = {
+            let guard = self.oidc.read().await;
+            guard.clone()
+        };
+
         // Try OIDC first if configured
-        if self.has_configured_oidc() {
-            if let Some(oidc) = &self.oidc {
+        if let Some(ref oidc) = oidc_snapshot {
+            if !oidc.config().issuer_url.is_empty() {
                 debug!("Trying OIDC validation");
                 match oidc.validate(token).await {
                     Ok(identity) => {
@@ -158,47 +173,30 @@ impl Default for AuthChain {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_auth_chain_none() {
+    #[tokio::test]
+    async fn test_auth_chain_none() {
         let chain = AuthChain::none();
-        assert!(chain.oidc.is_none());
+        assert!(chain.oidc.read().await.is_none());
         assert!(chain.sa.is_none());
     }
 
-    #[test]
-    fn test_auth_chain_oidc_only() {
+    #[tokio::test]
+    async fn test_auth_chain_oidc_only() {
         let oidc = Arc::new(OidcValidator::new());
         let chain = AuthChain::oidc_only(oidc);
-        assert!(chain.oidc.is_some());
+        assert!(chain.oidc.read().await.is_some());
         assert!(chain.sa.is_none());
     }
 
-    #[test]
-    fn test_has_configured_oidc_empty() {
-        let chain = AuthChain::none();
-        assert!(!chain.has_configured_oidc());
-    }
-
-    #[test]
-    fn test_has_configured_oidc_no_issuer() {
+    #[tokio::test]
+    async fn test_oidc_config_none_when_no_issuer() {
         let oidc = Arc::new(OidcValidator::new()); // Default has empty issuer
         let chain = AuthChain::oidc_only(oidc);
-        assert!(!chain.has_configured_oidc());
+        assert!(chain.oidc_config().await.is_none());
     }
 
-    #[test]
-    fn test_has_configured_oidc_with_issuer() {
-        let config = OidcConfig {
-            issuer_url: "https://idp.example.com".to_string(),
-            ..Default::default()
-        };
-        let oidc = Arc::new(OidcValidator::with_config(config));
-        let chain = AuthChain::oidc_only(oidc);
-        assert!(chain.has_configured_oidc());
-    }
-
-    #[test]
-    fn test_oidc_config_accessor() {
+    #[tokio::test]
+    async fn test_oidc_config_accessor() {
         let config = OidcConfig {
             issuer_url: "https://idp.example.com".to_string(),
             client_id: "test-client".to_string(),
@@ -207,7 +205,7 @@ mod tests {
         let oidc = Arc::new(OidcValidator::with_config(config));
         let chain = AuthChain::oidc_only(oidc);
 
-        let retrieved = chain.oidc_config().unwrap();
+        let retrieved = chain.oidc_config().await.unwrap();
         assert_eq!(retrieved.issuer_url, "https://idp.example.com");
         assert_eq!(retrieved.client_id, "test-client");
     }
@@ -232,5 +230,27 @@ mod tests {
         let result = chain.validate("some-token").await;
         assert!(result.is_err());
         // Should fail because OIDC has no issuer configured
+    }
+
+    #[tokio::test]
+    async fn test_set_oidc_dynamic_swap() {
+        let chain = AuthChain::none();
+        assert!(chain.oidc_config().await.is_none());
+
+        // Set an OIDC validator dynamically
+        let config = OidcConfig {
+            issuer_url: "https://new-idp.example.com".to_string(),
+            client_id: "new-client".to_string(),
+            ..Default::default()
+        };
+        let oidc = Arc::new(OidcValidator::with_config(config));
+        chain.set_oidc(Some(oidc)).await;
+
+        let retrieved = chain.oidc_config().await.unwrap();
+        assert_eq!(retrieved.issuer_url, "https://new-idp.example.com");
+
+        // Clear it
+        chain.set_oidc(None).await;
+        assert!(chain.oidc_config().await.is_none());
     }
 }

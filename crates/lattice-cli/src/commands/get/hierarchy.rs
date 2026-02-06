@@ -6,7 +6,7 @@ use super::tree::{discover_tree, ClusterTree};
 use super::OutputFormat;
 
 pub async fn run(kubeconfig: Option<&str>, output: &OutputFormat) -> Result<()> {
-    let tree = discover_tree(kubeconfig).await?;
+    let (tree, _port_forward) = discover_tree(kubeconfig).await?;
 
     if tree.clusters.is_empty() {
         println!("No clusters found.");

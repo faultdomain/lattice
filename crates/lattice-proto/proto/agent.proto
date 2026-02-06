@@ -64,6 +64,8 @@ message AgentMessage {
     SubtreeState subtree_state = 11;
     // Exec/attach/portforward: stdout/stderr data from agent
     ExecData exec_data = 12;
+    // Lattice lifecycle event forwarded from child
+    LatticeEvent event = 13;
   }
 }
 
@@ -103,6 +105,27 @@ message BootstrapComplete {
   repeated string installed_providers = 2;
 }
 
+// Lattice lifecycle event forwarded from child cluster
+//
+// When a child cluster emits a lifecycle event (e.g., PivotComplete,
+// ClusterReady), it is forwarded up the hierarchy so operators can see
+// the full fleet from one pane. Events appear on the parent's
+// LatticeCluster object with a "Child/" prefix.
+message LatticeEvent {
+  // Event reason (e.g., "PivotComplete", "ClusterReady")
+  string reason = 1;
+  // Event action (e.g., "Pivot", "Reconcile")
+  string action = 2;
+  // Human-readable message
+  string message = 3;
+  // Severity: "Normal" or "Warning"
+  string severity = 4;
+  // Timestamp of original event
+  google.protobuf.Timestamp timestamp = 5;
+  // Originating cluster name
+  string source_cluster = 6;
+}
+
 // Periodic heartbeat with agent state
 message Heartbeat {
   // Current agent state
@@ -111,6 +134,8 @@ message Heartbeat {
   google.protobuf.Timestamp timestamp = 2;
   // Uptime in seconds
   int64 uptime_seconds = 3;
+  // Cluster health data (node counts, conditions)
+  ClusterHealth health = 4;
 }
 
 // Cluster health information

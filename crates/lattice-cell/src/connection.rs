@@ -71,6 +71,10 @@ pub struct AgentConnection {
     pub pivot_complete: bool,
     /// Whether the agent is currently connected
     pub connected: bool,
+    /// Latest cluster health from heartbeat
+    pub health: Option<lattice_proto::ClusterHealth>,
+    /// Timestamp of last heartbeat
+    pub last_heartbeat: Option<std::time::Instant>,
 }
 
 impl AgentConnection {
@@ -90,6 +94,8 @@ impl AgentConnection {
             capi_ready: false,
             pivot_complete: false,
             connected: true,
+            health: None,
+            last_heartbeat: None,
         }
     }
 
@@ -404,6 +410,63 @@ impl AgentRegistry {
             debug!(cluster = %cluster_name, pivot_complete = complete, "Agent pivot status updated");
             agent.set_pivot_complete(complete);
         }
+    }
+
+    /// Update cluster health from heartbeat
+    pub fn update_health(&self, cluster_name: &str, health: lattice_proto::ClusterHealth) {
+        if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+            agent.health = Some(health);
+            agent.last_heartbeat = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Get the latest cluster health for a cluster
+    pub fn get_health(&self, cluster_name: &str) -> Option<lattice_proto::ClusterHealth> {
+        self.agents.get(cluster_name).and_then(|a| a.health.clone())
+    }
+
+    /// Get the age of the last heartbeat in seconds
+    pub fn heartbeat_age_seconds(&self, cluster_name: &str) -> Option<f64> {
+        self.agents
+            .get(cluster_name)
+            .and_then(|a| a.last_heartbeat.map(|t| t.elapsed().as_secs_f64()))
+    }
+
+    /// Collect health for all connected agents as ChildClusterHealth structs.
+    ///
+    /// Used by the cluster controller to populate children_health on the CRD status.
+    pub fn collect_children_health(&self) -> Vec<lattice_common::crd::ChildClusterHealth> {
+        self.agents
+            .iter()
+            .filter(|r| r.connected)
+            .map(|r| {
+                let agent = r.value();
+                let (ready_nodes, total_nodes, ready_cp, total_cp) =
+                    if let Some(ref h) = agent.health {
+                        (
+                            h.ready_nodes as u32,
+                            h.total_nodes as u32,
+                            h.ready_control_plane as u32,
+                            h.total_control_plane as u32,
+                        )
+                    } else {
+                        (0, 0, 0, 0)
+                    };
+                let last_heartbeat = agent.last_heartbeat.map(|t| {
+                    let age = t.elapsed().as_secs();
+                    format!("{}s ago", age)
+                });
+                lattice_common::crd::ChildClusterHealth {
+                    name: agent.cluster_name.clone(),
+                    ready_nodes,
+                    total_nodes,
+                    ready_control_plane: ready_cp,
+                    total_control_plane: total_cp,
+                    agent_state: format!("{:?}", agent.state),
+                    last_heartbeat,
+                }
+            })
+            .collect()
     }
 
     /// Send a command to a specific agent

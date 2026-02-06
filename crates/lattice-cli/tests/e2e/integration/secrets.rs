@@ -317,7 +317,7 @@ async fn verify_external_secret(
     // Verify apiVersion
     let api_version = json["apiVersion"].as_str().ok_or("Missing apiVersion")?;
     assert_eq!(
-        api_version, "external-secrets.io/v1beta1",
+        api_version, "external-secrets.io/v1",
         "ExternalSecret should have correct apiVersion"
     );
 

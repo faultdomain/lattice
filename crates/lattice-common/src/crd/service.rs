@@ -963,6 +963,98 @@ pub struct CertIssuerRef {
     pub kind: Option<String>,
 }
 
+// =============================================================================
+// Backup Configuration
+// =============================================================================
+
+/// Error action for backup hooks
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum HookErrorAction {
+    /// Continue backup even if hook fails (default)
+    #[default]
+    Continue,
+    /// Fail the backup if hook fails
+    Fail,
+}
+
+/// A single backup hook (pre or post)
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupHook {
+    /// Hook name (used in Velero annotation suffix)
+    pub name: String,
+
+    /// Target container name
+    pub container: String,
+
+    /// Command to execute
+    pub command: Vec<String>,
+
+    /// Timeout for hook execution (e.g., "600s", "10m")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+
+    /// Action on hook failure
+    #[serde(default)]
+    pub on_error: HookErrorAction,
+}
+
+/// Pre and post backup hooks
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct BackupHooksSpec {
+    /// Hooks to run before backup
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre: Vec<BackupHook>,
+
+    /// Hooks to run after backup
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post: Vec<BackupHook>,
+}
+
+/// Default volume backup behavior
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VolumeBackupDefault {
+    /// All volumes are backed up unless explicitly excluded (default)
+    #[default]
+    OptOut,
+    /// Only explicitly included volumes are backed up
+    OptIn,
+}
+
+/// Volume backup configuration
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeBackupSpec {
+    /// Volumes to explicitly include in backup
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+
+    /// Volumes to explicitly exclude from backup
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+
+    /// Default backup policy for volumes not in include/exclude lists
+    #[serde(default)]
+    pub default_policy: VolumeBackupDefault,
+}
+
+/// Service-level backup configuration
+///
+/// Defines Velero backup hooks and volume backup policies for a service.
+/// This spec is shared between `LatticeService.spec.backup` (inline) and
+/// `LatticeServicePolicy.spec.backup` (policy overlay).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct ServiceBackupSpec {
+    /// Pre/post backup hooks for application-aware backups
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<BackupHooksSpec>,
+
+    /// Volume backup configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volumes: Option<VolumeBackupSpec>,
+}
+
 /// Service lifecycle phase
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum ServicePhase {
@@ -1042,6 +1134,10 @@ pub struct LatticeServiceSpec {
     /// Share PID namespace between containers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_process_namespace: Option<bool>,
+
+    /// Backup configuration (Velero hooks and volume policies)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<ServiceBackupSpec>,
 }
 
 impl LatticeServiceSpec {
@@ -1495,6 +1591,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            backup: None,
         }
     }
 
@@ -1711,6 +1808,7 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            backup: None,
         };
 
         let result = spec.validate();
@@ -1906,6 +2004,7 @@ deploy:
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            backup: None,
         };
 
         assert_eq!(spec.primary_image(), Some("nginx:latest"));
@@ -2911,5 +3010,119 @@ containers:
         assert!(spec.sysctls.is_empty());
         assert!(spec.host_network.is_none());
         assert!(spec.share_process_namespace.is_none());
+    }
+
+    // =========================================================================
+    // Backup Configuration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_service_backup_spec_roundtrip() {
+        let yaml = r#"
+containers:
+  main:
+    image: postgres:16
+backup:
+  hooks:
+    pre:
+      - name: freeze-db
+        container: main
+        command: ["/bin/sh", "-c", "pg_dump -U postgres mydb -Fc -f /backup/dump.sql"]
+        timeout: "600s"
+        onError: Fail
+    post:
+      - name: cleanup
+        container: main
+        command: ["/bin/sh", "-c", "rm -f /backup/dump.sql"]
+  volumes:
+    include: [data, wal]
+    exclude: [tmp]
+    defaultPolicy: opt-in
+"#;
+
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec =
+            serde_json::from_value(value).expect("should parse spec with backup");
+        let backup = spec.backup.expect("should have backup spec");
+
+        let hooks = backup.hooks.expect("should have hooks");
+        assert_eq!(hooks.pre.len(), 1);
+        assert_eq!(hooks.pre[0].name, "freeze-db");
+        assert_eq!(hooks.pre[0].container, "main");
+        assert_eq!(hooks.pre[0].timeout, Some("600s".to_string()));
+        assert!(matches!(hooks.pre[0].on_error, HookErrorAction::Fail));
+
+        assert_eq!(hooks.post.len(), 1);
+        assert_eq!(hooks.post[0].name, "cleanup");
+
+        let volumes = backup.volumes.expect("should have volume spec");
+        assert_eq!(volumes.include, vec!["data", "wal"]);
+        assert_eq!(volumes.exclude, vec!["tmp"]);
+        assert!(matches!(volumes.default_policy, VolumeBackupDefault::OptIn));
+    }
+
+    #[test]
+    fn test_service_backup_defaults() {
+        let yaml = r#"
+containers:
+  main:
+    image: nginx:latest
+backup:
+  hooks:
+    pre:
+      - name: sync
+        container: main
+        command: ["/bin/sh", "-c", "sync"]
+"#;
+
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec = serde_json::from_value(value).expect("should parse spec");
+        let backup = spec.backup.expect("should have backup");
+        let hooks = backup.hooks.expect("should have hooks");
+
+        // Default onError is Continue
+        assert!(matches!(hooks.pre[0].on_error, HookErrorAction::Continue));
+        assert!(hooks.pre[0].timeout.is_none());
+        assert!(hooks.post.is_empty());
+
+        // Default volume policy is opt-out
+        assert!(backup.volumes.is_none());
+    }
+
+    #[test]
+    fn test_service_without_backup() {
+        let yaml = r#"
+containers:
+  main:
+    image: nginx:latest
+"#;
+
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec = serde_json::from_value(value).expect("should parse spec");
+        assert!(spec.backup.is_none());
+    }
+
+    #[test]
+    fn test_hook_error_action_serde() {
+        assert_eq!(
+            serde_json::to_string(&HookErrorAction::Continue).unwrap(),
+            r#""Continue""#
+        );
+        assert_eq!(
+            serde_json::to_string(&HookErrorAction::Fail).unwrap(),
+            r#""Fail""#
+        );
+    }
+
+    #[test]
+    fn test_volume_backup_default_serde() {
+        assert_eq!(
+            serde_json::to_string(&VolumeBackupDefault::OptOut).unwrap(),
+            r#""opt-out""#
+        );
+        assert_eq!(
+            serde_json::to_string(&VolumeBackupDefault::OptIn).unwrap(),
+            r#""opt-in""#
+        );
     }
 }

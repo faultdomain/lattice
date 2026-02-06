@@ -15,6 +15,7 @@
   <a href="#cedar-policies">Cedar Policies</a> &bull;
   <a href="#secrets">Secrets</a> &bull;
   <a href="#k8s-api-proxy">Proxy</a> &bull;
+  <a href="#observability">Observability</a> &bull;
   <a href="#how-it-works">Architecture</a> &bull;
   <a href="#development">Development</a>
 </p>
@@ -1101,6 +1102,117 @@ This is internal to the operator — users interact with the auth proxy on port 
 
 ---
 
+## Observability
+
+Lattice exposes Prometheus metrics, Kubernetes Events, and a fleet health CLI. Service-level observability (application metrics, distributed tracing, custom dashboards) is **BYOI** — bring your own instrumentation. Lattice focuses on the infrastructure layer: cluster lifecycle, pivot operations, agent connectivity, proxy traffic, and authorization decisions.
+
+### Prometheus Metrics
+
+Lattice exports OpenTelemetry metrics via a Prometheus endpoint. The telemetry pipeline supports both OTLP export and Prometheus scraping.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `lattice_clusters_total` | Gauge | `phase` | Total clusters by phase (pending, provisioning, pivoting, ready, failed, deleting) |
+| `lattice_cluster_reconcile_duration_seconds` | Histogram | `cluster`, `result` | Cluster reconciliation duration |
+| `lattice_cluster_reconcile_errors_total` | Counter | `cluster`, `error_type` | Reconciliation errors (transient, permanent) |
+| `lattice_pivot_duration_seconds` | Histogram | `cluster`, `direction` | Pivot operation duration (to_child, from_parent) |
+| `lattice_pivot_objects_total` | Counter | `cluster`, `kind` | Objects transferred during pivot (Machine, KubeadmControlPlane, etc.) |
+| `lattice_agent_connections` | Gauge | `state` | Agent connections by state (connected, disconnected, pending) |
+| `lattice_agent_heartbeat_age_seconds` | Gauge | `cluster` | Age of last agent heartbeat |
+| `lattice_proxy_requests_total` | Counter | `cluster`, `method`, `status` | K8s API proxy requests |
+| `lattice_proxy_request_duration_seconds` | Histogram | `cluster`, `method` | K8s API proxy request duration |
+| `lattice_cedar_decisions_total` | Counter | `decision`, `action` | Cedar authorization decisions (allow, deny) |
+
+#### Recommended Alerts
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| Agent heartbeat stale | `lattice_agent_heartbeat_age_seconds > 120` | Warning |
+| Cluster stuck provisioning | `lattice_clusters_total{phase="provisioning"} > 0` for 30m | Warning |
+| High reconcile error rate | `rate(lattice_cluster_reconcile_errors_total[5m]) > 0.1` | Critical |
+| Cedar deny spike | `rate(lattice_cedar_decisions_total{decision="deny"}[5m]) > 10` | Warning |
+| Proxy error rate | `rate(lattice_proxy_requests_total{status="5xx"}[5m]) > 0.05` | Warning |
+
+### Kubernetes Events
+
+Lattice controllers emit standard Kubernetes Events visible via `kubectl describe` and `kubectl get events`. Events cover Lattice lifecycle only — not application-level concerns.
+
+| Reason | Action | Type | Trigger |
+|--------|--------|------|---------|
+| `ProvisioningStarted` | Provision | Normal | CAPI manifests applied |
+| `InfrastructureReady` | Provision | Normal | CAPI infrastructure reports ready |
+| `PivotStarted` | Pivot | Normal | CAPI resource transfer begins |
+| `PivotComplete` | Pivot | Normal | Cluster is self-managing |
+| `ClusterReady` | Reconcile | Normal | Cluster phase transitions to Ready |
+| `ClusterFailed` | Reconcile | Warning | Cluster phase transitions to Failed |
+| `DeletionStarted` | Delete | Normal | Cluster deletion initiated |
+| `UnpivotStarted` | Delete | Normal | Reverse pivot begins |
+| `WorkerScaling` | Scale | Normal | Worker pool replica count changes |
+| `ValidationFailed` | Reconcile | Warning | CRD spec validation error |
+| `CompilationSuccess` | Compile | Normal | LatticeService compiles successfully |
+| `CompilationFailed` | Compile | Warning | LatticeService compilation error |
+| `SecretAccessDenied` | Compile | Warning | Cedar denied secret access for a service |
+
+#### Event Propagation
+
+Lifecycle events from child clusters are automatically forwarded up the hierarchy via the agent gRPC stream. Events appear on the parent's `LatticeCluster` resource with a `Child/` prefix:
+
+```bash
+# Events on the parent cluster include forwarded child events
+kubectl get events -n lattice-system --field-selector reason=Child/PivotComplete
+```
+
+This gives operators a single pane of glass for fleet-wide lifecycle events without needing direct access to each child cluster.
+
+### Fleet Health CLI
+
+`lattice get health` shows a tree view of all clusters with node status, agent connectivity, and conditions at a glance.
+
+```bash
+$ lattice get health
+
+Fleet Health
+
+mgmt-cluster (Ready) ✓
+    Nodes: 3/3 CP, 10/10 workers
+    Agent: n/a (root)
+    Children: 2 connected, 0 disconnected
+    Conditions: all healthy
+    ├── workload-1 (Ready) ✓
+    │       Nodes: 1/1 CP, 5/5 workers
+    │       Agent: connected
+    │       Conditions: all healthy
+    └── workload-2 (Provisioning) ⟳
+            Nodes: 1/1 CP, 0/2 workers
+            Agent: connected
+            Conditions: ScalingUp
+```
+
+| Icon | Meaning |
+|------|---------|
+| `✓` | Ready |
+| `✗` | Failed |
+| `⟳` | Provisioning / Pivoting / Pending |
+| `?` | Disconnected |
+| `·` | Unknown phase |
+
+```bash
+# JSON output for CI/CD and monitoring integration
+lattice get health -o json | jq '.clusters | to_entries[] | select(.value.phase != "Ready")'
+```
+
+### Heartbeat Health Data
+
+Agent heartbeats carry inline `ClusterHealth` data every 30 seconds, including:
+
+- Ready/total node counts for control plane and workers
+- Node conditions (MemoryPressure, DiskPressure, PIDPressure)
+- Agent connection state and uptime
+
+The parent persists this as `children_health` on the `LatticeClusterStatus`, making it available via `kubectl get latticecluster -o json` and the CLI health command.
+
+---
+
 ## How It Works
 
 ### Pivot Architecture
@@ -1174,7 +1286,8 @@ All communication between parent (Cell) and child (Agent) flows over a single ou
 |-----------|---------|---------|
 | Agent &rarr; Cell | `AgentReady` | Agent registration after bootstrap |
 | Agent &rarr; Cell | `PivotComplete` | Confirms CAPI resources imported |
-| Agent &rarr; Cell | `Heartbeat` | Periodic health signal |
+| Agent &rarr; Cell | `Heartbeat` | Periodic health signal with inline `ClusterHealth` (node counts, conditions) |
+| Agent &rarr; Cell | `LatticeEvent` | Forwarded lifecycle events (pivot, provisioning, failures) |
 | Cell &rarr; Agent | `PivotCommand` | Sends CAPI resources for import |
 | Cell &rarr; Agent | `KubernetesRequest` | Proxied K8s API calls (get, list, watch, create, update, delete) |
 

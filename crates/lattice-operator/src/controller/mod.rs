@@ -13,6 +13,6 @@ pub use lattice_cluster::{CAPIClient, CAPIClientImpl};
 // Re-export service controller
 pub use lattice_service::controller::{
     cleanup_external_service, cleanup_service, error_policy as service_error_policy,
-    error_policy_external, reconcile as service_reconcile, reconcile_external, ServiceContext,
-    ServiceKubeClient, ServiceKubeClientImpl,
+    error_policy_external, reconcile as service_reconcile, reconcile_external, DiscoveredCrds,
+    ServiceContext, ServiceKubeClient, ServiceKubeClientImpl,
 };

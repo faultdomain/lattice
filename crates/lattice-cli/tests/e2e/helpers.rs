@@ -305,13 +305,13 @@ pub fn ensure_docker_network() -> Result<(), String> {
 // Command Execution Helpers
 // =============================================================================
 
-/// Run a shell command with 30s timeout
+/// Run a shell command with 10s timeout
 #[cfg(feature = "provider-e2e")]
 pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     use std::io::Read;
     use std::process::Stdio;
 
-    let timeout = Duration::from_secs(30);
+    let timeout = Duration::from_secs(10);
 
     let mut child = Command::new(cmd)
         .args(args)
@@ -1535,6 +1535,7 @@ pub fn create_service_with_secrets(
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
+            backup: None,
         },
         status: None,
     }
@@ -1600,6 +1601,150 @@ pub async fn wait_for_service_phase(
         },
     )
     .await
+}
+
+/// Wait for a LatticeService to reach the given phase AND have a condition
+/// message containing `message_substring`. Phase and message are read atomically
+/// in a single kubectl call to avoid races with phase transitions.
+#[cfg(feature = "provider-e2e")]
+pub async fn wait_for_service_phase_with_message(
+    kubeconfig: &str,
+    namespace: &str,
+    name: &str,
+    phase: &str,
+    message_substring: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let kc = kubeconfig.to_string();
+    let ns = namespace.to_string();
+    let svc_name = name.to_string();
+    let expected_phase = phase.to_string();
+    let expected_msg = message_substring.to_string();
+
+    wait_for_condition(
+        &format!(
+            "LatticeService {}/{} to reach {} with '{}'",
+            namespace, name, phase, message_substring
+        ),
+        timeout,
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let ns = ns.clone();
+            let svc_name = svc_name.clone();
+            let expected_phase = expected_phase.clone();
+            let expected_msg = expected_msg.clone();
+            async move {
+                let output = run_cmd(
+                    "kubectl",
+                    &[
+                        "--kubeconfig",
+                        &kc,
+                        "get",
+                        "latticeservice",
+                        &svc_name,
+                        "-n",
+                        &ns,
+                        "-o",
+                        "jsonpath={.status.phase} {.status.conditions[0].message}",
+                    ],
+                );
+
+                match output {
+                    Ok(raw) => {
+                        let raw = raw.trim();
+                        let current_phase = raw.split_whitespace().next().unwrap_or("");
+                        info!(
+                            "LatticeService {}/{} phase: {}",
+                            ns, svc_name, current_phase
+                        );
+                        Ok(current_phase == expected_phase && raw.contains(&expected_msg))
+                    }
+                    Err(_) => Ok(false),
+                }
+            }
+        },
+    )
+    .await
+}
+
+// =============================================================================
+// Cedar Policy Helpers
+// =============================================================================
+
+/// Apply a CedarPolicy CRD with standard metadata and wait for the operator to load it.
+///
+/// Generates the boilerplate YAML wrapper. Callers provide only the variable parts:
+/// - `name`: CRD object name
+/// - `test_label`: value for `lattice.dev/test` label (used for batch cleanup)
+/// - `priority`: Cedar evaluation priority (higher = evaluated first)
+/// - `cedar_text`: Raw Cedar policy text (will be indented under `policies: |`)
+#[cfg(feature = "provider-e2e")]
+pub async fn apply_cedar_policy_crd(
+    kubeconfig: &str,
+    name: &str,
+    test_label: &str,
+    priority: u32,
+    cedar_text: &str,
+) -> Result<(), String> {
+    let indented: String = cedar_text
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("    {}", line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let yaml = format!(
+        r#"apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: {name}
+  namespace: {system_ns}
+  labels:
+    lattice.dev/test: {test_label}
+spec:
+  enabled: true
+  priority: {priority}
+  policies: |
+{indented}"#,
+        name = name,
+        system_ns = LATTICE_SYSTEM_NAMESPACE,
+        test_label = test_label,
+        priority = priority,
+        indented = indented,
+    );
+
+    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    info!(
+        "Applied CedarPolicy '{}' (priority={}, label={})",
+        name, priority, test_label
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    Ok(())
+}
+
+/// Delete all CedarPolicy CRDs matching a label selector.
+#[cfg(feature = "provider-e2e")]
+pub fn delete_cedar_policies_by_label(kubeconfig: &str, label_selector: &str) {
+    let _ = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            "cedarpolicy",
+            "-n",
+            LATTICE_SYSTEM_NAMESPACE,
+            "-l",
+            label_selector,
+            "--ignore-not-found",
+        ],
+    );
 }
 
 // =============================================================================
@@ -1681,14 +1826,16 @@ impl ProxySession {
 
     /// Wait until the proxy is healthy (useful after operations that disrupt connectivity).
     ///
-    /// The watchdog handles automatic restarts, but this method waits until
-    /// the proxy is actually responding. Returns Ok immediately for cloud providers.
+    /// Uses notification-based waiting: if the watchdog is restarting the
+    /// port-forward, this returns as soon as the restart completes instead
+    /// of polling. The 60s budget gives the warm restart (30s max) time to
+    /// complete plus margin. Returns Ok immediately for cloud providers.
     pub async fn ensure_alive(&mut self) -> Result<(), String> {
         let Some(ref pf) = self.port_forward else {
             return Ok(()); // Cloud providers don't use port-forward
         };
 
-        pf.wait_until_healthy(Duration::from_secs(10))
+        pf.wait_for_ready(Duration::from_secs(60))
             .await
             .map_err(|e| e.to_string())
     }

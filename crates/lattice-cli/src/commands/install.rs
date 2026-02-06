@@ -577,7 +577,7 @@ impl Installer {
                 .worker_pools
                 .values()
                 .any(|p| p.is_autoscaling_enabled()),
-            services_enabled: self.cluster.spec.services_enabled,
+            services: self.cluster.spec.services,
             cluster_manifest: &self.cluster_yaml,
         };
 

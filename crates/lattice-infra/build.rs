@@ -55,6 +55,10 @@ fn main() {
         "cargo:rustc-env=EXTERNAL_SECRETS_VERSION={}",
         versions.charts["external-secrets"].version
     );
+    println!(
+        "cargo:rustc-env=VELERO_VERSION={}",
+        versions.charts["velero"].version
+    );
 
     let charts_dir = workspace_root.join("test-charts");
     println!(

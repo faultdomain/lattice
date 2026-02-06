@@ -28,14 +28,12 @@ use kube::api::{Api, PostParams};
 use lattice_operator::crd::LatticeService;
 use tracing::info;
 
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
-
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    apply_yaml_with_retry, client_from_kubeconfig, create_service_with_secrets,
-    ensure_fresh_namespace, run_cmd, wait_for_service_phase,
+    apply_cedar_policy_crd, client_from_kubeconfig, create_service_with_secrets,
+    delete_cedar_policies_by_label, ensure_fresh_namespace, wait_for_service_phase,
+    wait_for_service_phase_with_message,
 };
-use super::cedar::delete_cedar_policy;
 
 // =============================================================================
 // Constants
@@ -64,39 +62,17 @@ async fn apply_cedar_secret_permit_policy(
     namespace: &str,
     path_pattern: &str,
 ) -> Result<(), String> {
-    let policy_yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: CedarPolicy
-metadata:
-  name: {name}
-  namespace: {system_ns}
-  labels:
-    lattice.dev/test: cedar-secret
-spec:
-  enabled: true
-  priority: 100
-  policies: |
-    permit(
-      principal,
-      action == Lattice::Action::"AccessSecret",
-      resource
-    ) when {{
-      principal.namespace == "{namespace}" &&
-      resource.path like "{path_pattern}"
-    }};"#,
-        name = name,
-        system_ns = LATTICE_SYSTEM_NAMESPACE,
-        namespace = namespace,
-        path_pattern = path_pattern,
+    let cedar = format!(
+        r#"permit(
+  principal,
+  action == Lattice::Action::"AccessSecret",
+  resource
+) when {{
+  principal.namespace == "{namespace}" &&
+  resource.path like "{path_pattern}"
+}};"#,
     );
-
-    apply_yaml_with_retry(kubeconfig, &policy_yaml).await?;
-    info!(
-        "[CedarSecrets] Applied permit policy {} for ns={}, path={}",
-        name, namespace, path_pattern
-    );
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    Ok(())
+    apply_cedar_policy_crd(kubeconfig, name, "cedar-secret", 100, &cedar).await
 }
 
 /// Apply a CedarPolicy CRD that forbids AccessSecret for a path pattern
@@ -105,37 +81,16 @@ async fn apply_cedar_secret_forbid_policy(
     name: &str,
     path_pattern: &str,
 ) -> Result<(), String> {
-    let policy_yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: CedarPolicy
-metadata:
-  name: {name}
-  namespace: {system_ns}
-  labels:
-    lattice.dev/test: cedar-secret
-spec:
-  enabled: true
-  priority: 200
-  policies: |
-    forbid(
-      principal,
-      action == Lattice::Action::"AccessSecret",
-      resource
-    ) when {{
-      resource.path like "{path_pattern}"
-    }};"#,
-        name = name,
-        system_ns = LATTICE_SYSTEM_NAMESPACE,
-        path_pattern = path_pattern,
+    let cedar = format!(
+        r#"forbid(
+  principal,
+  action == Lattice::Action::"AccessSecret",
+  resource
+) when {{
+  resource.path like "{path_pattern}"
+}};"#,
     );
-
-    apply_yaml_with_retry(kubeconfig, &policy_yaml).await?;
-    info!(
-        "[CedarSecrets] Applied forbid policy {} for path={}",
-        name, path_pattern
-    );
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    Ok(())
+    apply_cedar_policy_crd(kubeconfig, name, "cedar-secret", 200, &cedar).await
 }
 
 /// Apply a CedarPolicy CRD that permits AccessSecret scoped to a specific provider
@@ -145,133 +100,43 @@ async fn apply_cedar_secret_provider_policy(
     namespace: &str,
     provider: &str,
 ) -> Result<(), String> {
-    let policy_yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: CedarPolicy
-metadata:
-  name: {name}
-  namespace: {system_ns}
-  labels:
-    lattice.dev/test: cedar-secret
-spec:
-  enabled: true
-  priority: 100
-  policies: |
-    permit(
-      principal,
-      action == Lattice::Action::"AccessSecret",
-      resource
-    ) when {{
-      principal.namespace == "{namespace}" &&
-      resource.provider == "{provider}"
-    }};"#,
-        name = name,
-        system_ns = LATTICE_SYSTEM_NAMESPACE,
-        namespace = namespace,
-        provider = provider,
+    let cedar = format!(
+        r#"permit(
+  principal,
+  action == Lattice::Action::"AccessSecret",
+  resource
+) when {{
+  principal.namespace == "{namespace}" &&
+  resource.provider == "{provider}"
+}};"#,
     );
-
-    apply_yaml_with_retry(kubeconfig, &policy_yaml).await?;
-    info!(
-        "[CedarSecrets] Applied provider policy {} for ns={}, provider={}",
-        name, namespace, provider
-    );
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    Ok(())
+    apply_cedar_policy_crd(kubeconfig, name, "cedar-secret", 100, &cedar).await
 }
 
 /// Apply a CedarPolicy that permits all secrets (for use by other tests like secrets.rs)
 pub async fn apply_cedar_secret_permit_all(kubeconfig: &str) -> Result<(), String> {
-    let policy_yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: CedarPolicy
-metadata:
-  name: e2e-permit-all-secrets
-  namespace: {system_ns}
-  labels:
-    lattice.dev/test: cedar-secret
-    lattice.dev/e2e: "true"
-spec:
-  enabled: true
-  priority: 50
-  policies: |
-    // E2E test policy — permit all services to access all secrets
-    permit(
-      principal,
-      action == Lattice::Action::"AccessSecret",
-      resource
-    );"#,
-        system_ns = LATTICE_SYSTEM_NAMESPACE,
-    );
-
-    apply_yaml_with_retry(kubeconfig, &policy_yaml).await?;
-    info!("[CedarSecrets] Applied permit-all-secrets policy");
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    Ok(())
+    apply_cedar_policy_crd(
+        kubeconfig,
+        "e2e-permit-all-secrets",
+        "cedar-secret",
+        50,
+        "// E2E test policy — permit all services to access all secrets\npermit(\n  principal,\n  action == Lattice::Action::\"AccessSecret\",\n  resource\n);",
+    )
+    .await
 }
 
 /// Remove the permit-all-secrets policy
 pub fn remove_cedar_secret_permit_all(kubeconfig: &str) {
-    let _ = delete_cedar_policy(kubeconfig, "e2e-permit-all-secrets");
+    let _ = super::cedar::delete_cedar_policy(kubeconfig, "e2e-permit-all-secrets");
 }
 
 // =============================================================================
 // Verification Helpers
 // =============================================================================
 
-/// Verify that a Failed service's condition message contains the expected substring
-fn verify_service_denied_message(
-    kubeconfig: &str,
-    namespace: &str,
-    name: &str,
-    expected_substring: &str,
-) -> Result<(), String> {
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "latticeservice",
-            name,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.status.conditions[0].message}",
-        ],
-    )?;
-
-    let message = output.trim();
-    if message.contains(expected_substring) {
-        info!(
-            "[CedarSecrets] Service {}/{} denied with message: {}",
-            namespace, name, message
-        );
-        Ok(())
-    } else {
-        Err(format!(
-            "Expected condition message to contain '{}', got: '{}'",
-            expected_substring, message
-        ))
-    }
-}
-
 /// Clean up all Cedar secret test policies
 fn cleanup_cedar_secret_policies(kubeconfig: &str) {
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "cedarpolicy",
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "-l",
-            "lattice.dev/test=cedar-secret",
-            "--ignore-not-found",
-        ],
-    );
+    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=cedar-secret");
 }
 
 // =============================================================================
@@ -298,7 +163,7 @@ fn cedar_test_service(
 // Test Scenarios
 // =============================================================================
 
-/// Deploy a service and assert it reaches the expected phase with optional message check
+/// Deploy a service and assert it reaches the expected phase with optional message check.
 async fn deploy_and_assert(
     kubeconfig: &str,
     namespace: &str,
@@ -321,13 +186,20 @@ async fn deploy_and_assert(
         .await
         .map_err(|e| format!("Failed to create service {}: {}", name, e))?;
 
-    wait_for_service_phase(kubeconfig, namespace, &name, expected_phase, timeout).await?;
-
-    if let Some(substring) = expected_message {
-        verify_service_denied_message(kubeconfig, namespace, &name, substring)?;
+    match expected_message {
+        Some(substring) => {
+            wait_for_service_phase_with_message(
+                kubeconfig,
+                namespace,
+                &name,
+                expected_phase,
+                substring,
+                timeout,
+            )
+            .await
+        }
+        None => wait_for_service_phase(kubeconfig, namespace, &name, expected_phase, timeout).await,
     }
-
-    Ok(())
 }
 
 /// Test 1: Default deny — no CedarPolicy, service with secrets → Failed

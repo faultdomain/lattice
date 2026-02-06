@@ -12,13 +12,17 @@ use tracing::{debug, warn};
 
 use crate::{Error, Result};
 
+pub mod backup;
 pub mod get;
 pub mod install;
 pub mod kind_utils;
-pub mod kubeconfig;
+pub mod login;
 pub mod port_forward;
+pub mod proxy;
+pub mod restore;
 pub mod token;
 pub mod uninstall;
+pub mod use_cluster;
 
 /// Build clusterctl init arguments for a given provider type.
 ///
@@ -205,15 +209,60 @@ where
     }
 }
 
-/// Build a kube [`Client`] from an optional kubeconfig path.
+/// Load a [`Kubeconfig`] using the Lattice resolution chain and ensure the proxy is reachable.
 ///
-/// If a path is provided, reads that file and uses its default context.
-/// Otherwise falls back to default resolution ($KUBECONFIG, ~/.kube/config, in-cluster).
-pub async fn kube_client(kubeconfig_path: Option<&str>) -> Result<Client> {
-    match kubeconfig_path {
-        Some(path) => kube_client_from_path(path).await,
-        None => Client::try_default().await.cmd_err(),
+/// Resolution priority:
+/// 1. `explicit` — the `--kubeconfig` CLI flag
+/// 2. `LATTICE_KUBECONFIG` env var
+/// 3. `~/.lattice/kubeconfig` (from `lattice login`)
+/// 4. kube defaults (`KUBECONFIG` env / `~/.kube/config`)
+///
+/// If the kubeconfig is a proxy kubeconfig with a dead port, a port-forward is
+/// auto-started and the server URLs are rewritten. The caller must hold the
+/// `PortForward` guard to keep it alive.
+pub async fn load_kubeconfig(
+    explicit: Option<&str>,
+) -> Result<(Kubeconfig, Option<port_forward::PortForward>)> {
+    let resolved = crate::config::resolve_kubeconfig(explicit);
+    let mut kc = match resolved.as_deref() {
+        Some(path) => Kubeconfig::read_from(path).map_err(|e| {
+            Error::command_failed(format!("failed to read kubeconfig {}: {}", path, e))
+        })?,
+        None => Kubeconfig::read()
+            .map_err(|e| Error::command_failed(format!("failed to read kubeconfig: {}", e)))?,
+    };
+    let pf = port_forward::ensure_proxy_reachable(&mut kc).await;
+    Ok((kc, pf))
+}
+
+/// Build a kube [`Client`] using the Lattice kubeconfig resolution chain.
+///
+/// If `cluster` is provided, selects that context from the resolved kubeconfig.
+///
+/// Returns `(Client, Option<PortForward>)`. The caller must hold the `PortForward`
+/// guard to keep it alive.
+pub async fn resolve_kube_client(
+    explicit_kubeconfig: Option<&str>,
+    cluster: Option<&str>,
+) -> Result<(Client, Option<port_forward::PortForward>)> {
+    // No resolved kubeconfig and no cluster context → use kube defaults directly
+    if crate::config::resolve_kubeconfig(explicit_kubeconfig).is_none() && cluster.is_none() {
+        let client = Client::try_default().await.cmd_err()?;
+        return Ok((client, None));
     }
+
+    let (kc, pf) = load_kubeconfig(explicit_kubeconfig).await?;
+
+    let opts = match cluster {
+        Some(ctx) => KubeConfigOptions {
+            context: Some(ctx.to_string()),
+            ..Default::default()
+        },
+        None => KubeConfigOptions::default(),
+    };
+
+    let client = kube_client_from_kubeconfig(kc, &opts).await?;
+    Ok((client, pf))
 }
 
 /// Build a kube [`Client`] from a kubeconfig file path (default context).
@@ -237,8 +286,7 @@ pub async fn kube_client_from_kubeconfig(
 /// Create a ServiceAccount token using kubectl.
 ///
 /// Shells out to `kubectl create token` to generate a short-lived token
-/// for the given ServiceAccount. Used by both `lattice token` and
-/// `lattice kubeconfig` commands.
+/// for the given ServiceAccount. Used by `lattice token` and `lattice login`.
 pub fn create_sa_token(
     kubeconfig: &str,
     namespace: &str,

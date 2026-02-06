@@ -16,6 +16,7 @@ members = [
     "crates/lattice-cli",
     "crates/lattice-move",
     "crates/lattice-api",
+    "crates/lattice-backup",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ lattice-secrets-provider = { path = "crates/lattice-secrets-provider" }
 lattice-move = { path = "crates/lattice-move" }
 lattice-cedar = { path = "crates/lattice-cedar" }
 lattice-api = { path = "crates/lattice-api" }
+lattice-backup = { path = "crates/lattice-backup" }
 
 # Kubernetes
 kube = { version = "0.98", features = ["runtime", "derive", "client", "rustls-tls", "admission", "ws"] }
@@ -144,6 +146,7 @@ git2 = "0.19"
 
 # File system
 walkdir = "2.5"
+dirs = "5"
 
 # Dev dependencies
 mockall = "0.13"

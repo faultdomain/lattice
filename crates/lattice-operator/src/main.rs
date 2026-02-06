@@ -3,13 +3,20 @@
 //! This is the main entry point. It handles CLI parsing and starts subsystems.
 //! All business logic lives in library modules.
 //!
+//! # Architecture: Vertical Slices
+//!
+//! Each `ControllerMode` is a vertical slice that owns its full lifecycle:
+//! CRDs, infrastructure, shared state, and controllers.
+//!
 //! # HA Leader Election
 //!
 //! When running with replicas > 1, pods compete for leadership using Kubernetes
 //! Leases. Only the leader runs controllers and accepts traffic. The leader writes
 //! Endpoints directly to route all Service traffic to itself.
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,25 +30,30 @@ use kube::runtime::watcher::{self, Event};
 use kube::{Api, CustomResourceExt};
 use once_cell::sync::OnceCell;
 
-use lattice_api::{AuthChain, PolicyEngine, SaValidator, ServerConfig as AuthProxyConfig};
-use lattice_common::crd::CedarPolicy;
+use lattice_api::{
+    AuthChain, OidcValidator, PolicyEngine, SaValidator, ServerConfig as AuthProxyConfig,
+};
+use lattice_common::crd::{CedarPolicy, LatticeService, OIDCProvider};
 use lattice_common::telemetry::{init_telemetry, PrometheusHandle, TelemetryConfig};
 use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
     DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
 };
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
+use lattice_operator::crd::CloudProvider;
 
 /// Global Prometheus handle for metrics endpoint
 static PROMETHEUS_HANDLE: OnceCell<PrometheusHandle> = OnceCell::new();
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
+use lattice_operator::controller::DiscoveredCrds;
 use lattice_operator::crd::LatticeCluster;
 use lattice_operator::forwarder::SubtreeForwarder;
 use lattice_operator::parent::{ParentConfig, ParentServers};
 use lattice_operator::startup::{
-    ensure_crds_installed, ensure_infrastructure, get_cell_server_sans,
-    re_register_existing_clusters, start_ca_rotation, wait_for_api_ready,
+    ensure_cluster_crds, ensure_cluster_infrastructure, ensure_provider_crds, ensure_service_crds,
+    ensure_service_infrastructure, get_cell_server_sans, re_register_existing_clusters,
+    start_ca_rotation, wait_for_api_ready_for,
 };
 
 mod controller_runner;
@@ -82,6 +94,14 @@ enum Commands {
         #[arg(long, short, value_enum, default_value = "all")]
         mode: ControllerMode,
     },
+}
+
+/// Owns controller futures and cleanup resources for a vertical slice
+struct SliceHandle {
+    controllers: Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
+    agent_token: Option<tokio_util::sync::CancellationToken>,
+    auth_proxy_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[tokio::main]
@@ -181,96 +201,23 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     tracing::info!(pod = %pod_name, "Adding leader label to claim traffic...");
     guard.claim_traffic(&pod_name).await?;
 
-    // Install CRDs and infrastructure (only leader does this)
-    ensure_crds_installed(&client).await?;
-    ensure_infrastructure(&client).await?;
-    wait_for_api_ready(&client).await?;
-
-    // Determine what infrastructure this mode needs
-    let needs_cell_infra = matches!(mode, ControllerMode::All | ControllerMode::Cluster);
-
-    // Get cluster identity from environment
-    let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
-    let is_bootstrap = lattice_common::is_bootstrap_cluster();
-
-    // Create shared Cedar policy engine (used by both auth proxy and service controller)
-    let cedar = match PolicyEngine::from_crds(&client).await {
-        Ok(engine) => Arc::new(engine),
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to load Cedar policies, using default-deny");
-            Arc::new(PolicyEngine::new())
-        }
+    // Dispatch to the appropriate vertical slice
+    tracing::info!("Starting Lattice controllers...");
+    let handle = match mode {
+        ControllerMode::Cluster => run_cluster_slice(&client).await?,
+        ControllerMode::Service => run_service_slice(&client).await?,
+        ControllerMode::Provider => run_provider_slice(&client).await?,
+        ControllerMode::All => run_all_slices(&client).await?,
     };
 
-    // Start Cedar policy watcher to reload policies when CRDs change
-    start_cedar_policy_watcher(client.clone(), cedar.clone());
-
-    // Cell infrastructure (only for Cluster and All modes)
-    let parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>;
-    let agent_token = tokio_util::sync::CancellationToken::new();
-    let auth_proxy_handle: Option<tokio::task::JoinHandle<()>>;
-
-    if needs_cell_infra {
-        // Create cell servers
-        let parent_config = ParentConfig::default();
-        let servers = Arc::new(ParentServers::new(parent_config, &client).await?);
-
-        // Start agent connection to parent (if we have one)
-        // The forwarders enable hierarchical routing - when this cluster receives
-        // K8s/exec requests for child clusters, it forwards them via the gRPC tunnel.
-        if let Some(ref name) = self_cluster_name {
-            let client = client.clone();
-            let name = name.clone();
-            let token = agent_token.clone();
-            let subtree_forwarder =
-                SubtreeForwarder::new(servers.subtree_registry(), servers.agent_registry());
-            let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> =
-                Arc::new(subtree_forwarder);
-            let exec_forwarder: Arc<dyn lattice_agent::ExecRequestForwarder> = Arc::new(
-                SubtreeForwarder::new(servers.subtree_registry(), servers.agent_registry()),
-            );
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = token.cancelled() => {}
-                    _ = start_agent_with_retry(&client, &name, forwarder, exec_forwarder) => {}
-                }
-            });
-        }
-
-        // Start cell servers with TLS SANs from LoadBalancer
-        let extra_sans = get_cell_server_sans(&client, &self_cluster_name, is_bootstrap).await;
-        servers
-            .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
-            .await?;
-        tracing::info!("Cell servers started");
-
-        // Start auth proxy server (for authenticated access with Cedar authorization)
-        auth_proxy_handle = start_auth_proxy(
-            &client,
-            servers.clone(),
-            &self_cluster_name,
-            &extra_sans,
-            cedar.clone(),
-        )
-        .await;
-
-        // Start CA rotation background task
-        start_ca_rotation(servers.clone());
-
-        // Re-register clusters after restart (crash recovery)
-        if let Some(state) = servers.bootstrap_state().await {
-            re_register_existing_clusters(&client, &state, &self_cluster_name, &servers).await;
-        }
-
-        parent_servers = Some(servers);
-    } else {
-        parent_servers = None;
-        auth_proxy_handle = None;
-        tracing::info!(
-            "Skipping cell infrastructure (not needed for {:?} mode)",
-            mode
-        );
-    }
+    // Destructure handle so we can move controllers into select_all
+    // while keeping the cleanup resources separate
+    let SliceHandle {
+        controllers,
+        parent_servers,
+        agent_token,
+        auth_proxy_handle,
+    } = handle;
 
     // Run controllers until shutdown signal, controllers exit, or leadership lost
     let shutdown_signal = async {
@@ -278,9 +225,11 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         tracing::info!("Received shutdown signal");
     };
 
+    let controllers = futures::future::select_all(controllers);
+
     tokio::select! {
-        _ = controller_runner::run_controllers(client, mode, self_cluster_name, parent_servers.clone(), cedar) => {
-            tracing::info!("Controllers exited");
+        (_, idx, _) = controllers => {
+            tracing::info!(controller_index = idx, "Controller exited");
         }
         _ = guard.lost() => {
             tracing::warn!("Leadership lost, shutting down");
@@ -295,8 +244,10 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     }
 
     // Stop services
-    agent_token.cancel();
     health_handle.abort();
+    if let Some(token) = agent_token {
+        token.cancel();
+    }
     if let Some(handle) = auth_proxy_handle {
         handle.abort();
     }
@@ -306,6 +257,242 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     tracing::info!("Shutdown complete");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Vertical slice functions
+// ---------------------------------------------------------------------------
+
+/// Cluster slice: LatticeCluster CRDs, cluster infra (CAPI, network policies),
+/// Cedar + watcher, cell infra (gRPC, bootstrap, auth proxy), cluster controller
+async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
+    // 1. Install cluster CRDs
+    ensure_cluster_crds(client).await?;
+
+    // 2. Install cluster infrastructure (CAPI, network policies)
+    ensure_cluster_infrastructure(client).await?;
+
+    // 3. Wait for API readiness using LatticeCluster
+    wait_for_api_ready_for::<LatticeCluster>(client).await?;
+
+    // 4. Cedar policy engine + watcher
+    let cedar = load_cedar_engine(client).await;
+    start_cedar_policy_watcher(client.clone(), cedar.clone());
+
+    // 5. Cell infrastructure (gRPC, bootstrap, auth proxy)
+    let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
+    let (parent_servers, agent_token, auth_proxy_handle) =
+        setup_cell_infra(client, &self_cluster_name, cedar.clone()).await?;
+
+    // 6. Build controller futures
+    let controllers = controller_runner::build_cluster_controllers(
+        client.clone(),
+        self_cluster_name,
+        Some(parent_servers.clone()),
+    );
+
+    Ok(SliceHandle {
+        controllers,
+        parent_servers: Some(parent_servers),
+        agent_token: Some(agent_token),
+        auth_proxy_handle,
+    })
+}
+
+/// Service slice: Service CRDs, service infra (Istio, Gateway API, ESO, Cilium),
+/// Cedar + watcher, DiscoveredCrds, service controllers
+async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
+    // 1. Install service CRDs
+    ensure_service_crds(client).await?;
+
+    // 2. Install service infrastructure (Istio, Gateway API, ESO, Cilium)
+    ensure_service_infrastructure(client).await?;
+
+    // 3. Wait for API readiness using LatticeService
+    wait_for_api_ready_for::<LatticeService>(client).await?;
+
+    // 4. Cedar policy engine + watcher
+    let cedar = load_cedar_engine(client).await;
+    start_cedar_policy_watcher(client.clone(), cedar.clone());
+
+    // 5. Resolve config from env vars (no LatticeCluster dependency)
+    let cluster_name = std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
+    let provider_type = controller_runner::resolve_provider_type_from_env();
+    let crds = Arc::new(DiscoveredCrds::discover(client).await);
+
+    // 6. Build controller futures
+    let controllers = controller_runner::build_service_controllers(
+        client.clone(),
+        cluster_name,
+        provider_type,
+        cedar,
+        crds,
+    );
+
+    Ok(SliceHandle {
+        controllers,
+        parent_servers: None,
+        agent_token: None,
+        auth_proxy_handle: None,
+    })
+}
+
+/// Provider slice: Provider CRDs, API readiness, provider controllers
+async fn run_provider_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
+    // 1. Install provider CRDs
+    ensure_provider_crds(client).await?;
+
+    // 2. Wait for API readiness using CloudProvider
+    wait_for_api_ready_for::<CloudProvider>(client).await?;
+
+    // 3. Build controller futures (no Cedar, no cell infra)
+    let controllers = controller_runner::build_provider_controllers(client.clone());
+
+    Ok(SliceHandle {
+        controllers,
+        parent_servers: None,
+        agent_token: None,
+        auth_proxy_handle: None,
+    })
+}
+
+/// All slices: union of Cluster + Service + Provider. Same behavior as the
+/// monolithic path, but composed from the individual pieces.
+async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
+    // 1. Install ALL CRDs (union of all modes)
+    ensure_cluster_crds(client).await?;
+    ensure_service_crds(client).await?;
+    ensure_provider_crds(client).await?;
+
+    // 2. Install full infrastructure (reads from LatticeCluster CRD)
+    ensure_cluster_infrastructure(client).await?;
+
+    // 3. Wait for API readiness
+    wait_for_api_ready_for::<LatticeCluster>(client).await?;
+
+    // 4. Cedar policy engine + watcher (shared across cluster + service)
+    let cedar = load_cedar_engine(client).await;
+    start_cedar_policy_watcher(client.clone(), cedar.clone());
+
+    // 5. Cell infrastructure (gRPC, bootstrap, auth proxy)
+    let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
+    let (parent_servers, agent_token, auth_proxy_handle) =
+        setup_cell_infra(client, &self_cluster_name, cedar.clone()).await?;
+
+    // 6. Build all controller futures
+    let mut controllers = controller_runner::build_cluster_controllers(
+        client.clone(),
+        self_cluster_name.clone(),
+        Some(parent_servers.clone()),
+    );
+
+    // Service controllers need provider type from LatticeCluster
+    let provider_type = controller_runner::resolve_provider_type_from_cluster(client).await;
+    let cluster_name = self_cluster_name.unwrap_or_else(|| "default".to_string());
+    let crds = Arc::new(DiscoveredCrds::discover(client).await);
+    controllers.extend(controller_runner::build_service_controllers(
+        client.clone(),
+        cluster_name,
+        provider_type,
+        cedar,
+        crds,
+    ));
+
+    controllers.extend(controller_runner::build_provider_controllers(
+        client.clone(),
+    ));
+
+    Ok(SliceHandle {
+        controllers,
+        parent_servers: Some(parent_servers),
+        agent_token: Some(agent_token),
+        auth_proxy_handle,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Load Cedar policy engine from CRDs, falling back to default-deny
+async fn load_cedar_engine(client: &kube::Client) -> Arc<PolicyEngine> {
+    match PolicyEngine::from_crds(client).await {
+        Ok(engine) => Arc::new(engine),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load Cedar policies, using default-deny");
+            Arc::new(PolicyEngine::new())
+        }
+    }
+}
+
+/// Set up cell infrastructure (gRPC servers, agent connection, auth proxy)
+///
+/// Returns (parent_servers, agent_cancellation_token, auth_proxy_handle)
+async fn setup_cell_infra(
+    client: &kube::Client,
+    self_cluster_name: &Option<String>,
+    cedar: Arc<PolicyEngine>,
+) -> anyhow::Result<(
+    Arc<ParentServers<DefaultManifestGenerator>>,
+    tokio_util::sync::CancellationToken,
+    Option<tokio::task::JoinHandle<()>>,
+)> {
+    let is_bootstrap = lattice_common::is_bootstrap_cluster();
+
+    // Create cell servers
+    let parent_config = ParentConfig::default();
+    let servers = Arc::new(ParentServers::new(parent_config, client).await?);
+
+    // Start agent connection to parent (if we have one)
+    let agent_token = tokio_util::sync::CancellationToken::new();
+    if let Some(ref name) = self_cluster_name {
+        let client = client.clone();
+        let name = name.clone();
+        let token = agent_token.clone();
+        let subtree_forwarder =
+            SubtreeForwarder::new(servers.subtree_registry(), servers.agent_registry());
+        let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> = Arc::new(subtree_forwarder);
+        let exec_forwarder: Arc<dyn lattice_agent::ExecRequestForwarder> = Arc::new(
+            SubtreeForwarder::new(servers.subtree_registry(), servers.agent_registry()),
+        );
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = token.cancelled() => {}
+                _ = start_agent_with_retry(&client, &name, forwarder, exec_forwarder) => {}
+            }
+        });
+    }
+
+    // Start cell servers with TLS SANs from LoadBalancer
+    let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;
+    servers
+        .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
+        .await?;
+    tracing::info!("Cell servers started");
+
+    // Start auth proxy server
+    let auth_proxy_handle = start_auth_proxy(
+        client,
+        servers.clone(),
+        self_cluster_name,
+        &extra_sans,
+        cedar,
+    )
+    .await;
+
+    // Start CA rotation background task
+    start_ca_rotation(servers.clone());
+
+    // Re-register clusters after restart (crash recovery)
+    if let Some(state) = servers.bootstrap_state().await {
+        re_register_existing_clusters(client, &state, self_cluster_name, &servers).await;
+    }
+
+    Ok((servers, agent_token, auth_proxy_handle))
+}
+
+// ---------------------------------------------------------------------------
+// Health, auth proxy, and watcher functions (unchanged)
+// ---------------------------------------------------------------------------
 
 /// Start the health check server for Kubernetes probes
 ///
@@ -377,8 +564,23 @@ async fn start_auth_proxy(
     // Create SA validator for ServiceAccount token authentication
     let sa_validator = Arc::new(SaValidator::new(client.clone()));
 
-    // Create auth chain (SA auth only for now, OIDC can be added later)
-    let auth_chain = Arc::new(AuthChain::sa_only(sa_validator));
+    // Try to load OIDC provider from CRD
+    let oidc_validator = match OidcValidator::from_crd(client).await {
+        Ok(v) => {
+            tracing::info!(issuer = %v.config().issuer_url, "OIDC authentication enabled");
+            Some(Arc::new(v))
+        }
+        Err(e) => {
+            tracing::info!(error = %e, "No OIDC provider configured, SA auth only");
+            None
+        }
+    };
+
+    // Create auth chain with OIDC (if available) + SA fallback
+    let auth_chain = Arc::new(match oidc_validator {
+        Some(oidc) => AuthChain::new(oidc, sa_validator),
+        None => AuthChain::sa_only(sa_validator),
+    });
 
     // Generate server certificate and get CA cert for kubeconfig generation
     // Include LB address in SANs if available (for external access)
@@ -428,6 +630,9 @@ async fn start_auth_proxy(
 
     tracing::info!(addr = %addr, cluster = %cluster_name, "Starting auth proxy server");
 
+    // Start OIDCProvider watcher to reload OIDC config when CRDs change
+    start_oidc_provider_watcher(client.clone(), auth_chain.clone());
+
     // Start in background task
     let handle = tokio::spawn(async move {
         if let Err(e) = lattice_api::start_server(config, auth_chain, cedar, backend).await {
@@ -436,6 +641,54 @@ async fn start_auth_proxy(
     });
 
     Some(handle)
+}
+
+/// Start a background task to watch for OIDCProvider CRD changes and reload the OIDC validator.
+///
+/// On any change (create/update/delete), re-loads from CRD. If no providers remain,
+/// clears OIDC so SA auth is the only active validator.
+fn start_oidc_provider_watcher(client: kube::Client, auth_chain: Arc<AuthChain>) {
+    tokio::spawn(async move {
+        let api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+        // Use a shorter timeout than client's read_timeout to prevent "body read timed out"
+        let watcher_config = watcher::Config::default().timeout(25);
+        let watcher = watcher::watcher(api, watcher_config);
+        let mut watcher = std::pin::pin!(watcher);
+
+        tracing::info!("OIDCProvider watcher started");
+
+        loop {
+            match watcher.next().await {
+                Some(Ok(Event::Apply(_)))
+                | Some(Ok(Event::InitApply(_)))
+                | Some(Ok(Event::Delete(_))) => {
+                    tracing::info!("OIDCProvider changed, reloading...");
+                    match OidcValidator::from_crd(&client).await {
+                        Ok(v) => {
+                            tracing::info!(issuer = %v.config().issuer_url, "OIDC validator reloaded");
+                            auth_chain.set_oidc(Some(Arc::new(v))).await;
+                        }
+                        Err(_) => {
+                            tracing::info!("No OIDC providers configured, SA auth only");
+                            auth_chain.set_oidc(None).await;
+                        }
+                    }
+                }
+                Some(Ok(Event::Init)) | Some(Ok(Event::InitDone)) => {
+                    tracing::debug!("OIDCProvider watcher initialized");
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, "OIDCProvider watcher error, retrying...");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                None => {
+                    tracing::warn!("OIDCProvider watcher stream ended, restarting...");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    });
 }
 
 /// Start a background task to watch for CedarPolicy CRD changes and reload the policy engine.

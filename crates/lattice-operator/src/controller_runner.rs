@@ -1,8 +1,10 @@
-//! Controller runner - starts and manages all Kubernetes controllers
+//! Controller runner - builds controller futures for each vertical slice
 //!
-//! This module handles the creation and running of all controllers.
+//! Each `build_*` function returns a Vec of boxed futures that can be composed
+//! by the caller. This keeps controller construction pure and testable.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -11,143 +13,51 @@ use kube::runtime::watcher::Config as WatcherConfig;
 use kube::runtime::Controller;
 use kube::{Api, Client};
 
+use lattice_api::auth::oidc_controller as oidc_provider_ctrl;
 use lattice_api::cedar::validation as cedar_validation_ctrl;
 use lattice_api::PolicyEngine;
+use lattice_backup::backup_policy_controller as backup_policy_ctrl;
+use lattice_backup::restore_controller as restore_ctrl;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
 use lattice_operator::cloud_provider::{self as cloud_provider_ctrl, ControllerContext};
 use lattice_operator::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
-    service_reconcile, Context, ServiceContext,
+    service_reconcile, Context, DiscoveredCrds, ServiceContext,
 };
 use lattice_operator::crd::{
-    CedarPolicy, CloudProvider, LatticeCluster, LatticeExternalService, LatticeService,
-    ProviderType, SecretsProvider,
+    CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
+    LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider, ProviderType,
+    SecretsProvider,
 };
 use lattice_operator::parent::ParentServers;
 use lattice_operator::secrets_provider as secrets_provider_ctrl;
-
-use crate::ControllerMode;
-
-/// Run all controllers until shutdown
-pub async fn run_controllers(
-    client: Client,
-    mode: ControllerMode,
-    self_cluster_name: Option<String>,
-    parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
-    cedar: Arc<PolicyEngine>,
-) {
-    let run_cluster = matches!(mode, ControllerMode::All | ControllerMode::Cluster);
-    let run_service = matches!(mode, ControllerMode::All | ControllerMode::Service);
-    let run_provider = matches!(mode, ControllerMode::All | ControllerMode::Provider);
-
-    log_enabled_controllers(run_cluster, run_service, run_provider);
-
-    // Build cluster controller context and controller (only if needed)
-    let cluster_controller = if run_cluster {
-        let mut ctx_builder = Context::builder(client.clone());
-        if let Some(servers) = parent_servers {
-            ctx_builder = ctx_builder.parent_servers(servers);
-        }
-        if let Some(ref name) = self_cluster_name {
-            tracing::info!(cluster = %name, "Running as self-managed cluster");
-            ctx_builder = ctx_builder.self_cluster_name(name.clone());
-        }
-        let ctx = Arc::new(ctx_builder.build());
-        let clusters: Api<LatticeCluster> = Api::all(client.clone());
-        create_cluster_controller(clusters, ctx)
-    } else {
-        None
-    };
-
-    // Build service controller context and controllers (only if needed)
-    let (service_controller, external_controller) = if run_service {
-        // Get provider type for topology-aware scheduling
-        let clusters: Api<LatticeCluster> = Api::all(client.clone());
-        let provider_type = match clusters.list(&kube::api::ListParams::default()).await {
-            Ok(list) => list
-                .items
-                .first()
-                .map(|c| c.spec.provider.provider_type())
-                .unwrap_or(ProviderType::Docker),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to read LatticeCluster, defaulting to Docker");
-                ProviderType::Docker
-            }
-        };
-
-        let cluster_name_for_service = self_cluster_name.unwrap_or_else(|| "default".to_string());
-        let service_ctx = Arc::new(ServiceContext::from_client(
-            client.clone(),
-            cluster_name_for_service,
-            provider_type,
-            cedar,
-        ));
-        create_service_controllers(client.clone(), service_ctx)
-    } else {
-        (None, None)
-    };
-
-    // Build provider controllers (only if needed)
-    let (cloud_provider_controller, secrets_provider_controller, cedar_policy_controller) =
-        if run_provider {
-            (
-                create_cloud_provider_controller(client.clone()),
-                create_secrets_provider_controller(client.clone()),
-                create_cedar_policy_controller(client),
-            )
-        } else {
-            (None, None, None)
-        };
-
-    // Run all controllers until one exits
-    tokio::select! {
-        _ = run_optional_controller(cloud_provider_controller) => tracing::info!("CloudProvider controller completed"),
-        _ = run_optional_controller(secrets_provider_controller) => tracing::info!("SecretsProvider controller completed"),
-        _ = run_optional_controller(cedar_policy_controller) => tracing::info!("CedarPolicy controller completed"),
-        _ = run_optional_controller(cluster_controller) => tracing::info!("Cluster controller completed"),
-        _ = run_optional_controller(service_controller) => tracing::info!("Service controller completed"),
-        _ = run_optional_controller(external_controller) => tracing::info!("External service controller completed"),
-    }
-}
-
-/// Run an optional controller, or wait forever if None.
-///
-/// This helper consolidates the pattern of conditionally running a controller
-/// based on whether it was enabled. When the controller is None, it simply
-/// waits forever (pending), allowing tokio::select! to wait on other branches.
-async fn run_optional_controller<F: Future<Output = ()>>(controller: Option<F>) {
-    match controller {
-        Some(ctrl) => ctrl.await,
-        None => std::future::pending::<()>().await,
-    }
-}
-
-fn log_enabled_controllers(run_cluster: bool, run_service: bool, run_provider: bool) {
-    tracing::info!("Starting Lattice controllers...");
-    if run_cluster {
-        tracing::info!("- LatticeCluster controller");
-    }
-    if run_service {
-        tracing::info!("- LatticeService controller");
-        tracing::info!("- LatticeExternalService controller");
-    }
-    if run_provider {
-        tracing::info!("- CloudProvider controller");
-        tracing::info!("- SecretsProvider controller");
-        tracing::info!("- CedarPolicy controller");
-    }
-}
+use lattice_service::policy_controller as service_policy_ctrl;
 
 /// Watcher timeout (seconds) - must be less than client read_timeout (30s)
 /// This forces the API server to close the watch before the client times out,
 /// preventing "body read timed out" errors on idle watches.
 const WATCH_TIMEOUT_SECS: u32 = 25;
 
-fn create_cluster_controller(
-    clusters: Api<LatticeCluster>,
-    ctx: Arc<Context>,
-) -> Option<impl std::future::Future<Output = ()>> {
-    Some(
+/// Build cluster controller futures
+pub fn build_cluster_controllers(
+    client: Client,
+    self_cluster_name: Option<String>,
+    parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let mut ctx_builder = Context::builder(client.clone());
+    if let Some(servers) = parent_servers {
+        ctx_builder = ctx_builder.parent_servers(servers);
+    }
+    if let Some(ref name) = self_cluster_name {
+        tracing::info!(cluster = %name, "Running as self-managed cluster");
+        ctx_builder = ctx_builder.self_cluster_name(name.clone());
+    }
+    let ctx = Arc::new(ctx_builder.build());
+    let clusters: Api<LatticeCluster> = Api::all(client);
+
+    tracing::info!("- LatticeCluster controller");
+
+    vec![Box::pin(
         Controller::new(
             clusters,
             WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
@@ -155,20 +65,29 @@ fn create_cluster_controller(
         .shutdown_on_signal()
         .run(reconcile, error_policy, ctx)
         .for_each(log_reconcile_result("Cluster")),
-    )
+    )]
 }
 
-fn create_service_controllers(
+/// Build service controller futures (LatticeService, LatticeExternalService, LatticeServicePolicy)
+pub fn build_service_controllers(
     client: Client,
-    ctx: Arc<ServiceContext>,
-) -> (
-    Option<impl std::future::Future<Output = ()>>,
-    Option<impl std::future::Future<Output = ()>>,
-) {
-    let services: Api<LatticeService> = Api::all(client.clone());
-    let external_services: Api<LatticeExternalService> = Api::all(client);
+    cluster_name: String,
+    provider_type: ProviderType,
+    cedar: Arc<PolicyEngine>,
+    crds: Arc<DiscoveredCrds>,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let service_ctx = Arc::new(ServiceContext::from_client(
+        client.clone(),
+        cluster_name,
+        provider_type,
+        cedar,
+        crds,
+    ));
 
-    let graph_for_watch = ctx.graph.clone();
+    let services: Api<LatticeService> = Api::all(client.clone());
+    let external_services: Api<LatticeExternalService> = Api::all(client.clone());
+
+    let graph_for_watch = service_ctx.graph.clone();
     let services_for_watch = services.clone();
 
     let svc_ctrl = Controller::new(
@@ -186,7 +105,6 @@ fn create_service_controllers(
             };
             let name = service.metadata.name.as_deref().unwrap_or_default();
 
-            // Get affected services (dependencies + dependents)
             let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
             affected.extend(graph.get_dependents(namespace, name));
             affected.sort();
@@ -207,7 +125,7 @@ fn create_service_controllers(
         },
     )
     .shutdown_on_signal()
-    .run(service_reconcile, service_error_policy, ctx.clone())
+    .run(service_reconcile, service_error_policy, service_ctx.clone())
     .for_each(log_reconcile_result("Service"));
 
     let ext_ctrl = Controller::new(
@@ -215,76 +133,162 @@ fn create_service_controllers(
         WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
     )
     .shutdown_on_signal()
-    .run(reconcile_external, error_policy_external, ctx)
+    .run(reconcile_external, error_policy_external, service_ctx)
     .for_each(log_reconcile_result("ExternalService"));
 
-    (Some(svc_ctrl), Some(ext_ctrl))
+    let policies: Api<LatticeServicePolicy> = Api::all(client.clone());
+    let policy_ctx = Arc::new(ControllerContext::new(client));
+    let policy_ctrl = Controller::new(
+        policies,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .shutdown_on_signal()
+    .run(
+        service_policy_ctrl::reconcile,
+        lattice_common::default_error_policy,
+        policy_ctx,
+    )
+    .for_each(log_reconcile_result("ServicePolicy"));
+
+    tracing::info!("- LatticeService controller");
+    tracing::info!("- LatticeExternalService controller");
+    tracing::info!("- LatticeServicePolicy controller");
+
+    vec![
+        Box::pin(svc_ctrl),
+        Box::pin(ext_ctrl),
+        Box::pin(policy_ctrl),
+    ]
 }
 
-fn create_cloud_provider_controller(
-    client: Client,
-) -> Option<impl std::future::Future<Output = ()>> {
+/// Build provider controller futures (CloudProvider, SecretsProvider, CedarPolicy, OIDCProvider)
+pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let cloud_providers: Api<CloudProvider> = Api::all(client.clone());
-    let ctx = Arc::new(ControllerContext::new(client));
-
-    Some(
-        Controller::new(
-            cloud_providers,
-            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-        )
-        .shutdown_on_signal()
-        .run(
-            cloud_provider_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx,
-        )
-        .for_each(log_reconcile_result("CloudProvider")),
+    let cp_ctx = Arc::new(ControllerContext::new(client.clone()));
+    let cloud_ctrl = Controller::new(
+        cloud_providers,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
     )
-}
+    .shutdown_on_signal()
+    .run(
+        cloud_provider_ctrl::reconcile,
+        lattice_common::default_error_policy,
+        cp_ctx,
+    )
+    .for_each(log_reconcile_result("CloudProvider"));
 
-fn create_secrets_provider_controller(
-    client: Client,
-) -> Option<impl std::future::Future<Output = ()>> {
     let secrets_providers: Api<SecretsProvider> = Api::all(client.clone());
-    let ctx = Arc::new(ControllerContext::new(client));
-
-    Some(
-        Controller::new(
-            secrets_providers,
-            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-        )
-        .shutdown_on_signal()
-        .run(
-            secrets_provider_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx,
-        )
-        .for_each(log_reconcile_result("SecretsProvider")),
+    let sp_ctx = Arc::new(ControllerContext::new(client.clone()));
+    let secrets_ctrl = Controller::new(
+        secrets_providers,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
     )
+    .shutdown_on_signal()
+    .run(
+        secrets_provider_ctrl::reconcile,
+        lattice_common::default_error_policy,
+        sp_ctx,
+    )
+    .for_each(log_reconcile_result("SecretsProvider"));
+
+    let cedar_policies: Api<CedarPolicy> = Api::all(client.clone());
+    let cedar_ctx = Arc::new(ControllerContext::new(client.clone()));
+    let cedar_ctrl = Controller::new(
+        cedar_policies,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .shutdown_on_signal()
+    .run(
+        cedar_validation_ctrl::reconcile,
+        lattice_common::default_error_policy,
+        cedar_ctx,
+    )
+    .for_each(log_reconcile_result("CedarPolicy"));
+
+    let oidc_providers: Api<OIDCProvider> = Api::all(client.clone());
+    let oidc_ctx = Arc::new(ControllerContext::new(client.clone()));
+    let oidc_ctrl = Controller::new(
+        oidc_providers,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .shutdown_on_signal()
+    .run(
+        oidc_provider_ctrl::reconcile,
+        lattice_common::default_error_policy,
+        oidc_ctx,
+    )
+    .for_each(log_reconcile_result("OIDCProvider"));
+
+    let backup_policies: Api<LatticeBackupPolicy> = Api::all(client.clone());
+    let bp_ctx = Arc::new(ControllerContext::new(client.clone()));
+    let backup_ctrl = Controller::new(
+        backup_policies,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .shutdown_on_signal()
+    .run(
+        backup_policy_ctrl::reconcile,
+        lattice_common::default_error_policy,
+        bp_ctx,
+    )
+    .for_each(log_reconcile_result("BackupPolicy"));
+
+    let restores: Api<LatticeRestore> = Api::all(client.clone());
+    let restore_ctx = Arc::new(ControllerContext::new(client));
+    let restore_ctrl_future = Controller::new(
+        restores,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .shutdown_on_signal()
+    .run(
+        restore_ctrl::reconcile,
+        lattice_common::default_error_policy,
+        restore_ctx,
+    )
+    .for_each(log_reconcile_result("Restore"));
+
+    tracing::info!("- CloudProvider controller");
+    tracing::info!("- SecretsProvider controller");
+    tracing::info!("- CedarPolicy controller");
+    tracing::info!("- OIDCProvider controller");
+    tracing::info!("- LatticeBackupPolicy controller");
+    tracing::info!("- LatticeRestore controller");
+
+    vec![
+        Box::pin(cloud_ctrl),
+        Box::pin(secrets_ctrl),
+        Box::pin(cedar_ctrl),
+        Box::pin(oidc_ctrl),
+        Box::pin(backup_ctrl),
+        Box::pin(restore_ctrl_future),
+    ]
 }
 
-fn create_cedar_policy_controller(client: Client) -> Option<impl std::future::Future<Output = ()>> {
-    let cedar_policies: Api<CedarPolicy> = Api::all(client.clone());
-    let ctx = Arc::new(ControllerContext::new(client));
+/// Resolve provider type from env var (for Service mode, which has no LatticeCluster)
+pub fn resolve_provider_type_from_env() -> ProviderType {
+    std::env::var("LATTICE_PROVIDER")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(ProviderType::Docker)
+}
 
-    Some(
-        Controller::new(
-            cedar_policies,
-            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-        )
-        .shutdown_on_signal()
-        .run(
-            cedar_validation_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx,
-        )
-        .for_each(log_reconcile_result("CedarPolicy")),
-    )
+/// Resolve provider type from the first LatticeCluster CRD
+pub async fn resolve_provider_type_from_cluster(client: &Client) -> ProviderType {
+    let clusters: Api<LatticeCluster> = Api::all(client.clone());
+    match clusters.list(&kube::api::ListParams::default()).await {
+        Ok(list) => list
+            .items
+            .first()
+            .map(|c| c.spec.provider.provider_type())
+            .unwrap_or(ProviderType::Docker),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read LatticeCluster, defaulting to Docker");
+            ProviderType::Docker
+        }
+    }
 }
 
 /// Creates a closure for logging reconciliation results.
-///
-/// This consolidates the duplicated pattern of logging Ok/Err results from controller runs.
 fn log_reconcile_result<T: std::fmt::Debug, E: std::fmt::Debug>(
     controller_name: &'static str,
 ) -> impl Fn(Result<T, E>) -> std::future::Ready<()> {

@@ -68,15 +68,46 @@ async fn apply_manifests_with_retry(
         .unwrap_or_else(|| anyhow::anyhow!("max retries reached")))
 }
 
-/// Reconcile infrastructure components
+/// Reconcile Service-mode infrastructure (Istio, Gateway API, ESO, Cilium policies)
 ///
+/// Reads config from env vars instead of LatticeCluster CRD, so it can run
+/// independently in Service mode without requiring a LatticeCluster to exist.
+pub async fn ensure_service_infrastructure(client: &Client) -> anyhow::Result<()> {
+    let cluster_name = std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
+    let is_bootstrap = lattice_common::is_bootstrap_cluster();
+
+    tracing::info!(
+        cluster = %cluster_name,
+        is_bootstrap,
+        "Applying Service mode infrastructure..."
+    );
+
+    let config = InfrastructureConfig {
+        cluster_name,
+        skip_service_mesh: false,
+        skip_cilium_policies: is_bootstrap,
+        ..Default::default()
+    };
+
+    let manifests = bootstrap::generate_core(&config)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to generate service infrastructure: {}", e))?;
+    tracing::info!(count = manifests.len(), "applying service infrastructure");
+    apply_manifests_with_retry(client, &manifests, "service infrastructure").await?;
+
+    tracing::info!("Service infrastructure installation complete");
+    Ok(())
+}
+
+/// Reconcile Cluster-mode infrastructure (CAPI, operator network policies)
+///
+/// Reads provider/bootstrap from LatticeCluster CRD (the source of truth).
 /// Ensures all infrastructure is installed. Server-side apply handles idempotency.
-/// This runs on every controller startup, applying the latest manifests.
 ///
 /// IMPORTANT: Uses the SAME generate_all() function as the bootstrap webhook.
 /// This guarantees upgrades work by changing Lattice version - on restart,
 /// the operator re-applies identical infrastructure manifests.
-pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
+pub async fn ensure_cluster_infrastructure(client: &Client) -> anyhow::Result<()> {
     let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
     tracing::info!(

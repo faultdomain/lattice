@@ -9,6 +9,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::service::ServiceBackupSpec;
 use super::types::Condition;
 
 /// Operator for label selector requirements
@@ -287,6 +288,10 @@ pub struct LatticeServicePolicySpec {
     /// Default is 0.
     #[serde(default)]
     pub priority: i32,
+
+    /// Backup configuration to apply to matched services
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<ServiceBackupSpec>,
 }
 
 #[cfg(test)]

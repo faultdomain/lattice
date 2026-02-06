@@ -2,23 +2,32 @@
 //!
 //! This module contains all CRD definitions used by the Lattice operator.
 
+mod backup_policy;
 mod cedar_policy;
 mod cloud_provider;
 mod cluster;
 mod external_service;
 mod oidc_provider;
 mod providers;
+mod restore;
 mod secrets_provider;
 mod service;
 mod service_policy;
 mod types;
 
+pub use backup_policy::{
+    BackupPolicyPhase, BackupRetentionSpec, BackupScopeSpec, BackupStorageProvider,
+    BackupStorageSpec, LatticeBackupPolicy, LatticeBackupPolicySpec, LatticeBackupPolicyStatus,
+    S3StorageConfig, VolumeSnapshotConfig, VolumeSnapshotMethod,
+};
 pub use cedar_policy::{CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus};
 pub use cloud_provider::{
     AwsProviderConfig, CloudProvider, CloudProviderPhase, CloudProviderSpec, CloudProviderStatus,
     CloudProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
 };
-pub use cluster::{LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, WorkerPoolStatus};
+pub use cluster::{
+    ChildClusterHealth, LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, WorkerPoolStatus,
+};
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
@@ -26,18 +35,22 @@ pub use external_service::{
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
 };
+pub use restore::{
+    LatticeRestore, LatticeRestoreSpec, LatticeRestoreStatus, RestoreOrdering, RestorePhase,
+};
 pub use secrets_provider::{
     SecretsProvider, SecretsProviderPhase, SecretsProviderSpec, SecretsProviderStatus,
     VaultAuthMethod,
 };
 pub use service::{
-    CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec, DeployStrategy, ExecProbe,
-    FileMount, HttpGetProbe, HttpHeader, InboundPolicy, IngressPath, IngressSpec, IngressTls,
-    LatticeService, LatticeServiceSpec, LatticeServiceStatus, OutboundPolicy, PathMatchType,
-    PortSpec, Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata,
-    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RetryConfig,
-    SecurityContext, ServicePhase, ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode,
-    VolumeAccessMode, VolumeMount, VolumeParams,
+    BackupHook, BackupHooksSpec, CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec,
+    DeployStrategy, ExecProbe, FileMount, HookErrorAction, HttpGetProbe, HttpHeader, InboundPolicy,
+    IngressPath, IngressSpec, IngressTls, LatticeService, LatticeServiceSpec, LatticeServiceStatus,
+    OutboundPolicy, PathMatchType, PortSpec, Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec,
+    ResourceMetadata, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
+    RetryConfig, SecurityContext, ServiceBackupSpec, ServicePhase, ServicePortsSpec, SidecarSpec,
+    TimeoutConfig, TlsMode, VolumeAccessMode, VolumeBackupDefault, VolumeBackupSpec, VolumeMount,
+    VolumeParams,
 };
 pub use service_policy::{
     LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,

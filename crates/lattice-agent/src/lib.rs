@@ -18,8 +18,10 @@ use tokio_util::sync::CancellationToken;
 pub mod client;
 pub mod commands;
 pub mod config;
+pub mod events;
 pub mod exec;
 pub mod executor;
+pub mod health;
 pub mod kube_client;
 pub mod pivot;
 pub mod subtree;
@@ -194,7 +196,7 @@ pub use watch::{execute_watch, WatchRegistry};
 pub use lattice_proto::{
     agent_message, cell_command, AgentMessage, AgentReady, AgentState, BootstrapComplete,
     CellCommand, ClusterDeleting, ClusterHealth, ExecData, ExecRequest, Heartbeat,
-    KubernetesRequest, KubernetesResponse, StatusResponse,
+    KubernetesRequest, KubernetesResponse, LatticeEvent, StatusResponse,
 };
 
 /// Convert proto DistributableResources to domain type.

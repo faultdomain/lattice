@@ -541,6 +541,7 @@ impl AgentClient {
         let heartbeat_tx = message_tx.clone();
         let cluster_name = config.cluster_name.clone();
         let start_time = self.start_time;
+        let heartbeat_kube_provider = kube_provider.clone();
 
         self.heartbeat_handle = Some(tokio::spawn(async move {
             let mut ticker = interval(heartbeat_interval);
@@ -548,12 +549,15 @@ impl AgentClient {
                 ticker.tick().await;
 
                 let current_state = *heartbeat_state.read().await;
+                let health =
+                    crate::health::gather_cluster_health(heartbeat_kube_provider.as_ref()).await;
                 let msg = AgentMessage {
                     cluster_name: cluster_name.clone(),
                     payload: Some(Payload::Heartbeat(Heartbeat {
                         state: current_state.into(),
                         timestamp: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
                         uptime_seconds: start_time.elapsed().as_secs() as i64,
+                        health,
                     })),
                 };
 
@@ -1797,6 +1801,7 @@ mod tests {
                 state: AgentState::Ready.into(),
                 timestamp: Some(timestamp),
                 uptime_seconds: 3600,
+                health: None,
             })),
         };
 
