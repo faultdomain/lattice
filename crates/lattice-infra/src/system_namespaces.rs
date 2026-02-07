@@ -24,8 +24,8 @@ pub const CERT: &[&str] = &["cert-manager"];
 /// GPU infrastructure namespaces (GPU Operator + HAMi)
 pub const GPU: &[&str] = &["gpu-operator", "hami-system"];
 
-/// Monitoring namespaces (VictoriaMetrics + Prometheus Adapter)
-pub const MONITORING: &[&str] = &["monitoring"];
+/// Monitoring namespaces (VictoriaMetrics + KEDA)
+pub const MONITORING: &[&str] = &["monitoring", "keda"];
 
 /// Cluster API namespaces (core + bootstrap + control plane + providers)
 pub const CAPI: &[&str] = &[

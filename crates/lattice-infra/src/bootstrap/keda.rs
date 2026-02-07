@@ -1,8 +1,7 @@
 //! KEDA manifest generation
 //!
 //! Embeds pre-rendered KEDA manifests from build time.
-//! KEDA provides event-driven autoscaling, replacing prometheus-adapter
-//! for custom metrics HPA support.
+//! KEDA provides event-driven autoscaling via ScaledObject triggers.
 
 use std::sync::LazyLock;
 

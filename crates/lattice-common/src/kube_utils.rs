@@ -795,7 +795,7 @@ pub fn kind_priority(kind: &str) -> u8 {
         "ConfigMap" | "Secret" => 5,
         "Service" => 6,
         "Deployment" | "DaemonSet" | "StatefulSet" => 7,
-        "HorizontalPodAutoscaler" => 8,
+        "ScaledObject" => 8,
         _ => 10, // webhooks, policies, etc. come last
     }
 }

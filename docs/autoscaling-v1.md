@@ -38,11 +38,10 @@ Users cannot:
 1. Add an `autoscaling` field to `ReplicaSpec` with user-defined metrics
 2. The compiler translates each metric into the correct HPA v2 metric type
 3. Default to CPU 80% when `autoscaling` is empty (backwards compatible)
-4. Deploy Prometheus Adapter on GPU-enabled clusters for custom metrics
+4. Deploy KEDA on GPU-enabled clusters for custom metrics
 
-No new operators. No KEDA. Kubernetes HPA v2 natively supports custom metrics
-through the custom metrics API. Prometheus Adapter bridges Prometheus queries
-to that API.
+KEDA ScaledObjects query Prometheus directly and manage scaling for custom
+metrics like vLLM inference queue depth, token throughput, and latency.
 
 ---
 
@@ -138,7 +137,7 @@ The compiler maps metric names to HPA v2 metric types:
 | anything else | `Pods` | `averageValue` (absolute) | 5 → scale when avg > 5 |
 
 `Resource` metrics are built into Kubernetes (metrics-server). `Pods` metrics
-require the custom metrics API (Prometheus Adapter).
+are handled by KEDA ScaledObjects with Prometheus triggers.
 
 ### compile_hpa Changes
 
@@ -235,42 +234,17 @@ pub struct MetricTarget {
 
 ---
 
-## Infrastructure: Prometheus Adapter
+## Infrastructure: KEDA
 
-Custom metrics (anything besides `cpu`/`memory`) require Prometheus Adapter to
-bridge Prometheus → K8s custom metrics API. This is deployed automatically on
+Custom metrics (anything besides `cpu`/`memory`) are handled by KEDA ScaledObjects,
+which query Prometheus directly and manage scaling. KEDA is deployed automatically on
 GPU-enabled clusters (where vLLM metrics are the primary use case).
 
-### Bootstrap
+### Default Metrics
 
-```rust
-// crates/lattice-infra/src/bootstrap/prometheus_adapter.rs
+For vLLM / TGI workloads, KEDA ScaledObjects query the following Prometheus metrics:
 
-pub async fn generate_prometheus_adapter() -> Result<Arc<Vec<String>>, String> {
-    let charts = charts_dir();
-    let version = prometheus_adapter_version();
-    let chart = format!("{}/prometheus-adapter-v{}.tgz", charts, version);
-
-    let manifests = run_helm_template(
-        "prometheus-adapter",
-        &chart,
-        "monitoring",
-        &[
-            "--set", "prometheus.url=http://prometheus.monitoring.svc",
-            "--set", "prometheus.port=9090",
-        ],
-    ).await?;
-
-    // ... namespace + manifests
-}
-```
-
-### Default Metric Rules
-
-Prometheus Adapter ships with a default config that maps Prometheus metrics to
-K8s custom metrics. For vLLM / TGI workloads, common metrics are:
-
-| Prometheus Metric | K8s Custom Metric | What It Measures |
+| Prometheus Metric | ScaledObject Trigger Metric | What It Measures |
 |---|---|---|
 | `vllm:num_requests_waiting` | `vllm_num_requests_waiting` | Requests queued for inference |
 | `vllm:avg_prompt_throughput_toks_per_s` | `vllm_prompt_throughput` | Token throughput |
@@ -316,24 +290,22 @@ if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
 |---|---|
 | `crates/lattice-common/src/crd/service.rs` | Add `autoscaling: Vec<AutoscalingMetric>` to `ReplicaSpec`, add `AutoscalingMetric` struct |
 | `crates/lattice-service/src/workload/mod.rs` | Generalize `compile_hpa`, add `PodsMetricSource`, `MetricIdentifier`, extend `MetricSpec`/`MetricTarget` |
-| `crates/lattice-infra/src/bootstrap/mod.rs` | Add `pub mod prometheus_adapter;` (GPU clusters only) |
-| `crates/lattice-infra/src/bootstrap/prometheus_adapter.rs` | New — helm template for Prometheus Adapter |
-| `versions.toml` | Pin `PROMETHEUS_ADAPTER_VERSION` |
+| `crates/lattice-infra/src/bootstrap/mod.rs` | Add `pub mod keda;` (GPU clusters only) |
+| `crates/lattice-infra/src/bootstrap/keda.rs` | New — helm template for KEDA |
+| `versions.toml` | Pin `KEDA_VERSION` |
 
 ---
 
 ## What v1 Does NOT Include
 
-- **KEDA** — HPA v2 + Prometheus Adapter covers all v1 use cases. KEDA adds
-  complexity without benefit unless we need scale-to-zero or event-driven triggers.
 - **Scale-to-zero** — Min replicas is always >= 1. Cold starts on GPU workloads
   (30-120s model load) make scale-to-zero impractical for production inference.
-  Revisit with Knative or KEDA if demand emerges.
-- **Prometheus Adapter on non-GPU clusters** — v1 deploys it on GPU clusters only.
-  Non-GPU services use built-in `cpu`/`memory` metrics (no adapter needed).
+  Revisit with Knative if demand emerges.
+- **KEDA on non-GPU clusters** — v1 deploys KEDA on GPU clusters only.
+  Non-GPU services use built-in `cpu`/`memory` metrics (no KEDA needed).
   Easy to extend later.
-- **Custom Prometheus Adapter rules** — v1 ships with sensible defaults for vLLM/TGI.
-  Advanced users who need custom metric mappings can configure Prometheus Adapter
+- **Custom KEDA trigger rules** — v1 ships with sensible defaults for vLLM/TGI.
+  Advanced users who need custom metric triggers can configure KEDA ScaledObjects
   directly. A `metricsConfig` CRD field is a v2 concern.
 
 ---
@@ -351,14 +323,14 @@ if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
 7. Update tests
 
 **Result**: Users can configure CPU/memory thresholds. Custom metrics compile
-correctly but require Prometheus Adapter to actually resolve at runtime.
+correctly but require KEDA to actually resolve at runtime.
 
-### Phase B: Prometheus Adapter Bootstrap (GPU clusters)
+### Phase B: KEDA Bootstrap (GPU clusters)
 
-1. Add `prometheus_adapter.rs` to bootstrap module
+1. Add `keda.rs` to bootstrap module
 2. Pin version in `versions.toml`
 3. Include in GPU cluster bootstrap path
-4. Add default metric rules for vLLM/TGI
+4. Configure default KEDA ScaledObject triggers for vLLM/TGI
 
-**Result**: GPU clusters get Prometheus Adapter automatically. Custom metrics
-like `vllm_num_requests_waiting` work end-to-end with HPA.
+**Result**: GPU clusters get KEDA automatically. Custom metrics
+like `vllm_num_requests_waiting` work end-to-end with KEDA ScaledObjects.

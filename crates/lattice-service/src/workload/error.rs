@@ -53,6 +53,12 @@ pub enum CompilationError {
         /// Error message
         message: String,
     },
+
+    /// Custom Prometheus metrics require monitoring to be enabled on the cluster
+    MonitoringRequired {
+        /// The metric names that require monitoring
+        metrics: Vec<String>,
+    },
 }
 
 impl fmt::Display for CompilationError {
@@ -95,6 +101,13 @@ impl fmt::Display for CompilationError {
             }
             Self::InvalidContainer { container, message } => {
                 write!(f, "invalid container '{}': {}", container, message)
+            }
+            Self::MonitoringRequired { metrics } => {
+                write!(
+                    f,
+                    "custom Prometheus metrics [{}] require monitoring to be enabled on the cluster",
+                    metrics.join(", ")
+                )
             }
         }
     }
@@ -206,6 +219,20 @@ mod tests {
         let display = err.to_string();
         assert!(display.contains("sidecar"));
         assert!(display.contains("missing image"));
+    }
+
+    #[test]
+    fn test_monitoring_required_display() {
+        let err = CompilationError::MonitoringRequired {
+            metrics: vec![
+                "vllm_num_requests_waiting".to_string(),
+                "gpu_utilization".to_string(),
+            ],
+        };
+        let display = err.to_string();
+        assert!(display.contains("vllm_num_requests_waiting"));
+        assert!(display.contains("gpu_utilization"));
+        assert!(display.contains("monitoring"));
     }
 
     #[test]

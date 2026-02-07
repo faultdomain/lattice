@@ -4,7 +4,7 @@
 //! - Deployment: Container orchestration
 //! - Service: Network exposure
 //! - ServiceAccount: SPIFFE identity for mTLS
-//! - HorizontalPodAutoscaler: Auto-scaling
+//! - ScaledObject: KEDA-based auto-scaling
 //! - ConfigMap/Secret: Configuration and secrets
 //!
 //! For workload generation, use [`crate::compiler::ServiceCompiler`].
@@ -26,6 +26,7 @@ pub use volume::{
 use std::collections::BTreeMap;
 
 use aws_lc_rs::digest::{digest, SHA256};
+use lattice_common::kube_utils::HasApiResource;
 use serde::{Deserialize, Serialize};
 
 /// Compute a config hash from ConfigMap and Secret data
@@ -756,13 +757,17 @@ pub struct ServiceAccount {
 }
 
 // =============================================================================
-// HorizontalPodAutoscaler
+// KEDA ScaledObject
 // =============================================================================
 
-/// Kubernetes HorizontalPodAutoscaler (v2)
+/// KEDA ScaledObject — manages pod autoscaling via triggers (cpu, memory, prometheus, etc.)
+///
+/// KEDA creates and manages an HPA under the hood. All autoscaling goes through
+/// ScaledObject triggers, giving a single code path for both resource-based
+/// (cpu/memory) and custom Prometheus metrics.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct HorizontalPodAutoscaler {
+pub struct ScaledObject {
     /// API version
     pub api_version: String,
     /// Kind
@@ -770,22 +775,26 @@ pub struct HorizontalPodAutoscaler {
     /// Metadata
     pub metadata: ObjectMeta,
     /// Spec
-    pub spec: HpaSpec,
+    pub spec: ScaledObjectSpec,
 }
 
-/// HPA spec
+impl HasApiResource for ScaledObject {
+    const API_VERSION: &'static str = "keda.sh/v1alpha1";
+    const KIND: &'static str = "ScaledObject";
+}
+
+/// ScaledObject spec
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct HpaSpec {
-    /// Scale target ref
+pub struct ScaledObjectSpec {
+    /// Reference to the target Deployment/StatefulSet to scale
     pub scale_target_ref: ScaleTargetRef,
-    /// Min replicas
-    pub min_replicas: u32,
-    /// Max replicas
-    pub max_replicas: u32,
-    /// Metrics
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub metrics: Vec<MetricSpec>,
+    /// Minimum replica count
+    pub min_replica_count: u32,
+    /// Maximum replica count
+    pub max_replica_count: u32,
+    /// Autoscaling triggers (cpu, memory, prometheus, etc.)
+    pub triggers: Vec<ScaledObjectTrigger>,
 }
 
 /// Scale target reference
@@ -800,62 +809,18 @@ pub struct ScaleTargetRef {
     pub name: String,
 }
 
-/// Metric specification
+/// A single KEDA trigger (one scaling signal)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct MetricSpec {
-    /// Metric type
+pub struct ScaledObjectTrigger {
+    /// Trigger type: "cpu", "memory", or "prometheus"
     #[serde(rename = "type")]
     pub type_: String,
-    /// Resource metric (for cpu/memory)
+    /// Metric type for resource triggers (e.g. "Utilization")
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource: Option<ResourceMetricSource>,
-    /// Pods metric (for custom Prometheus metrics)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pods: Option<PodsMetricSource>,
-}
-
-/// Resource metric source
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceMetricSource {
-    /// Resource name (cpu, memory)
-    pub name: String,
-    /// Target
-    pub target: MetricTarget,
-}
-
-/// Metric target
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct MetricTarget {
-    /// Target type
-    #[serde(rename = "type")]
-    pub type_: String,
-    /// Average utilization percentage (for Resource type)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub average_utilization: Option<u32>,
-    /// Average value (for Pods type, e.g. "5")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub average_value: Option<String>,
-}
-
-/// Pods metric source (for custom Prometheus metrics)
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PodsMetricSource {
-    /// Metric identifier
-    pub metric: MetricIdentifier,
-    /// Target value
-    pub target: MetricTarget,
-}
-
-/// Metric identifier for pods metrics
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct MetricIdentifier {
-    /// Metric name (e.g. "vllm_num_requests_waiting")
-    pub name: String,
+    pub metric_type: Option<String>,
+    /// Trigger-specific key-value metadata
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 // =============================================================================
@@ -871,8 +836,8 @@ pub struct GeneratedWorkloads {
     pub service: Option<Service>,
     /// Kubernetes ServiceAccount
     pub service_account: Option<ServiceAccount>,
-    /// Kubernetes HorizontalPodAutoscaler
-    pub hpa: Option<HorizontalPodAutoscaler>,
+    /// KEDA ScaledObject for autoscaling
+    pub scaled_object: Option<ScaledObject>,
     /// ConfigMap for non-sensitive env vars
     pub env_config_map: Option<ConfigMap>,
     /// Secret for sensitive env vars
@@ -900,7 +865,7 @@ impl GeneratedWorkloads {
         self.deployment.is_none()
             && self.service.is_none()
             && self.service_account.is_none()
-            && self.hpa.is_none()
+            && self.scaled_object.is_none()
             && self.env_config_map.is_none()
             && self.env_secret.is_none()
             && self.files_config_map.is_none()
@@ -1000,7 +965,7 @@ fn gpu_shm_volume(gpu: &Option<GPUSpec>) -> Option<(Volume, VolumeMount)> {
 /// - ServiceAccount: For SPIFFE identity (always)
 /// - Deployment: Container orchestration (always)
 /// - Service: Network exposure (if ports defined)
-/// - HPA: Auto-scaling (if max replicas set)
+/// - ScaledObject: KEDA-based auto-scaling (if max replicas set)
 ///
 /// For webhook-based injection, use [`compile_pod_spec`] to get just the
 /// container and volume specifications.
@@ -1015,13 +980,20 @@ impl WorkloadCompiler {
     /// * `namespace` - Target namespace (from CRD metadata)
     /// * `volumes` - Pre-compiled volume resources (affinity, labels, etc.)
     /// * `provider_type` - Infrastructure provider for topology-aware scheduling
+    /// * `monitoring_enabled` - Whether the cluster has monitoring (VictoriaMetrics) enabled
+    ///
+    /// # Errors
+    ///
+    /// Returns `CompilationError::MonitoringRequired` if custom Prometheus metrics are
+    /// requested but monitoring is disabled on the cluster.
     pub fn compile(
         name: &str,
         service: &LatticeService,
         namespace: &str,
         volumes: &GeneratedVolumes,
         provider_type: ProviderType,
-    ) -> GeneratedWorkloads {
+        monitoring_enabled: bool,
+    ) -> Result<GeneratedWorkloads, CompilationError> {
         let mut output = GeneratedWorkloads::new();
 
         // Always generate ServiceAccount for SPIFFE identity
@@ -1041,12 +1013,17 @@ impl WorkloadCompiler {
             output.service = Some(Self::compile_service(name, namespace, &service.spec));
         }
 
-        // Generate HPA if max replicas is set
+        // Generate KEDA ScaledObject if max replicas is set
         if service.spec.replicas.max.is_some() {
-            output.hpa = Some(Self::compile_hpa(name, namespace, &service.spec));
+            output.scaled_object = Some(Self::compile_scaled_object(
+                name,
+                namespace,
+                &service.spec,
+                monitoring_enabled,
+            )?);
         }
 
-        output
+        Ok(output)
     }
 
     /// Compile containers from a LatticeServiceSpec with volume mounts
@@ -1527,11 +1504,18 @@ impl WorkloadCompiler {
         }
     }
 
-    fn compile_hpa(
+    /// Compile a KEDA ScaledObject from the service's autoscaling config.
+    ///
+    /// cpu/memory → KEDA resource triggers (no monitoring required).
+    /// Anything else → KEDA prometheus trigger querying VictoriaMetrics (requires monitoring).
+    fn compile_scaled_object(
         name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
-    ) -> HorizontalPodAutoscaler {
+        monitoring_enabled: bool,
+    ) -> Result<ScaledObject, CompilationError> {
+        use lattice_infra::bootstrap::prometheus::{vmselect_url, VMSELECT_PATH, VMSELECT_PORT};
+
         // Default to cpu at 80% if no autoscaling metrics specified
         let autoscaling = if spec.replicas.autoscaling.is_empty() {
             vec![AutoscalingMetric {
@@ -1542,53 +1526,65 @@ impl WorkloadCompiler {
             spec.replicas.autoscaling.clone()
         };
 
-        let metrics = autoscaling
+        // Reject custom Prometheus metrics when monitoring is disabled
+        let custom_metrics: Vec<String> = autoscaling
+            .iter()
+            .filter(|m| !matches!(m.metric.as_str(), "cpu" | "memory"))
+            .map(|m| m.metric.clone())
+            .collect();
+        if !custom_metrics.is_empty() && !monitoring_enabled {
+            return Err(CompilationError::MonitoringRequired {
+                metrics: custom_metrics,
+            });
+        }
+
+        let server_address = format!("{}:{}{}", vmselect_url(), VMSELECT_PORT, VMSELECT_PATH);
+
+        let triggers = autoscaling
             .iter()
             .map(|m| match m.metric.as_str() {
-                "cpu" | "memory" => MetricSpec {
-                    type_: "Resource".to_string(),
-                    resource: Some(ResourceMetricSource {
-                        name: m.metric.clone(),
-                        target: MetricTarget {
-                            type_: "Utilization".to_string(),
-                            average_utilization: Some(m.target),
-                            average_value: None,
-                        },
-                    }),
-                    pods: None,
+                "cpu" | "memory" => ScaledObjectTrigger {
+                    type_: m.metric.clone(),
+                    metric_type: Some("Utilization".to_string()),
+                    metadata: [("value".to_string(), m.target.to_string())]
+                        .into_iter()
+                        .collect(),
                 },
-                _ => MetricSpec {
-                    type_: "Pods".to_string(),
-                    resource: None,
-                    pods: Some(PodsMetricSource {
-                        metric: MetricIdentifier {
-                            name: m.metric.clone(),
-                        },
-                        target: MetricTarget {
-                            type_: "AverageValue".to_string(),
-                            average_utilization: None,
-                            average_value: Some(m.target.to_string()),
-                        },
-                    }),
+                _ => ScaledObjectTrigger {
+                    type_: "prometheus".to_string(),
+                    metric_type: None,
+                    metadata: [
+                        ("serverAddress".to_string(), server_address.clone()),
+                        (
+                            "query".to_string(),
+                            format!(
+                                "avg({}{{namespace=\"{}\",pod=~\"{}-.*\"}})",
+                                m.metric, namespace, name
+                            ),
+                        ),
+                        ("threshold".to_string(), m.target.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             })
             .collect();
 
-        HorizontalPodAutoscaler {
-            api_version: "autoscaling/v2".to_string(),
-            kind: "HorizontalPodAutoscaler".to_string(),
+        Ok(ScaledObject {
+            api_version: ScaledObject::API_VERSION.to_string(),
+            kind: ScaledObject::KIND.to_string(),
             metadata: ObjectMeta::new(name, namespace),
-            spec: HpaSpec {
+            spec: ScaledObjectSpec {
                 scale_target_ref: ScaleTargetRef {
                     api_version: "apps/v1".to_string(),
                     kind: "Deployment".to_string(),
                     name: name.to_string(),
                 },
-                min_replicas: spec.replicas.min,
-                max_replicas: spec.replicas.max.unwrap_or(spec.replicas.min),
-                metrics,
+                min_replica_count: spec.replicas.min,
+                max_replica_count: spec.replicas.max.unwrap_or(spec.replicas.min),
+                triggers,
             },
-        }
+        })
     }
 }
 
@@ -1607,6 +1603,13 @@ mod tests {
 
     /// Helper to compile a service with empty volumes (for basic tests)
     fn compile_service(service: &LatticeService) -> GeneratedWorkloads {
+        compile_service_with_monitoring(service, true)
+    }
+
+    fn compile_service_with_monitoring(
+        service: &LatticeService,
+        monitoring_enabled: bool,
+    ) -> GeneratedWorkloads {
         let name = service
             .metadata
             .name
@@ -1620,7 +1623,15 @@ mod tests {
         let volumes = VolumeCompiler::compile(name, namespace, &service.spec)
             .expect("test volume compilation should succeed");
         // Use Docker provider for tests (uses hostname-based spreading)
-        WorkloadCompiler::compile(name, service, namespace, &volumes, ProviderType::Docker)
+        WorkloadCompiler::compile(
+            name,
+            service,
+            namespace,
+            &volumes,
+            ProviderType::Docker,
+            monitoring_enabled,
+        )
+        .expect("test workload compilation should succeed")
     }
 
     fn make_service(name: &str, namespace: &str) -> LatticeService {
@@ -1806,11 +1817,11 @@ mod tests {
     }
 
     // =========================================================================
-    // Story: Generate HPA When Max Replicas Set
+    // Story: Generate KEDA ScaledObject When Max Replicas Set
     // =========================================================================
 
     #[test]
-    fn story_generates_hpa_with_max_replicas() {
+    fn scaled_object_generated_with_max_replicas() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = ReplicaSpec {
             min: 2,
@@ -1820,24 +1831,25 @@ mod tests {
 
         let output = compile_service(&service);
 
-        let hpa = output.hpa.expect("should have HPA");
-        assert_eq!(hpa.metadata.name, "my-app");
-        assert_eq!(hpa.api_version, "autoscaling/v2");
-        assert_eq!(hpa.spec.min_replicas, 2);
-        assert_eq!(hpa.spec.max_replicas, 10);
-        assert_eq!(hpa.spec.scale_target_ref.name, "my-app");
-        assert_eq!(hpa.spec.scale_target_ref.kind, "Deployment");
+        let so = output.scaled_object.expect("should have ScaledObject");
+        assert_eq!(so.api_version, "keda.sh/v1alpha1");
+        assert_eq!(so.kind, "ScaledObject");
+        assert_eq!(so.metadata.name, "my-app");
+        assert_eq!(so.spec.min_replica_count, 2);
+        assert_eq!(so.spec.max_replica_count, 10);
+        assert_eq!(so.spec.scale_target_ref.name, "my-app");
+        assert_eq!(so.spec.scale_target_ref.kind, "Deployment");
     }
 
     #[test]
-    fn story_no_hpa_without_max_replicas() {
+    fn no_scaled_object_without_max_replicas() {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
-        assert!(output.hpa.is_none());
+        assert!(output.scaled_object.is_none());
     }
 
     #[test]
-    fn hpa_default_cpu_80() {
+    fn scaled_object_default_cpu_80() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = ReplicaSpec {
             min: 1,
@@ -1845,17 +1857,16 @@ mod tests {
             autoscaling: vec![],
         };
         let output = compile_service(&service);
-        let hpa = output.hpa.expect("should have HPA");
-        assert_eq!(hpa.spec.metrics.len(), 1);
-        let m = &hpa.spec.metrics[0];
-        assert_eq!(m.type_, "Resource");
-        let resource = m.resource.as_ref().expect("should have resource");
-        assert_eq!(resource.name, "cpu");
-        assert_eq!(resource.target.average_utilization, Some(80));
+        let so = output.scaled_object.expect("should have ScaledObject");
+        assert_eq!(so.spec.triggers.len(), 1);
+        let t = &so.spec.triggers[0];
+        assert_eq!(t.type_, "cpu");
+        assert_eq!(t.metric_type.as_deref(), Some("Utilization"));
+        assert_eq!(t.metadata.get("value").unwrap(), "80");
     }
 
     #[test]
-    fn hpa_custom_cpu_threshold() {
+    fn scaled_object_custom_cpu_threshold() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = ReplicaSpec {
             min: 1,
@@ -1866,18 +1877,14 @@ mod tests {
             }],
         };
         let output = compile_service(&service);
-        let hpa = output.hpa.expect("should have HPA");
-        assert_eq!(hpa.spec.metrics.len(), 1);
-        let resource = hpa.spec.metrics[0]
-            .resource
-            .as_ref()
-            .expect("should have resource");
-        assert_eq!(resource.name, "cpu");
-        assert_eq!(resource.target.average_utilization, Some(60));
+        let so = output.scaled_object.expect("should have ScaledObject");
+        assert_eq!(so.spec.triggers.len(), 1);
+        assert_eq!(so.spec.triggers[0].type_, "cpu");
+        assert_eq!(so.spec.triggers[0].metadata.get("value").unwrap(), "60");
     }
 
     #[test]
-    fn hpa_memory_metric() {
+    fn scaled_object_memory_trigger() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = ReplicaSpec {
             min: 1,
@@ -1888,19 +1895,16 @@ mod tests {
             }],
         };
         let output = compile_service(&service);
-        let hpa = output.hpa.expect("should have HPA");
-        assert_eq!(hpa.spec.metrics.len(), 1);
-        let resource = hpa.spec.metrics[0]
-            .resource
-            .as_ref()
-            .expect("should have resource");
-        assert_eq!(resource.name, "memory");
-        assert_eq!(resource.target.type_, "Utilization");
-        assert_eq!(resource.target.average_utilization, Some(75));
+        let so = output.scaled_object.expect("should have ScaledObject");
+        assert_eq!(so.spec.triggers.len(), 1);
+        let t = &so.spec.triggers[0];
+        assert_eq!(t.type_, "memory");
+        assert_eq!(t.metric_type.as_deref(), Some("Utilization"));
+        assert_eq!(t.metadata.get("value").unwrap(), "75");
     }
 
     #[test]
-    fn hpa_custom_pods_metric() {
+    fn scaled_object_prometheus_trigger() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = ReplicaSpec {
             min: 1,
@@ -1911,19 +1915,36 @@ mod tests {
             }],
         };
         let output = compile_service(&service);
-        let hpa = output.hpa.expect("should have HPA");
-        assert_eq!(hpa.spec.metrics.len(), 1);
-        let m = &hpa.spec.metrics[0];
-        assert_eq!(m.type_, "Pods");
-        assert!(m.resource.is_none());
-        let pods = m.pods.as_ref().expect("should have pods metric");
-        assert_eq!(pods.metric.name, "vllm_num_requests_waiting");
-        assert_eq!(pods.target.type_, "AverageValue");
-        assert_eq!(pods.target.average_value, Some("5".to_string()));
+        let so = output.scaled_object.expect("should have ScaledObject");
+        assert_eq!(so.spec.triggers.len(), 1);
+        let t = &so.spec.triggers[0];
+        assert_eq!(t.type_, "prometheus");
+        assert!(t.metric_type.is_none());
+        assert!(t
+            .metadata
+            .get("serverAddress")
+            .unwrap()
+            .contains("vmselect"));
+        assert!(t
+            .metadata
+            .get("query")
+            .unwrap()
+            .contains("vllm_num_requests_waiting"));
+        assert!(t
+            .metadata
+            .get("query")
+            .unwrap()
+            .contains("namespace=\"default\""));
+        assert!(t
+            .metadata
+            .get("query")
+            .unwrap()
+            .contains("pod=~\"my-app-.*\""));
+        assert_eq!(t.metadata.get("threshold").unwrap(), "5");
     }
 
     #[test]
-    fn hpa_multi_signal() {
+    fn scaled_object_multi_signal() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = ReplicaSpec {
             min: 1,
@@ -1940,14 +1961,14 @@ mod tests {
             ],
         };
         let output = compile_service(&service);
-        let hpa = output.hpa.expect("should have HPA");
-        assert_eq!(hpa.spec.metrics.len(), 2);
-        assert_eq!(hpa.spec.metrics[0].type_, "Resource");
-        assert_eq!(hpa.spec.metrics[1].type_, "Pods");
+        let so = output.scaled_object.expect("should have ScaledObject");
+        assert_eq!(so.spec.triggers.len(), 2);
+        assert_eq!(so.spec.triggers[0].type_, "cpu");
+        assert_eq!(so.spec.triggers[1].type_, "prometheus");
     }
 
     #[test]
-    fn hpa_backwards_compatible() {
+    fn scaled_object_defaults_to_cpu_when_no_autoscaling() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = ReplicaSpec {
             min: 2,
@@ -1955,11 +1976,67 @@ mod tests {
             autoscaling: vec![],
         };
         let output = compile_service(&service);
-        let hpa = output.hpa.expect("should have HPA");
-        assert_eq!(hpa.spec.min_replicas, 2);
-        assert_eq!(hpa.spec.max_replicas, 8);
-        assert_eq!(hpa.spec.metrics.len(), 1);
-        assert_eq!(hpa.spec.metrics[0].type_, "Resource");
+        let so = output.scaled_object.expect("should have ScaledObject");
+        assert_eq!(so.spec.min_replica_count, 2);
+        assert_eq!(so.spec.max_replica_count, 8);
+        assert_eq!(so.spec.triggers.len(), 1);
+        assert_eq!(so.spec.triggers[0].type_, "cpu");
+    }
+
+    #[test]
+    fn scaled_object_custom_metrics_require_monitoring() {
+        let mut service = make_service("my-app", "default");
+        service.spec.replicas = ReplicaSpec {
+            min: 1,
+            max: Some(10),
+            autoscaling: vec![AutoscalingMetric {
+                metric: "vllm_num_requests_waiting".to_string(),
+                target: 5,
+            }],
+        };
+
+        // With monitoring disabled, custom metrics should fail
+        let name = "my-app";
+        let namespace = "default";
+        let volumes = VolumeCompiler::compile(name, namespace, &service.spec).unwrap();
+        let result = WorkloadCompiler::compile(
+            name,
+            &service,
+            namespace,
+            &volumes,
+            ProviderType::Docker,
+            false,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("monitoring"));
+        assert!(err.contains("vllm_num_requests_waiting"));
+    }
+
+    #[test]
+    fn scaled_object_cpu_memory_work_without_monitoring() {
+        let mut service = make_service("my-app", "default");
+        service.spec.replicas = ReplicaSpec {
+            min: 1,
+            max: Some(5),
+            autoscaling: vec![
+                AutoscalingMetric {
+                    metric: "cpu".to_string(),
+                    target: 70,
+                },
+                AutoscalingMetric {
+                    metric: "memory".to_string(),
+                    target: 80,
+                },
+            ],
+        };
+
+        // cpu/memory should work even without monitoring
+        let output = compile_service_with_monitoring(&service, false);
+        let so = output.scaled_object.expect("should have ScaledObject");
+        assert_eq!(so.spec.triggers.len(), 2);
+        assert_eq!(so.spec.triggers[0].type_, "cpu");
+        assert_eq!(so.spec.triggers[1].type_, "memory");
     }
 
     // =========================================================================

@@ -954,7 +954,7 @@ features with zero changes to those features:
 | **Bilateral agreements** | `resources` field works identically — callers/callees declare direction |
 | **CiliumNetworkPolicy** | PolicyCompiler sees same ServiceGraph edges, generates same L4 rules |
 | **AuthorizationPolicy** | Same SPIFFE identity, same L7 mTLS rules |
-| **HPA** | Same `replicas.autoscaling` field, same Prometheus Adapter metrics |
+| **Autoscaling** | Same `replicas.autoscaling` field, same KEDA ScaledObject triggers |
 | **Ingress** | Same `ingress` field, same Gateway/HTTPRoute compilation |
 | **Canary deploys** | Same `deploy.canary` field |
 | **GPU spec** | Same `gpu` field — `model` adds model loading, `gpu` adds GPU resources |

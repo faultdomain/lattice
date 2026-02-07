@@ -98,7 +98,7 @@ spec:
         min: 1
         max: 8
   services: true                # Istio ambient mesh (default: true)
-  monitoring: true              # VictoriaMetrics + Prometheus Adapter (default: true)
+  monitoring: true              # VictoriaMetrics + KEDA (default: true)
   backups: true                 # Velero (default: true)
   externalSecrets: true         # ESO for Vault integration (default: true)
   gpu: false                    # NFD + NVIDIA device plugin (default: false)

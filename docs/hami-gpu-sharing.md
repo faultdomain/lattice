@@ -51,9 +51,9 @@ Everything below is deployed automatically on clusters with `gpu: enabled`. No m
 ├─────────────────────────────────────────────────────────┤
 │  Layer 2: Observability                   ADOPT + CONFIG│
 │  ┌────────────────────┐  ┌──────────────────────┐      │
-│  │ DCGM Exporter      │  │ Prometheus Adapter    │      │
-│  │ (GPU Operator)     │  │ vLLM → K8s custom     │      │
-│  │ GPU util, mem,     │  │ metrics for HPA       │      │
+│  │ DCGM Exporter      │  │ KEDA                  │      │
+│  │ (GPU Operator)     │  │ vLLM → ScaledObject    │      │
+│  │ GPU util, mem,     │  │ triggers for scaling  │      │
 │  │ temp, ECC errors   │  │                       │      │
 │  └────────────────────┘  └──────────────────────┘      │
 ├─────────────────────────────────────────────────────────┤
@@ -86,7 +86,7 @@ Everything below is deployed automatically on clusters with `gpu: enabled`. No m
 | **NVIDIA GPU Operator** | Adopt (Helm) | Generate manifests, apply via agent | Manifest generation |
 | **HAMi** | Adopt (CNCF Sandbox, Helm) | Generate manifests, apply via agent | Manifest generation |
 | **Model Cache DaemonSet** | Build | DaemonSet + config on cluster spec | ~200 lines |
-| **Prometheus Adapter** | Adopt + config | Deploy with vLLM metric rules | ConfigMap |
+| **KEDA** | Adopt + config | Deploy with vLLM ScaledObject triggers | Helm + ScaledObject |
 | **`gpu:` on LatticeServiceSpec** | Build | CRD struct + compiler changes | Core feature |
 | **SHM / runtimeClass / mounts** | Build | Compiler generates pod spec correctly | Compiler changes |
 
@@ -178,7 +178,7 @@ When `gpu.enabled: true`, the cluster controller adds GPU infrastructure to the 
    c. NVIDIA GPU Operator               ← NEW (gpu.enabled)
    d. HAMi                              ← NEW (gpu.enabled)
    e. Model Cache DaemonSet             ← NEW (gpu.modelCache)
-   f. Prometheus Adapter + vLLM rules   ← NEW (gpu.enabled)
+   f. KEDA + vLLM ScaledObject triggers ← NEW (gpu.enabled)
 3. Cell sends SyncDistributedResourcesCommand (existing)
 4. Pivot CAPI resources (existing)
 ```
@@ -216,28 +216,31 @@ GPU Node
 └────────────────────────────────────────────┘
 ```
 
-### Prometheus Adapter Config (generated)
+### KEDA ScaledObject Config (generated)
 
-Enables HPA scaling on vLLM inference metrics:
+Enables scaling on vLLM inference metrics via KEDA Prometheus triggers:
 
 ```yaml
-rules:
-  - seriesQuery: 'vllm:num_requests_waiting{namespace!="",pod!=""}'
-    resources:
-      overrides:
-        namespace: {resource: "namespace"}
-        pod: {resource: "pod"}
-    name:
-      as: "vllm_queue_depth"
-    metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
-  - seriesQuery: 'vllm:time_to_first_token_seconds{namespace!="",pod!=""}'
-    resources:
-      overrides:
-        namespace: {resource: "namespace"}
-        pod: {resource: "pod"}
-    name:
-      as: "vllm_ttft_seconds"
-    metricsQuery: 'avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm-scaledobject
+spec:
+  scaleTargetRef:
+    name: <deployment>
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        metricName: vllm_queue_depth
+        query: sum(vllm:num_requests_waiting{namespace="<ns>"})
+        threshold: "5"
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        metricName: vllm_ttft_seconds
+        query: avg(vllm:time_to_first_token_seconds{namespace="<ns>"})
+        threshold: "2"
 ```
 
 ---
@@ -459,7 +462,7 @@ pub struct LatticeServiceSpec {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GPUClusterSpec {
-    /// Enable GPU infrastructure (GPU Operator + HAMi + DCGM + Prometheus Adapter)
+    /// Enable GPU infrastructure (GPU Operator + HAMi + DCGM + KEDA)
     pub enabled: bool,
 
     /// NVIDIA GPU Operator version (optional, uses default if omitted)
@@ -1094,11 +1097,11 @@ Works immediately on any cluster with the NVIDIA device plugin — no HAMi neede
 
 ### Phase B: Cluster GPU Bootstrap
 
-Install GPU Operator + HAMi + model cache + Prometheus Adapter on `gpu: enabled` clusters.
+Install GPU Operator + HAMi + model cache + KEDA on `gpu: enabled` clusters.
 
 **Files to modify:**
 1. `crates/lattice-common/src/crd/cluster.rs` — Add `GPUClusterSpec`, `ModelCacheSpec`
-2. `crates/lattice-cluster/src/phases/ready.rs` — Generate GPU Operator, HAMi, model cache, Prometheus Adapter manifests
+2. `crates/lattice-cluster/src/phases/ready.rs` — Generate GPU Operator, HAMi, model cache, KEDA manifests
 3. `crates/lattice-cluster/src/controller.rs` — Conditional manifest generation when `gpu.enabled`
 
 **Tests:**

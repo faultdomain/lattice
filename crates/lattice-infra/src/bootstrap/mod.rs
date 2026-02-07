@@ -43,7 +43,7 @@ pub struct InfrastructureConfig {
     pub parent_grpc_port: u16,
     /// Enable GPU infrastructure (NFD + NVIDIA device plugin + HAMi)
     pub gpu: bool,
-    /// Enable monitoring infrastructure (VictoriaMetrics + Prometheus Adapter for HPA).
+    /// Enable monitoring infrastructure (VictoriaMetrics + KEDA for autoscaling).
     /// Defaults to true.
     pub monitoring: bool,
     /// Enable backup infrastructure (Velero).

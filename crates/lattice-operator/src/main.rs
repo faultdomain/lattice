@@ -318,6 +318,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     // 5. Resolve config from env vars (no LatticeCluster dependency)
     let cluster_name = std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
     let provider_type = controller_runner::resolve_provider_type_from_env();
+    let monitoring_enabled = controller_runner::resolve_monitoring_from_env();
     let crds = Arc::new(DiscoveredCrds::discover(client).await);
 
     // 6. Build controller futures
@@ -327,6 +328,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         provider_type,
         cedar,
         crds,
+        monitoring_enabled,
     );
 
     Ok(SliceHandle {
@@ -389,8 +391,9 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         capi_installer,
     );
 
-    // Service controllers need provider type from LatticeCluster
+    // Service controllers need provider type + monitoring from LatticeCluster
     let provider_type = controller_runner::resolve_provider_type_from_cluster(client).await;
+    let monitoring_enabled = controller_runner::resolve_monitoring_from_cluster(client).await;
     let cluster_name = self_cluster_name.unwrap_or_else(|| "default".to_string());
     let crds = Arc::new(DiscoveredCrds::discover(client).await);
     controllers.extend(controller_runner::build_service_controllers(
@@ -399,6 +402,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         provider_type,
         cedar,
         crds,
+        monitoring_enabled,
     ));
 
     controllers.extend(controller_runner::build_provider_controllers(

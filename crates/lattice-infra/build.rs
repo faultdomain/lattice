@@ -327,7 +327,7 @@ fn main() {
     std::fs::write(out_dir.join("victoria-metrics.yaml"), yaml)
         .expect("write victoria-metrics.yaml");
 
-    // 11. KEDA (event-driven autoscaler, replaces prometheus-adapter)
+    // 11. KEDA (event-driven autoscaler)
     let yaml = run_helm_template(
         "keda",
         &chart(&format!("keda-{}.tgz", versions.charts["keda"].version)),

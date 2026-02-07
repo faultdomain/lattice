@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! The ServiceCompiler delegates to specialized compilers:
-//! - [`WorkloadCompiler`](crate::workload::WorkloadCompiler): Generates Deployment, Service, ServiceAccount, HPA
+//! - [`WorkloadCompiler`](crate::workload::WorkloadCompiler): Generates Deployment, Service, ServiceAccount, ScaledObject
 //! - [`PolicyCompiler`](crate::policy::PolicyCompiler): Generates AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
 //!
 //! # Usage
@@ -15,7 +15,7 @@
 //! ```text
 //! let graph = ServiceGraph::new();
 //! let cedar = PolicyEngine::new();
-//! let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+//! let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
 //! let output = compiler.compile(&lattice_service).await;
 //! // output.workloads, output.policies
 //! ```
@@ -51,6 +51,9 @@ pub enum CompileError {
     /// Cedar policy denied secret access
     #[error("secret access denied: {0}")]
     SecretAccessDenied(String),
+    /// Workload compilation failed (e.g. monitoring required for custom metrics)
+    #[error("workload compilation error: {0}")]
+    WorkloadCompilation(String),
 }
 
 impl From<CompileError> for crate::Error {
@@ -62,7 +65,7 @@ impl From<CompileError> for crate::Error {
 /// Combined output from compiling a LatticeService
 #[derive(Clone, Debug, Default)]
 pub struct CompiledService {
-    /// Generated workload resources (Deployment, Service, ServiceAccount, HPA)
+    /// Generated workload resources (Deployment, Service, ServiceAccount, ScaledObject)
     pub workloads: GeneratedWorkloads,
     /// Generated network policies (AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry)
     pub policies: GeneratedPolicies,
@@ -92,7 +95,7 @@ impl CompiledService {
             self.workloads.deployment.is_some(),
             self.workloads.service.is_some(),
             self.workloads.service_account.is_some(),
-            self.workloads.hpa.is_some(),
+            self.workloads.scaled_object.is_some(),
         ]
         .iter()
         .filter(|&&x| x)
@@ -109,7 +112,7 @@ impl CompiledService {
 ///
 /// This compiler orchestrates the generation of all Kubernetes resources for a
 /// LatticeService by delegating to specialized compilers:
-/// - WorkloadCompiler for Deployment, Service, ServiceAccount, HPA
+/// - WorkloadCompiler for Deployment, Service, ServiceAccount, ScaledObject
 /// - PolicyCompiler for AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
 /// - Cedar PolicyEngine for secret access authorization
 pub struct ServiceCompiler<'a> {
@@ -117,6 +120,7 @@ pub struct ServiceCompiler<'a> {
     cluster_name: String,
     provider_type: ProviderType,
     cedar: &'a PolicyEngine,
+    monitoring_enabled: bool,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -127,24 +131,27 @@ impl<'a> ServiceCompiler<'a> {
     /// * `cluster_name` - Cluster name used in trust domain (lattice.{cluster}.local)
     /// * `provider_type` - Infrastructure provider for topology-aware scheduling
     /// * `cedar` - Cedar policy engine for secret access authorization
+    /// * `monitoring_enabled` - Whether the cluster has monitoring (VictoriaMetrics) enabled
     pub fn new(
         graph: &'a ServiceGraph,
         cluster_name: impl Into<String>,
         provider_type: ProviderType,
         cedar: &'a PolicyEngine,
+        monitoring_enabled: bool,
     ) -> Self {
         Self {
             graph,
             cluster_name: cluster_name.into(),
             provider_type,
             cedar,
+            monitoring_enabled,
         }
     }
 
     /// Compile a LatticeService into Kubernetes resources
     ///
     /// Generates:
-    /// - Workloads: Deployment, Service, ServiceAccount, HPA
+    /// - Workloads: Deployment, Service, ServiceAccount, ScaledObject
     /// - Policies: AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
     /// - Ingress: Gateway, HTTPRoute, Certificate (if ingress configured)
     /// - Waypoint: Istio ambient mesh L7 policy enforcement
@@ -189,7 +196,9 @@ impl<'a> ServiceCompiler<'a> {
             namespace,
             &compiled_volumes,
             self.provider_type,
-        );
+            self.monitoring_enabled,
+        )
+        .map_err(|e| CompileError::WorkloadCompilation(e.to_string()))?;
 
         // Add PVCs to workloads
         workloads.pvcs = compiled_volumes.pvcs;
@@ -508,7 +517,8 @@ mod tests {
         // Create LatticeService for api
         let service = make_service("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should have workloads (from WorkloadCompiler)
@@ -537,7 +547,8 @@ mod tests {
         // Create LatticeService with staging label
         let service = make_service("my-app", "staging");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should find service in graph and generate cilium policy
@@ -556,7 +567,8 @@ mod tests {
         // Create LatticeService without env label
         let service = make_service("my-app", "prod-ns");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should find service using namespace as env
@@ -575,7 +587,8 @@ mod tests {
 
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should still have workloads
@@ -599,7 +612,8 @@ mod tests {
 
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointAuthPolicy = 6
@@ -620,7 +634,8 @@ mod tests {
         let cedar = PolicyEngine::new();
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
         assert!(!output.is_empty());
     }
@@ -638,7 +653,8 @@ mod tests {
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should have ingress resources
@@ -678,7 +694,8 @@ mod tests {
 
         let service = make_service("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should NOT have ingress resources
@@ -697,7 +714,8 @@ mod tests {
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should include: Deployment + Service + ServiceAccount + CiliumPolicy +
@@ -743,7 +761,8 @@ mod tests {
             }),
         });
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         let deployment = output.workloads.deployment.expect("should have deployment");
@@ -773,7 +792,8 @@ mod tests {
         let cedar = PolicyEngine::new();
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar);
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
         let deployment = output.workloads.deployment.expect("should have deployment");

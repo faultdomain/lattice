@@ -65,7 +65,7 @@ pub struct LatticeClusterSpec {
     #[serde(default)]
     pub gpu: bool,
 
-    /// Enable monitoring infrastructure (VictoriaMetrics + Prometheus Adapter for HPA).
+    /// Enable monitoring infrastructure (VictoriaMetrics + KEDA for autoscaling).
     /// Defaults to true.
     #[serde(default = "super::default_true")]
     pub monitoring: bool,

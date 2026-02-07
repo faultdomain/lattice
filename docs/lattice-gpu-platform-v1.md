@@ -554,9 +554,9 @@ replicas:
 ```
 
 - `cpu`/`memory` → HPA v2 Resource metric (built-in)
-- Anything else → HPA v2 Pods metric (via Prometheus Adapter)
+- Anything else → KEDA ScaledObject (via Prometheus triggers)
 - Default: CPU 80% when `autoscaling` is empty (backwards compatible)
-- No KEDA, no Knative, no scale-to-zero
+- No Knative, no scale-to-zero
 
 ---
 
@@ -574,7 +574,7 @@ Bootstrap sequence for gpu: enabled clusters:
 4. HAMi device plugin DaemonSet            (gpu.enabled)
 5. Volcano + HAMi scheduler plugin         ← NEW (gpu.enabled)
 6. Model Cache DaemonSet                   (gpu.modelCache)
-7. Prometheus Adapter + vLLM rules         (gpu.enabled)
+7. KEDA + vLLM ScaledObject triggers        (gpu.enabled)
 ```
 
 ### HAMi + Volcano Integration
@@ -913,7 +913,7 @@ if spec.gpu.is_some() && container.startup_probe.is_none() {
 | `crates/lattice-infra/src/system_namespaces.rs` | Add `volcano-system` to GPU exclusions |
 | `crates/lattice-operator/src/startup/crds.rs` | Register LatticeJob CRD |
 | `crates/lattice-operator/src/controller.rs` | Start LatticeJob controller |
-| `versions.toml` | Pin `VOLCANO_VERSION`, `PROMETHEUS_ADAPTER_VERSION` |
+| `versions.toml` | Pin `VOLCANO_VERSION`, `KEDA_VERSION` |
 
 ---
 
@@ -949,12 +949,12 @@ Build the training workload path.
 **Result**: Users can submit training jobs that are gang-scheduled on GPU clusters
 with L4 network isolation and full-speed NCCL between workers.
 
-### Phase 3: Volcano + Prometheus Adapter Bootstrap
+### Phase 3: Volcano + KEDA Bootstrap
 
 Deploy the remaining infrastructure on GPU clusters.
 
 1. Add `volcano.rs` to bootstrap module
-2. Add `prometheus_adapter.rs` to bootstrap module
+2. Add `keda.rs` to bootstrap module
 3. Pin versions in `versions.toml`
 4. Add `volcano-system` to system namespace exclusions
 5. Include both in GPU cluster bootstrap path
@@ -991,7 +991,7 @@ Build and deploy the model caching layer.
 |---|---|---|
 | **Kueue** | Single-team clusters don't need admission control. Volcano handles scheduling. | v2: multi-tenant quota |
 | **Scale-to-zero** | GPU cold starts (30-120s) make it impractical for production. | v2: if customer demand |
-| **KEDA** | HPA v2 + Prometheus Adapter is sufficient. | v2: if event-driven needed |
+| **Event-driven KEDA triggers** | Prometheus-based KEDA triggers are sufficient for v1. | v2: if non-Prometheus event sources needed |
 | **Knative** | No scale-to-zero requirement. | v2: if serverless needed |
 | **Multi-cluster job placement** | User picks the cluster in v1. | v2: control plane routes |
 | **Notebook support** | JupyterHub integration for interactive dev. | v2: developer experience |

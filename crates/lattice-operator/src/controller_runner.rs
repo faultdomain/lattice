@@ -80,6 +80,7 @@ pub fn build_service_controllers(
     provider_type: ProviderType,
     cedar: Arc<PolicyEngine>,
     crds: Arc<DiscoveredCrds>,
+    monitoring_enabled: bool,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
     let service_ctx = Arc::new(ServiceContext::from_client(
@@ -88,6 +89,7 @@ pub fn build_service_controllers(
         provider_type,
         cedar,
         crds,
+        monitoring_enabled,
     ));
 
     let services: Api<LatticeService> = Api::all(client.clone());
@@ -267,16 +269,37 @@ pub fn resolve_provider_type_from_env() -> ProviderType {
 
 /// Resolve provider type from the first LatticeCluster CRD
 pub async fn resolve_provider_type_from_cluster(client: &Client) -> ProviderType {
+    match read_first_cluster(client).await {
+        Some(cluster) => cluster.spec.provider.provider_type(),
+        None => ProviderType::Docker,
+    }
+}
+
+/// Resolve monitoring status from env var (for Service mode, which has no LatticeCluster).
+/// Defaults to true (monitoring is enabled by default).
+pub fn resolve_monitoring_from_env() -> bool {
+    std::env::var("LATTICE_MONITORING")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(true)
+}
+
+/// Resolve monitoring status from the first LatticeCluster CRD
+pub async fn resolve_monitoring_from_cluster(client: &Client) -> bool {
+    match read_first_cluster(client).await {
+        Some(cluster) => cluster.spec.monitoring,
+        None => true,
+    }
+}
+
+/// Read the first LatticeCluster from the API server, or None if unavailable.
+async fn read_first_cluster(client: &Client) -> Option<LatticeCluster> {
     let clusters: Api<LatticeCluster> = Api::all(client.clone());
     match clusters.list(&kube::api::ListParams::default()).await {
-        Ok(list) => list
-            .items
-            .first()
-            .map(|c| c.spec.provider.provider_type())
-            .unwrap_or(ProviderType::Docker),
+        Ok(list) => list.items.into_iter().next(),
         Err(e) => {
-            tracing::warn!(error = %e, "failed to read LatticeCluster, defaulting to Docker");
-            ProviderType::Docker
+            tracing::warn!(error = %e, "failed to read LatticeCluster");
+            None
         }
     }
 }

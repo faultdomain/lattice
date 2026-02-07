@@ -61,6 +61,7 @@ pub struct DiscoveredCrds {
     pub gateway: Option<ApiResource>,
     pub http_route: Option<ApiResource>,
     pub certificate: Option<ApiResource>,
+    pub scaled_object: Option<ApiResource>,
 }
 
 impl DiscoveredCrds {
@@ -99,6 +100,7 @@ impl DiscoveredCrds {
             gateway: Self::find_resource(&discovery, "gateway.networking.k8s.io", "Gateway"),
             http_route: Self::find_resource(&discovery, "gateway.networking.k8s.io", "HTTPRoute"),
             certificate: Self::find_resource(&discovery, "cert-manager.io", "Certificate"),
+            scaled_object: Self::find_resource(&discovery, "keda.sh", "ScaledObject"),
         }
     }
 
@@ -132,6 +134,7 @@ impl DiscoveredCrds {
     ///
     /// Used when API discovery fails entirely, and in tests.
     pub fn hardcoded_defaults() -> Self {
+        use crate::workload::ScaledObject;
         use lattice_secrets_provider::ExternalSecret;
 
         Self {
@@ -142,6 +145,7 @@ impl DiscoveredCrds {
             gateway: Some(Gateway::api_resource()),
             http_route: Some(HttpRoute::api_resource()),
             certificate: Some(Certificate::api_resource()),
+            scaled_object: Some(ScaledObject::api_resource()),
         }
     }
 }
@@ -346,7 +350,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>,
         > = Vec::new();
 
-        // Apply workload resources (ServiceAccount, PVCs, Deployment, Service, HPA)
+        // Apply workload resources (ServiceAccount, PVCs, Deployment, Service, ScaledObject)
         self.collect_workload_futures(&mut futures, namespace, &params, compiled)?;
 
         // Apply ExternalSecrets (ESO syncs secrets from Vault)
@@ -399,7 +403,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 type ApplyFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>;
 
 impl ServiceKubeClientImpl {
-    /// Collect futures for workload resources (ServiceAccount, PVCs, Deployment, Service, HPA)
+    /// Collect futures for workload resources (ServiceAccount, PVCs, Deployment, Service, ScaledObject)
     fn collect_workload_futures(
         &self,
         futures: &mut Vec<ApplyFuture>,
@@ -408,7 +412,6 @@ impl ServiceKubeClientImpl {
         compiled: &CompiledService,
     ) -> Result<(), Error> {
         use k8s_openapi::api::apps::v1::Deployment as K8sDeployment;
-        use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler as K8sHpa;
         use k8s_openapi::api::core::v1::{
             PersistentVolumeClaim as K8sPvc, Service as K8sService, ServiceAccount as K8sSA,
         };
@@ -465,17 +468,27 @@ impl ServiceKubeClientImpl {
             }));
         }
 
-        // HPA
-        if let Some(ref hpa) = compiled.workloads.hpa {
-            let name = hpa.metadata.name.clone();
-            let json = serialize_resource("HPA", hpa)?;
-            let api: Api<K8sHpa> = Api::namespaced(self.client.clone(), namespace);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying HPA");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+        // ScaledObject (KEDA)
+        if let Some(ref scaled_object) = compiled.workloads.scaled_object {
+            use kube::api::DynamicObject;
+
+            match &self.crds.scaled_object {
+                Some(so_ar) => {
+                    let name = scaled_object.metadata.name.clone();
+                    let json = serialize_resource_discovered("ScaledObject", scaled_object, so_ar)?;
+                    let api: Api<DynamicObject> =
+                        Api::namespaced_with(self.client.clone(), namespace, so_ar);
+                    let params = params.clone();
+                    futures.push(Box::pin(async move {
+                        debug!(name = %name, "applying ScaledObject");
+                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                        Ok(())
+                    }));
+                }
+                None => {
+                    warn!("ScaledObject CRD not installed (KEDA), skipping autoscaling");
+                }
+            }
         }
 
         Ok(())
@@ -809,6 +822,8 @@ pub struct ServiceContext {
     pub cedar: Arc<PolicyEngine>,
     /// Event publisher for emitting Kubernetes Events
     pub events: Arc<dyn EventPublisher>,
+    /// Whether monitoring (VictoriaMetrics) is enabled on this cluster
+    pub monitoring_enabled: bool,
 }
 
 impl ServiceContext {
@@ -820,6 +835,7 @@ impl ServiceContext {
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
         events: Arc<dyn EventPublisher>,
+        monitoring_enabled: bool,
     ) -> Self {
         Self {
             kube,
@@ -828,6 +844,7 @@ impl ServiceContext {
             provider_type,
             cedar,
             events,
+            monitoring_enabled,
         }
     }
 
@@ -841,6 +858,7 @@ impl ServiceContext {
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
         crds: Arc<DiscoveredCrds>,
+        monitoring_enabled: bool,
     ) -> Self {
         let events = Arc::new(KubeEventPublisher::new(
             client.clone(),
@@ -853,6 +871,7 @@ impl ServiceContext {
             provider_type,
             cedar,
             events,
+            monitoring_enabled,
         }
     }
 
@@ -869,6 +888,7 @@ impl ServiceContext {
             provider_type: ProviderType::Docker,
             cedar: Arc::new(PolicyEngine::new()),
             events: Arc::new(NoopEventPublisher),
+            monitoring_enabled: true,
         }
     }
 }
@@ -1052,8 +1072,13 @@ async fn compile_and_apply(
     namespace: &str,
     ctx: &ServiceContext,
 ) -> Result<(), Error> {
-    let compiler =
-        ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type, &ctx.cedar);
+    let compiler = ServiceCompiler::new(
+        &ctx.graph,
+        &ctx.cluster_name,
+        ctx.provider_type,
+        &ctx.cedar,
+        ctx.monitoring_enabled,
+    );
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {
@@ -1807,6 +1832,7 @@ mod tests {
             ProviderType::Docker,
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
+            true,
         );
         let ctx2 = ServiceContext::new(
             mock_kube2,
@@ -1815,6 +1841,7 @@ mod tests {
             ProviderType::Docker,
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
+            true,
         );
 
         // Add service via ctx1
