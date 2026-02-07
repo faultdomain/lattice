@@ -55,14 +55,10 @@ pub async fn ensure_infrastructure(
             ensure_capi_on_bootstrap(client, installer).await?;
         }
     } else {
-        // Try LatticeCluster CRD first (available after pivot in cluster/all mode)
-        let clusters: Api<LatticeCluster> = Api::all(client.clone());
-        let cluster = clusters
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .next();
+        // Resolve config from LatticeCluster CRD or env vars.
+        // When capi_installer is Some we're in cluster/all mode and a
+        // LatticeCluster MUST exist (pivoted from parent), so wait for it.
+        let cluster = find_lattice_cluster(client, capi_installer.is_some()).await?;
 
         let config = match &cluster {
             Some(c) => {
@@ -110,6 +106,50 @@ pub async fn ensure_infrastructure(
 
     tracing::info!("Infrastructure installation complete");
     Ok(())
+}
+
+/// Find the LatticeCluster instance.
+///
+/// When `required` is true (cluster/all mode), retries forever with
+/// exponential backoff until the API server registers the CRD and an
+/// instance appears (the CRD definition may have just been applied).
+/// When `required` is false (service-only mode), returns `None` immediately
+/// if no instance exists.
+async fn find_lattice_cluster(
+    client: &Client,
+    required: bool,
+) -> anyhow::Result<Option<LatticeCluster>> {
+    let clusters: Api<LatticeCluster> = Api::all(client.clone());
+
+    if !required {
+        return Ok(clusters
+            .list(&ListParams::default())
+            .await
+            .ok()
+            .and_then(|list| list.items.into_iter().next()));
+    }
+
+    // Cluster/all mode: the LatticeCluster must exist (pivoted from parent).
+    // Retry forever — the API server may still be registering the CRD schema.
+    let retry = RetryConfig {
+        initial_delay: Duration::from_secs(1),
+        ..RetryConfig::infinite()
+    };
+    retry_with_backoff(&retry, "find LatticeCluster", || {
+        let clusters = clusters.clone();
+        async move {
+            match clusters.list(&ListParams::default()).await {
+                Ok(list) => match list.items.into_iter().next() {
+                    Some(c) => Ok(c),
+                    None => Err(String::from("no LatticeCluster instance found yet")),
+                },
+                Err(e) => Err(format!("API error: {e}")),
+            }
+        }
+    })
+    .await
+    .map(Some)
+    .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Generate and apply infrastructure manifests with infinite retry.
