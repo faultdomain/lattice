@@ -75,6 +75,18 @@ where
 #[cfg(feature = "provider-e2e")]
 pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
+/// Nginx image for mesh server containers
+#[cfg(feature = "provider-e2e")]
+pub const NGINX_IMAGE: &str = "ghcr.io/evan-hines-js/nginx:alpine";
+
+/// Curl image for mesh traffic generator containers
+#[cfg(feature = "provider-e2e")]
+pub const CURL_IMAGE: &str = "ghcr.io/evan-hines-js/curl:latest";
+
+/// Busybox image for lightweight test pods
+#[cfg(feature = "provider-e2e")]
+pub const BUSYBOX_IMAGE: &str = "ghcr.io/evan-hines-js/busybox:latest";
+
 /// Standard cluster names for E2E tests
 #[cfg(feature = "provider-e2e")]
 pub const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
@@ -1492,7 +1504,7 @@ pub fn create_service_with_secrets(
     containers.insert(
         "main".to_string(),
         ContainerSpec {
-            image: "busybox:latest".to_string(),
+            image: BUSYBOX_IMAGE.to_string(),
             command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             args: None,
             variables: BTreeMap::new(),

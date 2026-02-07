@@ -363,7 +363,7 @@ impl CAPIClient for CAPIClientImpl {
                     .get("spec")
                     .and_then(|s| s.get("replicas"))
                     .and_then(|r| r.as_i64())
-                    .map(|r| r as u32);
+                    .and_then(|r| u32::try_from(r).ok());
                 debug!(
                     cluster = %cluster_name,
                     pool = %pool_id,

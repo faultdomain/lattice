@@ -6,7 +6,7 @@ metadata:
 spec:
   containers:
     main:
-      image: linuxserver/nzbget:latest
+      image: ghcr.io/evan-hines-js/nzbget:latest
       variables:
         PUID: "1000"
         PGID: "1000"
@@ -31,7 +31,7 @@ spec:
   # VPN sidecar for killswitch
   sidecars:
     vpn:
-      image: linuxserver/wireguard:latest
+      image: ghcr.io/evan-hines-js/wireguard:latest
       variables:
         PUID: "1000"
         PGID: "1000"

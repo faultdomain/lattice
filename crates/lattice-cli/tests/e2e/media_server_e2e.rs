@@ -279,8 +279,16 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
                     run_cmd(
                         "kubectl",
                         &[
-                            "--kubeconfig", &kp, "exec", "-n", NAMESPACE,
-                            &format!("deploy/{}", deploy), "--", "sh", "-c", cmd,
+                            "--kubeconfig",
+                            &kp,
+                            "exec",
+                            "-n",
+                            NAMESPACE,
+                            &format!("deploy/{}", deploy),
+                            "--",
+                            "sh",
+                            "-c",
+                            cmd,
                         ],
                     )
                 };
@@ -307,8 +315,16 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
                     run_cmd(
                         "kubectl",
                         &[
-                            "--kubeconfig", &kp, "exec", "-n", NAMESPACE,
-                            &format!("deploy/{}", deploy), "--", "sh", "-c", cmd,
+                            "--kubeconfig",
+                            &kp,
+                            "exec",
+                            "-n",
+                            NAMESPACE,
+                            &format!("deploy/{}", deploy),
+                            "--",
+                            "sh",
+                            "-c",
+                            cmd,
                         ],
                     )
                 };

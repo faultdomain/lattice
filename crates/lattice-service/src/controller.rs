@@ -72,13 +72,12 @@ impl DiscoveredCrds {
         use kube::discovery::Discovery;
 
         let discovery = match Discovery::new(client.clone()).run().await {
-            Ok(d) => Some(d),
+            Ok(d) => d,
             Err(e) => {
                 warn!(error = %e, "API discovery failed, falling back to hardcoded CRD versions");
                 return Self::hardcoded_defaults();
             }
         };
-        let discovery = discovery.unwrap();
 
         Self {
             external_secret: Self::find_resource(

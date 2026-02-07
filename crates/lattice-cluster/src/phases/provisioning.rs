@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use chrono::Utc;
 use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
@@ -18,6 +19,10 @@ use lattice_common::{
 
 use crate::controller::Context;
 use crate::phases::update_status;
+
+/// Maximum time a cluster can stay in Provisioning before transitioning to Failed.
+/// Cloud provisioning typically completes in 10-20 minutes; 60 minutes is generous.
+const MAX_PROVISIONING_DURATION: Duration = Duration::from_secs(3600);
 
 /// Handle a cluster in the Provisioning phase.
 ///
@@ -37,6 +42,28 @@ pub async fn handle_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Res
         .await?;
 
     if !is_ready {
+        // Check if provisioning has exceeded max duration
+        if let Some(status) = &cluster.status {
+            if let Some(condition) = status.conditions.iter().find(|c| c.type_ == "Provisioning") {
+                let elapsed = Utc::now() - condition.last_transition_time;
+                if elapsed.to_std().unwrap_or_default() > MAX_PROVISIONING_DURATION {
+                    warn!(
+                        elapsed_mins = elapsed.num_minutes(),
+                        "Provisioning exceeded max duration, transitioning to Failed"
+                    );
+                    update_status(
+                        cluster,
+                        ctx,
+                        ClusterPhase::Failed,
+                        Some("Provisioning timed out after 60 minutes"),
+                        false,
+                    )
+                    .await?;
+                    return Ok(Action::requeue(Duration::from_secs(60)));
+                }
+            }
+        }
+
         debug!("infrastructure not ready yet");
         return Ok(Action::requeue(Duration::from_secs(30)));
     }

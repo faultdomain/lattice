@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 
 use lattice_proto::KubernetesResponse;
 
-use crate::connection::SharedAgentRegistry;
+use crate::connection::{K8sResponseRegistry, SharedAgentRegistry};
 use crate::k8s_tunnel::{
     build_http_response, tunnel_request_streaming, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT,
     RESPONSE_CHANNEL_SIZE,
@@ -146,7 +146,7 @@ async fn tunnel_watch_resilient(
             };
 
             // Start watch stream
-            let response_rx = match tunnel_request_streaming(
+            let (request_id, response_rx) = match tunnel_request_streaming(
                 &registry,
                 &cluster_name,
                 command_tx,
@@ -154,7 +154,7 @@ async fn tunnel_watch_resilient(
             )
             .await
             {
-                Ok(rx) => rx,
+                Ok(pair) => pair,
                 Err(_) if !resilient_enabled => break,
                 Err(e) => {
                     debug!(
@@ -169,6 +169,13 @@ async fn tunnel_watch_resilient(
             // Stream responses to client, tracking resourceVersion
             let disconnected =
                 stream_watch_responses(response_rx, &body_tx, &mut current_params).await;
+
+            // Clean up the stale pending_k8s_responses entry for this watch.
+            // When the agent disconnects mid-watch, the entry is orphaned — the
+            // receiver is dropped but the registry still holds the sender under
+            // the old request_id. Without this, entries accumulate on every
+            // reconnect cycle.
+            registry.take_pending_k8s_response(&request_id);
 
             if !disconnected || !resilient_enabled {
                 break;
@@ -199,7 +206,7 @@ async fn tunnel_and_receive(
     command_tx: mpsc::Sender<lattice_proto::CellCommand>,
     params: &K8sRequestParams,
 ) -> Result<Response<Body>, TunnelError> {
-    let mut response_rx =
+    let (_request_id, mut response_rx) =
         tunnel_request_streaming(registry, cluster_name, command_tx, params.clone()).await?;
 
     match tokio::time::timeout(DEFAULT_TIMEOUT, response_rx.recv()).await {

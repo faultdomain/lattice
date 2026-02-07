@@ -14,6 +14,7 @@ use lattice_common::crd::{
     ReplicaSpec, ResourceSpec, ResourceType, ServicePortsSpec,
 };
 
+use super::helpers::{CURL_IMAGE, NGINX_IMAGE};
 use super::mesh_helpers::{generate_test_script, TestTarget};
 
 // =============================================================================
@@ -29,7 +30,7 @@ pub const TOTAL_SERVICES: usize = 10; // 9 original + 1 public-api (wildcard)
 
 pub fn nginx_container() -> ContainerSpec {
     ContainerSpec {
-        image: "nginx:alpine".to_string(),
+        image: NGINX_IMAGE.to_string(),
         command: None,
         args: None,
         variables: BTreeMap::new(),
@@ -45,7 +46,7 @@ pub fn nginx_container() -> ContainerSpec {
 
 pub fn curl_container(script: String) -> ContainerSpec {
     ContainerSpec {
-        image: "curlimages/curl:latest".to_string(),
+        image: CURL_IMAGE.to_string(),
         command: Some(vec!["/bin/sh".to_string()]),
         args: Some(vec!["-c".to_string(), script]),
         variables: BTreeMap::new(),

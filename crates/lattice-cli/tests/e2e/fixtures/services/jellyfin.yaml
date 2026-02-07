@@ -6,7 +6,7 @@ metadata:
 spec:
   containers:
     main:
-      image: jellyfin/jellyfin:latest
+      image: ghcr.io/evan-hines-js/jellyfin:latest
       variables:
         JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
       volumes:

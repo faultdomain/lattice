@@ -51,6 +51,9 @@ pub struct K8sRequestParams {
 
 /// Send K8s request and return raw response channel for streaming.
 ///
+/// Returns `(request_id, receiver)` so callers can clean up the pending
+/// response entry in the registry if the watch is interrupted.
+///
 /// Use this when you need to handle streaming responses (watch/follow) or
 /// need direct access to the KubernetesResponse messages.
 pub async fn tunnel_request_streaming(
@@ -58,7 +61,7 @@ pub async fn tunnel_request_streaming(
     cluster_name: &str,
     command_tx: mpsc::Sender<CellCommand>,
     params: K8sRequestParams,
-) -> Result<mpsc::Receiver<KubernetesResponse>, TunnelError> {
+) -> Result<(String, mpsc::Receiver<KubernetesResponse>), TunnelError> {
     let is_watch = is_watch_query(&params.query);
     send_request(registry, cluster_name, command_tx, params, is_watch).await
 }
@@ -75,7 +78,8 @@ pub async fn tunnel_request(
 ) -> Result<Response<Body>, TunnelError> {
     let timer = ProxyTimer::start(cluster_name, &params.method);
     let is_watch = is_watch_query(&params.query);
-    let response_rx = send_request(registry, cluster_name, command_tx, params, is_watch).await?;
+    let (_request_id, response_rx) =
+        send_request(registry, cluster_name, command_tx, params, is_watch).await?;
 
     let result = if is_watch {
         build_streaming_http_response(response_rx)
@@ -99,14 +103,14 @@ pub async fn tunnel_request(
     result
 }
 
-/// Send request to agent and return response channel
+/// Send request to agent and return request_id + response channel
 async fn send_request(
     registry: &SharedAgentRegistry,
     cluster_name: &str,
     command_tx: mpsc::Sender<CellCommand>,
     params: K8sRequestParams,
     is_watch: bool,
-) -> Result<mpsc::Receiver<KubernetesResponse>, TunnelError> {
+) -> Result<(String, mpsc::Receiver<KubernetesResponse>), TunnelError> {
     let request_id = Uuid::new_v4().to_string();
 
     let mut k8s_request = KubernetesRequest {
@@ -182,7 +186,7 @@ async fn send_request(
         "Sent K8s request to agent"
     );
 
-    Ok(response_rx)
+    Ok((request_id, response_rx))
 }
 
 /// Receive a single response and convert to HTTP

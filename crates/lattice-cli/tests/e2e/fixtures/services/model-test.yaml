@@ -1,22 +1,16 @@
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
 metadata:
-  name: vllm-inference
+  name: model-test
   namespace: model-cache-test
 spec:
   containers:
     main:
-      image: vllm/vllm-openai:latest
+      image: ghcr.io/evan-hines-js/busybox:latest
+      command: ["sleep", "infinity"]
       volumes:
         /models:
           source: ${resources.llm}
-      resources:
-        requests:
-          cpu: 1000m
-          memory: 2Gi
-        limits:
-          cpu: 4000m
-          memory: 8Gi
   service:
     ports:
       http:

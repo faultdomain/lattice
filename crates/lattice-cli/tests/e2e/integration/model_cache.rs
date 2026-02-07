@@ -76,8 +76,8 @@ async fn verify_model_artifact_creation(kubeconfig: &str) -> Result<(), String> 
 
     let client = client_from_kubeconfig(kubeconfig).await?;
 
-    // Load and apply the vllm-inference fixture
-    let service = load_service_config("vllm-inference.yaml")?;
+    // Load and apply the model-test fixture
+    let service = load_service_config("model-test.yaml")?;
 
     // Set the correct namespace
     let mut service = service;
@@ -88,7 +88,7 @@ async fn verify_model_artifact_creation(kubeconfig: &str) -> Result<(), String> 
         .create(&PostParams::default(), &service)
         .await
         .map_err(|e| format!("Failed to create LatticeService: {}", e))?;
-    info!("[ModelCache] LatticeService 'vllm-inference' created");
+    info!("[ModelCache] LatticeService 'model-test' created");
 
     // Wait for ModelArtifact to appear (created by discover_models mapper)
     let ma_api: Api<ModelArtifact> = Api::namespaced(client.clone(), TEST_NAMESPACE);

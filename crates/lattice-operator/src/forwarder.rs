@@ -139,7 +139,7 @@ impl K8sRequestForwarder for SubtreeForwarder {
         )
         .await
         {
-            Ok(rx) => rx,
+            Ok((_request_id, rx)) => rx,
             Err(e) => {
                 let (status, msg) = tunnel_error_to_status(&e);
                 return build_k8s_status_response(&request_id, status, &msg);
@@ -183,6 +183,7 @@ impl K8sRequestForwarder for SubtreeForwarder {
             params,
         )
         .await
+        .map(|(_request_id, rx)| rx)
         .map_err(|e| format!("tunnel error: {:?}", e))
     }
 }

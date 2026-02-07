@@ -375,7 +375,7 @@ spec:
       - operator: Exists
       containers:
       - name: blackout
-        image: bitnami/kubectl:latest
+        image: ghcr.io/evan-hines-js/kubectl:latest
         command: ["/bin/sh", "-c"]
         args:
         - |

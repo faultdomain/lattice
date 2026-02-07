@@ -70,11 +70,17 @@ async fn handle_self_cluster(
 
     // Check if CAPI resources exist (from pivot)
     let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
-    let capi_ready = ctx
+    let capi_ready = match ctx
         .capi
         .is_infrastructure_ready(name, &capi_namespace, bootstrap)
         .await
-        .unwrap_or(false);
+    {
+        Ok(ready) => ready,
+        Err(e) => {
+            warn!(error = %e, "Failed to check CAPI infrastructure status");
+            return Ok(Action::requeue(Duration::from_secs(10)));
+        }
+    };
 
     if !capi_ready {
         debug!("self-cluster waiting for CAPI resources (pivot not complete yet)");

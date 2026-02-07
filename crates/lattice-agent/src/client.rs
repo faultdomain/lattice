@@ -474,9 +474,10 @@ impl AgentClient {
         let mut capi_ready = false;
         let mut installed_providers = vec![];
 
+        let capi_install_timeout = Duration::from_secs(600); // 10 minutes per attempt
         for attempt in 1..=3 {
-            match self.install_capi().await {
-                Ok(provider) => {
+            match tokio::time::timeout(capi_install_timeout, self.install_capi()).await {
+                Ok(Ok(provider)) => {
                     info!("CAPI installed, waiting for CRDs");
                     if self.wait_for_capi_crds(120).await {
                         info!("CAPI is ready");
@@ -490,8 +491,14 @@ impl AgentClient {
                         );
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!(attempt, error = %e, "Failed to install CAPI, retrying...");
+                }
+                Err(_) => {
+                    warn!(
+                        attempt,
+                        "CAPI installation timed out after 10 minutes, retrying..."
+                    );
                 }
             }
             if attempt < 3 {
@@ -747,14 +754,17 @@ impl AgentClient {
         namespace: &str,
         kube_provider: &dyn KubeClientProvider,
     ) {
-        let retry_interval = std::time::Duration::from_secs(5);
+        let base_interval = Duration::from_secs(5);
+        let max_interval = Duration::from_secs(60);
+        let mut current_interval = base_interval;
 
         loop {
             // Create K8s client for this iteration
             let Some(client) =
                 crate::kube_client::create_client_logged(kube_provider, "unpivot").await
             else {
-                tokio::time::sleep(retry_interval).await;
+                tokio::time::sleep(current_interval).await;
+                current_interval = (current_interval * 2).min(max_interval);
                 continue;
             };
 
@@ -797,6 +807,9 @@ impl AgentClient {
                         warn!("Unpivot message channel closed, stopping retry loop");
                         break;
                     }
+
+                    // Success — reset to base interval
+                    current_interval = base_interval;
                 }
                 Err(e) => {
                     warn!(
@@ -804,10 +817,12 @@ impl AgentClient {
                         error = %e,
                         "Failed to prepare CAPI for unpivot, will retry"
                     );
+                    // Backoff on failure
+                    current_interval = (current_interval * 2).min(max_interval);
                 }
             }
 
-            tokio::time::sleep(retry_interval).await;
+            tokio::time::sleep(current_interval).await;
         }
     }
 
@@ -896,14 +911,18 @@ impl AgentClient {
 
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
-        let poll_interval = Duration::from_secs(5);
 
         while start.elapsed() < timeout {
             match crds.get("clusters.cluster.x-k8s.io").await {
                 Ok(_) => return true,
                 Err(_) => {
                     debug!("CAPI CRDs not yet available, waiting...");
-                    sleep(poll_interval).await;
+                    // 5s base + up to 3s jitter to avoid thundering herd
+                    let jitter_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_millis() as u64 % 3000)
+                        .unwrap_or(0);
+                    sleep(Duration::from_secs(5) + Duration::from_millis(jitter_ms)).await;
                 }
             }
         }

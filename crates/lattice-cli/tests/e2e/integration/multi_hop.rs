@@ -39,7 +39,7 @@ use tokio::time::sleep;
 use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
-use super::super::helpers::{run_cmd, run_kubectl_with_retry};
+use super::super::helpers::{run_cmd, run_kubectl_with_retry, BUSYBOX_IMAGE};
 
 // ============================================================================
 // Constants
@@ -216,7 +216,7 @@ async fn test_create_pod(kubeconfig: &str) -> Result<(), String> {
         TEST_POD_NAME,
         "-n",
         MULTI_HOP_NAMESPACE,
-        "--image=busybox:latest",
+        &format!("--image={}", BUSYBOX_IMAGE),
         "--restart=Never",
         "--",
         "sh",
