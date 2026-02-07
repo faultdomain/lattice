@@ -116,12 +116,14 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
     }
 
     // External Secrets Operator (for Vault integration)
-
-    manifests.extend(eso::generate_eso().iter().cloned());
+    if config.external_secrets {
+        manifests.extend(eso::generate_eso().iter().cloned());
+    }
 
     // Velero (for backup and restore)
-    manifests.extend(velero::generate_velero().iter().cloned());
-
+    if config.backups {
+        manifests.extend(velero::generate_velero().iter().cloned());
+    }
 
     // VictoriaMetrics K8s Stack (HA metrics backend) + KEDA (event-driven autoscaling)
     if config.monitoring {
