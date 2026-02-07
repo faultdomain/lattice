@@ -20,13 +20,15 @@ use lattice_backup::backup_policy_controller as backup_policy_ctrl;
 use lattice_backup::restore_controller as restore_ctrl;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::ParentServers;
-use lattice_cloud_provider::{self as cloud_provider_ctrl, ControllerContext};
+use lattice_cloud_provider as cloud_provider_ctrl;
+use lattice_common::ControllerContext;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
-    LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider, ProviderType,
-    SecretsProvider,
+    LatticeRestore, LatticeService, LatticeServicePolicy, ModelArtifact, OIDCProvider,
+    ProviderType, SecretsProvider,
 };
+use lattice_model_cache::{self as model_cache_ctrl, ModelCacheContext};
 use lattice_secrets_provider as secrets_provider_ctrl;
 use lattice_service::controller::{
     error_policy as service_error_policy, error_policy_external, reconcile as service_reconcile,
@@ -138,7 +140,7 @@ pub fn build_service_controllers(
     .for_each(log_reconcile_result("ExternalService"));
 
     let policies: Api<LatticeServicePolicy> = Api::all(client.clone());
-    let policy_ctx = Arc::new(ControllerContext::new(client));
+    let policy_ctx = Arc::new(ControllerContext::new(client.clone()));
     let policy_ctrl = Controller::new(
         policies,
         WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
@@ -151,14 +153,37 @@ pub fn build_service_controllers(
     )
     .for_each(log_reconcile_result("ServicePolicy"));
 
+    let model_artifacts: Api<ModelArtifact> = Api::all(client.clone());
+    let services_for_model_watch: Api<LatticeService> = Api::all(client.clone());
+    let model_ctx = Arc::new(ModelCacheContext::new(client));
+    let discover = model_cache_ctrl::discover_models(model_ctx.client.clone());
+    let model_ctrl = Controller::new(
+        model_artifacts,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+    )
+    .watches(
+        services_for_model_watch,
+        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        move |service| discover(service),
+    )
+    .shutdown_on_signal()
+    .run(
+        model_cache_ctrl::reconcile,
+        model_cache_ctrl::error_policy,
+        model_ctx,
+    )
+    .for_each(log_reconcile_result("ModelArtifact"));
+
     tracing::info!("- LatticeService controller");
     tracing::info!("- LatticeExternalService controller");
     tracing::info!("- LatticeServicePolicy controller");
+    tracing::info!("- ModelArtifact controller");
 
     vec![
         Box::pin(svc_ctrl),
         Box::pin(ext_ctrl),
         Box::pin(policy_ctrl),
+        Box::pin(model_ctrl),
     ]
 }
 

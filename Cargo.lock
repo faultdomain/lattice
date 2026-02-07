@@ -2481,6 +2481,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-model-cache"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-move"
 version = "0.1.0"
 dependencies = [
@@ -2533,6 +2547,7 @@ dependencies = [
  "lattice-cluster",
  "lattice-common",
  "lattice-infra",
+ "lattice-model-cache",
  "lattice-proto",
  "lattice-secrets-provider",
  "lattice-service",

@@ -17,6 +17,7 @@ members = [
     "crates/lattice-move",
     "crates/lattice-api",
     "crates/lattice-backup",
+    "crates/lattice-model-cache",
 ]
 
 [workspace.package]
@@ -40,6 +41,7 @@ lattice-move = { path = "crates/lattice-move" }
 lattice-cedar = { path = "crates/lattice-cedar" }
 lattice-api = { path = "crates/lattice-api" }
 lattice-backup = { path = "crates/lattice-backup" }
+lattice-model-cache = { path = "crates/lattice-model-cache" }
 
 # Kubernetes
 kube = { version = "0.98", features = ["runtime", "derive", "client", "rustls-tls", "admission", "ws"] }

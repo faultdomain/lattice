@@ -9,4 +9,4 @@
 
 mod controller;
 
-pub use controller::{reconcile, ControllerContext};
+pub use controller::reconcile;

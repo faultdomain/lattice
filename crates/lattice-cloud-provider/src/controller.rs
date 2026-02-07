@@ -24,10 +24,7 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{
     CloudProvider, CloudProviderPhase, CloudProviderStatus, CloudProviderType,
 };
-use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE};
-
-// Re-export for convenience
-pub use lattice_common::ControllerContext;
+use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
 /// Reconcile a CloudProvider
 ///

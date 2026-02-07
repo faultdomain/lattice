@@ -1,0 +1,29 @@
+[package]
+name = "lattice-model-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ModelCache controller for Lattice - manages model artifact pre-fetching and cache lifecycle"
+
+[dependencies]
+lattice-common = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
