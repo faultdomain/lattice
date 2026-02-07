@@ -12,7 +12,7 @@ use kube::api::{Api, PostParams};
 use tokio::time::sleep;
 use tracing::info;
 
-use lattice_operator::crd::LatticeService;
+use lattice_common::crd::LatticeService;
 
 use super::helpers::{client_from_kubeconfig, delete_namespace, ensure_fresh_namespace, run_cmd};
 use super::mesh_fixtures::*;

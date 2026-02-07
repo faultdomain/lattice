@@ -33,28 +33,27 @@ use once_cell::sync::OnceCell;
 use lattice_api::{
     AuthChain, OidcValidator, PolicyEngine, SaValidator, ServerConfig as AuthProxyConfig,
 };
+use lattice_cell::bootstrap::DefaultManifestGenerator;
+use lattice_cell::parent::{ParentConfig, ParentServers};
 use lattice_common::crd::{CedarPolicy, LatticeService, OIDCProvider};
+use lattice_common::crd::{CloudProvider, LatticeCluster};
 use lattice_common::telemetry::{init_telemetry, PrometheusHandle, TelemetryConfig};
 use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
     DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
 };
-use lattice_operator::cell_proxy_backend::CellProxyBackend;
-use lattice_operator::crd::CloudProvider;
-
-/// Global Prometheus handle for metrics endpoint
-static PROMETHEUS_HANDLE: OnceCell<PrometheusHandle> = OnceCell::new();
 use lattice_operator::agent::start_agent_with_retry;
-use lattice_operator::bootstrap::DefaultManifestGenerator;
-use lattice_operator::controller::DiscoveredCrds;
-use lattice_operator::crd::LatticeCluster;
+use lattice_operator::cell_proxy_backend::CellProxyBackend;
 use lattice_operator::forwarder::SubtreeForwarder;
-use lattice_operator::parent::{ParentConfig, ParentServers};
 use lattice_operator::startup::{
     ensure_cluster_crds, ensure_cluster_infrastructure, ensure_provider_crds, ensure_service_crds,
     ensure_service_infrastructure, get_cell_server_sans, re_register_existing_clusters,
     start_ca_rotation, wait_for_api_ready_for,
 };
+use lattice_service::controller::DiscoveredCrds;
+
+/// Global Prometheus handle for metrics endpoint
+static PROMETHEUS_HANDLE: OnceCell<PrometheusHandle> = OnceCell::new();
 
 mod controller_runner;
 

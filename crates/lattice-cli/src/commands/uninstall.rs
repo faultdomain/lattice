@@ -28,12 +28,12 @@ use tracing::{debug, info};
 use super::{generate_run_id, kind_utils, wait_for_deletion, CommandErrorExt};
 
 use lattice_common::clusterctl::{move_to_kubeconfig, teardown_cluster, TeardownConfig};
+use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::kube_utils;
 use lattice_common::CredentialProvider;
 use lattice_common::{
     capi_namespace, kubeconfig_secret_name, AwsCredentials, LATTICE_SYSTEM_NAMESPACE,
 };
-use lattice_operator::crd::{LatticeCluster, ProviderType};
 
 use crate::{Error, Result};
 

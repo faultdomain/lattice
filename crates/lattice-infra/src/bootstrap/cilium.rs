@@ -59,7 +59,6 @@ async fn render_cilium_helm() -> Result<Vec<String>, String> {
         &chart_path,
         "kube-system",
         &[
-            "--include-crds",
             "--set",
             "hubble.enabled=false",
             "--set",

@@ -49,6 +49,17 @@ async fn render_velero_helm() -> Result<Vec<String>, String> {
             "snapshotsEnabled=true",
             "--set",
             "initContainers=null",
+            // CRDs are included via --include-crds; disable the upgrade-crds Job
+            // (it uses bitnami/kubectl which is discontinued)
+            "--set",
+            "upgradeCRDs=false",
+            // Don't create default BackupStorageLocation or VolumeSnapshotLocation —
+            // these are configured later via LatticeBackupPolicy when the user sets up
+            // their backup target.
+            "--set-json",
+            "configuration.backupStorageLocation=[]",
+            "--set-json",
+            "configuration.volumeSnapshotLocation=[]",
         ],
     )
     .await?;

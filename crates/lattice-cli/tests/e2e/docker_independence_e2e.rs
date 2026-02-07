@@ -34,7 +34,7 @@ use kube::api::{Api, PostParams};
 use tracing::info;
 
 use lattice_cli::commands::install::Installer;
-use lattice_operator::crd::LatticeCluster;
+use lattice_common::crd::LatticeCluster;
 
 use super::context::init_e2e_test;
 use super::helpers::run_id;

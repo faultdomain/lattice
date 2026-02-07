@@ -18,19 +18,20 @@ use lattice_api::cedar::validation as cedar_validation_ctrl;
 use lattice_api::PolicyEngine;
 use lattice_backup::backup_policy_controller as backup_policy_ctrl;
 use lattice_backup::restore_controller as restore_ctrl;
-use lattice_operator::bootstrap::DefaultManifestGenerator;
-use lattice_operator::cloud_provider::{self as cloud_provider_ctrl, ControllerContext};
-use lattice_operator::controller::{
-    error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
-    service_reconcile, Context, DiscoveredCrds, ServiceContext,
-};
-use lattice_operator::crd::{
+use lattice_cell::bootstrap::DefaultManifestGenerator;
+use lattice_cell::parent::ParentServers;
+use lattice_cloud_provider::{self as cloud_provider_ctrl, ControllerContext};
+use lattice_cluster::controller::{error_policy, reconcile, Context};
+use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
     LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider, ProviderType,
     SecretsProvider,
 };
-use lattice_operator::parent::ParentServers;
-use lattice_operator::secrets_provider as secrets_provider_ctrl;
+use lattice_secrets_provider as secrets_provider_ctrl;
+use lattice_service::controller::{
+    error_policy as service_error_policy, error_policy_external, reconcile as service_reconcile,
+    reconcile_external, DiscoveredCrds, ServiceContext,
+};
 use lattice_service::policy_controller as service_policy_ctrl;
 
 /// Watcher timeout (seconds) - must be less than client read_timeout (30s)
@@ -286,6 +287,27 @@ pub async fn resolve_provider_type_from_cluster(client: &Client) -> ProviderType
             ProviderType::Docker
         }
     }
+}
+
+fn create_oidc_provider_controller(
+    client: Client,
+) -> Option<impl std::future::Future<Output = ()>> {
+    let oidc_providers: Api<OIDCProvider> = Api::all(client.clone());
+    let ctx = Arc::new(ControllerContext::new(client));
+
+    Some(
+        Controller::new(
+            oidc_providers,
+            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        )
+        .shutdown_on_signal()
+        .run(
+            oidc_provider_ctrl::reconcile,
+            lattice_common::default_error_policy,
+            ctx,
+        )
+        .for_each(log_reconcile_result("OIDCProvider")),
+    )
 }
 
 /// Creates a closure for logging reconciliation results.

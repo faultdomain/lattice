@@ -13,12 +13,12 @@ use kube::{
     Client,
 };
 #[cfg(feature = "provider-e2e")]
+use lattice_common::crd::{BootstrapProvider, ClusterPhase};
+#[cfg(feature = "provider-e2e")]
 use lattice_common::{
     retry::{retry_with_backoff, RetryConfig},
     LATTICE_SYSTEM_NAMESPACE,
 };
-#[cfg(feature = "provider-e2e")]
-use lattice_operator::crd::{BootstrapProvider, ClusterPhase};
 #[cfg(feature = "provider-e2e")]
 use tokio::time::sleep;
 #[cfg(feature = "provider-e2e")]
@@ -650,7 +650,7 @@ pub async fn watch_cluster_phases(
     timeout_secs: Option<u64>,
 ) -> Result<(), String> {
     use kube::Api;
-    use lattice_operator::crd::LatticeCluster;
+    use lattice_common::crd::LatticeCluster;
     use std::sync::Mutex;
 
     let api: Api<LatticeCluster> = Api::all(client.clone());
@@ -789,7 +789,7 @@ pub async fn watch_worker_scaling(
 use std::path::PathBuf;
 
 #[cfg(feature = "provider-e2e")]
-use lattice_operator::crd::LatticeCluster;
+use lattice_common::crd::LatticeCluster;
 
 /// Get the workspace root directory
 #[cfg(feature = "provider-e2e")]
@@ -1025,9 +1025,7 @@ pub fn load_cluster_config(
 
 /// Load a LatticeService config from a fixture file
 #[cfg(feature = "provider-e2e")]
-pub fn load_service_config(
-    filename: &str,
-) -> Result<lattice_operator::crd::LatticeService, String> {
+pub fn load_service_config(filename: &str) -> Result<lattice_common::crd::LatticeService, String> {
     let path = service_fixtures_dir().join(filename);
 
     if !path.exists() {
@@ -1039,7 +1037,7 @@ pub fn load_service_config(
 
     let value = lattice_common::yaml::parse_yaml(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
-    let service: lattice_operator::crd::LatticeService = serde_json::from_value(value)
+    let service: lattice_common::crd::LatticeService = serde_json::from_value(value)
         .map_err(|e| format!("Invalid service config in {}: {}", path.display(), e))?;
 
     Ok(service)
@@ -1461,11 +1459,11 @@ pub fn create_service_with_secrets(
     name: &str,
     namespace: &str,
     secrets: Vec<(&str, &str, &str, Option<Vec<&str>>)>,
-) -> lattice_operator::crd::LatticeService {
+) -> lattice_common::crd::LatticeService {
     use std::collections::BTreeMap;
 
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_operator::crd::{
+    use lattice_common::crd::{
         ContainerSpec, DeploySpec, LatticeService, LatticeServiceSpec, PortSpec, ReplicaSpec,
         ResourceSpec, ResourceType, ServicePortsSpec,
     };
@@ -2004,6 +2002,44 @@ impl ProxySession {
 }
 
 // Note: No explicit Drop needed for ProxySession - PortForward handles its own cleanup
+
+// =============================================================================
+// Teardown Helpers
+// =============================================================================
+
+/// Uninstall the management cluster using the Lattice uninstaller.
+///
+/// This is the standard teardown for E2E tests - it runs the full uninstall flow
+/// which handles CAPI resource cleanup, helm uninstall, and bootstrap cluster deletion.
+#[cfg(feature = "provider-e2e")]
+pub async fn teardown_mgmt_cluster(
+    mgmt_kubeconfig: &str,
+    mgmt_cluster_name: &str,
+) -> Result<(), String> {
+    use lattice_cli::commands::uninstall::{UninstallArgs, Uninstaller};
+
+    info!("Tearing down management cluster...");
+
+    let uninstall_args = UninstallArgs {
+        kubeconfig: std::path::PathBuf::from(mgmt_kubeconfig),
+        name: Some(mgmt_cluster_name.to_string()),
+        yes: true,
+        keep_bootstrap_on_failure: false,
+        run_id: Some(run_id().to_string()),
+    };
+
+    let uninstaller = Uninstaller::new(&uninstall_args)
+        .await
+        .map_err(|e| format!("Failed to create uninstaller: {}", e))?;
+
+    uninstaller
+        .run()
+        .await
+        .map_err(|e| format!("Uninstall failed: {}", e))?;
+
+    info!("SUCCESS: Management cluster uninstalled!");
+    Ok(())
+}
 
 // =============================================================================
 // Namespace Helpers

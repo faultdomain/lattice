@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-use lattice_operator::crd::{
+use lattice_common::crd::{
     ContainerSpec, DependencyDirection, DeploySpec, LatticeService, LatticeServiceSpec, PortSpec,
     ReplicaSpec, ResourceSpec, ResourceType, ServicePortsSpec,
 };

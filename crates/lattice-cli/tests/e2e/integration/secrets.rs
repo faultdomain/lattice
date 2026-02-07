@@ -23,7 +23,7 @@
 use std::time::Duration;
 
 use kube::api::{Api, PostParams};
-use lattice_operator::crd::LatticeService;
+use lattice_common::crd::LatticeService;
 use tokio::time::sleep;
 use tracing::info;
 
@@ -885,7 +885,7 @@ async fn test_basic_secret_standalone() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_operator::crd::ResourceType;
+    use lattice_common::crd::ResourceType;
 
     #[test]
     fn test_create_service_with_secrets_structure() {

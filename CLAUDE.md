@@ -196,7 +196,7 @@ async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Result<Ac
 │  └─ integration/pivot.rs      - Unpivot verification            │
 ├─────────────────────────────────────────────────────────────────┤
 │  E2E TESTS (build everything, compose integration tests)        │
-│  ├─ pivot_e2e.rs          - Full lifecycle                      │
+│  ├─ unified_e2e.rs          - Full lifecycle                      │
 │  ├─ upgrade_e2e.rs        - Upgrade with mesh traffic           │
 │  ├─ endurance_e2e.rs      - Infinite loop stress test           │
 │  └─ docker_independence_e2e.rs - Parent deletion survival       │
@@ -260,7 +260,7 @@ let ctx = InfraContext::new(mgmt, Some(workload), None, InfraProvider::Docker);
 
 ```bash
 # Full E2E (creates all infrastructure)
-cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
+cargo test --features provider-e2e --test e2e unified_e2e -- --nocapture
 
 # Integration tests on existing clusters
 LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
@@ -287,7 +287,7 @@ pub const DOCKER_KIND_SUBNET: &str = "172.18.0.0/16";
 
 ### E2E Test Coverage
 
-The E2E test (`pivot_e2e.rs`) validates:
+The E2E test (`unified_e2e.rs`) validates:
 - Bootstrap → management cluster pivot
 - Management → workload cluster provisioning and pivot
 - Workload cluster independence (delete parent, verify self-scaling)
@@ -397,7 +397,7 @@ crates/lattice-cli/tests/e2e/
 │   ├── pivot.rs        # Unpivot verification
 │   └── setup.rs        # Setup-only test + cleanup
 │
-├── pivot_e2e.rs        # Full lifecycle E2E
+├── unified_e2e.rs        # Full lifecycle E2E
 ├── upgrade_e2e.rs      # Upgrade with mesh traffic
 ├── endurance_e2e.rs    # Infinite loop stress test
 └── docker_independence_e2e.rs  # Parent deletion survival

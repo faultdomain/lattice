@@ -32,4 +32,4 @@ echo "Workload cluster config: $LATTICE_WORKLOAD_CLUSTER_CONFIG"
 echo "Workload2 cluster config: $LATTICE_WORKLOAD2_CLUSTER_CONFIG"
 echo
 
-RUST_LOG=info cargo test -p lattice-cli --features provider-e2e --test e2e pivot_e2e -- --nocapture
+RUST_LOG=info cargo test -p lattice-cli --features provider-e2e --test e2e unified_e2e -- --nocapture

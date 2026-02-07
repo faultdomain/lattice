@@ -269,12 +269,8 @@ pub struct RateLimitConfig {
     /// Maximum requests per interval
     pub requests_per_interval: u32,
     /// Interval in seconds (default: 60)
-    #[serde(default = "default_rate_limit_interval_config")]
+    #[serde(default = "default_rate_limit_interval")]
     pub interval_seconds: u32,
-}
-
-fn default_rate_limit_interval_config() -> u32 {
-    60
 }
 
 /// Retry configuration

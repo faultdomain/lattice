@@ -51,7 +51,7 @@ pub async fn reconcile(
         if policy
             .spec
             .selector
-            .matches(svc_labels, &ns_labels, &namespace, &svc_namespace)
+            .matches(&svc_labels, &ns_labels, &namespace, &svc_namespace)
         {
             matched_refs.push(format!("{}/{}", svc_namespace, svc_name));
         }
@@ -95,7 +95,6 @@ pub async fn reconcile(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use lattice_common::crd::{LatticeServicePolicySpec, ServiceSelector};
 
     #[test]

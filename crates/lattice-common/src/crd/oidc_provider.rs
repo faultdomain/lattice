@@ -7,6 +7,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::default_true;
 use super::types::SecretRef;
 
 /// OIDCProvider defines an OIDC identity provider for the auth proxy.
@@ -97,10 +98,6 @@ pub struct OIDCProviderSpec {
     /// When false (default), children must use inherited provider
     #[serde(default)]
     pub allow_child_override: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_username_claim() -> String {

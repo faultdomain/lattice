@@ -154,7 +154,7 @@ curl -X POST http://localhost:8200/v1/secret/data/myapp/config \
 ### Full E2E (creates all infrastructure)
 
 ```bash
-cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
+cargo test --features provider-e2e --test e2e unified_e2e -- --nocapture
 ```
 
 ### Standalone Tests (use existing clusters)

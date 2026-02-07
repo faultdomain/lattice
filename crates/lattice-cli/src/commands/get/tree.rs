@@ -14,11 +14,11 @@ use chrono::{DateTime, Utc};
 use kube::api::ListParams;
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::Api;
-use lattice_operator::crd::{LatticeCluster, LatticeClusterStatus};
+use lattice_common::crd::{LatticeCluster, LatticeClusterStatus};
 use serde::Serialize;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
-use crate::commands::port_forward::PortForward;
+use crate::commands::port_forward::{check_health, PortForward};
 use crate::{Error, Result};
 
 /// A discovered cluster with its metadata
@@ -276,4 +276,111 @@ async fn client_for_context(kubeconfig: &Kubeconfig, context: &str) -> Result<ku
         ..Default::default()
     };
     crate::commands::kube_client_from_kubeconfig(kubeconfig.clone(), &options).await
+}
+
+/// Detect proxy kubeconfigs and start a port-forward if the proxy is unreachable.
+///
+/// A proxy kubeconfig has server URLs like `https://127.0.0.1:PORT/clusters/NAME`.
+/// When the port is dead (e.g. the generating process exited), we extract the
+/// management kubeconfig path from the exec credential args, start a new
+/// port-forward, and rewrite the server URLs in place.
+async fn maybe_start_proxy_port_forward(kubeconfig: &mut Kubeconfig) -> Option<PortForward> {
+    // Find the common proxy base URL from cluster entries
+    let proxy_base = find_proxy_base_url(kubeconfig)?;
+
+    // Check if the proxy is already reachable
+    if check_health(&proxy_base, std::time::Duration::from_secs(2)).await {
+        debug!(
+            "Proxy at {} is reachable, no port-forward needed",
+            proxy_base
+        );
+        return None;
+    }
+
+    info!(
+        "Proxy at {} is unreachable, attempting auto port-forward",
+        proxy_base
+    );
+
+    // Extract the management kubeconfig path from exec credential args
+    let mgmt_kubeconfig = extract_mgmt_kubeconfig(kubeconfig)?;
+
+    // Start a port-forward
+    let pf =
+        match PortForward::start(&mgmt_kubeconfig, lattice_common::DEFAULT_AUTH_PROXY_PORT).await {
+            Ok(pf) => pf,
+            Err(e) => {
+                warn!("Failed to auto-start port-forward: {}", e);
+                return None;
+            }
+        };
+
+    // Rewrite all proxy server URLs to use the new port
+    let new_base = &pf.url;
+    rewrite_proxy_urls(kubeconfig, &proxy_base, new_base);
+    info!("Rewrote proxy URLs from {} to {}", proxy_base, new_base);
+
+    Some(pf)
+}
+
+/// Find the common proxy base URL (e.g. `https://127.0.0.1:49284`) from a kubeconfig.
+///
+/// Returns `Some(base_url)` if any cluster server URL matches the proxy pattern
+/// (localhost with `/clusters/` path). Returns `None` for normal kubeconfigs.
+fn find_proxy_base_url(kubeconfig: &Kubeconfig) -> Option<String> {
+    for named_cluster in &kubeconfig.clusters {
+        if let Some(ref cluster) = named_cluster.cluster {
+            if let Some(ref server) = cluster.server {
+                // Proxy URLs look like https://127.0.0.1:PORT/clusters/NAME
+                if let Some(path_start) = server.find("/clusters/") {
+                    let base = &server[..path_start];
+                    if base.contains("127.0.0.1")
+                        || base.contains("localhost")
+                        || base.contains("[::1]")
+                    {
+                        return Some(base.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the management kubeconfig path from exec credential args.
+///
+/// The proxy kubeconfig uses `lattice token --kubeconfig=<path>` as the exec
+/// credential plugin. We parse the `--kubeconfig=` arg to find the management
+/// cluster's kubeconfig.
+fn extract_mgmt_kubeconfig(kubeconfig: &Kubeconfig) -> Option<String> {
+    for auth in &kubeconfig.auth_infos {
+        if let Some(ref info) = auth.auth_info {
+            if let Some(ref exec) = info.exec {
+                if let Some(ref args) = exec.args {
+                    for arg in args {
+                        if let Some(path) = arg.strip_prefix("--kubeconfig=") {
+                            return Some(path.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Rewrite proxy server URLs from the old base to the new base.
+///
+/// E.g. `https://127.0.0.1:49284/clusters/foo` -> `https://127.0.0.1:55555/clusters/foo`
+fn rewrite_proxy_urls(kubeconfig: &mut Kubeconfig, old_base: &str, new_base: &str) {
+    for named_cluster in &mut kubeconfig.clusters {
+        if let Some(ref mut cluster) = named_cluster.cluster {
+            if let Some(ref mut server) = cluster.server {
+                if server.starts_with(old_base) {
+                    let path = &server[old_base.len()..];
+                    *server = format!("{}{}", new_base, path);
+                }
+            }
+        }
+    }
 }

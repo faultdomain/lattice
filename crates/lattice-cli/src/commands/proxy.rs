@@ -5,7 +5,7 @@
 
 use kube::api::ListParams;
 use kube::Api;
-use lattice_operator::crd::LatticeCluster;
+use lattice_common::crd::LatticeCluster;
 use tracing::{debug, info};
 
 use crate::{Error, Result};

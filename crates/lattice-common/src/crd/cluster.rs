@@ -7,6 +7,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::default_true;
 use super::types::{
     ClusterPhase, Condition, EndpointsSpec, NetworkingSpec, NodeSpec, ProviderSpec,
 };
@@ -59,10 +60,6 @@ pub struct LatticeClusterSpec {
     /// Defaults to true for backwards compatibility.
     #[serde(default = "default_true")]
     pub services: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl LatticeClusterSpec {

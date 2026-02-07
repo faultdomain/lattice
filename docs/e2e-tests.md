@@ -22,7 +22,7 @@ graph TB
         MOD[mod.rs<br/>Test Entry Point]
 
         subgraph "Core Tests"
-            PIVOT[pivot_e2e.rs<br/>9-Phase Lifecycle Test]
+            PIVOT[unified_e2e.rs<br/>9-Phase Lifecycle Test]
             INDEP[docker_independence_e2e.rs<br/>Parent Deletion Test]
             UPGRADE[upgrade_e2e.rs<br/>Upgrade Resilience Test]
         end
@@ -63,7 +63,7 @@ graph TB
 
 ---
 
-## Test 1: Main Pivot E2E Test (`pivot_e2e.rs`)
+## Test 1: Main Pivot E2E Test (`unified_e2e.rs`)
 
 The primary E2E test validates the complete Lattice lifecycle in **9 phases**. This test proves that clusters become fully self-managing and can operate independently.
 
@@ -647,18 +647,18 @@ stateDiagram-v2
 
 ```bash
 # Full pivot test with Docker
-cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
+cargo test --features provider-e2e --test e2e unified_e2e -- --nocapture
 
 # Independence test
 cargo test --features provider-e2e --test e2e docker_independence -- --nocapture
 
 # Skip mesh tests (faster)
-LATTICE_ENABLE_MESH_TEST=false cargo test --features provider-e2e --test e2e pivot_e2e
+LATTICE_ENABLE_MESH_TEST=false cargo test --features provider-e2e --test e2e unified_e2e
 
 # Use cloud provider configs
 LATTICE_MGMT_CLUSTER_CONFIG=fixtures/clusters/aws-mgmt.yaml \
 LATTICE_WORKLOAD_CLUSTER_CONFIG=fixtures/clusters/aws-workload.yaml \
-cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
+cargo test --features provider-e2e --test e2e unified_e2e -- --nocapture
 ```
 
 ---
@@ -779,7 +779,7 @@ LATTICE_UPGRADE_FROM_VERSION=1.30.0 LATTICE_UPGRADE_TO_VERSION=1.31.0 \
 
 | File | Lines | Tests | Purpose |
 |------|-------|-------|---------|
-| `pivot_e2e.rs` | 606 | 1 | 9-phase full lifecycle validation |
+| `unified_e2e.rs` | 606 | 1 | 9-phase full lifecycle validation |
 | `docker_independence_e2e.rs` | 239 | 1 | Parent deletion resilience |
 | `upgrade_e2e.rs` | 300 | 1 | Upgrade resilience with mesh traffic |
 | `mesh_tests.rs` | 1,550 | 2 | Fixed 9-service + random 10-20 service mesh |

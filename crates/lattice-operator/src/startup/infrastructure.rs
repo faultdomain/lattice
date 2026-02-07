@@ -16,9 +16,12 @@ const INFRA_APPLY_MAX_RETRIES: u32 = 10;
 /// Delay between infrastructure apply retries
 const INFRA_APPLY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
-use crate::crd::{CloudProvider, LatticeCluster, ProviderType};
-use crate::infra::bootstrap::{self, InfrastructureConfig};
+use lattice_capi::{
+    copy_credentials_to_provider_namespace, ensure_capi_installed, CapiProviderConfig,
+    ClusterctlInstaller,
+};
+use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
+use lattice_infra::bootstrap::{self, InfrastructureConfig};
 
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
 
@@ -223,7 +226,7 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
 
     // Copy credentials to CAPI provider namespace if present
     if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
-        crate::capi::copy_credentials_to_provider_namespace(client, infrastructure, secret_ref)
+        copy_credentials_to_provider_namespace(client, infrastructure, secret_ref)
             .await
             .map_err(|e| anyhow::anyhow!("failed to copy provider credentials: {}", e))?;
     }

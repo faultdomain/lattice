@@ -31,7 +31,7 @@ use kube::Client;
 use tracing::{error, info};
 
 use lattice_cli::commands::install::Installer;
-use lattice_operator::crd::LatticeCluster;
+use lattice_common::crd::LatticeCluster;
 
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::context::init_e2e_test;

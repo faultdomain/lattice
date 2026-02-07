@@ -2,7 +2,7 @@
 
 use clap::Args;
 use kube::api::{Api, Patch, PatchParams};
-use lattice_operator::crd::LatticeRestore;
+use lattice_common::crd::LatticeRestore;
 use tracing::info;
 
 use crate::{Error, Result};

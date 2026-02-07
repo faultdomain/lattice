@@ -16,7 +16,7 @@ use tokio::time::sleep;
 use tracing::info;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use lattice_operator::crd::{
+use lattice_common::crd::{
     LatticeExternalService, LatticeExternalServiceSpec, LatticeService, Resolution,
 };
 

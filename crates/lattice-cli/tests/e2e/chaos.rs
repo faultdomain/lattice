@@ -26,8 +26,8 @@ use rand::{Rng, SeedableRng};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use lattice_common::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
-use lattice_operator::crd::{ClusterPhase, LatticeCluster};
 
 use super::helpers::{client_from_kubeconfig, run_cmd, OPERATOR_LABEL};
 use super::providers::InfraProvider;

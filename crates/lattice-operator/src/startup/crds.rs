@@ -8,7 +8,7 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomRe
 use kube::api::{Api, Patch, PatchParams};
 use kube::{Client, CustomResourceExt};
 
-use crate::crd::{
+use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
     LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider, SecretsProvider,
 };

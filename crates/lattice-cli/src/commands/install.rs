@@ -39,6 +39,14 @@ const CLUSTER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const API_SERVER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CONTROL_PLANE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MACHINE_POLL_INTERVAL: Duration = Duration::from_secs(10);
+use lattice_cell::bootstrap::{
+    generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
+};
+use lattice_common::crd::{
+    BootstrapProvider, CloudProvider, CloudProviderSpec, CloudProviderType, LatticeCluster,
+    ProviderType, SecretRef,
+};
+use lattice_common::fips;
 use lattice_common::kube_utils;
 use lattice_common::CredentialProvider;
 use lattice_common::{
@@ -46,14 +54,6 @@ use lattice_common::{
     ProxmoxCredentials, AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE,
     OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
-use lattice_operator::bootstrap::{
-    generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
-};
-use lattice_operator::crd::{
-    BootstrapProvider, CloudProvider, CloudProviderSpec, CloudProviderType, LatticeCluster,
-    ProviderType, SecretRef,
-};
-use lattice_operator::fips;
 
 use super::CommandErrorExt;
 use crate::{Error, Result};
@@ -562,7 +562,7 @@ impl Installer {
             bootstrap: self.cluster.spec.provider.kubernetes.bootstrap.clone(),
             k8s_version: &self.cluster.spec.provider.kubernetes.version,
             parent_host: None, // Management cluster has no parent
-            parent_grpc_port: lattice_operator::DEFAULT_GRPC_PORT,
+            parent_grpc_port: lattice_common::DEFAULT_GRPC_PORT,
             relax_fips: self
                 .cluster
                 .spec

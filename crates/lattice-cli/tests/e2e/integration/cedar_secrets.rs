@@ -25,7 +25,7 @@
 use std::time::Duration;
 
 use kube::api::{Api, PostParams};
-use lattice_operator::crd::LatticeService;
+use lattice_common::crd::LatticeService;
 use tracing::info;
 
 use super::super::context::InfraContext;
@@ -433,7 +433,7 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
 
 /// Run all Cedar secret authorization tests.
 ///
-/// Called from E2E pivot_e2e.rs Phase 6.6 and from standalone test below.
+/// Called from unified_e2e.rs and per-integration cedar_secrets_e2e.rs.
 pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
     let kubeconfig = ctx.require_workload()?;
 

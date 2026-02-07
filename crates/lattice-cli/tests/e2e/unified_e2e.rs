@@ -1,42 +1,37 @@
-//! Full E2E test for Lattice installation, pivot, and unpivot flow
+//! Unified E2E test for Lattice: full lifecycle with all integration tests
 //!
-//! This test validates the complete Lattice lifecycle:
+//! This test validates the complete Lattice lifecycle by running ALL integration
+//! tests in sequence against a shared cluster hierarchy. Use this when you want
+//! comprehensive coverage in a single run.
+//!
+//! For isolated, per-integration E2E tests, see the individual `*_e2e.rs` files.
+//!
+//! # Phases
+//!
 //! 1. Set up cluster hierarchy (mgmt -> workload, optionally -> workload2)
-//! 2. Run mesh tests on workload cluster
-//! 3. Run secrets tests if Vault is reachable (via docker-compose)
-//! 4. Delete workload2 if enabled (unpivot to workload)
-//! 5. Delete workload (unpivot to mgmt)
-//! 6. Uninstall management cluster
+//! 2. Kubeconfig + proxy verification
+//! 3. Cedar policy enforcement
+//! 4. Multi-hop proxy (if workload2)
+//! 5. Mesh + secrets tests (parallel) + workload2 deletion
+//! 6. Workload deletion (unpivot to mgmt)
+//! 7. Management cluster uninstall
 //!
 //! # Running
 //!
 //! ```bash
-//! # Start Vault first
-//! docker compose up -d
-//!
-//! # Run E2E tests
-//! cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
+//! cargo test --features provider-e2e --test e2e test_configurable_provider_pivot -- --nocapture
 //! ```
-//!
-//! # Environment Variables
-//!
-//! - `LATTICE_MGMT_CLUSTER_CONFIG`: Path to LatticeCluster YAML for management cluster
-//! - `LATTICE_WORKLOAD_CLUSTER_CONFIG`: Path to LatticeCluster YAML for workload cluster
-//! - `LATTICE_WORKLOAD2_CLUSTER_CONFIG`: Path to LatticeCluster YAML for second workload cluster
-//! - `LATTICE_ENABLE_WORKLOAD2=1`: Enable workload2 cluster (default: disabled for faster iteration)
-//! - `LATTICE_ENABLE_MESH_TEST=true`: Enable service mesh validation tests (default: true)
 
 #![cfg(feature = "provider-e2e")]
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use tracing::info;
 
-use lattice_cli::commands::uninstall::{UninstallArgs, Uninstaller};
-
 use super::context::init_e2e_test;
-use super::helpers::{run_id, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME};
+use super::helpers::{
+    run_id, teardown_mgmt_cluster, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+};
 use super::integration::{self, setup};
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -225,24 +220,8 @@ async fn run_full_e2e() -> Result<(), String> {
     // Chaos continues running - uninstall should be resilient to pod restarts
     info!("[Phase 9] Uninstalling management cluster...");
 
-    let uninstall_args = UninstallArgs {
-        kubeconfig: PathBuf::from(&ctx.mgmt_kubeconfig),
-        name: Some(MGMT_CLUSTER_NAME.to_string()),
-        yes: true,
-        keep_bootstrap_on_failure: false,
-        run_id: Some(run_id().to_string()),
-    };
+    teardown_mgmt_cluster(&ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME).await?;
 
-    let uninstaller = Uninstaller::new(&uninstall_args)
-        .await
-        .map_err(|e| format!("Failed to create uninstaller: {}", e))?;
-
-    uninstaller
-        .run()
-        .await
-        .map_err(|e| format!("Uninstall failed: {}", e))?;
-
-    info!("SUCCESS: Management cluster uninstalled!");
     info!("E2E test complete: full lifecycle verified");
 
     Ok(())

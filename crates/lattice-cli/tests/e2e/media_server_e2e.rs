@@ -14,7 +14,7 @@ use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, PostParams};
 
-use lattice_operator::crd::LatticeService;
+use lattice_common::crd::LatticeService;
 
 use super::helpers::{client_from_kubeconfig, load_service_config, run_cmd, wait_for_condition};
 

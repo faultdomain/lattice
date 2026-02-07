@@ -183,9 +183,16 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    fn make_spec_with_secrets(
-        secrets: Vec<(&str, &str, &str, Option<Vec<&str>>, Option<&str>)>, // (name, vault_path, provider, keys, refresh_interval)
-    ) -> LatticeServiceSpec {
+    /// (name, vault_path, provider, keys, refresh_interval)
+    type SecretTuple<'a> = (
+        &'a str,
+        &'a str,
+        &'a str,
+        Option<Vec<&'a str>>,
+        Option<&'a str>,
+    );
+
+    fn make_spec_with_secrets(secrets: Vec<SecretTuple<'_>>) -> LatticeServiceSpec {
         let mut resources = BTreeMap::new();
 
         for (name, vault_path, provider, keys, refresh_interval) in secrets {

@@ -2,7 +2,7 @@
 
 use kube::api::ListParams;
 use kube::Api;
-use lattice_operator::crd::LatticeBackupPolicy;
+use lattice_common::crd::LatticeBackupPolicy;
 
 use crate::{Error, Result};
 

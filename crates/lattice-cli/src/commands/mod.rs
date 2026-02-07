@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
-use lattice_operator::crd::ProviderType;
+use lattice_common::crd::ProviderType;
 use tracing::{debug, warn};
 
 use crate::{Error, Result};

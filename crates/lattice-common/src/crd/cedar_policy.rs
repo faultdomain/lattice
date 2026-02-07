@@ -7,6 +7,8 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::default_true;
+
 /// CedarPolicy defines access control policies for Lattice.
 ///
 /// Policies are written in the Cedar policy language and evaluated by the
@@ -78,10 +80,6 @@ pub struct CedarPolicySpec {
     /// When true, policy is distributed down the hierarchy
     #[serde(default = "default_true")]
     pub propagate: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// CedarPolicy status

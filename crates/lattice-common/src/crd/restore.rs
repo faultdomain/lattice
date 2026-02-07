@@ -8,6 +8,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::default_true;
 use super::types::Condition;
 
 /// Restore ordering strategy
@@ -120,16 +121,12 @@ pub struct LatticeRestoreSpec {
     pub backup_policy_ref: Option<String>,
 
     /// Whether to restore persistent volumes
-    #[serde(default = "default_restore_volumes")]
+    #[serde(default = "default_true")]
     pub restore_volumes: bool,
 
     /// Restore ordering strategy
     #[serde(default)]
     pub ordering: RestoreOrdering,
-}
-
-fn default_restore_volumes() -> bool {
-    true
 }
 
 #[cfg(test)]

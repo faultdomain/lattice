@@ -3,8 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::bootstrap::ManifestGenerator;
-use crate::parent::ParentServers;
+use lattice_cell::bootstrap::ManifestGenerator;
+use lattice_cell::parent::ParentServers;
 
 /// Start background CA rotation task (checks daily)
 pub fn start_ca_rotation<G: ManifestGenerator + 'static>(parent_servers: Arc<ParentServers<G>>) {

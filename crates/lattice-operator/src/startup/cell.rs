@@ -15,7 +15,7 @@ use lattice_common::{
     DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
 };
 
-use crate::crd::{LatticeCluster, ProviderType};
+use lattice_common::crd::{LatticeCluster, ProviderType};
 
 use super::polling::{
     wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT, LOAD_BALANCER_POLL_INTERVAL,

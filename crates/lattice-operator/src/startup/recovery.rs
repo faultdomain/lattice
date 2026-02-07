@@ -10,9 +10,9 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 use serde::de::DeserializeOwned;
 
-use crate::bootstrap::{BootstrapState, ClusterRegistration, ManifestGenerator};
-use crate::crd::{ClusterPhase, LatticeCluster};
-use crate::parent::ParentServers;
+use lattice_cell::bootstrap::{BootstrapState, ClusterRegistration, ManifestGenerator};
+use lattice_cell::parent::ParentServers;
+use lattice_common::crd::{ClusterPhase, LatticeCluster};
 
 use super::cell::discover_cell_host;
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL};

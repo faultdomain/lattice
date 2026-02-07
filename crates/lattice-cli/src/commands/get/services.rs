@@ -5,7 +5,7 @@
 
 use kube::api::ListParams;
 use kube::Api;
-use lattice_operator::crd::LatticeService;
+use lattice_common::crd::LatticeService;
 
 use crate::{Error, Result};
 

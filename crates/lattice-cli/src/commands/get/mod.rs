@@ -102,6 +102,7 @@ pub async fn run(args: GetArgs) -> Result<()> {
         GetResource::Backups { policy } => {
             backups::run(kc, policy.as_deref(), cluster, &args.output).await
         }
+        GetResource::Backups { policy } => backups::run(kc, policy.as_deref(), &args.output).await,
         GetResource::Hierarchy => hierarchy::run(kc, &args.output).await,
         GetResource::Health => health::run(kc, &args.output).await,
     }

@@ -207,6 +207,7 @@ pub(crate) async fn run_helm_template(
             chart_path,
             "--namespace",
             namespace,
+            "--include-crds",
         ])
         .args(extra_args)
         .output()
