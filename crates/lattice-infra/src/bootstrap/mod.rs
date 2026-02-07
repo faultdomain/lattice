@@ -10,6 +10,8 @@ pub mod cilium;
 pub mod eso;
 pub mod gpu;
 pub mod istio;
+pub mod prometheus;
+pub mod prometheus_adapter;
 pub mod velero;
 
 use kube::ResourceExt;
@@ -91,6 +93,17 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
 
     // Velero (for backup and restore)
     manifests.extend(velero::generate_velero().await?.iter().cloned());
+
+    // VictoriaMetrics K8s Stack (HA metrics backend)
+    manifests.extend(prometheus::generate_prometheus().await?.iter().cloned());
+
+    // Prometheus Adapter (custom metrics HPA)
+    manifests.extend(
+        prometheus_adapter::generate_prometheus_adapter()
+            .await?
+            .iter()
+            .cloned(),
+    );
 
     // GPU stack (NFD + NVIDIA device plugin + HAMi)
     if config.gpu {

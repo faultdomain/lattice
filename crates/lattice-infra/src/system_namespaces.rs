@@ -24,6 +24,9 @@ pub const CERT: &[&str] = &["cert-manager"];
 /// GPU infrastructure namespaces (GPU Operator + HAMi)
 pub const GPU: &[&str] = &["gpu-operator", "hami-system"];
 
+/// Monitoring namespaces (VictoriaMetrics + Prometheus Adapter)
+pub const MONITORING: &[&str] = &["monitoring"];
+
 /// Cluster API namespaces (core + bootstrap + control plane + providers)
 pub const CAPI: &[&str] = &[
     "capi-system",
@@ -49,6 +52,7 @@ pub fn all() -> Vec<&'static str> {
         .chain(MESH.iter())
         .chain(CERT.iter())
         .chain(GPU.iter())
+        .chain(MONITORING.iter())
         .chain(CAPI.iter())
         .copied()
         .collect();
@@ -87,6 +91,7 @@ mod tests {
         assert!(namespaces.contains(&"istio-system"));
         assert!(namespaces.contains(&"cert-manager"));
         assert!(namespaces.contains(&"capi-system"));
+        assert!(namespaces.contains(&"monitoring"));
     }
 
     #[test]

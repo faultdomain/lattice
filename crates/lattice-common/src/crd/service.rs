@@ -933,12 +933,32 @@ pub struct ReplicaSpec {
     /// Maximum replicas
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<u32>,
+
+    /// Custom autoscaling metrics (defaults to cpu at 80% if empty)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub autoscaling: Vec<AutoscalingMetric>,
 }
 
 impl Default for ReplicaSpec {
     fn default() -> Self {
-        Self { min: 1, max: None }
+        Self {
+            min: 1,
+            max: None,
+            autoscaling: vec![],
+        }
     }
+}
+
+/// Autoscaling metric specification
+///
+/// Built-in metrics ("cpu", "memory") use resource utilization percentage.
+/// Custom metrics (e.g. "vllm_num_requests_waiting") use pods average value.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct AutoscalingMetric {
+    /// Metric name ("cpu", "memory", or a custom Prometheus metric)
+    pub metric: String,
+    /// Target value (percentage for cpu/memory, absolute for custom metrics)
+    pub target: u32,
 }
 
 /// Deployment strategy
@@ -1396,6 +1416,27 @@ impl LatticeServiceSpec {
                 return Err(crate::Error::validation(
                     "min replicas cannot exceed max replicas",
                 ));
+            }
+        }
+
+        // Validate autoscaling metrics
+        if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
+            return Err(crate::Error::validation(
+                "autoscaling metrics require max replicas to be set",
+            ));
+        }
+        for m in &self.replicas.autoscaling {
+            if m.target == 0 {
+                return Err(crate::Error::validation(format!(
+                    "autoscaling metric '{}' target must be greater than 0",
+                    m.metric
+                )));
+            }
+            if (m.metric == "cpu" || m.metric == "memory") && m.target > 100 {
+                return Err(crate::Error::validation(format!(
+                    "autoscaling metric '{}' target cannot exceed 100%",
+                    m.metric
+                )));
             }
         }
 
@@ -1969,6 +2010,7 @@ mod tests {
         spec.replicas = ReplicaSpec {
             min: 5,
             max: Some(3),
+            autoscaling: vec![],
         };
 
         let result = spec.validate();
@@ -3509,5 +3551,72 @@ gpu:
             ..Default::default()
         });
         assert!(spec.validate().is_err());
+    }
+
+    // =========================================================================
+    // Autoscaling Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn autoscaling_target_zero_fails() {
+        let mut spec = sample_service_spec();
+        spec.replicas.max = Some(10);
+        spec.replicas.autoscaling = vec![AutoscalingMetric {
+            metric: "cpu".to_string(),
+            target: 0,
+        }];
+        let result = spec.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn autoscaling_cpu_over_100_fails() {
+        let mut spec = sample_service_spec();
+        spec.replicas.max = Some(10);
+        spec.replicas.autoscaling = vec![AutoscalingMetric {
+            metric: "cpu".to_string(),
+            target: 120,
+        }];
+        let result = spec.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cannot exceed 100%"));
+    }
+
+    #[test]
+    fn autoscaling_memory_over_100_fails() {
+        let mut spec = sample_service_spec();
+        spec.replicas.max = Some(10);
+        spec.replicas.autoscaling = vec![AutoscalingMetric {
+            metric: "memory".to_string(),
+            target: 150,
+        }];
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn autoscaling_without_max_fails() {
+        let mut spec = sample_service_spec();
+        spec.replicas.autoscaling = vec![AutoscalingMetric {
+            metric: "cpu".to_string(),
+            target: 80,
+        }];
+        let result = spec.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("max replicas"));
+    }
+
+    #[test]
+    fn autoscaling_custom_metric_over_100_allowed() {
+        let mut spec = sample_service_spec();
+        spec.replicas.max = Some(10);
+        spec.replicas.autoscaling = vec![AutoscalingMetric {
+            metric: "vllm_num_requests_waiting".to_string(),
+            target: 200,
+        }];
+        assert!(spec.validate().is_ok());
     }
 }

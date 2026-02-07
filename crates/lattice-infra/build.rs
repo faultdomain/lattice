@@ -67,6 +67,14 @@ fn main() {
         "cargo:rustc-env=HAMI_VERSION={}",
         versions.charts["hami"].version
     );
+    println!(
+        "cargo:rustc-env=PROMETHEUS_ADAPTER_VERSION={}",
+        versions.charts["prometheus-adapter"].version
+    );
+    println!(
+        "cargo:rustc-env=VICTORIA_METRICS_VERSION={}",
+        versions.charts["victoria-metrics-k8s-stack"].version
+    );
 
     let charts_dir = workspace_root.join("test-charts");
     println!(

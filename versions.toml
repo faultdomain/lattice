@@ -89,6 +89,18 @@ repo = "https://project-hami.github.io/HAMi"
 chart = "hami/hami"
 filename = "hami-{version}.tgz"
 
+[charts.prometheus-adapter]
+version = "4.11.0"
+repo = "https://prometheus-community.github.io/helm-charts"
+chart = "prometheus-community/prometheus-adapter"
+filename = "prometheus-adapter-{version}.tgz"
+
+[charts.victoria-metrics-k8s-stack]
+version = "0.69.0"
+repo = "https://victoriametrics.github.io/helm-charts"
+chart = "vm/victoria-metrics-k8s-stack"
+filename = "victoria-metrics-k8s-stack-{version}.tgz"
+
 # =============================================================================
 # Gateway API CRDs (YAML download, not a Helm chart)
 # =============================================================================

@@ -43,14 +43,14 @@ pub use secrets_provider::{
     VaultAuthMethod,
 };
 pub use service::{
-    BackupHook, BackupHooksSpec, CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec,
-    DeployStrategy, ExecProbe, FileMount, GPUSpec, HookErrorAction, HttpGetProbe, HttpHeader,
-    InboundPolicy, IngressPath, IngressSpec, IngressTls, LatticeService, LatticeServiceSpec,
-    LatticeServiceStatus, OutboundPolicy, PathMatchType, PortSpec, Probe, RateLimitConfig,
-    RateLimitSpec, ReplicaSpec, ResourceMetadata, ResourceQuantity, ResourceRequirements,
-    ResourceSpec, ResourceType, RetryConfig, SecurityContext, ServiceBackupSpec, ServicePhase,
-    ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode, VolumeAccessMode, VolumeBackupDefault,
-    VolumeBackupSpec, VolumeMount, VolumeParams,
+    AutoscalingMetric, BackupHook, BackupHooksSpec, CertIssuerRef, ContainerSpec,
+    DependencyDirection, DeploySpec, DeployStrategy, ExecProbe, FileMount, GPUSpec,
+    HookErrorAction, HttpGetProbe, HttpHeader, InboundPolicy, IngressPath, IngressSpec, IngressTls,
+    LatticeService, LatticeServiceSpec, LatticeServiceStatus, OutboundPolicy, PathMatchType,
+    PortSpec, Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata,
+    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RetryConfig,
+    SecurityContext, ServiceBackupSpec, ServicePhase, ServicePortsSpec, SidecarSpec, TimeoutConfig,
+    TlsMode, VolumeAccessMode, VolumeBackupDefault, VolumeBackupSpec, VolumeMount, VolumeParams,
 };
 pub use service_policy::{
     LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,

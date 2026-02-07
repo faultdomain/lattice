@@ -172,7 +172,11 @@ pub fn build_lattice_service(
             containers,
             resources,
             service: if has_port { Some(http_port()) } else { None },
-            replicas: ReplicaSpec { min: 1, max: None },
+            replicas: ReplicaSpec {
+                min: 1,
+                max: None,
+                autoscaling: vec![],
+            },
             deploy: DeploySpec::default(),
             ingress: None,
             sidecars: BTreeMap::new(),

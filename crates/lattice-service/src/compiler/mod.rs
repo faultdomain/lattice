@@ -360,7 +360,11 @@ mod tests {
                 containers,
                 resources: BTreeMap::new(),
                 service: Some(ServicePortsSpec { ports }),
-                replicas: ReplicaSpec { min: 1, max: None },
+                replicas: ReplicaSpec {
+                    min: 1,
+                    max: None,
+                    autoscaling: vec![],
+                },
                 deploy: DeploySpec::default(),
                 ingress: None,
                 sidecars: BTreeMap::new(),

@@ -793,9 +793,12 @@ pub struct MetricSpec {
     /// Metric type
     #[serde(rename = "type")]
     pub type_: String,
-    /// Resource metric
+    /// Resource metric (for cpu/memory)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<ResourceMetricSource>,
+    /// Pods metric (for custom Prometheus metrics)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pods: Option<PodsMetricSource>,
 }
 
 /// Resource metric source
@@ -815,9 +818,30 @@ pub struct MetricTarget {
     /// Target type
     #[serde(rename = "type")]
     pub type_: String,
-    /// Average utilization percentage
+    /// Average utilization percentage (for Resource type)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub average_utilization: Option<u32>,
+    /// Average value (for Pods type, e.g. "5")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_value: Option<String>,
+}
+
+/// Pods metric source (for custom Prometheus metrics)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PodsMetricSource {
+    /// Metric identifier
+    pub metric: MetricIdentifier,
+    /// Target value
+    pub target: MetricTarget,
+}
+
+/// Metric identifier for pods metrics
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricIdentifier {
+    /// Metric name (e.g. "vllm_num_requests_waiting")
+    pub name: String,
 }
 
 // =============================================================================
@@ -876,7 +900,9 @@ impl GeneratedWorkloads {
 // Workload Compiler
 // =============================================================================
 
-use crate::crd::{DeployStrategy, GPUSpec, LatticeService, LatticeServiceSpec, ProviderType};
+use crate::crd::{
+    AutoscalingMetric, DeployStrategy, GPUSpec, LatticeService, LatticeServiceSpec, ProviderType,
+};
 use lattice_common::mesh;
 
 /// Merge GPU resource requests into container limits.
@@ -1491,6 +1517,48 @@ impl WorkloadCompiler {
         namespace: &str,
         spec: &LatticeServiceSpec,
     ) -> HorizontalPodAutoscaler {
+        // Default to cpu at 80% if no autoscaling metrics specified
+        let autoscaling = if spec.replicas.autoscaling.is_empty() {
+            vec![AutoscalingMetric {
+                metric: "cpu".to_string(),
+                target: 80,
+            }]
+        } else {
+            spec.replicas.autoscaling.clone()
+        };
+
+        let metrics = autoscaling
+            .iter()
+            .map(|m| match m.metric.as_str() {
+                "cpu" | "memory" => MetricSpec {
+                    type_: "Resource".to_string(),
+                    resource: Some(ResourceMetricSource {
+                        name: m.metric.clone(),
+                        target: MetricTarget {
+                            type_: "Utilization".to_string(),
+                            average_utilization: Some(m.target),
+                            average_value: None,
+                        },
+                    }),
+                    pods: None,
+                },
+                _ => MetricSpec {
+                    type_: "Pods".to_string(),
+                    resource: None,
+                    pods: Some(PodsMetricSource {
+                        metric: MetricIdentifier {
+                            name: m.metric.clone(),
+                        },
+                        target: MetricTarget {
+                            type_: "AverageValue".to_string(),
+                            average_utilization: None,
+                            average_value: Some(m.target.to_string()),
+                        },
+                    }),
+                },
+            })
+            .collect();
+
         HorizontalPodAutoscaler {
             api_version: "autoscaling/v2".to_string(),
             kind: "HorizontalPodAutoscaler".to_string(),
@@ -1503,16 +1571,7 @@ impl WorkloadCompiler {
                 },
                 min_replicas: spec.replicas.min,
                 max_replicas: spec.replicas.max.unwrap_or(spec.replicas.min),
-                metrics: vec![MetricSpec {
-                    type_: "Resource".to_string(),
-                    resource: Some(ResourceMetricSource {
-                        name: "cpu".to_string(),
-                        target: MetricTarget {
-                            type_: "Utilization".to_string(),
-                            average_utilization: Some(80),
-                        },
-                    }),
-                }],
+                metrics,
             },
         }
     }
@@ -1525,7 +1584,10 @@ impl WorkloadCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ContainerSpec, DeploySpec, GPUSpec, PortSpec, ReplicaSpec, ServicePortsSpec};
+    use crate::crd::{
+        AutoscalingMetric, ContainerSpec, DeploySpec, GPUSpec, PortSpec, ReplicaSpec,
+        ServicePortsSpec,
+    };
     use lattice_common::template::TemplateString;
 
     /// Helper to compile a service with empty volumes (for basic tests)
@@ -1585,7 +1647,11 @@ mod tests {
                 containers,
                 resources: BTreeMap::new(),
                 service: Some(ServicePortsSpec { ports }),
-                replicas: ReplicaSpec { min: 1, max: None },
+                replicas: ReplicaSpec {
+                    min: 1,
+                    max: None,
+                    autoscaling: vec![],
+                },
                 deploy: DeploySpec::default(),
                 ingress: None,
                 sidecars: BTreeMap::new(),
@@ -1734,6 +1800,7 @@ mod tests {
         service.spec.replicas = ReplicaSpec {
             min: 2,
             max: Some(10),
+            autoscaling: vec![],
         };
 
         let output = compile_service(&service);
@@ -1752,6 +1819,132 @@ mod tests {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
         assert!(output.hpa.is_none());
+    }
+
+    #[test]
+    fn hpa_default_cpu_80() {
+        let mut service = make_service("my-app", "default");
+        service.spec.replicas = ReplicaSpec {
+            min: 1,
+            max: Some(5),
+            autoscaling: vec![],
+        };
+        let output = compile_service(&service);
+        let hpa = output.hpa.expect("should have HPA");
+        assert_eq!(hpa.spec.metrics.len(), 1);
+        let m = &hpa.spec.metrics[0];
+        assert_eq!(m.type_, "Resource");
+        let resource = m.resource.as_ref().expect("should have resource");
+        assert_eq!(resource.name, "cpu");
+        assert_eq!(resource.target.average_utilization, Some(80));
+    }
+
+    #[test]
+    fn hpa_custom_cpu_threshold() {
+        let mut service = make_service("my-app", "default");
+        service.spec.replicas = ReplicaSpec {
+            min: 1,
+            max: Some(5),
+            autoscaling: vec![AutoscalingMetric {
+                metric: "cpu".to_string(),
+                target: 60,
+            }],
+        };
+        let output = compile_service(&service);
+        let hpa = output.hpa.expect("should have HPA");
+        assert_eq!(hpa.spec.metrics.len(), 1);
+        let resource = hpa.spec.metrics[0]
+            .resource
+            .as_ref()
+            .expect("should have resource");
+        assert_eq!(resource.name, "cpu");
+        assert_eq!(resource.target.average_utilization, Some(60));
+    }
+
+    #[test]
+    fn hpa_memory_metric() {
+        let mut service = make_service("my-app", "default");
+        service.spec.replicas = ReplicaSpec {
+            min: 1,
+            max: Some(5),
+            autoscaling: vec![AutoscalingMetric {
+                metric: "memory".to_string(),
+                target: 75,
+            }],
+        };
+        let output = compile_service(&service);
+        let hpa = output.hpa.expect("should have HPA");
+        assert_eq!(hpa.spec.metrics.len(), 1);
+        let resource = hpa.spec.metrics[0]
+            .resource
+            .as_ref()
+            .expect("should have resource");
+        assert_eq!(resource.name, "memory");
+        assert_eq!(resource.target.type_, "Utilization");
+        assert_eq!(resource.target.average_utilization, Some(75));
+    }
+
+    #[test]
+    fn hpa_custom_pods_metric() {
+        let mut service = make_service("my-app", "default");
+        service.spec.replicas = ReplicaSpec {
+            min: 1,
+            max: Some(10),
+            autoscaling: vec![AutoscalingMetric {
+                metric: "vllm_num_requests_waiting".to_string(),
+                target: 5,
+            }],
+        };
+        let output = compile_service(&service);
+        let hpa = output.hpa.expect("should have HPA");
+        assert_eq!(hpa.spec.metrics.len(), 1);
+        let m = &hpa.spec.metrics[0];
+        assert_eq!(m.type_, "Pods");
+        assert!(m.resource.is_none());
+        let pods = m.pods.as_ref().expect("should have pods metric");
+        assert_eq!(pods.metric.name, "vllm_num_requests_waiting");
+        assert_eq!(pods.target.type_, "AverageValue");
+        assert_eq!(pods.target.average_value, Some("5".to_string()));
+    }
+
+    #[test]
+    fn hpa_multi_signal() {
+        let mut service = make_service("my-app", "default");
+        service.spec.replicas = ReplicaSpec {
+            min: 1,
+            max: Some(10),
+            autoscaling: vec![
+                AutoscalingMetric {
+                    metric: "cpu".to_string(),
+                    target: 70,
+                },
+                AutoscalingMetric {
+                    metric: "vllm_num_requests_waiting".to_string(),
+                    target: 5,
+                },
+            ],
+        };
+        let output = compile_service(&service);
+        let hpa = output.hpa.expect("should have HPA");
+        assert_eq!(hpa.spec.metrics.len(), 2);
+        assert_eq!(hpa.spec.metrics[0].type_, "Resource");
+        assert_eq!(hpa.spec.metrics[1].type_, "Pods");
+    }
+
+    #[test]
+    fn hpa_backwards_compatible() {
+        let mut service = make_service("my-app", "default");
+        service.spec.replicas = ReplicaSpec {
+            min: 2,
+            max: Some(8),
+            autoscaling: vec![],
+        };
+        let output = compile_service(&service);
+        let hpa = output.hpa.expect("should have HPA");
+        assert_eq!(hpa.spec.min_replicas, 2);
+        assert_eq!(hpa.spec.max_replicas, 8);
+        assert_eq!(hpa.spec.metrics.len(), 1);
+        assert_eq!(hpa.spec.metrics[0].type_, "Resource");
     }
 
     // =========================================================================
