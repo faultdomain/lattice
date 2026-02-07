@@ -8,6 +8,8 @@ metadata:
     lattice.dev/environment: e2e-test
     lattice.dev/region: local
 spec:
+  monitoring: false
+  backups: false
   providerRef: openstack
   provider:
     kubernetes:

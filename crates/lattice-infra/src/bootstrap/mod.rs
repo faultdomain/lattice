@@ -1,7 +1,7 @@
 //! Infrastructure manifest generation
 //!
 //! Single source of truth for ALL infrastructure manifests.
-//! Used by operator startup (`ensure_cluster_infrastructure` / `ensure_service_infrastructure`)
+//! Used by operator startup (`ensure_infrastructure`)
 //! to install Istio, Gateway API CRDs, ESO, Velero, VictoriaMetrics, KEDA, and GPU stack.
 //!
 //! Server-side apply handles idempotency - no need to check if installed.

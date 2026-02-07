@@ -218,7 +218,7 @@ pub trait ManifestGenerator: Send + Sync {
 /// - LatticeCluster CRD definition + instance
 ///
 /// Infrastructure components (Istio, ESO, Velero, VictoriaMetrics, KEDA, GPU stack)
-/// are deferred to operator startup via `ensure_cluster_infrastructure()`.
+/// are deferred to operator startup via `ensure_infrastructure()`.
 #[derive(Debug, Clone)]
 pub struct BootstrapBundleConfig<'a> {
     /// Container image for the operator

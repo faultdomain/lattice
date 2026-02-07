@@ -46,9 +46,8 @@ use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
 use lattice_operator::forwarder::SubtreeForwarder;
 use lattice_operator::startup::{
-    ensure_cluster_crds, ensure_cluster_infrastructure, ensure_provider_crds, ensure_service_crds,
-    ensure_service_infrastructure, get_cell_server_sans, re_register_existing_clusters,
-    start_ca_rotation, wait_for_api_ready_for,
+    ensure_cluster_crds, ensure_infrastructure, ensure_provider_crds, ensure_service_crds,
+    get_cell_server_sans, re_register_existing_clusters, start_ca_rotation, wait_for_api_ready_for,
 };
 use lattice_service::controller::DiscoveredCrds;
 
@@ -270,7 +269,7 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     ensure_cluster_crds(client).await?;
 
     // 2. Install cluster infrastructure (CAPI, network policies)
-    ensure_cluster_infrastructure(client, &*capi_installer).await?;
+    ensure_infrastructure(client, Some(&*capi_installer)).await?;
 
     // 3. Wait for API readiness using LatticeCluster
     wait_for_api_ready_for::<LatticeCluster>(client).await?;
@@ -307,7 +306,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     ensure_service_crds(client).await?;
 
     // 2. Install service infrastructure (Istio, Gateway API, ESO, Cilium)
-    ensure_service_infrastructure(client).await?;
+    ensure_infrastructure(client, None).await?;
 
     // 3. Wait for API readiness using LatticeService
     wait_for_api_ready_for::<LatticeService>(client).await?;
@@ -368,7 +367,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     ensure_provider_crds(client).await?;
 
     // 2. Install full infrastructure (reads from LatticeCluster CRD)
-    ensure_cluster_infrastructure(client, &*capi_installer).await?;
+    ensure_infrastructure(client, Some(&*capi_installer)).await?;
 
     // 3. Wait for API readiness
     wait_for_api_ready_for::<LatticeCluster>(client).await?;

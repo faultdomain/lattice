@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::time::Duration;
-use tokio::time::sleep;
 use tracing::info;
 
 use k8s_openapi::api::core::v1::Namespace;
@@ -248,7 +247,6 @@ async fn verify_node_colocation(kubeconfig_path: &str) -> Result<(), String> {
 
 async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying volume sharing...");
-    sleep(Duration::from_secs(5)).await;
 
     let exec = |deploy: &str, cmd: &str| -> Result<String, String> {
         run_cmd(
@@ -269,34 +267,63 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
     };
 
     // jellyfin writes to library/, sonarr reads it
-    exec("jellyfin", "echo 'jellyfin-marker' > /media/.test-marker")?;
-    let result = exec("sonarr", "cat /tv/.test-marker")?;
-    if !result.contains("jellyfin-marker") {
-        return Err("sonarr cannot read jellyfin's marker".into());
-    }
+    let kp = kubeconfig_path.to_string();
+    wait_for_condition(
+        "sonarr to read jellyfin's marker via shared volume",
+        Duration::from_secs(60),
+        Duration::from_secs(3),
+        || {
+            let kp = kp.clone();
+            async move {
+                let exec = |deploy: &str, cmd: &str| -> Result<String, String> {
+                    run_cmd(
+                        "kubectl",
+                        &[
+                            "--kubeconfig", &kp, "exec", "-n", NAMESPACE,
+                            &format!("deploy/{}", deploy), "--", "sh", "-c", cmd,
+                        ],
+                    )
+                };
+                let _ = exec("jellyfin", "echo 'jellyfin-marker' > /media/.test-marker");
+                match exec("sonarr", "cat /tv/.test-marker") {
+                    Ok(result) => Ok(result.contains("jellyfin-marker")),
+                    Err(_) => Ok(false),
+                }
+            }
+        },
+    )
+    .await?;
 
     // nzbget writes to downloads/, sonarr reads it
-    exec("nzbget", "echo 'nzbget-marker' > /downloads/.test-marker")?;
-    let result = exec("sonarr", "cat /downloads/.test-marker")?;
-    if !result.contains("nzbget-marker") {
-        return Err("sonarr cannot read nzbget's marker".into());
-    }
+    let kp = kubeconfig_path.to_string();
+    wait_for_condition(
+        "sonarr to read nzbget's marker via shared volume",
+        Duration::from_secs(60),
+        Duration::from_secs(3),
+        || {
+            let kp = kp.clone();
+            async move {
+                let exec = |deploy: &str, cmd: &str| -> Result<String, String> {
+                    run_cmd(
+                        "kubectl",
+                        &[
+                            "--kubeconfig", &kp, "exec", "-n", NAMESPACE,
+                            &format!("deploy/{}", deploy), "--", "sh", "-c", cmd,
+                        ],
+                    )
+                };
+                let _ = exec("nzbget", "echo 'nzbget-marker' > /downloads/.test-marker");
+                match exec("sonarr", "cat /downloads/.test-marker") {
+                    Ok(result) => Ok(result.contains("nzbget-marker")),
+                    Err(_) => Ok(false),
+                }
+            }
+        },
+    )
+    .await?;
 
     // Verify subpath isolation - jellyfin should NOT see nzbget's marker in its /media mount
-    let isolated = match run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "exec",
-            "-n",
-            NAMESPACE,
-            "deploy/jellyfin",
-            "--",
-            "cat",
-            "/media/.test-marker",
-        ],
-    ) {
+    let isolated = match exec("jellyfin", "cat /media/.test-marker") {
         Ok(result) => !result.contains("nzbget-marker"),
         Err(_) => true, // File doesn't exist - good, isolation works
     };

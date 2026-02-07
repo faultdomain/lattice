@@ -80,7 +80,6 @@ pub struct PortForward {
     healthy: Arc<AtomicBool>,
     /// Wakes callers blocked in `wait_for_ready()` when the port-forward becomes healthy.
     ready_notify: Arc<tokio::sync::Notify>,
-    watchdog_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl PortForward {
@@ -118,7 +117,7 @@ impl PortForward {
         // Capture the tokio handle so the watchdog thread can call async functions.
         let handle = tokio::runtime::Handle::current();
 
-        let watchdog_handle = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let cfg = WatchdogConfig {
                 kubeconfig: kc,
                 local_port: port,
@@ -142,7 +141,6 @@ impl PortForward {
             restart_count,
             healthy,
             ready_notify,
-            watchdog_handle: Some(watchdog_handle),
         })
     }
 
@@ -199,10 +197,11 @@ impl PortForward {
 impl Drop for PortForward {
     fn drop(&mut self) {
         info!("[PortForward] Stopping watchdog on port {}", self.port);
-        self.stop_flag.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.watchdog_handle.take() {
-            let _ = handle.join();
-        }
+        self.stop_flag.store(true, Ordering::Release);
+        // Don't join the watchdog thread here — Drop often runs on a tokio
+        // worker thread, and the watchdog uses handle.block_on() which needs
+        // the runtime to make progress.  Joining would deadlock.  The watchdog
+        // checks stop_flag every WATCHDOG_POLL_INTERVAL and exits on its own.
     }
 }
 

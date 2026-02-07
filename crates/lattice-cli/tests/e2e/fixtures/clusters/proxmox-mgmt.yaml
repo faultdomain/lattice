@@ -4,6 +4,8 @@ kind: LatticeCluster
 metadata:
   name: e2e-mgmt
 spec:
+  monitoring: false
+  backups: false
   providerRef: proxmox
   provider:
     kubernetes:
