@@ -368,6 +368,9 @@ pub struct PodSpec {
     /// Tolerations for scheduling onto tainted nodes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tolerations: Vec<Toleration>,
+    /// Runtime class name (e.g., "nvidia" for GPU workloads)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_class_name: Option<String>,
 }
 
 /// Topology spread constraint for distributing pods across failure domains
@@ -652,7 +655,11 @@ pub struct SecretVolumeSource {
 /// EmptyDir volume source
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct EmptyDirVolumeSource {}
+pub struct EmptyDirVolumeSource {
+    /// Storage medium ("Memory" for tmpfs, empty for default)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<String>,
+}
 
 /// Volume mount
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -920,6 +927,33 @@ fn gpu_node_selector(gpu: &Option<GPUSpec>) -> Option<BTreeMap<String, String>> 
     gpu.as_ref().and_then(|g| g.node_selector())
 }
 
+/// Build SHM volume and mount for GPU pods.
+///
+/// GPU workloads (NCCL, PyTorch DataLoader) require a large `/dev/shm` for
+/// shared-memory IPC. The default 64MB is insufficient. This adds an emptyDir
+/// volume with `medium: Memory` (tmpfs) mounted at `/dev/shm`.
+fn gpu_shm_volume(gpu: &Option<GPUSpec>) -> Option<(Volume, VolumeMount)> {
+    gpu.as_ref().map(|_| {
+        (
+            Volume {
+                name: "dshm".to_string(),
+                config_map: None,
+                secret: None,
+                empty_dir: Some(EmptyDirVolumeSource {
+                    medium: Some("Memory".to_string()),
+                }),
+                persistent_volume_claim: None,
+            },
+            VolumeMount {
+                name: "dshm".to_string(),
+                mount_path: "/dev/shm".to_string(),
+                sub_path: None,
+                read_only: None,
+            },
+        )
+    })
+}
+
 /// Compiler for generating Kubernetes workload resources from LatticeService
 ///
 /// This compiler generates:
@@ -1051,11 +1085,18 @@ impl WorkloadCompiler {
                     .map(Self::compile_probe);
 
                 // Get volume mounts for this container
-                let volume_mounts = volumes
+                let mut volume_mounts = volumes
                     .volume_mounts
                     .get(container_name)
                     .cloned()
                     .unwrap_or_default();
+
+                // Add SHM volume mount for GPU pods (first container only)
+                if idx == 0 {
+                    if let Some((_, shm_mount)) = gpu_shm_volume(&spec.gpu) {
+                        volume_mounts.push(shm_mount);
+                    }
+                }
 
                 // Compile security context
                 let security_context = container_spec
@@ -1335,7 +1376,7 @@ impl WorkloadCompiler {
         }
 
         // Build pod volumes from PVCs
-        let pod_volumes: Vec<Volume> = volumes
+        let mut pod_volumes: Vec<Volume> = volumes
             .volumes
             .iter()
             .map(|pv| Volume {
@@ -1346,6 +1387,11 @@ impl WorkloadCompiler {
                 persistent_volume_claim: pv.persistent_volume_claim.clone(),
             })
             .collect();
+
+        // Add SHM volume for GPU pods
+        if let Some((shm_vol, _)) = gpu_shm_volume(&spec.gpu) {
+            pod_volumes.push(shm_vol);
+        }
 
         let strategy = Self::compile_strategy(spec);
 
@@ -1396,6 +1442,7 @@ impl WorkloadCompiler {
                         }],
                         node_selector: gpu_node_selector(&spec.gpu),
                         tolerations: gpu_tolerations(&spec.gpu),
+                        runtime_class_name: spec.gpu.as_ref().map(|_| "nvidia".to_string()),
                     },
                 },
                 strategy,
@@ -2429,6 +2476,81 @@ mod tests {
         assert_eq!(json["nvidia.com/gpu"], "1");
         assert_eq!(json["nvidia.com/gpumem"], "8192");
         assert_eq!(json["nvidia.com/gpucores"], "30");
+    }
+
+    #[test]
+    fn gpu_deployment_has_shm_volume() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.gpu = Some(GPUSpec {
+            count: 1,
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        // Verify dshm volume exists with medium: Memory
+        let shm_vol = deployment
+            .spec
+            .template
+            .spec
+            .volumes
+            .iter()
+            .find(|v| v.name == "dshm")
+            .expect("should have dshm volume");
+        let empty_dir = shm_vol.empty_dir.as_ref().expect("should be emptyDir");
+        assert_eq!(empty_dir.medium, Some("Memory".to_string()));
+
+        // Verify first container has /dev/shm mount
+        let main = &deployment.spec.template.spec.containers[0];
+        let shm_mount = main
+            .volume_mounts
+            .iter()
+            .find(|vm| vm.name == "dshm")
+            .expect("should have dshm volume mount");
+        assert_eq!(shm_mount.mount_path, "/dev/shm");
+    }
+
+    #[test]
+    fn gpu_deployment_has_runtime_class() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.gpu = Some(GPUSpec {
+            count: 1,
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        assert_eq!(
+            deployment.spec.template.spec.runtime_class_name,
+            Some("nvidia".to_string())
+        );
+    }
+
+    #[test]
+    fn no_gpu_no_shm_or_runtime_class() {
+        let service = make_service("my-app", "default");
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        // No dshm volume
+        assert!(
+            !deployment
+                .spec
+                .template
+                .spec
+                .volumes
+                .iter()
+                .any(|v| v.name == "dshm"),
+            "non-GPU deployment should not have dshm volume"
+        );
+
+        // No runtimeClassName
+        assert!(
+            deployment.spec.template.spec.runtime_class_name.is_none(),
+            "non-GPU deployment should not have runtimeClassName"
+        );
     }
 
     #[test]
