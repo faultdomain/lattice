@@ -196,7 +196,7 @@ pub async fn reconcile_infrastructure(
     }
 
     // Generate infrastructure manifests
-    let manifests = lattice_infra::bootstrap::generate_all(&config)
+    let manifests = lattice_infra::bootstrap::generate_core(&config)
         .await
         .map_err(|e| Error::internal(format!("failed to generate infrastructure: {}", e)))?;
 

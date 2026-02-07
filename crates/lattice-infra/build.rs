@@ -54,8 +54,12 @@ fn run_helm_template(
         panic!("helm template {} failed: {}", release_name, stderr);
     }
 
-    String::from_utf8(output.stdout)
-        .unwrap_or_else(|e| panic!("helm template {} produced invalid UTF-8: {}", release_name, e))
+    String::from_utf8(output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "helm template {} produced invalid UTF-8: {}",
+            release_name, e
+        )
+    })
 }
 
 fn main() {
@@ -76,8 +80,7 @@ fn main() {
     let content = std::fs::read_to_string(&versions_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", versions_path.display(), e));
 
-    let versions: Versions =
-        toml::from_str(&content).expect("versions.toml should be valid TOML");
+    let versions: Versions = toml::from_str(&content).expect("versions.toml should be valid TOML");
 
     // --- Set version environment variables ---
 
@@ -110,8 +113,8 @@ fn main() {
         versions.charts["hami"].version
     );
     println!(
-        "cargo:rustc-env=PROMETHEUS_ADAPTER_VERSION={}",
-        versions.charts["prometheus-adapter"].version
+        "cargo:rustc-env=KEDA_VERSION={}",
+        versions.charts["keda"].version
     );
     println!(
         "cargo:rustc-env=VICTORIA_METRICS_VERSION={}",
@@ -133,22 +136,38 @@ fn main() {
         &chart(&format!("cilium-{}.tgz", versions.charts["cilium"].version)),
         "kube-system",
         &[
-            "--set", "hubble.enabled=false",
-            "--set", "hubble.relay.enabled=false",
-            "--set", "hubble.ui.enabled=false",
-            "--set", "prometheus.enabled=false",
-            "--set", "operator.prometheus.enabled=false",
-            "--set", "cni.exclusive=false",
-            "--set", "kubeProxyReplacement=false",
-            "--set", "l2announcements.enabled=true",
-            "--set", "externalIPs.enabled=true",
-            "--set", "hostFirewall.enabled=false",
-            "--set", "routingMode=tunnel",
-            "--set", "tunnelProtocol=vxlan",
-            "--set", "mtu=1450",
-            "--set", "ipam.mode=kubernetes",
-            "--set", "bpf.masquerade=false",
-            "--set", "bpf.hostLegacyRouting=true",
+            "--set",
+            "hubble.enabled=false",
+            "--set",
+            "hubble.relay.enabled=false",
+            "--set",
+            "hubble.ui.enabled=false",
+            "--set",
+            "prometheus.enabled=false",
+            "--set",
+            "operator.prometheus.enabled=false",
+            "--set",
+            "cni.exclusive=false",
+            "--set",
+            "kubeProxyReplacement=false",
+            "--set",
+            "l2announcements.enabled=true",
+            "--set",
+            "externalIPs.enabled=true",
+            "--set",
+            "hostFirewall.enabled=false",
+            "--set",
+            "routingMode=tunnel",
+            "--set",
+            "tunnelProtocol=vxlan",
+            "--set",
+            "mtu=1450",
+            "--set",
+            "ipam.mode=kubernetes",
+            "--set",
+            "bpf.masquerade=false",
+            "--set",
+            "bpf.hostLegacyRouting=true",
         ],
     );
     std::fs::write(out_dir.join("cilium.yaml"), yaml).expect("write cilium.yaml");
@@ -168,8 +187,10 @@ fn main() {
         &chart(&format!("cni-{}.tgz", istio_ver)),
         "istio-system",
         &[
-            "--set", "profile=ambient",
-            "--set", "cni.cniConfFileName=05-cilium.conflist",
+            "--set",
+            "profile=ambient",
+            "--set",
+            "cni.cniConfFileName=05-cilium.conflist",
         ],
     );
     std::fs::write(out_dir.join("istio-cni.yaml"), yaml).expect("write istio-cni.yaml");
@@ -180,10 +201,14 @@ fn main() {
         &chart(&format!("istiod-{}.tgz", istio_ver)),
         "istio-system",
         &[
-            "--set", "profile=ambient",
-            "--set", "meshConfig.trustDomain=lattice.__LATTICE_CLUSTER_NAME__.local",
-            "--set", "pilot.resources.requests.cpu=100m",
-            "--set", "pilot.resources.requests.memory=128Mi",
+            "--set",
+            "profile=ambient",
+            "--set",
+            "meshConfig.trustDomain=lattice.__LATTICE_CLUSTER_NAME__.local",
+            "--set",
+            "pilot.resources.requests.cpu=100m",
+            "--set",
+            "pilot.resources.requests.memory=128Mi",
         ],
     );
     std::fs::write(out_dir.join("istiod.yaml"), yaml).expect("write istiod.yaml");
@@ -213,15 +238,19 @@ fn main() {
     // 7. Velero
     let yaml = run_helm_template(
         "velero",
-        &chart(&format!(
-            "velero-{}.tgz",
-            versions.charts["velero"].version
-        )),
+        &chart(&format!("velero-{}.tgz", versions.charts["velero"].version)),
         "velero",
         &[
-            "--set", "deployNodeAgent=true",
-            "--set", "snapshotsEnabled=true",
-            "--set", "initContainers=null",
+            "--set",
+            "deployNodeAgent=true",
+            "--set",
+            "snapshotsEnabled=true",
+            "--set",
+            "initContainers=null",
+            "--set-json",
+            "configuration.backupStorageLocation=[]",
+            "--set-json",
+            "configuration.volumeSnapshotLocation=[]",
         ],
     );
     std::fs::write(out_dir.join("velero.yaml"), yaml).expect("write velero.yaml");
@@ -235,13 +264,20 @@ fn main() {
         )),
         "gpu-operator",
         &[
-            "--set", "driver.enabled=false",
-            "--set", "toolkit.enabled=true",
-            "--set", "devicePlugin.enabled=true",
-            "--set", "nfd.enabled=true",
-            "--set", "dcgmExporter.enabled=true",
-            "--set", "migManager.enabled=false",
-            "--set", "gfd.enabled=true",
+            "--set",
+            "driver.enabled=false",
+            "--set",
+            "toolkit.enabled=true",
+            "--set",
+            "devicePlugin.enabled=true",
+            "--set",
+            "nfd.enabled=true",
+            "--set",
+            "dcgmExporter.enabled=true",
+            "--set",
+            "migManager.enabled=false",
+            "--set",
+            "gfd.enabled=true",
         ],
     );
     std::fs::write(out_dir.join("gpu-operator.yaml"), yaml).expect("write gpu-operator.yaml");
@@ -249,10 +285,7 @@ fn main() {
     // 9. HAMi
     let yaml = run_helm_template(
         "hami",
-        &chart(&format!(
-            "hami-{}.tgz",
-            versions.charts["hami"].version
-        )),
+        &chart(&format!("hami-{}.tgz", versions.charts["hami"].version)),
         "hami-system",
         &["--set", "scheduler.enabled=true"],
     );
@@ -267,45 +300,41 @@ fn main() {
         )),
         "monitoring",
         &[
-            "--set", "fullnameOverride=lattice-metrics",
-            "--set", "vmcluster.enabled=true",
-            "--set", "vmcluster.spec.retentionPeriod=24h",
-            "--set", "vmcluster.spec.vmstorage.replicaCount=2",
-            "--set", "vmcluster.spec.vmselect.replicaCount=2",
-            "--set", "vmcluster.spec.vminsert.replicaCount=2",
-            "--set", "vmcluster.spec.replicationFactor=2",
-            "--set", "vmsingle.enabled=false",
-            "--set", "grafana.enabled=false",
-            "--set", "alertmanager.enabled=false",
-            "--set", "vmalert.enabled=false",
+            "--set",
+            "fullnameOverride=lattice-metrics",
+            "--set",
+            "vmcluster.enabled=true",
+            "--set",
+            "vmcluster.spec.retentionPeriod=24h",
+            "--set",
+            "vmcluster.spec.vmstorage.replicaCount=2",
+            "--set",
+            "vmcluster.spec.vmselect.replicaCount=2",
+            "--set",
+            "vmcluster.spec.vminsert.replicaCount=2",
+            "--set",
+            "vmcluster.spec.replicationFactor=2",
+            "--set",
+            "vmsingle.enabled=false",
+            "--set",
+            "grafana.enabled=false",
+            "--set",
+            "alertmanager.enabled=false",
+            "--set",
+            "vmalert.enabled=false",
         ],
     );
     std::fs::write(out_dir.join("victoria-metrics.yaml"), yaml)
         .expect("write victoria-metrics.yaml");
 
-    // 11. Prometheus Adapter
+    // 11. KEDA (event-driven autoscaler, replaces prometheus-adapter)
     let yaml = run_helm_template(
-        "prometheus-adapter",
-        &chart(&format!(
-            "prometheus-adapter-{}.tgz",
-            versions.charts["prometheus-adapter"].version
-        )),
-        "monitoring",
-        &[
-            "--set", "prometheus.url=http://lattice-metrics-vmselect.monitoring.svc",
-            "--set", "prometheus.port=8481",
-            "--set", "prometheus.path=/select/0/prometheus",
-            "--set", "rules.default=false",
-            "--set", "rules.custom[0].seriesQuery={namespace!=\"\",pod!=\"\"}",
-            "--set", "rules.custom[0].resources.overrides.namespace.resource=namespace",
-            "--set", "rules.custom[0].resources.overrides.pod.resource=pod",
-            "--set", "rules.custom[0].name.matches=^(.*)$",
-            "--set", "rules.custom[0].name.as=${1}",
-            "--set", "rules.custom[0].metricsQuery=avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)",
-        ],
+        "keda",
+        &chart(&format!("keda-{}.tgz", versions.charts["keda"].version)),
+        "keda",
+        &[],
     );
-    std::fs::write(out_dir.join("prometheus-adapter.yaml"), yaml)
-        .expect("write prometheus-adapter.yaml");
+    std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");
 
     // 12. Gateway API CRDs (just copy, not helm)
     let gw_ver = &versions.resources["gateway-api"].version;

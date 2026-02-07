@@ -12,8 +12,8 @@ pub mod cilium;
 pub mod eso;
 pub mod gpu;
 pub mod istio;
+pub mod keda;
 pub mod prometheus;
-pub mod prometheus_adapter;
 pub mod velero;
 
 use std::sync::LazyLock;
@@ -96,10 +96,12 @@ impl From<&LatticeCluster> for InfrastructureConfig {
     }
 }
 
-/// Generate core infrastructure manifests (Istio, Gateway API, ESO)
+/// Generate infrastructure manifests
 ///
 /// Used by both operator startup and full cluster bootstrap.
 /// All manifests are pre-rendered at build time — no subprocess execution.
+/// NOTE: cert-manager and CAPI providers are installed via `clusterctl init`,
+/// which manages their lifecycle (including upgrades).
 pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     let mut manifests = Vec::new();
 
@@ -120,29 +122,17 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
     // Velero (for backup and restore)
     manifests.extend(velero::generate_velero().iter().cloned());
 
-    // VictoriaMetrics K8s Stack (HA metrics backend)
-    manifests.extend(prometheus::generate_prometheus().iter().cloned());
 
-    // Prometheus Adapter (custom metrics HPA)
-    manifests.extend(prometheus_adapter::generate_prometheus_adapter().iter().cloned());
+    // VictoriaMetrics K8s Stack (HA metrics backend) + KEDA (event-driven autoscaling)
+    if config.monitoring {
+        manifests.extend(prometheus::generate_prometheus().iter().cloned());
+        manifests.extend(keda::generate_keda().iter().cloned());
+    }
 
     // GPU stack (NFD + NVIDIA device plugin + HAMi)
     if config.gpu {
         manifests.extend(gpu::generate_gpu_stack().iter().cloned());
     }
-
-    Ok(manifests)
-}
-
-/// Generate ALL infrastructure manifests for a self-managing cluster
-///
-/// Includes core infrastructure (Istio, Gateway API, ESO, Cilium policies).
-/// NOTE: cert-manager and CAPI providers are installed via `clusterctl init`,
-/// which manages their lifecycle (including upgrades).
-pub async fn generate_all(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
-    // Core infrastructure (Istio, Gateway API, ESO, Cilium policies)
-    // cert-manager and CAPI are installed via clusterctl init
-    let manifests = generate_core(config).await?;
 
     info!(
         total = manifests.len(),

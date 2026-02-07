@@ -3,7 +3,6 @@
 //! The LatticeRestore CRD triggers a restore from a Velero backup.
 //! It supports both standard Velero ordering and Lattice-aware two-phase ordering.
 
-use chrono::{DateTime, Utc};
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -60,10 +59,6 @@ pub struct LatticeRestoreStatus {
     #[serde(default)]
     pub phase: RestorePhase,
 
-    /// Number of items restored
-    #[serde(default)]
-    pub restored_items: u32,
-
     /// Name of the Velero Restore resource (phase 1 for LatticeAware)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velero_restore_name: Option<String>,
@@ -71,14 +66,6 @@ pub struct LatticeRestoreStatus {
     /// Name of the Velero Restore resource for phase 2 (LatticeAware only)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velero_restore_phase2_name: Option<String>,
-
-    /// Timestamp when restore started
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_time: Option<DateTime<Utc>>,
-
-    /// Timestamp when restore completed
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_time: Option<DateTime<Utc>>,
 
     /// Status conditions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -108,7 +95,6 @@ pub struct LatticeRestoreStatus {
     status = "LatticeRestoreStatus",
     printcolumn = r#"{"name":"Backup","type":"string","jsonPath":".spec.backupName"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
-    printcolumn = r#"{"name":"Items","type":"integer","jsonPath":".status.restoredItems"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]

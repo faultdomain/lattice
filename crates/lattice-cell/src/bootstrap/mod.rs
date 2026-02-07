@@ -410,7 +410,7 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
         backups: config.backups,
         external_secrets: config.external_secrets,
     };
-    let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config)
+    let infra_manifests = lattice_infra::bootstrap::generate_core(&infra_config)
         .await
         .map_err(|e| {
             BootstrapError::Internal(format!("failed to generate infrastructure: {}", e))
@@ -757,7 +757,11 @@ impl DefaultManifestGenerator {
         let mut manifests = Vec::new();
 
         // CNI manifests first (Cilium) - embedded at build time
-        manifests.extend(lattice_infra::bootstrap::cilium::generate_cilium_manifests().iter().cloned());
+        manifests.extend(
+            lattice_infra::bootstrap::cilium::generate_cilium_manifests()
+                .iter()
+                .cloned(),
+        );
 
         // Then operator manifests
         let operator_manifests = self

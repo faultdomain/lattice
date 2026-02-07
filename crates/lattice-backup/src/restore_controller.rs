@@ -7,19 +7,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{info, warn};
 
 use lattice_common::crd::{LatticeRestore, LatticeRestoreStatus, RestoreOrdering, RestorePhase};
-use lattice_common::kube_utils::HasApiResource;
 use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
-use crate::velero;
-
-/// Velero namespace
-const VELERO_NAMESPACE: &str = "velero";
+use crate::velero::{self, VELERO_NAMESPACE};
 
 /// Requeue interval while restore is in progress
 const REQUEUE_IN_PROGRESS_SECS: u64 = 15;
@@ -65,13 +61,18 @@ pub async fn reconcile(
                 RestoreOrdering::VeleroDefault => {
                     // Single Velero Restore
                     let velero_restore = build_velero_restore(&name, &restore, None);
-                    match apply_velero_resource(client, &velero_restore).await {
+                    match velero::apply_resource(
+                        client,
+                        &velero_restore,
+                        "lattice-restore-controller",
+                    )
+                    .await
+                    {
                         Ok(()) => {
                             update_status(
                                 client,
                                 &restore,
                                 RestorePhase::InProgress,
-                                None,
                                 Some("Velero Restore created".to_string()),
                             )
                             .await?;
@@ -82,7 +83,6 @@ pub async fn reconcile(
                                 client,
                                 &restore,
                                 RestorePhase::Failed,
-                                None,
                                 Some(format!("Failed to create Velero Restore: {}", e)),
                             )
                             .await?;
@@ -97,13 +97,18 @@ pub async fn reconcile(
                         &restore,
                         Some(DEPENDENCY_RESOURCES.iter().map(|s| s.to_string()).collect()),
                     );
-                    match apply_velero_resource(client, &deps_restore).await {
+                    match velero::apply_resource(
+                        client,
+                        &deps_restore,
+                        "lattice-restore-controller",
+                    )
+                    .await
+                    {
                         Ok(()) => {
                             update_status(
                                 client,
                                 &restore,
                                 RestorePhase::InProgress,
-                                None,
                                 Some("Phase 1: Restoring dependencies".to_string()),
                             )
                             .await?;
@@ -114,7 +119,6 @@ pub async fn reconcile(
                                 client,
                                 &restore,
                                 RestorePhase::Failed,
-                                None,
                                 Some(format!("Failed: {}", e)),
                             )
                             .await?;
@@ -143,13 +147,12 @@ pub async fn reconcile(
                 &restore,
                 None, // All resources
             );
-            match apply_velero_resource(client, &all_restore).await {
+            match velero::apply_resource(client, &all_restore, "lattice-restore-controller").await {
                 Ok(()) => {
                     update_status(
                         client,
                         &restore,
                         RestorePhase::InProgress,
-                        None,
                         Some("Phase 2: Restoring remaining resources".to_string()),
                     )
                     .await?;
@@ -160,7 +163,6 @@ pub async fn reconcile(
                         client,
                         &restore,
                         RestorePhase::Failed,
-                        None,
                         Some(format!("Phase 2 failed: {}", e)),
                     )
                     .await?;
@@ -198,42 +200,11 @@ fn build_velero_restore(
     )
 }
 
-/// Apply a Velero resource using server-side apply
-async fn apply_velero_resource<T>(client: &kube::Client, resource: &T) -> Result<(), ReconcileError>
-where
-    T: serde::Serialize + HasApiResource,
-{
-    let ar = T::api_resource();
-    let value = serde_json::to_value(resource)
-        .map_err(|e| ReconcileError::Kube(format!("failed to serialize: {}", e)))?;
-
-    let name = value
-        .pointer("/metadata/name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let namespace = value
-        .pointer("/metadata/namespace")
-        .and_then(|v| v.as_str())
-        .unwrap_or(VELERO_NAMESPACE);
-
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
-    let params = PatchParams::apply("lattice-restore-controller").force();
-
-    api.patch(name, &params, &Patch::Apply(&value))
-        .await
-        .map_err(|e| {
-            ReconcileError::Kube(format!("failed to apply {}/{}: {}", ar.kind, name, e))
-        })?;
-
-    Ok(())
-}
-
 /// Update LatticeRestore status
 async fn update_status(
     client: &kube::Client,
     restore: &LatticeRestore,
     phase: RestorePhase,
-    restored_items: Option<u32>,
     message: Option<String>,
 ) -> Result<(), ReconcileError> {
     let name = restore.name_any();
@@ -243,11 +214,8 @@ async fn update_status(
 
     let status = LatticeRestoreStatus {
         phase,
-        restored_items: restored_items.unwrap_or(0),
         velero_restore_name: None,
         velero_restore_phase2_name: None,
-        start_time: None,
-        completion_time: None,
         conditions: vec![],
         message,
         observed_generation: restore.metadata.generation,

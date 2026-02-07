@@ -51,16 +51,7 @@ pub async fn run(
 }
 
 fn print_policies_table(policies: &[&LatticeBackupPolicy]) {
-    let headers = &[
-        "NAMESPACE",
-        "NAME",
-        "SCHEDULE",
-        "PHASE",
-        "PAUSED",
-        "BACKUPS",
-        "LAST BACKUP",
-        "AGE",
-    ];
+    let headers = &["NAMESPACE", "NAME", "SCHEDULE", "PHASE", "PAUSED", "AGE"];
 
     let rows: Vec<Vec<String>> = policies
         .iter()
@@ -78,17 +69,6 @@ fn print_policies_table(policies: &[&LatticeBackupPolicy]) {
             } else {
                 "false".to_string()
             };
-            let backup_count = policy
-                .status
-                .as_ref()
-                .map(|s| s.backup_count.to_string())
-                .unwrap_or_else(|| "0".to_string());
-            let last_backup = policy
-                .status
-                .as_ref()
-                .and_then(|s| s.last_backup_time.as_ref())
-                .map(format_age)
-                .unwrap_or_else(|| "-".to_string());
             let age = policy
                 .metadata
                 .creation_timestamp
@@ -102,8 +82,6 @@ fn print_policies_table(policies: &[&LatticeBackupPolicy]) {
                 schedule.clone(),
                 phase,
                 paused,
-                backup_count,
-                last_backup,
                 age,
             ]
         })

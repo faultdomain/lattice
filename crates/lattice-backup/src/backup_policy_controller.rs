@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
@@ -16,16 +16,12 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{
     BackupPolicyPhase, BackupStorageProvider, LatticeBackupPolicy, LatticeBackupPolicyStatus,
 };
-use lattice_common::kube_utils::HasApiResource;
 use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::velero::{
     self, BackupStorageLocation, BackupStorageLocationSpec, BackupTemplate, ObjectStorageLocation,
-    Schedule, ScheduleSpec, VeleroCredential,
+    Schedule, ScheduleSpec, VeleroCredential, VELERO_NAMESPACE,
 };
-
-/// Velero namespace where Schedule/BSL resources are created
-const VELERO_NAMESPACE: &str = "velero";
 
 /// Requeue interval for successful reconciliation
 const REQUEUE_SUCCESS_SECS: u64 = 300;
@@ -52,7 +48,7 @@ pub async fn reconcile(
     let schedule = build_schedule(&name, &policy);
 
     // Try to apply BSL
-    match apply_velero_resource(client, &bsl).await {
+    match velero::apply_resource(client, &bsl, "lattice-backup-controller").await {
         Ok(()) => {
             debug!(backup_policy = %name, "BackupStorageLocation applied");
         }
@@ -66,6 +62,8 @@ pub async fn reconcile(
                 &policy,
                 BackupPolicyPhase::Pending,
                 Some("Velero not installed".to_string()),
+                None,
+                None,
             )
             .await?;
             return Ok(Action::requeue(Duration::from_secs(
@@ -79,6 +77,8 @@ pub async fn reconcile(
                 &policy,
                 BackupPolicyPhase::Failed,
                 Some(format!("BSL apply failed: {}", e)),
+                None,
+                None,
             )
             .await?;
             return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
@@ -86,7 +86,7 @@ pub async fn reconcile(
     }
 
     // Try to apply Schedule
-    match apply_velero_resource(client, &schedule).await {
+    match velero::apply_resource(client, &schedule, "lattice-backup-controller").await {
         Ok(()) => {
             debug!(backup_policy = %name, "Schedule applied");
         }
@@ -97,6 +97,8 @@ pub async fn reconcile(
                 &policy,
                 BackupPolicyPhase::Failed,
                 Some(format!("Schedule apply failed: {}", e)),
+                None,
+                None,
             )
             .await?;
             return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
@@ -106,7 +108,15 @@ pub async fn reconcile(
     // Update status to Active
     let velero_schedule_name = format!("lattice-{}", name);
     let velero_bsl_name = format!("lattice-{}", name);
-    update_status_active(client, &policy, &velero_schedule_name, &velero_bsl_name).await?;
+    update_status(
+        client,
+        &policy,
+        BackupPolicyPhase::Active,
+        Some("Velero Schedule and BSL are configured".to_string()),
+        Some(velero_schedule_name),
+        Some(velero_bsl_name),
+    )
+    .await?;
 
     Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
 }
@@ -227,36 +237,6 @@ fn build_schedule(name: &str, policy: &LatticeBackupPolicy) -> Schedule {
     )
 }
 
-/// Apply a Velero resource using server-side apply via DynamicObject
-async fn apply_velero_resource<T>(client: &kube::Client, resource: &T) -> Result<(), ReconcileError>
-where
-    T: serde::Serialize + HasApiResource,
-{
-    let ar = T::api_resource();
-    let value = serde_json::to_value(resource)
-        .map_err(|e| ReconcileError::Kube(format!("failed to serialize Velero resource: {}", e)))?;
-
-    let name = value
-        .pointer("/metadata/name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let namespace = value
-        .pointer("/metadata/namespace")
-        .and_then(|v| v.as_str())
-        .unwrap_or(VELERO_NAMESPACE);
-
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
-    let params = PatchParams::apply("lattice-backup-controller").force();
-
-    api.patch(name, &params, &Patch::Apply(&value))
-        .await
-        .map_err(|e| {
-            ReconcileError::Kube(format!("failed to apply {}/{}: {}", ar.kind, name, e))
-        })?;
-
-    Ok(())
-}
-
 /// Check if an error indicates the CRD is not found
 fn is_crd_not_found(e: &ReconcileError) -> bool {
     match e {
@@ -271,6 +251,8 @@ async fn update_status(
     policy: &LatticeBackupPolicy,
     phase: BackupPolicyPhase,
     message: Option<String>,
+    velero_schedule_name: Option<String>,
+    velero_bsl_name: Option<String>,
 ) -> Result<(), ReconcileError> {
     let name = policy.name_any();
     let namespace = policy
@@ -279,48 +261,10 @@ async fn update_status(
 
     let status = LatticeBackupPolicyStatus {
         phase,
-        velero_schedule_name: None,
-        velero_bsl_name: None,
-        last_backup_time: None,
-        backup_count: 0,
+        velero_schedule_name,
+        velero_bsl_name,
         conditions: vec![],
         message,
-        observed_generation: policy.metadata.generation,
-    };
-
-    let patch = serde_json::json!({ "status": status });
-    let api: Api<LatticeBackupPolicy> = Api::namespaced(client.clone(), &namespace);
-    api.patch_status(
-        &name,
-        &PatchParams::apply("lattice-backup-controller"),
-        &Patch::Merge(&patch),
-    )
-    .await
-    .map_err(|e| ReconcileError::Kube(format!("status update failed: {}", e)))?;
-
-    Ok(())
-}
-
-/// Update LatticeBackupPolicy status to Active with Velero resource names
-async fn update_status_active(
-    client: &kube::Client,
-    policy: &LatticeBackupPolicy,
-    velero_schedule_name: &str,
-    velero_bsl_name: &str,
-) -> Result<(), ReconcileError> {
-    let name = policy.name_any();
-    let namespace = policy
-        .namespace()
-        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
-
-    let status = LatticeBackupPolicyStatus {
-        phase: BackupPolicyPhase::Active,
-        velero_schedule_name: Some(velero_schedule_name.to_string()),
-        velero_bsl_name: Some(velero_bsl_name.to_string()),
-        last_backup_time: None,
-        backup_count: 0,
-        conditions: vec![],
-        message: Some("Velero Schedule and BSL are configured".to_string()),
         observed_generation: policy.metadata.generation,
     };
 

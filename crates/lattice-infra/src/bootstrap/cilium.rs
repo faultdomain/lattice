@@ -25,9 +25,8 @@ use super::split_yaml_documents;
 use crate::system_namespaces;
 
 /// Pre-rendered Cilium manifests, split into individual YAML documents.
-static CILIUM_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    split_yaml_documents(include_str!(concat!(env!("OUT_DIR"), "/cilium.yaml")))
-});
+static CILIUM_MANIFESTS: LazyLock<Vec<String>> =
+    LazyLock::new(|| split_yaml_documents(include_str!(concat!(env!("OUT_DIR"), "/cilium.yaml"))));
 
 /// Generate Cilium manifests for a cluster
 ///

@@ -3,7 +3,6 @@
 //! The LatticeBackupPolicy CRD defines platform-level backup schedules and storage
 //! configuration. It translates to Velero Schedule and BackupStorageLocation resources.
 
-use chrono::{DateTime, Utc};
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -208,14 +207,6 @@ pub struct LatticeBackupPolicyStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velero_bsl_name: Option<String>,
 
-    /// Timestamp of the last successful backup
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_backup_time: Option<DateTime<Utc>>,
-
-    /// Total number of backups created by this policy
-    #[serde(default)]
-    pub backup_count: u32,
-
     /// Status conditions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
@@ -244,7 +235,6 @@ pub struct LatticeBackupPolicyStatus {
     status = "LatticeBackupPolicyStatus",
     printcolumn = r#"{"name":"Schedule","type":"string","jsonPath":".spec.schedule"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
-    printcolumn = r#"{"name":"Last Backup","type":"date","jsonPath":".status.lastBackupTime"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]

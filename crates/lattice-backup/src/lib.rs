@@ -11,6 +11,3 @@
 pub mod backup_policy_controller;
 pub mod restore_controller;
 pub mod velero;
-
-pub use backup_policy_controller::reconcile as backup_policy_reconcile;
-pub use restore_controller::reconcile as restore_reconcile;

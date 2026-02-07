@@ -107,7 +107,7 @@ pub async fn ensure_service_infrastructure(client: &Client) -> anyhow::Result<()
 /// Reads provider/bootstrap from LatticeCluster CRD (the source of truth).
 /// Ensures all infrastructure is installed. Server-side apply handles idempotency.
 ///
-/// IMPORTANT: Uses the SAME generate_all() function as the bootstrap webhook.
+/// IMPORTANT: Uses the SAME generate_core() function as the bootstrap webhook.
 /// This guarantees upgrades work by changing Lattice version - on restart,
 /// the operator re-applies identical infrastructure manifests.
 pub async fn ensure_cluster_infrastructure(client: &Client) -> anyhow::Result<()> {
@@ -167,7 +167,7 @@ pub async fn ensure_cluster_infrastructure(client: &Client) -> anyhow::Result<()
             "read config from LatticeCluster CRD"
         );
 
-        let manifests = bootstrap::generate_all(&config)
+        let manifests = bootstrap::generate_core(&config)
             .await
             .map_err(|e| anyhow::anyhow!("failed to generate infrastructure manifests: {}", e))?;
         tracing::info!(

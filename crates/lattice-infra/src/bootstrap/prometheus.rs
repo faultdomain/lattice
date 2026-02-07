@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use super::{namespace_yaml, split_yaml_documents};
 
 /// Well-known service name for the VMCluster components.
-/// Used as `fullnameOverride` so all downstream consumers (prometheus-adapter,
+/// Used as `fullnameOverride` so all downstream consumers (KEDA,
 /// canary controller, HPA, etc.) reference a stable integration point.
 pub const VMCLUSTER_NAME: &str = "lattice-metrics";
 

@@ -80,11 +80,11 @@ repo = "https://project-hami.github.io/HAMi"
 chart = "hami/hami"
 filename = "hami-{version}.tgz"
 
-[charts.prometheus-adapter]
-version = "4.11.0"
-repo = "https://prometheus-community.github.io/helm-charts"
-chart = "prometheus-community/prometheus-adapter"
-filename = "prometheus-adapter-{version}.tgz"
+[charts.keda]
+version = "2.19.0"
+repo = "https://kedacore.github.io/charts"
+chart = "kedacore/keda"
+filename = "keda-{version}.tgz"
 
 [charts.victoria-metrics-k8s-stack]
 version = "0.69.0"

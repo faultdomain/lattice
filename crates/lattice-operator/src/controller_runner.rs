@@ -164,7 +164,7 @@ pub fn build_service_controllers(
     .watches(
         services_for_model_watch,
         WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-        move |service| discover(service),
+        discover,
     )
     .shutdown_on_signal()
     .run(

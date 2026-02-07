@@ -21,7 +21,7 @@
 //! - [`bootstrap::IstioConfig`], [`bootstrap::IstioReconciler`]: Istio manifest generation
 //! - [`bootstrap::cilium`]: Cilium manifests and network policy generators
 //! - [`bootstrap::eso`]: External Secrets Operator manifests
-//! - [`bootstrap::generate_all`], [`bootstrap::generate_core`]: Top-level generators
+//! - [`bootstrap::generate_core`]: Top-level generator
 //!
 //! ## PKI
 //! - [`pki::CertificateAuthority`]: CA operations for signing CSRs
@@ -38,6 +38,5 @@ pub mod system_namespaces;
 
 // Re-export mTLS types (commonly used across many crates)
 pub use mtls::{
-    extract_cluster_id_from_cert, verify_cert_chain, ClientMtlsConfig, MtlsError,
-    ServerMtlsConfig,
+    extract_cluster_id_from_cert, verify_cert_chain, ClientMtlsConfig, MtlsError, ServerMtlsConfig,
 };

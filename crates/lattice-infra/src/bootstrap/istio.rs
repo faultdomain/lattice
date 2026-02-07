@@ -84,8 +84,8 @@ impl IstioReconciler {
             all.extend(ISTIO_STATIC_MANIFESTS.iter().cloned());
 
             // Istiod with cluster-specific trust domain
-            let istiod_yaml = ISTIOD_TEMPLATE
-                .replace("__LATTICE_CLUSTER_NAME__", &self.config.cluster_name);
+            let istiod_yaml =
+                ISTIOD_TEMPLATE.replace("__LATTICE_CLUSTER_NAME__", &self.config.cluster_name);
             all.extend(split_yaml_documents(&istiod_yaml));
 
             all

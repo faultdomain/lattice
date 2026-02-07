@@ -5,9 +5,48 @@
 
 use std::collections::BTreeMap;
 
+use kube::api::{Api, DynamicObject, Patch, PatchParams};
 use serde::{Deserialize, Serialize};
 
 use lattice_common::kube_utils::HasApiResource;
+use lattice_common::ReconcileError;
+
+/// Velero namespace where Schedule/BSL/Restore resources are created
+pub(crate) const VELERO_NAMESPACE: &str = "velero";
+
+/// Apply a Velero resource using server-side apply via DynamicObject
+pub(crate) async fn apply_resource<T>(
+    client: &kube::Client,
+    resource: &T,
+    field_manager: &str,
+) -> Result<(), ReconcileError>
+where
+    T: serde::Serialize + HasApiResource,
+{
+    let ar = T::api_resource();
+    let value = serde_json::to_value(resource)
+        .map_err(|e| ReconcileError::Kube(format!("failed to serialize Velero resource: {}", e)))?;
+
+    let name = value
+        .pointer("/metadata/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let namespace = value
+        .pointer("/metadata/namespace")
+        .and_then(|v| v.as_str())
+        .unwrap_or(VELERO_NAMESPACE);
+
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+    let params = PatchParams::apply(field_manager).force();
+
+    api.patch(name, &params, &Patch::Apply(&value))
+        .await
+        .map_err(|e| {
+            ReconcileError::Kube(format!("failed to apply {}/{}: {}", ar.kind, name, e))
+        })?;
+
+    Ok(())
+}
 
 // =============================================================================
 // BackupStorageLocation
