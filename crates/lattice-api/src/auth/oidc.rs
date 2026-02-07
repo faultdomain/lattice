@@ -21,9 +21,8 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
-use crate::is_local_resource;
 use lattice_common::crd::OIDCProvider;
-use lattice_common::INHERITED_LABEL;
+use lattice_common::{is_local_resource, INHERITED_LABEL};
 
 /// Validated user identity from OIDC token
 #[derive(Debug, Clone, Serialize, Deserialize)]

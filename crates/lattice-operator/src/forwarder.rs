@@ -10,11 +10,11 @@
 use lattice_agent::{
     build_k8s_status_response, ExecRequestForwarder, ForwardedExecSession, K8sRequestForwarder,
 };
-use lattice_proto::{ExecRequest, KubernetesRequest, KubernetesResponse};
 use lattice_cell::{
     start_exec_session, tunnel_request_streaming, ExecRequestParams, K8sRequestParams,
     SharedAgentRegistry, SharedSubtreeRegistry, TunnelError, RECONNECT_TIMEOUT,
 };
+use lattice_proto::{ExecRequest, KubernetesRequest, KubernetesResponse};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};

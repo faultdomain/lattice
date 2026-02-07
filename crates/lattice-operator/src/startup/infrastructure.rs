@@ -17,8 +17,7 @@ const INFRA_APPLY_MAX_RETRIES: u32 = 10;
 const INFRA_APPLY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 use lattice_capi::installer::{
-    copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
-    NativeInstaller,
+    copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig, NativeInstaller,
 };
 use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
 use lattice_infra::bootstrap::{self, InfrastructureConfig};
@@ -237,7 +236,9 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
 
     let config = CapiProviderConfig::new(infrastructure)
         .map_err(|e| anyhow::anyhow!("failed to create CAPI config: {}", e))?;
-    NativeInstaller::new().ensure(&config).await
+    NativeInstaller::new()
+        .ensure(&config)
+        .await
         .map_err(|e| anyhow::anyhow!("CAPI installation failed: {}", e))?;
 
     tracing::info!(infrastructure = %provider_str, "CAPI providers installed successfully");

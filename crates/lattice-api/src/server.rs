@@ -10,11 +10,11 @@ use tracing::info;
 
 use crate::auth_chain::AuthChain;
 use crate::backend::ProxyBackend;
-use lattice_cedar::PolicyEngine;
 use crate::error::Error;
 use crate::kubeconfig::kubeconfig_handler;
 use crate::portforward::portforward_handler;
 use crate::proxy::{exec_handler, proxy_handler};
+use lattice_cedar::PolicyEngine;
 
 /// Server configuration
 #[derive(Clone)]

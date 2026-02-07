@@ -69,7 +69,10 @@ fn provider_namespace(name: &str, provider_type: CapiProviderType) -> Option<&'s
 }
 
 /// Map (provider_name, provider_type) to the component YAML filenames
-fn provider_component_files(name: &str, provider_type: CapiProviderType) -> &'static [&'static str] {
+fn provider_component_files(
+    name: &str,
+    provider_type: CapiProviderType,
+) -> &'static [&'static str] {
     match (name, provider_type) {
         ("cluster-api", CapiProviderType::Core) => &["core-components.yaml"],
         ("kubeadm", CapiProviderType::Bootstrap) => &["bootstrap-components.yaml"],
@@ -687,10 +690,7 @@ impl NativeInstaller {
     }
 
     /// Install cert-manager before CAPI providers (they depend on cert-manager webhooks).
-    async fn install_cert_manager(
-        client: &KubeClient,
-        providers_dir: &Path,
-    ) -> Result<(), Error> {
+    async fn install_cert_manager(client: &KubeClient, providers_dir: &Path) -> Result<(), Error> {
         let cert_manager_version = format!("v{}", env!("CERT_MANAGER_VERSION"));
         let cert_manager_dir = providers_dir
             .join("cert-manager")
@@ -721,10 +721,7 @@ impl NativeInstaller {
         kube_utils::wait_for_all_deployments(client, "cert-manager", DEPLOYMENT_READY_TIMEOUT)
             .await
             .map_err(|e| {
-                Error::capi_installation(format!(
-                    "cert-manager deployments not ready: {}",
-                    e
-                ))
+                Error::capi_installation(format!("cert-manager deployments not ready: {}", e))
             })?;
 
         info!("cert-manager ready");
@@ -741,12 +738,8 @@ impl NativeInstaller {
         let dir_name = provider_dir_name(&desired.name, desired.provider_type);
         let components = provider_component_files(&desired.name, desired.provider_type);
 
-        let raw_manifests = Self::read_provider_manifests(
-            providers_dir,
-            dir_name,
-            &desired.version,
-            components,
-        )?;
+        let raw_manifests =
+            Self::read_provider_manifests(providers_dir, dir_name, &desired.version, components)?;
 
         let mut all_documents = Vec::new();
         for raw in &raw_manifests {
@@ -762,14 +755,18 @@ impl NativeInstaller {
             "Applying provider manifests"
         );
 
-        kube_utils::apply_manifests_with_discovery(client, &all_documents, &ApplyOptions::default())
-            .await
-            .map_err(|e| {
-                Error::capi_installation(format!(
-                    "Failed to apply {} {}: {}",
-                    desired.provider_type, desired.name, e
-                ))
-            })?;
+        kube_utils::apply_manifests_with_discovery(
+            client,
+            &all_documents,
+            &ApplyOptions::default(),
+        )
+        .await
+        .map_err(|e| {
+            Error::capi_installation(format!(
+                "Failed to apply {} {}: {}",
+                desired.provider_type, desired.name, e
+            ))
+        })?;
 
         Ok(())
     }
@@ -847,13 +844,9 @@ impl CapiInstaller for NativeInstaller {
                         "Upgrading provider (re-applying manifests)"
                     );
                     // For upgrades, re-apply the manifests (SSA handles diffs)
-                    if let Err(e) = Self::apply_provider(
-                        &client,
-                        &providers_dir,
-                        desired_provider,
-                        &env_vars,
-                    )
-                    .await
+                    if let Err(e) =
+                        Self::apply_provider(&client, &providers_dir, desired_provider, &env_vars)
+                            .await
                     {
                         warn!(
                             provider = %desired_provider.name,
@@ -877,7 +870,9 @@ impl CapiInstaller for NativeInstaller {
                 continue;
             }
 
-            let Some(namespace) = provider_namespace(&desired_provider.name, desired_provider.provider_type) else {
+            let Some(namespace) =
+                provider_namespace(&desired_provider.name, desired_provider.provider_type)
+            else {
                 debug!(provider = %desired_provider.name, "Unknown provider namespace, skipping readiness check");
                 continue;
             };
@@ -904,7 +899,10 @@ mod tests {
     fn substitute_vars_replaces_patterns() {
         let yaml = "url: ${PROXMOX_URL}\ntoken: ${PROXMOX_TOKEN}";
         let vars = vec![
-            ("PROXMOX_URL".to_string(), "https://pve.example.com".to_string()),
+            (
+                "PROXMOX_URL".to_string(),
+                "https://pve.example.com".to_string(),
+            ),
             ("PROXMOX_TOKEN".to_string(), "root@pam!token".to_string()),
         ];
         let result = substitute_vars(yaml, &vars);
@@ -1117,10 +1115,12 @@ mod tests {
             )
             .expect("supported provider should succeed");
             let providers = config.desired_providers();
-            assert!(providers
-                .iter()
-                .any(|p| p.name == expected
-                    && p.provider_type == CapiProviderType::Infrastructure));
+            assert!(
+                providers
+                    .iter()
+                    .any(|p| p.name == expected
+                        && p.provider_type == CapiProviderType::Infrastructure)
+            );
         }
     }
 

@@ -30,9 +30,8 @@ use kube::runtime::watcher::{self, Event};
 use kube::{Api, CustomResourceExt};
 use once_cell::sync::OnceCell;
 
-use lattice_api::{
-    AuthChain, OidcValidator, PolicyEngine, SaValidator, ServerConfig as AuthProxyConfig,
-};
+use lattice_api::{AuthChain, OidcValidator, SaValidator, ServerConfig as AuthProxyConfig};
+use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
 use lattice_common::crd::{CedarPolicy, LatticeService, OIDCProvider};

@@ -2544,6 +2544,7 @@ dependencies = [
  "lattice-api",
  "lattice-backup",
  "lattice-capi",
+ "lattice-cedar",
  "lattice-cell",
  "lattice-cloud-provider",
  "lattice-cluster",

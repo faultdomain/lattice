@@ -25,6 +25,7 @@ lattice-cloud-provider.workspace = true
 lattice-secrets-provider.workspace = true
 lattice-api.workspace = true
 lattice-backup.workspace = true
+lattice-cedar.workspace = true
 lattice-model-cache.workspace = true
 
 kube.workspace = true

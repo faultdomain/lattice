@@ -76,4 +76,3 @@ pub const MOVE_LABEL: &str = "clusterctl.cluster.x-k8s.io";
 
 /// Label indicating a CRD's hierarchy should be included in move operations
 pub const MOVE_HIERARCHY_LABEL: &str = "clusterctl.cluster.x-k8s.io/move-hierarchy";
-

@@ -470,7 +470,11 @@ pub async fn delete_pivoted_capi_resources(
         }
     }
 
-    info!(deleted, total = identities.len(), "CAPI resource deletion complete");
+    info!(
+        deleted,
+        total = identities.len(),
+        "CAPI resource deletion complete"
+    );
     Ok(deleted)
 }
 

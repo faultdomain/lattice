@@ -10,8 +10,8 @@ use tracing::debug;
 
 use crate::auth::UserIdentity;
 use crate::auth_chain::AuthChain;
-use lattice_cedar::{ClusterAttributes, PolicyEngine};
 use crate::error::{Error, Result};
+use lattice_cedar::{ClusterAttributes, PolicyEngine};
 
 /// Extract bearer token from Authorization header
 pub fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {

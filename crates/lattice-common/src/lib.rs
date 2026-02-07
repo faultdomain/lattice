@@ -306,3 +306,23 @@ pub const ORIGIN_CLUSTER_LABEL: &str = "lattice.dev/origin-cluster";
 pub const ORIGINAL_NAME_LABEL: &str = "lattice.dev/original-name";
 /// Label indicating this resource was inherited from a parent cluster
 pub const INHERITED_LABEL: &str = "lattice.dev/inherited";
+
+/// Check if a Kubernetes resource is inherited from a parent cluster.
+///
+/// Resources with the label `lattice.dev/inherited: true` are considered inherited.
+pub fn is_inherited_resource(metadata: &kube::api::ObjectMeta) -> bool {
+    metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(INHERITED_LABEL))
+        .map(|v| v == "true")
+        .unwrap_or(false)
+}
+
+/// Check if a Kubernetes resource is a local resource (not inherited).
+///
+/// Resources without the `lattice.dev/inherited` label or with it set to a value
+/// other than "true" are considered local.
+pub fn is_local_resource(metadata: &kube::api::ObjectMeta) -> bool {
+    !is_inherited_resource(metadata)
+}

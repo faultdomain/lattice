@@ -12,12 +12,12 @@ use serde::Deserialize;
 use tracing::{debug, instrument};
 
 use crate::auth::authenticate_and_authorize;
-use lattice_cedar::ClusterAttributes;
 use crate::error::Error;
 use crate::exec_proxy::{handle_exec_websocket, has_websocket_upgrade_headers};
 use crate::k8s_forwarder::route_to_cluster;
 use crate::routing::strip_cluster_prefix;
 use crate::server::AppState;
+use lattice_cedar::ClusterAttributes;
 use lattice_proto::is_exec_path;
 
 /// Path parameters for proxy routes

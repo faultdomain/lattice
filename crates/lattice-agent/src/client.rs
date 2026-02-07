@@ -25,8 +25,7 @@ use tracing::{debug, error, info, warn};
 use crate::commands::apply_manifests::extract_manifest_info_bytes;
 use crate::commands::{self, CommandContext, StoredExecSession};
 use lattice_capi::installer::{
-    copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
-    NativeInstaller,
+    copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig, NativeInstaller,
 };
 use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
 use lattice_common::{capi_namespace, CsrRequest, CsrResponse, LATTICE_SYSTEM_NAMESPACE};
@@ -871,7 +870,9 @@ impl AgentClient {
 
         let config = CapiProviderConfig::new(infrastructure)
             .map_err(|e| std::io::Error::other(format!("Failed to create CAPI config: {}", e)))?;
-        NativeInstaller::new().ensure(&config).await
+        NativeInstaller::new()
+            .ensure(&config)
+            .await
             .map_err(|e| std::io::Error::other(format!("CAPI installation failed: {}", e)))?;
 
         info!(infrastructure = %provider_str, "CAPI providers installed successfully");

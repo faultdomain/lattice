@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::auth::{authenticate, OidcConfig};
-use lattice_cedar::ClusterAttributes;
 use crate::error::Error;
 use crate::server::AppState;
+use lattice_cedar::ClusterAttributes;
 
 /// Kubeconfig structure
 #[derive(Debug, Serialize, Deserialize)]

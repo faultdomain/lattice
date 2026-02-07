@@ -47,10 +47,7 @@ fn main() {
         "cargo:rustc-env=LATTICE_SCRIPTS_DIR={}",
         scripts_dir.display()
     );
-    println!(
-        "cargo:rustc-env=PROVIDERS_DIR={}",
-        providers_dir.display()
-    );
+    println!("cargo:rustc-env=PROVIDERS_DIR={}", providers_dir.display());
 
     let content = std::fs::read_to_string(&versions_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", versions_path.display(), e));

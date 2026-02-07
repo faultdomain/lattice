@@ -17,4 +17,4 @@ pub mod workload;
 
 // Bridge lattice_common types into this crate's namespace.
 // Internal modules use `crate::crd`, `crate::graph`, etc.
-pub use lattice_common::{crd, graph, Error, Result};
+pub(crate) use lattice_common::{crd, graph, Error};

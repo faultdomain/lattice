@@ -15,9 +15,9 @@ use kube::{Api, Client};
 
 use lattice_api::auth::oidc_controller as oidc_provider_ctrl;
 use lattice_api::cedar::validation as cedar_validation_ctrl;
-use lattice_api::PolicyEngine;
 use lattice_backup::backup_policy_controller as backup_policy_ctrl;
 use lattice_backup::restore_controller as restore_ctrl;
+use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::ParentServers;
 use lattice_cloud_provider as cloud_provider_ctrl;
@@ -79,6 +79,7 @@ pub fn build_service_controllers(
     cedar: Arc<PolicyEngine>,
     crds: Arc<DiscoveredCrds>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
     let service_ctx = Arc::new(ServiceContext::from_client(
         client.clone(),
         cluster_name,
@@ -88,19 +89,11 @@ pub fn build_service_controllers(
     ));
 
     let services: Api<LatticeService> = Api::all(client.clone());
-    let external_services: Api<LatticeExternalService> = Api::all(client.clone());
-
-    let graph_for_watch = service_ctx.graph.clone();
     let services_for_watch = services.clone();
+    let graph_for_watch = service_ctx.graph.clone();
 
-    let svc_ctrl = Controller::new(
-        services,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-    )
-    .watches(
-        services_for_watch,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-        move |service| {
+    let svc_ctrl = Controller::new(services, watcher_config())
+        .watches(services_for_watch, watcher_config(), move |service| {
             let graph = graph_for_watch.clone();
             let namespace = match service.metadata.namespace.as_deref() {
                 Some(ns) => ns,
@@ -125,25 +118,23 @@ pub fn build_service_controllers(
                 .into_iter()
                 .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
                 .collect()
-        },
-    )
-    .shutdown_on_signal()
-    .run(service_reconcile, service_error_policy, service_ctx.clone())
-    .for_each(log_reconcile_result("Service"));
+        })
+        .shutdown_on_signal()
+        .run(service_reconcile, service_error_policy, service_ctx.clone())
+        .for_each(log_reconcile_result("Service"));
 
     let ext_ctrl = Controller::new(
-        external_services,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        Api::<LatticeExternalService>::all(client.clone()),
+        watcher_config(),
     )
     .shutdown_on_signal()
     .run(reconcile_external, error_policy_external, service_ctx)
     .for_each(log_reconcile_result("ExternalService"));
 
-    let policies: Api<LatticeServicePolicy> = Api::all(client.clone());
     let policy_ctx = Arc::new(ControllerContext::new(client.clone()));
     let policy_ctrl = Controller::new(
-        policies,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        Api::<LatticeServicePolicy>::all(client.clone()),
+        watcher_config(),
     )
     .shutdown_on_signal()
     .run(
@@ -153,26 +144,21 @@ pub fn build_service_controllers(
     )
     .for_each(log_reconcile_result("ServicePolicy"));
 
-    let model_artifacts: Api<ModelArtifact> = Api::all(client.clone());
-    let services_for_model_watch: Api<LatticeService> = Api::all(client.clone());
-    let model_ctx = Arc::new(ModelCacheContext::new(client));
+    let model_ctx = Arc::new(ModelCacheContext::new(client.clone()));
     let discover = model_cache_ctrl::discover_models(model_ctx.client.clone());
-    let model_ctrl = Controller::new(
-        model_artifacts,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-    )
-    .watches(
-        services_for_model_watch,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-        discover,
-    )
-    .shutdown_on_signal()
-    .run(
-        model_cache_ctrl::reconcile,
-        model_cache_ctrl::error_policy,
-        model_ctx,
-    )
-    .for_each(log_reconcile_result("ModelArtifact"));
+    let model_ctrl = Controller::new(Api::<ModelArtifact>::all(client), watcher_config())
+        .watches(
+            Api::<LatticeService>::all(model_ctx.client.clone()),
+            watcher_config(),
+            discover,
+        )
+        .shutdown_on_signal()
+        .run(
+            model_cache_ctrl::reconcile,
+            model_cache_ctrl::error_policy,
+            model_ctx,
+        )
+        .for_each(log_reconcile_result("ModelArtifact"));
 
     tracing::info!("- LatticeService controller");
     tracing::info!("- LatticeExternalService controller");
@@ -189,89 +175,68 @@ pub fn build_service_controllers(
 
 /// Build provider controller futures (CloudProvider, SecretsProvider, CedarPolicy, OIDCProvider)
 pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let cloud_providers: Api<CloudProvider> = Api::all(client.clone());
-    let cp_ctx = Arc::new(ControllerContext::new(client.clone()));
-    let cloud_ctrl = Controller::new(
-        cloud_providers,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-    )
-    .shutdown_on_signal()
-    .run(
-        cloud_provider_ctrl::reconcile,
-        lattice_common::default_error_policy,
-        cp_ctx,
-    )
-    .for_each(log_reconcile_result("CloudProvider"));
+    let ctx = Arc::new(ControllerContext::new(client.clone()));
+    let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
-    let secrets_providers: Api<SecretsProvider> = Api::all(client.clone());
-    let sp_ctx = Arc::new(ControllerContext::new(client.clone()));
+    let cloud_ctrl = Controller::new(Api::<CloudProvider>::all(client.clone()), watcher_config())
+        .shutdown_on_signal()
+        .run(
+            cloud_provider_ctrl::reconcile,
+            lattice_common::default_error_policy,
+            ctx.clone(),
+        )
+        .for_each(log_reconcile_result("CloudProvider"));
+
     let secrets_ctrl = Controller::new(
-        secrets_providers,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        Api::<SecretsProvider>::all(client.clone()),
+        watcher_config(),
     )
     .shutdown_on_signal()
     .run(
         secrets_provider_ctrl::reconcile,
         lattice_common::default_error_policy,
-        sp_ctx,
+        ctx.clone(),
     )
     .for_each(log_reconcile_result("SecretsProvider"));
 
-    let cedar_policies: Api<CedarPolicy> = Api::all(client.clone());
-    let cedar_ctx = Arc::new(ControllerContext::new(client.clone()));
-    let cedar_ctrl = Controller::new(
-        cedar_policies,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-    )
-    .shutdown_on_signal()
-    .run(
-        cedar_validation_ctrl::reconcile,
-        lattice_common::default_error_policy,
-        cedar_ctx,
-    )
-    .for_each(log_reconcile_result("CedarPolicy"));
+    let cedar_ctrl = Controller::new(Api::<CedarPolicy>::all(client.clone()), watcher_config())
+        .shutdown_on_signal()
+        .run(
+            cedar_validation_ctrl::reconcile,
+            lattice_common::default_error_policy,
+            ctx.clone(),
+        )
+        .for_each(log_reconcile_result("CedarPolicy"));
 
-    let oidc_providers: Api<OIDCProvider> = Api::all(client.clone());
-    let oidc_ctx = Arc::new(ControllerContext::new(client.clone()));
-    let oidc_ctrl = Controller::new(
-        oidc_providers,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-    )
-    .shutdown_on_signal()
-    .run(
-        oidc_provider_ctrl::reconcile,
-        lattice_common::default_error_policy,
-        oidc_ctx,
-    )
-    .for_each(log_reconcile_result("OIDCProvider"));
+    let oidc_ctrl = Controller::new(Api::<OIDCProvider>::all(client.clone()), watcher_config())
+        .shutdown_on_signal()
+        .run(
+            oidc_provider_ctrl::reconcile,
+            lattice_common::default_error_policy,
+            ctx.clone(),
+        )
+        .for_each(log_reconcile_result("OIDCProvider"));
 
-    let backup_policies: Api<LatticeBackupPolicy> = Api::all(client.clone());
-    let bp_ctx = Arc::new(ControllerContext::new(client.clone()));
     let backup_ctrl = Controller::new(
-        backup_policies,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        Api::<LatticeBackupPolicy>::all(client.clone()),
+        watcher_config(),
     )
     .shutdown_on_signal()
     .run(
         backup_policy_ctrl::reconcile,
         lattice_common::default_error_policy,
-        bp_ctx,
+        ctx.clone(),
     )
     .for_each(log_reconcile_result("BackupPolicy"));
 
-    let restores: Api<LatticeRestore> = Api::all(client.clone());
-    let restore_ctx = Arc::new(ControllerContext::new(client));
-    let restore_ctrl_future = Controller::new(
-        restores,
-        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-    )
-    .shutdown_on_signal()
-    .run(
-        restore_ctrl::reconcile,
-        lattice_common::default_error_policy,
-        restore_ctx,
-    )
-    .for_each(log_reconcile_result("Restore"));
+    let restore_ctrl = Controller::new(Api::<LatticeRestore>::all(client), watcher_config())
+        .shutdown_on_signal()
+        .run(
+            restore_ctrl::reconcile,
+            lattice_common::default_error_policy,
+            ctx,
+        )
+        .for_each(log_reconcile_result("Restore"));
 
     tracing::info!("- CloudProvider controller");
     tracing::info!("- SecretsProvider controller");
@@ -286,7 +251,7 @@ pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Outp
         Box::pin(cedar_ctrl),
         Box::pin(oidc_ctrl),
         Box::pin(backup_ctrl),
-        Box::pin(restore_ctrl_future),
+        Box::pin(restore_ctrl),
     ]
 }
 

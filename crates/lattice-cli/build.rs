@@ -11,9 +11,6 @@ fn main() {
 
     let providers_dir = workspace_root.join("test-providers");
 
-    println!(
-        "cargo:rustc-env=PROVIDERS_DIR={}",
-        providers_dir.display()
-    );
+    println!("cargo:rustc-env=PROVIDERS_DIR={}", providers_dir.display());
     println!("cargo:rerun-if-changed={}", providers_dir.display());
 }

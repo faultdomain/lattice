@@ -26,7 +26,7 @@ use tracing::{debug, info, instrument};
 
 use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
 use lattice_common::crd::CedarPolicy;
-use lattice_common::INHERITED_LABEL;
+use lattice_common::{is_local_resource, INHERITED_LABEL};
 
 // ============================================================================
 // Error types
@@ -352,19 +352,6 @@ impl Default for PolicyEngine {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Check if a Kubernetes resource is a local resource (not inherited).
-///
-/// Resources without the `lattice.dev/inherited` label or with it set to a value
-/// other than "true" are considered local.
-fn is_local_resource(metadata: &kube::api::ObjectMeta) -> bool {
-    !metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get(INHERITED_LABEL))
-        .map(|v| v == "true")
-        .unwrap_or(false)
 }
 
 /// Sort policies by priority (descending), append enabled ones to `out`.

@@ -745,7 +745,7 @@ impl Installer {
 
     /// Installs CAPI controllers on the management cluster using the native installer.
     async fn install_capi_on_management(&self) -> Result<()> {
-        use lattice_capi::installer::{CapiProviderConfig, NativeInstaller, CapiInstaller};
+        use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
 
         let config = CapiProviderConfig::new(self.provider())
             .map_err(|e| Error::command_failed(e.to_string()))?;

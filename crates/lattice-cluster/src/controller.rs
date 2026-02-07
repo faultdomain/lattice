@@ -2509,9 +2509,11 @@ mod tests {
 
             let mut installer = MockCapiInstaller::new();
             // Installation fails
-            installer
-                .expect_ensure()
-                .returning(|_| Err(Error::capi_installation("provider manifests not found".to_string())));
+            installer.expect_ensure().returning(|_| {
+                Err(Error::capi_installation(
+                    "provider manifests not found".to_string(),
+                ))
+            });
 
             let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
@@ -2522,7 +2524,10 @@ mod tests {
             let result = reconcile(cluster, ctx).await;
 
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("provider manifests"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("provider manifests"));
         }
     }
 

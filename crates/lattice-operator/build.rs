@@ -65,10 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cargo:rustc-env=LATTICE_SCRIPTS_DIR={}",
         scripts_dir.display()
     );
-    println!(
-        "cargo:rustc-env=PROVIDERS_DIR={}",
-        providers_dir.display()
-    );
+    println!("cargo:rustc-env=PROVIDERS_DIR={}", providers_dir.display());
 
     // Export specific env vars that code expects
     // Charts
