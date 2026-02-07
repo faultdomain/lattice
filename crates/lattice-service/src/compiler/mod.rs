@@ -40,8 +40,9 @@ use crate::graph::ServiceGraph;
 use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
 use crate::policy::{GeneratedPolicies, PolicyCompiler};
 use crate::workload::{
-    compute_config_hash, env, files, CompilationError, EnvFromSource, GeneratedWorkloads,
-    SecretEnvSource, SecretRef, SecretsCompiler, VolumeCompiler, WorkloadCompiler,
+    compute_config_hash, env, files, CompilationError, ContainerCompilationData, EnvFromSource,
+    GeneratedWorkloads, SecretEnvSource, SecretRef, SecretsCompiler, VolumeCompiler,
+    WorkloadCompiler,
 };
 
 impl From<CompilationError> for crate::Error {
@@ -256,6 +257,13 @@ impl<'a> ServiceCompiler<'a> {
         }
 
         // Delegate to WorkloadCompiler for Deployment, Service, ServiceAccount, HPA
+        let container_data = ContainerCompilationData {
+            secret_refs: &compiled_secrets.secret_refs,
+            rendered_containers: &rendered_containers,
+            per_container_env_from: &per_container_env_from,
+            per_container_file_volumes: &per_container_file_volumes,
+            per_container_file_mounts: &per_container_file_mounts,
+        };
         let mut workloads = WorkloadCompiler::compile(
             name,
             service,
@@ -263,11 +271,7 @@ impl<'a> ServiceCompiler<'a> {
             &compiled_volumes,
             self.provider_type,
             self.monitoring_enabled,
-            &compiled_secrets.secret_refs,
-            &rendered_containers,
-            &per_container_env_from,
-            &per_container_file_volumes,
-            &per_container_file_mounts,
+            &container_data,
         )?;
 
         // Populate generated workloads with compiled config resources

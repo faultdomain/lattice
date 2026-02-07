@@ -1019,6 +1019,25 @@ fn gpu_shm_volume(gpu: &Option<GPUSpec>) -> Option<(Volume, VolumeMount)> {
     })
 }
 
+/// Per-container compilation data bundled from earlier pipeline stages.
+///
+/// Groups the five per-container maps that flow from `SecretsCompiler`,
+/// `TemplateRenderer`, `env::compile`, and `files::compile` into a single
+/// parameter object. This avoids passing each map individually through
+/// `WorkloadCompiler::compile` → `compile_deployment` → `compile_containers_with_volumes`.
+pub struct ContainerCompilationData<'a> {
+    /// Secret references from ESO for `${secret.*}` resolution
+    pub secret_refs: &'a BTreeMap<String, SecretRef>,
+    /// Rendered container data from TemplateRenderer
+    pub rendered_containers: &'a BTreeMap<String, RenderedContainer>,
+    /// EnvFrom refs from env::compile per container
+    pub per_container_env_from: &'a BTreeMap<String, Vec<EnvFromSource>>,
+    /// File volumes from files::compile per container
+    pub per_container_file_volumes: &'a BTreeMap<String, Vec<Volume>>,
+    /// File volume mounts from files::compile per container
+    pub per_container_file_mounts: &'a BTreeMap<String, Vec<VolumeMount>>,
+}
+
 /// Compiler for generating Kubernetes workload resources from LatticeService
 ///
 /// This compiler generates:
@@ -1041,11 +1060,7 @@ impl WorkloadCompiler {
     /// * `volumes` - Pre-compiled volume resources (affinity, labels, etc.)
     /// * `provider_type` - Infrastructure provider for topology-aware scheduling
     /// * `monitoring_enabled` - Whether the cluster has monitoring (VictoriaMetrics) enabled
-    /// * `secret_refs` - Secret references from ESO for `${secret.*}` resolution
-    /// * `rendered_containers` - Rendered container data from TemplateRenderer
-    /// * `per_container_env_from` - EnvFrom refs from env::compile per container
-    /// * `per_container_file_volumes` - File volumes from files::compile per container
-    /// * `per_container_file_mounts` - File volume mounts from files::compile per container
+    /// * `container_data` - Per-container compilation data (secrets, rendered containers, env, files)
     ///
     /// # Errors
     ///
@@ -1058,11 +1073,7 @@ impl WorkloadCompiler {
         volumes: &GeneratedVolumes,
         provider_type: ProviderType,
         monitoring_enabled: bool,
-        secret_refs: &BTreeMap<String, SecretRef>,
-        rendered_containers: &BTreeMap<String, RenderedContainer>,
-        per_container_env_from: &BTreeMap<String, Vec<EnvFromSource>>,
-        per_container_file_volumes: &BTreeMap<String, Vec<Volume>>,
-        per_container_file_mounts: &BTreeMap<String, Vec<VolumeMount>>,
+        container_data: &ContainerCompilationData<'_>,
     ) -> Result<GeneratedWorkloads, CompilationError> {
         let mut output = GeneratedWorkloads::new();
 
@@ -1076,11 +1087,7 @@ impl WorkloadCompiler {
             &service.spec,
             volumes,
             provider_type,
-            secret_refs,
-            rendered_containers,
-            per_container_env_from,
-            per_container_file_volumes,
-            per_container_file_mounts,
+            container_data,
         )?);
 
         // Generate Service if ports are defined
@@ -1110,23 +1117,20 @@ impl WorkloadCompiler {
     fn compile_containers_with_volumes(
         spec: &LatticeServiceSpec,
         volumes: &GeneratedVolumes,
-        secret_refs: &BTreeMap<String, SecretRef>,
-        rendered_containers: &BTreeMap<String, RenderedContainer>,
-        per_container_env_from: &BTreeMap<String, Vec<EnvFromSource>>,
-        per_container_file_mounts: &BTreeMap<String, Vec<VolumeMount>>,
+        container_data: &ContainerCompilationData<'_>,
     ) -> Result<Vec<Container>, CompilationError> {
         spec.containers
             .iter()
             .enumerate()
             .map(|(idx, (container_name, container_spec))| {
-                let rendered = rendered_containers.get(container_name);
+                let rendered = container_data.rendered_containers.get(container_name);
 
                 // Build secret env vars from rendered secret_variables
                 let env = if let Some(rc) = rendered {
                     Self::compile_secret_env_vars(
                         container_name,
                         &rc.secret_variables,
-                        secret_refs,
+                        container_data.secret_refs,
                         &spec.resources,
                     )?
                 } else {
@@ -1134,7 +1138,8 @@ impl WorkloadCompiler {
                 };
 
                 // EnvFrom refs from env::compile (ConfigMap/Secret for non-secret vars)
-                let env_from = per_container_env_from
+                let env_from = container_data
+                    .per_container_env_from
                     .get(container_name)
                     .cloned()
                     .unwrap_or_default();
@@ -1214,7 +1219,7 @@ impl WorkloadCompiler {
                     .unwrap_or_default();
 
                 // Add file volume mounts from files::compile
-                if let Some(file_mounts) = per_container_file_mounts.get(container_name) {
+                if let Some(file_mounts) = container_data.per_container_file_mounts.get(container_name) {
                     volume_mounts.extend(file_mounts.iter().cloned());
                 }
 
@@ -1542,20 +1547,13 @@ impl WorkloadCompiler {
         spec: &LatticeServiceSpec,
         volumes: &GeneratedVolumes,
         provider_type: ProviderType,
-        secret_refs: &BTreeMap<String, SecretRef>,
-        rendered_containers: &BTreeMap<String, RenderedContainer>,
-        per_container_env_from: &BTreeMap<String, Vec<EnvFromSource>>,
-        per_container_file_volumes: &BTreeMap<String, Vec<Volume>>,
-        per_container_file_mounts: &BTreeMap<String, Vec<VolumeMount>>,
+        container_data: &ContainerCompilationData<'_>,
     ) -> Result<Deployment, CompilationError> {
         // Compile main containers with volume mounts
         let mut containers = Self::compile_containers_with_volumes(
             spec,
             volumes,
-            secret_refs,
-            rendered_containers,
-            per_container_env_from,
-            per_container_file_mounts,
+            container_data,
         )?;
 
         // Compile sidecars (init + regular)
@@ -1598,7 +1596,7 @@ impl WorkloadCompiler {
         // Add file volumes from files::compile (deduplicate by name)
         let existing_vol_names: std::collections::HashSet<_> =
             pod_volumes.iter().map(|v| v.name.clone()).collect();
-        for file_vols in per_container_file_volumes.values() {
+        for file_vols in container_data.per_container_file_volumes.values() {
             for vol in file_vols {
                 if !existing_vol_names.contains(&vol.name) {
                     pod_volumes.push(vol.clone());
@@ -1612,7 +1610,7 @@ impl WorkloadCompiler {
         let security_context = Self::compile_pod_security_context(spec);
 
         // Resolve imagePullSecrets from spec resource names to K8s Secret names
-        let image_pull_secrets = Self::compile_image_pull_secrets(spec, secret_refs)?;
+        let image_pull_secrets = Self::compile_image_pull_secrets(spec, container_data.secret_refs)?;
 
         Ok(Deployment {
             api_version: "apps/v1".to_string(),
@@ -1929,6 +1927,14 @@ mod tests {
         let empty_file_volumes = BTreeMap::new();
         let empty_file_mounts = BTreeMap::new();
 
+        let container_data = ContainerCompilationData {
+            secret_refs,
+            rendered_containers: &rendered_containers,
+            per_container_env_from: &per_container_env_from,
+            per_container_file_volumes: &empty_file_volumes,
+            per_container_file_mounts: &empty_file_mounts,
+        };
+
         WorkloadCompiler::compile(
             name,
             service,
@@ -1936,11 +1942,7 @@ mod tests {
             &volumes,
             ProviderType::Docker,
             monitoring_enabled,
-            secret_refs,
-            &rendered_containers,
-            &per_container_env_from,
-            &empty_file_volumes,
-            &empty_file_mounts,
+            &container_data,
         )
     }
 
@@ -2314,17 +2316,7 @@ mod tests {
         };
 
         // With monitoring disabled, custom metrics should fail
-        let name = "my-app";
-        let namespace = "default";
-        let volumes = VolumeCompiler::compile(name, namespace, &service.spec).unwrap();
-        let result = WorkloadCompiler::compile(
-            name,
-            &service,
-            namespace,
-            &volumes,
-            ProviderType::Docker,
-            false,
-        );
+        let result = test_compile_with_monitoring(&service, &BTreeMap::new(), false);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("monitoring"));
