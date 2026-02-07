@@ -38,7 +38,7 @@ pub struct SecretAuthzRequest {
     pub service_name: String,
     /// Service namespace
     pub namespace: String,
-    /// (resource_name, vault_path, provider_name)
+    /// (resource_name, remote_key, provider_name)
     pub secret_paths: Vec<(String, String, String)>,
 }
 
@@ -60,7 +60,7 @@ pub struct SecretDenial {
     /// LatticeService resource name
     pub resource_name: String,
     /// Vault path that was denied
-    pub vault_path: String,
+    pub remote_key: String,
     /// Provider name
     pub provider: String,
     /// Why access was denied
@@ -91,13 +91,13 @@ impl PolicyEngine {
 
         let mut denied = Vec::new();
 
-        for (resource_name, vault_path, provider) in &request.secret_paths {
+        for (resource_name, remote_key, provider) in &request.secret_paths {
             let eval = SecretEvalContext {
                 engine: self,
                 namespace: &request.namespace,
                 service_name: &request.service_name,
                 resource_name,
-                vault_path,
+                remote_key,
                 provider,
                 action_uid: &action_uid,
                 policy_set: &policy_set,
@@ -120,7 +120,7 @@ struct SecretEvalContext<'a> {
     namespace: &'a str,
     service_name: &'a str,
     resource_name: &'a str,
-    vault_path: &'a str,
+    remote_key: &'a str,
     provider: &'a str,
     action_uid: &'a cedar_policy::EntityUid,
     policy_set: &'a cedar_policy::PolicySet,
@@ -133,7 +133,7 @@ impl SecretEvalContext<'_> {
             .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
         let principal_uid = service_entity.uid().clone();
 
-        let secret_entity = build_secret_path_entity(self.provider, self.vault_path)
+        let secret_entity = build_secret_path_entity(self.provider, self.remote_key)
             .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
         let resource_uid = secret_entity.uid().clone();
 
@@ -185,7 +185,7 @@ impl SecretEvalContext<'_> {
     fn denial(&self, reason: DenialReason) -> SecretDenial {
         SecretDenial {
             resource_name: self.resource_name.to_string(),
-            vault_path: self.vault_path.to_string(),
+            remote_key: self.remote_key.to_string(),
             provider: self.provider.to_string(),
             reason,
         }
@@ -198,9 +198,9 @@ fn deny_all(request: &SecretAuthzRequest, error: Error) -> SecretAuthzResult {
     let denied = request
         .secret_paths
         .iter()
-        .map(|(resource_name, vault_path, provider)| SecretDenial {
+        .map(|(resource_name, remote_key, provider)| SecretDenial {
             resource_name: resource_name.clone(),
-            vault_path: vault_path.clone(),
+            remote_key: remote_key.clone(),
             provider: provider.clone(),
             reason: DenialReason::NoPermitPolicy,
         })

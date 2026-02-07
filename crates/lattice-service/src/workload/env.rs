@@ -23,10 +23,11 @@ pub struct CompiledEnv {
 /// Compile rendered environment variables into ConfigMap/Secret
 ///
 /// Routes variables based on their sensitivity:
-/// - Non-sensitive -> ConfigMap
-/// - Sensitive -> Secret
+/// - Non-sensitive -> ConfigMap (`{service}-{container}-env`)
+/// - Sensitive -> Secret (`{service}-{container}-env-secret`)
 pub fn compile(
     service_name: &str,
+    container_name: &str,
     namespace: &str,
     variables: &BTreeMap<String, RenderedVariable>,
 ) -> CompiledEnv {
@@ -45,7 +46,7 @@ pub fn compile(
 
     // Create ConfigMap if there are non-sensitive variables
     if !non_sensitive.is_empty() {
-        let cm_name = format!("{}-env", service_name);
+        let cm_name = format!("{}-{}-env", service_name, container_name);
         let mut cm = ConfigMap::new(&cm_name, namespace);
         cm.data = non_sensitive;
         result.config_map = Some(cm);
@@ -57,7 +58,7 @@ pub fn compile(
 
     // Create Secret if there are sensitive variables
     if !sensitive.is_empty() {
-        let secret_name = format!("{}-env", service_name);
+        let secret_name = format!("{}-{}-env-secret", service_name, container_name);
         let mut secret = Secret::new(&secret_name, namespace);
         secret.string_data = sensitive;
         result.secret = Some(secret);
@@ -80,18 +81,16 @@ mod tests {
         variables.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
         variables.insert("PORT".to_string(), RenderedVariable::plain("8080"));
 
-        let result = compile("api", "prod", &variables);
+        let result = compile("api", "main", "prod", &variables);
 
-        // Should create ConfigMap, no Secret
         assert!(result.config_map.is_some());
         assert!(result.secret.is_none());
 
         let cm = result.config_map.expect("config_map should be set");
-        assert_eq!(cm.metadata.name, "api-env");
+        assert_eq!(cm.metadata.name, "api-main-env");
         assert_eq!(cm.data.get("HOST"), Some(&"localhost".to_string()));
         assert_eq!(cm.data.get("PORT"), Some(&"8080".to_string()));
 
-        // Should have one envFrom referencing ConfigMap
         assert_eq!(result.env_from.len(), 1);
         assert!(result.env_from[0].config_map_ref.is_some());
         assert!(result.env_from[0].secret_ref.is_none());
@@ -105,20 +104,18 @@ mod tests {
             RenderedVariable::secret("secret123"),
         );
 
-        let result = compile("api", "prod", &variables);
+        let result = compile("api", "main", "prod", &variables);
 
-        // Should create Secret, no ConfigMap
         assert!(result.config_map.is_none());
         assert!(result.secret.is_some());
 
         let secret = result.secret.expect("secret should be set");
-        assert_eq!(secret.metadata.name, "api-env");
+        assert_eq!(secret.metadata.name, "api-main-env-secret");
         assert_eq!(
             secret.string_data.get("DB_PASSWORD"),
             Some(&"secret123".to_string())
         );
 
-        // Should have one envFrom referencing Secret
         assert_eq!(result.env_from.len(), 1);
         assert!(result.env_from[0].config_map_ref.is_none());
         assert!(result.env_from[0].secret_ref.is_some());
@@ -130,13 +127,10 @@ mod tests {
         variables.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
         variables.insert("PASSWORD".to_string(), RenderedVariable::secret("secret"));
 
-        let result = compile("api", "prod", &variables);
+        let result = compile("api", "main", "prod", &variables);
 
-        // Should create both ConfigMap and Secret
         assert!(result.config_map.is_some());
         assert!(result.secret.is_some());
-
-        // Should have two envFrom references
         assert_eq!(result.env_from.len(), 2);
     }
 
@@ -144,11 +138,24 @@ mod tests {
     fn test_compile_empty() {
         let variables = BTreeMap::new();
 
-        let result = compile("api", "prod", &variables);
+        let result = compile("api", "main", "prod", &variables);
 
-        // Should create neither
         assert!(result.config_map.is_none());
         assert!(result.secret.is_none());
         assert!(result.env_from.is_empty());
+    }
+
+    #[test]
+    fn test_compile_different_containers_have_different_names() {
+        let mut vars = BTreeMap::new();
+        vars.insert("KEY".to_string(), RenderedVariable::plain("value"));
+
+        let main = compile("api", "main", "prod", &vars);
+        let sidecar = compile("api", "sidecar", "prod", &vars);
+
+        let main_cm = main.config_map.expect("main should have cm");
+        let sidecar_cm = sidecar.config_map.expect("sidecar should have cm");
+        assert_eq!(main_cm.metadata.name, "api-main-env");
+        assert_eq!(sidecar_cm.metadata.name, "api-sidecar-env");
     }
 }

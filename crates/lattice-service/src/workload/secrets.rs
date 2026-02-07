@@ -11,6 +11,7 @@ use lattice_secrets_provider::{
     ExternalSecretSpec, ExternalSecretTarget, RemoteRef, SecretStoreRef,
 };
 
+use super::error::CompilationError;
 use crate::crd::LatticeServiceSpec;
 
 // =============================================================================
@@ -32,8 +33,13 @@ pub struct GeneratedSecrets {
 pub struct SecretRef {
     /// Name of the K8s Secret (created by ESO)
     pub secret_name: String,
+    /// Remote key/path in the external store (the `id` field from the resource spec).
+    /// E.g., a Vault path, AWS Secrets Manager ARN, or GCP secret name.
+    pub remote_key: String,
     /// Available keys in the secret (if explicitly specified)
     pub keys: Option<Vec<String>>,
+    /// ClusterSecretStore name (e.g., "vault")
+    pub store_name: String,
 }
 
 impl GeneratedSecrets {
@@ -59,25 +65,16 @@ impl SecretsCompiler {
     /// Compile secret resources for a LatticeService
     ///
     /// For each secret resource in the spec:
-    /// 1. Validates the resource has required fields (id for Vault path, params.provider)
+    /// 1. Validates the resource has required fields (`id` for remote key, `params.provider`)
     /// 2. Generates an ExternalSecret that syncs from the ClusterSecretStore
     /// 3. Registers the secret reference for template resolution
-    ///
-    /// # Arguments
-    /// * `service_name` - Name of the service
-    /// * `namespace` - Target namespace
-    /// * `spec` - LatticeService spec
-    ///
-    /// # Returns
-    /// Generated secrets including ExternalSecrets and secret references for templating.
     pub fn compile(
         service_name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
-    ) -> Result<GeneratedSecrets, String> {
+    ) -> Result<GeneratedSecrets, CompilationError> {
         let mut output = GeneratedSecrets::new();
 
-        // Collect all secret resources
         let secret_resources: Vec<_> = spec
             .resources
             .iter()
@@ -88,61 +85,57 @@ impl SecretsCompiler {
             return Ok(output);
         }
 
-        // Process each secret resource
         for (resource_name, resource_spec) in secret_resources {
-            // Validate and parse params
             let params = resource_spec
                 .secret_params()
-                .map_err(|e| format!("secret resource '{}': {}", resource_name, e))?
-                .ok_or_else(|| format!("secret resource '{}': missing params", resource_name))?;
-
-            // Get the Vault path from the id field
-            let vault_path = resource_spec
-                .secret_vault_path()
+                .map_err(|e| {
+                    CompilationError::secret(format!("secret resource '{}': {}", resource_name, e))
+                })?
                 .ok_or_else(|| {
-                    format!(
-                        "secret resource '{}': missing 'id' field (Vault path)",
+                    CompilationError::secret(format!(
+                        "secret resource '{}': missing params",
                         resource_name
-                    )
+                    ))
+                })?;
+
+            // The `id` field is the remote key/path in the external secret store
+            let remote_key = resource_spec
+                .secret_remote_key()
+                .ok_or_else(|| {
+                    CompilationError::secret(format!(
+                        "secret resource '{}': missing 'id' field (remote key for secret store)",
+                        resource_name
+                    ))
                 })?
                 .to_string();
 
-            // Generate K8s secret name
             let k8s_secret_name = resource_spec
                 .secret_k8s_name(service_name, resource_name)
                 .unwrap_or_else(|| format!("{}-{}", service_name, resource_name));
 
-            // Build ExternalSecret data mappings
             let data = match &params.keys {
-                Some(keys) => {
-                    // Explicit key mappings
-                    keys.iter()
-                        .map(|key| {
-                            ExternalSecretData::new(
-                                key.clone(),
-                                RemoteRef::with_property(&vault_path, key),
-                            )
-                        })
-                        .collect()
-                }
-                None => {
-                    // No explicit keys - use dataFrom to extract all
-                    vec![]
-                }
+                Some(keys) => keys
+                    .iter()
+                    .map(|key| {
+                        ExternalSecretData::new(
+                            key.clone(),
+                            RemoteRef::with_property(&remote_key, key),
+                        )
+                    })
+                    .collect(),
+                None => vec![],
             };
 
-            // Build dataFrom if no explicit keys
             let data_from = if params.keys.is_none() {
                 Some(vec![ExternalSecretDataFrom {
                     extract: Some(ExternalSecretExtract {
-                        key: vault_path.clone(),
+                        key: remote_key.clone(),
                     }),
                 }])
             } else {
                 None
             };
 
-            // Create ExternalSecret
             let external_secret = ExternalSecret::new(
                 &k8s_secret_name,
                 namespace,
@@ -157,12 +150,13 @@ impl SecretsCompiler {
 
             output.external_secrets.push(external_secret);
 
-            // Register secret reference for template resolution
             output.secret_refs.insert(
                 resource_name.clone(),
                 SecretRef {
                     secret_name: k8s_secret_name,
+                    remote_key: remote_key.clone(),
                     keys: params.keys,
+                    store_name: params.provider.clone(),
                 },
             );
         }
@@ -178,12 +172,10 @@ impl SecretsCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{
-        ContainerSpec, DependencyDirection, DeploySpec, ReplicaSpec, ResourceSpec, ResourceType,
-    };
+    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType};
     use std::collections::BTreeMap;
 
-    /// (name, vault_path, provider, keys, refresh_interval)
+    /// (name, remote_key, provider, keys, refresh_interval)
     type SecretTuple<'a> = (
         &'a str,
         &'a str,
@@ -195,7 +187,7 @@ mod tests {
     fn make_spec_with_secrets(secrets: Vec<SecretTuple<'_>>) -> LatticeServiceSpec {
         let mut resources = BTreeMap::new();
 
-        for (name, vault_path, provider, keys, refresh_interval) in secrets {
+        for (name, remote_key, provider, keys, refresh_interval) in secrets {
             let mut params = BTreeMap::new();
             params.insert("provider".to_string(), serde_json::json!(provider));
             if let Some(ks) = keys {
@@ -209,14 +201,9 @@ mod tests {
                 name.to_string(),
                 ResourceSpec {
                     type_: ResourceType::Secret,
-                    direction: DependencyDirection::default(),
-                    id: Some(vault_path.to_string()),
-                    class: None,
-                    metadata: None,
+                    id: Some(remote_key.to_string()),
                     params: Some(params),
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
+                    ..Default::default()
                 },
             );
         }
@@ -226,32 +213,14 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
         LatticeServiceSpec {
             containers,
             resources,
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         }
     }
 
@@ -361,7 +330,10 @@ mod tests {
 
         let result = SecretsCompiler::compile("myapp", "prod", &spec);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing 'id' field"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing 'id' field"));
     }
 
     #[test]
@@ -423,20 +395,7 @@ mod tests {
 
     #[test]
     fn story_no_secrets_returns_empty() {
-        let spec = LatticeServiceSpec {
-            containers: BTreeMap::new(),
-            resources: BTreeMap::new(),
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
-        };
+        let spec = LatticeServiceSpec::default();
 
         let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
 

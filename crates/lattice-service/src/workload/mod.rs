@@ -34,15 +34,14 @@ use serde::{Deserialize, Serialize};
 /// This hash is added as a pod annotation to trigger rollouts when config changes.
 /// Uses SHA-256 for FIPS compliance.
 pub fn compute_config_hash(
-    config_map: Option<&ConfigMap>,
-    secret: Option<&Secret>,
-    files_cm: Option<&ConfigMap>,
-    files_secret: Option<&Secret>,
+    env_config_maps: &[ConfigMap],
+    env_secrets: &[Secret],
+    files_config_maps: &[ConfigMap],
+    files_secrets: &[Secret],
 ) -> String {
     let mut data = String::new();
 
-    // Hash ConfigMap data
-    if let Some(cm) = config_map {
+    for cm in env_config_maps {
         for (k, v) in &cm.data {
             data.push_str(k);
             data.push('=');
@@ -51,8 +50,7 @@ pub fn compute_config_hash(
         }
     }
 
-    // Hash Secret data
-    if let Some(s) = secret {
+    for s in env_secrets {
         for (k, v) in &s.string_data {
             data.push_str(k);
             data.push('=');
@@ -61,8 +59,7 @@ pub fn compute_config_hash(
         }
     }
 
-    // Hash files ConfigMap
-    if let Some(cm) = files_cm {
+    for cm in files_config_maps {
         for (k, v) in &cm.data {
             data.push_str("file:");
             data.push_str(k);
@@ -72,8 +69,7 @@ pub fn compute_config_hash(
         }
     }
 
-    // Hash files Secret
-    if let Some(s) = files_secret {
+    for s in files_secrets {
         for (k, v) in &s.string_data {
             data.push_str("file:");
             data.push_str(k);
@@ -378,6 +374,9 @@ pub struct PodSpec {
     /// until model artifacts are cached in the PVC.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scheduling_gates: Vec<SchedulingGate>,
+    /// Image pull secrets for authenticating to private registries
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_pull_secrets: Vec<LocalObjectReference>,
 }
 
 /// Scheduling gate that blocks pod scheduling until removed
@@ -459,14 +458,74 @@ pub struct Container {
     pub security_context: Option<K8sSecurityContext>,
 }
 
-/// Environment variable
+/// Environment variable — either a literal value or a reference to a secret key
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvVar {
     /// Variable name
     pub name: String,
-    /// Variable value
-    pub value: String,
+    /// Literal value (mutually exclusive with `value_from`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Reference to a secret key (mutually exclusive with `value`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_from: Option<EnvVarSource>,
+}
+
+impl EnvVar {
+    /// Create an env var with a literal value
+    pub fn literal(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: Some(value.into()),
+            value_from: None,
+        }
+    }
+
+    /// Create an env var that references a secret key
+    pub fn from_secret(
+        name: impl Into<String>,
+        secret_name: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            value: None,
+            value_from: Some(EnvVarSource {
+                secret_key_ref: Some(SecretKeySelector {
+                    name: secret_name.into(),
+                    key: key.into(),
+                }),
+            }),
+        }
+    }
+}
+
+/// Source for an environment variable value
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVarSource {
+    /// Reference to a specific key in a K8s Secret
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_key_ref: Option<SecretKeySelector>,
+}
+
+/// Selector for a key within a K8s Secret
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretKeySelector {
+    /// Name of the K8s Secret
+    pub name: String,
+    /// Key within the secret
+    pub key: String,
+}
+
+/// Reference to a local object by name (e.g., for imagePullSecrets)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalObjectReference {
+    /// Object name
+    pub name: String,
 }
 
 /// Container port
@@ -838,14 +897,14 @@ pub struct GeneratedWorkloads {
     pub service_account: Option<ServiceAccount>,
     /// KEDA ScaledObject for autoscaling
     pub scaled_object: Option<ScaledObject>,
-    /// ConfigMap for non-sensitive env vars
-    pub env_config_map: Option<ConfigMap>,
-    /// Secret for sensitive env vars
-    pub env_secret: Option<Secret>,
-    /// ConfigMap for file mounts (text content)
-    pub files_config_map: Option<ConfigMap>,
-    /// Secret for file mounts (binary content)
-    pub files_secret: Option<Secret>,
+    /// ConfigMaps for non-sensitive env vars (one per container)
+    pub env_config_maps: Vec<ConfigMap>,
+    /// Secrets for sensitive env vars (one per container)
+    pub env_secrets: Vec<Secret>,
+    /// ConfigMaps for file mounts — text content (one per container)
+    pub files_config_maps: Vec<ConfigMap>,
+    /// Secrets for file mounts — binary content (one per container)
+    pub files_secrets: Vec<Secret>,
     /// PersistentVolumeClaims for owned volumes
     pub pvcs: Vec<PersistentVolumeClaim>,
     /// ExternalSecrets for syncing secrets from SecretsProvider (Vault)
@@ -866,10 +925,10 @@ impl GeneratedWorkloads {
             && self.service.is_none()
             && self.service_account.is_none()
             && self.scaled_object.is_none()
-            && self.env_config_map.is_none()
-            && self.env_secret.is_none()
-            && self.files_config_map.is_none()
-            && self.files_secret.is_none()
+            && self.env_config_maps.is_empty()
+            && self.env_secrets.is_empty()
+            && self.files_config_maps.is_empty()
+            && self.files_secrets.is_empty()
             && self.pvcs.is_empty()
             && self.external_secrets.is_empty()
     }
@@ -883,6 +942,7 @@ use crate::crd::{
     AutoscalingMetric, DeployStrategy, GPUSpec, LatticeService, LatticeServiceSpec, ProviderType,
 };
 use lattice_common::mesh;
+use lattice_common::template::RenderedContainer;
 
 /// Merge GPU resource requests into container limits.
 ///
@@ -981,6 +1041,11 @@ impl WorkloadCompiler {
     /// * `volumes` - Pre-compiled volume resources (affinity, labels, etc.)
     /// * `provider_type` - Infrastructure provider for topology-aware scheduling
     /// * `monitoring_enabled` - Whether the cluster has monitoring (VictoriaMetrics) enabled
+    /// * `secret_refs` - Secret references from ESO for `${secret.*}` resolution
+    /// * `rendered_containers` - Rendered container data from TemplateRenderer
+    /// * `per_container_env_from` - EnvFrom refs from env::compile per container
+    /// * `per_container_file_volumes` - File volumes from files::compile per container
+    /// * `per_container_file_mounts` - File volume mounts from files::compile per container
     ///
     /// # Errors
     ///
@@ -993,20 +1058,30 @@ impl WorkloadCompiler {
         volumes: &GeneratedVolumes,
         provider_type: ProviderType,
         monitoring_enabled: bool,
+        secret_refs: &BTreeMap<String, SecretRef>,
+        rendered_containers: &BTreeMap<String, RenderedContainer>,
+        per_container_env_from: &BTreeMap<String, Vec<EnvFromSource>>,
+        per_container_file_volumes: &BTreeMap<String, Vec<Volume>>,
+        per_container_file_mounts: &BTreeMap<String, Vec<VolumeMount>>,
     ) -> Result<GeneratedWorkloads, CompilationError> {
         let mut output = GeneratedWorkloads::new();
 
         // Always generate ServiceAccount for SPIFFE identity
         output.service_account = Some(Self::compile_service_account(name, namespace));
 
-        // Always generate Deployment (skeleton - webhook fills containers)
+        // Always generate Deployment
         output.deployment = Some(Self::compile_deployment(
             name,
             namespace,
             &service.spec,
             volumes,
             provider_type,
-        ));
+            secret_refs,
+            rendered_containers,
+            per_container_env_from,
+            per_container_file_volumes,
+            per_container_file_mounts,
+        )?);
 
         // Generate Service if ports are defined
         if service.spec.service.is_some() {
@@ -1026,26 +1101,56 @@ impl WorkloadCompiler {
         Ok(output)
     }
 
-    /// Compile containers from a LatticeServiceSpec with volume mounts
+    /// Compile containers from a LatticeServiceSpec using rendered container data
+    ///
+    /// Uses pre-rendered templates from TemplateRenderer. Secret variable references
+    /// (`${secret.RESOURCE.KEY}`) are compiled to K8s `secretKeyRef` env vars.
+    /// Non-secret env vars come via `envFrom` (ConfigMap/Secret from env::compile).
+    /// File volumes/mounts come from files::compile.
     fn compile_containers_with_volumes(
         spec: &LatticeServiceSpec,
         volumes: &GeneratedVolumes,
-    ) -> Vec<Container> {
+        secret_refs: &BTreeMap<String, SecretRef>,
+        rendered_containers: &BTreeMap<String, RenderedContainer>,
+        per_container_env_from: &BTreeMap<String, Vec<EnvFromSource>>,
+        per_container_file_mounts: &BTreeMap<String, Vec<VolumeMount>>,
+    ) -> Result<Vec<Container>, CompilationError> {
         spec.containers
             .iter()
             .enumerate()
             .map(|(idx, (container_name, container_spec))| {
-                // NOTE: Template rendering happens before this stage.
-                // At compile time, variables still contain unrendered templates.
-                // The workload compiler should render these before generating K8s resources.
-                let env: Vec<EnvVar> = container_spec
-                    .variables
-                    .iter()
-                    .map(|(k, v)| EnvVar {
-                        name: k.clone(),
-                        value: v.to_string(),
-                    })
-                    .collect();
+                let rendered = rendered_containers.get(container_name);
+
+                // Build secret env vars from rendered secret_variables
+                let env = if let Some(rc) = rendered {
+                    Self::compile_secret_env_vars(
+                        container_name,
+                        &rc.secret_variables,
+                        secret_refs,
+                        &spec.resources,
+                    )?
+                } else {
+                    vec![]
+                };
+
+                // EnvFrom refs from env::compile (ConfigMap/Secret for non-secret vars)
+                let env_from = per_container_env_from
+                    .get(container_name)
+                    .cloned()
+                    .unwrap_or_default();
+
+                // Use rendered image if available, fall back to spec
+                let image = rendered
+                    .map(|rc| rc.image.clone())
+                    .unwrap_or_else(|| container_spec.image.clone());
+
+                // Use rendered command/args if available
+                let command = rendered
+                    .and_then(|rc| rc.command.clone())
+                    .or_else(|| container_spec.command.clone());
+                let args = rendered
+                    .and_then(|rc| rc.args.clone())
+                    .or_else(|| container_spec.args.clone());
 
                 // Get ports from service spec
                 let ports: Vec<ContainerPort> = spec
@@ -1101,12 +1206,17 @@ impl WorkloadCompiler {
                     .as_ref()
                     .map(Self::compile_probe);
 
-                // Get volume mounts for this container
+                // Get volume mounts for this container (PVC volumes)
                 let mut volume_mounts = volumes
                     .volume_mounts
                     .get(container_name)
                     .cloned()
                     .unwrap_or_default();
+
+                // Add file volume mounts from files::compile
+                if let Some(file_mounts) = per_container_file_mounts.get(container_name) {
+                    volume_mounts.extend(file_mounts.iter().cloned());
+                }
 
                 // Add SHM volume mount for GPU pods (first container only)
                 if idx == 0 {
@@ -1121,13 +1231,13 @@ impl WorkloadCompiler {
                     .as_ref()
                     .and_then(Self::compile_security_context);
 
-                Container {
+                Ok(Container {
                     name: container_name.clone(),
-                    image: container_spec.image.clone(),
-                    command: container_spec.command.clone(),
-                    args: container_spec.args.clone(),
+                    image,
+                    command,
+                    args,
                     env,
-                    env_from: vec![],
+                    env_from,
                     ports,
                     resources,
                     liveness_probe,
@@ -1135,9 +1245,74 @@ impl WorkloadCompiler {
                     startup_probe,
                     volume_mounts,
                     security_context,
-                }
+                })
             })
             .collect()
+    }
+
+    /// Compile `${secret.RESOURCE.KEY}` references into K8s `secretKeyRef` env vars
+    ///
+    /// These are pure secret references that bypassed template rendering.
+    /// They compile to `EnvVar::from_secret` pointing at ESO-synced K8s Secrets.
+    fn compile_secret_env_vars(
+        container_name: &str,
+        secret_variables: &BTreeMap<String, lattice_common::template::SecretVariableRef>,
+        secret_refs: &BTreeMap<String, SecretRef>,
+        resources: &BTreeMap<String, crate::crd::ResourceSpec>,
+    ) -> Result<Vec<EnvVar>, CompilationError> {
+        let mut env = Vec::with_capacity(secret_variables.len());
+        for (var_name, secret_var) in secret_variables {
+            // Validate the resource exists and is type: secret
+            let resource = resources.get(&secret_var.resource_name).ok_or_else(|| {
+                CompilationError::container(
+                    container_name,
+                    format!(
+                        "variable '{}' references secret resource '{}' which does not exist",
+                        var_name, secret_var.resource_name
+                    ),
+                )
+            })?;
+
+            if !resource.is_secret() {
+                return Err(CompilationError::container(
+                    container_name,
+                    format!(
+                        "variable '{}' references resource '{}' via ${{secret.*}} but it is type '{}', not 'secret'",
+                        var_name, secret_var.resource_name, resource.type_
+                    ),
+                ));
+            }
+
+            let secret_ref = secret_refs.get(&secret_var.resource_name).ok_or_else(|| {
+                CompilationError::container(
+                    container_name,
+                    format!(
+                        "variable '{}' references secret resource '{}' but no SecretRef was compiled (missing vault path or params?)",
+                        var_name, secret_var.resource_name
+                    ),
+                )
+            })?;
+
+            // Validate key if keys are specified
+            if let Some(ref keys) = secret_ref.keys {
+                if !keys.contains(&secret_var.key) {
+                    return Err(CompilationError::container(
+                        container_name,
+                        format!(
+                            "variable '{}' references key '{}' in secret '{}' but available keys are: {:?}",
+                            var_name, secret_var.key, secret_var.resource_name, keys
+                        ),
+                    ));
+                }
+            }
+
+            env.push(EnvVar::from_secret(
+                var_name,
+                &secret_ref.secret_name,
+                &secret_var.key,
+            ));
+        }
+        Ok(env)
     }
 
     /// Compile a Score-compliant Probe to a K8s ProbeSpec
@@ -1265,10 +1440,7 @@ impl WorkloadCompiler {
             let env: Vec<EnvVar> = sidecar_spec
                 .variables
                 .iter()
-                .map(|(k, v)| EnvVar {
-                    name: k.clone(),
-                    value: v.to_string(),
-                })
+                .map(|(k, v)| EnvVar::literal(k, v.to_string()))
                 .collect();
 
             // Convert resources
@@ -1356,22 +1528,35 @@ impl WorkloadCompiler {
     /// Compile a complete Deployment from the LatticeService spec.
     ///
     /// Generates a fully-specified Deployment with:
-    /// - Containers with image, env vars, ports, probes, volume mounts
+    /// - Containers with rendered image, env vars via envFrom, ports, probes, volume mounts
     /// - Init containers and sidecars
-    /// - Volumes for PVCs
+    /// - Volumes for PVCs and file mounts
     /// - Pod affinity for RWO volume co-location
     /// - Volume ownership labels
     /// - Pod-level security context (sysctls)
     /// - Topology spread constraints for HA distribution
+    /// - imagePullSecrets resolved from secret resources
     fn compile_deployment(
         name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
         volumes: &GeneratedVolumes,
         provider_type: ProviderType,
-    ) -> Deployment {
+        secret_refs: &BTreeMap<String, SecretRef>,
+        rendered_containers: &BTreeMap<String, RenderedContainer>,
+        per_container_env_from: &BTreeMap<String, Vec<EnvFromSource>>,
+        per_container_file_volumes: &BTreeMap<String, Vec<Volume>>,
+        per_container_file_mounts: &BTreeMap<String, Vec<VolumeMount>>,
+    ) -> Result<Deployment, CompilationError> {
         // Compile main containers with volume mounts
-        let mut containers = Self::compile_containers_with_volumes(spec, volumes);
+        let mut containers = Self::compile_containers_with_volumes(
+            spec,
+            volumes,
+            secret_refs,
+            rendered_containers,
+            per_container_env_from,
+            per_container_file_mounts,
+        )?;
 
         // Compile sidecars (init + regular)
         let (init_containers, sidecar_containers) = Self::compile_sidecars(spec, volumes);
@@ -1410,12 +1595,26 @@ impl WorkloadCompiler {
             pod_volumes.push(shm_vol);
         }
 
+        // Add file volumes from files::compile (deduplicate by name)
+        let existing_vol_names: std::collections::HashSet<_> =
+            pod_volumes.iter().map(|v| v.name.clone()).collect();
+        for file_vols in per_container_file_volumes.values() {
+            for vol in file_vols {
+                if !existing_vol_names.contains(&vol.name) {
+                    pod_volumes.push(vol.clone());
+                }
+            }
+        }
+
         let strategy = Self::compile_strategy(spec);
 
         // Compile pod-level security context
         let security_context = Self::compile_pod_security_context(spec);
 
-        Deployment {
+        // Resolve imagePullSecrets from spec resource names to K8s Secret names
+        let image_pull_secrets = Self::compile_image_pull_secrets(spec, secret_refs)?;
+
+        Ok(Deployment {
             api_version: "apps/v1".to_string(),
             kind: "Deployment".to_string(),
             metadata: ObjectMeta::new(name, namespace),
@@ -1461,11 +1660,60 @@ impl WorkloadCompiler {
                         tolerations: gpu_tolerations(&spec.gpu),
                         runtime_class_name: spec.gpu.as_ref().map(|_| "nvidia".to_string()),
                         scheduling_gates: volumes.scheduling_gates.clone(),
+                        image_pull_secrets,
                     },
                 },
                 strategy,
             },
-        }
+        })
+    }
+
+    /// Resolve `imagePullSecrets` resource names to K8s Secret names
+    fn compile_image_pull_secrets(
+        spec: &LatticeServiceSpec,
+        secret_refs: &BTreeMap<String, SecretRef>,
+    ) -> Result<Vec<LocalObjectReference>, CompilationError> {
+        spec.image_pull_secrets
+            .iter()
+            .map(|resource_name| {
+                // Validate resource exists
+                let resource = spec.resources.get(resource_name).ok_or_else(|| {
+                    CompilationError::resource(
+                        resource_name,
+                        format!(
+                            "imagePullSecrets references resource '{}' which does not exist",
+                            resource_name
+                        ),
+                    )
+                })?;
+
+                // Validate resource is type: secret
+                if !resource.is_secret() {
+                    return Err(CompilationError::resource(
+                        resource_name,
+                        format!(
+                            "imagePullSecrets references resource '{}' but it is type '{}', not 'secret'",
+                            resource_name, resource.type_
+                        ),
+                    ));
+                }
+
+                // Look up K8s secret name
+                let secret_ref = secret_refs.get(resource_name).ok_or_else(|| {
+                    CompilationError::resource(
+                        resource_name,
+                        format!(
+                            "imagePullSecrets references resource '{}' but no SecretRef was compiled",
+                            resource_name
+                        ),
+                    )
+                })?;
+
+                Ok(LocalObjectReference {
+                    name: secret_ref.secret_name.clone(),
+                })
+            })
+            .collect()
     }
 
     fn compile_service(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Service {
@@ -1596,20 +1844,66 @@ impl WorkloadCompiler {
 mod tests {
     use super::*;
     use crate::crd::{
-        AutoscalingMetric, ContainerSpec, DeploySpec, GPUSpec, PortSpec, ReplicaSpec,
-        ServicePortsSpec,
+        AutoscalingMetric, ContainerSpec, GPUSpec, PortSpec, ReplicaSpec, ServicePortsSpec,
     };
     use lattice_common::template::TemplateString;
 
-    /// Helper to compile a service with empty volumes (for basic tests)
-    fn compile_service(service: &LatticeService) -> GeneratedWorkloads {
-        compile_service_with_monitoring(service, true)
+    /// Build rendered containers from a service spec for testing.
+    ///
+    /// Simulates what the TemplateRenderer does:
+    /// - Non-secret variables are treated as pre-rendered plain values
+    /// - `${secret.*}` variables are separated into `secret_variables`
+    /// - Image, command, args are copied from the spec
+    fn build_test_rendered_containers(
+        service: &LatticeService,
+    ) -> BTreeMap<String, RenderedContainer> {
+        use lattice_common::template::{parse_secret_ref, RenderedVariable};
+
+        service
+            .spec
+            .containers
+            .iter()
+            .map(|(cname, cspec)| {
+                let mut variables = BTreeMap::new();
+                let mut secret_variables = BTreeMap::new();
+
+                for (var_name, var_val) in &cspec.variables {
+                    if let Some(sref) = parse_secret_ref(var_val.as_str()) {
+                        secret_variables.insert(var_name.clone(), sref);
+                    } else {
+                        variables
+                            .insert(var_name.clone(), RenderedVariable::plain(var_val.as_str()));
+                    }
+                }
+
+                (
+                    cname.clone(),
+                    RenderedContainer {
+                        name: cname.clone(),
+                        image: cspec.image.clone(),
+                        command: cspec.command.clone(),
+                        args: cspec.args.clone(),
+                        variables,
+                        secret_variables,
+                        eso_templated_variables: BTreeMap::new(),
+                        files: BTreeMap::new(),
+                        volumes: BTreeMap::new(),
+                    },
+                )
+            })
+            .collect()
     }
 
-    fn compile_service_with_monitoring(
+    /// Core test compilation helper.
+    ///
+    /// Builds rendered containers, runs env::compile for envFrom, and delegates
+    /// to WorkloadCompiler. Mirrors the ServiceCompiler pipeline without
+    /// requiring a TemplateRenderer or ServiceGraph.
+    fn test_compile_with_monitoring(
         service: &LatticeService,
+        secret_refs: &BTreeMap<String, SecretRef>,
         monitoring_enabled: bool,
-    ) -> GeneratedWorkloads {
+    ) -> Result<GeneratedWorkloads, CompilationError> {
         let name = service
             .metadata
             .name
@@ -1622,7 +1916,19 @@ mod tests {
             .expect("test service must have a namespace");
         let volumes = VolumeCompiler::compile(name, namespace, &service.spec)
             .expect("test volume compilation should succeed");
-        // Use Docker provider for tests (uses hostname-based spreading)
+
+        let rendered_containers = build_test_rendered_containers(service);
+
+        // Run env::compile per container to get envFrom refs
+        let mut per_container_env_from = BTreeMap::new();
+        for (cname, rendered) in &rendered_containers {
+            let compiled_env = env::compile(name, cname, namespace, &rendered.variables);
+            per_container_env_from.insert(cname.clone(), compiled_env.env_from);
+        }
+
+        let empty_file_volumes = BTreeMap::new();
+        let empty_file_mounts = BTreeMap::new();
+
         WorkloadCompiler::compile(
             name,
             service,
@@ -1630,8 +1936,42 @@ mod tests {
             &volumes,
             ProviderType::Docker,
             monitoring_enabled,
+            secret_refs,
+            &rendered_containers,
+            &per_container_env_from,
+            &empty_file_volumes,
+            &empty_file_mounts,
         )
-        .expect("test workload compilation should succeed")
+    }
+
+    /// Core test compilation helper with monitoring enabled by default.
+    fn test_compile(
+        service: &LatticeService,
+        secret_refs: &BTreeMap<String, SecretRef>,
+    ) -> Result<GeneratedWorkloads, CompilationError> {
+        test_compile_with_monitoring(service, secret_refs, true)
+    }
+
+    /// Helper to compile a service with no secret refs
+    fn compile_service(service: &LatticeService) -> GeneratedWorkloads {
+        test_compile(service, &BTreeMap::new()).expect("test workload compilation should succeed")
+    }
+
+    /// Helper to compile a service with monitoring flag
+    fn compile_service_with_monitoring(
+        service: &LatticeService,
+        monitoring_enabled: bool,
+    ) -> GeneratedWorkloads {
+        test_compile_with_monitoring(service, &BTreeMap::new(), monitoring_enabled)
+            .expect("test workload compilation should succeed")
+    }
+
+    /// Helper to compile a service with secret refs
+    fn compile_service_with_secret_refs(
+        service: &LatticeService,
+        secret_refs: &BTreeMap<String, SecretRef>,
+    ) -> Result<GeneratedWorkloads, CompilationError> {
+        test_compile(service, secret_refs)
     }
 
     fn make_service(name: &str, namespace: &str) -> LatticeService {
@@ -1640,16 +1980,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -1671,21 +2002,8 @@ mod tests {
             },
             spec: crate::crd::LatticeServiceSpec {
                 containers,
-                resources: BTreeMap::new(),
                 service: Some(ServicePortsSpec { ports }),
-                replicas: ReplicaSpec {
-                    min: 1,
-                    max: None,
-                    autoscaling: vec![],
-                },
-                deploy: DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         }
@@ -2088,7 +2406,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_container_environment_variables() {
+    fn story_container_environment_variables_via_env_from() {
         let mut service = make_service("my-app", "default");
         let container = service
             .spec
@@ -2102,18 +2420,24 @@ mod tests {
         let output = compile_service(&service);
         let deployment = output.deployment.expect("deployment should be set");
 
-        let env = &deployment
+        // Non-secret env vars are delivered via envFrom (ConfigMap), not individual env entries
+        let main = deployment
             .spec
             .template
             .spec
             .containers
             .iter()
             .find(|c| c.name == "main")
-            .expect("main container should exist")
-            .env;
-        assert!(env
-            .iter()
-            .any(|e| e.name == "LOG_LEVEL" && e.value == "debug"));
+            .expect("main container should exist");
+
+        assert!(
+            !main.env_from.is_empty(),
+            "should have envFrom for rendered variables"
+        );
+        assert!(
+            main.env_from.iter().any(|ef| ef.config_map_ref.is_some()),
+            "envFrom should reference a ConfigMap"
+        );
     }
 
     #[test]
@@ -2155,7 +2479,7 @@ mod tests {
 
     #[test]
     fn test_config_hash_empty() {
-        let hash = compute_config_hash(None, None, None, None);
+        let hash = compute_config_hash(&[], &[], &[], &[]);
         // Empty data still produces a hash
         assert_eq!(hash.len(), 16); // 8 bytes = 16 hex chars
     }
@@ -2165,12 +2489,12 @@ mod tests {
         let mut cm = ConfigMap::new("test", "default");
         cm.data.insert("KEY".to_string(), "value".to_string());
 
-        let hash1 = compute_config_hash(Some(&cm), None, None, None);
+        let hash1 = compute_config_hash(&[cm.clone()], &[], &[], &[]);
         assert_eq!(hash1.len(), 16);
 
         // Different value produces different hash
         cm.data.insert("KEY".to_string(), "different".to_string());
-        let hash2 = compute_config_hash(Some(&cm), None, None, None);
+        let hash2 = compute_config_hash(&[cm], &[], &[], &[]);
         assert_ne!(hash1, hash2);
     }
 
@@ -2181,7 +2505,7 @@ mod tests {
             .string_data
             .insert("PASSWORD".to_string(), "secret123".to_string());
 
-        let hash = compute_config_hash(None, Some(&secret), None, None);
+        let hash = compute_config_hash(&[], &[secret], &[], &[]);
         assert_eq!(hash.len(), 16);
     }
 
@@ -2191,8 +2515,8 @@ mod tests {
         cm.data.insert("KEY".to_string(), "value".to_string());
 
         // Same input produces same hash
-        let hash1 = compute_config_hash(Some(&cm), None, None, None);
-        let hash2 = compute_config_hash(Some(&cm), None, None, None);
+        let hash1 = compute_config_hash(&[cm.clone()], &[], &[], &[]);
+        let hash2 = compute_config_hash(&[cm], &[], &[], &[]);
         assert_eq!(hash1, hash2);
     }
 
@@ -2220,14 +2544,14 @@ mod tests {
 
         // All four produce a combined hash
         let hash_all = compute_config_hash(
-            Some(&env_cm),
-            Some(&env_secret),
-            Some(&files_cm),
-            Some(&files_secret),
+            &[env_cm.clone()],
+            &[env_secret.clone()],
+            &[files_cm],
+            &[files_secret],
         );
 
         // Subset produces different hash
-        let hash_partial = compute_config_hash(Some(&env_cm), Some(&env_secret), None, None);
+        let hash_partial = compute_config_hash(&[env_cm], &[env_secret], &[], &[]);
 
         assert_ne!(hash_all, hash_partial);
     }
@@ -2678,16 +3002,7 @@ mod tests {
             "gpu-worker".to_string(),
             ContainerSpec {
                 image: "worker:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
         service.spec.gpu = Some(GPUSpec {
@@ -2836,6 +3151,348 @@ mod tests {
             deployment.spec.template.spec.runtime_class_name.is_none(),
             "non-GPU deployment should not have runtimeClassName"
         );
+    }
+
+    // =========================================================================
+    // Story: EnvVar Serialization (literal vs secretKeyRef)
+    // =========================================================================
+
+    #[test]
+    fn envvar_literal_serializes_with_value() {
+        let env = EnvVar::literal("DB_HOST", "postgres.svc");
+        let json = serde_json::to_value(&env).unwrap();
+        assert_eq!(json["name"], "DB_HOST");
+        assert_eq!(json["value"], "postgres.svc");
+        assert!(json.get("valueFrom").is_none());
+    }
+
+    #[test]
+    fn envvar_secret_ref_serializes_with_value_from() {
+        let env = EnvVar::from_secret("DB_PASSWORD", "myapp-db-creds", "password");
+        let json = serde_json::to_value(&env).unwrap();
+        assert_eq!(json["name"], "DB_PASSWORD");
+        assert!(json.get("value").is_none());
+        assert_eq!(json["valueFrom"]["secretKeyRef"]["name"], "myapp-db-creds");
+        assert_eq!(json["valueFrom"]["secretKeyRef"]["key"], "password");
+    }
+
+    #[test]
+    fn envvar_roundtrip() {
+        let literal = EnvVar::literal("KEY", "val");
+        let json = serde_json::to_string(&literal).unwrap();
+        let back: EnvVar = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, literal);
+
+        let secret = EnvVar::from_secret("KEY", "secret-name", "key");
+        let json = serde_json::to_string(&secret).unwrap();
+        let back: EnvVar = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, secret);
+    }
+
+    // =========================================================================
+    // Story: Secret Variable Resolution in Env Vars
+    // =========================================================================
+
+    fn make_service_with_secret_vars(
+        vars: Vec<(&str, &str)>,
+        secret_resource_name: &str,
+    ) -> LatticeService {
+        let mut variables = BTreeMap::new();
+        for (k, v) in vars {
+            variables.insert(
+                k.to_string(),
+                lattice_common::template::TemplateString::from(v),
+            );
+        }
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "nginx:latest".to_string(),
+                variables,
+                ..Default::default()
+            },
+        );
+
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            secret_resource_name.to_string(),
+            crate::crd::ResourceSpec {
+                type_: crate::crd::ResourceType::Secret,
+                id: Some("vault/path".to_string()),
+                ..Default::default()
+            },
+        );
+
+        LatticeService {
+            metadata: kube::api::ObjectMeta {
+                name: Some("myapp".to_string()),
+                namespace: Some("prod".to_string()),
+                ..Default::default()
+            },
+            spec: crate::crd::LatticeServiceSpec {
+                containers,
+                resources,
+                ..Default::default()
+            },
+            status: None,
+        }
+    }
+
+    #[test]
+    fn story_secret_var_compiles_to_secret_key_ref() {
+        let service = make_service_with_secret_vars(
+            vec![("DB_PASSWORD", "${secret.db-creds.password}")],
+            "db-creds",
+        );
+        let mut secret_refs = BTreeMap::new();
+        secret_refs.insert(
+            "db-creds".to_string(),
+            SecretRef {
+                secret_name: "myapp-db-creds".to_string(),
+                remote_key: "database/prod/credentials".to_string(),
+                keys: Some(vec!["password".to_string()]),
+                store_name: "vault".to_string(),
+            },
+        );
+
+        let output =
+            compile_service_with_secret_refs(&service, &secret_refs).expect("should compile");
+
+        let deployment = output.deployment.expect("should have deployment");
+        let env = &deployment.spec.template.spec.containers[0].env;
+        let db_pass = env
+            .iter()
+            .find(|e| e.name == "DB_PASSWORD")
+            .expect("should have DB_PASSWORD");
+        assert!(db_pass.value.is_none());
+        let vf = db_pass.value_from.as_ref().expect("should have valueFrom");
+        let skr = vf
+            .secret_key_ref
+            .as_ref()
+            .expect("should have secretKeyRef");
+        assert_eq!(skr.name, "myapp-db-creds");
+        assert_eq!(skr.key, "password");
+    }
+
+    #[test]
+    fn story_secret_var_and_secret_key_ref_coexist() {
+        let service = make_service_with_secret_vars(
+            vec![
+                ("DB_HOST", "postgres.svc"),
+                ("DB_PASSWORD", "${secret.db-creds.password}"),
+            ],
+            "db-creds",
+        );
+        let mut secret_refs = BTreeMap::new();
+        secret_refs.insert(
+            "db-creds".to_string(),
+            SecretRef {
+                secret_name: "myapp-db-creds".to_string(),
+                remote_key: "database/prod/credentials".to_string(),
+                keys: Some(vec!["password".to_string()]),
+                store_name: "vault".to_string(),
+            },
+        );
+
+        let output =
+            compile_service_with_secret_refs(&service, &secret_refs).expect("should compile");
+
+        let env = &output.deployment.unwrap().spec.template.spec.containers[0].env;
+
+        // Secret var should be a secretKeyRef
+        let pass = env
+            .iter()
+            .find(|e| e.name == "DB_PASSWORD")
+            .expect("DB_PASSWORD");
+        assert!(pass.value.is_none());
+        assert!(pass.value_from.is_some());
+    }
+
+    #[test]
+    fn story_secret_var_error_missing_resource() {
+        let mut service = make_service_with_secret_vars(
+            vec![("SECRET", "${secret.nonexistent.key}")],
+            "db-creds",
+        );
+        service.spec.resources.remove("nonexistent");
+
+        let secret_refs = BTreeMap::new();
+        let result = compile_service_with_secret_refs(&service, &secret_refs);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent"),
+            "error should mention the missing resource: {}",
+            err
+        );
+        assert!(
+            err.contains("does not exist"),
+            "error should say resource doesn't exist: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn story_secret_var_error_wrong_type() {
+        let mut service = make_service_with_secret_vars(vec![("VAR", "${secret.db.host}")], "db");
+        service.spec.resources.get_mut("db").unwrap().type_ = crate::crd::ResourceType::Service;
+
+        let secret_refs = BTreeMap::new();
+        let result = compile_service_with_secret_refs(&service, &secret_refs);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("service"),
+            "error should mention actual type: {}",
+            err
+        );
+        assert!(
+            err.contains("not 'secret'"),
+            "error should say not secret: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn story_secret_var_error_invalid_key() {
+        let service = make_service_with_secret_vars(
+            vec![("VAR", "${secret.db-creds.nonexistent}")],
+            "db-creds",
+        );
+        let mut secret_refs = BTreeMap::new();
+        secret_refs.insert(
+            "db-creds".to_string(),
+            SecretRef {
+                secret_name: "myapp-db-creds".to_string(),
+                remote_key: "database/prod/credentials".to_string(),
+                keys: Some(vec!["username".to_string(), "password".to_string()]),
+                store_name: "vault".to_string(),
+            },
+        );
+
+        let result = compile_service_with_secret_refs(&service, &secret_refs);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent"),
+            "error should mention the bad key: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn story_secret_var_no_explicit_keys_allows_any_key() {
+        let service =
+            make_service_with_secret_vars(vec![("VAR", "${secret.db-creds.anything}")], "db-creds");
+        let mut secret_refs = BTreeMap::new();
+        secret_refs.insert(
+            "db-creds".to_string(),
+            SecretRef {
+                secret_name: "myapp-db-creds".to_string(),
+                remote_key: "database/prod/credentials".to_string(),
+                keys: None,
+                store_name: "vault".to_string(),
+            },
+        );
+
+        let result = compile_service_with_secret_refs(&service, &secret_refs);
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Story: imagePullSecrets Resolution
+    // =========================================================================
+
+    #[test]
+    fn story_image_pull_secrets_resolved_from_secret_refs() {
+        let mut service = make_service("myapp", "prod");
+        service.spec.image_pull_secrets = vec!["ghcr-creds".to_string()];
+        service.spec.resources.insert(
+            "ghcr-creds".to_string(),
+            crate::crd::ResourceSpec {
+                type_: crate::crd::ResourceType::Secret,
+                id: Some("registry/ghcr".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let mut secret_refs = BTreeMap::new();
+        secret_refs.insert(
+            "ghcr-creds".to_string(),
+            SecretRef {
+                secret_name: "myapp-ghcr-creds".to_string(),
+                remote_key: "registry/ghcr".to_string(),
+                keys: None,
+                store_name: "vault".to_string(),
+            },
+        );
+
+        let output =
+            compile_service_with_secret_refs(&service, &secret_refs).expect("should compile");
+
+        let ips = &output
+            .deployment
+            .unwrap()
+            .spec
+            .template
+            .spec
+            .image_pull_secrets;
+        assert_eq!(ips.len(), 1);
+        assert_eq!(ips[0].name, "myapp-ghcr-creds");
+    }
+
+    #[test]
+    fn story_image_pull_secrets_error_missing_resource() {
+        let mut service = make_service("myapp", "prod");
+        service.spec.image_pull_secrets = vec!["nonexistent".to_string()];
+
+        let secret_refs = BTreeMap::new();
+        let result = compile_service_with_secret_refs(&service, &secret_refs);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn story_image_pull_secrets_error_wrong_type() {
+        let mut service = make_service("myapp", "prod");
+        service.spec.image_pull_secrets = vec!["db".to_string()];
+        service.spec.resources.insert(
+            "db".to_string(),
+            crate::crd::ResourceSpec {
+                type_: crate::crd::ResourceType::Service,
+                ..Default::default()
+            },
+        );
+
+        let secret_refs = BTreeMap::new();
+        let result = compile_service_with_secret_refs(&service, &secret_refs);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("service"),
+            "should mention actual type: {}",
+            err
+        );
+        assert!(
+            err.contains("not 'secret'"),
+            "should say not secret: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn story_no_image_pull_secrets_by_default() {
+        let service = make_service("myapp", "prod");
+        let output = compile_service(&service);
+        let deployment = output.deployment.unwrap();
+        assert!(deployment.spec.template.spec.image_pull_secrets.is_empty());
     }
 
     #[test]

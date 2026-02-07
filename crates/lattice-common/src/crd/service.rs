@@ -71,6 +71,12 @@ pub enum ResourceType {
     Custom(String),
 }
 
+impl std::fmt::Display for ResourceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl JsonSchema for ResourceType {
     fn schema_name() -> String {
         "ResourceType".to_string()
@@ -498,8 +504,11 @@ impl ResourceSpec {
         }
     }
 
-    /// Get the Vault path for this secret resource (from the id field)
-    pub fn secret_vault_path(&self) -> Option<&str> {
+    /// Get the remote key for this secret resource (from the `id` field).
+    ///
+    /// This is the key/path used to look up the secret in the external store
+    /// (e.g., a Vault path, AWS Secrets Manager ARN, GCP secret name).
+    pub fn secret_remote_key(&self) -> Option<&str> {
         if !self.type_.is_secret() {
             return None;
         }
@@ -874,7 +883,7 @@ pub struct SidecarSpec {
 }
 
 /// Container specification (Score-compatible)
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerSpec {
     /// Container image (use "." for runtime-supplied image via config)
@@ -1234,7 +1243,7 @@ impl std::fmt::Display for ServicePhase {
 }
 
 /// Specification for a LatticeService
-#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "lattice.dev",
     version = "v1alpha1",
@@ -1295,6 +1304,14 @@ pub struct LatticeServiceSpec {
     /// GPU resource specification
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GPUSpec>,
+
+    /// Image pull secrets — resource names referencing `type: secret` resources
+    ///
+    /// Each entry is a resource name from `resources` that must have `type: secret`.
+    /// The compiled K8s Secret name is resolved at compile time and added to the
+    /// pod's `imagePullSecrets` field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_pull_secrets: Vec<String>,
 }
 
 impl LatticeServiceSpec {
@@ -1746,16 +1763,7 @@ mod tests {
     fn simple_container() -> ContainerSpec {
         ContainerSpec {
             image: "nginx:latest".to_string(),
-            command: None,
-            args: None,
-            variables: BTreeMap::new(),
-            resources: None,
-            files: BTreeMap::new(),
-            volumes: BTreeMap::new(),
-            liveness_probe: None,
-            readiness_probe: None,
-            startup_probe: None,
-            security: None,
+            ..Default::default()
         }
     }
 
@@ -1765,17 +1773,7 @@ mod tests {
 
         LatticeServiceSpec {
             containers,
-            resources: BTreeMap::new(),
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         }
     }
 
@@ -1983,17 +1981,7 @@ mod tests {
     fn story_service_without_containers_fails() {
         let spec = LatticeServiceSpec {
             containers: BTreeMap::new(),
-            resources: BTreeMap::new(),
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         };
 
         let result = spec.validate();
@@ -2181,17 +2169,7 @@ deploy:
 
         let spec = LatticeServiceSpec {
             containers,
-            resources: BTreeMap::new(),
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         };
 
         assert_eq!(spec.primary_image(), Some("nginx:latest"));

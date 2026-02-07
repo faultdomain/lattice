@@ -11,8 +11,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use rand::prelude::*;
 
 use lattice_common::crd::{
-    ContainerSpec, DependencyDirection, DeploySpec, LatticeServiceSpec, PortSpec, ReplicaSpec,
-    ResourceSpec, ResourceType, ServicePortsSpec,
+    ContainerSpec, DependencyDirection, LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType,
+    ServicePortsSpec,
 };
 use lattice_common::graph::ServiceGraph;
 
@@ -23,16 +23,7 @@ use lattice_common::graph::ServiceGraph;
 fn simple_container() -> ContainerSpec {
     ContainerSpec {
         image: "nginx:latest".to_string(),
-        command: None,
-        args: None,
-        variables: BTreeMap::new(),
-        resources: None,
-        files: BTreeMap::new(),
-        volumes: BTreeMap::new(),
-        liveness_probe: None,
-        readiness_probe: None,
-        startup_probe: None,
-        security: None,
+        ..Default::default()
     }
 }
 
@@ -88,15 +79,7 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
         containers,
         resources,
         service: Some(ServicePortsSpec { ports }),
-        replicas: ReplicaSpec::default(),
-        deploy: DeploySpec::default(),
-        ingress: None,
-        sidecars: BTreeMap::new(),
-        sysctls: BTreeMap::new(),
-        host_network: None,
-        share_process_namespace: None,
-        backup: None,
-        gpu: None,
+        ..Default::default()
     }
 }
 

@@ -31,7 +31,7 @@ use lattice_common::KubeEventPublisher;
 #[cfg(test)]
 use lattice_common::NoopEventPublisher;
 
-use crate::compiler::{CompileError, CompiledService, ServiceCompiler};
+use crate::compiler::{CompiledService, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
     LatticeService, LatticeServiceSpec, LatticeServiceStatus, ProviderType, ServicePhase,
@@ -413,7 +413,8 @@ impl ServiceKubeClientImpl {
     ) -> Result<(), Error> {
         use k8s_openapi::api::apps::v1::Deployment as K8sDeployment;
         use k8s_openapi::api::core::v1::{
-            PersistentVolumeClaim as K8sPvc, Service as K8sService, ServiceAccount as K8sSA,
+            ConfigMap as K8sCm, PersistentVolumeClaim as K8sPvc, Secret as K8sSecret,
+            Service as K8sService, ServiceAccount as K8sSA,
         };
 
         // ServiceAccount
@@ -437,6 +438,58 @@ impl ServiceKubeClientImpl {
             let params = params.clone();
             futures.push(Box::pin(async move {
                 debug!(name = %name, "applying PersistentVolumeClaim");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
+        // Env ConfigMaps (non-sensitive env vars per container)
+        for cm in &compiled.workloads.env_config_maps {
+            let name = cm.metadata.name.clone();
+            let json = serialize_resource("ConfigMap", cm)?;
+            let api: Api<K8sCm> = Api::namespaced(self.client.clone(), namespace);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying env ConfigMap");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
+        // Env Secrets (sensitive env vars per container)
+        for secret in &compiled.workloads.env_secrets {
+            let name = secret.metadata.name.clone();
+            let json = serialize_resource("Secret", secret)?;
+            let api: Api<K8sSecret> = Api::namespaced(self.client.clone(), namespace);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying env Secret");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
+        // File ConfigMaps (text file content per container)
+        for cm in &compiled.workloads.files_config_maps {
+            let name = cm.metadata.name.clone();
+            let json = serialize_resource("ConfigMap", cm)?;
+            let api: Api<K8sCm> = Api::namespaced(self.client.clone(), namespace);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying files ConfigMap");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
+        // File Secrets (binary file content per container)
+        for secret in &compiled.workloads.files_secrets {
+            let name = secret.metadata.name.clone();
+            let json = serialize_resource("Secret", secret)?;
+            let api: Api<K8sSecret> = Api::namespaced(self.client.clone(), namespace);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying files Secret");
                 api.patch(&name, &params, &Patch::Apply(&json)).await?;
                 Ok(())
             }));
@@ -1082,9 +1135,10 @@ async fn compile_and_apply(
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {
-            let event_reason = match &e {
-                CompileError::SecretAccessDenied(_) => reasons::SECRET_ACCESS_DENIED,
-                _ => reasons::COMPILATION_FAILED,
+            let event_reason = if e.is_access_denied() {
+                reasons::SECRET_ACCESS_DENIED
+            } else {
+                reasons::COMPILATION_FAILED
             };
             let msg = e.to_string();
             ctx.events
@@ -1098,7 +1152,7 @@ async fn compile_and_apply(
                 .await;
             warn!(error = %msg, "compilation failed");
             update_service_status_failed(service, ctx, &msg).await?;
-            return Err(Error::internal_with_context("compiler", msg));
+            return Err(Error::from(e));
         }
     };
 
@@ -1411,8 +1465,7 @@ async fn update_external_status_failed(
 mod tests {
     use super::*;
     use crate::crd::{
-        ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalServiceSpec, ReplicaSpec,
-        Resolution, ResourceSpec, ResourceType,
+        ContainerSpec, DependencyDirection, LatticeExternalServiceSpec, Resolution, ResourceSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::collections::BTreeMap;
@@ -1424,16 +1477,7 @@ mod tests {
     fn simple_container() -> ContainerSpec {
         ContainerSpec {
             image: "nginx:latest".to_string(),
-            command: None,
-            args: None,
-            variables: BTreeMap::new(),
-            resources: None,
-            files: BTreeMap::new(),
-            volumes: BTreeMap::new(),
-            liveness_probe: None,
-            readiness_probe: None,
-            startup_probe: None,
-            security: None,
+            ..Default::default()
         }
     }
 
@@ -1443,17 +1487,7 @@ mod tests {
 
         LatticeServiceSpec {
             containers,
-            resources: BTreeMap::new(),
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         }
     }
 
@@ -1475,15 +1509,8 @@ mod tests {
             spec.resources.insert(
                 dep.to_string(),
                 ResourceSpec {
-                    type_: ResourceType::Service,
                     direction: DependencyDirection::Outbound,
-                    id: None,
-                    class: None,
-                    metadata: None,
-                    params: None,
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
+                    ..Default::default()
                 },
             );
         }
@@ -1505,15 +1532,8 @@ mod tests {
             spec.resources.insert(
                 caller.to_string(),
                 ResourceSpec {
-                    type_: ResourceType::Service,
                     direction: DependencyDirection::Inbound,
-                    id: None,
-                    class: None,
-                    metadata: None,
-                    params: None,
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
+                    ..Default::default()
                 },
             );
         }

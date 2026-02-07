@@ -38,8 +38,8 @@ pub use provisioner::{
     ServiceProvisioner, VolumeProvisioner,
 };
 pub use renderer::{
-    RenderConfig, RenderedContainer, RenderedFile, RenderedVariable, RenderedVolume,
-    TemplateRenderer,
+    parse_secret_ref, EsoTemplatedEnvVar, FileSecretRef, RenderConfig, RenderedContainer,
+    RenderedFile, RenderedVariable, RenderedVolume, SecretVariableRef, TemplateRenderer,
 };
 pub use types::{StaticString, TemplateString};
 

@@ -17,11 +17,21 @@ struct Versions {
 #[derive(Debug, Deserialize)]
 struct Chart {
     version: String,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    chart: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Resource {
     version: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
 }
 
 /// Run `helm template` and return the rendered YAML as a String.
@@ -60,6 +70,100 @@ fn run_helm_template(
             release_name, e
         )
     })
+}
+
+/// Ensure all helm charts and resource files are downloaded to `charts_dir`.
+///
+/// For each chart in `versions.toml` that has `repo`, `chart`, and `filename` fields,
+/// runs `helm pull` if the tgz doesn't exist. For resources with `url` and `filename`,
+/// downloads via curl.
+fn ensure_charts_downloaded(charts_dir: &Path, versions: &Versions) {
+    // Track which repos we've already added
+    let mut repos_added = std::collections::HashSet::new();
+
+    for (name, chart) in &versions.charts {
+        let (Some(repo), Some(chart_name), Some(filename_pattern)) =
+            (&chart.repo, &chart.chart, &chart.filename)
+        else {
+            continue;
+        };
+
+        let filename = filename_pattern.replace("{version}", &chart.version);
+        let path = charts_dir.join(&filename);
+        if path.exists() {
+            continue;
+        }
+
+        eprintln!("cargo:warning=Downloading missing chart: {}", filename);
+
+        // Add helm repo if we haven't yet
+        let repo_alias = chart_name.split('/').next().unwrap_or(name.as_str());
+        if repos_added.insert(repo_alias.to_string()) {
+            let output = Command::new("helm")
+                .args(["repo", "add", repo_alias, repo, "--force-update"])
+                .output()
+                .expect("helm repo add");
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                panic!("helm repo add {} failed: {}", repo_alias, stderr);
+            }
+        }
+
+        // Pull the chart
+        let output = Command::new("helm")
+            .args([
+                "pull",
+                chart_name,
+                "--version",
+                &chart.version,
+                "--destination",
+                &charts_dir.to_string_lossy(),
+            ])
+            .output()
+            .unwrap_or_else(|e| panic!("helm pull {} failed: {}", chart_name, e));
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!(
+                "helm pull {} --version {} failed: {}",
+                chart_name, chart.version, stderr
+            );
+        }
+
+        assert!(
+            path.exists(),
+            "helm pull succeeded but {} not found (expected at {})",
+            filename,
+            path.display()
+        );
+    }
+
+    // Download resource files (e.g., gateway-api CRDs)
+    for resource in versions.resources.values() {
+        let (Some(url_pattern), Some(filename_pattern)) = (&resource.url, &resource.filename)
+        else {
+            continue;
+        };
+
+        let filename = filename_pattern.replace("{version}", &resource.version);
+        let url = url_pattern.replace("{version}", &resource.version);
+        let path = charts_dir.join(&filename);
+        if path.exists() {
+            continue;
+        }
+
+        eprintln!("cargo:warning=Downloading missing resource: {}", filename);
+
+        let output = Command::new("curl")
+            .args(["-sL", "-o", &path.to_string_lossy(), &url])
+            .output()
+            .unwrap_or_else(|e| panic!("curl {} failed: {}", url, e));
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!("curl {} failed: {}", url, stderr);
+        }
+    }
 }
 
 fn main() {
@@ -120,6 +224,11 @@ fn main() {
         "cargo:rustc-env=VICTORIA_METRICS_VERSION={}",
         versions.charts["victoria-metrics-k8s-stack"].version
     );
+
+    // --- Auto-download missing charts ---
+
+    std::fs::create_dir_all(&charts_dir).expect("create test-charts dir");
+    ensure_charts_downloaded(&charts_dir, &versions);
 
     // --- Pre-render all Helm charts at build time ---
 

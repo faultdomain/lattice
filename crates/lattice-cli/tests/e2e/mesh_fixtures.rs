@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use lattice_common::crd::{
-    ContainerSpec, DependencyDirection, DeploySpec, LatticeService, LatticeServiceSpec, PortSpec,
-    ReplicaSpec, ResourceSpec, ResourceType, ServicePortsSpec,
+    ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec,
+    ResourceType, ServicePortsSpec,
 };
 
 use super::helpers::{CURL_IMAGE, NGINX_IMAGE};
@@ -31,16 +31,7 @@ pub const TOTAL_SERVICES: usize = 10; // 9 original + 1 public-api (wildcard)
 pub fn nginx_container() -> ContainerSpec {
     ContainerSpec {
         image: NGINX_IMAGE.to_string(),
-        command: None,
-        args: None,
-        variables: BTreeMap::new(),
-        files: BTreeMap::new(),
-        volumes: BTreeMap::new(),
-        resources: None,
-        liveness_probe: None,
-        readiness_probe: None,
-        startup_probe: None,
-        security: None,
+        ..Default::default()
     }
 }
 
@@ -49,14 +40,7 @@ pub fn curl_container(script: String) -> ContainerSpec {
         image: CURL_IMAGE.to_string(),
         command: Some(vec!["/bin/sh".to_string()]),
         args: Some(vec!["-c".to_string(), script]),
-        variables: BTreeMap::new(),
-        files: BTreeMap::new(),
-        volumes: BTreeMap::new(),
-        resources: None,
-        liveness_probe: None,
-        readiness_probe: None,
-        startup_probe: None,
-        security: None,
+        ..Default::default()
     }
 }
 
@@ -173,19 +157,7 @@ pub fn build_lattice_service(
             containers,
             resources,
             service: if has_port { Some(http_port()) } else { None },
-            replicas: ReplicaSpec {
-                min: 1,
-                max: None,
-                autoscaling: vec![],
-            },
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         },
         status: None,
     }

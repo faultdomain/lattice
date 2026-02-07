@@ -29,35 +29,23 @@
 use lattice_cedar::{PolicyEngine, SecretAuthzRequest};
 
 use lattice_common::mesh;
+use lattice_common::template::{EsoTemplatedEnvVar, RenderConfig, TemplateRenderer};
+use lattice_secrets_provider::{
+    ExternalSecret, ExternalSecretData, ExternalSecretSpec, ExternalSecretTarget,
+    ExternalSecretTemplate, RemoteRef, SecretStoreRef,
+};
 
 use crate::crd::{LatticeService, ProviderType};
 use crate::graph::ServiceGraph;
 use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
 use crate::policy::{GeneratedPolicies, PolicyCompiler};
-use crate::workload::{GeneratedWorkloads, SecretsCompiler, VolumeCompiler, WorkloadCompiler};
+use crate::workload::{
+    compute_config_hash, env, files, CompilationError, EnvFromSource, GeneratedWorkloads,
+    SecretEnvSource, SecretRef, SecretsCompiler, VolumeCompiler, WorkloadCompiler,
+};
 
-/// Errors that can occur during service compilation
-#[derive(Debug, thiserror::Error)]
-pub enum CompileError {
-    /// LatticeService is missing required metadata
-    #[error("LatticeService missing {field}")]
-    MissingMetadata { field: &'static str },
-    /// Invalid volume resource configuration
-    #[error("invalid volume config: {0}")]
-    InvalidVolume(String),
-    /// Invalid secret resource configuration
-    #[error("invalid secret config: {0}")]
-    InvalidSecret(String),
-    /// Cedar policy denied secret access
-    #[error("secret access denied: {0}")]
-    SecretAccessDenied(String),
-    /// Workload compilation failed (e.g. monitoring required for custom metrics)
-    #[error("workload compilation error: {0}")]
-    WorkloadCompilation(String),
-}
-
-impl From<CompileError> for crate::Error {
-    fn from(err: CompileError) -> Self {
+impl From<CompilationError> for crate::Error {
+    fn from(err: CompilationError) -> Self {
         crate::Error::validation(err.to_string())
     }
 }
@@ -102,6 +90,12 @@ impl CompiledService {
         .count();
 
         workload_count
+            + self.workloads.env_config_maps.len()
+            + self.workloads.env_secrets.len()
+            + self.workloads.files_config_maps.len()
+            + self.workloads.files_secrets.len()
+            + self.workloads.pvcs.len()
+            + self.workloads.external_secrets.len()
             + self.policies.total_count()
             + self.ingress.total_count()
             + self.waypoint.total_count()
@@ -121,6 +115,7 @@ pub struct ServiceCompiler<'a> {
     provider_type: ProviderType,
     cedar: &'a PolicyEngine,
     monitoring_enabled: bool,
+    renderer: TemplateRenderer,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -145,6 +140,7 @@ impl<'a> ServiceCompiler<'a> {
             provider_type,
             cedar,
             monitoring_enabled,
+            renderer: TemplateRenderer::new(),
         }
     }
 
@@ -163,33 +159,103 @@ impl<'a> ServiceCompiler<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `CompileError::MissingMetadata` if the service is missing name or namespace.
-    /// Returns `CompileError::SecretAccessDenied` if Cedar denies access to any secret path.
-    pub async fn compile(&self, service: &LatticeService) -> Result<CompiledService, CompileError> {
+    /// Returns `CompilationError::MissingMetadata` if the service is missing name or namespace.
+    /// Returns `CompilationError::SecretAccessDenied` if Cedar denies access to any secret path.
+    pub async fn compile(
+        &self,
+        service: &LatticeService,
+    ) -> Result<CompiledService, CompilationError> {
         let name = service
             .metadata
             .name
             .as_deref()
-            .ok_or(CompileError::MissingMetadata { field: "name" })?;
+            .ok_or(CompilationError::missing_metadata("name"))?;
         let namespace = service
             .metadata
             .namespace
             .as_deref()
-            .ok_or(CompileError::MissingMetadata { field: "namespace" })?;
+            .ok_or(CompilationError::missing_metadata("namespace"))?;
 
         // Compile volumes first (PVCs must exist before Deployment references them)
-        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec)
-            .map_err(CompileError::InvalidVolume)?;
+        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec)?;
 
         // Compile secrets (ExternalSecrets for syncing from Vault via ESO)
-        let compiled_secrets = SecretsCompiler::compile(name, namespace, &service.spec)
-            .map_err(CompileError::InvalidSecret)?;
+        let compiled_secrets = SecretsCompiler::compile(name, namespace, &service.spec)?;
 
         // Authorize secret access via Cedar — default-deny
         self.authorize_secrets(name, namespace, &service.spec)
             .await?;
 
-        // Delegate to specialized compilers
+        // Build template context and render all containers
+        let render_config = RenderConfig::new(self.graph, namespace, namespace)
+            .with_cluster("name", &self.cluster_name);
+        let template_ctx = self
+            .renderer
+            .build_context(service, &render_config)
+            .map_err(CompilationError::from)?;
+        let rendered_containers = self
+            .renderer
+            .render_all_containers(&service.spec, &template_ctx)
+            .map_err(CompilationError::from)?;
+
+        // Compile rendered env vars and files per-container
+        let mut env_config_maps = Vec::new();
+        let mut env_secrets = Vec::new();
+        let mut files_config_maps = Vec::new();
+        let mut files_secrets = Vec::new();
+        let mut file_external_secrets = Vec::new();
+        let mut per_container_env_from = std::collections::BTreeMap::new();
+        let mut per_container_file_volumes = std::collections::BTreeMap::new();
+        let mut per_container_file_mounts = std::collections::BTreeMap::new();
+
+        for (container_name, rendered) in &rendered_containers {
+            // Compile non-secret env vars → ConfigMap + Secret + envFrom refs
+            let compiled_env = env::compile(name, container_name, namespace, &rendered.variables);
+            if let Some(cm) = compiled_env.config_map {
+                env_config_maps.push(cm);
+            }
+            if let Some(secret) = compiled_env.secret {
+                env_secrets.push(secret);
+            }
+            let mut container_env_from = compiled_env.env_from;
+
+            // Compile ESO-templated env vars (mixed secret + non-secret content)
+            // These need an ESO ExternalSecret to render Go templates at sync time
+            if !rendered.eso_templated_variables.is_empty() {
+                let (eso_secrets, eso_env_from) = compile_eso_templated_env_vars(
+                    name,
+                    container_name,
+                    namespace,
+                    &rendered.eso_templated_variables,
+                    &compiled_secrets.secret_refs,
+                )?;
+                file_external_secrets.extend(eso_secrets);
+                container_env_from.extend(eso_env_from);
+            }
+
+            per_container_env_from.insert(container_name.clone(), container_env_from);
+
+            // Compile files → ConfigMap + Secret + ESO ExternalSecrets + Volumes
+            let compiled_files = files::compile(
+                name,
+                container_name,
+                namespace,
+                &rendered.files,
+                &compiled_secrets.secret_refs,
+            )?;
+
+            if let Some(cm) = compiled_files.config_map {
+                files_config_maps.push(cm);
+            }
+            if let Some(secret) = compiled_files.secret {
+                files_secrets.push(secret);
+            }
+            file_external_secrets.extend(compiled_files.file_external_secrets);
+            per_container_file_volumes.insert(container_name.clone(), compiled_files.volumes);
+            per_container_file_mounts.insert(container_name.clone(), compiled_files.volume_mounts);
+        }
+
+        // Delegate to WorkloadCompiler for Deployment, Service, ServiceAccount, HPA
         let mut workloads = WorkloadCompiler::compile(
             name,
             service,
@@ -197,15 +263,38 @@ impl<'a> ServiceCompiler<'a> {
             &compiled_volumes,
             self.provider_type,
             self.monitoring_enabled,
-        )
-        .map_err(|e| CompileError::WorkloadCompilation(e.to_string()))?;
+            &compiled_secrets.secret_refs,
+            &rendered_containers,
+            &per_container_env_from,
+            &per_container_file_volumes,
+            &per_container_file_mounts,
+        )?;
 
-        // Add PVCs to workloads
+        // Populate generated workloads with compiled config resources
         workloads.pvcs = compiled_volumes.pvcs;
-
-        // Add ExternalSecrets and secret refs to workloads
         workloads.external_secrets = compiled_secrets.external_secrets;
+        workloads.external_secrets.extend(file_external_secrets);
         workloads.secret_refs = compiled_secrets.secret_refs;
+        workloads.env_config_maps = env_config_maps;
+        workloads.env_secrets = env_secrets;
+        workloads.files_config_maps = files_config_maps;
+        workloads.files_secrets = files_secrets;
+
+        // Compute config hash and add as pod annotation to trigger rollouts
+        let config_hash = compute_config_hash(
+            &workloads.env_config_maps,
+            &workloads.env_secrets,
+            &workloads.files_config_maps,
+            &workloads.files_secrets,
+        );
+        if let Some(ref mut deployment) = workloads.deployment {
+            deployment
+                .spec
+                .template
+                .metadata
+                .annotations
+                .insert("lattice.dev/config-hash".to_string(), config_hash);
+        }
 
         // Inject Velero backup annotations into pod template if backup is configured
         if let Some(ref backup_spec) = service.spec.backup {
@@ -287,15 +376,15 @@ impl<'a> ServiceCompiler<'a> {
         name: &str,
         namespace: &str,
         spec: &crate::crd::LatticeServiceSpec,
-    ) -> Result<(), CompileError> {
+    ) -> Result<(), CompilationError> {
         let secret_paths: Vec<_> = spec
             .resources
             .iter()
             .filter(|(_, r)| r.is_secret())
             .filter_map(|(resource_name, r)| {
-                let vault_path = r.secret_vault_path()?.to_string();
+                let remote_key = r.secret_remote_key()?.to_string();
                 let provider = r.secret_params().ok()??.provider;
-                Some((resource_name.clone(), vault_path, provider))
+                Some((resource_name.clone(), remote_key, provider))
             })
             .collect();
 
@@ -319,11 +408,141 @@ impl<'a> ServiceCompiler<'a> {
                 .map(|d| format!("'{}': {}", d.resource_name, d.reason))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(CompileError::SecretAccessDenied(details));
+            return Err(CompilationError::secret_access_denied(details));
         }
 
         Ok(())
     }
+}
+
+/// Compile ESO-templated env vars into ExternalSecrets + envFrom references.
+///
+/// Each env var's secret refs must all come from the same store, but different
+/// env vars may use different stores. Creates one ExternalSecret per store group.
+fn compile_eso_templated_env_vars(
+    service_name: &str,
+    container_name: &str,
+    namespace: &str,
+    eso_templated_variables: &std::collections::BTreeMap<String, EsoTemplatedEnvVar>,
+    secret_refs: &std::collections::BTreeMap<String, SecretRef>,
+) -> Result<(Vec<ExternalSecret>, Vec<EnvFromSource>), CompilationError> {
+    // Validate per-var store consistency and group vars by store
+    let mut by_store: std::collections::BTreeMap<String, Vec<(&String, &EsoTemplatedEnvVar)>> =
+        std::collections::BTreeMap::new();
+
+    for (var_name, templated) in eso_templated_variables {
+        let store = resolve_env_var_store(var_name, &templated.secret_refs, secret_refs)?;
+        by_store
+            .entry(store)
+            .or_default()
+            .push((var_name, templated));
+    }
+
+    let mut external_secrets = Vec::new();
+    let mut env_from_refs = Vec::new();
+
+    for (idx, (store_name, vars)) in by_store.iter().enumerate() {
+        let suffix = if by_store.len() == 1 {
+            String::new()
+        } else {
+            format!("-{}", idx)
+        };
+        let es_name = format!("{}-{}-env-eso{}", service_name, container_name, suffix);
+
+        let mut eso_data: Vec<ExternalSecretData> = Vec::new();
+        let mut template_data = std::collections::BTreeMap::new();
+        let mut seen_eso_keys = std::collections::HashSet::new();
+
+        for (var_name, templated) in vars {
+            template_data.insert((*var_name).clone(), templated.rendered_template.clone());
+
+            for fref in &templated.secret_refs {
+                if !seen_eso_keys.insert(fref.eso_data_key.clone()) {
+                    continue;
+                }
+
+                let sr = secret_refs.get(&fref.resource_name).ok_or_else(|| {
+                    CompilationError::file_compilation(format!(
+                        "env var '{}' references secret resource '{}' but no SecretRef was compiled",
+                        var_name, fref.resource_name
+                    ))
+                })?;
+
+                if let Some(ref keys) = sr.keys {
+                    if !keys.contains(&fref.key) {
+                        return Err(CompilationError::file_compilation(format!(
+                            "env var '{}' references key '{}' in secret '{}' but available keys are: {:?}",
+                            var_name, fref.key, fref.resource_name, keys
+                        )));
+                    }
+                }
+
+                eso_data.push(ExternalSecretData::new(
+                    &fref.eso_data_key,
+                    RemoteRef::with_property(&sr.remote_key, &fref.key),
+                ));
+            }
+        }
+
+        external_secrets.push(ExternalSecret::new(
+            &es_name,
+            namespace,
+            ExternalSecretSpec {
+                secret_store_ref: SecretStoreRef::cluster_secret_store(store_name),
+                target: ExternalSecretTarget::with_template(
+                    &es_name,
+                    ExternalSecretTemplate::new(template_data),
+                ),
+                data: eso_data,
+                data_from: None,
+                refresh_interval: Some("1h".to_string()),
+            },
+        ));
+
+        env_from_refs.push(EnvFromSource {
+            config_map_ref: None,
+            secret_ref: Some(SecretEnvSource { name: es_name }),
+        });
+    }
+
+    Ok((external_secrets, env_from_refs))
+}
+
+/// Validate that a single env var's secret refs all come from the same store.
+fn resolve_env_var_store(
+    var_name: &str,
+    refs: &[lattice_common::template::FileSecretRef],
+    secret_refs: &std::collections::BTreeMap<String, SecretRef>,
+) -> Result<String, CompilationError> {
+    let mut store: Option<String> = None;
+
+    for fref in refs {
+        let sr = secret_refs.get(&fref.resource_name).ok_or_else(|| {
+            CompilationError::file_compilation(format!(
+                "env var '{}' references secret resource '{}' but no SecretRef was compiled",
+                var_name, fref.resource_name
+            ))
+        })?;
+
+        match &store {
+            None => store = Some(sr.store_name.clone()),
+            Some(existing) if existing != &sr.store_name => {
+                return Err(CompilationError::file_compilation(format!(
+                    "env var '{}' references secrets from multiple stores ('{}' and '{}'); \
+                     a single env var can only use one store",
+                    var_name, existing, sr.store_name
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+
+    store.ok_or_else(|| {
+        CompilationError::file_compilation(format!(
+            "env var '{}' has no secret references",
+            var_name
+        ))
+    })
 }
 
 // =============================================================================
@@ -334,8 +553,8 @@ impl<'a> ServiceCompiler<'a> {
 mod tests {
     use super::*;
     use crate::crd::{
-        CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec, IngressSpec, IngressTls,
-        PortSpec, ReplicaSpec, ResourceSpec, ResourceType, ServicePortsSpec, TlsMode,
+        CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, PortSpec,
+        ResourceSpec, ServicePortsSpec, TlsMode,
     };
     use std::collections::BTreeMap;
 
@@ -345,16 +564,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -376,21 +586,8 @@ mod tests {
             },
             spec: crate::crd::LatticeServiceSpec {
                 containers,
-                resources: BTreeMap::new(),
                 service: Some(ServicePortsSpec { ports }),
-                replicas: ReplicaSpec {
-                    min: 1,
-                    max: None,
-                    autoscaling: vec![],
-                },
-                deploy: DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         }
@@ -423,15 +620,8 @@ mod tests {
             resources.insert(
                 dep.to_string(),
                 ResourceSpec {
-                    type_: ResourceType::Service,
                     direction: DependencyDirection::Outbound,
-                    id: None,
-                    class: None,
-                    metadata: None,
-                    params: None,
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
+                    ..Default::default()
                 },
             );
         }
@@ -439,15 +629,8 @@ mod tests {
             resources.insert(
                 caller.to_string(),
                 ResourceSpec {
-                    type_: ResourceType::Service,
                     direction: DependencyDirection::Inbound,
-                    id: None,
-                    class: None,
-                    metadata: None,
-                    params: None,
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
+                    ..Default::default()
                 },
             );
         }
@@ -457,16 +640,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "test:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -484,15 +658,7 @@ mod tests {
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         }
     }
 

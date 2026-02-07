@@ -405,16 +405,7 @@ mod tests {
             "main".to_string(),
             crate::crd::ContainerSpec {
                 image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -430,17 +421,8 @@ mod tests {
 
         let spec = crate::crd::LatticeServiceSpec {
             containers,
-            resources: BTreeMap::new(),
             service: Some(crate::crd::ServicePortsSpec { ports }),
-            replicas: crate::crd::ReplicaSpec::default(),
-            deploy: crate::crd::DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         };
 
         graph.put_service(env, name, &spec);
@@ -624,29 +606,11 @@ mod tests {
                 "main".to_string(),
                 crate::crd::ContainerSpec {
                     image: "app:latest".to_string(),
-                    command: None,
-                    args: None,
-                    variables: BTreeMap::new(),
-                    files: BTreeMap::new(),
-                    volumes: BTreeMap::new(),
-                    resources: None,
-                    liveness_probe: None,
-                    readiness_probe: None,
-                    startup_probe: None,
-                    security: None,
+                    ..Default::default()
                 },
             )]),
             resources,
-            service: None,
-            replicas: crate::crd::ReplicaSpec::default(),
-            deploy: crate::crd::DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         };
 
         let registry = ProvisionerRegistry::new();

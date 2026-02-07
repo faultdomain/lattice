@@ -292,7 +292,7 @@ async fn verify_external_secret(
     namespace: &str,
     name: &str,
     expected_store: &str,
-    expected_vault_path: &str,
+    expected_remote_key: &str,
     expected_keys: Option<&[&str]>,
 ) -> Result<(), String> {
     // Use kubectl to get the ExternalSecret JSON
@@ -377,7 +377,7 @@ async fn verify_external_secret(
                 .as_str()
                 .ok_or("Missing remoteRef.key")?;
             assert_eq!(
-                remote_key, expected_vault_path,
+                remote_key, expected_remote_key,
                 "remoteRef.key should be vault path"
             );
 
@@ -398,7 +398,7 @@ async fn verify_external_secret(
             .as_str()
             .ok_or("Missing dataFrom[].extract.key")?;
         assert_eq!(
-            extract_key, expected_vault_path,
+            extract_key, expected_remote_key,
             "extract.key should be vault path"
         );
     }
@@ -413,7 +413,7 @@ async fn verify_external_secret(
 
     info!(
         "[Secrets] ExternalSecret {} verified: store={}, path={}, keys={:?}",
-        name, store_name, expected_vault_path, expected_keys
+        name, store_name, expected_remote_key, expected_keys
     );
 
     Ok(())

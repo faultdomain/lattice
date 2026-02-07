@@ -140,20 +140,20 @@ pub fn build_service_entity(namespace: &str, name: &str) -> Result<Entity> {
 
 /// Build a secret path entity for secret access authorization
 ///
-/// UID: `Lattice::SecretPath::"provider:vault_path"` — provider is part of identity
+/// UID: `Lattice::SecretPath::"provider:remote_key"` — provider is part of identity
 /// because two providers can legitimately share the same path string.
 ///
 /// Attributes:
 /// - `path`: full vault path
 /// - `provider`: SecretsProvider name
-pub fn build_secret_path_entity(provider: &str, vault_path: &str) -> Result<Entity> {
-    let uid_str = format!("{}:{}", provider, vault_path);
+pub fn build_secret_path_entity(provider: &str, remote_key: &str) -> Result<Entity> {
+    let uid_str = format!("{}:{}", provider, remote_key);
     let uid = build_entity_uid("SecretPath", &uid_str)?;
 
     let mut attrs = HashMap::new();
     attrs.insert(
         "path".to_string(),
-        RestrictedExpression::new_string(vault_path.to_string()),
+        RestrictedExpression::new_string(remote_key.to_string()),
     );
     attrs.insert(
         "provider".to_string(),

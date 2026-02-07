@@ -315,6 +315,13 @@ pub struct ExternalSecretTarget {
     /// Deletion policy: Retain, Delete, Merge
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletion_policy: Option<String>,
+    /// Template for rendering secret data using Go templates
+    ///
+    /// When set, ESO uses this template to construct the K8s Secret data.
+    /// This enables files with `${secret.*}` placeholders to be rendered
+    /// at secret-sync time using ESO's Go template engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<ExternalSecretTemplate>,
 }
 
 impl ExternalSecretTarget {
@@ -324,6 +331,50 @@ impl ExternalSecretTarget {
             name: name.into(),
             creation_policy: None,
             deletion_policy: None,
+            template: None,
+        }
+    }
+
+    /// Create a new target with a template
+    pub fn with_template(name: impl Into<String>, template: ExternalSecretTemplate) -> Self {
+        Self {
+            name: name.into(),
+            creation_policy: None,
+            deletion_policy: None,
+            template: Some(template),
+        }
+    }
+}
+
+/// Template for rendering ESO secret data using Go templates
+///
+/// ESO evaluates Go templates in `data` against the fetched secret values,
+/// producing the final K8s Secret content. This allows files containing
+/// `${secret.*}` placeholders to be rendered at sync time.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalSecretTemplate {
+    /// Template engine version (default "v2")
+    #[serde(default = "ExternalSecretTemplate::default_engine_version")]
+    pub engine_version: String,
+    /// Template data: key -> Go template content
+    ///
+    /// Each key becomes a key in the resulting K8s Secret.
+    /// Values can use Go template syntax like `{{ .secret_key }}` to
+    /// reference fetched secret values from `spec.data`.
+    pub data: BTreeMap<String, String>,
+}
+
+impl ExternalSecretTemplate {
+    fn default_engine_version() -> String {
+        "v2".to_string()
+    }
+
+    /// Create a new template with the given data
+    pub fn new(data: BTreeMap<String, String>) -> Self {
+        Self {
+            engine_version: Self::default_engine_version(),
+            data,
         }
     }
 }
@@ -465,5 +516,56 @@ mod tests {
     fn test_secret_store_ref_default_kind() {
         let store_ref = SecretStoreRef::cluster_secret_store("my-store");
         assert_eq!(store_ref.kind, "ClusterSecretStore");
+    }
+
+    #[test]
+    fn test_external_secret_with_template() {
+        let mut template_data = BTreeMap::new();
+        template_data.insert(
+            "config.yaml".to_string(),
+            "database:\n  host: db.svc\n  password: {{ .db_password }}".to_string(),
+        );
+
+        let secret = ExternalSecret::new(
+            "my-api-files",
+            "prod",
+            ExternalSecretSpec {
+                secret_store_ref: SecretStoreRef::cluster_secret_store("vault-prod"),
+                target: ExternalSecretTarget::with_template(
+                    "my-api-files",
+                    ExternalSecretTemplate::new(template_data),
+                ),
+                data: vec![ExternalSecretData::new(
+                    "db_password",
+                    RemoteRef::with_property("database/prod/credentials", "password"),
+                )],
+                data_from: None,
+                refresh_interval: Some("1h".to_string()),
+            },
+        );
+
+        let json = serde_json::to_string_pretty(&secret).unwrap();
+        assert!(json.contains("template"));
+        assert!(json.contains("engineVersion"));
+        assert!(json.contains("v2"));
+        assert!(json.contains("{{ .db_password }}"));
+        assert!(json.contains("config.yaml"));
+
+        // Verify round-trip
+        let parsed: ExternalSecret = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, secret);
+        assert!(parsed.spec.target.template.is_some());
+
+        let template = parsed.spec.target.template.unwrap();
+        assert_eq!(template.engine_version, "v2");
+        assert_eq!(template.data.len(), 1);
+    }
+
+    #[test]
+    fn test_external_secret_target_no_template_omits_field() {
+        let target = ExternalSecretTarget::new("my-secret");
+        let json = serde_json::to_string(&target).unwrap();
+        // template should not appear in JSON when None
+        assert!(!json.contains("template"));
     }
 }

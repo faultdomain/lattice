@@ -491,8 +491,8 @@ mod tests {
 
     fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> LatticeServiceSpec {
         use crate::crd::{
-            ContainerSpec, DependencyDirection, DeploySpec, PortSpec, ReplicaSpec, ResourceSpec,
-            ResourceType, ServicePortsSpec,
+            ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
+            ServicePortsSpec,
         };
 
         let mut containers = BTreeMap::new();
@@ -500,16 +500,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "test:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                resources: None,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -561,15 +552,7 @@ mod tests {
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         }
     }
 
@@ -600,8 +583,8 @@ mod tests {
     #[test]
     fn test_cross_namespace_dependency() {
         use crate::crd::{
-            ContainerSpec, DependencyDirection, DeploySpec, PortSpec, ReplicaSpec, ResourceSpec,
-            ResourceType, ServicePortsSpec,
+            ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
+            ServicePortsSpec,
         };
 
         let graph = ServiceGraph::new();
@@ -628,16 +611,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "web:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                resources: None,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -654,15 +628,7 @@ mod tests {
                     },
                 )]),
             }),
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         };
 
         graph.put_service("frontend", "web", &frontend_spec);
@@ -824,8 +790,8 @@ mod tests {
     #[test]
     fn test_wildcard_cross_namespace() {
         use crate::crd::{
-            ContainerSpec, DependencyDirection, DeploySpec, PortSpec, ReplicaSpec, ResourceSpec,
-            ResourceType, ServicePortsSpec,
+            ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
+            ServicePortsSpec,
         };
 
         let graph = ServiceGraph::new();
@@ -856,16 +822,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "web:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                resources: None,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -882,15 +839,7 @@ mod tests {
                     },
                 )]),
             }),
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         };
 
         graph.put_service("frontend", "web", &frontend_spec);

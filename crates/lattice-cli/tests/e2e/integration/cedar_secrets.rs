@@ -9,7 +9,7 @@
 //! The operator evaluates Cedar policies during `ServiceCompiler::compile()`:
 //! - Principal: `Lattice::Service::"namespace/name"` (service identity)
 //! - Action: `Lattice::Action::"AccessSecret"`
-//! - Resource: `Lattice::SecretPath::"provider:vault_path"` (secret identity)
+//! - Resource: `Lattice::SecretPath::"provider:remote_key"` (secret identity)
 //!
 //! Default-deny: no policies = all secret access denied.
 //!

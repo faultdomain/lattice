@@ -1465,7 +1465,7 @@ fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
 /// # Arguments
 /// * `name` - Service name
 /// * `namespace` - Target namespace
-/// * `secrets` - Vec of (resource_name, vault_path, provider, optional_keys)
+/// * `secrets` - Vec of (resource_name, remote_key, provider, optional_keys)
 #[cfg(feature = "provider-e2e")]
 pub fn create_service_with_secrets(
     name: &str,
@@ -1476,12 +1476,12 @@ pub fn create_service_with_secrets(
 
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        ContainerSpec, DeploySpec, LatticeService, LatticeServiceSpec, PortSpec, ReplicaSpec,
-        ResourceSpec, ResourceType, ServicePortsSpec,
+        ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType,
+        ServicePortsSpec,
     };
 
     let mut resources = BTreeMap::new();
-    for (resource_name, vault_path, provider, keys) in secrets {
+    for (resource_name, remote_key, provider, keys) in secrets {
         let mut params = BTreeMap::new();
         params.insert("provider".to_string(), serde_json::json!(provider));
         if let Some(ks) = keys {
@@ -1493,7 +1493,7 @@ pub fn create_service_with_secrets(
             resource_name.to_string(),
             ResourceSpec {
                 type_: ResourceType::Secret,
-                id: Some(vault_path.to_string()),
+                id: Some(remote_key.to_string()),
                 params: Some(params),
                 ..Default::default()
             },
@@ -1506,15 +1506,7 @@ pub fn create_service_with_secrets(
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
             command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
-            args: None,
-            variables: BTreeMap::new(),
-            resources: None,
-            files: BTreeMap::new(),
-            volumes: BTreeMap::new(),
-            liveness_probe: None,
-            readiness_probe: None,
-            startup_probe: None,
-            security: None,
+            ..Default::default()
         },
     );
 
@@ -1538,19 +1530,7 @@ pub fn create_service_with_secrets(
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
-            replicas: ReplicaSpec {
-                min: 1,
-                max: None,
-                autoscaling: vec![],
-            },
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         },
         status: None,
     }

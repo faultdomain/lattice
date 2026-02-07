@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::error::CompilationError;
 use super::ObjectMeta;
 use crate::crd::{LatticeServiceSpec, VolumeAccessMode};
 
@@ -198,7 +199,7 @@ impl VolumeCompiler {
         service_name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
-    ) -> Result<GeneratedVolumes, String> {
+    ) -> Result<GeneratedVolumes, CompilationError> {
         let mut output = GeneratedVolumes::new();
 
         // -----------------------------------------------------------------
@@ -219,7 +220,9 @@ impl VolumeCompiler {
             if resource_spec.is_volume_owner() {
                 let params = resource_spec
                     .volume_params()
-                    .map_err(|e| format!("resource '{}': {}", resource_name, e))?
+                    .map_err(|e| {
+                        CompilationError::volume(format!("resource '{}': {}", resource_name, e))
+                    })?
                     .unwrap_or_default();
                 let pvc = Self::compile_pvc(&pvc_name, namespace, &params);
                 output.pvcs.push(pvc);
@@ -283,8 +286,15 @@ impl VolumeCompiler {
         for (resource_name, resource_spec) in &model_resources {
             let params = resource_spec
                 .model_params()
-                .map_err(|e| format!("resource '{}': {}", resource_name, e))?
-                .ok_or_else(|| format!("resource '{}': expected model params", resource_name))?;
+                .map_err(|e| {
+                    CompilationError::volume(format!("resource '{}': {}", resource_name, e))
+                })?
+                .ok_or_else(|| {
+                    CompilationError::volume(format!(
+                        "resource '{}': expected model params",
+                        resource_name
+                    ))
+                })?;
 
             let pvc_name = params.cache_pvc_name();
 
@@ -417,10 +427,7 @@ impl VolumeCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{
-        ContainerSpec, DependencyDirection, DeploySpec, ReplicaSpec, ResourceSpec, ResourceType,
-        MODEL_READY_GATE,
-    };
+    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType, MODEL_READY_GATE};
     use lattice_common::template::TemplateString;
 
     fn make_spec_with_volumes(
@@ -446,14 +453,9 @@ mod tests {
                 name.to_string(),
                 ResourceSpec {
                     type_: ResourceType::Volume,
-                    direction: DependencyDirection::default(),
                     id: id.map(|s: &str| s.to_string()),
-                    class: None,
-                    metadata: None,
                     params: Some(params),
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
+                    ..Default::default()
                 },
             );
         }
@@ -464,14 +466,8 @@ mod tests {
                 name.to_string(),
                 ResourceSpec {
                     type_: ResourceType::Volume,
-                    direction: DependencyDirection::default(),
                     id: Some(id.to_string()),
-                    class: None,
-                    metadata: None,
-                    params: None, // No params = reference
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
+                    ..Default::default()
                 },
             );
         }
@@ -494,32 +490,15 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
                 volumes,
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
         LatticeServiceSpec {
             containers,
             resources,
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         }
     }
 
@@ -790,20 +769,7 @@ mod tests {
 
     #[test]
     fn story_no_volumes_returns_empty() {
-        let spec = LatticeServiceSpec {
-            containers: BTreeMap::new(),
-            resources: BTreeMap::new(),
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
-        };
+        let spec = LatticeServiceSpec::default();
 
         let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 
@@ -828,14 +794,8 @@ mod tests {
             "llm".to_string(),
             ResourceSpec {
                 type_: ResourceType::Model,
-                direction: DependencyDirection::default(),
-                id: None,
-                class: None,
-                metadata: None,
                 params: Some(params),
-                namespace: None,
-                inbound: None,
-                outbound: None,
+                ..Default::default()
             },
         );
 
@@ -856,32 +816,15 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "vllm/vllm-openai:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
                 volumes,
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
         LatticeServiceSpec {
             containers,
             resources,
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         }
     }
 
@@ -979,14 +922,8 @@ mod tests {
             "data".to_string(),
             ResourceSpec {
                 type_: ResourceType::Volume,
-                direction: DependencyDirection::default(),
-                id: None,
-                class: None,
-                metadata: None,
                 params: Some(vol_params),
-                namespace: None,
-                inbound: None,
-                outbound: None,
+                ..Default::default()
             },
         );
 
@@ -1000,14 +937,8 @@ mod tests {
             "llm".to_string(),
             ResourceSpec {
                 type_: ResourceType::Model,
-                direction: DependencyDirection::default(),
-                id: None,
-                class: None,
-                metadata: None,
                 params: Some(model_params),
-                namespace: None,
-                inbound: None,
-                outbound: None,
+                ..Default::default()
             },
         );
 
@@ -1034,32 +965,15 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "myapp:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
                 volumes,
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
         let spec = LatticeServiceSpec {
             containers,
             resources,
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         };
 
         let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();

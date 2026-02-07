@@ -1,7 +1,7 @@
 //! Workload compilation error types
 //!
 //! Structured errors for workload compilation that include context
-//! about where the error occurred (container, variable, file path).
+//! about where the error occurred (container, resource, volume, secret, etc.).
 
 use std::fmt;
 
@@ -10,46 +10,54 @@ use lattice_common::template::TemplateError;
 /// Errors that can occur during workload compilation
 #[derive(Debug)]
 pub enum CompilationError {
-    /// Error rendering a template variable
-    TemplateVariable {
-        /// Container where the error occurred
+    /// Error related to a container (invalid spec, bad variable reference, etc.)
+    Container {
+        /// Container name
         container: String,
-        /// Variable name that failed
-        variable: String,
-        /// Underlying error
-        source: TemplateError,
+        /// Error message
+        message: String,
     },
 
-    /// Error rendering a file template
-    TemplateFile {
-        /// Container where the error occurred
-        container: String,
-        /// File path that failed
-        path: String,
-        /// Underlying error
-        source: TemplateError,
-    },
-
-    /// Required resource not found
-    ResourceNotFound {
-        /// Resource name
-        name: String,
-        /// Resource type (e.g., "postgres", "redis")
-        resource_type: String,
-    },
-
-    /// Provisioner failed to generate outputs
-    ProvisionerError {
+    /// Error related to a resource (missing, wrong type, bad config, etc.)
+    Resource {
         /// Resource name
         name: String,
         /// Error message
         message: String,
     },
 
-    /// Invalid container specification
-    InvalidContainer {
-        /// Container name
-        container: String,
+    /// LatticeService is missing required metadata
+    MissingMetadata {
+        /// Which metadata field is missing
+        field: &'static str,
+    },
+
+    /// Invalid volume resource configuration
+    Volume {
+        /// Error message
+        message: String,
+    },
+
+    /// Invalid secret resource configuration
+    Secret {
+        /// Error message
+        message: String,
+    },
+
+    /// Cedar policy denied secret access
+    SecretAccessDenied {
+        /// Denial details
+        details: String,
+    },
+
+    /// Template rendering error
+    Template {
+        /// The underlying template error
+        source: TemplateError,
+    },
+
+    /// File compilation error
+    FileCompilation {
         /// Error message
         message: String,
     },
@@ -64,43 +72,29 @@ pub enum CompilationError {
 impl fmt::Display for CompilationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TemplateVariable {
-                container,
-                variable,
-                source,
-            } => {
-                write!(
-                    f,
-                    "failed to render variable '{}' in container '{}': {}",
-                    variable, container, source
-                )
-            }
-            Self::TemplateFile {
-                container,
-                path,
-                source,
-            } => {
-                write!(
-                    f,
-                    "failed to render file '{}' in container '{}': {}",
-                    path, container, source
-                )
-            }
-            Self::ResourceNotFound {
-                name,
-                resource_type,
-            } => {
-                write!(
-                    f,
-                    "resource '{}' of type '{}' not found",
-                    name, resource_type
-                )
-            }
-            Self::ProvisionerError { name, message } => {
-                write!(f, "provisioner error for resource '{}': {}", name, message)
-            }
-            Self::InvalidContainer { container, message } => {
+            Self::Container { container, message } => {
                 write!(f, "invalid container '{}': {}", container, message)
+            }
+            Self::Resource { name, message } => {
+                write!(f, "resource '{}': {}", name, message)
+            }
+            Self::MissingMetadata { field } => {
+                write!(f, "LatticeService missing {}", field)
+            }
+            Self::Volume { message } => {
+                write!(f, "invalid volume config: {}", message)
+            }
+            Self::Secret { message } => {
+                write!(f, "invalid secret config: {}", message)
+            }
+            Self::SecretAccessDenied { details } => {
+                write!(f, "secret access denied: {}", details)
+            }
+            Self::Template { source } => {
+                write!(f, "template error: {}", source)
+            }
+            Self::FileCompilation { message } => {
+                write!(f, "file compilation error: {}", message)
             }
             Self::MonitoringRequired { metrics } => {
                 write!(
@@ -116,55 +110,71 @@ impl fmt::Display for CompilationError {
 impl std::error::Error for CompilationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::TemplateVariable { source, .. } | Self::TemplateFile { source, .. } => {
-                Some(source)
-            }
+            Self::Template { source } => Some(source),
             _ => None,
         }
     }
 }
 
 impl CompilationError {
-    /// Create a template variable error
-    pub fn template_variable(container: &str, variable: &str, source: TemplateError) -> Self {
-        Self::TemplateVariable {
+    /// Create a container-scoped error
+    pub fn container(container: &str, message: String) -> Self {
+        Self::Container {
             container: container.to_string(),
-            variable: variable.to_string(),
-            source,
+            message,
         }
     }
 
-    /// Create a template file error
-    pub fn template_file(container: &str, path: &str, source: TemplateError) -> Self {
-        Self::TemplateFile {
-            container: container.to_string(),
-            path: path.to_string(),
-            source,
-        }
-    }
-
-    /// Create a resource not found error
-    pub fn resource_not_found(name: &str, resource_type: &str) -> Self {
-        Self::ResourceNotFound {
+    /// Create a resource-scoped error
+    pub fn resource(name: &str, message: String) -> Self {
+        Self::Resource {
             name: name.to_string(),
-            resource_type: resource_type.to_string(),
+            message,
         }
     }
 
-    /// Create a provisioner error
-    pub fn provisioner_error(name: &str, message: &str) -> Self {
-        Self::ProvisionerError {
-            name: name.to_string(),
-            message: message.to_string(),
+    /// Create a missing-metadata error
+    pub fn missing_metadata(field: &'static str) -> Self {
+        Self::MissingMetadata { field }
+    }
+
+    /// Create a volume compilation error
+    pub fn volume(message: impl Into<String>) -> Self {
+        Self::Volume {
+            message: message.into(),
         }
     }
 
-    /// Create an invalid container error
-    pub fn invalid_container(container: &str, message: &str) -> Self {
-        Self::InvalidContainer {
-            container: container.to_string(),
-            message: message.to_string(),
+    /// Create a secret compilation error
+    pub fn secret(message: impl Into<String>) -> Self {
+        Self::Secret {
+            message: message.into(),
         }
+    }
+
+    /// Create a secret-access-denied error
+    pub fn secret_access_denied(details: impl Into<String>) -> Self {
+        Self::SecretAccessDenied {
+            details: details.into(),
+        }
+    }
+
+    /// Create a file compilation error
+    pub fn file_compilation(message: impl Into<String>) -> Self {
+        Self::FileCompilation {
+            message: message.into(),
+        }
+    }
+
+    /// Returns true if this is a SecretAccessDenied error
+    pub fn is_access_denied(&self) -> bool {
+        matches!(self, Self::SecretAccessDenied { .. })
+    }
+}
+
+impl From<TemplateError> for CompilationError {
+    fn from(err: TemplateError) -> Self {
+        Self::Template { source: err }
     }
 }
 
@@ -173,52 +183,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_template_variable_error_display() {
-        let err = CompilationError::template_variable(
-            "main",
-            "DATABASE_URL",
-            TemplateError::Undefined("resources.db.url".to_string()),
-        );
+    fn test_container_error_display() {
+        let err = CompilationError::container("main", "missing image".to_string());
         let display = err.to_string();
-        assert!(display.contains("DATABASE_URL"));
         assert!(display.contains("main"));
-        assert!(display.contains("resources.db.url"));
-    }
-
-    #[test]
-    fn test_template_file_error_display() {
-        let err = CompilationError::template_file(
-            "main",
-            "/etc/app/config.yaml",
-            TemplateError::Syntax("unclosed brace".to_string()),
-        );
-        let display = err.to_string();
-        assert!(display.contains("/etc/app/config.yaml"));
-        assert!(display.contains("main"));
-    }
-
-    #[test]
-    fn test_resource_not_found_display() {
-        let err = CompilationError::resource_not_found("primary-db", "postgres");
-        let display = err.to_string();
-        assert!(display.contains("primary-db"));
-        assert!(display.contains("postgres"));
-    }
-
-    #[test]
-    fn test_provisioner_error_display() {
-        let err = CompilationError::provisioner_error("cache", "connection refused");
-        let display = err.to_string();
-        assert!(display.contains("cache"));
-        assert!(display.contains("connection refused"));
-    }
-
-    #[test]
-    fn test_invalid_container_display() {
-        let err = CompilationError::invalid_container("sidecar", "missing image");
-        let display = err.to_string();
-        assert!(display.contains("sidecar"));
         assert!(display.contains("missing image"));
+    }
+
+    #[test]
+    fn test_resource_error_display() {
+        let err = CompilationError::resource("db-creds", "vault path not set".to_string());
+        let display = err.to_string();
+        assert!(display.contains("db-creds"));
+        assert!(display.contains("vault path not set"));
     }
 
     #[test]
@@ -236,15 +213,49 @@ mod tests {
     }
 
     #[test]
-    fn test_error_source() {
-        let template_err = TemplateError::Undefined("foo".to_string());
-        let err = CompilationError::template_variable("main", "VAR", template_err);
+    fn test_missing_metadata_display() {
+        let err = CompilationError::missing_metadata("name");
+        assert_eq!(err.to_string(), "LatticeService missing name");
+    }
 
-        // Should have a source error
+    #[test]
+    fn test_volume_error_display() {
+        let err = CompilationError::volume("bad size");
+        assert!(err.to_string().contains("bad size"));
+    }
+
+    #[test]
+    fn test_secret_error_display() {
+        let err = CompilationError::secret("missing provider");
+        assert!(err.to_string().contains("missing provider"));
+    }
+
+    #[test]
+    fn test_secret_access_denied_display() {
+        let err = CompilationError::secret_access_denied("denied by policy");
+        assert!(err.to_string().contains("denied by policy"));
+        assert!(err.is_access_denied());
+    }
+
+    #[test]
+    fn test_file_compilation_display() {
+        let err = CompilationError::file_compilation("invalid key");
+        assert!(err.to_string().contains("invalid key"));
+    }
+
+    #[test]
+    fn test_is_access_denied() {
+        assert!(CompilationError::secret_access_denied("x").is_access_denied());
+        assert!(!CompilationError::secret("x").is_access_denied());
+        assert!(!CompilationError::volume("x").is_access_denied());
+    }
+
+    #[test]
+    fn test_template_error_source_chain() {
+        let template_err = TemplateError::Syntax("bad template".to_string());
+        let err = CompilationError::from(template_err);
+        assert!(err.to_string().contains("bad template"));
+        // source() should return the TemplateError
         assert!(std::error::Error::source(&err).is_some());
-
-        // Non-template errors don't have a source
-        let err2 = CompilationError::resource_not_found("db", "postgres");
-        assert!(std::error::Error::source(&err2).is_none());
     }
 }

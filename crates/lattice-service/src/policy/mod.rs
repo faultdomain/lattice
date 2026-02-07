@@ -176,8 +176,8 @@ impl<'a> PolicyCompiler<'a> {
 mod tests {
     use super::PolicyCompiler;
     use crate::crd::{
-        ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalServiceSpec, PortSpec,
-        ReplicaSpec, Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
+        ContainerSpec, DependencyDirection, LatticeExternalServiceSpec, PortSpec, Resolution,
+        ResourceSpec, ServicePortsSpec,
     };
     use crate::graph::ServiceGraph;
     use lattice_common::mesh;
@@ -202,15 +202,8 @@ mod tests {
             resources.insert(
                 dep.to_string(),
                 ResourceSpec {
-                    type_: ResourceType::Service,
                     direction: DependencyDirection::Outbound,
-                    id: None,
-                    class: None,
-                    metadata: None,
-                    params: None,
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
+                    ..Default::default()
                 },
             );
         }
@@ -218,15 +211,8 @@ mod tests {
             resources.insert(
                 caller.to_string(),
                 ResourceSpec {
-                    type_: ResourceType::Service,
                     direction: DependencyDirection::Inbound,
-                    id: None,
-                    class: None,
-                    metadata: None,
-                    params: None,
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
+                    ..Default::default()
                 },
             );
         }
@@ -236,16 +222,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "test:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -263,15 +240,7 @@ mod tests {
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         }
     }
 

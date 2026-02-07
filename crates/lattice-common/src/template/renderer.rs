@@ -98,6 +98,56 @@ impl RenderedVariable {
     }
 }
 
+/// A reference to a secret variable: `${secret.RESOURCE.KEY}`
+///
+/// Secret variables are not rendered by the template engine — they compile
+/// to K8s `secretKeyRef` env vars where the kubelet injects the value at
+/// pod startup (ESO syncs the secret from Vault asynchronously).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SecretVariableRef {
+    /// Resource name (must reference a `type: secret` resource)
+    pub resource_name: String,
+    /// Key within the secret
+    pub key: String,
+}
+
+/// Parse `${secret.RESOURCE.KEY}` if it is the entire value.
+///
+/// Returns `None` for non-secret templates (e.g., `${resources.db.host}`).
+/// The value must be exactly `${secret.RESOURCE.KEY}` with no surrounding content.
+pub fn parse_secret_ref(template: &str) -> Option<SecretVariableRef> {
+    let trimmed = template.trim();
+    let inner = trimmed.strip_prefix("${secret.")?.strip_suffix('}')?;
+
+    let dot = inner.find('.')?;
+    let resource_name = &inner[..dot];
+    let key = &inner[dot + 1..];
+
+    if resource_name.is_empty() || key.is_empty() || key.contains('.') {
+        return None;
+    }
+
+    Some(SecretVariableRef {
+        resource_name: resource_name.to_string(),
+        key: key.to_string(),
+    })
+}
+
+
+/// An env var that contains `${secret.*}` mixed with other content.
+///
+/// The non-secret parts have been rendered through the template engine.
+/// The secret parts are replaced with ESO Go template syntax.
+/// This needs to be mounted via an ESO ExternalSecret with `spec.target.template`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EsoTemplatedEnvVar {
+    /// Rendered content with ESO Go template syntax for secret values
+    /// e.g., `"host=postgres.svc,pass={{ .db_creds_password }}"`
+    pub rendered_template: String,
+    /// Secret references found in the content
+    pub secret_refs: Vec<FileSecretRef>,
+}
+
 /// Rendered container spec with all templates resolved
 #[derive(Clone, Debug)]
 pub struct RenderedContainer {
@@ -111,16 +161,43 @@ pub struct RenderedContainer {
     pub args: Option<Vec<String>>,
     /// Rendered environment variables with sensitivity tracking
     pub variables: BTreeMap<String, RenderedVariable>,
+    /// Pure secret variable references — compile to K8s `secretKeyRef` env vars.
+    /// The value is exactly `${secret.RESOURCE.KEY}` with no surrounding content.
+    pub secret_variables: BTreeMap<String, SecretVariableRef>,
+    /// Env vars containing `${secret.*}` mixed with other content.
+    /// These need ESO templating — the non-secret parts are pre-rendered,
+    /// and secret parts use Go template syntax.
+    pub eso_templated_variables: BTreeMap<String, EsoTemplatedEnvVar>,
     /// Rendered file mounts
     pub files: BTreeMap<String, RenderedFile>,
     /// Rendered volume mounts
     pub volumes: BTreeMap<String, RenderedVolume>,
 }
 
+/// A reference to a secret value found in file content: `${secret.RESOURCE.KEY}`
+///
+/// When file content contains secret references, the file must be rendered via
+/// ESO's Go template engine at secret-sync time, not at compile time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileSecretRef {
+    /// Resource name (must reference a `type: secret` resource)
+    pub resource_name: String,
+    /// Key within the secret
+    pub key: String,
+    /// ESO data key — a Go-template-safe identifier for this secret value.
+    /// Used as the key in `spec.data[].secretKey` and referenced in
+    /// Go templates as `{{ .eso_data_key }}`.
+    pub eso_data_key: String,
+}
+
 /// Rendered file mount
 #[derive(Clone, Debug)]
 pub struct RenderedFile {
     /// Rendered content (if inline)
+    ///
+    /// When `secret_refs` is non-empty, this content contains ESO Go template
+    /// syntax (`{{ .key }}`) for secret values instead of the original
+    /// `${secret.*}` placeholders.
     pub content: Option<String>,
     /// Binary content (unchanged)
     pub binary_content: Option<String>,
@@ -128,6 +205,11 @@ pub struct RenderedFile {
     pub source: Option<String>,
     /// File mode
     pub mode: Option<String>,
+    /// Secret references found in the content
+    ///
+    /// If non-empty, this file must be rendered via an ESO ExternalSecret
+    /// with `spec.target.template.data` instead of a plain ConfigMap.
+    pub secret_refs: Vec<FileSecretRef>,
 }
 
 /// Rendered volume mount
@@ -253,10 +335,41 @@ impl TemplateRenderer {
         // Resolve image - handle Score's "." placeholder for runtime-supplied images
         let image = self.resolve_image(&container.image, name, ctx)?;
 
-        // Render environment variables with sensitivity tracking
+        // Render environment variables with sensitivity tracking.
+        //
+        // Three cases:
+        // 1. Pure `${secret.RESOURCE.KEY}` → secretKeyRef (kubelet injects at pod start)
+        // 2. Mixed content with `${secret.*}` → ESO template (rendered at sync time)
+        // 3. No secret refs → render normally through template engine
         let mut variables = BTreeMap::new();
+        let mut secret_variables = BTreeMap::new();
+        let mut eso_templated_variables = BTreeMap::new();
         for (k, v) in &container.variables {
             let template_str = v.as_str();
+
+            // Case 1: Pure ${secret.*} — bypass rendering, use secretKeyRef
+            if let Some(secret_ref) = parse_secret_ref(template_str) {
+                secret_variables.insert(k.clone(), secret_ref);
+                continue;
+            }
+
+            // Case 2: Mixed content with ${secret.*} — extract secrets, render
+            // non-secret parts, produce ESO Go template content
+            if template_str.contains("${secret.") {
+                let (preprocessed, refs) =
+                    Self::extract_secret_refs_from_content(template_str, false);
+                let rendered = self.engine.render(&preprocessed, ctx)?;
+                eso_templated_variables.insert(
+                    k.clone(),
+                    EsoTemplatedEnvVar {
+                        rendered_template: rendered,
+                        secret_refs: refs,
+                    },
+                );
+                continue;
+            }
+
+            // Case 3: No secret refs — render normally
             let rendered = self.engine.render(template_str, ctx)?;
             let sensitive = self.is_template_sensitive(template_str, ctx);
             variables.insert(
@@ -288,6 +401,8 @@ impl TemplateRenderer {
             command: container.command.clone(),
             args: container.args.clone(),
             variables,
+            secret_variables,
+            eso_templated_variables,
             files,
             volumes,
         })
@@ -327,7 +442,7 @@ impl TemplateRenderer {
         Err(TemplateError::missing_image(container_name))
     }
 
-    /// Render a file mount
+    /// Render a file mount, detecting secret references in content
     fn render_file(
         &self,
         file: &FileMount,
@@ -336,8 +451,26 @@ impl TemplateRenderer {
         let no_expand = file.no_expand;
         let reverse_expand = file.reverse_expand;
 
+        let mut secret_refs = Vec::new();
+
         let content: Option<String> = if let Some(ref template) = file.content {
-            Some(self.render_file_content(template.as_str(), ctx, no_expand, reverse_expand)?)
+            let raw = template.as_str();
+            if no_expand {
+                Some(raw.to_string())
+            } else {
+                // Extract secret references, replace with ESO Go template
+                // syntax, then render remaining templates through the engine.
+                //
+                // In normal mode: `${secret.*}` is the secret syntax
+                // In reverse mode: `$${secret.*}` is the secret syntax
+                //   (because `$${...}` means "expand this Lattice template")
+                let (preprocessed, refs) =
+                    Self::extract_secret_refs_from_content(raw, reverse_expand);
+                secret_refs = refs;
+                let rendered =
+                    self.render_file_content(&preprocessed, ctx, false, reverse_expand)?;
+                Some(rendered)
+            }
         } else {
             None
         };
@@ -353,7 +486,90 @@ impl TemplateRenderer {
             binary_content: file.binary_content.clone(),
             source,
             mode: file.mode.clone(),
+            secret_refs,
         })
+    }
+
+    /// Extract secret references from content and replace with ESO Go templates.
+    ///
+    /// In **normal mode** (`reverse_expand = false`):
+    ///   `${secret.RESOURCE.KEY}` → `{{ .RESOURCE_KEY }}`
+    ///
+    /// In **reverse mode** (`reverse_expand = true`):
+    ///   `$${secret.RESOURCE.KEY}` → `{{ .RESOURCE_KEY }}`
+    ///   `${secret.RESOURCE.KEY}` stays literal (it's a shell variable)
+    ///
+    /// Returns the modified content plus a list of `FileSecretRef` entries.
+    fn extract_secret_refs_from_content(
+        content: &str,
+        reverse_expand: bool,
+    ) -> (String, Vec<FileSecretRef>) {
+        // In reverse mode, the secret prefix is `$${secret.` (3 extra chars)
+        let prefix = if reverse_expand {
+            "$${secret."
+        } else {
+            "${secret."
+        };
+
+        let mut result = String::with_capacity(content.len());
+        let mut refs = Vec::new();
+        let mut seen_keys = std::collections::HashSet::new();
+        let mut remaining = content;
+
+        while let Some(start) = remaining.find(prefix) {
+            // Copy everything before this match
+            result.push_str(&remaining[..start]);
+
+            let after_prefix = &remaining[start + prefix.len()..];
+            if let Some(end) = after_prefix.find('}') {
+                let inner = &after_prefix[..end];
+                if let Some(ref_data) = Self::parse_secret_ref_inner(inner) {
+                    let (resource, key, eso_data_key) = ref_data;
+
+                    if seen_keys.insert(eso_data_key.clone()) {
+                        refs.push(FileSecretRef {
+                            resource_name: resource,
+                            key,
+                            eso_data_key: eso_data_key.clone(),
+                        });
+                    }
+
+                    result.push_str(&format!("{{{{ .{} }}}}", eso_data_key));
+                    remaining = &after_prefix[end + 1..];
+                    continue;
+                }
+                // Not a valid secret ref, keep as-is
+                result.push_str(&remaining[..start + prefix.len() + end + 1]);
+                remaining = &after_prefix[end + 1..];
+            } else {
+                // No closing brace, keep rest as-is (from the match position onward)
+                result.push_str(&remaining[start..]);
+                remaining = "";
+            }
+        }
+
+        result.push_str(remaining);
+        (result, refs)
+    }
+
+    /// Parse the inner part of a secret ref (`RESOURCE.KEY`) into
+    /// (resource_name, key, eso_data_key) or None if invalid.
+    fn parse_secret_ref_inner(inner: &str) -> Option<(String, String, String)> {
+        let dot = inner.find('.')?;
+        let resource = &inner[..dot];
+        let key = &inner[dot + 1..];
+
+        if resource.is_empty() || key.is_empty() || key.contains('.') {
+            return None;
+        }
+
+        let eso_data_key = format!(
+            "{}_{}",
+            resource.replace('-', "_"),
+            key.replace('-', "_")
+        );
+
+        Some((resource.to_string(), key.to_string(), eso_data_key))
     }
 
     /// Render file content with expansion options
@@ -426,8 +642,8 @@ impl TemplateRenderer {
 mod tests {
     use super::*;
     use crate::crd::{
-        ContainerSpec, DependencyDirection, LatticeServiceSpec, PortSpec, ReplicaSpec,
-        ResourceSpec, ResourceType, ServicePortsSpec,
+        ContainerSpec, DependencyDirection, LatticeServiceSpec, PortSpec, ResourceSpec,
+        ResourceType, ServicePortsSpec,
     };
     use crate::template::TemplateString;
     use kube::api::ObjectMeta;
@@ -440,16 +656,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "postgres:15".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -465,17 +672,8 @@ mod tests {
 
         let spec = LatticeServiceSpec {
             containers,
-            resources: BTreeMap::new(),
             service: Some(ServicePortsSpec { ports }),
-            replicas: ReplicaSpec::default(),
-            deploy: crate::crd::DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-            backup: None,
-            gpu: None,
+            ..Default::default()
         };
 
         graph.put_service(env, "postgres", &spec);
@@ -520,16 +718,9 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "myapp:latest".to_string(),
-                command: None,
-                args: None,
                 variables,
                 files,
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -558,16 +749,7 @@ mod tests {
             spec: LatticeServiceSpec {
                 containers,
                 resources,
-                service: None,
-                replicas: ReplicaSpec::default(),
-                deploy: crate::crd::DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         }
@@ -668,16 +850,8 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "app:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
                 files,
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -689,17 +863,7 @@ mod tests {
             },
             spec: LatticeServiceSpec {
                 containers,
-                resources: BTreeMap::new(),
-                service: None,
-                replicas: ReplicaSpec::default(),
-                deploy: crate::crd::DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         };
@@ -746,16 +910,8 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "app:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
                 files,
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -784,16 +940,7 @@ mod tests {
             spec: LatticeServiceSpec {
                 containers,
                 resources,
-                service: None,
-                replicas: ReplicaSpec::default(),
-                deploy: crate::crd::DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         };
@@ -867,16 +1014,8 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "app:latest".to_string(),
-                command: None,
-                args: None,
                 variables,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -888,17 +1027,7 @@ mod tests {
             },
             spec: LatticeServiceSpec {
                 containers,
-                resources: BTreeMap::new(),
-                service: None,
-                replicas: ReplicaSpec::default(),
-                deploy: crate::crd::DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         };
@@ -935,16 +1064,8 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "placeholder".to_string(),
-                command: None,
-                args: None,
                 variables,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -956,17 +1077,7 @@ mod tests {
             },
             spec: LatticeServiceSpec {
                 containers,
-                resources: BTreeMap::new(),
-                service: None,
-                replicas: ReplicaSpec::default(),
-                deploy: crate::crd::DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         };
@@ -1029,16 +1140,8 @@ mod tests {
 
         let container = ContainerSpec {
             image: "app:latest".to_string(),
-            command: None,
-            args: None,
             variables,
-            files: BTreeMap::new(),
-            volumes: BTreeMap::new(),
-            resources: None,
-            liveness_probe: None,
-            readiness_probe: None,
-            startup_probe: None,
-            security: None,
+            ..Default::default()
         };
 
         let renderer = TemplateRenderer::new();
@@ -1096,16 +1199,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: ".".to_string(), // Score placeholder
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -1117,17 +1211,7 @@ mod tests {
             },
             spec: LatticeServiceSpec {
                 containers,
-                resources: BTreeMap::new(),
-                service: None,
-                replicas: ReplicaSpec::default(),
-                deploy: crate::crd::DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         };
@@ -1155,32 +1239,14 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: ".".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
         containers.insert(
             "sidecar".to_string(),
             ContainerSpec {
                 image: ".".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -1192,17 +1258,7 @@ mod tests {
             },
             spec: LatticeServiceSpec {
                 containers,
-                resources: BTreeMap::new(),
-                service: None,
-                replicas: ReplicaSpec::default(),
-                deploy: crate::crd::DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         };
@@ -1236,16 +1292,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: ".".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -1257,17 +1304,7 @@ mod tests {
             },
             spec: LatticeServiceSpec {
                 containers,
-                resources: BTreeMap::new(),
-                service: None,
-                replicas: ReplicaSpec::default(),
-                deploy: crate::crd::DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         };
@@ -1295,16 +1332,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "nginx:latest".to_string(), // Normal image
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                resources: None,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -1316,17 +1344,7 @@ mod tests {
             },
             spec: LatticeServiceSpec {
                 containers,
-                resources: BTreeMap::new(),
-                service: None,
-                replicas: ReplicaSpec::default(),
-                deploy: crate::crd::DeploySpec::default(),
-                ingress: None,
-                sidecars: BTreeMap::new(),
-                sysctls: BTreeMap::new(),
-                host_network: None,
-                share_process_namespace: None,
-                backup: None,
-                gpu: None,
+                ..Default::default()
             },
             status: None,
         };
@@ -1373,16 +1391,8 @@ mod tests {
 
         let container = ContainerSpec {
             image: "app:latest".to_string(),
-            command: None,
-            args: None,
-            variables: BTreeMap::new(),
-            files: BTreeMap::new(),
             volumes,
-            resources: None,
-            liveness_probe: None,
-            readiness_probe: None,
-            startup_probe: None,
-            security: None,
+            ..Default::default()
         };
 
         let renderer = TemplateRenderer::new();
@@ -1415,16 +1425,8 @@ mod tests {
 
         let container = ContainerSpec {
             image: "app:latest".to_string(),
-            command: None,
-            args: None,
-            variables: BTreeMap::new(),
-            files: BTreeMap::new(),
             volumes,
-            resources: None,
-            liveness_probe: None,
-            readiness_probe: None,
-            startup_probe: None,
-            security: None,
+            ..Default::default()
         };
 
         let renderer = TemplateRenderer::new();
@@ -1456,16 +1458,8 @@ mod tests {
 
         let container = ContainerSpec {
             image: "app:latest".to_string(),
-            command: None,
-            args: None,
-            variables: BTreeMap::new(),
-            files: BTreeMap::new(),
             volumes,
-            resources: None,
-            liveness_probe: None,
-            readiness_probe: None,
-            startup_probe: None,
-            security: None,
+            ..Default::default()
         };
 
         let renderer = TemplateRenderer::new();
@@ -1494,21 +1488,449 @@ mod tests {
 
         let container = ContainerSpec {
             image: "app:latest".to_string(),
-            command: None,
-            args: None,
-            variables: BTreeMap::new(),
-            files: BTreeMap::new(),
             volumes,
-            resources: None,
-            liveness_probe: None,
-            readiness_probe: None,
-            startup_probe: None,
-            security: None,
+            ..Default::default()
         };
 
         let renderer = TemplateRenderer::new();
         let result = renderer.render_container("main", &container, &ctx);
 
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Story: parse_secret_ref
+    // =========================================================================
+
+    #[test]
+    fn test_parse_secret_ref_valid() {
+        let result = parse_secret_ref("${secret.db-creds.password}");
+        assert_eq!(
+            result,
+            Some(SecretVariableRef {
+                resource_name: "db-creds".to_string(),
+                key: "password".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_secret_ref_with_whitespace() {
+        let result = parse_secret_ref("  ${secret.db-creds.password}  ");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().resource_name, "db-creds");
+    }
+
+    #[test]
+    fn test_parse_secret_ref_non_secret() {
+        assert!(parse_secret_ref("${resources.db.host}").is_none());
+        assert!(parse_secret_ref("plain-value").is_none());
+        assert!(parse_secret_ref("${config.key}").is_none());
+    }
+
+    #[test]
+    fn test_parse_secret_ref_rejects_nested_dots() {
+        // Only RESOURCE.KEY is allowed, not RESOURCE.NESTED.KEY
+        assert!(parse_secret_ref("${secret.db.nested.key}").is_none());
+    }
+
+    #[test]
+    fn test_parse_secret_ref_rejects_empty_parts() {
+        assert!(parse_secret_ref("${secret..key}").is_none());
+        assert!(parse_secret_ref("${secret.db.}").is_none());
+    }
+
+    // =========================================================================
+    // Story: Renderer intercepts ${secret.*} variables
+    // =========================================================================
+
+    #[test]
+    fn test_render_container_separates_secret_variables() {
+        let ctx = TemplateContext::builder()
+            .metadata("api", std::collections::HashMap::new())
+            .config("log_level", "debug")
+            .build();
+
+        let mut variables = BTreeMap::new();
+        variables.insert(
+            "LOG_LEVEL".to_string(),
+            TemplateString::from("${config.log_level}"),
+        );
+        variables.insert(
+            "DB_PASSWORD".to_string(),
+            TemplateString::from("${secret.db-creds.password}"),
+        );
+
+        let container = ContainerSpec {
+            image: "app:latest".to_string(),
+            variables,
+            ..Default::default()
+        };
+
+        let renderer = TemplateRenderer::new();
+        let rendered = renderer
+            .render_container("main", &container, &ctx)
+            .expect("should render");
+
+        // LOG_LEVEL should be in regular variables (rendered)
+        assert_eq!(
+            rendered.variables.get("LOG_LEVEL").map(|v| &v.value),
+            Some(&"debug".to_string())
+        );
+        assert!(!rendered.variables.contains_key("DB_PASSWORD"));
+
+        // DB_PASSWORD should be in secret_variables (not rendered)
+        let secret_var = rendered
+            .secret_variables
+            .get("DB_PASSWORD")
+            .expect("should have secret var");
+        assert_eq!(secret_var.resource_name, "db-creds");
+        assert_eq!(secret_var.key, "password");
+    }
+
+    #[test]
+    fn test_render_container_mixed_secret_ref_becomes_eso_template() {
+        let ctx = TemplateContext::builder()
+            .metadata("api", std::collections::HashMap::new())
+            .config("prefix", "myprefix")
+            .build();
+
+        let mut variables = BTreeMap::new();
+        variables.insert(
+            "CONN_STRING".to_string(),
+            TemplateString::from("host=${config.prefix},pass=${secret.db.pass}"),
+        );
+
+        let container = ContainerSpec {
+            image: "app:latest".to_string(),
+            variables,
+            ..Default::default()
+        };
+
+        let renderer = TemplateRenderer::new();
+        let rendered = renderer
+            .render_container("main", &container, &ctx)
+            .expect("should render");
+
+        // Should NOT be in regular variables or pure secret_variables
+        assert!(!rendered.variables.contains_key("CONN_STRING"));
+        assert!(!rendered.secret_variables.contains_key("CONN_STRING"));
+
+        // Should be in eso_templated_variables
+        let eso_var = rendered
+            .eso_templated_variables
+            .get("CONN_STRING")
+            .expect("should have ESO templated var");
+
+        // Non-secret parts should be rendered
+        assert!(eso_var.rendered_template.contains("host=myprefix"));
+        // Secret parts should be Go template syntax
+        assert!(eso_var.rendered_template.contains("{{ .db_pass }}"));
+
+        // Should track the secret ref
+        assert_eq!(eso_var.secret_refs.len(), 1);
+        assert_eq!(eso_var.secret_refs[0].resource_name, "db");
+        assert_eq!(eso_var.secret_refs[0].key, "pass");
+    }
+
+    // =========================================================================
+    // Story: File secret reference detection
+    // =========================================================================
+
+    #[test]
+    fn test_extract_secret_refs_from_content() {
+        let content = "database:\n  host: ${resources.db.host}\n  password: ${secret.db-creds.password}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].resource_name, "db-creds");
+        assert_eq!(refs[0].key, "password");
+        assert_eq!(refs[0].eso_data_key, "db_creds_password");
+
+        // The ${secret.*} should be replaced with Go template syntax
+        assert!(result.contains("{{ .db_creds_password }}"));
+        // The ${resources.*} should be left alone for engine rendering
+        assert!(result.contains("${resources.db.host}"));
+    }
+
+    #[test]
+    fn test_extract_secret_refs_multiple() {
+        let content = "user=${secret.db.username} pass=${secret.db.password}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 2);
+        assert!(result.contains("{{ .db_username }}"));
+        assert!(result.contains("{{ .db_password }}"));
+    }
+
+    #[test]
+    fn test_extract_secret_refs_deduplicates() {
+        let content = "${secret.db.pass} and again ${secret.db.pass}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        // Should only have one ref even though the pattern appears twice
+        assert_eq!(refs.len(), 1);
+        // Both occurrences should be replaced
+        assert_eq!(result.matches("{{ .db_pass }}").count(), 2);
+    }
+
+    #[test]
+    fn test_extract_secret_refs_no_secrets() {
+        let content = "just ${resources.db.host} and ${config.key}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert!(refs.is_empty());
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_extract_secret_refs_at_start_of_content() {
+        let content = "${secret.db.pass} is the password";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(result, "{{ .db_pass }} is the password");
+    }
+
+    #[test]
+    fn test_extract_secret_refs_at_end_of_content() {
+        let content = "password: ${secret.db.pass}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(result, "password: {{ .db_pass }}");
+    }
+
+    #[test]
+    fn test_extract_secret_refs_entire_content() {
+        let content = "${secret.db.pass}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(result, "{{ .db_pass }}");
+    }
+
+    #[test]
+    fn test_extract_secret_refs_adjacent() {
+        let content = "${secret.db.user}${secret.db.pass}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 2);
+        assert_eq!(result, "{{ .db_user }}{{ .db_pass }}");
+    }
+
+    #[test]
+    fn test_extract_secret_refs_hyphenated_resource_name() {
+        let content = "${secret.my-db-creds.password}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].resource_name, "my-db-creds");
+        assert_eq!(refs[0].key, "password");
+        assert_eq!(refs[0].eso_data_key, "my_db_creds_password");
+        assert_eq!(result, "{{ .my_db_creds_password }}");
+    }
+
+    #[test]
+    fn test_extract_secret_refs_ignores_nested_dots() {
+        // ${secret.db.nested.key} has too many dots — not a valid secret ref
+        let content = "${secret.db.nested.key}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        // Should not be parsed (key contains a dot)
+        assert!(refs.is_empty());
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_extract_secret_refs_empty_parts() {
+        // ${secret..key} is invalid
+        let content = "${secret..key}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert!(refs.is_empty());
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_extract_secret_refs_no_closing_brace() {
+        let content = "before ${secret.db.pass and after";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert!(refs.is_empty());
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_extract_secret_refs_mixed_with_other_templates() {
+        let content = "host=${resources.db.host} port=${resources.db.port} pass=${secret.creds.pw}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].resource_name, "creds");
+        assert_eq!(refs[0].key, "pw");
+        // Non-secret templates preserved for minijinja
+        assert!(result.contains("${resources.db.host}"));
+        assert!(result.contains("${resources.db.port}"));
+        assert!(result.contains("{{ .creds_pw }}"));
+    }
+
+    #[test]
+    fn test_extract_secret_refs_multiline() {
+        let content = "database:\n  host: ${resources.db.host}\n  password: ${secret.db.pass}\n  port: 5432";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 1);
+        assert!(result.contains("host: ${resources.db.host}"));
+        assert!(result.contains("password: {{ .db_pass }}"));
+        assert!(result.contains("port: 5432"));
+    }
+
+    #[test]
+    fn test_extract_secret_refs_from_different_resources() {
+        let content = "${secret.db.pass} and ${secret.api.key}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].resource_name, "db");
+        assert_eq!(refs[0].key, "pass");
+        assert_eq!(refs[1].resource_name, "api");
+        assert_eq!(refs[1].key, "key");
+        assert_eq!(result, "{{ .db_pass }} and {{ .api_key }}");
+    }
+
+    #[test]
+    fn test_extract_secret_refs_empty_content() {
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content("", false);
+        assert!(refs.is_empty());
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_extract_secret_refs_plain_text() {
+        let content = "just plain text without any templates";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        assert!(refs.is_empty());
+        assert_eq!(result, content);
+    }
+
+    // =========================================================================
+    // Story: reverse_expand mode secret ref extraction
+    // =========================================================================
+
+    #[test]
+    fn test_extract_secret_refs_reverse_mode_double_dollar() {
+        // In reverse mode, $${secret.*} is the Lattice template syntax
+        let content = "pass=$${secret.db.password}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, true);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].resource_name, "db");
+        assert_eq!(refs[0].key, "password");
+        assert_eq!(result, "pass={{ .db_password }}");
+    }
+
+    #[test]
+    fn test_extract_secret_refs_reverse_mode_single_dollar_stays_literal() {
+        // In reverse mode, ${secret.*} should stay literal (bash variable)
+        let content = "pass=${secret.db.password}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, true);
+
+        assert!(refs.is_empty());
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_extract_secret_refs_reverse_mode_mixed() {
+        // Mix of reverse-mode Lattice templates and bash variables
+        let content =
+            "DB_PASS=$${secret.db.password}\nSHELL_VAR=${SOME_BASH_VAR}";
+        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, true);
+
+        assert_eq!(refs.len(), 1);
+        // $${secret.*} replaced with Go template
+        assert!(result.contains("DB_PASS={{ .db_password }}"));
+        // ${SOME_BASH_VAR} stays literal
+        assert!(result.contains("SHELL_VAR=${SOME_BASH_VAR}"));
+    }
+
+    #[test]
+    fn test_render_file_with_secret_refs() {
+        let graph = make_graph_with_db("prod");
+
+        let mut files = BTreeMap::new();
+        files.insert(
+            "/etc/app/config.yaml".to_string(),
+            FileMount {
+                content: Some(TemplateString::from(
+                    "database:\n  host: ${resources.db.host}\n  password: ${secret.db-creds.password}",
+                )),
+                binary_content: None,
+                source: None,
+                mode: Some("0644".to_string()),
+                no_expand: false,
+                reverse_expand: false,
+            },
+        );
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "myapp:latest".to_string(),
+                files,
+                ..Default::default()
+            },
+        );
+
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "db".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Outbound,
+                id: Some("postgres".to_string()),
+                class: None,
+                metadata: None,
+                params: None,
+                namespace: None,
+                inbound: None,
+                outbound: None,
+            },
+        );
+
+        let service = LatticeService {
+            metadata: ObjectMeta {
+                name: Some("my-api".to_string()),
+                namespace: Some("prod".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeServiceSpec {
+                containers,
+                resources,
+                ..Default::default()
+            },
+            status: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let config = RenderConfig::new(&graph, "prod", "prod-ns");
+        let ctx = renderer.build_context(&service, &config).unwrap();
+        let rendered = renderer
+            .render_container("main", &service.spec.containers["main"], &ctx)
+            .unwrap();
+
+        let file = &rendered.files["/etc/app/config.yaml"];
+        let content = file.content.as_ref().unwrap();
+
+        // Non-secret templates should be resolved
+        assert!(content.contains("host: postgres.prod-ns.svc.cluster.local"));
+        // Secret templates should become ESO Go template syntax
+        assert!(content.contains("password: {{ .db_creds_password }}"));
+
+        // Should have secret refs
+        assert_eq!(file.secret_refs.len(), 1);
+        assert_eq!(file.secret_refs[0].resource_name, "db-creds");
+        assert_eq!(file.secret_refs[0].key, "password");
     }
 }
