@@ -320,6 +320,9 @@ mod tests {
                 networking: None,
                 services: true,
                 gpu: false,
+                monitoring: true,
+                backups: true,
+                external_secrets: true,
             },
             status: None,
         }

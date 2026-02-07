@@ -124,6 +124,10 @@ pub async fn ensure_cluster_infrastructure(client: &Client) -> anyhow::Result<()
         let config = InfrastructureConfig {
             cluster_name: "bootstrap".to_string(),
             skip_cilium_policies: true,
+            skip_service_mesh: true,
+            monitoring: false,
+            backups: false,
+            external_secrets: false,
             ..Default::default()
         };
         let manifests = bootstrap::generate_core(&config)

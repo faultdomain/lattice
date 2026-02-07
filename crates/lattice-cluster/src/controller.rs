@@ -1714,6 +1714,9 @@ mod tests {
                 parent_config: None,
                 services: true,
                 gpu: false,
+                monitoring: true,
+                backups: true,
+                external_secrets: true,
             },
             status: None,
         }
@@ -2276,6 +2279,9 @@ mod tests {
                     parent_config: None,
                     services: true,
                     gpu: false,
+                    monitoring: true,
+                    backups: true,
+                    external_secrets: true,
                 },
                 status: None,
             }

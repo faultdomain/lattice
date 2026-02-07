@@ -29,7 +29,7 @@ pub use cilium::{
 pub use istio::{IstioConfig, IstioReconciler};
 
 /// Configuration for infrastructure manifest generation
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct InfrastructureConfig {
     /// Infrastructure provider type (docker, proxmox, aws, etc.)
     pub provider: ProviderType,
@@ -47,6 +47,33 @@ pub struct InfrastructureConfig {
     pub parent_grpc_port: u16,
     /// Enable GPU infrastructure (NFD + NVIDIA device plugin + HAMi)
     pub gpu: bool,
+    /// Enable monitoring infrastructure (VictoriaMetrics + Prometheus Adapter for HPA).
+    /// Defaults to true.
+    pub monitoring: bool,
+    /// Enable backup infrastructure (Velero).
+    /// Defaults to true.
+    pub backups: bool,
+    /// Enable external secrets infrastructure (External Secrets Operator for Vault).
+    /// Defaults to true.
+    pub external_secrets: bool,
+}
+
+impl Default for InfrastructureConfig {
+    fn default() -> Self {
+        Self {
+            provider: ProviderType::default(),
+            bootstrap: BootstrapProvider::default(),
+            cluster_name: String::new(),
+            skip_cilium_policies: false,
+            skip_service_mesh: false,
+            parent_host: None,
+            parent_grpc_port: DEFAULT_GRPC_PORT,
+            gpu: false,
+            monitoring: true,
+            backups: true,
+            external_secrets: true,
+        }
+    }
 }
 
 impl From<&LatticeCluster> for InfrastructureConfig {
@@ -66,6 +93,9 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             parent_host: None,
             parent_grpc_port: DEFAULT_GRPC_PORT,
             gpu: cluster.spec.gpu,
+            monitoring: cluster.spec.monitoring,
+            backups: cluster.spec.backups,
+            external_secrets: cluster.spec.external_secrets,
         }
     }
 }
@@ -89,21 +119,25 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
     }
 
     // External Secrets Operator (for Vault integration)
-    manifests.extend(eso::generate_eso().await?.iter().cloned());
+    if config.external_secrets {
+        manifests.extend(eso::generate_eso().await?.iter().cloned());
+    }
 
     // Velero (for backup and restore)
-    manifests.extend(velero::generate_velero().await?.iter().cloned());
+    if config.backups {
+        manifests.extend(velero::generate_velero().await?.iter().cloned());
+    }
 
-    // VictoriaMetrics K8s Stack (HA metrics backend)
-    manifests.extend(prometheus::generate_prometheus().await?.iter().cloned());
-
-    // Prometheus Adapter (custom metrics HPA)
-    manifests.extend(
-        prometheus_adapter::generate_prometheus_adapter()
-            .await?
-            .iter()
-            .cloned(),
-    );
+    // VictoriaMetrics K8s Stack (HA metrics backend) + Prometheus Adapter (custom metrics HPA)
+    if config.monitoring {
+        manifests.extend(prometheus::generate_prometheus().await?.iter().cloned());
+        manifests.extend(
+            prometheus_adapter::generate_prometheus_adapter()
+                .await?
+                .iter()
+                .cloned(),
+        );
+    }
 
     // GPU stack (NFD + NVIDIA device plugin + HAMi)
     if config.gpu {
@@ -272,7 +306,7 @@ pub(crate) fn namespace_yaml(name: &str) -> String {
 pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
     yaml.split("\n---")
         .map(|doc| doc.trim())
-        .filter(|doc| !doc.is_empty() && doc.contains("kind:"))
+        .filter(|doc| !doc.is_empty() && doc.contains("kind:") && !doc.contains("helm.sh/hook"))
         .map(|doc| {
             if doc.starts_with("---") {
                 doc.to_string()

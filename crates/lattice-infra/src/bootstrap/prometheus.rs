@@ -88,11 +88,13 @@ async fn render_prometheus_helm() -> Result<Vec<String>, String> {
             // Disable VMSingle (using VMCluster instead)
             "--set",
             "vmsingle.enabled=false",
-            // Disable unused components
+            // Disable unused components (metrics only, no alerting)
             "--set",
             "grafana.enabled=false",
             "--set",
             "alertmanager.enabled=false",
+            "--set",
+            "vmalert.enabled=false",
         ],
     )
     .await?;

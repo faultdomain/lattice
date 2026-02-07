@@ -7,8 +7,6 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::default_true;
-
 /// CedarPolicy defines access control policies for Lattice.
 ///
 /// Policies are written in the Cedar policy language and evaluated by the

@@ -190,6 +190,12 @@ pub struct ClusterRegistration {
     pub services: bool,
     /// Whether GPU infrastructure is enabled (NFD + NVIDIA device plugin + HAMi)
     pub gpu: bool,
+    /// Whether monitoring infrastructure is enabled (VictoriaMetrics + Prometheus Adapter)
+    pub monitoring: bool,
+    /// Whether backup infrastructure is enabled (Velero)
+    pub backups: bool,
+    /// Whether external secrets infrastructure is enabled (ESO for Vault)
+    pub external_secrets: bool,
 }
 
 /// Bootstrap manifest generator
@@ -348,6 +354,12 @@ pub struct BootstrapBundleConfig<'a> {
     pub services: bool,
     /// Whether GPU infrastructure is enabled (NFD + NVIDIA device plugin + HAMi)
     pub gpu: bool,
+    /// Whether monitoring infrastructure is enabled (VictoriaMetrics + Prometheus Adapter)
+    pub monitoring: bool,
+    /// Whether backup infrastructure is enabled (Velero)
+    pub backups: bool,
+    /// Whether external secrets infrastructure is enabled (ESO for Vault)
+    pub external_secrets: bool,
     /// The LatticeCluster manifest (JSON or YAML) to include
     pub cluster_manifest: &'a str,
 }
@@ -394,6 +406,9 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
         parent_host: config.parent_host.map(|s| s.to_string()),
         parent_grpc_port: config.parent_grpc_port,
         gpu: config.gpu,
+        monitoring: config.monitoring,
+        backups: config.backups,
+        external_secrets: config.external_secrets,
     };
     let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config)
         .await
@@ -798,6 +813,12 @@ pub struct ClusterBootstrapInfo {
     pub services: bool,
     /// Whether GPU infrastructure is enabled (NFD + NVIDIA device plugin + HAMi)
     pub gpu: bool,
+    /// Whether monitoring infrastructure is enabled (VictoriaMetrics + Prometheus Adapter)
+    pub monitoring: bool,
+    /// Whether backup infrastructure is enabled (Velero)
+    pub backups: bool,
+    /// Whether external secrets infrastructure is enabled (ESO for Vault)
+    pub external_secrets: bool,
 }
 
 /// Bootstrap endpoint state
@@ -925,6 +946,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             autoscaling_enabled: registration.autoscaling_enabled,
             services: registration.services,
             gpu: registration.gpu,
+            monitoring: registration.monitoring,
+            backups: registration.backups,
+            external_secrets: registration.external_secrets,
         };
 
         self.clusters.insert(cluster_id, info);
@@ -1052,6 +1076,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             autoscaling_enabled: info.autoscaling_enabled,
             services: info.services,
             gpu: info.gpu,
+            monitoring: info.monitoring,
+            backups: info.backups,
+            external_secrets: info.external_secrets,
             cluster_manifest: &info.cluster_manifest,
         };
         let mut manifests =
@@ -1406,6 +1433,9 @@ mod tests {
                 autoscaling_enabled: false,
                 services: true,
                 gpu: false,
+                monitoring: true,
+                backups: true,
+                external_secrets: true,
             })
             .await
     }
@@ -2542,6 +2572,9 @@ mod tests {
                 autoscaling_enabled: false,
                 services: true,
                 gpu: false,
+                monitoring: true,
+                backups: true,
+                external_secrets: true,
             },
         );
 
@@ -2600,6 +2633,9 @@ mod tests {
                 autoscaling_enabled: false,
                 services: true,
                 gpu: false,
+                monitoring: true,
+                backups: true,
+                external_secrets: true,
             },
         );
 
@@ -2671,6 +2707,9 @@ mod tests {
                 autoscaling_enabled: false,
                 services: true,
                 gpu: false,
+                monitoring: true,
+                backups: true,
+                external_secrets: true,
             },
         );
 
@@ -2736,6 +2775,9 @@ mod tests {
                 autoscaling_enabled: false,
                 services: true,
                 gpu: false,
+                monitoring: true,
+                backups: true,
+                external_secrets: true,
             },
         );
 

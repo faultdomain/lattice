@@ -7,7 +7,6 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::default_true;
 use super::types::{
     ClusterPhase, Condition, EndpointsSpec, NetworkingSpec, NodeSpec, ProviderSpec,
 };
@@ -65,6 +64,21 @@ pub struct LatticeClusterSpec {
     /// GPUs are discovered automatically by NFD from instance types.
     #[serde(default)]
     pub gpu: bool,
+
+    /// Enable monitoring infrastructure (VictoriaMetrics + Prometheus Adapter for HPA).
+    /// Defaults to true.
+    #[serde(default = "super::default_true")]
+    pub monitoring: bool,
+
+    /// Enable backup infrastructure (Velero).
+    /// Defaults to true.
+    #[serde(default = "super::default_true")]
+    pub backups: bool,
+
+    /// Enable external secrets infrastructure (External Secrets Operator for Vault).
+    /// Defaults to true.
+    #[serde(default = "super::default_true")]
+    pub external_secrets: bool,
 }
 
 impl LatticeClusterSpec {
@@ -346,6 +360,9 @@ mod tests {
             parent_config: Some(endpoints_spec()),
             services: true,
             gpu: false,
+            monitoring: true,
+            backups: true,
+            external_secrets: true,
         };
 
         assert!(spec.is_parent(), "Should be recognized as a parent");
@@ -365,6 +382,9 @@ mod tests {
             parent_config: None,
             services: true,
             gpu: false,
+            monitoring: true,
+            backups: true,
+            external_secrets: true,
         };
 
         assert!(!spec.is_parent(), "Leaf cluster cannot have children");
@@ -389,6 +409,9 @@ mod tests {
             parent_config: Some(endpoints_spec()),
             services: true,
             gpu: false,
+            monitoring: true,
+            backups: true,
+            external_secrets: true,
         };
 
         assert!(
@@ -410,6 +433,9 @@ mod tests {
             parent_config: None,
             services: true,
             gpu: false,
+            monitoring: true,
+            backups: true,
+            external_secrets: true,
         };
 
         assert!(
@@ -440,6 +466,9 @@ mod tests {
             parent_config: None,
             services: true,
             gpu: false,
+            monitoring: true,
+            backups: true,
+            external_secrets: true,
         };
 
         assert!(
@@ -461,6 +490,9 @@ mod tests {
             parent_config: None,
             services: true,
             gpu: false,
+            monitoring: true,
+            backups: true,
+            external_secrets: true,
         };
 
         assert!(
@@ -637,6 +669,9 @@ nodes:
             parent_config: None,
             services: true,
             gpu: false,
+            monitoring: true,
+            backups: true,
+            external_secrets: true,
         };
 
         let json =
@@ -669,6 +704,9 @@ nodes:
                 parent_config: None,
                 services: true,
                 gpu: false,
+                monitoring: true,
+                backups: true,
+                external_secrets: true,
             },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };

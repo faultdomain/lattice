@@ -225,6 +225,9 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             autoscaling_enabled,
             services: cluster.spec.services,
             gpu: cluster.spec.gpu,
+            monitoring: cluster.spec.monitoring,
+            backups: cluster.spec.backups,
+            external_secrets: cluster.spec.external_secrets,
         };
 
         // Use token from LatticeCluster.status if available (source of truth)

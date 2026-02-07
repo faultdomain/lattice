@@ -7,7 +7,6 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::default_true;
 use super::types::SecretRef;
 
 /// OIDCProvider defines an OIDC identity provider for the auth proxy.

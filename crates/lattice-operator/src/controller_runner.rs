@@ -289,27 +289,6 @@ pub async fn resolve_provider_type_from_cluster(client: &Client) -> ProviderType
     }
 }
 
-fn create_oidc_provider_controller(
-    client: Client,
-) -> Option<impl std::future::Future<Output = ()>> {
-    let oidc_providers: Api<OIDCProvider> = Api::all(client.clone());
-    let ctx = Arc::new(ControllerContext::new(client));
-
-    Some(
-        Controller::new(
-            oidc_providers,
-            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-        )
-        .shutdown_on_signal()
-        .run(
-            oidc_provider_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx,
-        )
-        .for_each(log_reconcile_result("OIDCProvider")),
-    )
-}
-
 /// Creates a closure for logging reconciliation results.
 fn log_reconcile_result<T: std::fmt::Debug, E: std::fmt::Debug>(
     controller_name: &'static str,

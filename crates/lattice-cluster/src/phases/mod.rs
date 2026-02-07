@@ -363,6 +363,9 @@ async fn get_or_create_bootstrap_token(
         autoscaling_enabled,
         services: cluster.spec.services,
         gpu: cluster.spec.gpu,
+        monitoring: cluster.spec.monitoring,
+        backups: cluster.spec.backups,
+        external_secrets: cluster.spec.external_secrets,
     };
     let new_token = bootstrap_state.register_cluster(registration).await;
     let token_str = new_token.as_str().to_string();

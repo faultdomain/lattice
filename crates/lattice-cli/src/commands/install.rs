@@ -389,7 +389,8 @@ impl Installer {
             .map(|s| {
                 if fips::is_deployment(s) {
                     let with_fips = fips::add_fips_relax_env(s);
-                    add_bootstrap_env(&with_fips, &provider_str, provider_ref)
+                    let with_env = add_bootstrap_env(&with_fips, &provider_str, provider_ref);
+                    add_container_args(&with_env, &["controller", "--mode", "cluster"])
                 } else {
                     s.to_string()
                 }
@@ -579,6 +580,9 @@ impl Installer {
                 .any(|p| p.is_autoscaling_enabled()),
             services: self.cluster.spec.services,
             gpu: self.cluster.spec.gpu,
+            monitoring: self.cluster.spec.monitoring,
+            backups: self.cluster.spec.backups,
+            external_secrets: self.cluster.spec.external_secrets,
             cluster_manifest: &self.cluster_yaml,
         };
 
@@ -1145,6 +1149,28 @@ fn add_bootstrap_env(deployment_json: &str, provider: &str, provider_ref: &str) 
             ("LATTICE_PROVIDER_REF", provider_ref),
         ],
     )
+}
+
+/// Set container args on a deployment JSON (e.g., ["controller", "--mode", "cluster"]).
+fn add_container_args(deployment_json: &str, args: &[&str]) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) else {
+        return deployment_json.to_string();
+    };
+
+    let Some(containers) = value
+        .pointer_mut("/spec/template/spec/containers")
+        .and_then(|c| c.as_array_mut())
+    else {
+        return deployment_json.to_string();
+    };
+
+    for container in containers {
+        if let Some(obj) = container.as_object_mut() {
+            obj.insert("args".to_string(), serde_json::json!(args));
+        }
+    }
+
+    serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
 }
 
 /// Add environment variables to a deployment JSON.
