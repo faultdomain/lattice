@@ -11,7 +11,8 @@ use kube::{Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_agent::{patch_kubeconfig_for_self_management, InClusterClientProvider};
-use lattice_capi::{create_provider, ensure_capi_installed, CapiProviderConfig};
+use lattice_capi::installer::CapiProviderConfig;
+use lattice_capi::provider::create_provider;
 use lattice_common::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
@@ -149,14 +150,14 @@ async fn handle_child_cluster(
     if let (Some(ref client), Some(ref secret_ref)) =
         (&ctx.client, &cloud_provider.spec.credentials_secret_ref)
     {
-        lattice_capi::copy_credentials_to_provider_namespace(client, provider_type, secret_ref)
+        lattice_capi::installer::copy_credentials_to_provider_namespace(client, provider_type, secret_ref)
             .await?;
     }
 
     // Ensure CAPI is installed before provisioning
     info!("ensuring CAPI is installed for provider");
     let capi_config = CapiProviderConfig::new(provider_type)?;
-    ensure_capi_installed(ctx.capi_installer.as_ref(), &capi_config).await?;
+    ctx.capi_installer.ensure(&capi_config).await?;
 
     // Generate and apply CAPI manifests
     info!("generating CAPI manifests for cluster");

@@ -12,8 +12,10 @@ provider-e2e = []
 [dependencies]
 lattice-common.workspace = true
 lattice-agent.workspace = true
+lattice-capi.workspace = true
 lattice-cell.workspace = true
 lattice-cluster.workspace = true
+lattice-move.workspace = true
 lattice-operator = { path = "../lattice-operator" }
 
 # CLI

@@ -10,7 +10,7 @@ use tracing::info;
 
 use crate::auth_chain::AuthChain;
 use crate::backend::ProxyBackend;
-use crate::cedar::PolicyEngine;
+use lattice_cedar::PolicyEngine;
 use crate::error::Error;
 use crate::kubeconfig::kubeconfig_handler;
 use crate::portforward::portforward_handler;

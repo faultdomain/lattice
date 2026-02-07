@@ -65,7 +65,7 @@ pub use backend::{
     ExecSessionHandle, ExecTunnelRequest, K8sTunnelRequest, ProxyBackend, ProxyError,
     ProxyRouteInfo,
 };
-pub use cedar::PolicyEngine;
+pub use lattice_cedar::PolicyEngine;
 pub use error::{Error, Result};
 pub use sa_auth::SaValidator;
 pub use server::{start_server, AppState, ServerConfig};

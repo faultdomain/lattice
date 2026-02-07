@@ -32,11 +32,12 @@ use lattice_common::{
 use lattice_move::{CellMover, CellMoverConfig};
 use lattice_proto::AgentState;
 
-use lattice_capi::{CAPIClient, CAPIClientImpl, CapiInstaller};
+use lattice_capi::client::{CAPIClient, CAPIClientImpl};
+use lattice_capi::installer::CapiInstaller;
 use lattice_cell::{
-    fetch_distributable_resources, DefaultManifestGenerator, DistributableResources, ParentServers,
-    SharedAgentRegistry,
+    fetch_distributable_resources, DefaultManifestGenerator, ParentServers, SharedAgentRegistry,
 };
+use lattice_common::DistributableResources;
 
 use crate::phases::{
     handle_pending, handle_pivoting, handle_provisioning, handle_ready, update_status,
@@ -1036,7 +1037,7 @@ impl ContextBuilder {
 
     /// Build the Context
     pub fn build(self) -> Context {
-        use lattice_capi::ClusterctlInstaller;
+        use lattice_capi::installer::NativeInstaller;
 
         let events = self.events.unwrap_or_else(|| {
             Arc::new(KubeEventPublisher::new(
@@ -1055,7 +1056,7 @@ impl ContextBuilder {
                 .unwrap_or_else(|| Arc::new(CAPIClientImpl::new(self.client.clone()))),
             capi_installer: self
                 .capi_installer
-                .unwrap_or_else(|| Arc::new(ClusterctlInstaller::new())),
+                .unwrap_or_else(|| Arc::new(NativeInstaller::new())),
             parent_servers: self.parent_servers,
             self_cluster_name: self.self_cluster_name,
             events,
@@ -1645,7 +1646,8 @@ mod tests {
     use super::*;
     use crate::phases::{generate_capi_manifests, update_status as update_cluster_status};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_capi::{CAPIManifest, CapiProviderConfig};
+    use lattice_capi::installer::CapiProviderConfig;
+    use lattice_capi::provider::CAPIManifest;
     use lattice_common::crd::{
         BootstrapProvider, CloudProvider, Condition, ConditionStatus, EndpointsSpec,
         KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
@@ -2445,14 +2447,14 @@ mod tests {
     /// CAPI Installation Flow Tests
     ///
     /// These tests verify the controller correctly handles CAPI installation.
-    /// clusterctl init is always called (it's idempotent).
+    /// CAPI ensure is always called (it's idempotent).
     mod capi_installation_flow {
         use super::*;
 
         use std::sync::{Arc as StdArc, Mutex};
 
-        /// Story: Controller always calls clusterctl init before provisioning
-        /// (clusterctl init is idempotent - handles upgrades and no-ops).
+        /// Story: Controller always calls CAPI ensure before provisioning
+        /// (ensure is idempotent - handles upgrades and no-ops).
         #[tokio::test]
         async fn story_capi_init_called_before_provisioning() {
             let cluster = Arc::new(sample_cluster("ready-to-provision"));
@@ -2509,7 +2511,7 @@ mod tests {
             // Installation fails
             installer
                 .expect_ensure()
-                .returning(|_| Err(Error::capi_installation("clusterctl not found".to_string())));
+                .returning(|_| Err(Error::capi_installation("provider manifests not found".to_string())));
 
             let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
@@ -2520,7 +2522,7 @@ mod tests {
             let result = reconcile(cluster, ctx).await;
 
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("clusterctl"));
+            assert!(result.unwrap_err().to_string().contains("provider manifests"));
         }
     }
 

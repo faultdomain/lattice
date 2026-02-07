@@ -225,7 +225,6 @@ jobs:
           }
 
           echo "helm=$(get_version helm version)" >> $GITHUB_OUTPUT
-          echo "clusterctl=$(get_version clusterctl version)" >> $GITHUB_OUTPUT
           echo "capi=$(get_version capi version)" >> $GITHUB_OUTPUT
           echo "rke2=$(get_version rke2 version)" >> $GITHUB_OUTPUT
           echo "capmox=$(get_version capmox version)" >> $GITHUB_OUTPUT
@@ -362,13 +361,6 @@ jobs:
           build-args: |
             FIPS=true
             HELM_VERSION=${{ steps.versions.outputs.helm }}
-            CLUSTERCTL_VERSION=${{ steps.versions.outputs.clusterctl }}
-            CAPI_VERSION=${{ steps.versions.outputs.capi }}
-            RKE2_VERSION=${{ steps.versions.outputs.rke2 }}
-            CAPMOX_VERSION=${{ steps.versions.outputs.capmox }}
-            CAPA_VERSION=${{ steps.versions.outputs.capa }}
-            CAPO_VERSION=${{ steps.versions.outputs.capo }}
-            IPAM_VERSION=${{ steps.versions.outputs.ipam }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -390,12 +382,5 @@ jobs:
           build-args: |
             FIPS=
             HELM_VERSION=${{ steps.versions.outputs.helm }}
-            CLUSTERCTL_VERSION=${{ steps.versions.outputs.clusterctl }}
-            CAPI_VERSION=${{ steps.versions.outputs.capi }}
-            RKE2_VERSION=${{ steps.versions.outputs.rke2 }}
-            CAPMOX_VERSION=${{ steps.versions.outputs.capmox }}
-            CAPA_VERSION=${{ steps.versions.outputs.capa }}
-            CAPO_VERSION=${{ steps.versions.outputs.capo }}
-            IPAM_VERSION=${{ steps.versions.outputs.ipam }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

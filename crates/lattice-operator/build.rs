@@ -66,8 +66,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scripts_dir.display()
     );
     println!(
-        "cargo:rustc-env=CLUSTERCTL_CONFIG={}",
-        providers_dir.join("clusterctl.yaml").display()
+        "cargo:rustc-env=PROVIDERS_DIR={}",
+        providers_dir.display()
     );
 
     // Export specific env vars that code expects
@@ -223,11 +223,8 @@ fn download_providers(
     versions: &Versions,
     providers_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = providers_dir.join("clusterctl.yaml");
-    println!("cargo:rerun-if-changed={}", config_path.display());
-
     // Check if all providers exist
-    let mut all_exist = config_path.exists();
+    let mut all_exist = true;
     for (name, provider) in &versions.providers {
         let provider_dir = providers_dir
             .join(name)
@@ -277,9 +274,6 @@ fn download_providers(
     // Copy metadata.yaml for providers that share it
     copy_metadata(providers_dir, &versions.providers)?;
 
-    // Generate clusterctl.yaml
-    generate_clusterctl_config(providers_dir, &versions.providers)?;
-
     Ok(())
 }
 
@@ -314,69 +308,6 @@ fn copy_metadata(
         }
     }
 
-    Ok(())
-}
-
-fn generate_clusterctl_config(
-    providers_dir: &Path,
-    providers: &HashMap<String, Provider>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = providers_dir.join("clusterctl.yaml");
-
-    // Map provider names to clusterctl types
-    let type_map: HashMap<&str, (&str, &str)> = [
-        ("cluster-api", ("cluster-api", "CoreProvider")),
-        ("bootstrap-kubeadm", ("kubeadm", "BootstrapProvider")),
-        ("control-plane-kubeadm", ("kubeadm", "ControlPlaneProvider")),
-        ("bootstrap-rke2", ("rke2", "BootstrapProvider")),
-        ("control-plane-rke2", ("rke2", "ControlPlaneProvider")),
-        (
-            "infrastructure-docker",
-            ("docker", "InfrastructureProvider"),
-        ),
-        (
-            "infrastructure-proxmox",
-            ("proxmox", "InfrastructureProvider"),
-        ),
-        ("infrastructure-aws", ("aws", "InfrastructureProvider")),
-        (
-            "infrastructure-openstack",
-            ("openstack", "InfrastructureProvider"),
-        ),
-        ("ipam-in-cluster", ("in-cluster", "IPAMProvider")),
-    ]
-    .into_iter()
-    .collect();
-
-    let mut config = String::from("providers:\n");
-
-    for (name, provider) in providers {
-        if let Some((clusterctl_name, provider_type)) = type_map.get(name.as_str()) {
-            // Find the main component file
-            let component = provider
-                .components
-                .iter()
-                .find(|c| {
-                    c.ends_with("-components.yaml") || c.ends_with("-components-development.yaml")
-                })
-                .unwrap_or(&provider.components[0]);
-
-            let url = format!(
-                "file://{}/{}/v{}/{}",
-                providers_dir.display(),
-                name,
-                provider.version,
-                component
-            );
-
-            config.push_str(&format!(
-                "- name: \"{}\"\n    url: \"{}\"\n    type: \"{}\"\n",
-                clusterctl_name, url, provider_type
-            ));
-        }
-    }
-
-    std::fs::write(&config_path, config)?;
     Ok(())
 }
 

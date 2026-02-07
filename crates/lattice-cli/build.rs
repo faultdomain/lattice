@@ -9,13 +9,11 @@ fn main() {
         .parent()
         .expect("crates directory should have a parent (workspace root)");
 
-    // Point to the same clusterctl config as the operator
     let providers_dir = workspace_root.join("test-providers");
-    let config_path = providers_dir.join("clusterctl.yaml");
 
     println!(
-        "cargo:rustc-env=CLUSTERCTL_CONFIG={}",
-        config_path.display()
+        "cargo:rustc-env=PROVIDERS_DIR={}",
+        providers_dir.display()
     );
-    println!("cargo:rerun-if-changed={}", config_path.display());
+    println!("cargo:rerun-if-changed={}", providers_dir.display());
 }

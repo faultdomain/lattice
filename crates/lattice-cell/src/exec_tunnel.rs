@@ -173,9 +173,6 @@ pub async fn start_exec_session(
     Ok((session, data_rx))
 }
 
-// Re-export stream_id from lattice_proto for external use
-pub use lattice_proto::stream_id;
-
 /// Errors that can occur during exec tunneling
 #[derive(Debug, thiserror::Error)]
 pub enum ExecTunnelError {
@@ -188,6 +185,7 @@ pub enum ExecTunnelError {
 mod tests {
     use super::*;
     use crate::AgentRegistry;
+    use lattice_proto::stream_id;
     use std::sync::Arc;
 
     #[tokio::test]

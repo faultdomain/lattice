@@ -22,18 +22,14 @@ use clap::Args;
 use k8s_openapi::api::core::v1::{Secret, Service};
 use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
 use kube::Client;
-use tokio::process::Command;
 use tracing::{debug, info};
 
 use super::{generate_run_id, kind_utils, wait_for_deletion, CommandErrorExt};
 
-use lattice_common::clusterctl::{move_to_kubeconfig, teardown_cluster, TeardownConfig};
+use lattice_common::capi_lifecycle::{teardown_cluster, TeardownConfig};
 use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::kube_utils;
-use lattice_common::CredentialProvider;
-use lattice_common::{
-    capi_namespace, kubeconfig_secret_name, AwsCredentials, LATTICE_SYSTEM_NAMESPACE,
-};
+use lattice_common::{capi_namespace, kubeconfig_secret_name, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::{Error, Result};
 
@@ -271,7 +267,7 @@ impl Uninstaller {
 
     /// Patch the kubeconfig secret to use the external control plane endpoint.
     ///
-    /// After `clusterctl move`, the kubeconfig secret points to the internal Kubernetes
+    /// After CAPI resource move, the kubeconfig secret points to the internal Kubernetes
     /// endpoint (kubernetes.default.svc:443) which only works from inside the target cluster.
     /// We patch it to use the external endpoint from the CAPI Cluster's controlPlaneEndpoint
     /// so CAPI controllers on the kind cluster can reach the target for teardown.
@@ -422,13 +418,14 @@ impl Uninstaller {
 
         info!("Moving CAPI resources from target to kind cluster...");
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
-        move_to_kubeconfig(
+        lattice_move::local_move(
             &self.kubeconfig,
             &bootstrap_kubeconfig,
             &self.capi_namespace,
             &self.cluster_name,
         )
         .await
+        .map(|_| ())
         .cmd_err()?;
 
         info!("Patching kubeconfig for direct cluster access...");
@@ -451,32 +448,16 @@ impl Uninstaller {
     }
 
     async fn install_capi_providers(&self) -> Result<()> {
-        let kubeconfig = self.bootstrap_kubeconfig_path();
-        let init_args = self.clusterctl_init_args();
+        use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
 
-        let mut cmd = Command::new("clusterctl");
-        cmd.args(&init_args).env("KUBECONFIG", &kubeconfig);
+        let config = CapiProviderConfig::new(self.provider)
+            .map_err(|e| Error::command_failed(e.to_string()))?;
 
-        if self.provider == ProviderType::Aws {
-            if let Ok(creds) = AwsCredentials::from_env() {
-                cmd.env("AWS_B64ENCODED_CREDENTIALS", creds.to_b64_encoded());
-            }
-        }
-
-        let output = cmd.output().await?;
-
-        if !output.status.success() {
-            return Err(Error::command_failed(format!(
-                "clusterctl init failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        Ok(())
-    }
-
-    fn clusterctl_init_args(&self) -> Vec<String> {
-        super::clusterctl_init_args(self.provider)
+        let installer = NativeInstaller::new();
+        installer
+            .ensure(&config)
+            .await
+            .map_err(|e| Error::command_failed(e.to_string()))
     }
 }
 

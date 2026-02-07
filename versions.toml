@@ -12,9 +12,6 @@ version = "1.35.0"
 [tools.helm]
 version = "4.0.4"
 
-[tools.clusterctl]
-version = "1.12.1"
-
 # =============================================================================
 # Helm Charts
 # Each chart specifies: version, repo URL, chart name, and output filename pattern

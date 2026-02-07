@@ -20,7 +20,7 @@ use lattice_proto::{MoveObject, SourceOwnerRef};
 use crate::error::MoveError;
 use crate::graph::{GraphNode, ObjectGraph};
 use crate::sequence::{extract_nodes_for_group, MoveSequence};
-use crate::DELETE_FOR_MOVE_ANNOTATION;
+use lattice_common::capi_lifecycle::DELETE_FOR_MOVE_ANNOTATION;
 
 // =============================================================================
 // Standalone Functions (used by both pivot and unpivot)

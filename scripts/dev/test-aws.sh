@@ -31,7 +31,7 @@ if [[ -z "$AWS_REGION" ]]; then
 fi
 
 # Generate AWS_B64ENCODED_CREDENTIALS for CAPA
-# This is the format clusterctl expects
+# This is the format the CAPI AWS provider expects
 AWS_CREDENTIALS="[default]
 aws_access_key_id = $AWS_ACCESS_KEY_ID
 aws_secret_access_key = $AWS_SECRET_ACCESS_KEY

@@ -2,7 +2,7 @@
 
 #![deny(missing_docs)]
 
-pub mod clusterctl;
+pub mod capi_lifecycle;
 pub mod crd;
 pub mod credentials;
 pub mod error;

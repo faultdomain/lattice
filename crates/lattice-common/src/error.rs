@@ -465,8 +465,8 @@ mod tests {
     /// intermediate state.
     #[test]
     fn story_pivot_errors_during_self_management_transition() {
-        // Scenario: clusterctl move command fails
-        let err = Error::pivot_for("target-cluster", "clusterctl move failed");
+        // Scenario: move operation fails
+        let err = Error::pivot_for("target-cluster", "CAPI resource move failed");
         assert!(err.to_string().contains("pivot error"));
         assert!(err.to_string().contains("target-cluster"));
 

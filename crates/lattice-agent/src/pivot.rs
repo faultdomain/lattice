@@ -14,7 +14,7 @@ use tracing::{debug, info};
 
 use crate::kube_client::KubeClientProvider;
 use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretsProvider};
-pub use lattice_common::DistributableResources;
+use lattice_common::DistributableResources;
 use lattice_common::{kubeconfig_secret_name, INTERNAL_K8S_ENDPOINT, LATTICE_SYSTEM_NAMESPACE};
 
 /// Pivot errors

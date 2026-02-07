@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tracing::{debug, instrument};
 
 use crate::auth::authenticate_and_authorize;
-use crate::cedar::ClusterAttributes;
+use lattice_cedar::ClusterAttributes;
 use crate::error::Error;
 use crate::exec_proxy::{handle_exec_websocket, has_websocket_upgrade_headers};
 use crate::k8s_forwarder::route_to_cluster;

@@ -27,7 +27,6 @@ get_version() {
 
 # Get tool versions
 HELM_VERSION=$(get_version "tools" "helm")
-CLUSTERCTL_VERSION=$(get_version "tools" "clusterctl")
 
 # Get provider versions
 CAPI_VERSION=$(get_version "providers" "cluster-api")
@@ -40,7 +39,6 @@ CERTMANAGER_VERSION=$(get_version "providers" "cert-manager")
 
 echo "Building with versions from versions.toml:"
 echo "helm: $HELM_VERSION"
-echo "clusterctl: $CLUSTERCTL_VERSION"
 echo "capi: $CAPI_VERSION"
 echo "rke2: $RKE2_VERSION"
 echo "capmox: $CAPMOX_VERSION"
@@ -51,7 +49,6 @@ echo "cert-manager: $CERTMANAGER_VERSION"
 
 docker build \
     --build-arg HELM_VERSION="$HELM_VERSION" \
-    --build-arg CLUSTERCTL_VERSION="$CLUSTERCTL_VERSION" \
     --build-arg CAPI_VERSION="$CAPI_VERSION" \
     --build-arg RKE2_VERSION="$RKE2_VERSION" \
     --build-arg CAPMOX_VERSION="$CAPMOX_VERSION" \

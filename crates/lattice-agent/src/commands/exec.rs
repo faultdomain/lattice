@@ -5,7 +5,7 @@ use lattice_proto::{
 };
 use tracing::{debug, error};
 
-use crate::exec::stream_id;
+use lattice_proto::stream_id;
 
 use super::{CommandContext, StoredExecSession};
 

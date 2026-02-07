@@ -9,19 +9,15 @@
 //! 4. Pivoting CAPI resources to make it self-managing
 //! 5. Deleting the bootstrap cluster
 
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::Args;
 use kube::Client;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{info, warn};
 
 use super::{generate_run_id, kind_utils, wait_with_timeout};
-
-use lattice_common::clusterctl::move_to_kubeconfig;
 
 // Timeout constants for various provisioning phases
 const CLUSTER_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(600);
@@ -228,10 +224,6 @@ impl Installer {
         self.cluster.spec.provider.provider_type()
     }
 
-    fn clusterctl_init_args(&self) -> Vec<String> {
-        super::clusterctl_init_args(self.provider())
-    }
-
     /// Run the installation
     pub async fn run(&self) -> Result<()> {
         info!("=======================================================");
@@ -277,10 +269,6 @@ impl Installer {
             (
                 "kind",
                 "Install kind: https://kind.sigs.k8s.io/docs/user/quick-start/#installation",
-            ),
-            (
-                "clusterctl",
-                "Install clusterctl: https://cluster-api.sigs.k8s.io/user/quick-start#install-clusterctl",
             ),
         ];
 
@@ -528,7 +516,7 @@ impl Installer {
         wait_for_control_plane_ready(&mgmt_client, CONTROL_PLANE_READY_TIMEOUT).await?;
 
         info!("Installing CAPI on management cluster...");
-        self.install_capi_on_management(&kubeconfig_path).await?;
+        self.install_capi_on_management().await?;
 
         info!("Waiting for CAPI controllers to be ready...");
         self.wait_for_management_controllers(&mgmt_client).await?;
@@ -755,11 +743,18 @@ impl Installer {
         .await
     }
 
-    /// Installs CAPI controllers on the management cluster via clusterctl.
-    async fn install_capi_on_management(&self, kubeconfig_path: &Path) -> Result<()> {
-        let init_args = self.clusterctl_init_args();
-        let init_args_ref: Vec<&str> = init_args.iter().map(|s| s.as_str()).collect();
-        self.run_clusterctl(&init_args_ref, kubeconfig_path).await
+    /// Installs CAPI controllers on the management cluster using the native installer.
+    async fn install_capi_on_management(&self) -> Result<()> {
+        use lattice_capi::installer::{CapiProviderConfig, NativeInstaller, CapiInstaller};
+
+        let config = CapiProviderConfig::new(self.provider())
+            .map_err(|e| Error::command_failed(e.to_string()))?;
+
+        let installer = NativeInstaller::new();
+        installer
+            .ensure(&config)
+            .await
+            .map_err(|e| Error::command_failed(e.to_string()))
     }
 
     /// Waits for CAPI and Lattice controllers to be ready on the management cluster.
@@ -971,75 +966,15 @@ impl Installer {
 
         // Move CAPI resources from bootstrap to management cluster
         info!("Moving CAPI resources from bootstrap to management cluster...");
-        move_to_kubeconfig(
+        lattice_move::local_move(
             &bootstrap_kubeconfig,
             &mgmt_kubeconfig,
             &namespace,
             self.cluster_name(),
         )
         .await
+        .map(|_| ())
         .cmd_err()
-    }
-
-    async fn run_clusterctl(&self, args: &[&str], kubeconfig: &Path) -> Result<()> {
-        let mut command = Command::new("clusterctl");
-        command
-            .args(args)
-            .env("KUBECONFIG", kubeconfig)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = command.spawn()?;
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        // Spawn tasks to read stdout and stderr concurrently
-        let stdout_task = tokio::spawn(async move {
-            let mut lines_out = Vec::new();
-            if let Some(stdout) = stdout {
-                let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    info!("{}", line);
-                    lines_out.push(line);
-                }
-            }
-            lines_out
-        });
-
-        let stderr_task = tokio::spawn(async move {
-            let mut lines_err = Vec::new();
-            if let Some(stderr) = stderr {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    lines_err.push(line);
-                }
-            }
-            lines_err
-        });
-
-        let status = child.wait().await?;
-        let _ = stdout_task.await;
-        let stderr_lines = match stderr_task.await {
-            Ok(lines) => lines,
-            Err(e) => {
-                warn!("stderr reader task panicked: {}", e);
-                Vec::new()
-            }
-        };
-
-        if !status.success() {
-            let stderr_output = stderr_lines.join("\n");
-            return Err(Error::command_failed(format!(
-                "clusterctl {} failed: {}",
-                args.join(" "),
-                stderr_output
-            )));
-        }
-
-        Ok(())
     }
 }
 

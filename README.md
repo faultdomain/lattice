@@ -199,7 +199,7 @@ Enforced at two layers simultaneously: Cilium L4 eBPF + Istio L7 mTLS. Remove ei
           ▼
  ┌─────────────────┐
  │  Pivot           │  CAPI resources move into target
- │                  │  via clusterctl move
+ │                  │  via distributed move protocol
  └────────┬────────┘
           │
           ▼
@@ -259,7 +259,7 @@ crates/
 ├── lattice-backup/         Velero backup/restore controllers
 ├── lattice-cloud-provider/ Cloud account validation
 ├── lattice-secrets-provider/ ESO integration
-├── lattice-move/           clusterctl move for pivot operations
+├── lattice-move/           CAPI resource move for pivot operations
 └── lattice-proto/          gRPC protobuf definitions
 ```
 

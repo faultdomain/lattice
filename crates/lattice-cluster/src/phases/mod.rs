@@ -20,7 +20,7 @@ use kube::runtime::events::EventType;
 use kube::{Client, Resource};
 use tracing::{debug, info, warn};
 
-use lattice_capi::{create_provider, CAPIManifest};
+use lattice_capi::provider::{create_provider, CAPIManifest};
 use lattice_common::crd::{
     ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus,
 };
@@ -224,7 +224,7 @@ pub async fn generate_capi_manifests(
     cluster: &LatticeCluster,
     ctx: &Context,
 ) -> Result<Vec<CAPIManifest>, Error> {
-    use lattice_capi::BootstrapInfo;
+    use lattice_capi::provider::BootstrapInfo;
 
     // Each cluster gets its own CAPI namespace for pivot isolation
     let cluster_name = cluster
@@ -259,8 +259,8 @@ async fn build_bootstrap_info(
     ctx: &Context,
     parent_servers: &lattice_cell::ParentServers<lattice_cell::DefaultManifestGenerator>,
     cluster_name: &str,
-) -> Result<lattice_capi::BootstrapInfo, Error> {
-    use lattice_capi::BootstrapInfo;
+) -> Result<lattice_capi::provider::BootstrapInfo, Error> {
+    use lattice_capi::provider::BootstrapInfo;
 
     let self_cluster_name = ctx.self_cluster_name.as_ref().ok_or_else(|| {
         Error::validation("self_cluster_name required when parent_servers is configured")

@@ -366,7 +366,7 @@ message KubernetesResponse {
 }
 
 // =============================================================================
-// Distributed Move Messages (clusterctl move semantics over gRPC)
+// Distributed Move Messages (CAPI resource move over gRPC)
 // =============================================================================
 
 // Cell → Agent: Batch of objects to create

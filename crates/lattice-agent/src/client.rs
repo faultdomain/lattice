@@ -24,9 +24,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::commands::apply_manifests::extract_manifest_info_bytes;
 use crate::commands::{self, CommandContext, StoredExecSession};
-use lattice_capi::{
-    copy_credentials_to_provider_namespace, ensure_capi_installed, CapiProviderConfig,
-    ClusterctlInstaller,
+use lattice_capi::installer::{
+    copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
+    NativeInstaller,
 };
 use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
 use lattice_common::{capi_namespace, CsrRequest, CsrResponse, LATTICE_SYSTEM_NAMESPACE};
@@ -40,7 +40,8 @@ use lattice_proto::{
 use crate::kube_client::{InClusterClientProvider, KubeClientProvider};
 use crate::subtree::SubtreeSender;
 use crate::watch::WatchRegistry;
-use crate::{ClientMtlsConfig, SharedExecForwarder, SharedK8sForwarder};
+use crate::{SharedExecForwarder, SharedK8sForwarder};
+use lattice_infra::ClientMtlsConfig;
 
 /// Configuration for the agent client
 #[derive(Clone, Debug)]
@@ -468,7 +469,7 @@ impl AgentClient {
         // This registers the agent on the server side
         self.send_ready().await?;
 
-        // Install CAPI on this cluster - required for clusterctl move during pivot
+        // Install CAPI on this cluster - required for resource move during pivot
         // Retry up to 3 times with backoff for slow clusters (RKE2 image pulls)
         info!("Installing CAPI on local cluster");
         let mut capi_ready = false;
@@ -815,7 +816,7 @@ impl AgentClient {
     ///
     /// Reads provider type from LatticeCluster CRD, then:
     /// 1. Copies provider credentials from lattice-system to provider namespace
-    /// 2. Runs clusterctl init (installs cert-manager + CAPI providers from bundled manifests)
+    /// 2. Installs cert-manager + CAPI providers from bundled manifests
     async fn install_capi(&self) -> Result<String, std::io::Error> {
         use kube::api::ListParams;
 
@@ -870,8 +871,7 @@ impl AgentClient {
 
         let config = CapiProviderConfig::new(infrastructure)
             .map_err(|e| std::io::Error::other(format!("Failed to create CAPI config: {}", e)))?;
-        ensure_capi_installed(&ClusterctlInstaller::new(), &config)
-            .await
+        NativeInstaller::new().ensure(&config).await
             .map_err(|e| std::io::Error::other(format!("CAPI installation failed: {}", e)))?;
 
         info!(infrastructure = %provider_str, "CAPI providers installed successfully");

@@ -134,6 +134,19 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
         manifests.extend(gpu::generate_gpu_stack().iter().cloned());
     }
 
+    Ok(manifests)
+}
+
+/// Generate ALL infrastructure manifests for a self-managing cluster
+///
+/// Includes core infrastructure (Istio, Gateway API, ESO, Cilium policies).
+/// NOTE: cert-manager and CAPI providers are installed via the native CAPI installer,
+/// which manages their lifecycle (including upgrades).
+pub async fn generate_all(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
+    // Core infrastructure (Istio, Gateway API, ESO, Cilium policies)
+    // cert-manager and CAPI are installed via the native CAPI installer
+    let manifests = generate_core(config).await?;
+
     info!(
         total = manifests.len(),
         "generated infrastructure manifests"

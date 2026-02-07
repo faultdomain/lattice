@@ -159,9 +159,9 @@ impl CredentialProvider for AwsCredentials {
 }
 
 impl AwsCredentials {
-    /// Generate AWS_B64ENCODED_CREDENTIALS for clusterctl
+    /// Generate AWS_B64ENCODED_CREDENTIALS for CAPI AWS provider
     ///
-    /// clusterctl requires credentials in a base64-encoded INI profile format.
+    /// The AWS provider requires credentials in a base64-encoded INI profile format.
     pub fn to_b64_encoded(&self) -> String {
         use base64::engine::general_purpose::STANDARD;
         use base64::Engine;

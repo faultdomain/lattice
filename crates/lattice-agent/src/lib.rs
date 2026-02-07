@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use lattice_proto::{ExecData, ExecRequest, KubernetesRequest, KubernetesResponse};
 use tokio_util::sync::CancellationToken;
 
 pub mod client;
@@ -179,25 +180,14 @@ pub fn build_cluster_not_found_response(
 }
 
 pub use client::{AgentClient, AgentClientConfig, AgentCredentials, CertificateError, ClientState};
-pub use kube_client::{InClusterClientProvider, KubeClientProvider};
-
-// Re-export protocol types from lattice_common
 pub use exec::{execute_exec, ExecRegistry};
 pub use executor::{execute_k8s_request, is_watch_request};
-pub use lattice_common::{CsrRequest, CsrResponse};
-pub use pivot::{
-    apply_distributed_resources, patch_kubeconfig_for_self_management, DistributableResources,
-    PivotError,
-};
+pub use kube_client::{InClusterClientProvider, KubeClientProvider};
+pub use pivot::{apply_distributed_resources, patch_kubeconfig_for_self_management, PivotError};
 pub use subtree::SubtreeSender;
 pub use watch::{execute_watch, WatchRegistry};
 
-// Re-export proto types for convenience
-pub use lattice_proto::{
-    agent_message, cell_command, AgentMessage, AgentReady, AgentState, BootstrapComplete,
-    CellCommand, ClusterDeleting, ClusterHealth, ExecData, ExecRequest, Heartbeat,
-    KubernetesRequest, KubernetesResponse, LatticeEvent, StatusResponse,
-};
+use lattice_common::DistributableResources;
 
 /// Convert proto DistributableResources to domain type.
 ///
@@ -214,9 +204,6 @@ pub fn distributable_resources_from_proto(
         oidc_providers: proto.oidc_providers,
     }
 }
-
-// Re-export mTLS from infra
-pub use lattice_infra::{ClientMtlsConfig, MtlsError, ServerMtlsConfig};
 
 #[cfg(test)]
 mod tests {

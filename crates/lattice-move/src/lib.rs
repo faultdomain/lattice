@@ -1,9 +1,8 @@
-//! Distributed clusterctl move implementation for CAPI pivot over gRPC
+//! Distributed CAPI resource move for pivot operations
 //!
-//! This crate implements the clusterctl move algorithm in Rust, replacing direct
-//! target k8s API calls with gRPC message passing. This enables pivot operations
-//! where the cell (parent cluster) doesn't have direct k8s API access to the
-//! agent (child cluster).
+//! Moves CAPI resources between clusters using ownership-aware topological
+//! ordering and UID remapping. Supports both gRPC (for pivot over outbound
+//! stream) and local mode (for CLI install/uninstall with both kubeconfigs).
 //!
 //! ## Architecture
 //!
@@ -32,23 +31,19 @@
 //!     └─ Delete
 //! ```
 //!
-//! ## Key Differences from clusterctl move --to-directory
+//! ## Modes
 //!
-//! The `--to-directory` and `--from-directory` flags have **backup semantics**:
-//! - Source cluster is unpaused after export
-//! - Source resources are NOT deleted
-//! - Requires manual cleanup
-//!
-//! This implementation provides the exact semantics of `--to-kubeconfig`:
-//! - Source cluster stays paused until deletion
-//! - Source resources ARE deleted after successful import
-//! - Target cluster is unpaused after all objects created
-//! - Full object graph with topological ordering and UID remapping
+//! - **gRPC mode**: Cell sends batches over outbound gRPC stream to agent.
+//!   Used during pivot when the parent can't access the child's K8s API directly.
+//! - **Local mode** (`local_move()`): Both kubeconfigs accessible locally.
+//!   Uses `LocalMoveSender` wrapping `AgentMover` directly. Used by CLI
+//!   install/uninstall commands.
 
 mod agent;
 mod cell;
 mod error;
 mod graph;
+pub mod local;
 mod sequence;
 mod utils;
 
@@ -72,10 +67,8 @@ pub use cell::{
 };
 pub use error::MoveError;
 pub use graph::{GraphNode, ObjectGraph, ObjectIdentity};
+pub use local::local_move;
 pub use sequence::MoveSequence;
-
-/// Annotation added before deletion (matches clusterctl behavior)
-pub const DELETE_FOR_MOVE_ANNOTATION: &str = "clusterctl.cluster.x-k8s.io/delete-for-move";
 
 /// Label indicating a CRD should be included in move operations
 /// CAPI uses the label key with empty value: `clusterctl.cluster.x-k8s.io: ""`
@@ -84,20 +77,3 @@ pub const MOVE_LABEL: &str = "clusterctl.cluster.x-k8s.io";
 /// Label indicating a CRD's hierarchy should be included in move operations
 pub const MOVE_HIERARCHY_LABEL: &str = "clusterctl.cluster.x-k8s.io/move-hierarchy";
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(
-            DELETE_FOR_MOVE_ANNOTATION,
-            "clusterctl.cluster.x-k8s.io/delete-for-move"
-        );
-        assert_eq!(MOVE_LABEL, "clusterctl.cluster.x-k8s.io");
-        assert_eq!(
-            MOVE_HIERARCHY_LABEL,
-            "clusterctl.cluster.x-k8s.io/move-hierarchy"
-        );
-    }
-}

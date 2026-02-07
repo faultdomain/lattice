@@ -51,7 +51,6 @@ check_prerequisites() {
     command -v kind >/dev/null 2>&1 || missing+=("kind")
     command -v kubectl >/dev/null 2>&1 || missing+=("kubectl")
     command -v docker >/dev/null 2>&1 || missing+=("docker")
-    command -v clusterctl >/dev/null 2>&1 || missing+=("clusterctl")
     command -v cargo >/dev/null 2>&1 || missing+=("cargo")
 
     if [ ${#missing[@]} -gt 0 ]; then
@@ -104,14 +103,11 @@ EOF
 
 # Install CAPI and providers
 install_capi() {
-    log_info "Installing Cluster API (${CAPI_VERSION})..."
+    log_info "Installing Cluster API..."
 
-    # Initialize clusterctl with Docker provider
-    clusterctl init \
-        --infrastructure docker:${CAPD_VERSION} \
-        --wait-providers
-
-    log_info "CAPI installed"
+    # CAPI providers are installed by the Lattice operator natively
+    # (no clusterctl needed - the operator reads YAML manifests from /providers/)
+    log_info "CAPI will be installed by the Lattice operator"
 
     # Wait for CAPI pods to be ready
     log_info "Waiting for CAPI pods to be ready..."

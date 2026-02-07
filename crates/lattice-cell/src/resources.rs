@@ -12,7 +12,7 @@ use thiserror::Error;
 use tracing::debug;
 
 use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretsProvider};
-pub use lattice_common::DistributableResources;
+use lattice_common::DistributableResources;
 use lattice_common::{
     INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL,
 };

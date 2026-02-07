@@ -211,7 +211,7 @@ impl ObjectGraph {
         Ok(())
     }
 
-    /// Discover CRDs with clusterctl move labels
+    /// Discover CRDs with CAPI move labels
     async fn discover_types(&mut self, client: &Client) -> Result<(), MoveError> {
         let discovered = crate::utils::discover_move_crds(client).await?;
 

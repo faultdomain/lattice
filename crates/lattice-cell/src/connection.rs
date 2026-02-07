@@ -14,8 +14,7 @@ use lattice_proto::{AgentState, CellCommand, ExecData, KubernetesResponse};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-// Re-export from lattice_move to avoid duplicate type definitions
-pub use lattice_move::{BatchAck, CompleteAck};
+use lattice_move::{BatchAck, CompleteAck};
 
 // ============================================================================
 // Traits for Testability
@@ -148,7 +147,7 @@ pub enum SendError {
 /// CAPI manifests received from child during unpivot
 #[derive(Clone, Debug, Default)]
 pub struct UnpivotManifests {
-    /// CAPI manifests exported via clusterctl move --to-directory
+    /// CAPI manifests received during unpivot
     pub capi_manifests: Vec<Vec<u8>>,
     /// Namespace to import into
     pub namespace: String,
@@ -157,7 +156,7 @@ pub struct UnpivotManifests {
 /// CAPI manifests exported during pivot (deleted after MoveCompleteAck)
 #[derive(Clone, Debug, Default)]
 pub struct PivotSourceManifests {
-    /// CAPI manifests exported via clusterctl move --to-directory
+    /// CAPI manifests exported during pivot
     pub capi_manifests: Vec<Vec<u8>>,
     /// Source namespace where resources live
     pub namespace: String,

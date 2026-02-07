@@ -5,7 +5,7 @@
 //! - **PKI**: Certificate authority, certificate generation, CSR signing
 //! - **Bootstrap**: Manifest generation for Cilium, Istio, Gateway API, ESO, Velero, etc.
 //!
-//! Note: cert-manager and CAPI providers are installed via `clusterctl init`,
+//! Note: cert-manager and CAPI providers are installed via the native CAPI installer,
 //! which manages their lifecycle including upgrades.
 //!
 //! # Architecture

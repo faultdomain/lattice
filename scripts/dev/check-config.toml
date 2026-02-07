@@ -10,7 +10,6 @@
 # Matches if the filename contains the pattern
 
 [blocking_io.allowed]
-"clusterctl.rs" = "TempDir helper is sync (Drop trait cannot be async)"
 "bootstrap/mod.rs" = "Sync helpers reading embedded chart files at startup"
 "pivot/mod.rs:read_in_cluster_ca" = "Sync helper reading small CA file"
 "provider/mod.rs:render_bootstrap" = "Sync helper reading template at startup"

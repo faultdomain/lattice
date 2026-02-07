@@ -1,4 +1,4 @@
-//! Error types for distributed clusterctl move operations
+//! Error types for distributed CAPI resource move operations
 
 use thiserror::Error;
 

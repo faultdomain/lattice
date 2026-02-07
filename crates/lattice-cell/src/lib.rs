@@ -35,8 +35,7 @@ pub use connection::{
     KubeconfigProxyConfig, PivotSourceManifests, SendError, SharedAgentRegistry, UnpivotManifests,
 };
 pub use exec_tunnel::{
-    start_exec_session, stream_id, ExecRequestParams, ExecSession, ExecTunnelError,
-    EXEC_CHANNEL_SIZE,
+    start_exec_session, ExecRequestParams, ExecSession, ExecTunnelError, EXEC_CHANNEL_SIZE,
 };
 pub use k8s_tunnel::{
     build_http_response, tunnel_request, tunnel_request_streaming, K8sRequestParams, TunnelError,
@@ -46,6 +45,6 @@ pub use kubeconfig::patch_kubeconfig_for_proxy;
 pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{load_or_create_ca, CellServerError, ParentConfig, ParentServers};
 pub use resilient_tunnel::{tunnel_request_resilient, ResilientTunnelConfig, RECONNECT_TIMEOUT};
-pub use resources::{fetch_distributable_resources, DistributableResources, ResourceError};
+pub use resources::{fetch_distributable_resources, ResourceError};
 pub use server::{AgentServer, SharedSubtreeRegistry};
 pub use subtree_registry::{ClusterInfo, RouteInfo, SubtreeRegistry};

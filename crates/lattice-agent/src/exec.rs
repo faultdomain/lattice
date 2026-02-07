@@ -23,8 +23,7 @@ use lattice_proto::{
     parse_portforward_ports, AgentMessage, ExecData, ExecRequest,
 };
 
-// Re-export stream_id from lattice_proto for use by other modules
-pub use lattice_proto::stream_id;
+use lattice_proto::stream_id;
 
 /// Registry for tracking active exec sessions on the agent
 #[derive(Default)]

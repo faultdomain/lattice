@@ -9,15 +9,3 @@
 
 pub mod controller;
 pub mod phases;
-
-// Re-export controller types
-pub use controller::{
-    error_policy, reconcile, Context, ContextBuilder, KubeClient, KubeClientImpl, PivotOperations,
-    PivotOperationsImpl,
-};
-
-// Re-export CAPI types from lattice-capi
-pub use lattice_capi::{create_provider, CAPIClient, CAPIClientImpl, CAPIManifest, Provider};
-
-// Re-export common error types
-pub use lattice_common::{Error, Result};

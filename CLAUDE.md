@@ -18,7 +18,7 @@ Lattice is a Kubernetes operator for multi-cluster lifecycle management. It prov
 3. kubeadm postKubeadmCommands calls parent's bootstrap webhook
 4. Agent installed, establishes outbound gRPC stream to parent
 5. Parent sends PivotCommand with CAPI resources over stream
-6. Agent imports CAPI resources locally via clusterctl move
+6. Agent imports CAPI resources locally via distributed move protocol
 7. Cluster is now self-managing (parent can be deleted)
 ```
 

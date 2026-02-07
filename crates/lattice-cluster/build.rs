@@ -31,15 +31,14 @@ fn main() {
     // Set paths
     let scripts_dir = workspace_root.join("scripts/runtime");
     let providers_dir = workspace_root.join("test-providers");
-    let config_path = providers_dir.join("clusterctl.yaml");
 
     println!(
         "cargo:rustc-env=LATTICE_SCRIPTS_DIR={}",
         scripts_dir.display()
     );
     println!(
-        "cargo:rustc-env=CLUSTERCTL_CONFIG={}",
-        config_path.display()
+        "cargo:rustc-env=PROVIDERS_DIR={}",
+        providers_dir.display()
     );
 
     let content = std::fs::read_to_string(&versions_path)

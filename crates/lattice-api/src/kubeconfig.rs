@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::auth::{authenticate, OidcConfig};
-use crate::cedar::ClusterAttributes;
+use lattice_cedar::ClusterAttributes;
 use crate::error::Error;
 use crate::server::AppState;
 
