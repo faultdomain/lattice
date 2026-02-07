@@ -73,12 +73,12 @@ pub struct CedarPolicySpec {
 
     /// Whether this policy is enabled
     /// Disabled policies are not evaluated
-    #[serde(default = "default_true")]
+    #[serde(default = "super::default_true")]
     pub enabled: bool,
 
     /// Whether to propagate this policy to child clusters
     /// When true, policy is distributed down the hierarchy
-    #[serde(default = "default_true")]
+    #[serde(default = "super::default_true")]
     pub propagate: bool,
 }
 

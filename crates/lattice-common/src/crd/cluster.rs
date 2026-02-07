@@ -58,8 +58,13 @@ pub struct LatticeClusterSpec {
 
     /// Enable LatticeService support (Istio ambient mesh + bilateral agreements).
     /// Defaults to true for backwards compatibility.
-    #[serde(default = "default_true")]
+    #[serde(default = "super::default_true")]
     pub services: bool,
+
+    /// Enable GPU infrastructure (NFD + NVIDIA device plugin + HAMi).
+    /// GPUs are discovered automatically by NFD from instance types.
+    #[serde(default)]
+    pub gpu: bool,
 }
 
 impl LatticeClusterSpec {
@@ -340,6 +345,7 @@ mod tests {
             networking: None,
             parent_config: Some(endpoints_spec()),
             services: true,
+            gpu: false,
         };
 
         assert!(spec.is_parent(), "Should be recognized as a parent");
@@ -358,6 +364,7 @@ mod tests {
             networking: None,
             parent_config: None,
             services: true,
+            gpu: false,
         };
 
         assert!(!spec.is_parent(), "Leaf cluster cannot have children");
@@ -381,6 +388,7 @@ mod tests {
             networking: None,
             parent_config: Some(endpoints_spec()),
             services: true,
+            gpu: false,
         };
 
         assert!(
@@ -401,6 +409,7 @@ mod tests {
             networking: None,
             parent_config: None,
             services: true,
+            gpu: false,
         };
 
         assert!(
@@ -430,6 +439,7 @@ mod tests {
             networking: None,
             parent_config: None,
             services: true,
+            gpu: false,
         };
 
         assert!(
@@ -450,6 +460,7 @@ mod tests {
             networking: None,
             parent_config: None,
             services: true,
+            gpu: false,
         };
 
         assert!(
@@ -625,6 +636,7 @@ nodes:
             networking: None,
             parent_config: None,
             services: true,
+            gpu: false,
         };
 
         let json =
@@ -656,6 +668,7 @@ nodes:
                 networking: None,
                 parent_config: None,
                 services: true,
+                gpu: false,
             },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };

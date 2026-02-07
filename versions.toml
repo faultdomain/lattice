@@ -77,6 +77,18 @@ repo = "https://vmware-tanzu.github.io/helm-charts"
 chart = "vmware-tanzu/velero"
 filename = "velero-{version}.tgz"
 
+[charts.gpu-operator]
+version = "24.9.2"
+repo = "https://helm.ngc.nvidia.com/nvidia"
+chart = "nvidia/gpu-operator"
+filename = "gpu-operator-v{version}.tgz"
+
+[charts.hami]
+version = "2.4.1"
+repo = "https://project-hami.github.io/HAMi"
+chart = "hami/hami"
+filename = "hami-{version}.tgz"
+
 # =============================================================================
 # Gateway API CRDs (YAML download, not a Helm chart)
 # =============================================================================

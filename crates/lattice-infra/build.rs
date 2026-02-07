@@ -59,6 +59,14 @@ fn main() {
         "cargo:rustc-env=VELERO_VERSION={}",
         versions.charts["velero"].version
     );
+    println!(
+        "cargo:rustc-env=GPU_OPERATOR_VERSION={}",
+        versions.charts["gpu-operator"].version
+    );
+    println!(
+        "cargo:rustc-env=HAMI_VERSION={}",
+        versions.charts["hami"].version
+    );
 
     let charts_dir = workspace_root.join("test-charts");
     println!(

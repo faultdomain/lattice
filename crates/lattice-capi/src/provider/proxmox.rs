@@ -411,6 +411,7 @@ mod tests {
                 parent_config: None,
                 networking: None,
                 services: true,
+                gpu: false,
             },
             status: None,
         }

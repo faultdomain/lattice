@@ -91,7 +91,7 @@ pub struct OIDCProviderSpec {
 
     /// Whether to propagate this provider to child clusters
     /// When true, provider is distributed down the hierarchy
-    #[serde(default = "default_true")]
+    #[serde(default = "super::default_true")]
     pub propagate: bool,
 
     /// Whether child clusters can define their own OIDC provider

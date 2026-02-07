@@ -43,14 +43,14 @@ pub use secrets_provider::{
     VaultAuthMethod,
 };
 pub use service::{
-    parse_gpu_memory_mib, BackupHook, BackupHooksSpec, CertIssuerRef, ContainerSpec,
-    DependencyDirection, DeploySpec, DeployStrategy, ExecProbe, FileMount, GPUSpec,
-    HookErrorAction, HttpGetProbe, HttpHeader, InboundPolicy, IngressPath, IngressSpec, IngressTls,
-    LatticeService, LatticeServiceSpec, LatticeServiceStatus, OutboundPolicy, PathMatchType,
-    PortSpec, Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata,
-    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RetryConfig,
-    SecurityContext, ServiceBackupSpec, ServicePhase, ServicePortsSpec, SidecarSpec, TimeoutConfig,
-    TlsMode, VolumeAccessMode, VolumeBackupDefault, VolumeBackupSpec, VolumeMount, VolumeParams,
+    BackupHook, BackupHooksSpec, CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec,
+    DeployStrategy, ExecProbe, FileMount, GPUSpec, HookErrorAction, HttpGetProbe, HttpHeader,
+    InboundPolicy, IngressPath, IngressSpec, IngressTls, LatticeService, LatticeServiceSpec,
+    LatticeServiceStatus, OutboundPolicy, PathMatchType, PortSpec, Probe, RateLimitConfig,
+    RateLimitSpec, ReplicaSpec, ResourceMetadata, ResourceQuantity, ResourceRequirements,
+    ResourceSpec, ResourceType, RetryConfig, SecurityContext, ServiceBackupSpec, ServicePhase,
+    ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode, VolumeAccessMode, VolumeBackupDefault,
+    VolumeBackupSpec, VolumeMount, VolumeParams,
 };
 pub use service_policy::{
     LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,
@@ -65,19 +65,11 @@ pub use types::{
 };
 
 // =============================================================================
-// Shared Serde Defaults
-// =============================================================================
 
-/// Serde default for boolean fields that should default to `true`.
-///
-/// Used by `#[serde(default = "default_true")]` across CRDs.
+/// Serde default helper returning `true`
 pub(crate) fn default_true() -> bool {
     true
 }
-
-// =============================================================================
-// Shared Validation
-// =============================================================================
 
 /// Validate a DNS-style identifier (lowercase alphanumeric with hyphens).
 ///

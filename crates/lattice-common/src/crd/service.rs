@@ -514,15 +514,10 @@ pub struct ResourceQuantity {
     pub memory: Option<String>,
 }
 
-/// Serde default helper returning `true`
-fn default_true() -> bool {
-    true
-}
-
 /// Parse a GPU memory string into MiB.
 ///
 /// Accepts "20Gi" → 20480, "512Mi" → 512, bare number → MiB.
-pub fn parse_gpu_memory_mib(memory: &str) -> Result<u64, String> {
+pub(crate) fn parse_gpu_memory_mib(memory: &str) -> Result<u64, String> {
     let memory = memory.trim();
     if memory.ends_with("Gi") {
         let num = memory
@@ -565,12 +560,8 @@ pub struct GPUSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Whether this is a shared GPU (incompatible with memory/compute).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shared: Option<bool>,
-
     /// Whether to add nvidia.com/gpu toleration (default: true)
-    #[serde(default = "default_true")]
+    #[serde(default = "super::default_true")]
     pub tolerations: bool,
 }
 
@@ -581,7 +572,6 @@ impl Default for GPUSpec {
             memory: None,
             compute: None,
             model: None,
-            shared: None,
             tolerations: true,
         }
     }
@@ -610,19 +600,53 @@ impl GPUSpec {
             }
         }
 
-        if let Some(true) = self.shared {
-            if self.memory.is_some() || self.compute.is_some() {
-                return Err(
-                    "gpu.shared: true is incompatible with gpu.memory/gpu.compute".to_string(),
-                );
-            }
-        }
-
         if let Some(ref memory) = self.memory {
             parse_gpu_memory_mib(memory)?;
         }
 
         Ok(())
+    }
+
+    /// Parse the memory field into MiB, if present.
+    pub fn memory_mib(&self) -> Option<Result<u64, String>> {
+        self.memory.as_ref().map(|m| parse_gpu_memory_mib(m))
+    }
+
+    /// Map a short GPU model name to the `nvidia.com/gpu.product` NFD label value.
+    ///
+    /// Known models are mapped to their full NVIDIA product names.
+    /// Unknown models are passed through as-is.
+    /// Returns None if no model is set.
+    pub fn product_label(&self) -> Option<String> {
+        self.model
+            .as_ref()
+            .map(|model| match model.to_uppercase().as_str() {
+                "H100" => "NVIDIA-H100-80GB-HBM3".to_string(),
+                "H100SXM" => "NVIDIA-H100-80GB-HBM3".to_string(),
+                "H100PCIE" => "NVIDIA-H100-PCIe".to_string(),
+                "A100" => "NVIDIA-A100-SXM4-80GB".to_string(),
+                "A100-80G" => "NVIDIA-A100-SXM4-80GB".to_string(),
+                "A100-40G" => "NVIDIA-A100-SXM4-40GB".to_string(),
+                "A10G" => "NVIDIA-A10G".to_string(),
+                "L40S" => "NVIDIA-L40S".to_string(),
+                "L40" => "NVIDIA-L40".to_string(),
+                "L4" => "NVIDIA-L4".to_string(),
+                "T4" => "NVIDIA-Tesla-T4".to_string(),
+                "V100" => "NVIDIA-Tesla-V100-SXM2-16GB".to_string(),
+                _ => model.to_string(),
+            })
+    }
+
+    /// Build a node selector map for GPU model selection.
+    ///
+    /// Returns a BTreeMap with `nvidia.com/gpu.product` set to the product label
+    /// if a model is specified, or None otherwise.
+    pub fn node_selector(&self) -> Option<std::collections::BTreeMap<String, String>> {
+        self.product_label().map(|label| {
+            let mut selector = std::collections::BTreeMap::new();
+            selector.insert("nvidia.com/gpu.product".to_string(), label);
+            selector
+        })
     }
 }
 
@@ -3313,18 +3337,6 @@ containers:
     }
 
     #[test]
-    fn gpu_shared_incompatible_with_fractional() {
-        let gpu = GPUSpec {
-            count: 1,
-            memory: Some("8Gi".to_string()),
-            shared: Some(true),
-            ..Default::default()
-        };
-        let err = gpu.validate().unwrap_err();
-        assert!(err.contains("incompatible"));
-    }
-
-    #[test]
     fn gpu_invalid_memory_format() {
         let gpu = GPUSpec {
             count: 1,
@@ -3356,6 +3368,82 @@ containers:
         assert!(parse_gpu_memory_mib("abc").is_err());
         assert!(parse_gpu_memory_mib("").is_err());
         assert!(parse_gpu_memory_mib("10Xi").is_err());
+    }
+
+    #[test]
+    fn gpu_memory_mib_method() {
+        let gpu = GPUSpec {
+            count: 1,
+            memory: Some("8Gi".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(gpu.memory_mib().unwrap().unwrap(), 8192);
+
+        let gpu_none = GPUSpec {
+            count: 1,
+            ..Default::default()
+        };
+        assert!(gpu_none.memory_mib().is_none());
+    }
+
+    #[test]
+    fn gpu_product_label_known_models() {
+        let gpu = |model: &str| GPUSpec {
+            count: 1,
+            model: Some(model.to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            gpu("H100").product_label().unwrap(),
+            "NVIDIA-H100-80GB-HBM3"
+        );
+        assert_eq!(
+            gpu("A100").product_label().unwrap(),
+            "NVIDIA-A100-SXM4-80GB"
+        );
+        assert_eq!(gpu("L4").product_label().unwrap(), "NVIDIA-L4");
+        assert_eq!(gpu("T4").product_label().unwrap(), "NVIDIA-Tesla-T4");
+        assert_eq!(gpu("L40S").product_label().unwrap(), "NVIDIA-L40S");
+    }
+
+    #[test]
+    fn gpu_product_label_unknown_passthrough() {
+        let gpu = GPUSpec {
+            count: 1,
+            model: Some("custom-gpu-xyz".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(gpu.product_label().unwrap(), "custom-gpu-xyz");
+    }
+
+    #[test]
+    fn gpu_product_label_none_when_no_model() {
+        let gpu = GPUSpec {
+            count: 1,
+            ..Default::default()
+        };
+        assert!(gpu.product_label().is_none());
+    }
+
+    #[test]
+    fn gpu_node_selector_with_model() {
+        let gpu = GPUSpec {
+            count: 1,
+            model: Some("L4".to_string()),
+            ..Default::default()
+        };
+        let selector = gpu.node_selector().unwrap();
+        assert_eq!(selector.get("nvidia.com/gpu.product").unwrap(), "NVIDIA-L4");
+    }
+
+    #[test]
+    fn gpu_node_selector_none_without_model() {
+        let gpu = GPUSpec {
+            count: 1,
+            ..Default::default()
+        };
+        assert!(gpu.node_selector().is_none());
     }
 
     #[test]

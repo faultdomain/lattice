@@ -188,6 +188,8 @@ pub struct ClusterRegistration {
     pub autoscaling_enabled: bool,
     /// Whether LatticeService support is enabled (Istio + mesh policies)
     pub services: bool,
+    /// Whether GPU infrastructure is enabled (NFD + NVIDIA device plugin + HAMi)
+    pub gpu: bool,
 }
 
 /// Bootstrap manifest generator
@@ -344,6 +346,8 @@ pub struct BootstrapBundleConfig<'a> {
     pub autoscaling_enabled: bool,
     /// Whether LatticeService support is enabled (Istio + mesh policies)
     pub services: bool,
+    /// Whether GPU infrastructure is enabled (NFD + NVIDIA device plugin + HAMi)
+    pub gpu: bool,
     /// The LatticeCluster manifest (JSON or YAML) to include
     pub cluster_manifest: &'a str,
 }
@@ -389,6 +393,7 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
         skip_service_mesh: !config.services,
         parent_host: config.parent_host.map(|s| s.to_string()),
         parent_grpc_port: config.parent_grpc_port,
+        gpu: config.gpu,
     };
     let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config)
         .await
@@ -791,6 +796,8 @@ pub struct ClusterBootstrapInfo {
     pub autoscaling_enabled: bool,
     /// Whether LatticeService support is enabled (Istio + mesh policies)
     pub services: bool,
+    /// Whether GPU infrastructure is enabled (NFD + NVIDIA device plugin + HAMi)
+    pub gpu: bool,
 }
 
 /// Bootstrap endpoint state
@@ -917,6 +924,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             k8s_version: registration.k8s_version,
             autoscaling_enabled: registration.autoscaling_enabled,
             services: registration.services,
+            gpu: registration.gpu,
         };
 
         self.clusters.insert(cluster_id, info);
@@ -1043,6 +1051,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             relax_fips: info.bootstrap.needs_fips_relax(),
             autoscaling_enabled: info.autoscaling_enabled,
             services: info.services,
+            gpu: info.gpu,
             cluster_manifest: &info.cluster_manifest,
         };
         let mut manifests =
@@ -1396,6 +1405,7 @@ mod tests {
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
                 services: true,
+                gpu: false,
             })
             .await
     }
@@ -2531,6 +2541,7 @@ mod tests {
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
                 services: true,
+                gpu: false,
             },
         );
 
@@ -2588,6 +2599,7 @@ mod tests {
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
                 services: true,
+                gpu: false,
             },
         );
 
@@ -2658,6 +2670,7 @@ mod tests {
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
                 services: true,
+                gpu: false,
             },
         );
 
@@ -2722,6 +2735,7 @@ mod tests {
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
                 services: true,
+                gpu: false,
             },
         );
 

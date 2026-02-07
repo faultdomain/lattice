@@ -8,6 +8,7 @@
 
 pub mod cilium;
 pub mod eso;
+pub mod gpu;
 pub mod istio;
 pub mod velero;
 
@@ -42,6 +43,8 @@ pub struct InfrastructureConfig {
     pub parent_host: Option<String>,
     /// Parent cell gRPC port (used with parent_host)
     pub parent_grpc_port: u16,
+    /// Enable GPU infrastructure (NFD + NVIDIA device plugin + HAMi)
+    pub gpu: bool,
 }
 
 impl From<&LatticeCluster> for InfrastructureConfig {
@@ -60,6 +63,7 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             skip_service_mesh: !cluster.spec.services,
             parent_host: None,
             parent_grpc_port: DEFAULT_GRPC_PORT,
+            gpu: cluster.spec.gpu,
         }
     }
 }
@@ -87,6 +91,11 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
 
     // Velero (for backup and restore)
     manifests.extend(velero::generate_velero().await?.iter().cloned());
+
+    // GPU stack (NFD + NVIDIA device plugin + HAMi)
+    if config.gpu {
+        manifests.extend(gpu::generate_gpu_stack().await?.iter().cloned());
+    }
 
     Ok(manifests)
 }

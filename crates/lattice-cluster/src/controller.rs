@@ -1713,6 +1713,7 @@ mod tests {
                 networking: None,
                 parent_config: None,
                 services: true,
+                gpu: false,
             },
             status: None,
         }
@@ -2274,6 +2275,7 @@ mod tests {
                     networking: None,
                     parent_config: None,
                     services: true,
+                    gpu: false,
                 },
                 status: None,
             }

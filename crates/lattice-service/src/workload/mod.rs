@@ -870,30 +870,7 @@ impl GeneratedWorkloads {
 // =============================================================================
 
 use crate::crd::{DeployStrategy, GPUSpec, LatticeService, LatticeServiceSpec, ProviderType};
-use lattice_common::crd::parse_gpu_memory_mib;
 use lattice_common::mesh;
-
-/// Map a short GPU model name to the `nvidia.com/gpu.product` NFD label value.
-///
-/// Known models are mapped to their full NVIDIA product names.
-/// Unknown models are passed through as-is.
-fn gpu_product_label(model: &str) -> String {
-    match model.to_uppercase().as_str() {
-        "H100" => "NVIDIA-H100-80GB-HBM3".to_string(),
-        "H100SXM" => "NVIDIA-H100-80GB-HBM3".to_string(),
-        "H100PCIE" => "NVIDIA-H100-PCIe".to_string(),
-        "A100" => "NVIDIA-A100-SXM4-80GB".to_string(),
-        "A100-80G" => "NVIDIA-A100-SXM4-80GB".to_string(),
-        "A100-40G" => "NVIDIA-A100-SXM4-40GB".to_string(),
-        "A10G" => "NVIDIA-A10G".to_string(),
-        "L40S" => "NVIDIA-L40S".to_string(),
-        "L40" => "NVIDIA-L40".to_string(),
-        "L4" => "NVIDIA-L4".to_string(),
-        "T4" => "NVIDIA-Tesla-T4".to_string(),
-        "V100" => "NVIDIA-Tesla-V100-SXM2-16GB".to_string(),
-        _ => model.to_string(),
-    }
-}
 
 /// Merge GPU resource requests into container limits.
 ///
@@ -914,10 +891,8 @@ fn merge_gpu_resources(
 
     limits.gpu = Some(gpu.count.to_string());
 
-    if let Some(ref memory) = gpu.memory {
-        if let Ok(mib) = parse_gpu_memory_mib(memory) {
-            limits.gpu_memory = Some(mib.to_string());
-        }
+    if let Some(Ok(mib)) = gpu.memory_mib() {
+        limits.gpu_memory = Some(mib.to_string());
     }
 
     if let Some(compute) = gpu.compute {
@@ -942,17 +917,7 @@ fn gpu_tolerations(gpu: &Option<GPUSpec>) -> Vec<Toleration> {
 
 /// Build GPU node selector for a pod spec.
 fn gpu_node_selector(gpu: &Option<GPUSpec>) -> Option<BTreeMap<String, String>> {
-    match gpu {
-        Some(g) => g.model.as_ref().map(|model| {
-            let mut selector = BTreeMap::new();
-            selector.insert(
-                "nvidia.com/gpu.product".to_string(),
-                gpu_product_label(model),
-            );
-            selector
-        }),
-        None => None,
-    }
+    gpu.as_ref().and_then(|g| g.node_selector())
 }
 
 /// Compiler for generating Kubernetes workload resources from LatticeService
@@ -2446,20 +2411,6 @@ mod tests {
         assert_eq!(limits.memory, Some("16Gi".to_string()));
         // GPU merged alongside
         assert_eq!(limits.gpu, Some("1".to_string()));
-    }
-
-    #[test]
-    fn gpu_product_label_known_models() {
-        assert_eq!(gpu_product_label("H100"), "NVIDIA-H100-80GB-HBM3");
-        assert_eq!(gpu_product_label("A100"), "NVIDIA-A100-SXM4-80GB");
-        assert_eq!(gpu_product_label("L4"), "NVIDIA-L4");
-        assert_eq!(gpu_product_label("T4"), "NVIDIA-Tesla-T4");
-        assert_eq!(gpu_product_label("L40S"), "NVIDIA-L40S");
-    }
-
-    #[test]
-    fn gpu_product_label_unknown_passthrough() {
-        assert_eq!(gpu_product_label("custom-gpu-xyz"), "custom-gpu-xyz");
     }
 
     #[test]

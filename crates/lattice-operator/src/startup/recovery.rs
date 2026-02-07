@@ -224,6 +224,7 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             k8s_version: cluster.spec.provider.kubernetes.version.clone(),
             autoscaling_enabled,
             services: cluster.spec.services,
+            gpu: cluster.spec.gpu,
         };
 
         // Use token from LatticeCluster.status if available (source of truth)

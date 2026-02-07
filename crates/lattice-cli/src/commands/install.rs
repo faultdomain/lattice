@@ -578,6 +578,7 @@ impl Installer {
                 .values()
                 .any(|p| p.is_autoscaling_enabled()),
             services: self.cluster.spec.services,
+            gpu: self.cluster.spec.gpu,
             cluster_manifest: &self.cluster_yaml,
         };
 

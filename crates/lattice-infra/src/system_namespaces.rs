@@ -21,6 +21,9 @@ pub const MESH: &[&str] = &["istio-system"];
 /// Certificate management namespace
 pub const CERT: &[&str] = &["cert-manager"];
 
+/// GPU infrastructure namespaces (GPU Operator + HAMi)
+pub const GPU: &[&str] = &["gpu-operator", "hami-system"];
+
 /// Cluster API namespaces (core + bootstrap + control plane + providers)
 pub const CAPI: &[&str] = &[
     "capi-system",
@@ -45,6 +48,7 @@ pub fn all() -> Vec<&'static str> {
         .chain(CNI.iter())
         .chain(MESH.iter())
         .chain(CERT.iter())
+        .chain(GPU.iter())
         .chain(CAPI.iter())
         .copied()
         .collect();
