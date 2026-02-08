@@ -337,57 +337,168 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         namespace: &str,
         compiled: &CompiledService,
     ) -> Result<(), Error> {
-        use futures::future::join_all;
+        use k8s_openapi::api::apps::v1::Deployment as K8sDeployment;
+        use k8s_openapi::api::core::v1::{
+            ConfigMap as K8sCm, PersistentVolumeClaim as K8sPvc, Secret as K8sSecret,
+            Service as K8sService, ServiceAccount as K8sSA,
+        };
 
-        // Ensure namespace exists with ambient mode label for Istio traffic routing
         self.ensure_namespace_with_ambient(namespace).await?;
 
         let params = PatchParams::apply("lattice-service-controller").force();
 
-        // Collect all patch operations as futures and run them in parallel
-        // This significantly improves performance vs sequential application
-        let mut futures: Vec<
-            std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>,
-        > = Vec::new();
+        // ApiResources for native K8s types (used by push via DynamicObject)
+        let ar_sa = ApiResource::erase::<K8sSA>(&());
+        let ar_pvc = ApiResource::erase::<K8sPvc>(&());
+        let ar_cm = ApiResource::erase::<K8sCm>(&());
+        let ar_secret = ApiResource::erase::<K8sSecret>(&());
+        let ar_svc = ApiResource::erase::<K8sService>(&());
+        let ar_deploy = ApiResource::erase::<K8sDeployment>(&());
 
-        // Apply workload resources (ServiceAccount, PVCs, Deployment, Service, ScaledObject)
-        self.collect_workload_futures(&mut futures, namespace, &params, compiled)?;
+        // ── Layer 1: Everything except the Deployment ──
+        // ExternalSecrets trigger ESO to sync K8s Secrets that the Deployment
+        // may reference via imagePullSecrets. Apply them first.
+        let mut layer1 = ApplyBatch::new(self.client.clone(), namespace, &params);
 
-        // Apply ExternalSecrets (ESO syncs secrets from Vault)
-        self.collect_secret_futures(&mut futures, namespace, &params, compiled)?;
+        // Workload infrastructure
+        if let Some(sa) = &compiled.workloads.service_account {
+            layer1.push("ServiceAccount", &sa.metadata.name, sa, &ar_sa)?;
+        }
+        for pvc in &compiled.workloads.pvcs {
+            layer1.push("PVC", &pvc.metadata.name, pvc, &ar_pvc)?;
+        }
+        for cm in &compiled.workloads.env_config_maps {
+            layer1.push("ConfigMap", &cm.metadata.name, cm, &ar_cm)?;
+        }
+        for secret in &compiled.workloads.env_secrets {
+            layer1.push("Secret", &secret.metadata.name, secret, &ar_secret)?;
+        }
+        for cm in &compiled.workloads.files_config_maps {
+            layer1.push("ConfigMap", &cm.metadata.name, cm, &ar_cm)?;
+        }
+        for secret in &compiled.workloads.files_secrets {
+            layer1.push("Secret", &secret.metadata.name, secret, &ar_secret)?;
+        }
+        if let Some(svc) = &compiled.workloads.service {
+            layer1.push("Service", &svc.metadata.name, svc, &ar_svc)?;
+        }
 
-        // Apply policy resources (Cilium and Istio policies)
-        self.collect_policy_futures(&mut futures, namespace, &params, compiled)?;
-
-        // Apply ingress resources (Gateway, HttpRoute, Certificate)
-        self.collect_ingress_futures(&mut futures, namespace, &params, compiled)?;
-
-        // Apply waypoint resources (Waypoint gateway and policies)
-        self.collect_waypoint_futures(&mut futures, namespace, &params, compiled)?;
-
-        // Execute all patches in parallel and collect all results
-        let count = futures.len();
-        if count > 0 {
-            debug!(count = count, "applying resources in parallel");
-            let results = join_all(futures).await;
-
-            // Collect all errors and log them
-            let mut errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
-
-            // Log all failures and return the first error if any
-            if !errors.is_empty() {
-                for (i, err) in errors.iter().enumerate() {
-                    error!(error = %err, index = i, "resource application failed");
-                }
-                // Use swap_remove to avoid the unwrap - we verified errors is non-empty above
-                return Err(errors.swap_remove(0));
+        // ScaledObject (KEDA)
+        if let Some(so) = &compiled.workloads.scaled_object {
+            if let Some(ar) = &self.crds.scaled_object {
+                layer1.push("ScaledObject", &so.metadata.name, so, ar)?;
+            } else {
+                warn!("ScaledObject CRD not installed, skipping autoscaling");
             }
         }
+
+        // ExternalSecrets (ESO syncs secrets from Vault)
+        if let Some(ar) = &self.crds.external_secret {
+            for es in &compiled.workloads.external_secrets {
+                layer1.push("ExternalSecret", &es.metadata.name, es, ar)?;
+            }
+        } else if !compiled.workloads.external_secrets.is_empty() {
+            warn!(
+                count = compiled.workloads.external_secrets.len(),
+                "ExternalSecret CRD not installed, skipping"
+            );
+        }
+
+        // Network policies
+        if let Some(ar) = &self.crds.cilium_network_policy {
+            for cnp in &compiled.policies.cilium_policies {
+                layer1.push("CiliumNetworkPolicy", &cnp.metadata.name, cnp, ar)?;
+            }
+        } else if !compiled.policies.cilium_policies.is_empty() {
+            warn!(
+                count = compiled.policies.cilium_policies.len(),
+                "CiliumNetworkPolicy CRD not installed, skipping"
+            );
+        }
+        if let Some(ar) = &self.crds.authorization_policy {
+            for authz in &compiled.policies.authorization_policies {
+                layer1.push("AuthorizationPolicy", &authz.metadata.name, authz, ar)?;
+            }
+        } else if !compiled.policies.authorization_policies.is_empty() {
+            warn!(
+                count = compiled.policies.authorization_policies.len(),
+                "AuthorizationPolicy CRD not installed, skipping"
+            );
+        }
+        if let Some(ar) = &self.crds.service_entry {
+            for entry in &compiled.policies.service_entries {
+                layer1.push("ServiceEntry", &entry.metadata.name, entry, ar)?;
+            }
+        } else if !compiled.policies.service_entries.is_empty() {
+            warn!(
+                count = compiled.policies.service_entries.len(),
+                "ServiceEntry CRD not installed, skipping"
+            );
+        }
+
+        // Ingress
+        if let Some(gw) = &compiled.ingress.gateway {
+            if let Some(ar) = &self.crds.gateway {
+                layer1.push("Gateway", &gw.metadata.name, gw, ar)?;
+            } else {
+                warn!("Gateway CRD not installed, skipping ingress");
+            }
+        }
+        if let Some(route) = &compiled.ingress.http_route {
+            if let Some(ar) = &self.crds.http_route {
+                layer1.push("HTTPRoute", &route.metadata.name, route, ar)?;
+            } else {
+                warn!("HTTPRoute CRD not installed, skipping ingress");
+            }
+        }
+        if let Some(cert) = &compiled.ingress.certificate {
+            if let Some(ar) = &self.crds.certificate {
+                layer1.push("Certificate", &cert.metadata.name, cert, ar)?;
+            } else {
+                warn!("Certificate CRD not installed, skipping ingress");
+            }
+        }
+
+        // Waypoint (east-west L7 policies via Istio ambient mesh)
+        if let Some(gw) = &compiled.waypoint.gateway {
+            if let Some(ar) = &self.crds.gateway {
+                layer1.push("Gateway", &gw.metadata.name, gw, ar)?;
+            } else {
+                warn!("Gateway CRD not installed, skipping waypoint");
+            }
+        }
+        if let Some(policy) = &compiled.waypoint.allow_to_waypoint_policy {
+            if let Some(ar) = &self.crds.authorization_policy {
+                layer1.push("AuthorizationPolicy", &policy.metadata.name, policy, ar)?;
+            } else {
+                warn!("AuthorizationPolicy CRD not installed, skipping waypoint policy");
+            }
+        }
+
+        let layer1_count = layer1.run("infrastructure").await?;
+
+        // ── Wait: imagePullSecrets must exist before the Deployment ──
+        // ESO syncs K8s Secrets from the ExternalSecrets applied above.
+        // On subsequent reconciles the secrets already exist so this is instant.
+        self.wait_for_image_pull_secrets(namespace, &compiled.workloads.deployment)
+            .await?;
+
+        // ── Layer 2: Deployment ──
+        let mut layer2 = ApplyBatch::new(self.client.clone(), namespace, &params);
+        if let Some(deployment) = &compiled.workloads.deployment {
+            layer2.push(
+                "Deployment",
+                &deployment.metadata.name,
+                deployment,
+                &ar_deploy,
+            )?;
+        }
+        let layer2_count = layer2.run("deployment").await?;
 
         info!(
             service = %service_name,
             namespace = %namespace,
-            resources = count,
+            resources = layer1_count + layer2_count,
             "applied compiled resources"
         );
         Ok(())
@@ -395,462 +506,166 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 }
 
 // =============================================================================
-// Helper methods for ServiceKubeClientImpl
+// ApplyBatch — parallel server-side-apply for K8s resources
 // =============================================================================
 
 /// Type alias for boxed futures used in parallel resource application.
-/// This reduces complexity in function signatures.
 type ApplyFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>;
 
-impl ServiceKubeClientImpl {
-    /// Collect futures for workload resources (ServiceAccount, PVCs, Deployment, Service, ScaledObject)
-    fn collect_workload_futures(
-        &self,
-        futures: &mut Vec<ApplyFuture>,
-        namespace: &str,
-        params: &PatchParams,
-        compiled: &CompiledService,
-    ) -> Result<(), Error> {
-        use k8s_openapi::api::apps::v1::Deployment as K8sDeployment;
-        use k8s_openapi::api::core::v1::{
-            ConfigMap as K8sCm, PersistentVolumeClaim as K8sPvc, Secret as K8sSecret,
-            Service as K8sService, ServiceAccount as K8sSA,
-        };
+/// Collects server-side-apply operations and runs them in parallel.
+///
+/// All resources (native K8s types and discovered CRDs) are applied via
+/// `DynamicObject` with an explicit `ApiResource`. For native types, construct
+/// the `ApiResource` with `ApiResource::erase::<T>(&())`. For discovered CRDs,
+/// use the `ApiResource` from `DiscoveredCrds`.
+struct ApplyBatch<'a> {
+    client: Client,
+    futures: Vec<ApplyFuture>,
+    namespace: &'a str,
+    params: &'a PatchParams,
+}
 
-        // ServiceAccount
-        if let Some(ref sa) = compiled.workloads.service_account {
-            let name = sa.metadata.name.clone();
-            let json = serialize_resource("ServiceAccount", sa)?;
-            let api: Api<K8sSA> = Api::namespaced(self.client.clone(), namespace);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying ServiceAccount");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
+impl<'a> ApplyBatch<'a> {
+    fn new(client: Client, namespace: &'a str, params: &'a PatchParams) -> Self {
+        Self {
+            client,
+            futures: Vec::new(),
+            namespace,
+            params,
         }
-
-        // PersistentVolumeClaims
-        for pvc in &compiled.workloads.pvcs {
-            let name = pvc.metadata.name.clone();
-            let json = serialize_resource("PersistentVolumeClaim", pvc)?;
-            let api: Api<K8sPvc> = Api::namespaced(self.client.clone(), namespace);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying PersistentVolumeClaim");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // Env ConfigMaps (non-sensitive env vars per container)
-        for cm in &compiled.workloads.env_config_maps {
-            let name = cm.metadata.name.clone();
-            let json = serialize_resource("ConfigMap", cm)?;
-            let api: Api<K8sCm> = Api::namespaced(self.client.clone(), namespace);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying env ConfigMap");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // Env Secrets (sensitive env vars per container)
-        for secret in &compiled.workloads.env_secrets {
-            let name = secret.metadata.name.clone();
-            let json = serialize_resource("Secret", secret)?;
-            let api: Api<K8sSecret> = Api::namespaced(self.client.clone(), namespace);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying env Secret");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // File ConfigMaps (text file content per container)
-        for cm in &compiled.workloads.files_config_maps {
-            let name = cm.metadata.name.clone();
-            let json = serialize_resource("ConfigMap", cm)?;
-            let api: Api<K8sCm> = Api::namespaced(self.client.clone(), namespace);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying files ConfigMap");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // File Secrets (binary file content per container)
-        for secret in &compiled.workloads.files_secrets {
-            let name = secret.metadata.name.clone();
-            let json = serialize_resource("Secret", secret)?;
-            let api: Api<K8sSecret> = Api::namespaced(self.client.clone(), namespace);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying files Secret");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // Deployment
-        if let Some(ref deployment) = compiled.workloads.deployment {
-            let name = deployment.metadata.name.clone();
-            let json = serialize_resource("Deployment", deployment)?;
-            let api: Api<K8sDeployment> = Api::namespaced(self.client.clone(), namespace);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying Deployment");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // Service
-        if let Some(ref service) = compiled.workloads.service {
-            let name = service.metadata.name.clone();
-            let json = serialize_resource("Service", service)?;
-            let api: Api<K8sService> = Api::namespaced(self.client.clone(), namespace);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying Service");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        // ScaledObject (KEDA)
-        if let Some(ref scaled_object) = compiled.workloads.scaled_object {
-            use kube::api::DynamicObject;
-
-            match &self.crds.scaled_object {
-                Some(so_ar) => {
-                    let name = scaled_object.metadata.name.clone();
-                    let json = serialize_resource_discovered("ScaledObject", scaled_object, so_ar)?;
-                    let api: Api<DynamicObject> =
-                        Api::namespaced_with(self.client.clone(), namespace, so_ar);
-                    let params = params.clone();
-                    futures.push(Box::pin(async move {
-                        debug!(name = %name, "applying ScaledObject");
-                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                        Ok(())
-                    }));
-                }
-                None => {
-                    warn!("ScaledObject CRD not installed (KEDA), skipping autoscaling");
-                }
-            }
-        }
-
-        Ok(())
     }
 
-    /// Collect futures for ExternalSecret resources (ESO syncs secrets from Vault)
-    fn collect_secret_futures(
-        &self,
-        futures: &mut Vec<ApplyFuture>,
-        namespace: &str,
-        params: &PatchParams,
-        compiled: &CompiledService,
+    /// Serialize a resource and queue a server-side-apply patch.
+    ///
+    /// Overrides `apiVersion` from the `ApiResource` so CRD versions always
+    /// match what the server actually serves.
+    fn push(
+        &mut self,
+        kind: &str,
+        name: &str,
+        resource: &impl serde::Serialize,
+        ar: &ApiResource,
     ) -> Result<(), Error> {
         use kube::api::DynamicObject;
 
-        if compiled.workloads.external_secrets.is_empty() {
+        let mut json = serde_json::to_value(resource)
+            .map_err(|e| Error::serialization(format!("{}: {}", kind, e)))?;
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert(
+                "apiVersion".to_string(),
+                serde_json::Value::String(ar.api_version.clone()),
+            );
+        }
+
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), self.namespace, ar);
+        let params = self.params.clone();
+        let name = name.to_string();
+        let kind = kind.to_string();
+        self.futures.push(Box::pin(async move {
+            debug!(name = %name, kind = %kind, "applying resource");
+            api.patch(&name, &params, &Patch::Apply(&json)).await?;
+            Ok(())
+        }));
+        Ok(())
+    }
+
+    /// Execute all queued patches in parallel, returning the count applied.
+    async fn run(self, layer: &str) -> Result<usize, Error> {
+        use futures::future::join_all;
+
+        let count = self.futures.len();
+        if count == 0 {
+            return Ok(0);
+        }
+
+        debug!(count, layer, "applying resources in parallel");
+        let results = join_all(self.futures).await;
+
+        let mut errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
+        if !errors.is_empty() {
+            for (i, err) in errors.iter().enumerate() {
+                error!(error = %err, index = i, layer, "resource application failed");
+            }
+            return Err(errors.swap_remove(0));
+        }
+
+        Ok(count)
+    }
+}
+
+impl ServiceKubeClientImpl {
+    /// Wait for imagePullSecrets K8s Secrets to exist before applying the Deployment.
+    ///
+    /// ESO creates K8s Secrets from the ExternalSecrets applied in Layer 1. If the
+    /// Deployment references those secrets via `imagePullSecrets` and they don't exist
+    /// yet, kubelet enters `ImagePullBackOff` with exponential backoff (up to 5 min).
+    /// Polling here is cheap: on subsequent reconciles the secrets already exist so
+    /// `get_opt` returns immediately.
+    async fn wait_for_image_pull_secrets(
+        &self,
+        namespace: &str,
+        deployment: &Option<crate::workload::Deployment>,
+    ) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::Secret as K8sSecret;
+
+        let deployment = match deployment {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        let secret_names: Vec<&str> = deployment
+            .spec
+            .template
+            .spec
+            .image_pull_secrets
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+
+        if secret_names.is_empty() {
             return Ok(());
         }
 
-        let es_ar = match &self.crds.external_secret {
-            Some(ar) => ar.clone(),
-            None => {
-                warn!(
-                    "ExternalSecret CRD not installed, skipping {} ExternalSecret resource(s)",
-                    compiled.workloads.external_secrets.len()
-                );
-                return Ok(());
-            }
-        };
+        let api: Api<K8sSecret> = Api::namespaced(self.client.clone(), namespace);
+        let timeout = Duration::from_secs(120);
+        let poll_interval = Duration::from_secs(2);
 
-        for external_secret in &compiled.workloads.external_secrets {
-            let name = external_secret.metadata.name.clone();
-            let json = serialize_resource_discovered("ExternalSecret", external_secret, &es_ar)?;
-            let api: Api<DynamicObject> =
-                Api::namespaced_with(self.client.clone(), namespace, &es_ar);
-            let params = params.clone();
-            futures.push(Box::pin(async move {
-                debug!(name = %name, "applying ExternalSecret");
-                api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                Ok(())
-            }));
-        }
-
-        Ok(())
-    }
-
-    /// Collect futures for policy resources (Cilium and Istio policies)
-    fn collect_policy_futures(
-        &self,
-        futures: &mut Vec<ApplyFuture>,
-        namespace: &str,
-        params: &PatchParams,
-        compiled: &CompiledService,
-    ) -> Result<(), Error> {
-        use kube::api::DynamicObject;
-
-        // CiliumNetworkPolicies
-        if !compiled.policies.cilium_policies.is_empty() {
-            match &self.crds.cilium_network_policy {
-                Some(cnp_ar) => {
-                    for cnp in &compiled.policies.cilium_policies {
-                        let name = cnp.metadata.name.clone();
-                        let json =
-                            serialize_resource_discovered("CiliumNetworkPolicy", cnp, cnp_ar)?;
-                        let api: Api<DynamicObject> =
-                            Api::namespaced_with(self.client.clone(), namespace, cnp_ar);
-                        let params = params.clone();
-                        futures.push(Box::pin(async move {
-                            debug!(name = %name, "applying CiliumNetworkPolicy");
-                            api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                            Ok(())
-                        }));
+        for secret_name in &secret_names {
+            let start = std::time::Instant::now();
+            loop {
+                match api.get_opt(secret_name).await? {
+                    Some(_) => {
+                        debug!(secret = %secret_name, "imagePullSecret exists");
+                        break;
+                    }
+                    None => {
+                        if start.elapsed() >= timeout {
+                            return Err(Error::internal_with_context(
+                                "wait_for_image_pull_secrets",
+                                format!(
+                                    "timed out waiting for imagePullSecret '{}' in namespace '{}'",
+                                    secret_name, namespace
+                                ),
+                            ));
+                        }
+                        debug!(
+                            secret = %secret_name,
+                            elapsed = ?start.elapsed(),
+                            "waiting for imagePullSecret to be synced by ESO"
+                        );
+                        tokio::time::sleep(poll_interval).await;
                     }
                 }
-                None => {
-                    warn!(
-                        "CiliumNetworkPolicy CRD not installed, skipping {} policy resource(s)",
-                        compiled.policies.cilium_policies.len()
-                    );
-                }
             }
         }
 
-        // AuthorizationPolicies
-        if !compiled.policies.authorization_policies.is_empty() {
-            match &self.crds.authorization_policy {
-                Some(authz_ar) => {
-                    for authz in &compiled.policies.authorization_policies {
-                        let name = authz.metadata.name.clone();
-                        let json =
-                            serialize_resource_discovered("AuthorizationPolicy", authz, authz_ar)?;
-                        let api: Api<DynamicObject> =
-                            Api::namespaced_with(self.client.clone(), namespace, authz_ar);
-                        let params = params.clone();
-                        futures.push(Box::pin(async move {
-                            debug!(name = %name, "applying AuthorizationPolicy");
-                            api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                            Ok(())
-                        }));
-                    }
-                }
-                None => {
-                    warn!(
-                        "AuthorizationPolicy CRD not installed, skipping {} policy resource(s)",
-                        compiled.policies.authorization_policies.len()
-                    );
-                }
-            }
-        }
-
-        // ServiceEntries
-        if !compiled.policies.service_entries.is_empty() {
-            match &self.crds.service_entry {
-                Some(se_ar) => {
-                    for entry in &compiled.policies.service_entries {
-                        let name = entry.metadata.name.clone();
-                        let json = serialize_resource_discovered("ServiceEntry", entry, se_ar)?;
-                        let api: Api<DynamicObject> =
-                            Api::namespaced_with(self.client.clone(), namespace, se_ar);
-                        let params = params.clone();
-                        futures.push(Box::pin(async move {
-                            debug!(name = %name, "applying ServiceEntry");
-                            api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                            Ok(())
-                        }));
-                    }
-                }
-                None => {
-                    warn!(
-                        "ServiceEntry CRD not installed, skipping {} service entry resource(s)",
-                        compiled.policies.service_entries.len()
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Collect futures for ingress resources (Gateway, HttpRoute, Certificate)
-    fn collect_ingress_futures(
-        &self,
-        futures: &mut Vec<ApplyFuture>,
-        namespace: &str,
-        params: &PatchParams,
-        compiled: &CompiledService,
-    ) -> Result<(), Error> {
-        use kube::api::DynamicObject;
-
-        // Gateway
-        if let Some(ref gateway) = compiled.ingress.gateway {
-            match &self.crds.gateway {
-                Some(gw_ar) => {
-                    let name = gateway.metadata.name.clone();
-                    let json = serialize_resource_discovered("Gateway", gateway, gw_ar)?;
-                    let api: Api<DynamicObject> =
-                        Api::namespaced_with(self.client.clone(), namespace, gw_ar);
-                    let params = params.clone();
-                    futures.push(Box::pin(async move {
-                        debug!(name = %name, "applying Gateway");
-                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                        Ok(())
-                    }));
-                }
-                None => {
-                    warn!("Gateway CRD not installed, skipping ingress Gateway");
-                }
-            }
-        }
-
-        // HTTPRoute
-        if let Some(ref route) = compiled.ingress.http_route {
-            match &self.crds.http_route {
-                Some(route_ar) => {
-                    let name = route.metadata.name.clone();
-                    let json = serialize_resource_discovered("HTTPRoute", route, route_ar)?;
-                    let api: Api<DynamicObject> =
-                        Api::namespaced_with(self.client.clone(), namespace, route_ar);
-                    let params = params.clone();
-                    futures.push(Box::pin(async move {
-                        debug!(name = %name, "applying HTTPRoute");
-                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                        Ok(())
-                    }));
-                }
-                None => {
-                    warn!("HTTPRoute CRD not installed, skipping ingress HTTPRoute");
-                }
-            }
-        }
-
-        // Certificate
-        if let Some(ref cert) = compiled.ingress.certificate {
-            match &self.crds.certificate {
-                Some(cert_ar) => {
-                    let name = cert.metadata.name.clone();
-                    let json = serialize_resource_discovered("Certificate", cert, cert_ar)?;
-                    let api: Api<DynamicObject> =
-                        Api::namespaced_with(self.client.clone(), namespace, cert_ar);
-                    let params = params.clone();
-                    futures.push(Box::pin(async move {
-                        debug!(name = %name, "applying Certificate");
-                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                        Ok(())
-                    }));
-                }
-                None => {
-                    warn!("Certificate CRD not installed, skipping ingress Certificate");
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Collect futures for waypoint resources (Waypoint gateway and policies)
-    fn collect_waypoint_futures(
-        &self,
-        futures: &mut Vec<ApplyFuture>,
-        namespace: &str,
-        params: &PatchParams,
-        compiled: &CompiledService,
-    ) -> Result<(), Error> {
-        use kube::api::DynamicObject;
-
-        // Waypoint Gateway (for east-west L7 policies via Istio ambient mesh)
-        if let Some(ref gateway) = compiled.waypoint.gateway {
-            match &self.crds.gateway {
-                Some(gw_ar) => {
-                    let name = gateway.metadata.name.clone();
-                    let json = serialize_resource_discovered("Waypoint Gateway", gateway, gw_ar)?;
-                    let api: Api<DynamicObject> =
-                        Api::namespaced_with(self.client.clone(), namespace, gw_ar);
-                    let params = params.clone();
-                    futures.push(Box::pin(async move {
-                        debug!(name = %name, "applying waypoint Gateway");
-                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                        Ok(())
-                    }));
-                }
-                None => {
-                    warn!("Gateway CRD not installed, skipping waypoint Gateway");
-                }
-            }
-        }
-
-        // Waypoint allow-to-waypoint AuthorizationPolicy
-        // This allows any authenticated traffic to reach the waypoint on port 15008 (HBONE)
-        // Without this, mesh-default-deny blocks traffic before it reaches the waypoint
-        if let Some(ref policy) = compiled.waypoint.allow_to_waypoint_policy {
-            match &self.crds.authorization_policy {
-                Some(authz_ar) => {
-                    let name = policy.metadata.name.clone();
-                    let json = serialize_resource_discovered(
-                        "Waypoint AuthorizationPolicy",
-                        policy,
-                        authz_ar,
-                    )?;
-                    let api: Api<DynamicObject> =
-                        Api::namespaced_with(self.client.clone(), namespace, authz_ar);
-                    let params = params.clone();
-                    futures.push(Box::pin(async move {
-                        debug!(name = %name, "applying waypoint AuthorizationPolicy");
-                        api.patch(&name, &params, &Patch::Apply(&json)).await?;
-                        Ok(())
-                    }));
-                }
-                None => {
-                    warn!("AuthorizationPolicy CRD not installed, skipping waypoint AuthorizationPolicy");
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Serialize a Kubernetes resource to JSON Value for patching
-///
-/// This helper reduces repetitive serialization error handling throughout
-/// the apply_compiled_service function.
-fn serialize_resource<T: serde::Serialize>(
-    name: &str,
-    resource: &T,
-) -> Result<serde_json::Value, Error> {
-    serde_json::to_value(resource).map_err(|e| Error::serialization(format!("{}: {}", name, e)))
-}
-
-/// Serialize a Kubernetes resource and override the `apiVersion` with the
-/// version discovered from the API server.
-///
-/// Custom resource types (ServiceEntry, AuthorizationPolicy, etc.) hardcode an
-/// `apiVersion` in their struct default. If the cluster serves a different
-/// version (e.g. `networking.istio.io/v1` instead of `v1beta1`), server-side
-/// apply rejects the mismatch. This helper patches the serialized JSON to use
-/// the discovered version.
-fn serialize_resource_discovered<T: serde::Serialize>(
-    name: &str,
-    resource: &T,
-    discovered: &ApiResource,
-) -> Result<serde_json::Value, Error> {
-    let mut json = serialize_resource(name, resource)?;
-    if let Some(obj) = json.as_object_mut() {
-        obj.insert(
-            "apiVersion".to_string(),
-            serde_json::Value::String(discovered.api_version.clone()),
+        info!(
+            count = secret_names.len(),
+            namespace = %namespace,
+            "all imagePullSecrets available"
         );
+        Ok(())
     }
-    Ok(json)
 }
 
 // =============================================================================

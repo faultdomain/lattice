@@ -446,8 +446,10 @@ impl Installer {
         let cluster_name = self.cluster_name().to_string();
         let client = client.clone();
 
-        // Wait for kubeconfig secret to exist. We don't wait for Ready phase because
+        // Wait for kubeconfig secret AND CAPI Cluster control plane to be ready.
+        // We check controlPlaneReady instead of the full Ready phase because
         // the cluster needs CNI to reach Ready, and CNI is applied after this phase.
+        // controlPlaneReady ensures the API server is reachable before Phase 6.
         wait_with_timeout(
             CLUSTER_PROVISIONING_TIMEOUT,
             CLUSTER_POLL_INTERVAL,
@@ -468,15 +470,23 @@ impl Installer {
                     info!("Cluster phase: {}", phase);
 
                     // Check if kubeconfig is ready
-                    if kube_utils::secret_exists(&client, &secret_name, &namespace)
+                    if !kube_utils::secret_exists(&client, &secret_name, &namespace)
                         .await
                         .unwrap_or(false)
                     {
-                        info!("Kubeconfig secret is ready");
-                        return Ok(Some(()));
+                        return Ok(None); // Keep polling
                     }
 
-                    Ok(None) // Keep polling
+                    // Check if CAPI Cluster control plane is ready (API server reachable)
+                    if !is_capi_cluster_control_plane_ready(&client, &cluster_name, &namespace)
+                        .await
+                    {
+                        info!("Waiting for CAPI Cluster control plane to be ready...");
+                        return Ok(None); // Keep polling
+                    }
+
+                    info!("Kubeconfig secret and control plane are ready");
+                    Ok(Some(()))
                 }
             },
         )
@@ -991,6 +1001,37 @@ async fn get_latticecluster_phase(client: &Client, name: &str) -> String {
             warn!("Transient error getting LatticeCluster {}: {}", name, e);
             "Unknown".to_string()
         }
+    }
+}
+
+/// Check if the CAPI Cluster resource's control plane is ready.
+///
+/// Returns true when `status.controlPlaneReady` is true, indicating the
+/// API server is reachable. This is checked before the full Ready phase
+/// (which requires CNI) to avoid noisy connection errors in Phase 6.
+async fn is_capi_cluster_control_plane_ready(
+    client: &Client,
+    cluster_name: &str,
+    namespace: &str,
+) -> bool {
+    use kube::api::{Api, DynamicObject};
+
+    let Ok(ar) =
+        kube_utils::build_api_resource_with_discovery(client, "cluster.x-k8s.io", "Cluster").await
+    else {
+        return false;
+    };
+
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+
+    match api.get(cluster_name).await {
+        Ok(cluster) => cluster
+            .data
+            .get("status")
+            .and_then(|s| s.get("controlPlaneReady"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        Err(_) => false,
     }
 }
 
