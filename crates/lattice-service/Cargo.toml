@@ -59,3 +59,8 @@ schemars = { workspace = true }
 tokio-test = { workspace = true }
 mockall = { workspace = true }
 rstest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "compile"
+harness = false

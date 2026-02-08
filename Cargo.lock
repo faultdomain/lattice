@@ -2623,6 +2623,7 @@ dependencies = [
  "aws-lc-rs",
  "axum 0.8.8",
  "chrono",
+ "criterion",
  "dashmap",
  "futures",
  "json-patch",
