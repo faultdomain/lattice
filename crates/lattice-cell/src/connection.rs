@@ -218,6 +218,10 @@ const CONNECTION_CHANNEL_CAPACITY: usize = 64;
 /// If an agent crashes mid-teardown, this prevents the guard from blocking forever.
 const TEARDOWN_GUARD_TTL: Duration = Duration::from_secs(600);
 
+/// Heartbeat staleness threshold (3x the 30s agent heartbeat interval).
+/// Connected agents that haven't sent a heartbeat within this window are considered stale.
+pub const HEARTBEAT_STALE_THRESHOLD: Duration = Duration::from_secs(90);
+
 impl Default for AgentRegistry {
     fn default() -> Self {
         let (connection_tx, _) = broadcast::channel(CONNECTION_CHANNEL_CAPACITY);
@@ -672,6 +676,26 @@ impl AgentRegistry {
             .get(cluster_name)
             .map(|a| a.connected)
             .unwrap_or(false)
+    }
+
+    /// Detect connected agents with stale heartbeats.
+    ///
+    /// Returns cluster names of agents that are marked connected but haven't sent
+    /// a heartbeat within `threshold`. Agents that have never sent a heartbeat
+    /// (e.g. still in initial handshake) are excluded.
+    pub fn detect_stale_agents(&self, threshold: Duration) -> Vec<String> {
+        self.agents
+            .iter()
+            .filter(|r| {
+                let agent = r.value();
+                agent.connected
+                    && agent
+                        .last_heartbeat
+                        .map(|t| t.elapsed() > threshold)
+                        .unwrap_or(false)
+            })
+            .map(|r| r.key().clone())
+            .collect()
     }
 }
 
@@ -1258,5 +1282,72 @@ mod tests {
         // pivot_complete should be preserved from before
         let agent = registry.get("test-cluster").unwrap();
         assert!(agent.pivot_complete);
+    }
+
+    // =========================================================================
+    // Heartbeat Staleness Tests
+    // =========================================================================
+
+    #[test]
+    fn test_detect_stale_agents_none_stale() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        // Fresh heartbeat
+        registry.update_health(
+            "cluster-a",
+            lattice_proto::ClusterHealth {
+                ready_nodes: 1,
+                total_nodes: 1,
+                ..Default::default()
+            },
+        );
+
+        let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn test_detect_stale_agents_stale_heartbeat() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        // Manually set a stale heartbeat (100 seconds ago, past the 90s threshold)
+        if let Some(mut agent) = registry.get_mut("cluster-a") {
+            agent.last_heartbeat = Some(Instant::now() - Duration::from_secs(100));
+        }
+
+        let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
+        assert_eq!(stale, vec!["cluster-a"]);
+    }
+
+    #[test]
+    fn test_detect_stale_agents_disconnected_excluded() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        // Set a stale heartbeat then disconnect
+        if let Some(mut agent) = registry.get_mut("cluster-a") {
+            agent.last_heartbeat = Some(Instant::now() - Duration::from_secs(200));
+        }
+        registry.unregister("cluster-a");
+
+        // Disconnected agents should NOT appear in stale list
+        let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn test_detect_stale_agents_no_heartbeat_yet() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        // No heartbeat received yet (still in handshake)
+        let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
+        assert!(stale.is_empty());
     }
 }

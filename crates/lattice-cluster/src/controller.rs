@@ -7,6 +7,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
+
 use async_trait::async_trait;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, Patch, PatchParams, PostParams};
@@ -904,6 +906,8 @@ pub struct Context {
     pub self_cluster_name: Option<String>,
     /// Event publisher for emitting Kubernetes Events
     pub events: Arc<dyn EventPublisher>,
+    /// Per-cluster error counts for exponential backoff in error_policy
+    pub error_counts: DashMap<String, u32>,
 }
 
 impl Context {
@@ -930,6 +934,7 @@ impl Context {
             parent_servers: None,
             self_cluster_name: None,
             events: Arc::new(NoopEventPublisher),
+            error_counts: DashMap::new(),
         }
     }
 }
@@ -1042,6 +1047,7 @@ impl ContextBuilder {
             parent_servers: self.parent_servers,
             self_cluster_name: self.self_cluster_name,
             events,
+            error_counts: DashMap::new(),
         }
     }
 }
@@ -1206,6 +1212,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     match &result {
         Ok(_) => {
             timer.success();
+            ctx.error_counts.remove(&cluster.name_any());
             // Update cluster phase gauge with current phase
             let phase_label = match current_phase {
                 ClusterPhase::Pending => metrics::ClusterPhase::Pending,
@@ -1225,30 +1232,43 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     result
 }
 
+/// Maximum backoff delay for retryable errors (5 minutes)
+const MAX_ERROR_BACKOFF: Duration = Duration::from_secs(300);
+
 /// Error policy for the controller
 ///
 /// This function is called when reconciliation fails. It determines
-/// the requeue strategy using exponential backoff.
-///
-/// # Arguments
-///
-/// * `cluster` - The LatticeCluster that failed reconciliation
-/// * `error` - The error that occurred
-/// * `_ctx` - Shared controller context (unused but required by signature)
-///
-/// # Returns
-///
-/// Returns an `Action` to requeue the resource after a delay.
-pub fn error_policy(cluster: Arc<LatticeCluster>, error: &Error, _ctx: Arc<Context>) -> Action {
-    error!(
-        ?error,
-        cluster = %cluster.name_any(),
-        "reconciliation failed"
-    );
+/// the requeue strategy:
+/// - Retryable errors: exponential backoff (5s, 10s, 20s, ... capped at 5m)
+/// - Non-retryable errors: await spec change, don't retry
+pub fn error_policy(cluster: Arc<LatticeCluster>, error: &Error, ctx: Arc<Context>) -> Action {
+    let cluster_name = cluster.name_any();
 
-    // Exponential backoff: start at 5 seconds
-    // In a full implementation, we would track retry count and increase delay
-    Action::requeue(Duration::from_secs(5))
+    if error.is_retryable() {
+        let count = ctx
+            .error_counts
+            .entry(cluster_name.clone())
+            .and_modify(|c| *c = c.saturating_add(1))
+            .or_insert(1);
+        let backoff_secs = (5u64 << (*count - 1).min(6)).min(MAX_ERROR_BACKOFF.as_secs());
+
+        error!(
+            ?error,
+            cluster = %cluster_name,
+            retry_count = *count,
+            backoff_secs,
+            "reconciliation failed (retryable)"
+        );
+        Action::requeue(Duration::from_secs(backoff_secs))
+    } else {
+        error!(
+            ?error,
+            cluster = %cluster_name,
+            "reconciliation failed (permanent)"
+        );
+        ctx.error_counts.remove(&cluster_name);
+        Action::await_change()
+    }
 }
 
 /// Real implementation of PivotOperations using AgentRegistry

@@ -33,6 +33,7 @@ pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
 pub use connection::{
     AgentConnection, AgentRegistry, ConnectionNotification, K8sResponseRegistry,
     KubeconfigProxyConfig, PivotSourceManifests, SendError, SharedAgentRegistry, UnpivotManifests,
+    HEARTBEAT_STALE_THRESHOLD,
 };
 pub use exec_tunnel::{
     start_exec_session, ExecRequestParams, ExecSession, ExecTunnelError, EXEC_CHANNEL_SIZE,

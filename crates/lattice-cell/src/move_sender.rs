@@ -76,8 +76,11 @@ impl MoveCommandSender for GrpcMoveCommandSender {
             return Err(MoveError::AgentCommunication(e.to_string()));
         }
 
-        tokio::time::timeout(self.timeout, rx)
-            .await
+        let result = tokio::time::timeout(self.timeout, rx).await;
+        if result.is_err() {
+            self.registry.take_pending_batch_ack(&request_id);
+        }
+        result
             .map_err(|_| MoveError::Timeout {
                 seconds: self.timeout.as_secs(),
             })?
@@ -114,8 +117,11 @@ impl MoveCommandSender for GrpcMoveCommandSender {
             return Err(MoveError::AgentCommunication(e.to_string()));
         }
 
-        let ack = tokio::time::timeout(self.timeout, rx)
-            .await
+        let result = tokio::time::timeout(self.timeout, rx).await;
+        if result.is_err() {
+            self.registry.take_pending_complete_ack(&request_id);
+        }
+        let ack = result
             .map_err(|_| MoveError::Timeout {
                 seconds: self.timeout.as_secs(),
             })?

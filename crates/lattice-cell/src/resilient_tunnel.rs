@@ -263,11 +263,12 @@ async fn stream_watch_responses(
 ///
 /// Watch events look like: {"type":"ADDED","object":{"metadata":{"resourceVersion":"12345",...},...}}
 fn extract_resource_version(body: &[u8]) -> Option<String> {
-    let s = std::str::from_utf8(body).ok()?;
-    let rv_key = "\"resourceVersion\":\"";
-    let start = s.find(rv_key)? + rv_key.len();
-    let end = s[start..].find('"')? + start;
-    Some(s[start..end].to_string())
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    v.get("object")?
+        .get("metadata")?
+        .get("resourceVersion")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 /// Update resourceVersion in query string for watch resume

@@ -1029,7 +1029,10 @@ async fn is_capi_cluster_control_plane_ready(
             let status = cluster.data.get("status");
 
             // CAPI v1beta2: check conditions array for ControlPlaneAvailable
-            if let Some(conditions) = status.and_then(|s| s.get("conditions")).and_then(|c| c.as_array()) {
+            if let Some(conditions) = status
+                .and_then(|s| s.get("conditions"))
+                .and_then(|c| c.as_array())
+            {
                 return conditions.iter().any(|c| {
                     c.get("type").and_then(|t| t.as_str()) == Some("ControlPlaneAvailable")
                         && c.get("status").and_then(|s| s.as_str()) == Some("True")

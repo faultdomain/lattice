@@ -684,6 +684,16 @@ impl CapiProviderConfig {
 
         providers
     }
+
+    /// Return the Kubernetes namespaces where all desired CAPI providers run.
+    ///
+    /// Used by the installer to wait for deployments before starting the pivot.
+    pub fn provider_namespaces(&self) -> Vec<&'static str> {
+        self.desired_providers()
+            .iter()
+            .filter_map(|p| provider_namespace(&p.name, p.provider_type))
+            .collect()
+    }
 }
 
 // =============================================================================
