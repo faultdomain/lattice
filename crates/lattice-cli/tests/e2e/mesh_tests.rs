@@ -8,14 +8,14 @@
 
 use std::time::Duration;
 
-use kube::api::{Api, PostParams};
+use kube::api::Api;
 use tokio::time::sleep;
 use tracing::info;
 
 use lattice_common::crd::LatticeService;
 
 use super::helpers::{
-    client_from_kubeconfig, delete_namespace, ensure_fresh_namespace, run_cmd,
+    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace, run_cmd,
     setup_regcreds_infrastructure,
 };
 use super::mesh_fixtures::*;
@@ -84,9 +84,7 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
         ("public-api", create_public_api()),
     ] {
         info!("[Fixed Mesh] Deploying {}...", name);
-        api.create(&PostParams::default(), &svc)
-            .await
-            .map_err(|e| format!("Failed to create {}: {}", name, e))?;
+        create_with_retry(&api, &svc, name).await?;
     }
 
     info!("[Fixed Mesh] [Layer 2] Deploying API services...");
@@ -96,9 +94,7 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
         ("api-orders", create_api_orders()),
     ] {
         info!("[Fixed Mesh] Deploying {}...", name);
-        api.create(&PostParams::default(), &svc)
-            .await
-            .map_err(|e| format!("Failed to create {}: {}", name, e))?;
+        create_with_retry(&api, &svc, name).await?;
     }
 
     info!("[Fixed Mesh] [Layer 1] Deploying frontend services...");
@@ -108,9 +104,7 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
         ("frontend-admin", create_frontend_admin()),
     ] {
         info!("[Fixed Mesh] Deploying {}...", name);
-        api.create(&PostParams::default(), &svc)
-            .await
-            .map_err(|e| format!("Failed to create {}: {}", name, e))?;
+        create_with_retry(&api, &svc, name).await?;
     }
 
     info!("[Fixed Mesh] All {} services deployed!", TOTAL_SERVICES);

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use tracing::warn;
 
 use crate::crd::{LatticeExternalServiceSpec, LatticeServiceSpec, ParsedEndpoint, Resolution};
 
@@ -362,6 +363,11 @@ impl ServiceGraph {
                 // Get caller details
                 let caller = self.get_service(caller_ns, caller_name)?;
                 if caller.type_ == ServiceType::Unknown {
+                    warn!(
+                        caller = %format!("{}/{}", caller_ns, caller_name),
+                        callee = %format!("{}/{}", namespace, name),
+                        "skipping inbound edge from unknown service (check dependency name)"
+                    );
                     return None;
                 }
 
@@ -396,7 +402,14 @@ impl ServiceGraph {
                 // Check bilateral agreement
                 let allowed = match callee.type_ {
                     ServiceType::Local | ServiceType::External => callee.allows(namespace, name),
-                    ServiceType::Unknown => false,
+                    ServiceType::Unknown => {
+                        warn!(
+                            caller = %format!("{}/{}", namespace, name),
+                            callee = %format!("{}/{}", callee_ns, callee_name),
+                            "skipping outbound edge to unknown service (check dependency name)"
+                        );
+                        false
+                    }
                 };
 
                 if !allowed {

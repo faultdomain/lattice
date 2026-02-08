@@ -33,6 +33,15 @@ use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::ServerMtlsConfig;
 use lattice_proto::SubtreeState;
 
+const DEFAULT_GRPC_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
+fn grpc_max_message_size() -> usize {
+    std::env::var("LATTICE_GRPC_MAX_MESSAGE_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_GRPC_MAX_MESSAGE_SIZE)
+}
+
 /// Shared reference to SubtreeRegistry
 pub type SharedSubtreeRegistry = std::sync::Arc<SubtreeRegistry>;
 
@@ -636,9 +645,10 @@ impl AgentServer {
 
     /// Convert to a tonic service
     pub fn into_service(self) -> LatticeAgentServer<Self> {
+        let max_msg_size = grpc_max_message_size();
         LatticeAgentServer::new(self)
-            .max_decoding_message_size(16 * 1024 * 1024)
-            .max_encoding_message_size(16 * 1024 * 1024)
+            .max_decoding_message_size(max_msg_size)
+            .max_encoding_message_size(max_msg_size)
     }
 
     /// Start the gRPC server with mTLS on the given address
@@ -1104,6 +1114,17 @@ mod tests {
         assert!(ctx.subtree_registry.contains("grandchild").await);
         // Self is always present
         assert!(ctx.subtree_registry.contains("test-cell").await);
+    }
+
+    // =========================================================================
+    // gRPC Max Message Size
+    // =========================================================================
+
+    #[test]
+    fn test_grpc_max_message_size_default() {
+        // When env var is not set, should return 16 MiB
+        std::env::remove_var("LATTICE_GRPC_MAX_MESSAGE_SIZE");
+        assert_eq!(grpc_max_message_size(), 16 * 1024 * 1024);
     }
 
     #[tokio::test]

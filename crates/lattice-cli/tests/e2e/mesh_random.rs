@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-use kube::api::{Api, PostParams};
+use kube::api::Api;
 use rand::prelude::*;
 use tokio::time::sleep;
 use tracing::info;
@@ -21,7 +21,7 @@ use lattice_common::crd::{
 };
 
 use super::helpers::{
-    client_from_kubeconfig, delete_namespace, ensure_fresh_namespace, run_cmd,
+    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace, run_cmd,
     setup_regcreds_infrastructure,
 };
 use super::mesh_fixtures::{
@@ -593,10 +593,7 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
             Api::namespaced(client.clone(), RANDOM_MESH_NAMESPACE);
         for name in mesh.external_services.keys() {
             let ext_svc = mesh.create_external_service(name, RANDOM_MESH_NAMESPACE);
-            ext_api
-                .create(&PostParams::default(), &ext_svc)
-                .await
-                .map_err(|e| format!("Failed to create external service {}: {}", name, e))?;
+            create_with_retry(&ext_api, &ext_svc, name).await?;
         }
     }
 
@@ -610,9 +607,7 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
         );
         for name in layer {
             let svc = mesh.create_lattice_service(name, RANDOM_MESH_NAMESPACE);
-            api.create(&PostParams::default(), &svc)
-                .await
-                .map_err(|e| format!("Failed to create {}: {}", name, e))?;
+            create_with_retry(&api, &svc, name).await?;
         }
         sleep(Duration::from_secs(2)).await;
     }

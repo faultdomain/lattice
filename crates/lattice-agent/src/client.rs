@@ -442,9 +442,10 @@ impl AgentClient {
         &mut self,
         channel: tonic::transport::Channel,
     ) -> Result<(), ClientError> {
+        let max_msg_size = grpc_max_message_size();
         let mut client = LatticeAgentClient::new(channel.clone())
-            .max_decoding_message_size(16 * 1024 * 1024)
-            .max_encoding_message_size(16 * 1024 * 1024);
+            .max_decoding_message_size(max_msg_size)
+            .max_encoding_message_size(max_msg_size);
 
         // Create message channel
         let (message_tx, message_rx) = mpsc::channel::<AgentMessage>(32);
@@ -987,6 +988,15 @@ impl Drop for AgentClient {
             handle.abort();
         }
     }
+}
+
+const DEFAULT_GRPC_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
+fn grpc_max_message_size() -> usize {
+    std::env::var("LATTICE_GRPC_MAX_MESSAGE_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_GRPC_MAX_MESSAGE_SIZE)
 }
 
 /// Extract domain name from a URL for TLS verification
@@ -2105,6 +2115,17 @@ mod tests {
             .build();
 
         assert!(client.api_server_endpoint().is_empty());
+    }
+
+    // ==========================================================================
+    // gRPC Max Message Size
+    // ==========================================================================
+
+    #[test]
+    fn test_grpc_max_message_size_default() {
+        // When env var is not set, should return 16 MiB
+        std::env::remove_var("LATTICE_GRPC_MAX_MESSAGE_SIZE");
+        assert_eq!(grpc_max_message_size(), 16 * 1024 * 1024);
     }
 
     // Note: Ack helper tests moved to the commands module

@@ -208,6 +208,31 @@ pub async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
     .await
 }
 
+/// Create a Kubernetes resource with retry logic (survives port-forward restarts).
+///
+/// Wraps `api.create()` with exponential backoff (up to 5 attempts).
+#[cfg(feature = "provider-e2e")]
+pub async fn create_with_retry<K>(api: &Api<K>, resource: &K, name: &str) -> Result<K, String>
+where
+    K: kube::Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let api = api.clone();
+    let resource = resource.clone();
+    let name = name.to_string();
+    let op_name = format!("create_{}", name);
+    retry_with_backoff(&RetryConfig::with_max_attempts(5), &op_name, || {
+        let api = api.clone();
+        let resource = resource.clone();
+        let name = name.clone();
+        async move {
+            api.create(&PostParams::default(), &resource)
+                .await
+                .map_err(|e| format!("Failed to create {}: {}", name, e))
+        }
+    })
+    .await
+}
+
 /// Inner function for client creation (called by retry wrapper).
 #[cfg(feature = "provider-e2e")]
 async fn client_from_kubeconfig_inner(path: &str) -> Result<Client, String> {
@@ -1711,9 +1736,7 @@ pub async fn deploy_and_wait_for_phase(
     let client = client_from_kubeconfig(kubeconfig).await?;
     let api: Api<LatticeService> = Api::namespaced(client, namespace);
 
-    api.create(&PostParams::default(), &service)
-        .await
-        .map_err(|e| format!("Failed to create service {}: {}", name, e))?;
+    create_with_retry(&api, &service, &name).await?;
 
     match expected_message {
         Some(substring) => {

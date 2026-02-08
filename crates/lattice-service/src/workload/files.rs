@@ -5,7 +5,7 @@
 //! - Binary content → K8s Secret
 //! - Text content with `${secret.*}` refs → ESO ExternalSecret with template
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use lattice_common::template::{FileSecretRef, RenderedFile};
 use lattice_secrets_provider::{
@@ -48,9 +48,17 @@ pub fn compile(
     let mut text_files: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut binary_files: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut secret_files: BTreeMap<String, (String, String, Vec<FileSecretRef>)> = BTreeMap::new();
+    let mut seen_keys: HashSet<String> = HashSet::new();
 
     for (path, file) in files {
         let key = path_to_key(path);
+        if !seen_keys.insert(key.clone()) {
+            return Err(CompilationError::file_compilation(format!(
+                "file path '{}' produces key '{}' which collides with another path \
+                 (paths differing only by '/', '.', or '-' will collide)",
+                path, key
+            )));
+        }
 
         if let Some(ref content) = file.content {
             if file.secret_refs.is_empty() {
@@ -504,6 +512,68 @@ mod tests {
         let result = compile("api", "main", "prod", &files, &secret_refs);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("badkey"));
+    }
+
+    #[test]
+    fn test_path_key_collision_error() {
+        let mut files = BTreeMap::new();
+        files.insert(
+            "/a/b".to_string(),
+            RenderedFile {
+                content: Some("first".to_string()),
+                binary_content: None,
+                source: None,
+                mode: None,
+                secret_refs: vec![],
+            },
+        );
+        files.insert(
+            "/a-b".to_string(),
+            RenderedFile {
+                content: Some("second".to_string()),
+                binary_content: None,
+                source: None,
+                mode: None,
+                secret_refs: vec![],
+            },
+        );
+
+        let result = compile("api", "main", "prod", &files, &empty_secret_refs());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("collides"),
+            "error should mention collision: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_path_key_no_collision() {
+        let mut files = BTreeMap::new();
+        files.insert(
+            "/etc/config.yaml".to_string(),
+            RenderedFile {
+                content: Some("config1".to_string()),
+                binary_content: None,
+                source: None,
+                mode: None,
+                secret_refs: vec![],
+            },
+        );
+        files.insert(
+            "/var/data.txt".to_string(),
+            RenderedFile {
+                content: Some("config2".to_string()),
+                binary_content: None,
+                source: None,
+                mode: None,
+                secret_refs: vec![],
+            },
+        );
+
+        let result = compile("api", "main", "prod", &files, &empty_secret_refs());
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -3689,11 +3689,7 @@ gpu:
     // =========================================================================
 
     /// Build a secret resource with provider, optional keys, and refresh interval.
-    fn secret_resource(
-        remote_key: &str,
-        provider: &str,
-        keys: Option<&[&str]>,
-    ) -> ResourceSpec {
+    fn secret_resource(remote_key: &str, provider: &str, keys: Option<&[&str]>) -> ResourceSpec {
         let mut params = BTreeMap::new();
         params.insert("provider".to_string(), serde_json::json!(provider));
         params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
@@ -3711,9 +3707,10 @@ gpu:
     #[test]
     fn secret_resource_with_explicit_keys() {
         let mut resources = BTreeMap::new();
-        resources.insert("db-creds".to_string(), secret_resource(
-            "path/to/db", "local-test", Some(&["user", "pass"]),
-        ));
+        resources.insert(
+            "db-creds".to_string(),
+            secret_resource("path/to/db", "local-test", Some(&["user", "pass"])),
+        );
 
         let spec = LatticeServiceSpec {
             containers: {
@@ -3746,9 +3743,10 @@ gpu:
     #[test]
     fn service_with_image_pull_secrets() {
         let mut resources = BTreeMap::new();
-        resources.insert("ghcr-creds".to_string(), secret_resource(
-            "local-regcreds", "local-test", None,
-        ));
+        resources.insert(
+            "ghcr-creds".to_string(),
+            secret_resource("local-regcreds", "local-test", None),
+        );
 
         let spec = LatticeServiceSpec {
             containers: {
@@ -3798,9 +3796,14 @@ gpu:
         };
 
         let mut resources = BTreeMap::new();
-        resources.insert("db-creds".to_string(), secret_resource(
-            "local-db-creds", "local-test", Some(&["username", "password"]),
-        ));
+        resources.insert(
+            "db-creds".to_string(),
+            secret_resource(
+                "local-db-creds",
+                "local-test",
+                Some(&["username", "password"]),
+            ),
+        );
 
         let spec = LatticeServiceSpec {
             containers: {

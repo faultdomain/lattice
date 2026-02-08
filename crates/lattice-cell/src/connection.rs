@@ -8,6 +8,7 @@
 //! - `K8sResponseRegistry`: Pending K8s API response tracking (for tunnel tests)
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use lattice_proto::{AgentState, CellCommand, ExecData, KubernetesResponse};
@@ -190,8 +191,9 @@ pub struct AgentRegistry {
     unpivot_manifests: DashMap<String, UnpivotManifests>,
     /// CAPI manifests exported during pivot (deleted after MoveCompleteAck)
     pivot_source_manifests: DashMap<String, PivotSourceManifests>,
-    /// Clusters with teardown in progress (prevents concurrent teardown spawns)
-    teardown_in_progress: DashMap<String, ()>,
+    /// Clusters with teardown in progress (prevents concurrent teardown spawns).
+    /// Stores the time the teardown started; guards older than TEARDOWN_GUARD_TTL are stale.
+    teardown_in_progress: DashMap<String, Instant>,
     /// Pending batch acks keyed by request_id (CellCommand.command_id)
     pending_batch_acks: DashMap<String, oneshot::Sender<BatchAck>>,
     /// Pending complete acks keyed by request_id (CellCommand.command_id)
@@ -211,6 +213,10 @@ pub struct AgentRegistry {
 
 /// Channel capacity for connection notifications
 const CONNECTION_CHANNEL_CAPACITY: usize = 64;
+
+/// Maximum age of a teardown guard before it's considered stale.
+/// If an agent crashes mid-teardown, this prevents the guard from blocking forever.
+const TEARDOWN_GUARD_TTL: Duration = Duration::from_secs(600);
 
 impl Default for AgentRegistry {
     fn default() -> Self {
@@ -524,14 +530,24 @@ impl AgentRegistry {
     /// Mark teardown as in progress for a cluster
     ///
     /// Returns true if we successfully started (wasn't already in progress).
+    /// Stale guards older than TEARDOWN_GUARD_TTL are cleared automatically
+    /// to recover from agent crashes during teardown.
     pub fn start_teardown(&self, cluster_name: &str) -> bool {
-        if self.teardown_in_progress.contains_key(cluster_name) {
-            false
-        } else {
-            self.teardown_in_progress
-                .insert(cluster_name.to_string(), ());
-            true
+        if let Some(started_at) = self.teardown_in_progress.get(cluster_name) {
+            if started_at.elapsed() < TEARDOWN_GUARD_TTL {
+                return false;
+            }
+            warn!(
+                cluster = %cluster_name,
+                age_secs = started_at.elapsed().as_secs(),
+                "clearing stale teardown guard"
+            );
+            drop(started_at);
+            self.teardown_in_progress.remove(cluster_name);
         }
+        self.teardown_in_progress
+            .insert(cluster_name.to_string(), Instant::now());
+        true
     }
 
     /// Clear teardown in progress for a cluster
@@ -1161,6 +1177,60 @@ mod tests {
         let registry = AgentRegistry::new();
         assert!(!registry.is_known("never-seen"));
         assert!(!registry.is_connected("never-seen"));
+    }
+
+    // =========================================================================
+    // Teardown Guard Tests
+    // =========================================================================
+
+    #[test]
+    fn test_teardown_guard_blocks() {
+        let registry = AgentRegistry::new();
+
+        // First call should succeed
+        assert!(registry.start_teardown("test-cluster"));
+
+        // Second call should be blocked (guard still fresh)
+        assert!(!registry.start_teardown("test-cluster"));
+    }
+
+    #[test]
+    fn test_teardown_guard_stale_expires() {
+        let registry = AgentRegistry::new();
+
+        // Manually insert a stale guard (700 seconds ago, past the 600s TTL)
+        let stale_time = Instant::now() - Duration::from_secs(700);
+        registry
+            .teardown_in_progress
+            .insert("test-cluster".to_string(), stale_time);
+
+        // start_teardown should clear the stale guard and succeed
+        assert!(registry.start_teardown("test-cluster"));
+    }
+
+    #[test]
+    fn test_teardown_guard_fresh_blocks() {
+        let registry = AgentRegistry::new();
+
+        // Insert a guard that's 500 seconds old (within the 600s TTL)
+        let recent_time = Instant::now() - Duration::from_secs(500);
+        registry
+            .teardown_in_progress
+            .insert("test-cluster".to_string(), recent_time);
+
+        // start_teardown should still be blocked
+        assert!(!registry.start_teardown("test-cluster"));
+    }
+
+    #[test]
+    fn test_teardown_finish_clears_guard() {
+        let registry = AgentRegistry::new();
+
+        assert!(registry.start_teardown("test-cluster"));
+        registry.finish_teardown("test-cluster");
+
+        // After finish, a new teardown should succeed
+        assert!(registry.start_teardown("test-cluster"));
     }
 
     #[test]

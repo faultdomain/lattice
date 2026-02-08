@@ -15,7 +15,9 @@ use kube::api::{Api, PostParams};
 
 use lattice_common::crd::LatticeService;
 
-use super::helpers::{client_from_kubeconfig, load_service_config, run_cmd, wait_for_condition};
+use super::helpers::{
+    client_from_kubeconfig, create_with_retry, load_service_config, run_cmd, wait_for_condition,
+};
 
 const NAMESPACE: &str = "media";
 
@@ -69,9 +71,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
         let service = load_service_config(filename)?;
         let name = service.metadata.name.as_deref().unwrap_or(filename);
         info!("Deploying {}...", name);
-        api.create(&PostParams::default(), &service)
-            .await
-            .map_err(|e| format!("Failed to create {}: {}", name, e))?;
+        create_with_retry(&api, &service, name).await?;
     }
 
     Ok(())
