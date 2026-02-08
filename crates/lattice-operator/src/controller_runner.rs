@@ -26,11 +26,11 @@ use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
     LatticeRestore, LatticeService, LatticeServicePolicy, ModelArtifact, OIDCProvider,
-    ProviderType, SecretsProvider,
+    ProviderType, SecretProvider,
 };
 use lattice_common::ControllerContext;
 use lattice_model_cache::{self as model_cache_ctrl, ModelCacheContext};
-use lattice_secrets_provider as secrets_provider_ctrl;
+use lattice_secret_provider as secrets_provider_ctrl;
 use lattice_service::controller::{
     error_policy as service_error_policy, error_policy_external, reconcile as service_reconcile,
     reconcile_external, DiscoveredCrds, ServiceContext,
@@ -177,7 +177,7 @@ pub fn build_service_controllers(
     ]
 }
 
-/// Build provider controller futures (CloudProvider, SecretsProvider, CedarPolicy, OIDCProvider)
+/// Build provider controller futures (CloudProvider, SecretProvider, CedarPolicy, OIDCProvider)
 pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let ctx = Arc::new(ControllerContext::new(client.clone()));
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
@@ -192,7 +192,7 @@ pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Outp
         .for_each(log_reconcile_result("CloudProvider"));
 
     let secrets_ctrl = Controller::new(
-        Api::<SecretsProvider>::all(client.clone()),
+        Api::<SecretProvider>::all(client.clone()),
         watcher_config(),
     )
     .shutdown_on_signal()
@@ -201,7 +201,7 @@ pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Outp
         lattice_common::default_error_policy,
         ctx.clone(),
     )
-    .for_each(log_reconcile_result("SecretsProvider"));
+    .for_each(log_reconcile_result("SecretProvider"));
 
     let cedar_ctrl = Controller::new(Api::<CedarPolicy>::all(client.clone()), watcher_config())
         .shutdown_on_signal()
@@ -243,7 +243,7 @@ pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Outp
         .for_each(log_reconcile_result("Restore"));
 
     tracing::info!("- CloudProvider controller");
-    tracing::info!("- SecretsProvider controller");
+    tracing::info!("- SecretProvider controller");
     tracing::info!("- CedarPolicy controller");
     tracing::info!("- OIDCProvider controller");
     tracing::info!("- LatticeBackupPolicy controller");

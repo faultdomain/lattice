@@ -133,7 +133,7 @@ pub fn external_outbound_dep(name: &str) -> (String, ResourceSpec) {
 ///
 /// All test images come from GHCR, so every LatticeService must declare this
 /// resource and reference it in `image_pull_secrets`. The resource points at the
-/// seeded `local-regcreds` K8s Secret via the local SecretsProvider.
+/// seeded `local-regcreds` K8s Secret via the local SecretProvider.
 fn ghcr_creds_resource() -> (String, ResourceSpec) {
     let mut params = BTreeMap::new();
     params.insert("provider".to_string(), serde_json::json!(REGCREDS_PROVIDER));

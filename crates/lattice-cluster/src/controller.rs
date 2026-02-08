@@ -1293,7 +1293,7 @@ impl PivotOperations for PivotOperationsImpl {
         self.agent_registry
             .update_state(cluster_name, AgentState::Pivoting);
 
-        // Fetch resources for distribution (CloudProviders, SecretsProviders, CedarPolicies, OIDCProviders, and their secrets)
+        // Fetch resources for distribution (CloudProviders, SecretProviders, CedarPolicies, OIDCProviders, and their secrets)
         let self_cluster_name = self.self_cluster_name.as_deref().unwrap_or("unknown");
         let resources = fetch_distributable_resources(&self.client, self_cluster_name)
             .await

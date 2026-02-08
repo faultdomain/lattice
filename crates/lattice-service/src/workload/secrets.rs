@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_secrets_provider::{build_external_secret, ExternalSecret};
+use lattice_secret_provider::{build_external_secret, ExternalSecret};
 
 use super::error::CompilationError;
 use crate::crd::LatticeServiceSpec;

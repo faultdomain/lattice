@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::debug;
 
-use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretsProvider};
+use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{
     INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL,
@@ -74,10 +74,10 @@ pub async fn fetch_distributable_resources(
         }
     }
 
-    // Fetch SecretsProvider CRDs
-    let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    // Fetch SecretProvider CRDs
+    let sp_api: Api<SecretProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let mut secrets_providers = Vec::new();
-    if let Some(sp_list) = list_crd_optional(&sp_api, &lp, "SecretsProvider").await? {
+    if let Some(sp_list) = list_crd_optional(&sp_api, &lp, "SecretProvider").await? {
         for sp in &sp_list.items {
             secrets_providers.push(serialize_for_distribution(sp)?);
         }

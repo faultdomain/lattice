@@ -114,13 +114,13 @@ spec:
 
 Supported providers: `aws`, `proxmox`, `openstack`, `docker`.
 
-### SecretsProvider
+### SecretProvider
 
 Wraps an ESO `ClusterSecretStore` provider configuration. The `spec.provider` field is passed through verbatim — you write native ESO provider YAML and Lattice manages the ClusterSecretStore lifecycle.
 
 ```yaml
 apiVersion: lattice.dev/v1alpha1
-kind: SecretsProvider
+kind: SecretProvider
 metadata:
   name: vault-prod
 spec:
@@ -329,7 +329,7 @@ crates/
 ├── lattice-infra/          PKI, infrastructure manifests, FIPS crypto
 ├── lattice-backup/         Velero backup/restore controllers
 ├── lattice-cloud-provider/ Cloud account validation
-├── lattice-secrets-provider/ ESO integration
+├── lattice-secret-provider/ ESO integration
 ├── lattice-move/           CAPI resource move for pivot operations
 └── lattice-proto/          gRPC protobuf definitions
 ```

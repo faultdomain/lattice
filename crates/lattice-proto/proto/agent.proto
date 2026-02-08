@@ -250,7 +250,7 @@ message ApplyManifestsCommand {
 message DistributableResources {
   // CloudProvider CRDs (JSON) - infrastructure provider configurations
   repeated bytes cloud_providers = 1;
-  // SecretsProvider CRDs (JSON) - external secrets integrations
+  // SecretProvider CRDs (JSON) - external secrets integrations
   repeated bytes secrets_providers = 2;
   // Secrets referenced by providers (JSON) - credentials for providers
   repeated bytes secrets = 3;

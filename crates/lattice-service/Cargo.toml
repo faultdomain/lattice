@@ -14,7 +14,7 @@ fips = ["lattice-common/fips", "lattice-infra/fips"]
 lattice-common = { workspace = true }
 lattice-cedar = { workspace = true }
 lattice-infra = { workspace = true }
-lattice-secrets-provider = { workspace = true }
+lattice-secret-provider = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

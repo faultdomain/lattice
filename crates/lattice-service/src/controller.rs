@@ -135,7 +135,7 @@ impl DiscoveredCrds {
     /// Used when API discovery fails entirely, and in tests.
     pub fn hardcoded_defaults() -> Self {
         use crate::workload::ScaledObject;
-        use lattice_secrets_provider::ExternalSecret;
+        use lattice_secret_provider::ExternalSecret;
 
         Self {
             external_secret: Some(ExternalSecret::api_resource()),

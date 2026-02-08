@@ -386,8 +386,14 @@ impl TemplateRenderer {
                 // Find the field name (up to })
                 if let Some(end_pos) = remaining.find('}') {
                     let field = &remaining[..end_pos];
-                    // Check if this field is sensitive
-                    if let Some(outputs) = ctx.resources.get(resource_name) {
+                    // Check if this field is sensitive — try both original and
+                    // normalized name since resource keys may contain hyphens
+                    let normalized = resource_name.replace('-', "_");
+                    let outputs = ctx
+                        .resources
+                        .get(resource_name)
+                        .or_else(|| ctx.resources.get(&normalized));
+                    if let Some(outputs) = outputs {
                         if outputs.is_sensitive(field) {
                             return true;
                         }

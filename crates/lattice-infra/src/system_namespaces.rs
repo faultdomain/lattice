@@ -21,6 +21,9 @@ pub const MESH: &[&str] = &["istio-system"];
 /// Certificate management namespace
 pub const CERT: &[&str] = &["cert-manager"];
 
+/// External Secrets Operator namespace
+pub const ESO: &[&str] = &["external-secrets"];
+
 /// GPU infrastructure namespaces (GPU Operator + HAMi)
 pub const GPU: &[&str] = &["gpu-operator", "hami-system"];
 
@@ -51,6 +54,7 @@ pub fn all() -> Vec<&'static str> {
         .chain(CNI.iter())
         .chain(MESH.iter())
         .chain(CERT.iter())
+        .chain(ESO.iter())
         .chain(GPU.iter())
         .chain(MONITORING.iter())
         .chain(CAPI.iter())
@@ -90,6 +94,7 @@ mod tests {
         assert!(namespaces.contains(&"cilium-system"));
         assert!(namespaces.contains(&"istio-system"));
         assert!(namespaces.contains(&"cert-manager"));
+        assert!(namespaces.contains(&"external-secrets"));
         assert!(namespaces.contains(&"capi-system"));
         assert!(namespaces.contains(&"monitoring"));
     }

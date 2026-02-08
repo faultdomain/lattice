@@ -53,7 +53,7 @@
 //!
 //! - [`ApplyManifestsCommand`]: Apply Kubernetes manifests on the child cluster
 //! - [`StatusRequest`]: Request current cluster status from agent
-//! - [`SyncDistributedResourcesCommand`]: Sync CloudProviders, SecretsProviders, policies
+//! - [`SyncDistributedResourcesCommand`]: Sync CloudProviders, SecretProviders, policies
 //! - [`MoveObjectBatch`]: Batch of CAPI resources during pivot
 //! - [`MoveComplete`]: Signals all resources sent, agent should unpause CAPI
 //! - [`KubernetesRequest`]: Proxy Kubernetes API requests through the agent

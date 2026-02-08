@@ -18,7 +18,7 @@ use lattice_common::policy::{
 };
 use lattice_common::{
     DEFAULT_AUTH_PROXY_PORT, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT,
-    LATTICE_SYSTEM_NAMESPACE,
+    LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT,
 };
 
 use super::split_yaml_documents;
@@ -362,6 +362,10 @@ pub fn generate_operator_network_policy(
                         },
                         CiliumPort {
                             port: DEFAULT_AUTH_PROXY_PORT.to_string(),
+                            protocol: "TCP".to_string(),
+                        },
+                        CiliumPort {
+                            port: LOCAL_SECRETS_PORT.to_string(),
                             protocol: "TCP".to_string(),
                         },
                     ],

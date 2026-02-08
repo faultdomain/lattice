@@ -945,7 +945,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             BootstrapError::Internal(format!("failed to serialize parent config Secret: {}", e))
         })?);
 
-        // Note: CloudProvider and SecretsProvider resources (with their referenced secrets)
+        // Note: CloudProvider and SecretProvider resources (with their referenced secrets)
         // are added by the bootstrap_manifests_handler after calling this method.
 
         Ok(BootstrapResponse {
@@ -1080,7 +1080,7 @@ pub async fn csr_handler<G: ManifestGenerator>(
 /// one-time token and returns the manifests as concatenated YAML that can
 /// be piped directly to `kubectl apply -f -`.
 ///
-/// Includes CloudProvider, SecretsProvider CRDs and their referenced secrets
+/// Includes CloudProvider, SecretProvider CRDs and their referenced secrets
 /// from the parent cluster so they're available immediately when the operator starts.
 pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     State(state): State<Arc<BootstrapState<G>>>,
@@ -1103,7 +1103,7 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     // Collect all manifests
     let mut all_manifests = response.manifests;
 
-    // Include CloudProvider, SecretsProvider, CedarPolicy, OIDCProvider and their referenced secrets
+    // Include CloudProvider, SecretProvider, CedarPolicy, OIDCProvider and their referenced secrets
     // This ensures credentials and policies are available when the operator starts, before the gRPC connection
     if let Some(ref client) = state.kube_client {
         let parent_cluster_name =
@@ -1130,7 +1130,7 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
                     }
                 }
 
-                // Add SecretsProviders
+                // Add SecretProviders
                 for sp_bytes in resources.secrets_providers {
                     if let Ok(json) = String::from_utf8(sp_bytes) {
                         all_manifests.push(json);

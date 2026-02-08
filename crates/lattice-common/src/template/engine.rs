@@ -82,10 +82,14 @@ impl TemplateEngine {
         // Preprocess: replace $${...} with placeholder to prevent interpretation
         let preprocessed = template.replace("$${", ESCAPED_PLACEHOLDER);
 
+        // Normalize hyphens in identifier positions within ${...} expressions.
+        // MiniJinja interprets `my-db` as `my` minus `db`, so we convert to `my_db`.
+        let normalized = normalize_template_identifiers(&preprocessed);
+
         // Render the template
         let rendered = self
             .env
-            .render_str(&preprocessed, ctx.to_value())
+            .render_str(&normalized, ctx.to_value())
             .map_err(TemplateError::from)?;
 
         // Postprocess: restore escaped sequences as literal ${
@@ -113,6 +117,75 @@ impl TemplateEngine {
     pub fn has_template_syntax(s: &str) -> bool {
         s.contains("${") || s.contains("{%") || s.contains("{#")
     }
+}
+
+/// Normalize hyphens in identifier positions within `${...}` template expressions.
+///
+/// Converts `${resources.my-db.host}` → `${resources.my_db.host}` so that
+/// minijinja doesn't interpret hyphens as the subtraction operator.
+/// Quoted strings inside expressions are preserved (e.g., `${x | default("my-val")}` keeps the hyphen).
+fn normalize_template_identifiers(template: &str) -> String {
+    let mut result = String::with_capacity(template.len());
+    let mut remaining = template;
+
+    while let Some(start) = remaining.find("${") {
+        result.push_str(&remaining[..start + 2]); // Include "${"
+        remaining = &remaining[start + 2..];
+
+        if let Some(end) = remaining.find('}') {
+            let expression = &remaining[..end];
+            result.push_str(&normalize_expression_hyphens(expression));
+            result.push('}');
+            remaining = &remaining[end + 1..];
+        } else {
+            // No closing brace, keep rest as-is
+            result.push_str(remaining);
+            remaining = "";
+        }
+    }
+
+    result.push_str(remaining);
+    result
+}
+
+/// Normalize hyphens to underscores in identifier positions within an expression,
+/// skipping quoted strings.
+fn normalize_expression_hyphens(expr: &str) -> String {
+    let mut result = String::with_capacity(expr.len());
+    let mut chars = expr.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+                result.push(ch);
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+                result.push(ch);
+            }
+            '-' if !in_single_quote && !in_double_quote => {
+                // Replace hyphen with underscore when between identifier characters
+                let prev_is_ident = result
+                    .chars()
+                    .last()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let next_is_ident = chars
+                    .peek()
+                    .is_some_and(|c| c.is_alphanumeric() || *c == '_');
+                if prev_is_ident && next_is_ident {
+                    result.push('_');
+                } else {
+                    result.push('-');
+                }
+            }
+            _ => result.push(ch),
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -423,5 +496,90 @@ mod tests {
     fn test_has_template_syntax_false_for_plain() {
         assert!(!TemplateEngine::has_template_syntax("plain text"));
         assert!(!TemplateEngine::has_template_syntax(""));
+    }
+
+    // =========================================================================
+    // Hyphen normalization in identifiers
+    // =========================================================================
+
+    #[test]
+    fn test_normalize_simple_hyphenated_resource() {
+        let input = "${resources.my-db.host}";
+        let result = normalize_template_identifiers(input);
+        assert_eq!(result, "${resources.my_db.host}");
+    }
+
+    #[test]
+    fn test_normalize_multiple_hyphens() {
+        let input = "${resources.my-db-creds.some-key}";
+        let result = normalize_template_identifiers(input);
+        assert_eq!(result, "${resources.my_db_creds.some_key}");
+    }
+
+    #[test]
+    fn test_normalize_preserves_quoted_strings() {
+        let input = r#"${config.name | default("my-value")}"#;
+        let result = normalize_template_identifiers(input);
+        assert_eq!(result, r#"${config.name | default("my-value")}"#);
+    }
+
+    #[test]
+    fn test_normalize_no_hyphens_unchanged() {
+        let input = "${resources.db.host}";
+        let result = normalize_template_identifiers(input);
+        assert_eq!(result, "${resources.db.host}");
+    }
+
+    #[test]
+    fn test_normalize_plain_text_hyphens_unchanged() {
+        let input = "plain-text-with-hyphens";
+        let result = normalize_template_identifiers(input);
+        assert_eq!(result, "plain-text-with-hyphens");
+    }
+
+    #[test]
+    fn test_normalize_multiple_expressions() {
+        let input = "${resources.my-db.host}:${resources.my-db.port}";
+        let result = normalize_template_identifiers(input);
+        assert_eq!(result, "${resources.my_db.host}:${resources.my_db.port}");
+    }
+
+    #[test]
+    fn test_hyphenated_resource_renders_correctly() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            .resource(
+                "my-db",
+                ResourceOutputs::builder()
+                    .output("host", "db.svc")
+                    .output("port", "5432")
+                    .build(),
+            )
+            .build();
+
+        let result = engine
+            .render("${resources.my-db.host}:${resources.my-db.port}", &ctx)
+            .expect("hyphenated resource name should render");
+        assert_eq!(result, "db.svc:5432");
+    }
+
+    #[test]
+    fn test_hyphenated_resource_with_filter() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            .resource(
+                "my-db",
+                ResourceOutputs::builder()
+                    .output("host", "db.svc")
+                    .build(),
+            )
+            .build();
+
+        let result = engine
+            .render(r#"${resources.my-db.host | default("fallback")}"#, &ctx)
+            .expect("hyphenated resource with filter should render");
+        assert_eq!(result, "db.svc");
     }
 }

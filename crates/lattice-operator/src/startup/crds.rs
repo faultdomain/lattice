@@ -11,7 +11,7 @@ use kube::{Client, CustomResourceExt};
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
     LatticeRestore, LatticeService, LatticeServicePolicy, ModelArtifact, OIDCProvider,
-    SecretsProvider,
+    SecretProvider,
 };
 
 /// CRD definition with name and resource
@@ -21,7 +21,7 @@ struct CrdDef {
 }
 
 /// CRDs needed by Cluster mode:
-/// LatticeCluster, CloudProvider, SecretsProvider, CedarPolicy, OIDCProvider
+/// LatticeCluster, CloudProvider, SecretProvider, CedarPolicy, OIDCProvider
 fn cluster_crds() -> Vec<CrdDef> {
     vec![
         CrdDef {
@@ -33,8 +33,8 @@ fn cluster_crds() -> Vec<CrdDef> {
             crd: CloudProvider::crd(),
         },
         CrdDef {
-            name: "secretsproviders.lattice.dev",
-            crd: SecretsProvider::crd(),
+            name: "secretproviders.lattice.dev",
+            crd: SecretProvider::crd(),
         },
         CrdDef {
             name: "cedarpolicies.lattice.dev",
@@ -84,7 +84,7 @@ fn service_crds() -> Vec<CrdDef> {
 }
 
 /// CRDs needed by Provider mode:
-/// CloudProvider, SecretsProvider, CedarPolicy, OIDCProvider
+/// CloudProvider, SecretProvider, CedarPolicy, OIDCProvider
 fn provider_crds() -> Vec<CrdDef> {
     vec![
         CrdDef {
@@ -92,8 +92,8 @@ fn provider_crds() -> Vec<CrdDef> {
             crd: CloudProvider::crd(),
         },
         CrdDef {
-            name: "secretsproviders.lattice.dev",
-            crd: SecretsProvider::crd(),
+            name: "secretproviders.lattice.dev",
+            crd: SecretProvider::crd(),
         },
         CrdDef {
             name: "cedarpolicies.lattice.dev",

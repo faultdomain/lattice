@@ -67,7 +67,7 @@ pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), 
         ReconcileError::Internal(format!("failed to build local ClusterSecretStore: {e}"))
     })?;
 
-    let params = PatchParams::apply("lattice-secret-provider").force();
+    let params = PatchParams::apply("lattice-secrets-provider").force();
     css_api
         .patch(LOCAL_WEBHOOK_STORE_NAME, &params, &Patch::Apply(&css_obj))
         .await
@@ -80,23 +80,23 @@ pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), 
         LOCAL_WEBHOOK_STORE_NAME
     );
     Ok(())
-}SecretProvider
+}
 
 /// Reconcile a SecretProvider
 ///
 /// Ensures the corresponding ESO ClusterSecretStore exists with the
-/// providerSecretProviderpassed through verbatim.
+/// provider configuration passed through verbatim.
 pub async fn reconcile(
     sp: Arc<SecretProvider>,
     ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
     let name = sp.name_any();
-    let client = &ctx.client;SecretProvider
+    let client = &ctx.client;
 
     info!(secrets_provider = %name, "Reconciling SecretProvider");
 
-    // Validate spec before attempting to create the ClusterSecSecretProvider
-    if let Err(msg) = sp.spec.validSecretProvider
+    // Validate spec before attempting to create the ClusterSecretStore
+    if let Err(msg) = sp.spec.validate() {
         warn!(secrets_provider = %name, error = %msg, "Invalid SecretProvider spec");
         update_status(client, &sp, SecretProviderPhase::Failed, Some(msg), None).await?;
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
@@ -110,7 +110,7 @@ pub async fn reconcile(
             info!(secrets_provider = %name, "ClusterSecretStore is up to date");
 
             update_status(
-                SecretProvider
+                client,
                 &sp,
                 SecretProviderPhase::Ready,
                 None,
@@ -127,7 +127,7 @@ pub async fn reconcile(
             );
 
             update_status(
-                SecretProvider
+                client,
                 &sp,
                 SecretProviderPhase::Pending,
                 Some("Waiting for ESO to be installed".to_string()),
@@ -147,7 +147,7 @@ pub async fn reconcile(
             );
 
             update_status(
-                SecretProvider
+                client,
                 &sp,
                 SecretProviderPhase::Failed,
                 Some(e.to_string()),
@@ -166,12 +166,12 @@ fn is_crd_not_found(error: &ReconcileError) -> bool {
     err_str.contains("404")
         || err_str.contains("not found")
         || err_str.contains("the server could not find the requested resource")
-}SecretProvider
+}
 
 /// Ensure ClusterSecretStore exists for the SecretProvider.
 ///
 /// Passes `sp.spec.provider` through verbatim as the CSS `spec.provider`.
-async fn SecretProvidersecret_store(
+async fn ensure_cluster_secret_store(
     client: &Client,
     sp: &SecretProvider,
 ) -> Result<(), ReconcileError> {
@@ -185,7 +185,7 @@ async fn SecretProvidersecret_store(
             "name": name,
             "labels": {
                 LABEL_MANAGED_BY: LABEL_MANAGED_BY_LATTICE,
-                "lattice.dev/secret-provider": name,
+                "lattice.dev/secrets-provider": name,
             }
         },
         "spec": {
@@ -199,7 +199,7 @@ async fn SecretProvidersecret_store(
         ReconcileError::Internal(format!("failed to build ClusterSecretStore: {e}"))
     })?;
 
-    let params = PatchParams::apply("lattice-secret-provider").force();
+    let params = PatchParams::apply("lattice-secrets-provider").force();
     css_api
         .patch(&name, &params, &Patch::Apply(&css_obj))
         .await
@@ -245,7 +245,7 @@ async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), Reconcile
         }
     });
 
-    let params = PatchParams::apply("lattice-secret-provider").force();
+    let params = PatchParams::apply("lattice-secrets-provider").force();
     ns_api
         .patch(LOCAL_SECRETS_NAMESPACE, &params, &Patch::Apply(&ns))
         .await
@@ -287,7 +287,7 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
     });
 
     let svc_api: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let params = PatchParams::apply("lattice-secret-provider").force();
+    let params = PatchParams::apply("lattice-secrets-provider").force();
     svc_api
         .patch(LOCAL_SECRETS_SERVICE, &params, &Patch::Apply(&svc))
         .await
@@ -299,11 +299,11 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
 
     debug!("Ensured webhook service {}", LOCAL_SECRETS_SERVICE);
     Ok(())
-}SecretProvider
+}
 
 /// Update SecretProvider status
-async fn SecretProvider
-    client:SecretProvider
+async fn update_status(
+    client: &Client,
     sp: &SecretProvider,
     phase: SecretProviderPhase,
     message: Option<String>,
@@ -323,7 +323,7 @@ async fn SecretProvider
     let name = sp.name_any();
     let namespace = sp
         .namespace()
-        .unwrap_oSecretProviderCE_SYSTEM_NAMESPACE.to_string());
+        .unwrap_or(LATTICE_SYSTEM_NAMESPACE.to_string());
 
     let status = SecretProviderStatus {
         phase,
@@ -334,12 +334,12 @@ async fn SecretProvider
 
     let patch = serde_json::json!({
         "status": status
-    });SecretProvider
+    });
 
     let api: Api<SecretProvider> = Api::namespaced(client.clone(), &namespace);
     api.patch_status(
         &name,
-        &PatchParams::apply("lattice-secret-provider"),
+        &PatchParams::apply("lattice-secrets-provider"),
         &Patch::Merge(&patch),
     )
     .await

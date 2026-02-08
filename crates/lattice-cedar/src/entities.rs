@@ -145,7 +145,7 @@ pub fn build_service_entity(namespace: &str, name: &str) -> Result<Entity> {
 ///
 /// Attributes:
 /// - `path`: full vault path
-/// - `provider`: SecretsProvider name
+/// - `provider`: SecretProvider name
 pub fn build_secret_path_entity(provider: &str, remote_key: &str) -> Result<Entity> {
     let uid_str = format!("{}:{}", provider, remote_key);
     let uid = build_entity_uid("SecretPath", &uid_str)?;

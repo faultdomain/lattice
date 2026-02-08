@@ -47,7 +47,7 @@ const NS_ISOLATION_B: &str = "cedar-secret-t4b";
 const NS_LIFECYCLE: &str = "cedar-secret-t5";
 const NS_PROVIDER: &str = "cedar-secret-t6";
 
-/// Test SecretsProvider name (does not need to exist — Cedar checks happen before ESO)
+/// Test SecretProvider name (does not need to exist — Cedar checks happen before ESO)
 const TEST_PROVIDER: &str = "test-provider";
 
 /// Alternative provider name for provider-scoped tests

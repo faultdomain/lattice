@@ -2362,7 +2362,7 @@ dependencies = [
  "chrono",
  "kube",
  "lattice-common",
- "lattice-secrets-provider",
+ "lattice-secret-provider",
  "serde_json",
  "tokio",
  "tracing",
@@ -2553,7 +2553,7 @@ dependencies = [
  "lattice-infra",
  "lattice-model-cache",
  "lattice-proto",
- "lattice-secrets-provider",
+ "lattice-secret-provider",
  "lattice-service",
  "minijinja",
  "mockall",
@@ -2601,7 +2601,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lattice-secrets-provider"
+name = "lattice-secret-provider"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.8",
@@ -2635,7 +2635,7 @@ dependencies = [
  "lattice-cedar",
  "lattice-common",
  "lattice-infra",
- "lattice-secrets-provider",
+ "lattice-secret-provider",
  "mockall",
  "parking_lot",
  "rstest",

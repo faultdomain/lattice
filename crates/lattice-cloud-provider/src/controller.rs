@@ -29,7 +29,7 @@ use lattice_common::crd::{
 };
 use lattice_common::template::extract_secret_refs;
 use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
-use lattice_secrets_provider::{
+use lattice_secret_provider::{
     apply_external_secret, build_external_secret, build_templated_external_secret,
 };
 

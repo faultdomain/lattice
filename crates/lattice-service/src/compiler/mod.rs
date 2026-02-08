@@ -30,7 +30,7 @@ use lattice_cedar::{PolicyEngine, SecretAuthzRequest};
 
 use lattice_common::mesh;
 use lattice_common::template::{EsoTemplatedEnvVar, RenderConfig, TemplateRenderer};
-use lattice_secrets_provider::{
+use lattice_secret_provider::{
     ExternalSecret, ExternalSecretData, ExternalSecretSpec, ExternalSecretTarget,
     ExternalSecretTemplate, RemoteRef, SecretStoreRef,
 };

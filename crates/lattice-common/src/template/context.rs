@@ -49,11 +49,13 @@ impl TemplateContext {
         );
         map.insert("metadata".to_string(), Value::from_iter(metadata_map));
 
-        // resources
+        // resources — normalize hyphens to underscores so minijinja doesn't
+        // interpret `my-db` as subtraction. Templates are also normalized in
+        // TemplateEngine::render() so `${resources.my-db.host}` matches `my_db`.
         let resources_map: HashMap<String, Value> = self
             .resources
             .iter()
-            .map(|(name, outputs)| (name.clone(), outputs.to_value()))
+            .map(|(name, outputs)| (name.replace('-', "_"), outputs.to_value()))
             .collect();
         map.insert("resources".to_string(), Value::from_iter(resources_map));
 

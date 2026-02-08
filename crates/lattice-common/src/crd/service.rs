@@ -62,7 +62,7 @@ pub enum ResourceType {
     ExternalService,
     /// Persistent volume (Score-compatible)
     Volume,
-    /// Secret from SecretsProvider (ESO ExternalSecret)
+    /// Secret from SecretProvider (ESO ExternalSecret)
     Secret,
     /// Model artifact (pre-fetched to PVC, managed by ModelCache controller)
     Model,
@@ -363,7 +363,7 @@ pub enum VolumeAccessMode {
 
 /// Parsed secret parameters from Score's generic `params` field
 ///
-/// Secrets are synced from a SecretsProvider (Vault) via ESO ExternalSecret.
+/// Secrets are synced from a SecretProvider (Vault) via ESO ExternalSecret.
 /// The `id` field on ResourceSpec specifies the Vault path.
 ///
 /// ```yaml
@@ -372,7 +372,7 @@ pub enum VolumeAccessMode {
 ///     type: secret
 ///     id: database/prod/credentials  # Vault path
 ///     params:
-///       provider: vault-prod         # SecretsProvider name
+///       provider: vault-prod         # SecretProvider name
 ///       keys:
 ///         - username
 ///         - password
@@ -381,7 +381,7 @@ pub enum VolumeAccessMode {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretParams {
-    /// SecretsProvider name (references a ClusterSecretStore)
+    /// SecretProvider name (references a ClusterSecretStore)
     pub provider: String,
 
     /// Specific keys to sync from the secret (optional, syncs all if omitted)

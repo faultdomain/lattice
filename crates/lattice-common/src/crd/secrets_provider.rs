@@ -1,6 +1,6 @@
-//! SecretsProvider CRD for ESO integration
+//! SecretProvider CRD for ESO integration
 //!
-//! A SecretsProvider wraps an ESO `ClusterSecretStore.spec.provider` configuration.
+//! A SecretProvider wraps an ESO `ClusterSecretStore.spec.provider` configuration.
 //! The `spec.provider` field is passed through verbatim — users write native ESO
 //! provider YAML and Lattice manages the ClusterSecretStore lifecycle.
 
@@ -8,7 +8,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// SecretsProvider defines an ESO provider configuration.
+/// SecretProvider defines an ESO provider configuration.
 ///
 /// When created, the controller creates a corresponding ESO ClusterSecretStore
 /// whose `spec.provider` is populated verbatim from `spec.provider`.
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// Example (AWS Secrets Manager):
 /// ```yaml
 /// apiVersion: lattice.dev/v1alpha1
-/// kind: SecretsProvider
+/// kind: SecretProvider
 /// metadata:
 ///   name: team-b-store
 /// spec:
@@ -37,15 +37,15 @@ use serde::{Deserialize, Serialize};
 #[kube(
     group = "lattice.dev",
     version = "v1alpha1",
-    kind = "SecretsProvider",
+    kind = "SecretProvider",
     namespaced,
-    status = "SecretsProviderStatus",
+    status = "SecretProviderStatus",
     printcolumn = r#"{"name":"Provider","type":"string","jsonPath":".status.providerType"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
-pub struct SecretsProviderSpec {
+pub struct SecretProviderSpec {
     /// ESO provider configuration.
     ///
     /// Exactly one top-level key (the provider type) must be present.
@@ -71,13 +71,13 @@ fn preserve_unknown_fields_object(
     obj.into()
 }
 
-/// SecretsProvider status
+/// SecretProvider status
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SecretsProviderStatus {
+pub struct SecretProviderStatus {
     /// Current phase
     #[serde(default)]
-    pub phase: SecretsProviderPhase,
+    pub phase: SecretProviderPhase,
 
     /// Human-readable message
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,9 +92,9 @@ pub struct SecretsProviderStatus {
     pub provider_type: Option<String>,
 }
 
-/// SecretsProvider phase
+/// SecretProvider phase
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-pub enum SecretsProviderPhase {
+pub enum SecretProviderPhase {
     /// Provider is being validated
     #[default]
     Pending,
@@ -104,7 +104,7 @@ pub enum SecretsProviderPhase {
     Failed,
 }
 
-impl SecretsProviderSpec {
+impl SecretProviderSpec {
     /// Returns the provider type name (first key of the provider map).
     ///
     /// E.g. `"vault"`, `"aws"`, `"webhook"`.
@@ -137,7 +137,7 @@ mod tests {
     fn aws_secrets_manager_yaml() {
         let yaml = r#"
 apiVersion: lattice.dev/v1alpha1
-kind: SecretsProvider
+kind: SecretProvider
 metadata:
   name: team-b-store
 spec:
@@ -155,7 +155,7 @@ spec:
             key: secret-access-key
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
+        let provider: SecretProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type_name(), Some("aws"));
         assert!(provider.spec.validate().is_ok());
 
@@ -168,7 +168,7 @@ spec:
     fn vault_provider_yaml() {
         let yaml = r#"
 apiVersion: lattice.dev/v1alpha1
-kind: SecretsProvider
+kind: SecretProvider
 metadata:
   name: vault-prod
 spec:
@@ -184,7 +184,7 @@ spec:
           key: token
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
+        let provider: SecretProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type_name(), Some("vault"));
         assert!(provider.spec.validate().is_ok());
 
@@ -196,7 +196,7 @@ spec:
     fn webhook_provider_yaml() {
         let yaml = r#"
 apiVersion: lattice.dev/v1alpha1
-kind: SecretsProvider
+kind: SecretProvider
 metadata:
   name: webhook-test
 spec:
@@ -208,7 +208,7 @@ spec:
         jsonPath: "$"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
+        let provider: SecretProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type_name(), Some("webhook"));
         assert!(provider.spec.validate().is_ok());
     }
@@ -217,7 +217,7 @@ spec:
     fn barbican_provider_yaml() {
         let yaml = r#"
 apiVersion: lattice.dev/v1alpha1
-kind: SecretsProvider
+kind: SecretProvider
 metadata:
   name: barbican-store
 spec:
@@ -229,14 +229,14 @@ spec:
           name: os-creds
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
+        let provider: SecretProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type_name(), Some("barbican"));
         assert!(provider.spec.validate().is_ok());
     }
 
     #[test]
     fn validate_rejects_empty_provider() {
-        let spec = SecretsProviderSpec {
+        let spec = SecretProviderSpec {
             provider: serde_json::Map::new(),
         };
         let err = spec.validate().unwrap_err();
@@ -248,7 +248,7 @@ spec:
         let mut provider = serde_json::Map::new();
         provider.insert("vault".to_string(), serde_json::json!({}));
         provider.insert("aws".to_string(), serde_json::json!({}));
-        let spec = SecretsProviderSpec { provider };
+        let spec = SecretProviderSpec { provider };
         let err = spec.validate().unwrap_err();
         assert!(err.contains("exactly one provider key"));
         assert!(err.contains("found 2"));
@@ -261,13 +261,13 @@ spec:
             "aws".to_string(),
             serde_json::json!({"region": "us-east-1"}),
         );
-        let spec = SecretsProviderSpec { provider };
+        let spec = SecretProviderSpec { provider };
         assert_eq!(spec.provider_type_name(), Some("aws"));
     }
 
     #[test]
     fn provider_type_name_returns_none_for_empty() {
-        let spec = SecretsProviderSpec {
+        let spec = SecretProviderSpec {
             provider: serde_json::Map::new(),
         };
         assert_eq!(spec.provider_type_name(), None);

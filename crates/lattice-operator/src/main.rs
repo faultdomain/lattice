@@ -72,7 +72,7 @@ struct Cli {
 /// - `All`: Complete operator (default for single-deployment scenarios)
 /// - `Cluster`: Cluster lifecycle (provisioning, pivoting, scaling) + cell infrastructure
 /// - `Service`: Service mesh (policies, workloads, ingress) - no cell infrastructure
-/// - `Provider`: Provider validation only (CloudProvider, SecretsProvider)
+/// - `Provider`: Provider validation only (CloudProvider, SecretProvider)
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 pub enum ControllerMode {
     /// Run all controllers and infrastructure
@@ -82,7 +82,7 @@ pub enum ControllerMode {
     Cluster,
     /// Run service mesh controller only (no cell infrastructure)
     Service,
-    /// Run provider validation controllers only (CloudProvider, SecretsProvider)
+    /// Run provider validation controllers only (CloudProvider, SecretProvider)
     Provider,
 }
 
@@ -351,12 +351,12 @@ async fn run_provider_slice(client: &kube::Client) -> anyhow::Result<SliceHandle
     let controllers = controller_runner::build_provider_controllers(client.clone());
 
     // 4. Ensure local webhook infrastructure (namespace, Service, ClusterSecretStore)
-    lattice_secrets_provider::ensure_local_webhook_infrastructure(client)
+    lattice_secret_provider::ensure_local_webhook_infrastructure(client)
         .await
         .map_err(|e| anyhow::anyhow!("failed to ensure local webhook infrastructure: {e}"))?;
 
     // 5. Start local secrets webhook
-    tokio::spawn(lattice_secrets_provider::start_webhook_server(
+    tokio::spawn(lattice_secret_provider::start_webhook_server(
         client.clone(),
     ));
 
@@ -420,10 +420,10 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     ));
 
     // Ensure local webhook infrastructure + start webhook server
-    lattice_secrets_provider::ensure_local_webhook_infrastructure(client)
+    lattice_secret_provider::ensure_local_webhook_infrastructure(client)
         .await
         .map_err(|e| anyhow::anyhow!("failed to ensure local webhook infrastructure: {e}"))?;
-    tokio::spawn(lattice_secrets_provider::start_webhook_server(
+    tokio::spawn(lattice_secret_provider::start_webhook_server(
         client.clone(),
     ));
 

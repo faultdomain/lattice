@@ -47,7 +47,7 @@ use super::cedar::apply_e2e_default_policy;
 // Constants
 // =============================================================================
 
-/// Local test SecretsProvider name
+/// Local test SecretProvider name
 const LOCAL_TEST_PROVIDER: &str = "local-test";
 
 /// Namespace for basic local secret test

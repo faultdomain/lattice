@@ -88,9 +88,9 @@ pub const CURL_IMAGE: &str = "ghcr.io/evan-hines-js/curl:latest";
 #[cfg(feature = "provider-e2e")]
 pub const BUSYBOX_IMAGE: &str = "ghcr.io/evan-hines-js/busybox:latest";
 
-/// SecretsProvider name used for GHCR registry credentials across all tests.
+/// SecretProvider name used for GHCR registry credentials across all tests.
 ///
-/// Every test that deploys LatticeServices needs a local SecretsProvider with
+/// Every test that deploys LatticeServices needs a local SecretProvider with
 /// this name, plus a seeded `local-regcreds` source secret.
 #[cfg(feature = "provider-e2e")]
 pub const REGCREDS_PROVIDER: &str = "local-test";
@@ -220,7 +220,7 @@ where
     let resource = resource.clone();
     let name = name.to_string();
     let op_name = format!("create_{}", name);
-    retry_with_backoff(&RetryConfig::with_max_attempts(5), &op_name, || {
+    retry_with_backoff(&RetryConfig::infinite(), &op_name, || {
         let api = api.clone();
         let resource = resource.clone();
         let name = name.clone();
@@ -1437,7 +1437,7 @@ pub async fn delete_cluster_and_wait(
 #[cfg(feature = "provider-e2e")]
 pub async fn apply_yaml_with_retry(kubeconfig: &str, yaml: &str) -> Result<(), String> {
     let retry_config = RetryConfig {
-        max_attempts: 5,
+        max_attempts: 0,
         initial_delay: Duration::from_millis(500),
         max_delay: Duration::from_secs(5),
         backoff_multiplier: 2.0,
@@ -2259,17 +2259,17 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 // Local Secrets Helpers
 // =============================================================================
 
-/// Create a SecretsProvider CRD with a webhook provider pointing at the local secrets service
+/// Create a SecretProvider CRD with a webhook provider pointing at the local secrets service
 #[cfg(feature = "provider-e2e")]
 async fn create_local_secrets_provider(kubeconfig: &str, name: &str) -> Result<(), String> {
     info!(
-        "[LocalSecrets] Creating SecretsProvider '{}' with webhook provider...",
+        "[LocalSecrets] Creating SecretProvider '{}' with webhook provider...",
         name
     );
 
     let provider_yaml = format!(
         r#"apiVersion: lattice.dev/v1alpha1
-kind: SecretsProvider
+kind: SecretProvider
 metadata:
   name: {name}
   namespace: {namespace}
@@ -2287,7 +2287,7 @@ spec:
 
     apply_yaml_with_retry(kubeconfig, &provider_yaml).await?;
 
-    info!("[LocalSecrets] SecretsProvider '{}' created", name);
+    info!("[LocalSecrets] SecretProvider '{}' created", name);
     Ok(())
 }
 
@@ -2351,7 +2351,7 @@ metadata:
     apply_yaml_with_retry(kubeconfig, &ns_yaml).await
 }
 
-/// Wait for a SecretsProvider CRD to reach the Ready phase.
+/// Wait for a SecretProvider CRD to reach the Ready phase.
 ///
 /// Polls the `.status.phase` field until it reads "Ready" or "Failed".
 /// Used by local-backed secret provider tests.
@@ -2361,12 +2361,12 @@ pub async fn wait_for_secrets_provider_ready(
     provider_name: &str,
 ) -> Result<(), String> {
     info!(
-        "[SecretsProvider] Waiting for '{}' to be Ready...",
+        "[SecretProvider] Waiting for '{}' to be Ready...",
         provider_name
     );
 
     wait_for_condition(
-        &format!("SecretsProvider '{}' to be Ready", provider_name),
+        &format!("SecretProvider '{}' to be Ready", provider_name),
         Duration::from_secs(120),
         Duration::from_secs(5),
         || async move {
@@ -2376,7 +2376,7 @@ pub async fn wait_for_secrets_provider_ready(
                     "--kubeconfig",
                     kubeconfig,
                     "get",
-                    "secretsprovider",
+                    "secretprovider",
                     provider_name,
                     "-n",
                     LATTICE_SYSTEM_NAMESPACE,
@@ -2388,18 +2388,18 @@ pub async fn wait_for_secrets_provider_ready(
             match output {
                 Ok(raw) => {
                     let phase = raw.trim();
-                    info!("[SecretsProvider] '{}' phase: {}", provider_name, phase);
+                    info!("[SecretProvider] '{}' phase: {}", provider_name, phase);
                     if phase == "Ready" {
                         return Ok(true);
                     }
                     if phase == "Failed" {
-                        return Err(format!("SecretsProvider '{}' failed", provider_name));
+                        return Err(format!("SecretProvider '{}' failed", provider_name));
                     }
                     Ok(false)
                 }
                 Err(e) => {
                     info!(
-                        "[SecretsProvider] Error checking '{}': {}",
+                        "[SecretProvider] Error checking '{}': {}",
                         provider_name, e
                     );
                     Ok(false)
@@ -2944,7 +2944,7 @@ pub async fn verify_synced_secret_keys(
 // Regcreds Infrastructure Setup
 // =============================================================================
 
-/// Set up the local SecretsProvider, seed GHCR regcreds, and apply a broad
+/// Set up the local SecretProvider, seed GHCR regcreds, and apply a broad
 /// Cedar policy permitting all services to access them.
 ///
 /// Call this before deploying any LatticeService in a test — every service
@@ -2952,7 +2952,7 @@ pub async fn verify_synced_secret_keys(
 /// `local-regcreds`, so the local webhook must be ready to serve it.
 #[cfg(feature = "provider-e2e")]
 pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), String> {
-    // Create the local SecretsProvider (idempotent — uses kubectl apply)
+    // Create the local SecretProvider (idempotent — uses kubectl apply)
     create_local_secrets_provider(kubeconfig, REGCREDS_PROVIDER).await?;
     wait_for_secrets_provider_ready(kubeconfig, REGCREDS_PROVIDER).await?;
 

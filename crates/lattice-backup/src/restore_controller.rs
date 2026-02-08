@@ -29,7 +29,7 @@ const DEPENDENCY_RESOURCES: &[&str] = &[
     "secrets",
     "cloudproviders.lattice.dev",
     "cedarpolicies.lattice.dev",
-    "secretsproviders.lattice.dev",
+    "secretproviders.lattice.dev",
     "gpupools.lattice.dev",
     "gputenantquotas.lattice.dev",
 ];

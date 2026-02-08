@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - Kubeconfig patching for self-management (internal K8s endpoint)
-//! - Distributed resource application (CloudProviders, SecretsProviders, Secrets, etc.)
+//! - Distributed resource application (CloudProviders, SecretProviders, Secrets, etc.)
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use k8s_openapi::api::core::v1::Secret;
@@ -13,7 +13,7 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::kube_client::KubeClientProvider;
-use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretsProvider};
+use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{kubeconfig_secret_name, INTERNAL_K8S_ENDPOINT, LATTICE_SYSTEM_NAMESPACE};
 
@@ -264,13 +264,13 @@ pub async fn apply_distributed_resources(
     )
     .await?;
 
-    // Apply SecretsProviders
-    let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    // Apply SecretProviders
+    let sp_api: Api<SecretProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     apply_resources(
         &sp_api,
         &resources.secrets_providers,
         &params,
-        "SecretsProvider",
+        "SecretProvider",
     )
     .await?;
 

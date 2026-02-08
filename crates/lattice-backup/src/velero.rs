@@ -349,7 +349,7 @@ pub const LATTICE_CONTROL_PLANE_RESOURCES: &[&str] = &[
     "latticeexternalservices.lattice.dev",
     "latticeservicepolicies.lattice.dev",
     "cloudproviders.lattice.dev",
-    "secretsproviders.lattice.dev",
+    "secretproviders.lattice.dev",
     "cedarpolicies.lattice.dev",
     "oidcproviders.lattice.dev",
     "latticebackuppolicies.lattice.dev",

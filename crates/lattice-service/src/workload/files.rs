@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use lattice_common::template::{FileSecretRef, RenderedFile};
-use lattice_secrets_provider::{
+use lattice_secret_provider::{
     ExternalSecret, ExternalSecretData, ExternalSecretSpec, ExternalSecretTarget,
     ExternalSecretTemplate, RemoteRef, SecretStoreRef,
 };
