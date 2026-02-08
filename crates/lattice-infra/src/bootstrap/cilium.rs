@@ -6,15 +6,12 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use lattice_common::mesh::{
-    CILIUM_WAYPOINT_FOR_LABEL, HBONE_PORT, ISTIOD_XDS_PORT, WAYPOINT_FOR_SERVICE,
-};
+use lattice_common::mesh::{CILIUM_GATEWAY_NAME_LABEL, HBONE_PORT, ISTIOD_XDS_PORT};
 use lattice_common::policy::{
     CiliumClusterwideNetworkPolicy, CiliumClusterwideSpec, CiliumEgressRule, CiliumIngressRule,
     CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule,
-    ClusterwideEgressRule, ClusterwideEndpointSelector, ClusterwideIngressRule,
-    ClusterwideMetadata, DnsMatch, DnsRules, EnableDefaultDeny, EndpointSelector, FqdnSelector,
-    MatchExpression, PolicyMetadata,
+    ClusterwideEgressRule, ClusterwideIngressRule, ClusterwideMetadata, DnsMatch, DnsRules,
+    EnableDefaultDeny, EndpointSelector, FqdnSelector, MatchExpression, PolicyMetadata,
 };
 use lattice_common::{
     DEFAULT_AUTH_PROXY_PORT, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT,
@@ -61,7 +58,7 @@ pub fn generate_ztunnel_allowlist() -> CiliumClusterwideNetworkPolicy {
                 egress: false,
                 ingress: false,
             }),
-            endpoint_selector: ClusterwideEndpointSelector::default(),
+            endpoint_selector: EndpointSelector::default(),
             ingress: vec![ClusterwideIngressRule {
                 from_cidr: vec!["169.254.7.127/32".to_string()],
                 from_endpoints: vec![],
@@ -89,7 +86,7 @@ pub fn generate_default_deny() -> CiliumClusterwideNetworkPolicy {
                 "Block all ingress traffic by default, allow DNS and K8s API egress".to_string(),
             ),
             enable_default_deny: None,
-            endpoint_selector: ClusterwideEndpointSelector {
+            endpoint_selector: EndpointSelector {
                 match_labels: BTreeMap::new(),
                 match_expressions: vec![MatchExpression {
                     key: "k8s:io.kubernetes.pod.namespace".to_string(),
@@ -103,15 +100,13 @@ pub fn generate_default_deny() -> CiliumClusterwideNetworkPolicy {
             ingress: vec![],
             egress: vec![
                 ClusterwideEgressRule {
-                    to_endpoints: vec![EndpointSelector {
-                        match_labels: BTreeMap::from([
-                            (
-                                "k8s:io.kubernetes.pod.namespace".to_string(),
-                                "kube-system".to_string(),
-                            ),
-                            ("k8s:k8s-app".to_string(), "kube-dns".to_string()),
-                        ]),
-                    }],
+                    to_endpoints: vec![EndpointSelector::from_labels(BTreeMap::from([
+                        (
+                            "k8s:io.kubernetes.pod.namespace".to_string(),
+                            "kube-system".to_string(),
+                        ),
+                        ("k8s:k8s-app".to_string(), "kube-dns".to_string()),
+                    ]))],
                     to_entities: vec![],
                     to_cidr: vec![],
                     to_ports: vec![CiliumPortRule {
@@ -143,43 +138,43 @@ pub fn generate_default_deny() -> CiliumClusterwideNetworkPolicy {
     )
 }
 
-/// Generate a CiliumClusterwideNetworkPolicy for Istio waypoint proxies.
+/// Generate a CiliumClusterwideNetworkPolicy for all Istio Gateway API proxy pods.
 ///
-/// Waypoint proxies need to:
+/// This covers both waypoint proxies and ingress gateways — any pod created by
+/// Istio's Gateway API controller carries the `gateway.networking.k8s.io/gateway-name`
+/// label. All such pods need to:
 /// 1. Connect to istiod for xDS configuration and certificate signing
 /// 2. Forward traffic to services (internal and external) after L7 processing
 ///
-/// In Istio ambient mode, traffic flows: client -> ztunnel -> waypoint -> service
-/// The waypoint terminates HBONE, evaluates AuthorizationPolicy, then forwards to the service.
-/// L7 AuthorizationPolicy controls access - L4 just needs to allow the waypoint to forward.
-pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
+/// Using a single cluster-wide policy avoids duplicating namespace-scoped policies
+/// per service namespace.
+pub fn generate_mesh_proxy_egress_policy() -> CiliumClusterwideNetworkPolicy {
     CiliumClusterwideNetworkPolicy::new(
-        ClusterwideMetadata::new("waypoint-egress"),
+        ClusterwideMetadata::new("mesh-proxy-egress"),
         CiliumClusterwideSpec {
             description: Some(
-                "Allow Istio waypoint proxies to reach istiod and forward to services".to_string(),
+                "Allow Istio mesh proxy pods (waypoints + ingress gateways) to reach istiod and forward traffic".to_string(),
             ),
             enable_default_deny: None,
-            endpoint_selector: ClusterwideEndpointSelector {
-                match_labels: BTreeMap::from([(
-                    CILIUM_WAYPOINT_FOR_LABEL.to_string(),
-                    WAYPOINT_FOR_SERVICE.to_string(),
-                )]),
-                match_expressions: vec![],
+            endpoint_selector: EndpointSelector {
+                match_labels: BTreeMap::new(),
+                match_expressions: vec![MatchExpression {
+                    key: CILIUM_GATEWAY_NAME_LABEL.to_string(),
+                    operator: "Exists".to_string(),
+                    values: vec![],
+                }],
             },
             ingress: vec![],
             egress: vec![
                 // Allow xDS and certificate signing to istiod
                 ClusterwideEgressRule {
-                    to_endpoints: vec![EndpointSelector {
-                        match_labels: BTreeMap::from([
-                            (
-                                "k8s:io.kubernetes.pod.namespace".to_string(),
-                                "istio-system".to_string(),
-                            ),
-                            ("k8s:app".to_string(), "istiod".to_string()),
-                        ]),
-                    }],
+                    to_endpoints: vec![EndpointSelector::from_labels(BTreeMap::from([
+                        (
+                            "k8s:io.kubernetes.pod.namespace".to_string(),
+                            "istio-system".to_string(),
+                        ),
+                        ("k8s:app".to_string(), "istiod".to_string()),
+                    ]))],
                     to_entities: vec![],
                     to_cidr: vec![],
                     to_ports: vec![CiliumPortRule {
@@ -203,16 +198,14 @@ pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
                         rules: None,
                     }],
                 },
-                // Allow waypoints to forward traffic to any internal endpoint
+                // Allow proxies to forward traffic to any internal endpoint
                 ClusterwideEgressRule {
-                    to_endpoints: vec![EndpointSelector {
-                        match_labels: BTreeMap::new(),
-                    }],
+                    to_endpoints: vec![EndpointSelector::default()],
                     to_entities: vec![],
                     to_cidr: vec![],
                     to_ports: vec![],
                 },
-                // Allow waypoints to forward traffic to external services
+                // Allow proxies to forward traffic to external services
                 ClusterwideEgressRule {
                     to_endpoints: vec![],
                     to_entities: vec![],
@@ -261,15 +254,13 @@ pub fn generate_operator_network_policy(
     let mut egress_rules = vec![
         // DNS to kube-dns (with DNS interception rules if we have an FQDN parent)
         CiliumEgressRule {
-            to_endpoints: vec![EndpointSelector {
-                match_labels: BTreeMap::from([
-                    (
-                        "k8s:io.kubernetes.pod.namespace".to_string(),
-                        "kube-system".to_string(),
-                    ),
-                    ("k8s:k8s-app".to_string(), "kube-dns".to_string()),
-                ]),
-            }],
+            to_endpoints: vec![EndpointSelector::from_labels(BTreeMap::from([
+                (
+                    "k8s:io.kubernetes.pod.namespace".to_string(),
+                    "kube-system".to_string(),
+                ),
+                ("k8s:k8s-app".to_string(), "kube-dns".to_string()),
+            ]))],
             to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -341,9 +332,10 @@ pub fn generate_operator_network_policy(
     CiliumNetworkPolicy::new(
         PolicyMetadata::new("lattice-operator", LATTICE_SYSTEM_NAMESPACE),
         CiliumNetworkPolicySpec {
-            endpoint_selector: EndpointSelector {
-                match_labels: BTreeMap::from([("app".to_string(), "lattice-operator".to_string())]),
-            },
+            endpoint_selector: EndpointSelector::from_labels(BTreeMap::from([(
+                "app".to_string(),
+                "lattice-operator".to_string(),
+            )])),
             ingress: vec![CiliumIngressRule {
                 from_endpoints: vec![],
                 to_ports: vec![CiliumPortRule {
@@ -592,6 +584,42 @@ mod tests {
         // Should have ingress rule with fromCIDR
         assert!(!policy.spec.ingress.is_empty());
         assert!(policy.spec.ingress.iter().any(|r| !r.from_cidr.is_empty()));
+    }
+
+    #[test]
+    fn test_mesh_proxy_egress_policy() {
+        let policy = generate_mesh_proxy_egress_policy();
+
+        assert_eq!(policy.metadata.name, "mesh-proxy-egress");
+
+        // Endpoint selector uses Exists on gateway-name label to match all Gateway API pods
+        assert!(policy.spec.endpoint_selector.match_labels.is_empty());
+        assert_eq!(policy.spec.endpoint_selector.match_expressions.len(), 1);
+        let expr = &policy.spec.endpoint_selector.match_expressions[0];
+        assert_eq!(expr.key, CILIUM_GATEWAY_NAME_LABEL);
+        assert_eq!(expr.operator, "Exists");
+        assert!(expr.values.is_empty());
+
+        // Should have egress rules for istiod, HBONE, internal, and external forwarding
+        assert_eq!(policy.spec.egress.len(), 4);
+
+        // First egress rule: istiod xDS
+        let istiod_rule = &policy.spec.egress[0];
+        assert!(istiod_rule
+            .to_endpoints
+            .iter()
+            .any(|e| e.match_labels.get("k8s:app") == Some(&"istiod".to_string())));
+        assert!(istiod_rule.to_ports.iter().any(|p| p
+            .ports
+            .iter()
+            .any(|port| port.port == ISTIOD_XDS_PORT.to_string())));
+
+        // Second egress rule: HBONE
+        let hbone_rule = &policy.spec.egress[1];
+        assert!(hbone_rule.to_ports.iter().any(|p| p
+            .ports
+            .iter()
+            .any(|port| port.port == HBONE_PORT.to_string())));
     }
 
     #[test]

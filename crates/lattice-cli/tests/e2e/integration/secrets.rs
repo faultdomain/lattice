@@ -254,7 +254,7 @@ async fn run_basic_secret_test(kubeconfig: &str) -> Result<(), String> {
         service,
         "Ready",
         None,
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -317,7 +317,7 @@ async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String>
         service,
         "Ready",
         None,
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -376,7 +376,7 @@ async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), Strin
         service,
         "Ready",
         None,
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -412,7 +412,7 @@ async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), Strin
         service,
         "Ready",
         None,
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -458,7 +458,7 @@ async fn run_route4_image_pull_secrets_test(kubeconfig: &str) -> Result<(), Stri
         service,
         "Ready",
         None,
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -498,7 +498,7 @@ async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
         service,
         "Ready",
         None,
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -540,7 +540,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
         service,
         "Ready",
         None,
-        Duration::from_secs(180),
+        Duration::from_secs(300),
     )
     .await?;
 

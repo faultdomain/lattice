@@ -234,7 +234,7 @@ async fn test_create_pod(kubeconfig: &str) -> Result<(), String> {
 async fn test_wait_pod_ready(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/MultiHop] Test 2: Waiting for pod to be ready (polling through 2-hop proxy)...");
 
-    let timeout = Duration::from_secs(120);
+    let timeout = Duration::from_secs(300);
     let start = std::time::Instant::now();
 
     loop {

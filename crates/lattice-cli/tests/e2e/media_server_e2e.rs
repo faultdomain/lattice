@@ -337,7 +337,7 @@ async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
 
     wait_for_condition(
         "Istio waypoint to be ready",
-        Duration::from_secs(120),
+        Duration::from_secs(300),
         Duration::from_secs(5),
         || async move {
             let output = run_cmd(

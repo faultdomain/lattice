@@ -171,7 +171,7 @@ pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, Stri
             })?,
         );
         manifests.push(
-            serde_json::to_string_pretty(&cilium::generate_waypoint_egress_policy()).map_err(
+            serde_json::to_string_pretty(&cilium::generate_mesh_proxy_egress_policy()).map_err(
                 |e| format!("Failed to serialize CiliumClusterwideNetworkPolicy: {}", e),
             )?,
         );

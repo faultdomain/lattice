@@ -65,12 +65,27 @@ pub struct CiliumNetworkPolicySpec {
 }
 
 /// Endpoint selector for CiliumNetworkPolicy
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+///
+/// Used in both namespace-scoped and cluster-scoped policies.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointSelector {
-    /// Match labels
+    /// Match labels (exact key-value match)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub match_labels: BTreeMap<String, String>,
+    /// Match expressions for advanced label selection (Exists, NotIn, etc.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub match_expressions: Vec<MatchExpression>,
+}
+
+impl EndpointSelector {
+    /// Create a selector from exact label matches.
+    pub fn from_labels(labels: BTreeMap<String, String>) -> Self {
+        Self {
+            match_labels: labels,
+            match_expressions: vec![],
+        }
+    }
 }
 
 /// Cilium ingress rule
@@ -215,7 +230,7 @@ pub struct CiliumClusterwideSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_default_deny: Option<EnableDefaultDeny>,
     /// Endpoint selector
-    pub endpoint_selector: ClusterwideEndpointSelector,
+    pub endpoint_selector: EndpointSelector,
     /// Ingress rules
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingress: Vec<ClusterwideIngressRule>,
@@ -233,18 +248,6 @@ pub struct EnableDefaultDeny {
     /// Enable default deny for ingress
     #[serde(default)]
     pub ingress: bool,
-}
-
-/// Endpoint selector with match expressions support
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ClusterwideEndpointSelector {
-    /// Match labels
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub match_labels: BTreeMap<String, String>,
-    /// Match expressions
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub match_expressions: Vec<MatchExpression>,
 }
 
 /// Label selector requirement

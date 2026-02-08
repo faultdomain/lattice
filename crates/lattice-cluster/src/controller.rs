@@ -2205,17 +2205,20 @@ mod tests {
         }
 
         #[rstest]
-        #[case::provider_error(Error::provider("test error".to_string()))]
-        #[case::validation_error(Error::validation("invalid spec".to_string()))]
-        #[case::pivot_error(Error::pivot("pivot failed".to_string()))]
-        fn test_error_policy_always_requeues_with_backoff(#[case] error: Error) {
-            // error_policy should always requeue with 5s backoff regardless of error type
+        #[case::provider_error(Error::provider("test error".to_string()), true)]
+        #[case::validation_error(Error::validation("invalid spec".to_string()), false)]
+        #[case::pivot_error(Error::pivot("pivot failed".to_string()), true)]
+        fn test_error_policy_requeue_behavior(#[case] error: Error, #[case] retryable: bool) {
             let cluster = Arc::new(sample_cluster("test-cluster"));
             let ctx = mock_context_no_updates();
 
             let action = error_policy(cluster, &error, ctx);
 
-            assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+            if retryable {
+                assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+            } else {
+                assert_eq!(action, Action::await_change());
+            }
         }
     }
 
@@ -2705,27 +2708,41 @@ mod tests {
             ))
         }
 
-        /// Story: All errors should result in a requeue with backoff,
-        /// regardless of error type, to handle transient failures.
+        /// Story: Retryable errors requeue with exponential backoff,
+        /// non-retryable errors await change.
         #[test]
-        fn story_all_error_types_trigger_requeue() {
+        fn story_retryable_errors_requeue_nonretryable_await() {
             let cluster = Arc::new(sample_cluster("error-cluster"));
-            let ctx = mock_context_minimal();
 
-            let error_types = vec![
+            // Retryable errors should requeue
+            let retryable = vec![
                 Error::provider("provider error".to_string()),
-                Error::validation("validation error".to_string()),
                 Error::pivot("pivot error".to_string()),
-                Error::serialization("serialization error".to_string()),
                 Error::capi_installation("capi error".to_string()),
             ];
+            for error in retryable {
+                let ctx = mock_context_minimal(); // Fresh context per error
+                let action = error_policy(cluster.clone(), &error, ctx);
+                assert_ne!(
+                    action,
+                    Action::await_change(),
+                    "retryable error {:?} should requeue",
+                    error
+                );
+            }
 
-            for error in error_types {
-                let action = error_policy(cluster.clone(), &error, ctx.clone());
+            // Non-retryable errors should await change
+            let non_retryable = vec![
+                Error::validation("validation error".to_string()),
+                Error::serialization("serialization error".to_string()),
+            ];
+            for error in non_retryable {
+                let ctx = mock_context_minimal();
+                let action = error_policy(cluster.clone(), &error, ctx);
                 assert_eq!(
                     action,
-                    Action::requeue(Duration::from_secs(5)),
-                    "error type {:?} should trigger 5s requeue",
+                    Action::await_change(),
+                    "non-retryable error {:?} should await change",
                     error
                 );
             }
@@ -2734,8 +2751,6 @@ mod tests {
         /// Story: Error policy should work correctly with clusters in any phase.
         #[test]
         fn story_error_policy_works_for_all_phases() {
-            let ctx = mock_context_minimal();
-
             let phases = vec![
                 ClusterPhase::Pending,
                 ClusterPhase::Provisioning,
@@ -2748,14 +2763,15 @@ mod tests {
             ];
 
             for phase in phases {
+                let ctx = mock_context_minimal(); // Fresh context per phase
                 let cluster = Arc::new(cluster_with_phase("test", phase.clone()));
                 let error = Error::provider("test error".to_string());
-                let action = error_policy(cluster, &error, ctx.clone());
+                let action = error_policy(cluster, &error, ctx);
 
                 assert_eq!(
                     action,
                     Action::requeue(Duration::from_secs(5)),
-                    "phase {:?} should trigger requeue",
+                    "phase {:?} should trigger requeue on first error",
                     phase
                 );
             }

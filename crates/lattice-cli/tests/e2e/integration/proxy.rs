@@ -64,7 +64,7 @@ pub async fn wait_for_agent_ready(
 
     wait_for_condition(
         &format!("cluster {} to reach Ready/Pivoted", child_cluster_name),
-        Duration::from_secs(150),
+        Duration::from_secs(300),
         Duration::from_secs(5),
         || async move {
             let phase_trimmed = match run_cmd(

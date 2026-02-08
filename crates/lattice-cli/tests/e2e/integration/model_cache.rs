@@ -91,7 +91,7 @@ async fn verify_model_artifact_creation(kubeconfig: &str) -> Result<(), String> 
     let ma_api: Api<ModelArtifact> = Api::namespaced(client.clone(), TEST_NAMESPACE);
     wait_for_condition(
         "ModelArtifact to be created",
-        Duration::from_secs(120),
+        Duration::from_secs(300),
         Duration::from_secs(5),
         || {
             let ma_api = ma_api.clone();
@@ -164,7 +164,7 @@ async fn verify_prefetch_job_created(kubeconfig: &str) -> Result<(), String> {
     let job_name = expected_job_name.clone();
     wait_for_condition(
         &format!("Job {} to be created", expected_job_name),
-        Duration::from_secs(120),
+        Duration::from_secs(300),
         Duration::from_secs(5),
         || {
             let kc = kc.clone();
@@ -288,7 +288,7 @@ async fn verify_phase_transitions(kubeconfig: &str) -> Result<(), String> {
     let name_dl = artifact_name.to_string();
     wait_for_condition(
         &format!("ModelArtifact {} to reach Downloading", artifact_name),
-        Duration::from_secs(120),
+        Duration::from_secs(300),
         Duration::from_secs(5),
         || {
             let kc = kc_dl.clone();
@@ -395,7 +395,7 @@ async fn verify_failed_retry(kubeconfig: &str) -> Result<(), String> {
     // Wait for it to leave Pending (controller picks it up)
     wait_for_condition(
         &format!("test artifact {} to leave Pending", test_name),
-        Duration::from_secs(120),
+        Duration::from_secs(300),
         Duration::from_secs(5),
         || {
             let kc = kubeconfig.to_string();

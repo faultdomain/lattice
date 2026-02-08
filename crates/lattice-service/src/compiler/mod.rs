@@ -765,7 +765,7 @@ mod tests {
         assert!(output.workloads.deployment.is_some());
         assert!(output.workloads.service_account.is_some());
 
-        // But no policies (not in graph)
+        // No policies when service is not in graph
         assert!(output.policies.is_empty());
     }
 
@@ -786,8 +786,8 @@ mod tests {
             ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
         let output = compiler.compile(&service).await.unwrap();
 
-        // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointAuthPolicy = 6
-        // (VirtualService is generated per dependency, not per service)
+        // Deployment + Service + ServiceAccount + CiliumPolicy
+        // + WaypointGateway + WaypointAuthPolicy = 6
         assert_eq!(output.resource_count(), 6);
     }
 

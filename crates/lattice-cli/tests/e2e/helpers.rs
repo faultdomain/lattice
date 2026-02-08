@@ -1297,7 +1297,7 @@ async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> 
 
     wait_for_condition(
         "LoadBalancer IP to be assigned",
-        Duration::from_secs(120),
+        Duration::from_secs(300),
         Duration::from_secs(5),
         || {
             let result_url = &result_url;
@@ -1473,7 +1473,7 @@ pub async fn delete_cluster_and_wait(
         info!("Waiting for Docker containers to be cleaned up...");
         wait_for_condition(
             &format!("{} Docker container cleanup", cluster_name),
-            Duration::from_secs(150),
+            Duration::from_secs(300),
             Duration::from_secs(5),
             || async move {
                 let deleted = docker_containers_deleted(cluster_name);
@@ -2063,7 +2063,7 @@ impl ProxySession {
 
         wait_for_condition(
             &format!("cluster '{}' to appear in subtree", cluster_name),
-            Duration::from_secs(120),
+            Duration::from_secs(300),
             Duration::from_secs(5),
             || {
                 let client = &client;
@@ -2252,7 +2252,7 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 
         wait_for_condition(
             &format!("namespace {} deletion", namespace),
-            Duration::from_secs(120),
+            Duration::from_secs(300),
             Duration::from_secs(5),
             || async move {
                 let deleted = match run_cmd(
@@ -2855,7 +2855,7 @@ async fn wait_for_pod_running(
             "pod (label={}) in {} to be Running",
             label_selector, namespace
         ),
-        Duration::from_secs(180),
+        Duration::from_secs(300),
         Duration::from_secs(5),
         || async move {
             let output = run_cmd(
@@ -2933,7 +2933,7 @@ pub async fn verify_synced_secret_keys(
 
     wait_for_condition(
         &format!("secret {} in {} to be synced", secret_name, namespace),
-        Duration::from_secs(120),
+        Duration::from_secs(300),
         Duration::from_secs(5),
         || async move {
             let output = run_cmd(

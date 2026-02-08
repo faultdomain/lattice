@@ -48,9 +48,7 @@ impl<'a> PolicyCompiler<'a> {
                         edge.caller_namespace.clone(),
                     );
                     labels.insert(CILIUM_LABEL_NAME.to_string(), edge.caller_name.clone());
-                    EndpointSelector {
-                        match_labels: labels,
-                    }
+                    EndpointSelector::from_labels(labels)
                 })
                 .collect();
 
@@ -93,9 +91,7 @@ impl<'a> PolicyCompiler<'a> {
         );
 
         ingress_rules.push(CiliumIngressRule {
-            from_endpoints: vec![EndpointSelector {
-                match_labels: waypoint_ingress_labels,
-            }],
+            from_endpoints: vec![EndpointSelector::from_labels(waypoint_ingress_labels)],
             to_ports: vec![CiliumPortRule {
                 ports: vec![CiliumPort {
                     port: mesh::HBONE_PORT.to_string(),
@@ -130,9 +126,7 @@ impl<'a> PolicyCompiler<'a> {
         );
         kube_dns_labels.insert("k8s:k8s-app".to_string(), "kube-dns".to_string());
         egress_rules.push(CiliumEgressRule {
-            to_endpoints: vec![EndpointSelector {
-                match_labels: kube_dns_labels,
-            }],
+            to_endpoints: vec![EndpointSelector::from_labels(kube_dns_labels)],
             to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -167,9 +161,7 @@ impl<'a> PolicyCompiler<'a> {
             mesh::WAYPOINT_FOR_SERVICE.to_string(),
         );
         egress_rules.push(CiliumEgressRule {
-            to_endpoints: vec![EndpointSelector {
-                match_labels: waypoint_egress_labels,
-            }],
+            to_endpoints: vec![EndpointSelector::from_labels(waypoint_egress_labels)],
             to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -188,9 +180,7 @@ impl<'a> PolicyCompiler<'a> {
         CiliumNetworkPolicy::new(
             PolicyMetadata::new(format!("policy-{}", service.name), namespace),
             CiliumNetworkPolicySpec {
-                endpoint_selector: EndpointSelector {
-                    match_labels: endpoint_labels,
-                },
+                endpoint_selector: EndpointSelector::from_labels(endpoint_labels),
                 ingress: ingress_rules,
                 egress: egress_rules,
             },
@@ -241,9 +231,7 @@ impl<'a> PolicyCompiler<'a> {
         let to_ports = Self::build_port_rules_for_service(callee);
 
         egress_rules.push(CiliumEgressRule {
-            to_endpoints: vec![EndpointSelector {
-                match_labels: dep_labels,
-            }],
+            to_endpoints: vec![EndpointSelector::from_labels(dep_labels)],
             to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -364,9 +352,7 @@ impl<'a> PolicyCompiler<'a> {
         };
 
         CiliumIngressRule {
-            from_endpoints: vec![EndpointSelector {
-                match_labels: labels,
-            }],
+            from_endpoints: vec![EndpointSelector::from_labels(labels)],
             to_ports,
         }
     }

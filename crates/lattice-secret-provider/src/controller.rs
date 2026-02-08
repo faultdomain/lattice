@@ -276,9 +276,13 @@ async fn check_cluster_secret_store_ready(
 
 /// Build webhook provider configuration for local backend
 fn build_webhook_provider() -> WebhookProvider {
-    // Go template placeholder for ESO — kept as a const to avoid fragile `{{{{`
+    // Go template placeholders for ESO — kept as consts to avoid fragile `{{{{`
     // escaping that `format!` would require for literal double-braces.
     const ESO_REMOTE_REF_KEY: &str = "{{ .remoteRef.key }}";
+    // Extract specific property from the JSON response.
+    // For data entries with property="password", this becomes "$.password".
+    // For dataFrom (no property), this becomes "$." which is equivalent to "$".
+    const ESO_PROPERTY_JSONPATH: &str = "$.{{ .remoteRef.property }}";
 
     let base = format!(
         "http://{}.{}.svc:{}/secret/",
@@ -289,7 +293,7 @@ fn build_webhook_provider() -> WebhookProvider {
         url,
         method: "GET".to_string(),
         result: WebhookResult {
-            json_path: "$".to_string(),
+            json_path: ESO_PROPERTY_JSONPATH.to_string(),
         },
     }
 }
@@ -533,7 +537,10 @@ mod tests {
             provider.url
         );
         assert_eq!(provider.method, "GET");
-        assert_eq!(provider.result.json_path, "$");
+        assert_eq!(
+            provider.result.json_path, "$.{{ .remoteRef.property }}",
+            "jsonPath should extract by remoteRef.property"
+        );
     }
 
     #[test]

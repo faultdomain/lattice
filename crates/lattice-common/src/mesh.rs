@@ -47,6 +47,13 @@ pub const CILIUM_WAYPOINT_FOR_LABEL: &str = "k8s:istio.io/waypoint-for";
 /// Value: name of the waypoint Gateway (e.g., "{namespace}-waypoint").
 pub const USE_WAYPOINT_LABEL: &str = "istio.io/use-waypoint";
 
+/// Cilium label selector for Gateway API gateway-name label.
+///
+/// Present on all pods created by a Gateway API controller (both ingress
+/// gateways and waypoint proxies). Used for cluster-wide Cilium policies
+/// that apply to all mesh proxy pods.
+pub const CILIUM_GATEWAY_NAME_LABEL: &str = "k8s:gateway.networking.k8s.io/gateway-name";
+
 /// Label key for Istio dataplane mode.
 /// Value: "ambient" to enroll pods in ambient mesh.
 pub const DATAPLANE_MODE_LABEL: &str = "istio.io/dataplane-mode";
