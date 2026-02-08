@@ -144,9 +144,7 @@ fn compile_binary_files(
     result.volumes.push(Volume {
         name: vol_name.clone(),
         config_map: None,
-        secret: Some(SecretVolumeSource {
-            secret_name,
-        }),
+        secret: Some(SecretVolumeSource { secret_name }),
         empty_dir: None,
         persistent_volume_claim: None,
     });

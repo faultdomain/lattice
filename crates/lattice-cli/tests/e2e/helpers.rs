@@ -2156,3 +2156,692 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 
     Ok(())
 }
+
+// =============================================================================
+// Local Secrets Helpers
+// =============================================================================
+
+/// Namespace where local secret source K8s Secrets live
+#[cfg(feature = "provider-e2e")]
+pub const LOCAL_SECRETS_NAMESPACE: &str = "lattice-secrets";
+
+/// Create a SecretsProvider CRD with `backend: local`
+#[cfg(feature = "provider-e2e")]
+pub async fn create_local_secrets_provider(kubeconfig: &str, name: &str) -> Result<(), String> {
+    info!(
+        "[LocalSecrets] Creating SecretsProvider '{}' with backend: local...",
+        name
+    );
+
+    let provider_yaml = format!(
+        r#"apiVersion: lattice.dev/v1alpha1
+kind: SecretsProvider
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  backend: local
+  server: ""
+"#,
+        name = name,
+        namespace = LATTICE_SYSTEM_NAMESPACE,
+    );
+
+    apply_yaml_with_retry(kubeconfig, &provider_yaml).await?;
+
+    info!("[LocalSecrets] SecretsProvider '{}' created", name);
+    Ok(())
+}
+
+/// Seed a K8s Secret in the `lattice-secrets` namespace with the source label.
+///
+/// The secret will be labeled with `lattice.dev/secret-source: "true"` so the
+/// webhook handler will serve it.
+#[cfg(feature = "provider-e2e")]
+pub async fn seed_local_secret(
+    kubeconfig: &str,
+    secret_name: &str,
+    data: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    info!("[LocalSecrets] Seeding source secret '{}'...", secret_name);
+
+    // Ensure the namespace exists
+    ensure_namespace(kubeconfig, LOCAL_SECRETS_NAMESPACE).await?;
+
+    // Build stringData entries
+    let string_data: String = data
+        .iter()
+        .map(|(k, v)| format!("  {}: \"{}\"", k, v.replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let secret_yaml = format!(
+        r#"apiVersion: v1
+kind: Secret
+metadata:
+  name: {name}
+  namespace: {namespace}
+  labels:
+    lattice.dev/secret-source: "true"
+type: Opaque
+stringData:
+{string_data}
+"#,
+        name = secret_name,
+        namespace = LOCAL_SECRETS_NAMESPACE,
+        string_data = string_data,
+    );
+
+    apply_yaml_with_retry(kubeconfig, &secret_yaml).await?;
+
+    info!("[LocalSecrets] Source secret '{}' seeded", secret_name);
+    Ok(())
+}
+
+/// Ensure a namespace exists (creates if missing, no-op if present)
+#[cfg(feature = "provider-e2e")]
+pub async fn ensure_namespace(kubeconfig: &str, namespace: &str) -> Result<(), String> {
+    let ns_yaml = format!(
+        r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {namespace}
+"#,
+        namespace = namespace,
+    );
+
+    apply_yaml_with_retry(kubeconfig, &ns_yaml).await
+}
+
+/// Wait for a SecretsProvider CRD to reach the Ready phase.
+///
+/// Polls the `.status.phase` field until it reads "Ready" or "Failed".
+/// Used by both Vault-backed and local-backed secret provider tests.
+#[cfg(feature = "provider-e2e")]
+pub async fn wait_for_secrets_provider_ready(
+    kubeconfig: &str,
+    provider_name: &str,
+) -> Result<(), String> {
+    info!(
+        "[SecretsProvider] Waiting for '{}' to be Ready...",
+        provider_name
+    );
+
+    wait_for_condition(
+        &format!("SecretsProvider '{}' to be Ready", provider_name),
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || async move {
+            let output = run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig,
+                    "get",
+                    "secretsprovider",
+                    provider_name,
+                    "-n",
+                    LATTICE_SYSTEM_NAMESPACE,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ],
+            );
+
+            match output {
+                Ok(raw) => {
+                    let phase = raw.trim();
+                    info!("[SecretsProvider] '{}' phase: {}", provider_name, phase);
+                    if phase == "Ready" {
+                        return Ok(true);
+                    }
+                    if phase == "Failed" {
+                        return Err(format!("SecretsProvider '{}' failed", provider_name));
+                    }
+                    Ok(false)
+                }
+                Err(e) => {
+                    info!(
+                        "[SecretsProvider] Error checking '{}': {}",
+                        provider_name, e
+                    );
+                    Ok(false)
+                }
+            }
+        },
+    )
+    .await
+}
+
+// =============================================================================
+// Local Secrets Route Test Helpers
+// =============================================================================
+
+/// Seed GHCR registry credentials as a local secret for imagePullSecrets.
+///
+/// Uses `load_registry_credentials()` to get the `.dockerconfigjson` payload
+/// and stores it as a labeled K8s Secret in the `lattice-secrets` namespace
+/// so the webhook can serve it to ESO.
+#[cfg(feature = "provider-e2e")]
+pub async fn seed_local_regcreds(kubeconfig: &str, secret_name: &str) -> Result<(), String> {
+    let docker_config = load_registry_credentials()
+        .ok_or("No GHCR credentials (check .env or GHCR_USER/GHCR_TOKEN env vars)")?;
+    let mut data = std::collections::BTreeMap::new();
+    data.insert(".dockerconfigjson".to_string(), docker_config);
+    seed_local_secret(kubeconfig, secret_name, &data).await
+}
+
+/// Seed all source secrets needed for the 5-route secret tests.
+///
+/// Seeds:
+/// - `local-db-creds` (Routes 1, 2, 3): username + password
+/// - `local-api-key` (Route 3 file mount): key
+/// - `local-database-config` (Route 5 dataFrom): host, port, name, ssl
+/// - `local-regcreds` (Route 4 imagePullSecrets): .dockerconfigjson from GHCR creds
+#[cfg(feature = "provider-e2e")]
+pub async fn seed_all_local_test_secrets(kubeconfig: &str) -> Result<(), String> {
+    use std::collections::BTreeMap;
+
+    info!("[LocalSecrets] Seeding all local test secrets...");
+
+    // db-creds (Routes 1, 2, 3)
+    seed_local_secret(
+        kubeconfig,
+        "local-db-creds",
+        &BTreeMap::from([
+            ("username".to_string(), "admin".to_string()),
+            ("password".to_string(), "s3cret-p@ss".to_string()),
+        ]),
+    )
+    .await?;
+
+    // api-key (Route 3 file mount)
+    seed_local_secret(
+        kubeconfig,
+        "local-api-key",
+        &BTreeMap::from([("key".to_string(), "ak-test-12345".to_string())]),
+    )
+    .await?;
+
+    // database-config (Route 5 dataFrom — all keys)
+    seed_local_secret(
+        kubeconfig,
+        "local-database-config",
+        &BTreeMap::from([
+            ("host".to_string(), "db.prod".to_string()),
+            ("port".to_string(), "5432".to_string()),
+            ("name".to_string(), "appdb".to_string()),
+            ("ssl".to_string(), "true".to_string()),
+        ]),
+    )
+    .await?;
+
+    // regcreds (imagePullSecrets — needed by every service)
+    seed_local_regcreds(kubeconfig, "local-regcreds").await?;
+
+    info!("[LocalSecrets] All local test secrets seeded");
+    Ok(())
+}
+
+/// Build a LatticeService exercising all 5 secret routes programmatically.
+///
+/// This parallels the `secret-routes-test.yaml` fixture but allows a
+/// runtime-configurable provider name. Every service includes `ghcr-creds`
+/// for imagePullSecrets since all images come from GHCR.
+#[cfg(feature = "provider-e2e")]
+pub fn create_service_with_all_secret_routes(
+    name: &str,
+    namespace: &str,
+    provider: &str,
+) -> lattice_common::crd::LatticeService {
+    use std::collections::BTreeMap;
+
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use lattice_common::crd::{
+        ContainerSpec, FileMount, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec,
+        ResourceType, ServicePortsSpec,
+    };
+    use lattice_common::template::TemplateString;
+
+    // Container with env vars and file mounts exercising routes 1-3
+    let mut variables = BTreeMap::new();
+    // Route 1: Pure secret env vars → secretKeyRef
+    variables.insert(
+        "DB_PASSWORD".to_string(),
+        TemplateString::new("${secret.db-creds.password}"),
+    );
+    variables.insert(
+        "DB_USERNAME".to_string(),
+        TemplateString::new("${secret.db-creds.username}"),
+    );
+    // Route 2: Mixed-content env var → ESO templated secret
+    variables.insert(
+        "DATABASE_URL".to_string(),
+        TemplateString::new(
+            "postgres://${secret.db-creds.username}:${secret.db-creds.password}@db.svc:5432/mydb",
+        ),
+    );
+    // Plain env var (contrast)
+    variables.insert(
+        "APP_NAME".to_string(),
+        TemplateString::new("secret-routes-test"),
+    );
+
+    // Route 3: File mount with secret templates
+    let mut files = BTreeMap::new();
+    files.insert(
+        "/etc/app/config.yaml".to_string(),
+        FileMount {
+            content: Some(TemplateString::new(
+                "database:\n  password: ${secret.db-creds.password}\n  username: ${secret.db-creds.username}\napi_key: ${secret.api-key.key}\n",
+            )),
+            ..Default::default()
+        },
+    );
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            variables,
+            files,
+            ..Default::default()
+        },
+    );
+
+    // Resources: 4 secret resources covering all 5 routes
+    let mut resources = BTreeMap::new();
+
+    // Routes 1, 2, 3: db-creds with explicit keys
+    let mut db_params = BTreeMap::new();
+    db_params.insert("provider".to_string(), serde_json::json!(provider));
+    db_params.insert(
+        "keys".to_string(),
+        serde_json::json!(["username", "password"]),
+    );
+    db_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+    resources.insert(
+        "db-creds".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("local-db-creds".to_string()),
+            params: Some(db_params),
+            ..Default::default()
+        },
+    );
+
+    // Route 3: api-key with explicit key
+    let mut api_params = BTreeMap::new();
+    api_params.insert("provider".to_string(), serde_json::json!(provider));
+    api_params.insert("keys".to_string(), serde_json::json!(["key"]));
+    api_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+    resources.insert(
+        "api-key".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("local-api-key".to_string()),
+            params: Some(api_params),
+            ..Default::default()
+        },
+    );
+
+    // Route 5: dataFrom (all keys, no explicit keys param)
+    let mut all_params = BTreeMap::new();
+    all_params.insert("provider".to_string(), serde_json::json!(provider));
+    all_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+    resources.insert(
+        "all-db-config".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("local-database-config".to_string()),
+            params: Some(all_params),
+            ..Default::default()
+        },
+    );
+
+    // Route 4: ghcr-creds for imagePullSecrets
+    let mut reg_params = BTreeMap::new();
+    reg_params.insert("provider".to_string(), serde_json::json!(provider));
+    reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+    resources.insert(
+        "ghcr-creds".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("local-regcreds".to_string()),
+            params: Some(reg_params),
+            ..Default::default()
+        },
+    );
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 8080,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            containers,
+            resources,
+            service: Some(ServicePortsSpec { ports }),
+            image_pull_secrets: vec!["ghcr-creds".to_string()],
+            ..Default::default()
+        },
+        status: None,
+    }
+}
+
+// =============================================================================
+// Pod Verification Helpers
+// =============================================================================
+
+/// Wait for a pod matching `label_selector` to be Running, then exec `printenv`
+/// and verify the specified env var has the expected value.
+#[cfg(feature = "provider-e2e")]
+pub async fn verify_pod_env_var(
+    kubeconfig: &str,
+    namespace: &str,
+    label_selector: &str,
+    var_name: &str,
+    expected_value: &str,
+) -> Result<(), String> {
+    info!(
+        "[PodVerify] Checking env var {} in pod (label={}) in {}",
+        var_name, label_selector, namespace
+    );
+
+    // Wait for pod to be Running
+    wait_for_pod_running(kubeconfig, namespace, label_selector).await?;
+
+    // Get the pod name
+    let pod_name = get_pod_name(kubeconfig, namespace, label_selector)?;
+
+    // Exec printenv inside the pod
+    let actual = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "exec",
+            &pod_name,
+            "-n",
+            namespace,
+            "--",
+            "printenv",
+            var_name,
+        ],
+    )?;
+
+    let actual = actual.trim();
+    if actual != expected_value {
+        return Err(format!(
+            "Env var {} mismatch: expected '{}', got '{}'",
+            var_name, expected_value, actual
+        ));
+    }
+
+    info!("[PodVerify] Env var {} = '{}' (correct)", var_name, actual);
+    Ok(())
+}
+
+/// Wait for a pod matching `label_selector` to be Running, then exec `cat`
+/// and verify the file content contains the expected substring.
+#[cfg(feature = "provider-e2e")]
+pub async fn verify_pod_file_content(
+    kubeconfig: &str,
+    namespace: &str,
+    label_selector: &str,
+    file_path: &str,
+    expected_substr: &str,
+) -> Result<(), String> {
+    info!(
+        "[PodVerify] Checking file {} in pod (label={}) in {}",
+        file_path, label_selector, namespace
+    );
+
+    wait_for_pod_running(kubeconfig, namespace, label_selector).await?;
+    let pod_name = get_pod_name(kubeconfig, namespace, label_selector)?;
+
+    let content = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "exec",
+            &pod_name,
+            "-n",
+            namespace,
+            "--",
+            "cat",
+            file_path,
+        ],
+    )?;
+
+    if !content.contains(expected_substr) {
+        return Err(format!(
+            "File {} does not contain '{}'. Actual content:\n{}",
+            file_path, expected_substr, content
+        ));
+    }
+
+    info!("[PodVerify] File {} contains expected content", file_path);
+    Ok(())
+}
+
+/// Check pod spec `imagePullSecrets` via jsonpath and verify the expected
+/// secret name is present.
+#[cfg(feature = "provider-e2e")]
+pub async fn verify_pod_image_pull_secrets(
+    kubeconfig: &str,
+    namespace: &str,
+    label_selector: &str,
+    expected_secret: &str,
+) -> Result<(), String> {
+    info!(
+        "[PodVerify] Checking imagePullSecrets for '{}' in pod (label={}) in {}",
+        expected_secret, label_selector, namespace
+    );
+
+    wait_for_pod_running(kubeconfig, namespace, label_selector).await?;
+    let pod_name = get_pod_name(kubeconfig, namespace, label_selector)?;
+
+    let output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "get",
+            "pod",
+            &pod_name,
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.spec.imagePullSecrets[*].name}",
+        ],
+    )?;
+
+    if !output.contains(expected_secret) {
+        return Err(format!(
+            "Pod {} imagePullSecrets does not contain '{}'. Found: '{}'",
+            pod_name,
+            expected_secret,
+            output.trim()
+        ));
+    }
+
+    info!(
+        "[PodVerify] Pod {} has imagePullSecret '{}'",
+        pod_name, expected_secret
+    );
+    Ok(())
+}
+
+/// Wait for at least one pod matching `label_selector` to reach the Running phase.
+#[cfg(feature = "provider-e2e")]
+pub async fn wait_for_pod_running(
+    kubeconfig: &str,
+    namespace: &str,
+    label_selector: &str,
+) -> Result<(), String> {
+    wait_for_condition(
+        &format!(
+            "pod (label={}) in {} to be Running",
+            label_selector, namespace
+        ),
+        Duration::from_secs(180),
+        Duration::from_secs(5),
+        || async move {
+            let output = run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig,
+                    "get",
+                    "pods",
+                    "-n",
+                    namespace,
+                    "-l",
+                    label_selector,
+                    "-o",
+                    "jsonpath={.items[0].status.phase}",
+                ],
+            );
+            match output {
+                Ok(phase) => {
+                    let phase = phase.trim();
+                    info!("[PodVerify] Pod phase: {}", phase);
+                    Ok(phase == "Running")
+                }
+                Err(_) => Ok(false),
+            }
+        },
+    )
+    .await
+}
+
+/// Get the name of the first pod matching `label_selector`.
+#[cfg(feature = "provider-e2e")]
+pub fn get_pod_name(
+    kubeconfig: &str,
+    namespace: &str,
+    label_selector: &str,
+) -> Result<String, String> {
+    let output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-l",
+            label_selector,
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ],
+    )?;
+
+    let name = output.trim().to_string();
+    if name.is_empty() {
+        return Err(format!(
+            "No pod found matching label '{}' in namespace '{}'",
+            label_selector, namespace
+        ));
+    }
+    Ok(name)
+}
+
+/// Verify a synced K8s Secret has all the expected data keys.
+///
+/// Waits for the secret to appear (ESO may take a moment to sync),
+/// then checks all expected keys are present.
+#[cfg(feature = "provider-e2e")]
+pub async fn verify_synced_secret_keys(
+    kubeconfig: &str,
+    namespace: &str,
+    secret_name: &str,
+    expected_keys: &[&str],
+) -> Result<(), String> {
+    info!(
+        "[PodVerify] Verifying synced secret '{}' has keys {:?}",
+        secret_name, expected_keys
+    );
+
+    wait_for_condition(
+        &format!("secret {} in {} to be synced", secret_name, namespace),
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || async move {
+            let output = run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig,
+                    "get",
+                    "secret",
+                    secret_name,
+                    "-n",
+                    namespace,
+                    "-o",
+                    "jsonpath={.data}",
+                ],
+            );
+            match output {
+                Ok(data) if !data.trim().is_empty() => Ok(true),
+                _ => Ok(false),
+            }
+        },
+    )
+    .await?;
+
+    // Now verify the keys
+    let output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "get",
+            "secret",
+            secret_name,
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ],
+    )?;
+
+    let json: serde_json::Value =
+        serde_json::from_str(&output).map_err(|e| format!("Failed to parse secret JSON: {}", e))?;
+
+    let data = json["data"]
+        .as_object()
+        .ok_or_else(|| format!("Secret {} has no data field", secret_name))?;
+
+    for key in expected_keys {
+        if !data.contains_key(*key) {
+            return Err(format!(
+                "Secret {} missing expected key '{}'. Found: {:?}",
+                secret_name,
+                key,
+                data.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+
+    info!(
+        "[PodVerify] Secret '{}' has all expected keys: {:?}",
+        secret_name, expected_keys
+    );
+    Ok(())
+}

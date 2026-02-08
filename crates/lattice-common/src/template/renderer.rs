@@ -133,7 +133,6 @@ pub fn parse_secret_ref(template: &str) -> Option<SecretVariableRef> {
     })
 }
 
-
 /// An env var that contains `${secret.*}` mixed with other content.
 ///
 /// The non-secret parts have been rendered through the template engine.
@@ -563,11 +562,7 @@ impl TemplateRenderer {
             return None;
         }
 
-        let eso_data_key = format!(
-            "{}_{}",
-            resource.replace('-', "_"),
-            key.replace('-', "_")
-        );
+        let eso_data_key = format!("{}_{}", resource.replace('-', "_"), key.replace('-', "_"));
 
         Some((resource.to_string(), key.to_string(), eso_data_key))
     }
@@ -1639,7 +1634,8 @@ mod tests {
 
     #[test]
     fn test_extract_secret_refs_from_content() {
-        let content = "database:\n  host: ${resources.db.host}\n  password: ${secret.db-creds.password}";
+        let content =
+            "database:\n  host: ${resources.db.host}\n  password: ${secret.db-creds.password}";
         let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
 
         assert_eq!(refs.len(), 1);
@@ -1777,7 +1773,8 @@ mod tests {
 
     #[test]
     fn test_extract_secret_refs_multiline() {
-        let content = "database:\n  host: ${resources.db.host}\n  password: ${secret.db.pass}\n  port: 5432";
+        let content =
+            "database:\n  host: ${resources.db.host}\n  password: ${secret.db.pass}\n  port: 5432";
         let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
 
         assert_eq!(refs.len(), 1);
@@ -1843,8 +1840,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_reverse_mode_mixed() {
         // Mix of reverse-mode Lattice templates and bash variables
-        let content =
-            "DB_PASS=$${secret.db.password}\nSHELL_VAR=${SOME_BASH_VAR}";
+        let content = "DB_PASS=$${secret.db.password}\nSHELL_VAR=${SOME_BASH_VAR}";
         let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, true);
 
         assert_eq!(refs.len(), 1);

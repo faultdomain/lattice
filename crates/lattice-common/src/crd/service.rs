@@ -740,7 +740,7 @@ pub struct Probe {
 }
 
 /// File mount specification
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileMount {
     /// Inline file content (UTF-8, supports `${...}` placeholders)

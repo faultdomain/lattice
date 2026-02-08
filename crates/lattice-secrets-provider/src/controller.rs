@@ -11,14 +11,14 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{
-    SecretsProvider, SecretsProviderPhase, SecretsProviderStatus, VaultAuthMethod,
+    SecretsBackend, SecretsProvider, SecretsProviderPhase, SecretsProviderStatus, VaultAuthMethod,
 };
 use lattice_common::kube_utils::HasApiResource;
 use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::eso::{
     AppRoleAuth, ClusterSecretStore, ClusterSecretStoreSpec, KubernetesAuth, ProviderSpec,
-    SecretKeyRef, ServiceAccountRef, VaultAuth, VaultProvider,
+    SecretKeyRef, ServiceAccountRef, VaultAuth, VaultProvider, WebhookProvider, WebhookResult,
 };
 
 /// Default Vault secret path
@@ -35,6 +35,13 @@ const DEFAULT_APPROLE_PATH: &str = "approle";
 const ESO_NAMESPACE: &str = "external-secrets";
 /// Default ESO service account name
 const ESO_SERVICE_ACCOUNT: &str = "external-secrets";
+
+/// Service name for the local secrets webhook
+const LOCAL_SECRETS_SERVICE: &str = "lattice-local-secrets";
+/// Port for the local secrets webhook
+pub const LOCAL_SECRETS_PORT: u16 = 8787;
+/// Namespace for local secret source K8s Secrets
+pub const LOCAL_SECRETS_NAMESPACE: &str = "lattice-secrets";
 
 /// Requeue interval for successful reconciliation (handles drift detection)
 const REQUEUE_SUCCESS_SECS: u64 = 300;
@@ -123,14 +130,29 @@ async fn ensure_cluster_secret_store(
 ) -> Result<(), ReconcileError> {
     let name = sp.name_any();
 
-    // Build the ClusterSecretStore using typed structs
-    let vault_provider = build_vault_provider(sp)?;
+    // Build the provider spec based on backend type
+    let provider_spec = match sp.spec.backend {
+        SecretsBackend::Vault => {
+            let vault_provider = build_vault_provider(sp)?;
+            ProviderSpec {
+                vault: Some(vault_provider),
+                webhook: None,
+            }
+        }
+        SecretsBackend::Local => {
+            ensure_local_secrets_namespace(client).await?;
+            ensure_webhook_service(client).await?;
+            ProviderSpec {
+                vault: None,
+                webhook: Some(build_webhook_provider()),
+            }
+        }
+    };
+
     let css = ClusterSecretStore::new(
         &name,
         ClusterSecretStoreSpec {
-            provider: ProviderSpec {
-                vault: vault_provider,
-            },
+            provider: provider_spec,
         },
     );
 
@@ -153,6 +175,106 @@ async fn ensure_cluster_secret_store(
         .map_err(|e| ReconcileError::Kube(format!("failed to apply ClusterSecretStore: {e}")))?;
 
     debug!(secrets_provider = %name, "Applied ClusterSecretStore");
+    Ok(())
+}
+
+/// Build webhook provider configuration for local backend
+fn build_webhook_provider() -> WebhookProvider {
+    // Build URL with Go template placeholder for ESO.
+    // Uses string concatenation to avoid fragile `{{` escaping in format! macros.
+    let base = format!(
+        "http://{}.{}.svc:{}/secret/",
+        LOCAL_SECRETS_SERVICE, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT
+    );
+    let url = format!("{}{}", base, go_template("{{ .remoteRef.key }}"));
+    WebhookProvider {
+        url,
+        method: "GET".to_string(),
+        result: WebhookResult {
+            json_path: "$".to_string(),
+        },
+    }
+}
+
+/// Pass through a Go template string unchanged.
+///
+/// This exists solely to keep Go template literals like `{{ .remoteRef.key }}`
+/// out of `format!` macros, where the double-braces would need fragile escaping
+/// (`{{{{` → `{{`). By accepting and returning the literal string, the template
+/// is always human-readable and never misinterpreted by Rust's formatter.
+fn go_template(s: &str) -> &str {
+    s
+}
+
+/// Ensure the `lattice-secrets` namespace exists for local secret sources
+async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), ReconcileError> {
+    use k8s_openapi::api::core::v1::Namespace;
+
+    let ns_api: Api<Namespace> = Api::all(client.clone());
+    let ns = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": LOCAL_SECRETS_NAMESPACE,
+            "labels": {
+                "app.kubernetes.io/managed-by": "lattice"
+            }
+        }
+    });
+
+    let params = PatchParams::apply("lattice-secrets-provider").force();
+    ns_api
+        .patch(LOCAL_SECRETS_NAMESPACE, &params, &Patch::Apply(&ns))
+        .await
+        .map_err(|e| {
+            ReconcileError::Kube(format!(
+                "failed to ensure namespace {LOCAL_SECRETS_NAMESPACE}: {e}"
+            ))
+        })?;
+
+    debug!("Ensured namespace {}", LOCAL_SECRETS_NAMESPACE);
+    Ok(())
+}
+
+/// Ensure the webhook K8s Service exists pointing at operator pods
+async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
+    use k8s_openapi::api::core::v1::Service;
+
+    let svc = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": LOCAL_SECRETS_SERVICE,
+            "namespace": LATTICE_SYSTEM_NAMESPACE,
+            "labels": {
+                "app.kubernetes.io/managed-by": "lattice"
+            }
+        },
+        "spec": {
+            "selector": {
+                "app": "lattice-operator"
+            },
+            "ports": [{
+                "name": "webhook",
+                "port": LOCAL_SECRETS_PORT,
+                "targetPort": LOCAL_SECRETS_PORT,
+                "protocol": "TCP"
+            }]
+        }
+    });
+
+    let svc_api: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let params = PatchParams::apply("lattice-secrets-provider").force();
+    svc_api
+        .patch(LOCAL_SECRETS_SERVICE, &params, &Patch::Apply(&svc))
+        .await
+        .map_err(|e| {
+            ReconcileError::Kube(format!(
+                "failed to ensure webhook service {LOCAL_SECRETS_SERVICE}: {e}"
+            ))
+        })?;
+
+    debug!("Ensured webhook service {}", LOCAL_SECRETS_SERVICE);
     Ok(())
 }
 
@@ -311,6 +433,7 @@ mod tests {
         SecretsProvider::new(
             "vault-prod",
             SecretsProviderSpec {
+                backend: SecretsBackend::default(),
                 server: "https://vault.example.com".to_string(),
                 path: Some("secret/data/myapp".to_string()),
                 auth_method: VaultAuthMethod::Token,
@@ -331,6 +454,7 @@ mod tests {
         SecretsProvider::new(
             "vault-k8s",
             SecretsProviderSpec {
+                backend: SecretsBackend::default(),
                 server: "https://vault.example.com".to_string(),
                 path: Some("secret".to_string()),
                 auth_method: VaultAuthMethod::Kubernetes,
@@ -382,6 +506,7 @@ mod tests {
         SecretsProvider::new(
             "vault-approle",
             SecretsProviderSpec {
+                backend: SecretsBackend::default(),
                 server: "https://vault.example.com".to_string(),
                 path: Some("secret/data/myapp".to_string()),
                 auth_method: VaultAuthMethod::AppRole,
@@ -443,6 +568,7 @@ mod tests {
         let sp = SecretsProvider::new(
             "vault-k8s-default",
             SecretsProviderSpec {
+                backend: SecretsBackend::default(),
                 server: "https://vault.example.com".to_string(),
                 path: None, // Should default to "secret"
                 auth_method: VaultAuthMethod::Kubernetes,
@@ -507,6 +633,7 @@ mod tests {
         let sp = SecretsProvider::new(
             "vault-token-default",
             SecretsProviderSpec {
+                backend: SecretsBackend::default(),
                 server: "https://vault.example.com".to_string(),
                 path: None, // Should default to "secret"
                 auth_method: VaultAuthMethod::Token,
@@ -589,5 +716,35 @@ mod tests {
         assert_eq!(REQUEUE_CRD_NOT_FOUND_SECS, 30);
         // Error path: 1 minute for backoff
         assert_eq!(REQUEUE_ERROR_SECS, 60);
+    }
+
+    // =========================================================================
+    // Webhook Provider Tests
+    // =========================================================================
+
+    #[test]
+    fn build_webhook_provider_produces_correct_url() {
+        let provider = build_webhook_provider();
+        assert!(
+            provider
+                .url
+                .contains("lattice-local-secrets.lattice-system.svc:8787"),
+            "URL should target the webhook service: {}",
+            provider.url
+        );
+        assert!(
+            provider.url.contains("{{ .remoteRef.key }}"),
+            "URL should contain Go template placeholder: {}",
+            provider.url
+        );
+        assert_eq!(provider.method, "GET");
+        assert_eq!(provider.result.json_path, "$");
+    }
+
+    #[test]
+    fn local_secrets_constants_are_expected() {
+        assert_eq!(LOCAL_SECRETS_SERVICE, "lattice-local-secrets");
+        assert_eq!(LOCAL_SECRETS_PORT, 8787);
+        assert_eq!(LOCAL_SECRETS_NAMESPACE, "lattice-secrets");
     }
 }

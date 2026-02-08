@@ -350,6 +350,11 @@ async fn run_provider_slice(client: &kube::Client) -> anyhow::Result<SliceHandle
     // 3. Build controller futures (no Cedar, no cell infra)
     let controllers = controller_runner::build_provider_controllers(client.clone());
 
+    // 4. Start local secrets webhook (lightweight, harmless if no Local provider configured)
+    tokio::spawn(lattice_secrets_provider::start_webhook_server(
+        client.clone(),
+    ));
+
     Ok(SliceHandle {
         controllers,
         parent_servers: None,
@@ -406,6 +411,11 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     ));
 
     controllers.extend(controller_runner::build_provider_controllers(
+        client.clone(),
+    ));
+
+    // Start local secrets webhook (lightweight, harmless if no Local provider configured)
+    tokio::spawn(lattice_secrets_provider::start_webhook_server(
         client.clone(),
     ));
 

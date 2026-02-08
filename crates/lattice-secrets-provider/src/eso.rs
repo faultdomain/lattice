@@ -87,11 +87,40 @@ pub struct ClusterSecretStoreSpec {
     pub provider: ProviderSpec,
 }
 
-/// Provider specification (currently only Vault is supported)
+/// Provider specification (Vault or webhook backend)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ProviderSpec {
     /// Vault provider configuration
-    pub vault: VaultProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<VaultProvider>,
+    /// Webhook provider configuration (used by local backend)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookProvider>,
+}
+
+/// Webhook provider configuration for ESO ClusterSecretStore
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookProvider {
+    /// Webhook URL with template placeholders (e.g., `{{ .remoteRef.key }}`)
+    pub url: String,
+    /// HTTP method (GET, POST, etc.)
+    #[serde(default = "default_get")]
+    pub method: String,
+    /// Result extraction configuration
+    pub result: WebhookResult,
+}
+
+fn default_get() -> String {
+    "GET".to_string()
+}
+
+/// Result extraction for webhook provider
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookResult {
+    /// JSONPath expression to extract data from response
+    pub json_path: String,
 }
 
 /// Vault provider configuration
@@ -567,5 +596,59 @@ mod tests {
         let json = serde_json::to_string(&target).unwrap();
         // template should not appear in JSON when None
         assert!(!json.contains("template"));
+    }
+
+    #[test]
+    fn test_provider_spec_vault_only() {
+        let spec = ProviderSpec {
+            vault: Some(VaultProvider {
+                server: "https://vault.example.com".to_string(),
+                path: "secret".to_string(),
+                version: "v2".to_string(),
+                namespace: None,
+                ca_bundle: None,
+                auth: VaultAuth {
+                    token_secret_ref: None,
+                    kubernetes: None,
+                    app_role: None,
+                },
+            }),
+            webhook: None,
+        };
+        let json = serde_json::to_string_pretty(&spec).unwrap();
+        assert!(json.contains("vault"));
+        assert!(!json.contains("webhook"));
+
+        let parsed: ProviderSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn test_provider_spec_webhook_only() {
+        let spec = ProviderSpec {
+            vault: None,
+            webhook: Some(WebhookProvider {
+                url: "http://lattice-local-secrets.lattice-system.svc:8787/secret/{{ .remoteRef.key }}".to_string(),
+                method: "GET".to_string(),
+                result: WebhookResult {
+                    json_path: "$".to_string(),
+                },
+            }),
+        };
+        let json = serde_json::to_string_pretty(&spec).unwrap();
+        assert!(!json.contains("vault"));
+        assert!(json.contains("webhook"));
+        assert!(json.contains("remoteRef.key"));
+        assert!(json.contains("jsonPath"));
+
+        let parsed: ProviderSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn test_webhook_provider_default_method() {
+        let json = r#"{"url":"http://example.com","result":{"jsonPath":"$"}}"#;
+        let parsed: WebhookProvider = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.method, "GET");
     }
 }

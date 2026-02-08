@@ -35,6 +35,7 @@ use super::types::SecretRef;
     kind = "SecretsProvider",
     namespaced,
     status = "SecretsProviderStatus",
+    printcolumn = r#"{"name":"Backend","type":"string","jsonPath":".spec.backend"}"#,
     printcolumn = r#"{"name":"Server","type":"string","jsonPath":".spec.server"}"#,
     printcolumn = r#"{"name":"Auth","type":"string","jsonPath":".spec.authMethod"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
@@ -42,7 +43,11 @@ use super::types::SecretRef;
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SecretsProviderSpec {
-    /// Vault server URL
+    /// Backend type (default: vault)
+    #[serde(default)]
+    pub backend: SecretsBackend,
+
+    /// Vault server URL (required for vault backend, ignored for local)
     pub server: String,
 
     /// Path prefix for secrets (e.g., "secret/data/lattice")
@@ -78,6 +83,17 @@ pub struct SecretsProviderSpec {
     /// CA certificate for TLS verification (PEM format)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_bundle: Option<String>,
+}
+
+/// Backend type for secrets storage
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SecretsBackend {
+    /// HashiCorp Vault backend (requires server, auth config)
+    #[default]
+    Vault,
+    /// Local webhook backend (operator proxies K8s Secrets via HTTP)
+    Local,
 }
 
 /// Vault authentication methods
@@ -163,5 +179,37 @@ spec:
         let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.auth_method, VaultAuthMethod::Kubernetes);
         assert_eq!(provider.spec.kubernetes_role, Some("lattice".to_string()));
+    }
+
+    #[test]
+    fn backend_defaults_to_vault() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: SecretsProvider
+metadata:
+  name: vault-prod
+spec:
+  server: https://vault.example.com
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
+        assert_eq!(provider.spec.backend, SecretsBackend::Vault);
+    }
+
+    #[test]
+    fn local_backend_parses() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: SecretsProvider
+metadata:
+  name: local-test
+spec:
+  backend: local
+  server: ""
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
+        assert_eq!(provider.spec.backend, SecretsBackend::Local);
+        assert_eq!(provider.spec.server, "");
     }
 }

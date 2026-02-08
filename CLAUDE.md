@@ -92,6 +92,29 @@ This generates:
 - **Istio**: `AuthorizationPolicy` with empty `spec: {}` (deny all)
 - System namespaces excluded: `kube-system`, `cilium-system`, `istio-system`, `lattice-system`, `cert-manager`, `capi-*`
 
+### Cedar Policy Authorization
+
+Secret access is governed by Cedar policies (default-deny):
+- **Principal**: `Lattice::Service::"namespace/name"` (service identity)
+- **Action**: `Lattice::Action::"AccessSecret"`
+- **Resource**: `Lattice::SecretPath::"provider:remote_key"` (secret identity)
+- Policies are evaluated during `ServiceCompiler::compile()` before ESO objects are created
+- `forbid` policies override `permit` policies (standard Cedar semantics)
+
+### Secrets via External Secrets Operator (ESO)
+
+LatticeService resources declare secrets via `spec.resources` with `type: secret`. The compiler routes these through 5 paths:
+
+| Route | Input | Compilation Output |
+|-------|-------|--------------------|
+| Pure secret env var | `VAR: "${secret.name.key}"` | K8s `secretKeyRef` |
+| Mixed-content env var | `DSN: "prefix${secret.name.key}suffix"` | ESO ExternalSecret with Go template |
+| File mount with secrets | `files: path: content: "${secret.name.key}"` | ESO ExternalSecret with `target.template.data` |
+| imagePullSecrets | `imagePullSecrets: [name]` + secret resource | ExternalSecret → synced secret → pod spec |
+| dataFrom (all keys) | Secret resource with no `keys` param | ExternalSecret with `dataFrom.extract` |
+
+**Backends**: Vault (production) or local webhook (dev/testing). The local webhook serves K8s Secrets from `lattice-secrets` namespace as flat JSON for ESO.
+
 ### FIPS Requirements
 
 All cryptographic operations MUST use FIPS 140-2/140-3 validated implementations:
@@ -189,11 +212,13 @@ async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Result<Ac
 │                    Test Infrastructure                          │
 ├─────────────────────────────────────────────────────────────────┤
 │  INTEGRATION TESTS (assume cluster exists, can run standalone)  │
-│  ├─ integration/mesh.rs       - Mesh bilateral agreement tests  │
-│  ├─ integration/capi.rs       - CAPI resource verification      │
-│  ├─ integration/scaling.rs    - Worker scaling tests            │
-│  ├─ integration/proxy.rs      - K8s API proxy through hierarchy │
-│  └─ integration/pivot.rs      - Unpivot verification            │
+│  ├─ integration/mesh.rs         - Mesh bilateral agreement tests│
+│  ├─ integration/secrets.rs      - ESO secret route tests        │
+│  ├─ integration/cedar_secrets.rs- Cedar secret authz tests      │
+│  ├─ integration/capi.rs         - CAPI resource verification    │
+│  ├─ integration/scaling.rs      - Worker scaling tests          │
+│  ├─ integration/proxy.rs        - K8s API proxy through hierarchy│
+│  └─ integration/pivot.rs        - Unpivot verification          │
 ├─────────────────────────────────────────────────────────────────┤
 │  E2E TESTS (build everything, compose integration tests)        │
 │  ├─ unified_e2e.rs          - Full lifecycle                      │
@@ -268,6 +293,23 @@ cargo test --features provider-e2e --test e2e test_mesh_standalone -- --ignored 
 
 # Setup infrastructure only (leave running for iteration)
 cargo test --features provider-e2e --test e2e test_setup_hierarchy_only -- --ignored --nocapture
+
+# Secrets tests (Vault-backed)
+docker compose up -d
+LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
+cargo test --features provider-e2e --test e2e test_secrets_standalone -- --ignored --nocapture
+
+# Local secrets tests (no Vault — uses webhook backend)
+LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
+cargo test --features provider-e2e --test e2e test_local_secrets_standalone -- --ignored --nocapture
+
+# 5-route secret tests only
+LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
+cargo test --features provider-e2e --test e2e test_local_secrets_routes_standalone -- --ignored --nocapture
+
+# Cedar secret authorization tests
+LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
+cargo test --features provider-e2e --test e2e test_cedar_secret_standalone -- --ignored --nocapture
 ```
 
 ### Centralized Constants
@@ -391,6 +433,8 @@ crates/lattice-cli/tests/e2e/
 ├── integration/        # Integration tests (assume infra exists)
 │   ├── mod.rs
 │   ├── mesh.rs         # Mesh tests (wraps mesh_tests.rs)
+│   ├── secrets.rs      # ESO secret routes (Vault + local + 5-route)
+│   ├── cedar_secrets.rs# Cedar secret authorization tests
 │   ├── capi.rs         # CAPI resource verification
 │   ├── scaling.rs      # Worker scaling
 │   ├── proxy.rs        # K8s API proxy through hierarchy

@@ -1219,7 +1219,9 @@ impl WorkloadCompiler {
                     .unwrap_or_default();
 
                 // Add file volume mounts from files::compile
-                if let Some(file_mounts) = container_data.per_container_file_mounts.get(container_name) {
+                if let Some(file_mounts) =
+                    container_data.per_container_file_mounts.get(container_name)
+                {
                     volume_mounts.extend(file_mounts.iter().cloned());
                 }
 
@@ -1550,11 +1552,7 @@ impl WorkloadCompiler {
         container_data: &ContainerCompilationData<'_>,
     ) -> Result<Deployment, CompilationError> {
         // Compile main containers with volume mounts
-        let mut containers = Self::compile_containers_with_volumes(
-            spec,
-            volumes,
-            container_data,
-        )?;
+        let mut containers = Self::compile_containers_with_volumes(spec, volumes, container_data)?;
 
         // Compile sidecars (init + regular)
         let (init_containers, sidecar_containers) = Self::compile_sidecars(spec, volumes);
@@ -1610,7 +1608,8 @@ impl WorkloadCompiler {
         let security_context = Self::compile_pod_security_context(spec);
 
         // Resolve imagePullSecrets from spec resource names to K8s Secret names
-        let image_pull_secrets = Self::compile_image_pull_secrets(spec, container_data.secret_refs)?;
+        let image_pull_secrets =
+            Self::compile_image_pull_secrets(spec, container_data.secret_refs)?;
 
         Ok(Deployment {
             api_version: "apps/v1".to_string(),
