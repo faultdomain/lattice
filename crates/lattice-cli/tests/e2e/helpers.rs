@@ -18,7 +18,7 @@ use lattice_common::crd::{BootstrapProvider, ClusterPhase, LatticeService};
 #[cfg(feature = "provider-e2e")]
 use lattice_common::{
     retry::{retry_with_backoff, RetryConfig},
-    LATTICE_SYSTEM_NAMESPACE,
+    LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE,
 };
 #[cfg(feature = "provider-e2e")]
 use tokio::time::sleep;
@@ -2229,10 +2229,6 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 // Local Secrets Helpers
 // =============================================================================
 
-/// Namespace where local secret source K8s Secrets live
-#[cfg(feature = "provider-e2e")]
-pub const LOCAL_SECRETS_NAMESPACE: &str = "lattice-secrets";
-
 /// Create a SecretsProvider CRD with `backend: local`
 #[cfg(feature = "provider-e2e")]
 async fn create_local_secrets_provider(kubeconfig: &str, name: &str) -> Result<(), String> {
@@ -2452,9 +2448,9 @@ pub async fn seed_all_local_test_secrets(kubeconfig: &str) -> Result<(), String>
 
 /// Build a LatticeService exercising all 5 secret routes programmatically.
 ///
-/// This parallels the `secret-routes-test.yaml` fixture but allows a
-/// runtime-configurable provider name. Every service includes `ghcr-creds`
-/// for imagePullSecrets since all images come from GHCR.
+/// Build a LatticeService with a runtime-configurable provider name exercising
+/// all 5 secret routes. Every service includes `ghcr-creds` for imagePullSecrets
+/// since all images come from GHCR.
 #[cfg(feature = "provider-e2e")]
 pub fn create_service_with_all_secret_routes(
     name: &str,

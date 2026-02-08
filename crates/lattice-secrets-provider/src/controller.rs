@@ -14,7 +14,10 @@ use lattice_common::crd::{
     SecretsBackend, SecretsProvider, SecretsProviderPhase, SecretsProviderStatus, VaultAuthMethod,
 };
 use lattice_common::kube_utils::HasApiResource;
-use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE,
+    LOCAL_SECRETS_PORT,
+};
 
 use crate::eso::{
     AppRoleAuth, ClusterSecretStore, ClusterSecretStoreSpec, KubernetesAuth, ProviderSpec,
@@ -38,10 +41,6 @@ const ESO_SERVICE_ACCOUNT: &str = "external-secrets";
 
 /// Service name for the local secrets webhook
 const LOCAL_SECRETS_SERVICE: &str = "lattice-local-secrets";
-/// Port for the local secrets webhook
-pub const LOCAL_SECRETS_PORT: u16 = 8787;
-/// Namespace for local secret source K8s Secrets
-pub const LOCAL_SECRETS_NAMESPACE: &str = "lattice-secrets";
 
 /// Requeue interval for successful reconciliation (handles drift detection)
 const REQUEUE_SUCCESS_SECS: u64 = 300;
@@ -180,13 +179,15 @@ async fn ensure_cluster_secret_store(
 
 /// Build webhook provider configuration for local backend
 fn build_webhook_provider() -> WebhookProvider {
-    // Build URL with Go template placeholder for ESO.
-    // Uses string concatenation to avoid fragile `{{` escaping in format! macros.
+    // Go template placeholder for ESO — kept as a const to avoid fragile `{{{{`
+    // escaping that `format!` would require for literal double-braces.
+    const ESO_REMOTE_REF_KEY: &str = "{{ .remoteRef.key }}";
+
     let base = format!(
         "http://{}.{}.svc:{}/secret/",
         LOCAL_SECRETS_SERVICE, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT
     );
-    let url = format!("{}{}", base, go_template("{{ .remoteRef.key }}"));
+    let url = format!("{}{}", base, ESO_REMOTE_REF_KEY);
     WebhookProvider {
         url,
         method: "GET".to_string(),
@@ -194,16 +195,6 @@ fn build_webhook_provider() -> WebhookProvider {
             json_path: "$".to_string(),
         },
     }
-}
-
-/// Pass through a Go template string unchanged.
-///
-/// This exists solely to keep Go template literals like `{{ .remoteRef.key }}`
-/// out of `format!` macros, where the double-braces would need fragile escaping
-/// (`{{{{` → `{{`). By accepting and returning the literal string, the template
-/// is always human-readable and never misinterpreted by Rust's formatter.
-fn go_template(s: &str) -> &str {
-    s
 }
 
 /// Ensure the `lattice-secrets` namespace exists for local secret sources

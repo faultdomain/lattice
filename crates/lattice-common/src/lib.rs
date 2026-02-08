@@ -56,6 +56,12 @@ pub const DEFAULT_HEALTH_PORT: u16 = 8080;
 /// Namespace for Lattice system resources (CA, credentials, operator)
 pub const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";
 
+/// Namespace for local secret source K8s Secrets (used by ESO webhook backend)
+pub const LOCAL_SECRETS_NAMESPACE: &str = "lattice-secrets";
+
+/// Port for the local secrets webhook (ESO webhook backend)
+pub const LOCAL_SECRETS_PORT: u16 = 8787;
+
 /// Construct the CAPI namespace for a cluster.
 ///
 /// CAPI resources for each cluster are stored in a dedicated namespace

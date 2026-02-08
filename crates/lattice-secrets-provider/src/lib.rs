@@ -12,8 +12,7 @@ mod webhook;
 
 pub use controller::reconcile;
 pub use eso::{
-    ClusterSecretStore, ExternalSecret, ExternalSecretData, ExternalSecretDataFrom,
-    ExternalSecretExtract, ExternalSecretMetadata, ExternalSecretSpec, ExternalSecretTarget,
-    ExternalSecretTemplate, RemoteRef, SecretStoreRef, WebhookProvider, WebhookResult,
+    ExternalSecret, ExternalSecretData, ExternalSecretDataFrom, ExternalSecretExtract,
+    ExternalSecretSpec, ExternalSecretTarget, ExternalSecretTemplate, RemoteRef, SecretStoreRef,
 };
 pub use webhook::start_webhook_server;

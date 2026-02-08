@@ -20,13 +20,13 @@ use kube::api::Api;
 use kube::Client;
 use tracing::info;
 
-use crate::controller::{LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT};
+use lattice_common::{LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT};
 
 /// Label that must be present (and set to "true") on source secrets
 const SECRET_SOURCE_LABEL: &str = "lattice.dev/secret-source";
 
 /// Build the webhook router with a shared `Client` state
-pub fn webhook_routes(client: Client) -> Router {
+fn webhook_routes(client: Client) -> Router {
     Router::new()
         .route("/secret/{name}", get(get_secret))
         .route("/healthz", get(|| async { "ok" }))
@@ -68,11 +68,7 @@ async fn get_secret(
     })?;
 
     // Only serve secrets explicitly labeled as sources
-    let labels = secret.metadata.labels.as_ref();
-    let is_source = labels
-        .and_then(|l| l.get(SECRET_SOURCE_LABEL))
-        .is_some_and(|v| v == "true");
-    if !is_source {
+    if !is_labeled_source(&secret) {
         return Err((
             StatusCode::NOT_FOUND,
             format!("secret '{}' not labeled as source", name),
@@ -96,6 +92,19 @@ async fn get_secret(
     }
 
     Ok(Json(result))
+}
+
+/// Check whether a K8s Secret has the `lattice.dev/secret-source: "true"` label.
+///
+/// This is the gate that prevents arbitrary secrets from being exposed via the
+/// webhook — only explicitly labeled secrets are served.
+fn is_labeled_source(secret: &k8s_openapi::api::core::v1::Secret) -> bool {
+    secret
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(SECRET_SOURCE_LABEL))
+        .is_some_and(|v| v == "true")
 }
 
 /// Fallback hex encoding for binary data that isn't valid UTF-8.
@@ -123,5 +132,31 @@ mod tests {
     #[test]
     fn local_secrets_port_matches_controller() {
         assert_eq!(LOCAL_SECRETS_PORT, 8787);
+    }
+
+    #[test]
+    fn unlabeled_secret_is_not_source() {
+        let secret = k8s_openapi::api::core::v1::Secret::default();
+        assert!(!is_labeled_source(&secret));
+    }
+
+    #[test]
+    fn wrong_label_value_is_not_source() {
+        let mut secret = k8s_openapi::api::core::v1::Secret::default();
+        secret.metadata.labels = Some(BTreeMap::from([(
+            SECRET_SOURCE_LABEL.to_string(),
+            "false".to_string(),
+        )]));
+        assert!(!is_labeled_source(&secret));
+    }
+
+    #[test]
+    fn correct_label_is_source() {
+        let mut secret = k8s_openapi::api::core::v1::Secret::default();
+        secret.metadata.labels = Some(BTreeMap::from([(
+            SECRET_SOURCE_LABEL.to_string(),
+            "true".to_string(),
+        )]));
+        assert!(is_labeled_source(&secret));
     }
 }

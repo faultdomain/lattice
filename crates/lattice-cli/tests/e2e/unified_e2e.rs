@@ -10,9 +10,9 @@
 //!
 //! 1. Set up cluster hierarchy (mgmt -> workload, optionally -> workload2)
 //! 2. Kubeconfig + proxy verification
-//! 3. Cedar policy enforcement
+//! 3. Cedar cluster-access policy enforcement
 //! 4. Multi-hop proxy (if workload2)
-//! 5. Mesh + secrets tests (parallel) + workload2 deletion
+//! 5. Mesh + secrets + Cedar secret tests (parallel) + workload2 deletion
 //! 6. Workload deletion (unpivot to mgmt)
 //! 7. Management cluster uninstall
 //!
@@ -117,10 +117,6 @@ async fn run_full_e2e() -> Result<(), String> {
 
     info!("SUCCESS: Cedar policy enforcement verified!");
 
-    // Test Cedar secret authorization (default-deny, permit, forbid, namespace isolation)
-    integration::cedar_secrets::run_cedar_secret_tests(&ctx).await?;
-    info!("SUCCESS: Cedar secret authorization tests verified!");
-
     // =========================================================================
     // Phase 6.7: Test multi-hop proxy operations (if workload2 exists)
     // =========================================================================
@@ -131,12 +127,12 @@ async fn run_full_e2e() -> Result<(), String> {
     }
 
     // =========================================================================
-    // Phase 7: Run mesh + secrets tests + delete workload2 (parallel, if workload2 exists)
+    // Phase 7: Run mesh + secrets + Cedar secret tests + delete workload2 (parallel)
     // =========================================================================
     if ctx.has_workload2() {
-        info!("[Phase 7] Running mesh/secrets tests + deleting workload2...");
+        info!("[Phase 7] Running mesh/secrets/cedar tests + deleting workload2...");
     } else {
-        info!("[Phase 7] Running mesh/secrets tests (workload2 disabled)...");
+        info!("[Phase 7] Running mesh/secrets/cedar tests (workload2 disabled)...");
     }
 
     // Start mesh tests in background
@@ -150,6 +146,11 @@ async fn run_full_e2e() -> Result<(), String> {
     // Start secrets tests in background
     info!("[Phase 7] Starting secrets tests...");
     let secrets_handle = Some(integration::secrets::start_secrets_tests_async(&ctx).await?);
+
+    // Start Cedar secret authorization tests in background
+    info!("[Phase 7] Starting Cedar secret authorization tests...");
+    let cedar_handle =
+        Some(integration::cedar_secrets::start_cedar_secret_tests_async(&ctx).await?);
 
     // Start workload2 deletion in background (if workload2 exists)
     let delete_handle = if ctx.has_workload2() {
@@ -179,6 +180,15 @@ async fn run_full_e2e() -> Result<(), String> {
             .await
             .map_err(|e| format!("Secrets test task panicked: {}", e))??;
         info!("SUCCESS: Secrets tests complete!");
+    }
+
+    // Wait for Cedar secret authorization tests
+    if let Some(handle) = cedar_handle {
+        info!("[Phase 7] Waiting for Cedar secret tests to complete...");
+        handle
+            .await
+            .map_err(|e| format!("Cedar secret test task panicked: {}", e))??;
+        info!("SUCCESS: Cedar secret authorization tests verified!");
     }
 
     // Wait for workload2 deletion (if started)
