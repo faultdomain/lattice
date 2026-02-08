@@ -6,7 +6,7 @@ metadata:
 spec:
   containers:
     main:
-      image: ghcr.io/evan-hines-js/busybox:latest
+      image: docker.io/library/busybox:latest
       command: ["sleep", "infinity"]
       volumes:
         /models:

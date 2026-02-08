@@ -29,7 +29,7 @@ use tracing::info;
 use lattice_common::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
-use super::helpers::{client_from_kubeconfig, run_cmd, OPERATOR_LABEL};
+use super::helpers::{client_from_kubeconfig, run_kubectl, test_image, OPERATOR_LABEL};
 use super::providers::InfraProvider;
 
 /// Create a seeded RNG from a string (typically run_id).
@@ -377,7 +377,7 @@ spec:
       - operator: Exists
       containers:
       - name: blackout
-        image: ghcr.io/evan-hines-js/kubectl:latest
+        image: {kubectl_image}
         command: ["/bin/sh", "-c"]
         args:
         - |
@@ -402,6 +402,7 @@ spec:
           echo "Blackout removed"
 "#,
         secs = blackout_secs,
+        kubectl_image = test_image("docker.io/bitnami/kubectl:latest"),
     )
 }
 
@@ -486,7 +487,7 @@ async fn pod_chaos_loop(
             if let Some(attack) = targets.find_coordinated_attack() {
                 if targets.random_probability() < config.coordinated_probability {
                     info!("[Chaos] Coordinated pod attack: {}", attack.description());
-                    kill_pod(&attack.parent().name, &attack.parent().kubeconfig);
+                    kill_pod(&attack.parent().name, &attack.parent().kubeconfig).await;
                     continue;
                 }
             }
@@ -494,7 +495,7 @@ async fn pod_chaos_loop(
 
         // Fall back to random single-cluster attack
         if let Some(target) = targets.random() {
-            kill_pod(&target.name, &target.kubeconfig);
+            kill_pod(&target.name, &target.kubeconfig).await;
         }
     }
 }
@@ -584,21 +585,20 @@ async fn query_cluster_context(
 // Attack Implementations
 // =============================================================================
 
-fn kill_pod(cluster: &str, kubeconfig: &str) {
-    let msg = match run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "pod",
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "-l",
-            OPERATOR_LABEL,
-            "--wait=false",
-        ],
-    ) {
+async fn kill_pod(cluster: &str, kubeconfig: &str) {
+    let msg = match run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "pod",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-l",
+        OPERATOR_LABEL,
+        "--wait=false",
+    ])
+    .await
+    {
         Ok(output) if output.contains("deleted") => "killed operator pod".to_string(),
         Ok(_) => "no pod found (may be restarting)".to_string(),
         Err(e) if is_unreachable(&e) => "cluster unreachable".to_string(),
@@ -621,25 +621,20 @@ async fn cut_network(
     }
 
     // Delete any previous job first (in case ttl hasn't cleaned it up yet)
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "job",
-            "chaos-blackout",
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "--ignore-not-found",
-        ],
-    );
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "job",
+        "chaos-blackout",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "--ignore-not-found",
+    ])
+    .await;
 
     // Deploy the self-cleaning blackout job
-    match run_cmd(
-        "kubectl",
-        &["--kubeconfig", kubeconfig, "apply", "-f", &job_file],
-    ) {
+    match run_kubectl(&["--kubeconfig", kubeconfig, "apply", "-f", &job_file]).await {
         Ok(_) => {
             info!(
                 "[Chaos] Network cut on {}: blackout job deployed for {}s",

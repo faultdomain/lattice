@@ -14,7 +14,7 @@ use lattice_common::crd::LatticeService;
 
 use super::helpers::{
     client_from_kubeconfig, create_with_retry, ensure_fresh_namespace, load_service_config,
-    run_cmd, run_kubectl_with_retry, setup_regcreds_infrastructure, wait_for_condition,
+    run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
 };
 
 const NAMESPACE: &str = "media";
@@ -33,7 +33,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     setup_regcreds_infrastructure(kubeconfig_path).await?;
 
     // Label for Istio ambient mesh
-    run_kubectl_with_retry(&[
+    run_kubectl(&[
         "--kubeconfig",
         kubeconfig_path,
         "label",
@@ -69,20 +69,18 @@ async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
             Duration::from_secs(300),
             Duration::from_secs(5),
             || async move {
-                let output = run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        kubeconfig_path,
-                        "get",
-                        "deployment",
-                        "-n",
-                        NAMESPACE,
-                        name,
-                        "-o",
-                        "jsonpath={.status.availableReplicas}/{.status.replicas}",
-                    ],
-                );
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "get",
+                    "deployment",
+                    "-n",
+                    NAMESPACE,
+                    name,
+                    "-o",
+                    "jsonpath={.status.availableReplicas}/{.status.replicas}",
+                ])
+                .await;
 
                 match output {
                     Ok(status) => {
@@ -124,19 +122,17 @@ async fn verify_pvcs(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying PVCs...");
 
     // Use kubectl for resilience - handles retries/reconnection internally
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "pvc",
-            "-n",
-            NAMESPACE,
-            "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
-        ],
-    )
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "get",
+        "pvc",
+        "-n",
+        NAMESPACE,
+        "-o",
+        "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+    ])
+    .await
     .map_err(|e| format!("Failed to list PVCs: {}", e))?;
 
     let pvc_names: Vec<&str> = output.lines().map(|l| l.trim()).collect();
@@ -176,19 +172,17 @@ async fn verify_node_colocation(kubeconfig_path: &str) -> Result<(), String> {
         label_escaped
     );
 
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "pods",
-            "-n",
-            NAMESPACE,
-            "-o",
-            &format!("jsonpath={}", jsonpath),
-        ],
-    )
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "get",
+        "pods",
+        "-n",
+        NAMESPACE,
+        "-o",
+        &format!("jsonpath={}", jsonpath),
+    ])
+    .await
     .map_err(|e| format!("Failed to list pods: {}", e))?;
 
     // Parse output: "service-name:node-name\n..."
@@ -229,24 +223,6 @@ async fn verify_node_colocation(kubeconfig_path: &str) -> Result<(), String> {
 async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying volume sharing...");
 
-    let exec = |deploy: &str, cmd: &str| -> Result<String, String> {
-        run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "exec",
-                "-n",
-                NAMESPACE,
-                &format!("deploy/{}", deploy),
-                "--",
-                "sh",
-                "-c",
-                cmd,
-            ],
-        )
-    };
-
     // jellyfin writes to library/, sonarr reads it
     let kp = kubeconfig_path.to_string();
     wait_for_condition(
@@ -256,25 +232,35 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
         || {
             let kp = kp.clone();
             async move {
-                let exec = |deploy: &str, cmd: &str| -> Result<String, String> {
-                    run_cmd(
-                        "kubectl",
-                        &[
-                            "--kubeconfig",
-                            &kp,
-                            "exec",
-                            "-n",
-                            NAMESPACE,
-                            &format!("deploy/{}", deploy),
-                            "--",
-                            "sh",
-                            "-c",
-                            cmd,
-                        ],
-                    )
-                };
-                let _ = exec("jellyfin", "echo 'jellyfin-marker' > /media/.test-marker");
-                match exec("sonarr", "cat /tv/.test-marker") {
+                let deploy_jellyfin = format!("deploy/{}", "jellyfin");
+                let _ = run_kubectl(&[
+                    "--kubeconfig",
+                    &kp,
+                    "exec",
+                    "-n",
+                    NAMESPACE,
+                    &deploy_jellyfin,
+                    "--",
+                    "sh",
+                    "-c",
+                    "echo 'jellyfin-marker' > /media/.test-marker",
+                ])
+                .await;
+                let deploy_sonarr = format!("deploy/{}", "sonarr");
+                match run_kubectl(&[
+                    "--kubeconfig",
+                    &kp,
+                    "exec",
+                    "-n",
+                    NAMESPACE,
+                    &deploy_sonarr,
+                    "--",
+                    "sh",
+                    "-c",
+                    "cat /tv/.test-marker",
+                ])
+                .await
+                {
                     Ok(result) => Ok(result.contains("jellyfin-marker")),
                     Err(_) => Ok(false),
                 }
@@ -292,25 +278,35 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
         || {
             let kp = kp.clone();
             async move {
-                let exec = |deploy: &str, cmd: &str| -> Result<String, String> {
-                    run_cmd(
-                        "kubectl",
-                        &[
-                            "--kubeconfig",
-                            &kp,
-                            "exec",
-                            "-n",
-                            NAMESPACE,
-                            &format!("deploy/{}", deploy),
-                            "--",
-                            "sh",
-                            "-c",
-                            cmd,
-                        ],
-                    )
-                };
-                let _ = exec("nzbget", "echo 'nzbget-marker' > /downloads/.test-marker");
-                match exec("sonarr", "cat /downloads/.test-marker") {
+                let deploy_nzbget = format!("deploy/{}", "nzbget");
+                let _ = run_kubectl(&[
+                    "--kubeconfig",
+                    &kp,
+                    "exec",
+                    "-n",
+                    NAMESPACE,
+                    &deploy_nzbget,
+                    "--",
+                    "sh",
+                    "-c",
+                    "echo 'nzbget-marker' > /downloads/.test-marker",
+                ])
+                .await;
+                let deploy_sonarr = format!("deploy/{}", "sonarr");
+                match run_kubectl(&[
+                    "--kubeconfig",
+                    &kp,
+                    "exec",
+                    "-n",
+                    NAMESPACE,
+                    &deploy_sonarr,
+                    "--",
+                    "sh",
+                    "-c",
+                    "cat /downloads/.test-marker",
+                ])
+                .await
+                {
                     Ok(result) => Ok(result.contains("nzbget-marker")),
                     Err(_) => Ok(false),
                 }
@@ -320,7 +316,21 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
     .await?;
 
     // Verify subpath isolation - jellyfin should NOT see nzbget's marker in its /media mount
-    let isolated = match exec("jellyfin", "cat /media/.test-marker") {
+    let deploy_jellyfin = format!("deploy/{}", "jellyfin");
+    let isolated = match run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "exec",
+        "-n",
+        NAMESPACE,
+        &deploy_jellyfin,
+        "--",
+        "sh",
+        "-c",
+        "cat /media/.test-marker",
+    ])
+    .await
+    {
         Ok(result) => !result.contains("nzbget-marker"),
         Err(_) => true, // File doesn't exist - good, isolation works
     };
@@ -340,19 +350,17 @@ async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
         Duration::from_secs(300),
         Duration::from_secs(5),
         || async move {
-            let output = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "get",
-                    "deployments",
-                    "-n",
-                    NAMESPACE,
-                    "-o",
-                    "jsonpath={range .items[*]}{.metadata.name}:{.status.availableReplicas}/{.status.replicas}{\"\\n\"}{end}",
-                ],
-            )
+            let output = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "deployments",
+                "-n",
+                NAMESPACE,
+                "-o",
+                "jsonpath={range .items[*]}{.metadata.name}:{.status.availableReplicas}/{.status.replicas}{\"\\n\"}{end}",
+            ])
+            .await
             .unwrap_or_default();
 
             for line in output.lines() {
@@ -380,31 +388,51 @@ async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
 async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying bilateral agreements...");
 
-    let curl_check = |from: &str, to: &str, port: u16| -> String {
-        run_cmd("kubectl", &[
-            "--kubeconfig", kubeconfig_path,
-            "exec", "-n", NAMESPACE, &format!("deploy/{}", from),
-            "--", "sh", "-c",
-            &format!("curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 5 http://{}:{}/ || echo '000'", to, port),
-        ]).unwrap_or_else(|_| "000".to_string()).trim().to_string()
-    };
-
     // sonarr -> jellyfin (allowed)
-    let code = curl_check("sonarr", "jellyfin", 8096);
+    let deploy_sonarr = format!("deploy/{}", "sonarr");
+    let code = run_kubectl(&[
+        "--kubeconfig", kubeconfig_path,
+        "exec", "-n", NAMESPACE, &deploy_sonarr,
+        "--", "sh", "-c",
+        "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 http://jellyfin:8096/ || echo '000'",
+    ])
+    .await
+    .unwrap_or_else(|_| "000".to_string())
+    .trim()
+    .to_string();
     if code == "403" {
         return Err("sonarr->jellyfin blocked unexpectedly".into());
     }
     info!("sonarr->jellyfin: {} (allowed)", code);
 
     // sonarr -> nzbget (allowed)
-    let code = curl_check("sonarr", "nzbget", 6789);
+    let code = run_kubectl(&[
+        "--kubeconfig", kubeconfig_path,
+        "exec", "-n", NAMESPACE, &deploy_sonarr,
+        "--", "sh", "-c",
+        "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 http://nzbget:6789/ || echo '000'",
+    ])
+    .await
+    .unwrap_or_else(|_| "000".to_string())
+    .trim()
+    .to_string();
     if code == "403" {
         return Err("sonarr->nzbget blocked unexpectedly".into());
     }
     info!("sonarr->nzbget: {} (allowed)", code);
 
     // jellyfin -> sonarr (should be blocked)
-    let code = curl_check("jellyfin", "sonarr", 8989);
+    let deploy_jellyfin = format!("deploy/{}", "jellyfin");
+    let code = run_kubectl(&[
+        "--kubeconfig", kubeconfig_path,
+        "exec", "-n", NAMESPACE, &deploy_jellyfin,
+        "--", "sh", "-c",
+        "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 http://sonarr:8989/ || echo '000'",
+    ])
+    .await
+    .unwrap_or_else(|_| "000".to_string())
+    .trim()
+    .to_string();
     info!("jellyfin->sonarr: {} (expected 403)", code);
 
     Ok(())

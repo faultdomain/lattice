@@ -15,8 +15,8 @@ use tracing::info;
 use lattice_common::crd::LatticeService;
 
 use super::helpers::{
-    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace, run_cmd,
-    setup_regcreds_infrastructure,
+    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
+    run_kubectl, setup_regcreds_infrastructure,
 };
 use super::mesh_fixtures::*;
 use super::mesh_helpers::*;
@@ -128,20 +128,18 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
     ] {
         info!("[Fixed Mesh] Checking {} logs...", frontend_name);
 
-        let logs = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "logs",
-                "-n",
-                TEST_SERVICES_NAMESPACE,
-                "-l",
-                &format!("{}={}", lattice_common::LABEL_NAME, frontend_name),
-                "--tail",
-                "100",
-            ],
-        )?;
+        let logs = run_kubectl(&[
+            "--kubeconfig",
+            kubeconfig_path,
+            "logs",
+            "-n",
+            TEST_SERVICES_NAMESPACE,
+            "-l",
+            &format!("{}={}", lattice_common::LABEL_NAME, frontend_name),
+            "--tail",
+            "100",
+        ])
+        .await?;
 
         for (target, expected_allowed) in expected_results.iter() {
             let expected_str = if *expected_allowed {
@@ -280,7 +278,7 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
 
     let result = handle.stop_and_verify().await;
     if result.is_ok() {
-        delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE);
+        delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
     } else {
         info!(
             "[Mesh] Leaving namespace {} for debugging (test failed)",

@@ -37,7 +37,7 @@ use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_secret_policy_for_service, create_service_with_all_secret_routes,
     create_service_with_secrets, delete_cedar_policies_by_label, delete_namespace,
-    deploy_and_wait_for_phase, ensure_fresh_namespace, run_cmd, seed_all_local_test_secrets,
+    deploy_and_wait_for_phase, ensure_fresh_namespace, run_kubectl, seed_all_local_test_secrets,
     seed_local_secret, service_pod_selector, setup_regcreds_infrastructure, verify_pod_env_var,
     verify_pod_file_content, verify_pod_image_pull_secrets, verify_synced_secret_keys,
 };
@@ -72,20 +72,18 @@ async fn verify_external_secret(
     expected_remote_key: &str,
     expected_keys: Option<&[&str]>,
 ) -> Result<(), String> {
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "externalsecret",
-            name,
-            "-n",
-            namespace,
-            "-o",
-            "json",
-        ],
-    )?;
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "get",
+        "externalsecret",
+        name,
+        "-n",
+        namespace,
+        "-o",
+        "json",
+    ])
+    .await?;
 
     let json: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("Failed to parse JSON: {}", e))?;
@@ -221,8 +219,8 @@ pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
 
     // Clean up services before policies — the controller re-checks Cedar on every
     // reconcile, so deleting policies while services still exist causes them to fail.
-    delete_namespace(kubeconfig, BASIC_TEST_NAMESPACE);
-    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=local-secrets");
+    delete_namespace(kubeconfig, BASIC_TEST_NAMESPACE).await;
+    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=local-secrets").await;
     result?;
 
     // Run the comprehensive 5-route tests (manages its own Cedar policies)
@@ -665,8 +663,8 @@ pub async fn run_secrets_route_tests(ctx: &InfraContext) -> Result<(), String> {
 
     // Clean up services before policies — the controller re-checks Cedar on every
     // reconcile, so deleting policies while services still exist causes them to fail.
-    delete_namespace(kubeconfig, ROUTES_TEST_NAMESPACE);
-    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=secret-routes");
+    delete_namespace(kubeconfig, ROUTES_TEST_NAMESPACE).await;
+    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=secret-routes").await;
     result?;
 
     info!("[Routes] All secrets route tests passed!");

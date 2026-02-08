@@ -3,7 +3,7 @@
 //! Provides utilities for Docker-based cluster testing.
 
 #[cfg(feature = "provider-e2e")]
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 #[cfg(feature = "provider-e2e")]
 use std::{process::Command, time::Duration};
 
@@ -76,17 +76,42 @@ where
 #[cfg(feature = "provider-e2e")]
 pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
+/// When `true`, rewrite all non-lattice test images to the GHCR mirror
+/// (`ghcr.io/evan-hines-js/{name}:{tag}`). Flip this single bool to switch.
+#[cfg(feature = "provider-e2e")]
+const USE_GHCR_MIRROR: bool = false;
+
+/// GHCR org where mirrored images live (only used when `USE_GHCR_MIRROR` is true).
+#[cfg(feature = "provider-e2e")]
+const GHCR_MIRROR_PREFIX: &str = "ghcr.io/evan-hines-js";
+
+/// Resolve a test image: returns the canonical docker.io path unchanged, or
+/// rewrites it to the GHCR mirror by extracting `name:tag` from the last
+/// path segment. e.g. `docker.io/curlimages/curl:latest` → `ghcr.io/evan-hines-js/curl:latest`
+#[cfg(feature = "provider-e2e")]
+pub fn test_image(docker_path: &str) -> String {
+    if USE_GHCR_MIRROR {
+        let name_tag = docker_path.rsplit('/').next().unwrap_or(docker_path);
+        format!("{GHCR_MIRROR_PREFIX}/{name_tag}")
+    } else {
+        docker_path.to_string()
+    }
+}
+
 /// Nginx image for mesh server containers
 #[cfg(feature = "provider-e2e")]
-pub const NGINX_IMAGE: &str = "ghcr.io/evan-hines-js/nginx:alpine";
+pub static NGINX_IMAGE: LazyLock<String> =
+    LazyLock::new(|| test_image("docker.io/library/nginx:alpine"));
 
 /// Curl image for mesh traffic generator containers
 #[cfg(feature = "provider-e2e")]
-pub const CURL_IMAGE: &str = "ghcr.io/evan-hines-js/curl:latest";
+pub static CURL_IMAGE: LazyLock<String> =
+    LazyLock::new(|| test_image("docker.io/curlimages/curl:latest"));
 
 /// Busybox image for lightweight test pods
 #[cfg(feature = "provider-e2e")]
-pub const BUSYBOX_IMAGE: &str = "ghcr.io/evan-hines-js/busybox:latest";
+pub static BUSYBOX_IMAGE: LazyLock<String> =
+    LazyLock::new(|| test_image("docker.io/library/busybox:latest"));
 
 /// SecretProvider name used for GHCR registry credentials across all tests.
 ///
@@ -461,15 +486,15 @@ pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// Run a kubectl command with retry logic.
+/// Run a kubectl command with built-in retry (3 attempts, exponential backoff).
 ///
-/// Use this for kubectl commands that go through proxy kubeconfigs during
-/// chaos testing. Retries all errors with exponential backoff.
+/// ALL kubectl invocations should go through this function so transient
+/// proxy / port-forward hiccups don't kill the test run.
 #[cfg(feature = "provider-e2e")]
-pub async fn run_kubectl_with_retry(args: &[&str]) -> Result<String, String> {
+pub async fn run_kubectl(args: &[&str]) -> Result<String, String> {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
-    retry_with_backoff(&RetryConfig::with_max_attempts(20), "kubectl", || {
+    retry_with_backoff(&RetryConfig::with_max_attempts(3), "kubectl", || {
         let args = args.clone();
         async move {
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -850,8 +875,7 @@ pub async fn watch_worker_scaling(
         || {
             let last_count = &last_count;
             async move {
-                let output = run_cmd(
-                    "kubectl",
+                let output = run_kubectl(
                     &[
                         "--kubeconfig",
                         kubeconfig_path,
@@ -863,6 +887,7 @@ pub async fn watch_worker_scaling(
                         "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
                     ],
                 )
+                .await
                 .unwrap_or_default();
                 let ready_workers = count_ready_nodes(&output);
 
@@ -993,7 +1018,7 @@ pub async fn rebuild_and_restart_operators(
         kubeconfigs.len()
     );
     for (cluster_name, kubeconfig) in kubeconfigs.iter().rev() {
-        delete_operator_pods(cluster_name, kubeconfig);
+        delete_operator_pods(cluster_name, kubeconfig).await;
     }
 
     // 3. Wait for operators to be ready (also bottom-up so children are ready before parents need them)
@@ -1010,21 +1035,20 @@ pub async fn rebuild_and_restart_operators(
 
 /// Delete operator pods to trigger image pull.
 #[cfg(feature = "provider-e2e")]
-fn delete_operator_pods(cluster_name: &str, kubeconfig: &str) {
-    let msg = match run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "pod",
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "-l",
-            OPERATOR_LABEL,
-            "--wait=false",
-        ],
-    ) {
+async fn delete_operator_pods(cluster_name: &str, kubeconfig: &str) {
+    let msg = match run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "pod",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-l",
+        OPERATOR_LABEL,
+        "--wait=false",
+    ])
+    .await
+    {
         Ok(output) if output.contains("deleted") => "deleted operator pod",
         Ok(_) => "no pod found",
         Err(_) => "no pod found or not accessible",
@@ -1046,19 +1070,18 @@ pub async fn wait_for_operator_ready(
         Duration::from_secs(timeout_secs.unwrap_or(300)),
         Duration::from_secs(5),
         || async move {
-            if let Ok(output) = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig,
-                    "rollout",
-                    "status",
-                    "deployment/lattice-operator",
-                    "-n",
-                    LATTICE_SYSTEM_NAMESPACE,
-                    "--timeout=10s",
-                ],
-            ) {
+            if let Ok(output) = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "rollout",
+                "status",
+                "deployment/lattice-operator",
+                "-n",
+                LATTICE_SYSTEM_NAMESPACE,
+                "--timeout=10s",
+            ])
+            .await
+            {
                 if output.contains("successfully rolled out") {
                     info!("[{}] Operator is ready", cluster_name);
                     return Ok(true);
@@ -1233,16 +1256,11 @@ pub async fn verify_cluster_capi_resources(
     kubeconfig: &str,
     cluster_name: &str,
 ) -> Result<(), String> {
-    let nodes_output = run_cmd(
-        "kubectl",
-        &["--kubeconfig", kubeconfig, "get", "nodes", "-o", "wide"],
-    )?;
+    let nodes_output =
+        run_kubectl(&["--kubeconfig", kubeconfig, "get", "nodes", "-o", "wide"]).await?;
     info!("Cluster nodes:\n{}", nodes_output);
 
-    let capi_output = run_cmd(
-        "kubectl",
-        &["--kubeconfig", kubeconfig, "get", "clusters", "-A"],
-    )?;
+    let capi_output = run_kubectl(&["--kubeconfig", kubeconfig, "get", "clusters", "-A"]).await?;
     info!("CAPI clusters:\n{}", capi_output);
 
     if !capi_output.contains(cluster_name) {
@@ -1268,21 +1286,19 @@ const PROXY_PORT: u16 = 8082;
 
 /// Check if the lattice-cell proxy service exists
 #[cfg(feature = "provider-e2e")]
-pub fn proxy_service_exists(kubeconfig: &str) -> bool {
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "svc",
-            PROXY_SERVICE_NAME,
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "-o",
-            "name",
-        ],
-    )
+pub async fn proxy_service_exists(kubeconfig: &str) -> bool {
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "svc",
+        PROXY_SERVICE_NAME,
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-o",
+        "name",
+    ])
+    .await
     .is_ok()
 }
 
@@ -1302,8 +1318,7 @@ async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> 
         || {
             let result_url = &result_url;
             async move {
-                let result = run_cmd(
-                    "kubectl",
+                let result = run_kubectl(
                     &[
                         "--kubeconfig",
                         kubeconfig,
@@ -1315,7 +1330,8 @@ async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> 
                         "-o",
                         "jsonpath={.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}",
                     ],
-                );
+                )
+                .await;
 
                 if let Ok(addr) = result {
                     let addr = addr.trim().to_string();
@@ -1375,31 +1391,33 @@ pub async fn get_or_create_proxy(
 /// Duration is 8 hours for long-running E2E tests. Use `refresh_sa_token()`
 /// if you need to refresh an expired token.
 #[cfg(feature = "provider-e2e")]
-pub fn get_sa_token(kubeconfig: &str, namespace: &str, sa_name: &str) -> Result<String, String> {
-    get_sa_token_with_duration(kubeconfig, namespace, sa_name, "8h")
+pub async fn get_sa_token(
+    kubeconfig: &str,
+    namespace: &str,
+    sa_name: &str,
+) -> Result<String, String> {
+    get_sa_token_with_duration(kubeconfig, namespace, sa_name, "8h").await
 }
 
 /// Get a ServiceAccount token with custom duration
 #[cfg(feature = "provider-e2e")]
-fn get_sa_token_with_duration(
+async fn get_sa_token_with_duration(
     kubeconfig: &str,
     namespace: &str,
     sa_name: &str,
     duration: &str,
 ) -> Result<String, String> {
-    let token = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "create",
-            "token",
-            sa_name,
-            "-n",
-            namespace,
-            &format!("--duration={}", duration),
-        ],
-    )?;
+    let token = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "create",
+        "token",
+        sa_name,
+        "-n",
+        namespace,
+        &format!("--duration={}", duration),
+    ])
+    .await?;
     Ok(token.trim().to_string())
 }
 
@@ -1427,7 +1445,7 @@ pub async fn delete_cluster_and_wait(
     // 3. Parent imports and deletes via CAPI, which kills the infrastructure
     // 4. The cluster's API server dies before the finalizer is removed
     // So we just initiate deletion and wait for parent confirmation
-    run_kubectl_with_retry(&[
+    run_kubectl(&[
         "--kubeconfig",
         cluster_kubeconfig,
         "delete",
@@ -1445,18 +1463,17 @@ pub async fn delete_cluster_and_wait(
         Duration::from_secs(600),
         Duration::from_secs(10),
         || async move {
-            let deleted = match run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    parent_kubeconfig,
-                    "get",
-                    "latticecluster",
-                    cluster_name,
-                    "-o",
-                    "name",
-                ],
-            ) {
+            let deleted = match run_kubectl(&[
+                "--kubeconfig",
+                parent_kubeconfig,
+                "get",
+                "latticecluster",
+                cluster_name,
+                "-o",
+                "name",
+            ])
+            .await
+            {
                 Ok(output) => output.trim().is_empty(),
                 Err(_) => true,
             };
@@ -1681,20 +1698,18 @@ pub async fn wait_for_service_phase(
             let svc_name = svc_name.clone();
             let expected_phase = expected_phase.clone();
             async move {
-                let output = run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        &kc,
-                        "get",
-                        "latticeservice",
-                        &svc_name,
-                        "-n",
-                        &ns,
-                        "-o",
-                        "jsonpath={.status.phase}",
-                    ],
-                );
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "latticeservice",
+                    &svc_name,
+                    "-n",
+                    &ns,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ])
+                .await;
 
                 match output {
                     Ok(current_phase) => {
@@ -1748,20 +1763,18 @@ pub async fn wait_for_service_phase_with_message(
             let expected_phase = expected_phase.clone();
             let expected_msg = expected_msg.clone();
             async move {
-                let output = run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        &kc,
-                        "get",
-                        "latticeservice",
-                        &svc_name,
-                        "-n",
-                        &ns,
-                        "-o",
-                        "jsonpath={.status.phase} {.status.conditions[0].message}",
-                    ],
-                );
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "latticeservice",
+                    &svc_name,
+                    "-n",
+                    &ns,
+                    "-o",
+                    "jsonpath={.status.phase} {.status.conditions[0].message}",
+                ])
+                .await;
 
                 match output {
                     Ok(raw) => {
@@ -1885,21 +1898,19 @@ spec:
 
 /// Delete all CedarPolicy CRDs matching a label selector.
 #[cfg(feature = "provider-e2e")]
-pub fn delete_cedar_policies_by_label(kubeconfig: &str, label_selector: &str) {
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "cedarpolicy",
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "-l",
-            label_selector,
-            "--ignore-not-found",
-        ],
-    );
+pub async fn delete_cedar_policies_by_label(kubeconfig: &str, label_selector: &str) {
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "cedarpolicy",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-l",
+        label_selector,
+        "--ignore-not-found",
+    ])
+    .await;
 }
 
 // =============================================================================
@@ -1945,7 +1956,7 @@ impl ProxySession {
             .await
             .map_err(|e| e.to_string())?;
         let url = pf.url.clone();
-        let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator")?;
+        let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator").await?;
 
         Ok(Self {
             kubeconfig: kubeconfig.to_string(),
@@ -1958,7 +1969,7 @@ impl ProxySession {
     /// Start a proxy session for cloud providers (fetches LoadBalancer URL).
     pub async fn start_cloud(kubeconfig: &str) -> Result<Self, String> {
         let lb_url = get_proxy_loadbalancer_url(kubeconfig).await?;
-        let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator")?;
+        let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator").await?;
 
         Ok(Self {
             kubeconfig: kubeconfig.to_string(),
@@ -2010,13 +2021,14 @@ impl ProxySession {
     /// Call this if you encounter authentication failures after the token has
     /// expired. Note that previously generated proxy kubeconfigs will still
     /// use the old token - you'll need to regenerate them with `kubeconfig_for()`.
-    pub fn refresh_token(&mut self) -> Result<(), String> {
+    pub async fn refresh_token(&mut self) -> Result<(), String> {
         info!("[ProxySession] Refreshing SA token...");
         self.token = get_sa_token(
             &self.kubeconfig,
             LATTICE_SYSTEM_NAMESPACE,
             "lattice-operator",
-        )?;
+        )
+        .await?;
         info!("[ProxySession] Token refreshed successfully");
         Ok(())
     }
@@ -2208,19 +2220,17 @@ pub async fn teardown_mgmt_cluster(
 
 /// Delete a namespace (non-blocking).
 #[cfg(feature = "provider-e2e")]
-pub fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
+pub async fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
     info!("[Namespace] Deleting namespace {}...", namespace);
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "delete",
-            "namespace",
-            namespace,
-            "--wait=false",
-        ],
-    );
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "delete",
+        "namespace",
+        namespace,
+        "--wait=false",
+    ])
+    .await;
 }
 
 /// Ensure a fresh namespace exists by deleting if present and waiting for full cleanup.
@@ -2229,18 +2239,16 @@ pub fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
 #[cfg(feature = "provider-e2e")]
 pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> Result<(), String> {
     // Check if namespace exists
-    let ns_exists = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "namespace",
-            namespace,
-            "-o",
-            "name",
-        ],
-    )
+    let ns_exists = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "get",
+        "namespace",
+        namespace,
+        "-o",
+        "name",
+    ])
+    .await
     .is_ok();
 
     if ns_exists {
@@ -2248,43 +2256,40 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
             "[Namespace] Namespace {} exists, deleting for fresh start...",
             namespace
         );
-        delete_namespace(kubeconfig_path, namespace);
+        delete_namespace(kubeconfig_path, namespace).await;
 
         wait_for_condition(
             &format!("namespace {} deletion", namespace),
             Duration::from_secs(300),
             Duration::from_secs(5),
             || async move {
-                let deleted = match run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        kubeconfig_path,
-                        "get",
-                        "namespace",
-                        namespace,
-                        "-o",
-                        "name",
-                    ],
-                ) {
+                let deleted = match run_kubectl(&[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "get",
+                    "namespace",
+                    namespace,
+                    "-o",
+                    "name",
+                ])
+                .await
+                {
                     Ok(output) => output.trim().is_empty(),
                     Err(_) => true,
                 };
                 if deleted {
                     info!("[Namespace] Namespace {} fully deleted", namespace);
                 } else {
-                    let phase = run_cmd(
-                        "kubectl",
-                        &[
-                            "--kubeconfig",
-                            kubeconfig_path,
-                            "get",
-                            "namespace",
-                            namespace,
-                            "-o",
-                            "jsonpath={.status.phase}",
-                        ],
-                    )
+                    let phase = run_kubectl(&[
+                        "--kubeconfig",
+                        kubeconfig_path,
+                        "get",
+                        "namespace",
+                        namespace,
+                        "-o",
+                        "jsonpath={.status.phase}",
+                    ])
+                    .await
                     .unwrap_or_default();
                     info!(
                         "[Namespace] Waiting for namespace {} deletion (phase: {})...",
@@ -2300,18 +2305,13 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 
     // Create fresh namespace with retry for transient connection failures
     info!("[Namespace] Creating fresh namespace {}...", namespace);
-    let kc = kubeconfig_path.to_string();
-    let ns = namespace.to_string();
-    retry_with_backoff(
-        &RetryConfig::with_max_attempts(10),
-        "create_namespace",
-        || async {
-            run_cmd(
-                "kubectl",
-                &["--kubeconfig", &kc, "create", "namespace", &ns],
-            )
-        },
-    )
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "create",
+        "namespace",
+        namespace,
+    ])
     .await?;
 
     Ok(())
@@ -2432,20 +2432,18 @@ pub async fn wait_for_secrets_provider_ready(
         Duration::from_secs(600),
         Duration::from_secs(5),
         || async move {
-            let output = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig,
-                    "get",
-                    "secretprovider",
-                    provider_name,
-                    "-n",
-                    LATTICE_SYSTEM_NAMESPACE,
-                    "-o",
-                    "jsonpath={.status.phase}",
-                ],
-            );
+            let output = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "secretprovider",
+                provider_name,
+                "-n",
+                LATTICE_SYSTEM_NAMESPACE,
+                "-o",
+                "jsonpath={.status.phase}",
+            ])
+            .await;
 
             match output {
                 Ok(raw) => {
@@ -2721,23 +2719,21 @@ pub async fn verify_pod_env_var(
     wait_for_pod_running(kubeconfig, namespace, label_selector).await?;
 
     // Get the pod name
-    let pod_name = get_pod_name(kubeconfig, namespace, label_selector)?;
+    let pod_name = get_pod_name(kubeconfig, namespace, label_selector).await?;
 
     // Exec printenv inside the pod
-    let actual = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "exec",
-            &pod_name,
-            "-n",
-            namespace,
-            "--",
-            "printenv",
-            var_name,
-        ],
-    )?;
+    let actual = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "exec",
+        &pod_name,
+        "-n",
+        namespace,
+        "--",
+        "printenv",
+        var_name,
+    ])
+    .await?;
 
     let actual = actual.trim();
     if actual != expected_value {
@@ -2767,22 +2763,20 @@ pub async fn verify_pod_file_content(
     );
 
     wait_for_pod_running(kubeconfig, namespace, label_selector).await?;
-    let pod_name = get_pod_name(kubeconfig, namespace, label_selector)?;
+    let pod_name = get_pod_name(kubeconfig, namespace, label_selector).await?;
 
-    let content = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "exec",
-            &pod_name,
-            "-n",
-            namespace,
-            "--",
-            "cat",
-            file_path,
-        ],
-    )?;
+    let content = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "exec",
+        &pod_name,
+        "-n",
+        namespace,
+        "--",
+        "cat",
+        file_path,
+    ])
+    .await?;
 
     if !content.contains(expected_substr) {
         return Err(format!(
@@ -2810,22 +2804,20 @@ pub async fn verify_pod_image_pull_secrets(
     );
 
     wait_for_pod_running(kubeconfig, namespace, label_selector).await?;
-    let pod_name = get_pod_name(kubeconfig, namespace, label_selector)?;
+    let pod_name = get_pod_name(kubeconfig, namespace, label_selector).await?;
 
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "pod",
-            &pod_name,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.spec.imagePullSecrets[*].name}",
-        ],
-    )?;
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "pod",
+        &pod_name,
+        "-n",
+        namespace,
+        "-o",
+        "jsonpath={.spec.imagePullSecrets[*].name}",
+    ])
+    .await?;
 
     if !output.contains(expected_secret) {
         return Err(format!(
@@ -2858,21 +2850,19 @@ async fn wait_for_pod_running(
         Duration::from_secs(300),
         Duration::from_secs(5),
         || async move {
-            let output = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig,
-                    "get",
-                    "pods",
-                    "-n",
-                    namespace,
-                    "-l",
-                    label_selector,
-                    "-o",
-                    "jsonpath={.items[0].status.phase}",
-                ],
-            );
+            let output = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "pods",
+                "-n",
+                namespace,
+                "-l",
+                label_selector,
+                "-o",
+                "jsonpath={.items[0].status.phase}",
+            ])
+            .await;
             match output {
                 Ok(phase) => {
                     let phase = phase.trim();
@@ -2888,22 +2878,24 @@ async fn wait_for_pod_running(
 
 /// Get the name of the first pod matching `label_selector`.
 #[cfg(feature = "provider-e2e")]
-fn get_pod_name(kubeconfig: &str, namespace: &str, label_selector: &str) -> Result<String, String> {
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            label_selector,
-            "-o",
-            "jsonpath={.items[0].metadata.name}",
-        ],
-    )?;
+async fn get_pod_name(
+    kubeconfig: &str,
+    namespace: &str,
+    label_selector: &str,
+) -> Result<String, String> {
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-l",
+        label_selector,
+        "-o",
+        "jsonpath={.items[0].metadata.name}",
+    ])
+    .await?;
 
     let name = output.trim().to_string();
     if name.is_empty() {
@@ -2936,20 +2928,18 @@ pub async fn verify_synced_secret_keys(
         Duration::from_secs(300),
         Duration::from_secs(5),
         || async move {
-            let output = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig,
-                    "get",
-                    "secret",
-                    secret_name,
-                    "-n",
-                    namespace,
-                    "-o",
-                    "jsonpath={.data}",
-                ],
-            );
+            let output = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "secret",
+                secret_name,
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={.data}",
+            ])
+            .await;
             match output {
                 Ok(data) if !data.trim().is_empty() => Ok(true),
                 _ => Ok(false),
@@ -2959,20 +2949,18 @@ pub async fn verify_synced_secret_keys(
     .await?;
 
     // Now verify the keys
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "secret",
-            secret_name,
-            "-n",
-            namespace,
-            "-o",
-            "json",
-        ],
-    )?;
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "secret",
+        secret_name,
+        "-n",
+        namespace,
+        "-o",
+        "json",
+    ])
+    .await?;
 
     let json: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("Failed to parse secret JSON: {}", e))?;

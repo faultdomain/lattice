@@ -21,8 +21,8 @@ use lattice_common::crd::{
 };
 
 use super::helpers::{
-    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace, run_cmd,
-    setup_regcreds_infrastructure,
+    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
+    run_kubectl, setup_regcreds_infrastructure,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,
@@ -641,20 +641,18 @@ async fn verify_random_mesh_traffic(
     );
 
     for source in &traffic_generators {
-        let logs = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "logs",
-                "-n",
-                RANDOM_MESH_NAMESPACE,
-                "-l",
-                &format!("{}={}", lattice_common::LABEL_NAME, source),
-                "--tail",
-                "1000",
-            ],
-        )
+        let logs = run_kubectl(&[
+            "--kubeconfig",
+            kubeconfig_path,
+            "logs",
+            "-n",
+            RANDOM_MESH_NAMESPACE,
+            "-l",
+            &format!("{}={}", lattice_common::LABEL_NAME, source),
+            "--tail",
+            "1000",
+        ])
+        .await
         .unwrap_or_default();
 
         for ((src, tgt), (_, _, actual)) in results.iter_mut() {
@@ -794,7 +792,7 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
 
     let result = handle.stop_and_verify().await;
     if result.is_ok() {
-        delete_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE);
+        delete_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE).await;
     } else {
         info!(
             "[Random Mesh] Leaving namespace {} for debugging (test failed)",

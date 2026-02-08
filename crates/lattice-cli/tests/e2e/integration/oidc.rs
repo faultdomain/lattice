@@ -26,7 +26,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     apply_yaml_with_retry, get_child_cluster_name, get_or_create_proxy, http_get_with_retry,
-    proxy_service_exists, run_cmd, wait_for_condition,
+    proxy_service_exists, run_kubectl, wait_for_condition,
 };
 use super::cedar::{apply_cedar_policy_allow_group, apply_e2e_default_policy};
 
@@ -163,42 +163,38 @@ async fn wait_for_oidc_provider_ready(kubeconfig: &str) -> Result<(), String> {
 }
 
 /// Delete OIDCProvider CRD
-fn delete_oidc_provider(kubeconfig: &str) {
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "oidcprovider",
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "-l",
-            "lattice.dev/test=oidc",
-            "--ignore-not-found",
-        ],
-    );
+async fn delete_oidc_provider(kubeconfig: &str) {
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "oidcprovider",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-l",
+        "lattice.dev/test=oidc",
+        "--ignore-not-found",
+    ])
+    .await;
 }
 
 /// Clean up all OIDC test resources
-fn cleanup_oidc_test_resources(kubeconfig: &str) {
+async fn cleanup_oidc_test_resources(kubeconfig: &str) {
     info!("[Integration/OIDC] Cleaning up test resources...");
-    delete_oidc_provider(kubeconfig);
+    delete_oidc_provider(kubeconfig).await;
     // Delete test Cedar policies
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "cedarpolicy",
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "-l",
-            "lattice.dev/test=oidc",
-            "--ignore-not-found",
-        ],
-    );
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "cedarpolicy",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-l",
+        "lattice.dev/test=oidc",
+        "--ignore-not-found",
+    ])
+    .await;
     info!("[Integration/OIDC] Cleanup complete");
 }
 
@@ -256,20 +252,18 @@ pub async fn run_oidc_auth_test(
     .await?;
 
     // Label the policy for cleanup
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            parent_kubeconfig,
-            "label",
-            "cedarpolicy",
-            "oidc-test-allow-admins",
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "lattice.dev/test=oidc",
-            "--overwrite",
-        ],
-    );
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        parent_kubeconfig,
+        "label",
+        "cedarpolicy",
+        "oidc-test-allow-admins",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "lattice.dev/test=oidc",
+        "--overwrite",
+    ])
+    .await;
 
     // 5. Verify admin OIDC token grants access
     info!("[Integration/OIDC] Testing admin access (should be allowed)...");
@@ -279,7 +273,7 @@ pub async fn run_oidc_auth_test(
     );
     let response = http_get_with_retry(&url, &admin_token, 10).await?;
     if !response.is_success() {
-        cleanup_oidc_test_resources(parent_kubeconfig);
+        cleanup_oidc_test_resources(parent_kubeconfig).await;
         return Err(format!(
             "Expected admin OIDC access to succeed, got HTTP {}",
             response.status_code
@@ -294,7 +288,7 @@ pub async fn run_oidc_auth_test(
     info!("[Integration/OIDC] Testing viewer access (should be denied)...");
     let response = http_get_with_retry(&url, &viewer_token, 10).await?;
     if !response.is_forbidden() {
-        cleanup_oidc_test_resources(parent_kubeconfig);
+        cleanup_oidc_test_resources(parent_kubeconfig).await;
         return Err(format!(
             "Expected viewer OIDC access to be denied (403), got HTTP {}",
             response.status_code
@@ -306,7 +300,7 @@ pub async fn run_oidc_auth_test(
     );
 
     // Cleanup
-    cleanup_oidc_test_resources(parent_kubeconfig);
+    cleanup_oidc_test_resources(parent_kubeconfig).await;
 
     info!("[Integration/OIDC] OIDC auth test passed!");
     Ok(())
@@ -327,7 +321,7 @@ pub async fn run_oidc_hierarchy_tests(
         return Ok(());
     }
 
-    if !proxy_service_exists(&ctx.mgmt_kubeconfig) {
+    if !proxy_service_exists(&ctx.mgmt_kubeconfig).await {
         info!("[Integration/OIDC] Proxy service not deployed, skipping OIDC tests");
         return Ok(());
     }

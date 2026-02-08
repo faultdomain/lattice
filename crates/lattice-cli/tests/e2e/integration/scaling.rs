@@ -16,7 +16,7 @@ use tracing::info;
 
 use super::super::context::{ClusterLevel, InfraContext, TestSession};
 use super::super::helpers::{
-    count_ready_nodes, get_workload_cluster_name, run_cmd, watch_worker_scaling,
+    count_ready_nodes, get_workload_cluster_name, run_kubectl, watch_worker_scaling,
 };
 use super::cedar::apply_e2e_default_policy;
 
@@ -55,46 +55,39 @@ pub async fn verify_cluster_workers(
 
 /// Get current worker count for a cluster
 pub async fn get_worker_count(kubeconfig: &str) -> Result<u32, String> {
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "nodes",
-            "-l",
-            "!node-role.kubernetes.io/control-plane",
-            "-o",
-            "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
-        ],
-    )
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "nodes",
+        "-l",
+        "!node-role.kubernetes.io/control-plane",
+        "-o",
+        "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
+    ])
+    .await
     .unwrap_or_default();
     Ok(count_ready_nodes(&output))
 }
 
 /// List all nodes with their status
 pub async fn list_nodes(kubeconfig: &str) -> Result<String, String> {
-    run_cmd(
-        "kubectl",
-        &["--kubeconfig", kubeconfig, "get", "nodes", "-o", "wide"],
-    )
+    run_kubectl(&["--kubeconfig", kubeconfig, "get", "nodes", "-o", "wide"]).await
 }
 
 /// Get control plane node count
 pub async fn get_control_plane_count(kubeconfig: &str) -> Result<u32, String> {
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "nodes",
-            "-l",
-            "node-role.kubernetes.io/control-plane",
-            "-o",
-            "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
-        ],
-    )
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "nodes",
+        "-l",
+        "node-role.kubernetes.io/control-plane",
+        "-o",
+        "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
+    ])
+    .await
     .unwrap_or_default();
     Ok(count_ready_nodes(&output))
 }

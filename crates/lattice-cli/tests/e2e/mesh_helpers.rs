@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use super::helpers::{run_cmd, wait_for_condition};
+use super::helpers::{run_kubectl, wait_for_condition};
 
 // =============================================================================
 // Constants
@@ -283,19 +283,17 @@ pub async fn wait_for_cycles(
                 "{{range .items[*]}}{{.metadata.name}}:{{.metadata.labels.{}}}{{\"\\n\"}}{{end}}",
                 label_escaped
             );
-            let pods_output = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "get",
-                    "pods",
-                    "-n",
-                    namespace,
-                    "-o",
-                    &format!("jsonpath={}", jsonpath),
-                ],
-            )
+            let pods_output = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "pods",
+                "-n",
+                namespace,
+                "-o",
+                &format!("jsonpath={}", jsonpath),
+            ])
+            .await
             .unwrap_or_default();
 
             let pods: Vec<&str> = pods_output
@@ -327,19 +325,18 @@ pub async fn wait_for_cycles(
             let mut min_cycles_found = usize::MAX;
 
             for pod in &pods {
-                let logs = match run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        kubeconfig_path,
-                        "logs",
-                        "-n",
-                        namespace,
-                        pod,
-                        "--tail",
-                        "2000",
-                    ],
-                ) {
+                let logs = match run_kubectl(&[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "logs",
+                    "-n",
+                    namespace,
+                    pod,
+                    "--tail",
+                    "2000",
+                ])
+                .await
+                {
                     Ok(output) => output,
                     Err(e) => {
                         warn!("[{}] Failed to get logs for pod {}: {}", label, pod, e);
@@ -405,19 +402,18 @@ pub async fn wait_for_pods_running(
         timeout,
         poll_interval,
         || async move {
-            let running_count = match run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "get",
-                    "pods",
-                    "-n",
-                    namespace,
-                    "-o",
-                    "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}",
-                ],
-            ) {
+            let running_count = match run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "pods",
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}",
+            ])
+            .await
+            {
                 Ok(output) => output
                     .lines()
                     .filter(|l: &&str| l.trim() == "Running")
@@ -463,19 +459,17 @@ pub async fn wait_for_services_ready(
         Duration::from_secs(300),
         Duration::from_secs(5),
         || async move {
-            let output = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "get",
-                    "latticeservices",
-                    "-n",
-                    namespace,
-                    "-o",
-                    "jsonpath={range .items[*]}{.metadata.name}:{.status.phase}{\"\\n\"}{end}",
-                ],
-            )
+            let output = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "latticeservices",
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={range .items[*]}{.metadata.name}:{.status.phase}{\"\\n\"}{end}",
+            ])
+            .await
             .unwrap_or_default();
 
             let services: Vec<(&str, &str)> = output
@@ -536,19 +530,17 @@ pub async fn check_no_incorrectly_allowed(
 ) -> Result<(), String> {
     let mut violations: Vec<String> = Vec::new();
 
-    let pods_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
-        ],
-    )?;
+    let pods_output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-o",
+        "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+    ])
+    .await?;
 
     for pod in pods_output.lines() {
         let pod = pod.trim();
@@ -556,19 +548,17 @@ pub async fn check_no_incorrectly_allowed(
             continue;
         }
 
-        let logs = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "logs",
-                "-n",
-                namespace,
-                pod,
-                "--tail",
-                "500",
-            ],
-        )
+        let logs = run_kubectl(&[
+            "--kubeconfig",
+            kubeconfig_path,
+            "logs",
+            "-n",
+            namespace,
+            pod,
+            "--tail",
+            "500",
+        ])
+        .await
         .unwrap_or_default();
 
         for line in logs.lines() {

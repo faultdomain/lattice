@@ -29,7 +29,7 @@ use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     apply_cedar_policy_crd, apply_yaml_with_retry, delete_cedar_policies_by_label,
     delete_namespace, get_child_cluster_name, get_or_create_proxy, get_sa_token,
-    http_get_with_retry, proxy_service_exists, run_cmd,
+    http_get_with_retry, proxy_service_exists, run_kubectl,
 };
 
 // =============================================================================
@@ -136,27 +136,25 @@ pub async fn apply_cedar_policy_allow_group(
 }
 
 /// Delete a CedarPolicy
-pub fn delete_cedar_policy(kubeconfig: &str, policy_name: &str) -> Result<(), String> {
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "cedarpolicy",
-            policy_name,
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "--ignore-not-found",
-        ],
-    )?;
+pub async fn delete_cedar_policy(kubeconfig: &str, policy_name: &str) -> Result<(), String> {
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "cedarpolicy",
+        policy_name,
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "--ignore-not-found",
+    ])
+    .await?;
     info!("[Integration/Cedar] Deleted CedarPolicy {}", policy_name);
     Ok(())
 }
 
 /// Clean up all Cedar test policies (safety net for failures)
-pub fn cleanup_cedar_test_policies(kubeconfig: &str) {
-    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=cedar");
+pub async fn cleanup_cedar_test_policies(kubeconfig: &str) {
+    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=cedar").await;
 }
 
 /// E2E default policy name
@@ -275,8 +273,9 @@ pub async fn run_cedar_proxy_test(
     )
     .await?;
 
-    let allowed_token = get_sa_token(parent_kubeconfig, CEDAR_PROXY_TEST_NS, ALLOWED_SA_NAME)?;
-    let denied_token = get_sa_token(parent_kubeconfig, CEDAR_PROXY_TEST_NS, DENIED_SA_NAME)?;
+    let allowed_token =
+        get_sa_token(parent_kubeconfig, CEDAR_PROXY_TEST_NS, ALLOWED_SA_NAME).await?;
+    let denied_token = get_sa_token(parent_kubeconfig, CEDAR_PROXY_TEST_NS, DENIED_SA_NAME).await?;
 
     info!("[Integration/Cedar] Testing allowed SA access...");
     verify_sa_access_allowed(&proxy_url, &allowed_token, child_cluster_name).await?;
@@ -284,8 +283,8 @@ pub async fn run_cedar_proxy_test(
     info!("[Integration/Cedar] Testing denied SA access...");
     verify_sa_access_denied(&proxy_url, &denied_token, child_cluster_name).await?;
 
-    delete_cedar_policy(parent_kubeconfig, &policy_name)?;
-    delete_namespace(parent_kubeconfig, CEDAR_PROXY_TEST_NS);
+    delete_cedar_policy(parent_kubeconfig, &policy_name).await?;
+    delete_namespace(parent_kubeconfig, CEDAR_PROXY_TEST_NS).await;
 
     info!(
         "[Integration/Cedar] Cedar proxy test for {} passed!",
@@ -327,9 +326,12 @@ pub async fn run_cedar_group_test(
     )
     .await?;
 
-    let in_group_token1 = get_sa_token(parent_kubeconfig, CEDAR_GROUP_TEST_NS, ALLOWED_SA_NAME)?;
-    let in_group_token2 = get_sa_token(parent_kubeconfig, CEDAR_GROUP_TEST_NS, DENIED_SA_NAME)?;
-    let outside_group_token = get_sa_token(parent_kubeconfig, LATTICE_SYSTEM_NAMESPACE, "default")?;
+    let in_group_token1 =
+        get_sa_token(parent_kubeconfig, CEDAR_GROUP_TEST_NS, ALLOWED_SA_NAME).await?;
+    let in_group_token2 =
+        get_sa_token(parent_kubeconfig, CEDAR_GROUP_TEST_NS, DENIED_SA_NAME).await?;
+    let outside_group_token =
+        get_sa_token(parent_kubeconfig, LATTICE_SYSTEM_NAMESPACE, "default").await?;
 
     info!("[Integration/Cedar] Testing SA in group (should be allowed)...");
     verify_sa_access_allowed(&proxy_url, &in_group_token1, child_cluster_name).await?;
@@ -340,8 +342,8 @@ pub async fn run_cedar_group_test(
     info!("[Integration/Cedar] Testing SA outside group (should be denied)...");
     verify_sa_access_denied(&proxy_url, &outside_group_token, child_cluster_name).await?;
 
-    delete_cedar_policy(parent_kubeconfig, &policy_name)?;
-    delete_namespace(parent_kubeconfig, CEDAR_GROUP_TEST_NS);
+    delete_cedar_policy(parent_kubeconfig, &policy_name).await?;
+    delete_namespace(parent_kubeconfig, CEDAR_GROUP_TEST_NS).await;
 
     info!("[Integration/Cedar] Group policy test passed!");
     Ok(())
@@ -361,13 +363,13 @@ pub async fn run_cedar_hierarchy_tests(
         child_cluster_name
     );
 
-    if !proxy_service_exists(&ctx.mgmt_kubeconfig) {
+    if !proxy_service_exists(&ctx.mgmt_kubeconfig).await {
         info!("[Integration/Cedar] Proxy service not deployed - skipping Cedar tests");
         return Ok(());
     }
 
     // Remove default E2E policy so deny checks work correctly
-    let _ = delete_cedar_policy(&ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME);
+    let _ = delete_cedar_policy(&ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let proxy_url = ctx.mgmt_proxy_url.as_deref();
@@ -379,7 +381,7 @@ pub async fn run_cedar_hierarchy_tests(
     );
 
     // Safety net: clean up any leftover policies on failure
-    cleanup_cedar_test_policies(kubeconfig);
+    cleanup_cedar_test_policies(kubeconfig).await;
 
     // Restore default policy for subsequent tests (mesh, secrets, etc.)
     apply_e2e_default_policy(kubeconfig).await?;
@@ -404,7 +406,7 @@ async fn test_cedar_sa_auth_standalone() {
             .unwrap();
     let child_cluster_name = get_child_cluster_name();
 
-    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME);
+    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     run_cedar_proxy_test(
@@ -426,7 +428,7 @@ async fn test_cedar_group_policy_standalone() {
             .unwrap();
     let child_cluster_name = get_child_cluster_name();
 
-    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME);
+    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     run_cedar_group_test(

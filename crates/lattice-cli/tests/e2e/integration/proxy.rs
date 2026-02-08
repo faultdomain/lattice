@@ -28,7 +28,7 @@ use tracing::info;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     get_or_create_proxy, get_sa_token, get_workload2_cluster_name, get_workload_cluster_name,
-    http_get_with_retry, run_cmd,
+    http_get_with_retry, run_kubectl,
 };
 use super::cedar::{apply_e2e_default_policy, delete_cedar_policy, E2E_DEFAULT_POLICY_NAME};
 
@@ -67,18 +67,17 @@ pub async fn wait_for_agent_ready(
         Duration::from_secs(300),
         Duration::from_secs(5),
         || async move {
-            let phase_trimmed = match run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    parent_kubeconfig,
-                    "get",
-                    "latticecluster",
-                    child_cluster_name,
-                    "-o",
-                    "jsonpath={.status.phase}",
-                ],
-            ) {
+            let phase_trimmed = match run_kubectl(&[
+                "--kubeconfig",
+                parent_kubeconfig,
+                "get",
+                "latticecluster",
+                child_cluster_name,
+                "-o",
+                "jsonpath={.status.phase}",
+            ])
+            .await
+            {
                 Ok(output) => output.trim().to_string(),
                 Err(_) => String::new(),
             };
@@ -127,7 +126,7 @@ pub async fn test_proxy_access_to_child(
         get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
 
     // Get a ServiceAccount token from the parent cluster
-    let token = get_sa_token(parent_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
+    let token = get_sa_token(parent_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA).await?;
     info!(
         "[Integration/Proxy] Got SA token for {}/{}",
         PROXY_TEST_NAMESPACE, PROXY_TEST_SA
@@ -163,7 +162,7 @@ pub async fn test_proxy_access_to_grandchild(
         get_or_create_proxy(root_kubeconfig, existing_proxy_url).await?;
 
     // Get a ServiceAccount token from the root cluster
-    let token = get_sa_token(root_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
+    let token = get_sa_token(root_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA).await?;
 
     // Test proxy access and validate response
     verify_proxy_namespace_access(&proxy_url, &token, grandchild_cluster_name, "grandchild").await
@@ -333,7 +332,7 @@ async fn test_proxy_access_standalone() {
     .await;
 
     // Cleanup
-    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME);
+    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
 
     result.unwrap();
 }

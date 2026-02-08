@@ -25,7 +25,7 @@ use tracing::info;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     client_from_kubeconfig, create_with_retry, ensure_fresh_namespace, list_with_retry,
-    load_service_config, run_cmd, wait_for_condition,
+    load_service_config, run_kubectl, wait_for_condition,
 };
 
 /// Test namespace for model cache integration tests
@@ -59,7 +59,7 @@ pub async fn run_model_cache_tests(ctx: &InfraContext) -> Result<(), String> {
     .await;
 
     // Always clean up
-    cleanup(kubeconfig);
+    cleanup(kubeconfig).await;
 
     result?;
     info!("[Integration/ModelCache] All model cache tests passed!");
@@ -170,20 +170,18 @@ async fn verify_prefetch_job_created(kubeconfig: &str) -> Result<(), String> {
             let kc = kc.clone();
             let job_name = job_name.clone();
             async move {
-                let output = run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        &kc,
-                        "get",
-                        "job",
-                        &job_name,
-                        "-n",
-                        TEST_NAMESPACE,
-                        "-o",
-                        "name",
-                    ],
-                );
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "job",
+                    &job_name,
+                    "-n",
+                    TEST_NAMESPACE,
+                    "-o",
+                    "name",
+                ])
+                .await;
                 match output {
                     Ok(out) => {
                         let exists = !out.trim().is_empty();
@@ -200,20 +198,18 @@ async fn verify_prefetch_job_created(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     // Verify Job labels
-    let label_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "job",
-            &expected_job_name,
-            "-n",
-            TEST_NAMESPACE,
-            "-o",
-            "jsonpath={.metadata.labels.lattice\\.dev/model-artifact}",
-        ],
-    )?;
+    let label_output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "job",
+        &expected_job_name,
+        "-n",
+        TEST_NAMESPACE,
+        "-o",
+        "jsonpath={.metadata.labels.lattice\\.dev/model-artifact}",
+    ])
+    .await?;
     if label_output.trim() != artifact_name {
         return Err(format!(
             "Job label 'lattice.dev/model-artifact' expected '{}', got '{}'",
@@ -223,20 +219,18 @@ async fn verify_prefetch_job_created(kubeconfig: &str) -> Result<(), String> {
     }
 
     // Verify ownerReferences
-    let owner_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "job",
-            &expected_job_name,
-            "-n",
-            TEST_NAMESPACE,
-            "-o",
-            "jsonpath={.metadata.ownerReferences[0].kind}",
-        ],
-    )?;
+    let owner_output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "job",
+        &expected_job_name,
+        "-n",
+        TEST_NAMESPACE,
+        "-o",
+        "jsonpath={.metadata.ownerReferences[0].kind}",
+    ])
+    .await?;
     if owner_output.trim() != "ModelArtifact" {
         return Err(format!(
             "Job ownerReference kind expected 'ModelArtifact', got '{}'",
@@ -245,20 +239,18 @@ async fn verify_prefetch_job_created(kubeconfig: &str) -> Result<(), String> {
     }
 
     // Verify Job mounts a PVC
-    let pvc_output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "job",
-            &expected_job_name,
-            "-n",
-            TEST_NAMESPACE,
-            "-o",
-            "jsonpath={.spec.template.spec.volumes[0].persistentVolumeClaim.claimName}",
-        ],
-    )?;
+    let pvc_output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "job",
+        &expected_job_name,
+        "-n",
+        TEST_NAMESPACE,
+        "-o",
+        "jsonpath={.spec.template.spec.volumes[0].persistentVolumeClaim.claimName}",
+    ])
+    .await?;
     if pvc_output.trim().is_empty() {
         return Err("Job should mount a PVC but claimName is empty".to_string());
     }
@@ -294,20 +286,18 @@ async fn verify_phase_transitions(kubeconfig: &str) -> Result<(), String> {
             let kc = kc_dl.clone();
             let name = name_dl.clone();
             async move {
-                let output = run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        &kc,
-                        "get",
-                        "modelartifact",
-                        &name,
-                        "-n",
-                        TEST_NAMESPACE,
-                        "-o",
-                        "jsonpath={.status.phase}",
-                    ],
-                );
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "modelartifact",
+                    &name,
+                    "-n",
+                    TEST_NAMESPACE,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ])
+                .await;
                 match output {
                     Ok(phase) => {
                         let phase = phase.trim();
@@ -334,20 +324,18 @@ async fn verify_phase_transitions(kubeconfig: &str) -> Result<(), String> {
             let kc = kc.clone();
             let name = name.clone();
             async move {
-                let output = run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        &kc,
-                        "get",
-                        "modelartifact",
-                        &name,
-                        "-n",
-                        TEST_NAMESPACE,
-                        "-o",
-                        "jsonpath={.status.phase}",
-                    ],
-                );
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "modelartifact",
+                    &name,
+                    "-n",
+                    TEST_NAMESPACE,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ])
+                .await;
                 match output {
                     Ok(phase) => {
                         let phase = phase.trim();
@@ -400,20 +388,18 @@ async fn verify_failed_retry(kubeconfig: &str) -> Result<(), String> {
         || {
             let kc = kubeconfig.to_string();
             async move {
-                let output = run_cmd(
-                    "kubectl",
-                    &[
-                        "--kubeconfig",
-                        &kc,
-                        "get",
-                        "modelartifact",
-                        test_name,
-                        "-n",
-                        TEST_NAMESPACE,
-                        "-o",
-                        "jsonpath={.status.phase}",
-                    ],
-                );
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "modelartifact",
+                    test_name,
+                    "-n",
+                    TEST_NAMESPACE,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ])
+                .await;
                 match output {
                     Ok(phase) => {
                         let phase = phase.trim();
@@ -438,19 +424,17 @@ async fn verify_failed_retry(kubeconfig: &str) -> Result<(), String> {
 // Cleanup
 // =============================================================================
 
-fn cleanup(kubeconfig: &str) {
+async fn cleanup(kubeconfig: &str) {
     info!("[ModelCache] Cleaning up test namespace...");
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "namespace",
-            TEST_NAMESPACE,
-            "--wait=false",
-        ],
-    );
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "namespace",
+        TEST_NAMESPACE,
+        "--wait=false",
+    ])
+    .await;
 }
 
 // =============================================================================

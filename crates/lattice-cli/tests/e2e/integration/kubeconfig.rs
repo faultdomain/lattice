@@ -18,7 +18,7 @@ use tracing::info;
 use lattice_common::{capi_namespace, kubeconfig_secret_name};
 
 use super::super::context::{InfraContext, TestSession};
-use super::super::helpers::{get_workload_cluster_name, run_cmd};
+use super::super::helpers::{get_workload_cluster_name, run_kubectl};
 
 // ============================================================================
 // Core Test Functions
@@ -44,21 +44,20 @@ pub async fn verify_kubeconfig_patched(
     let secret_name = kubeconfig_secret_name(cluster_name);
 
     // Try to get the kubeconfig secret from the parent cluster (pre-pivot location)
-    // Use run_cmd which returns Result - if kubectl fails (e.g., secret not found), it's an Err
-    let kubeconfig_b64 = match run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            parent_kubeconfig,
-            "get",
-            "secret",
-            &secret_name,
-            "-n",
-            &namespace,
-            "-o",
-            "jsonpath={.data.value}",
-        ],
-    ) {
+    // Use run_kubectl which returns Result - if kubectl fails (e.g., secret not found), it's an Err
+    let kubeconfig_b64 = match run_kubectl(&[
+        "--kubeconfig",
+        parent_kubeconfig,
+        "get",
+        "secret",
+        &secret_name,
+        "-n",
+        &namespace,
+        "-o",
+        "jsonpath={.data.value}",
+    ])
+    .await
+    {
         Ok(data) if !data.trim().is_empty() => data,
         Ok(_) | Err(_) => {
             // After pivot, the secret is moved to the child cluster
@@ -103,36 +102,33 @@ pub async fn verify_cedar_policies_loaded(kubeconfig: &str) -> Result<(), String
     info!("[Integration/Kubeconfig] Verifying Cedar policies are loaded...");
 
     // Check for CedarPolicy CRD
-    let crd_check = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "crd",
-            "cedarpolicies.lattice.dev",
-            "-o",
-            "name",
-        ],
-    );
+    let crd_check = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "crd",
+        "cedarpolicies.lattice.dev",
+        "-o",
+        "name",
+    ])
+    .await;
 
     if crd_check.is_err() {
         info!("[Integration/Kubeconfig] Cedar CRD not installed - skipping policy verification");
         return Ok(());
     }
 
-    let policy_count = match run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "cedarpolicy",
-            "-A",
-            "-o",
-            "name",
-        ],
-    ) {
+    let policy_count = match run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "cedarpolicy",
+        "-A",
+        "-o",
+        "name",
+    ])
+    .await
+    {
         Ok(policies) => policies.lines().filter(|l| !l.is_empty()).count(),
         Err(_) => 0,
     };

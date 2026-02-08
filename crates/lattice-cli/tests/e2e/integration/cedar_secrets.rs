@@ -120,8 +120,8 @@ async fn apply_cedar_secret_provider_policy(
 // =============================================================================
 
 /// Clean up all Cedar secret test policies
-fn cleanup_cedar_secret_policies(kubeconfig: &str) {
-    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=cedar-secret");
+async fn cleanup_cedar_secret_policies(kubeconfig: &str) {
+    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=cedar-secret").await;
 }
 
 // =============================================================================
@@ -167,7 +167,7 @@ async fn test_default_deny(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    delete_namespace(kubeconfig, NS_DEFAULT_DENY);
+    delete_namespace(kubeconfig, NS_DEFAULT_DENY).await;
     info!("[CedarSecrets] Test 1 passed: default deny works");
     Ok(())
 }
@@ -199,7 +199,7 @@ async fn test_permit_specific_path(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    delete_namespace(kubeconfig, NS_PERMIT_PATH);
+    delete_namespace(kubeconfig, NS_PERMIT_PATH).await;
     info!("[CedarSecrets] Test 2 passed: permit specific path works");
     Ok(())
 }
@@ -227,7 +227,7 @@ async fn test_forbid_overrides_permit(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    delete_namespace(kubeconfig, NS_FORBID_OVERRIDE);
+    delete_namespace(kubeconfig, NS_FORBID_OVERRIDE).await;
     info!("[CedarSecrets] Test 3 passed: forbid overrides permit");
     Ok(())
 }
@@ -276,8 +276,8 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    delete_namespace(kubeconfig, NS_ISOLATION_A);
-    delete_namespace(kubeconfig, NS_ISOLATION_B);
+    delete_namespace(kubeconfig, NS_ISOLATION_A).await;
+    delete_namespace(kubeconfig, NS_ISOLATION_B).await;
     info!("[CedarSecrets] Test 4 passed: namespace isolation works");
     Ok(())
 }
@@ -322,7 +322,7 @@ async fn test_policy_lifecycle(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    delete_namespace(kubeconfig, NS_LIFECYCLE);
+    delete_namespace(kubeconfig, NS_LIFECYCLE).await;
     info!("[CedarSecrets] Test 5 passed: policy lifecycle recovery works");
     Ok(())
 }
@@ -370,7 +370,7 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    delete_namespace(kubeconfig, NS_PROVIDER);
+    delete_namespace(kubeconfig, NS_PROVIDER).await;
     info!("[CedarSecrets] Test 6 passed: provider-scoped access works");
     Ok(())
 }
@@ -395,7 +395,7 @@ pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
     setup_regcreds_infrastructure(kubeconfig).await?;
 
     // Clean up any leftover policies from previous runs
-    cleanup_cedar_secret_policies(kubeconfig);
+    cleanup_cedar_secret_policies(kubeconfig).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Run all tests concurrently — each uses its own namespace
@@ -409,7 +409,7 @@ pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
     );
 
     // Always clean up policies, even on failure
-    cleanup_cedar_secret_policies(kubeconfig);
+    cleanup_cedar_secret_policies(kubeconfig).await;
 
     result.map_err(|e| e.to_string())?;
 

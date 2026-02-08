@@ -42,8 +42,8 @@ use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, create_with_retry, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, patch_with_retry, run_cmd, run_id, watch_cluster_phases,
-    DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    load_registry_credentials, patch_with_retry, run_cmd, run_id, run_kubectl,
+    watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
 use super::integration::setup;
 use super::mesh_tests::{start_mesh_test, wait_for_mesh_test_cycles};
@@ -266,18 +266,17 @@ async fn wait_for_cluster_deleted(kubeconfig: &str, name: &str) -> Result<(), St
         Duration::from_secs(600),
         Duration::from_secs(5),
         || async move {
-            match run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig,
-                    "get",
-                    "latticecluster",
-                    name,
-                    "-o",
-                    "name",
-                ],
-            ) {
+            match run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "latticecluster",
+                name,
+                "-o",
+                "name",
+            ])
+            .await
+            {
                 Err(e) if e.contains("not found") || e.contains("NotFound") => Ok(true),
                 Err(e) => {
                     info!("[Upgrade] Error checking cluster deletion: {}", e);
@@ -308,14 +307,11 @@ async fn monitor_upgrade(
         }
 
         // Check node versions
-        let output = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig", kubeconfig_path,
-                "get", "nodes",
-                "-o", "jsonpath={range .items[*]}{.status.nodeInfo.kubeletVersion} {.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
-            ],
-        ).unwrap_or_default();
+        let output = run_kubectl(&[
+            "--kubeconfig", kubeconfig_path,
+            "get", "nodes",
+            "-o", "jsonpath={range .items[*]}{.status.nodeInfo.kubeletVersion} {.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
+        ]).await.unwrap_or_default();
 
         let mut all_upgraded = true;
         let mut all_ready = true;

@@ -42,7 +42,7 @@ use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, create_with_retry,
     docker_containers_deleted, ensure_docker_network, extract_docker_cluster_kubeconfig,
     force_delete_docker_cluster, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd, watch_cluster_phases, watch_worker_scaling,
+    load_registry_credentials, run_kubectl, watch_cluster_phases, watch_worker_scaling,
     DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::setup;
@@ -180,16 +180,14 @@ async fn run_independence_test(
     )
     .await?;
 
-    let capi_check = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            &workload_kubeconfig,
-            "get",
-            "clusters",
-            "-A",
-        ],
-    )?;
+    let capi_check = run_kubectl(&[
+        "--kubeconfig",
+        &workload_kubeconfig,
+        "get",
+        "clusters",
+        "-A",
+    ])
+    .await?;
 
     if !capi_check.contains(&workload_cluster_name) {
         return Err("Workload cluster missing CAPI resources after pivot".to_string());
@@ -219,19 +217,17 @@ async fn run_independence_test(
     info!("[Phase 5] Scaling workload cluster workers 1 -> 2...");
     info!("If this works, the cluster is truly self-managing");
 
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            &workload_kubeconfig,
-            "patch",
-            "latticecluster",
-            &workload_cluster_name,
-            "--type=merge",
-            "-p",
-            r#"{"spec":{"nodes":{"workerPools":{"default":{"replicas":2}}}}}"#,
-        ],
-    )?;
+    run_kubectl(&[
+        "--kubeconfig",
+        &workload_kubeconfig,
+        "patch",
+        "latticecluster",
+        &workload_cluster_name,
+        "--type=merge",
+        "-p",
+        r#"{"spec":{"nodes":{"workerPools":{"default":{"replicas":2}}}}}"#,
+    ])
+    .await?;
 
     info!("Patch applied, waiting for scale-up...");
 

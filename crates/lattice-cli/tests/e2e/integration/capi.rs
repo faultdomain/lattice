@@ -22,7 +22,7 @@ use tracing::info;
 
 use super::super::context::{ClusterLevel, InfraContext, TestSession};
 use super::super::helpers::{
-    get_mgmt_cluster_name, get_workload_cluster_name, run_cmd, verify_cluster_capi_resources,
+    get_mgmt_cluster_name, get_workload_cluster_name, run_kubectl, verify_cluster_capi_resources,
 };
 use super::cedar::apply_e2e_default_policy;
 
@@ -59,18 +59,16 @@ pub async fn verify_capi_resources(
 
 /// List all CAPI clusters visible from a kubeconfig
 pub async fn list_capi_clusters(kubeconfig: &str) -> Result<String, String> {
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "clusters",
-            "-A",
-            "-o",
-            "wide",
-        ],
-    )
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "clusters",
+        "-A",
+        "-o",
+        "wide",
+    ])
+    .await
 }
 
 // =============================================================================

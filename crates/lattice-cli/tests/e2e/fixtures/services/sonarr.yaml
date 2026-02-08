@@ -6,7 +6,7 @@ metadata:
 spec:
   containers:
     main:
-      image: ghcr.io/evan-hines-js/sonarr:latest
+      image: docker.io/linuxserver/sonarr:latest
       variables:
         PUID: "1000"
         PGID: "1000"
