@@ -5,7 +5,7 @@
 <h3 align="center">Self-managing Kubernetes clusters with zero-trust networking</h3>
 
 <p align="center">
-  <em>One CRD. Fully self-managing clusters. Bilateral service mesh. Multi-provider. FIPS-ready.</em>
+  <em>Fully self-managing clusters. Bilateral service mesh. Multi-provider. FIPS-ready.</em>
 </p>
 
 ---
@@ -38,14 +38,12 @@ Networking follows the same philosophy: default-deny everywhere, traffic only fl
 
 **FIPS 140-2 cryptography** — All TLS and signing uses `aws-lc-rs` via `rustls`. RKE2 bootstrap available for FIPS Kubernetes distributions.
 
-**Configurable infrastructure** — Monitoring (VictoriaMetrics), backups (Velero), and external secrets (ESO) are each independently toggleable per cluster. Bootstrap clusters run cluster-only mode with no extra infrastructure.
-
 ---
 
 ## Quick Start
 
 ```bash
-# Provision a fully self-managing cluster in one command
+# Provision a fully self-managing cluster
 lattice install -f cluster.yaml
 
 # See your fleet
@@ -70,7 +68,79 @@ mgmt  [Ready] (parent)
 
 ---
 
-## Cluster Definition
+## Infrastructure
+
+### CloudProvider
+
+Registers cloud credentials that clusters reference via `providerRef`. Supports two credential modes:
+
+**Manual** — you create a Kubernetes Secret and reference it directly:
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: CloudProvider
+metadata:
+  name: aws-prod
+spec:
+  type: aws
+  region: us-east-1
+  credentialsSecretRef:             # manual mode
+    name: aws-prod-creds
+  aws:
+    vpcId: vpc-0abc123def456
+    subnetIds: [subnet-a, subnet-b]
+```
+
+**ESO** — credentials are synced from a ClusterSecretStore via External Secrets Operator:
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: CloudProvider
+metadata:
+  name: aws-prod
+spec:
+  type: aws
+  region: us-east-1
+  credentials:                      # ESO mode
+    type: secret
+    id: infrastructure/aws/prod
+    params:
+      provider: vault-prod
+      keys: [access_key_id, secret_access_key]
+  aws:
+    vpcId: vpc-0abc123def456
+    subnetIds: [subnet-a, subnet-b]
+```
+
+Supported providers: `aws`, `proxmox`, `openstack`, `docker`.
+
+### SecretsProvider
+
+Wraps an ESO `ClusterSecretStore` provider configuration. The `spec.provider` field is passed through verbatim — you write native ESO provider YAML and Lattice manages the ClusterSecretStore lifecycle.
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: SecretsProvider
+metadata:
+  name: vault-prod
+spec:
+  provider:
+    vault:
+      server: https://vault.example.com
+      path: secret
+      version: v2
+      auth:
+        tokenSecretRef:
+          name: vault-token
+          namespace: lattice-system
+          key: token
+```
+
+Any ESO-supported provider works: `vault`, `aws`, `webhook`, `barbican`, etc.
+
+### LatticeCluster
+
+Defines a cluster's infrastructure, node topology, and lifecycle. After provisioning via Cluster API, the cluster pivots to own its own resources and becomes self-managing.
 
 ```yaml
 apiVersion: lattice.dev/v1alpha1
@@ -82,7 +152,7 @@ spec:
   provider:
     kubernetes:
       version: "1.32.0"
-      bootstrap: kubeadm       # or rke2 for FIPS
+      bootstrap: kubeadm            # or rke2 for FIPS
     config:
       aws:
         region: us-west-2
@@ -97,19 +167,21 @@ spec:
         replicas: 2
         min: 1
         max: 8
-  services: true                # Istio ambient mesh (default: true)
-  monitoring: true              # VictoriaMetrics + KEDA (default: true)
-  backups: true                 # Velero (default: true)
-  externalSecrets: true         # ESO for Vault integration (default: true)
-  gpu: false                    # NFD + NVIDIA device plugin (default: false)
-  parentConfig:                 # Enables this cluster to provision children
+  services: true                    # Istio ambient mesh
+  monitoring: true                  # VictoriaMetrics + KEDA
+  backups: true                     # Velero
+  externalSecrets: true             # ESO for Vault integration
+  gpu: false                        # NFD + NVIDIA device plugin
+  parentConfig:                     # enables this cluster to provision children
     service:
       type: LoadBalancer
 ```
 
 ---
 
-## LatticeService
+## Workloads
+
+### LatticeService
 
 One CRD that compiles into everything your service needs:
 
@@ -135,10 +207,10 @@ spec:
   resources:
     auth-service:
       type: service
-      direction: outbound         # "I call auth-service"
+      direction: outbound            # "I call auth-service"
     web-frontend:
       type: service
-      direction: inbound          # "web-frontend can call me"
+      direction: inbound             # "web-frontend can call me"
     db-creds:
       type: secret
       id: database/prod/creds
@@ -153,9 +225,7 @@ spec:
 
 Generates: Deployment, Service, ScaledObject, CiliumNetworkPolicy, AuthorizationPolicy, ExternalSecret, ServiceAccount — all wired together, default-deny enforced.
 
----
-
-## Bilateral Service Mesh
+### Bilateral Service Mesh
 
 Traffic requires mutual consent:
 
@@ -219,13 +289,17 @@ After pivot, the cluster is independent. The parent can be deleted without affec
 |---------|-------------|
 | `lattice install -f cluster.yaml` | Provision a self-managing cluster |
 | `lattice uninstall -k kubeconfig` | Tear down a cluster (reverse pivot) |
+| `lattice login` | Authenticate with a Lattice cluster |
+| `lattice use <cluster>` | Switch active cluster context |
+| `lattice token` | ServiceAccount token (exec credential plugin) |
 | `lattice get clusters` | List your fleet |
 | `lattice get cluster <name>` | Detail view of one cluster |
+| `lattice get services` | List LatticeService resources |
 | `lattice get hierarchy` | ASCII tree of parent-child topology |
-| `lattice get services` | List service mesh policies |
-| `lattice get health` | Fleet health with node counts and agent status |
-| `lattice kubeconfig` | Multi-context kubeconfig via K8s API proxy |
-| `lattice token` | ServiceAccount token (exec credential plugin) |
+| `lattice get health` | Fleet health with node counts and heartbeats |
+| `lattice get backups` | List backup policies and recent backups |
+| `lattice backup` | Create a Velero backup |
+| `lattice restore <name>` | Restore from backup (supports Lattice-aware ordering) |
 
 ---
 
@@ -245,7 +319,7 @@ cargo test --features provider-e2e --test e2e
 
 ```
 crates/
-├── lattice-cli/            CLI (install, uninstall, get, token, kubeconfig)
+├── lattice-cli/            CLI (install, uninstall, get, token, login)
 ├── lattice-operator/       Kubernetes operator and controller dispatch
 ├── lattice-common/         Shared CRDs, types, and utilities
 ├── lattice-service/        Service dependency -> network policy compiler

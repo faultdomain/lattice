@@ -49,9 +49,6 @@ pub struct InfrastructureConfig {
     /// Enable backup infrastructure (Velero).
     /// Defaults to true.
     pub backups: bool,
-    /// Enable external secrets infrastructure (External Secrets Operator for Vault).
-    /// Defaults to true.
-    pub external_secrets: bool,
 }
 
 impl Default for InfrastructureConfig {
@@ -67,7 +64,6 @@ impl Default for InfrastructureConfig {
             gpu: false,
             monitoring: true,
             backups: true,
-            external_secrets: true,
         }
     }
 }
@@ -91,7 +87,6 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             gpu: cluster.spec.gpu,
             monitoring: cluster.spec.monitoring,
             backups: cluster.spec.backups,
-            external_secrets: cluster.spec.external_secrets,
         }
     }
 }
@@ -115,10 +110,8 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
         manifests.extend(gw_api.iter().cloned());
     }
 
-    // External Secrets Operator (for Vault integration)
-    if config.external_secrets {
-        manifests.extend(eso::generate_eso().iter().cloned());
-    }
+    // External Secrets Operator (always installed — required for credential management)
+    manifests.extend(eso::generate_eso().iter().cloned());
 
     // Velero (for backup and restore)
     if config.backups {

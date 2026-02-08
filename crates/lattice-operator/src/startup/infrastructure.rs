@@ -45,7 +45,6 @@ pub async fn ensure_infrastructure(
             skip_service_mesh: true,
             monitoring: false,
             backups: false,
-            external_secrets: false,
             ..Default::default()
         };
 

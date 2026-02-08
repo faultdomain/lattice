@@ -444,7 +444,6 @@ mod tests {
                 gpu: false,
                 monitoring: true,
                 backups: true,
-                external_secrets: true,
             },
             status: None,
         }

@@ -74,11 +74,6 @@ pub struct LatticeClusterSpec {
     /// Defaults to true.
     #[serde(default = "super::default_true")]
     pub backups: bool,
-
-    /// Enable external secrets infrastructure (External Secrets Operator for Vault).
-    /// Defaults to true.
-    #[serde(default = "super::default_true")]
-    pub external_secrets: bool,
 }
 
 impl LatticeClusterSpec {
@@ -717,7 +712,6 @@ nodes:
                 gpu: false,
                 monitoring: true,
                 backups: true,
-                external_secrets: true,
             },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };
