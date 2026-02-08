@@ -12,7 +12,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{SecretProvider, SecretProviderPhase, SecretProviderStatus};
+use lattice_common::crd::{SecretProvider, SecretProviderPhase};
 use lattice_common::kube_utils::HasApiResource;
 use lattice_common::{
     ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE,
@@ -397,15 +397,17 @@ async fn update_status(
         .namespace()
         .unwrap_or(LATTICE_SYSTEM_NAMESPACE.to_string());
 
-    let status = SecretProviderStatus {
-        phase,
-        message,
-        last_validated: Some(chrono::Utc::now().to_rfc3339()),
-        provider_type,
-    };
-
+    // Build the patch manually instead of serializing SecretProviderStatus,
+    // because Merge patches need explicit `null` to clear fields — serde's
+    // `skip_serializing_if = "Option::is_none"` omits them entirely, which
+    // leaves stale values in place and causes a reconcile loop.
     let patch = serde_json::json!({
-        "status": status
+        "status": {
+            "phase": phase,
+            "message": message,
+            "lastValidated": chrono::Utc::now().to_rfc3339(),
+            "providerType": provider_type,
+        }
     });
 
     let api: Api<SecretProvider> = Api::namespaced(client.clone(), &namespace);

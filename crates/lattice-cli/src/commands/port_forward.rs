@@ -29,7 +29,8 @@ const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How often the watchdog performs active health checks even when the process is alive.
 /// Catches stale tunnels where kubectl is alive but the pod was restarted.
-const ACTIVE_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// With 2 consecutive failures required, worst-case detection time is 2× this value.
+const ACTIVE_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Maximum time to wait for kubectl to emit its "Forwarding from" line.
 const PORT_PARSE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,7 +52,8 @@ const WARM_RESTART_MAX_PROBES: u32 = 10;
 const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long to wait per health check probe during watchdog.
-const WATCHDOG_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Kept short so locked-up tunnels (TLS hangs) are detected quickly.
+const WATCHDOG_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A resilient port-forward that automatically restarts when it dies.
 ///
