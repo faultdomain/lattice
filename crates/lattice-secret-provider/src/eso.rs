@@ -169,6 +169,18 @@ impl ExternalSecret {
             spec,
         }
     }
+
+    /// Set the K8s Secret type on the target (e.g., `kubernetes.io/dockerconfigjson`)
+    pub fn with_secret_type(mut self, secret_type: impl Into<String>) -> Self {
+        match &mut self.spec.target.template {
+            Some(t) => t.type_ = Some(secret_type.into()),
+            None => {
+                self.spec.target.template =
+                    Some(ExternalSecretTemplate::with_type(secret_type));
+            }
+        }
+        self
+    }
 }
 
 /// Metadata for ExternalSecret (namespace-scoped)
@@ -298,11 +310,15 @@ pub struct ExternalSecretTemplate {
     /// Template engine version (default "v2")
     #[serde(default = "ExternalSecretTemplate::default_engine_version")]
     pub engine_version: String,
+    /// K8s Secret type (e.g., `kubernetes.io/dockerconfigjson` for imagePullSecrets)
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
+    pub type_: Option<String>,
     /// Template data: key -> Go template content
     ///
     /// Each key becomes a key in the resulting K8s Secret.
     /// Values can use Go template syntax like `{{ .secret_key }}` to
     /// reference fetched secret values from `spec.data`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub data: BTreeMap<String, String>,
 }
 
@@ -315,7 +331,17 @@ impl ExternalSecretTemplate {
     pub fn new(data: BTreeMap<String, String>) -> Self {
         Self {
             engine_version: Self::default_engine_version(),
+            type_: None,
             data,
+        }
+    }
+
+    /// Create a template that only sets the K8s Secret type (no data templates)
+    pub fn with_type(secret_type: impl Into<String>) -> Self {
+        Self {
+            engine_version: Self::default_engine_version(),
+            type_: Some(secret_type.into()),
+            data: BTreeMap::new(),
         }
     }
 }

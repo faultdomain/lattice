@@ -107,18 +107,51 @@ pub async fn reconcile(
     // Try to create/update the ClusterSecretStore
     match ensure_cluster_secret_store(client, &sp).await {
         Ok(()) => {
-            info!(secrets_provider = %name, "ClusterSecretStore is up to date");
-
-            update_status(
-                client,
-                &sp,
-                SecretProviderPhase::Ready,
-                None,
-                provider_type,
-            )
-            .await?;
-
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
+            // Check if ESO has validated the ClusterSecretStore
+            match check_cluster_secret_store_ready(client, &name).await {
+                Ok(Some((true, _))) => {
+                    info!(secrets_provider = %name, "ClusterSecretStore is Ready");
+                    update_status(
+                        client,
+                        &sp,
+                        SecretProviderPhase::Ready,
+                        None,
+                        provider_type,
+                    )
+                    .await?;
+                    Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
+                }
+                Ok(Some((false, msg))) => {
+                    info!(secrets_provider = %name, reason = %msg, "ClusterSecretStore not ready yet");
+                    update_status(
+                        client,
+                        &sp,
+                        SecretProviderPhase::Pending,
+                        Some(format!("ClusterSecretStore not ready: {msg}")),
+                        provider_type,
+                    )
+                    .await?;
+                    Ok(Action::requeue(Duration::from_secs(REQUEUE_WAITING_SECS)))
+                }
+                Ok(None) => {
+                    // No Ready condition yet — ESO hasn't reconciled
+                    info!(secrets_provider = %name, "Waiting for ESO to validate ClusterSecretStore");
+                    update_status(
+                        client,
+                        &sp,
+                        SecretProviderPhase::Pending,
+                        Some("Waiting for ESO to validate ClusterSecretStore".to_string()),
+                        provider_type,
+                    )
+                    .await?;
+                    Ok(Action::requeue(Duration::from_secs(REQUEUE_WAITING_SECS)))
+                }
+                Err(e) => {
+                    warn!(secrets_provider = %name, error = %e, "Failed to check ClusterSecretStore status");
+                    // CSS was applied successfully, just can't read status — requeue
+                    Ok(Action::requeue(Duration::from_secs(REQUEUE_WAITING_SECS)))
+                }
+            }
         }
         Err(e) if is_crd_not_found(&e) => {
             warn!(
@@ -207,6 +240,45 @@ async fn ensure_cluster_secret_store(
 
     debug!(secrets_provider = %name, "Applied ClusterSecretStore");
     Ok(())
+}
+
+/// Check if a ClusterSecretStore has been validated by ESO.
+///
+/// Returns `Ok(Some((ready, message)))` if a Ready condition exists,
+/// `Ok(None)` if ESO hasn't set a condition yet.
+async fn check_cluster_secret_store_ready(
+    client: &Client,
+    name: &str,
+) -> Result<Option<(bool, String)>, ReconcileError> {
+    let api_resource = ClusterSecretStore::api_resource();
+    let css_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
+
+    let css = css_api.get(name).await.map_err(|e| {
+        ReconcileError::Kube(format!("failed to get ClusterSecretStore '{name}': {e}"))
+    })?;
+
+    let conditions = css
+        .data
+        .get("status")
+        .and_then(|s| s.get("conditions"))
+        .and_then(|c| c.as_array());
+
+    if let Some(conditions) = conditions {
+        for condition in conditions {
+            if condition.get("type").and_then(|t| t.as_str()) == Some("Ready") {
+                let is_ready =
+                    condition.get("status").and_then(|s| s.as_str()) == Some("True");
+                let message = condition
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                return Ok(Some((is_ready, message)));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 /// Build webhook provider configuration for local backend
@@ -443,6 +515,7 @@ mod tests {
         assert_eq!(REQUEUE_SUCCESS_SECS, 300);
         assert_eq!(REQUEUE_CRD_NOT_FOUND_SECS, 30);
         assert_eq!(REQUEUE_ERROR_SECS, 60);
+        assert_eq!(REQUEUE_WAITING_SECS, 10);
     }
 
     // =========================================================================

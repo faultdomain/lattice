@@ -64,7 +64,8 @@ impl SecretsCompiler {
     /// For each secret resource in the spec:
     /// 1. Validates the resource has required fields (`id` for remote key, `params.provider`)
     /// 2. Generates an ExternalSecret that syncs from the ClusterSecretStore
-    /// 3. Registers the secret reference for template resolution
+    /// 3. Sets `kubernetes.io/dockerconfigjson` type for imagePullSecrets resources
+    /// 4. Registers the secret reference for template resolution
     pub fn compile(
         service_name: &str,
         namespace: &str,
@@ -110,7 +111,7 @@ impl SecretsCompiler {
                 .secret_k8s_name(service_name, resource_name)
                 .unwrap_or_else(|| format!("{}-{}", service_name, resource_name));
 
-            let external_secret = build_external_secret(
+            let mut external_secret = build_external_secret(
                 &k8s_secret_name,
                 namespace,
                 &params.provider,
@@ -118,6 +119,12 @@ impl SecretsCompiler {
                 params.keys.as_deref(),
                 params.refresh_interval.clone(),
             );
+
+            // imagePullSecrets need kubernetes.io/dockerconfigjson type
+            if spec.image_pull_secrets.contains(resource_name) {
+                external_secret = external_secret
+                    .with_secret_type("kubernetes.io/dockerconfigjson");
+            }
 
             output.external_secrets.push(external_secret);
 
