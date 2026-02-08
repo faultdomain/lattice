@@ -80,9 +80,6 @@ pub async fn fetch_distributable_resources(
     if let Some(sp_list) = list_crd_optional(&sp_api, &lp, "SecretsProvider").await? {
         for sp in &sp_list.items {
             secrets_providers.push(serialize_for_distribution(sp)?);
-            if let Some(ref secret_ref) = sp.spec.credentials_secret_ref {
-                secret_names.insert(secret_ref.name.clone());
-            }
         }
     }
 

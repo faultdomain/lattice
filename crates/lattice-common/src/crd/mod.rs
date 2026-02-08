@@ -44,8 +44,7 @@ pub use restore::{
     LatticeRestore, LatticeRestoreSpec, LatticeRestoreStatus, RestoreOrdering, RestorePhase,
 };
 pub use secrets_provider::{
-    SecretsBackend, SecretsProvider, SecretsProviderPhase, SecretsProviderSpec,
-    SecretsProviderStatus, VaultAuthMethod,
+    SecretsProvider, SecretsProviderPhase, SecretsProviderSpec, SecretsProviderStatus,
 };
 pub use service::{
     AutoscalingMetric, BackupHook, BackupHooksSpec, CertIssuerRef, ContainerSpec,

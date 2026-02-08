@@ -1,6 +1,8 @@
 //! SecretsProvider reconciliation controller
 //!
 //! Watches SecretsProvider CRDs and ensures ESO ClusterSecretStore exists.
+//! The provider configuration is passed through verbatim from
+//! `SecretsProvider.spec.provider` to `ClusterSecretStore.spec.provider`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,37 +12,16 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{
-    SecretsBackend, SecretsProvider, SecretsProviderPhase, SecretsProviderStatus, VaultAuthMethod,
-};
+use lattice_common::crd::{SecretsProvider, SecretsProviderPhase, SecretsProviderStatus};
 use lattice_common::kube_utils::HasApiResource;
 use lattice_common::{
-    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE,
-    LOCAL_SECRETS_PORT,
+    ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE,
+    LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT,
 };
-
-use lattice_common::template::extract_secret_refs;
 
 use crate::eso::{
-    apply_external_secret, build_external_secret, build_templated_external_secret, AppRoleAuth,
-    ClusterSecretStore, ClusterSecretStoreSpec, KubernetesAuth, ProviderSpec, SecretKeyRef,
-    SecretStoreRef, ServiceAccountRef, VaultAuth, VaultProvider, WebhookProvider, WebhookResult,
+    ClusterSecretStore, ClusterSecretStoreSpec, ProviderSpec, WebhookProvider, WebhookResult,
 };
-
-/// Default Vault secret path
-const DEFAULT_PATH: &str = "secret";
-/// Default Vault KV version
-const DEFAULT_VAULT_VERSION: &str = "v2";
-/// Default Kubernetes auth mount path in Vault
-const DEFAULT_MOUNT_PATH: &str = "kubernetes";
-/// Default Kubernetes auth role name
-const DEFAULT_ROLE: &str = "external-secrets";
-/// Default AppRole auth mount path in Vault
-const DEFAULT_APPROLE_PATH: &str = "approle";
-/// Default ESO namespace
-const ESO_NAMESPACE: &str = "external-secrets";
-/// Default ESO service account name
-const ESO_SERVICE_ACCOUNT: &str = "external-secrets";
 
 /// Well-known name for the local webhook ClusterSecretStore
 pub(crate) const LOCAL_WEBHOOK_STORE_NAME: &str = "lattice-local";
@@ -69,7 +50,6 @@ pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), 
         LOCAL_WEBHOOK_STORE_NAME,
         ClusterSecretStoreSpec {
             provider: ProviderSpec {
-                vault: None,
                 webhook: Some(build_webhook_provider()),
             },
         },
@@ -102,8 +82,8 @@ pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), 
 
 /// Reconcile a SecretsProvider
 ///
-/// Ensures the corresponding ESO ClusterSecretStore exists.
-/// If ESO is not installed, requeues to retry later.
+/// Ensures the corresponding ESO ClusterSecretStore exists with the
+/// provider configuration passed through verbatim.
 pub async fn reconcile(
     sp: Arc<SecretsProvider>,
     ctx: Arc<ControllerContext>,
@@ -113,19 +93,32 @@ pub async fn reconcile(
 
     info!(secrets_provider = %name, "Reconciling SecretsProvider");
 
+    // Validate spec before attempting to create the ClusterSecretStore
+    if let Err(msg) = sp.spec.validate() {
+        warn!(secrets_provider = %name, error = %msg, "Invalid SecretsProvider spec");
+        update_status(client, &sp, SecretsProviderPhase::Failed, Some(msg), None).await?;
+        return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
+    }
+
+    let provider_type = sp.spec.provider_type_name().map(|s| s.to_string());
+
     // Try to create/update the ClusterSecretStore
     match ensure_cluster_secret_store(client, &sp).await {
         Ok(()) => {
             info!(secrets_provider = %name, "ClusterSecretStore is up to date");
 
-            // Update status to Ready
-            update_status(client, &sp, SecretsProviderPhase::Ready, None).await?;
+            update_status(
+                client,
+                &sp,
+                SecretsProviderPhase::Ready,
+                None,
+                provider_type,
+            )
+            .await?;
 
-            // Requeue periodically to handle drift
             Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
         }
         Err(e) if is_crd_not_found(&e) => {
-            // ESO not installed yet - requeue to try again
             warn!(
                 secrets_provider = %name,
                 "ESO ClusterSecretStore CRD not found - ESO may not be installed, will retry"
@@ -136,10 +129,10 @@ pub async fn reconcile(
                 &sp,
                 SecretsProviderPhase::Pending,
                 Some("Waiting for ESO to be installed".to_string()),
+                provider_type,
             )
             .await?;
 
-            // Retry more frequently when waiting for ESO
             Ok(Action::requeue(Duration::from_secs(
                 REQUEUE_CRD_NOT_FOUND_SECS,
             )))
@@ -156,10 +149,10 @@ pub async fn reconcile(
                 &sp,
                 SecretsProviderPhase::Failed,
                 Some(e.to_string()),
+                provider_type,
             )
             .await?;
 
-            // Retry with backoff on other errors
             Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
         }
     }
@@ -173,40 +166,31 @@ fn is_crd_not_found(error: &ReconcileError) -> bool {
         || err_str.contains("the server could not find the requested resource")
 }
 
-/// Ensure ClusterSecretStore exists for the SecretsProvider
+/// Ensure ClusterSecretStore exists for the SecretsProvider.
+///
+/// Passes `sp.spec.provider` through verbatim as the CSS `spec.provider`.
 async fn ensure_cluster_secret_store(
     client: &Client,
     sp: &SecretsProvider,
 ) -> Result<(), ReconcileError> {
     let name = sp.name_any();
 
-    // Build the ClusterSecretStore based on backend type
-    // Local backend uses the always-present local webhook store (ensured on startup),
-    // so we skip creating a per-provider CSS.
-    if sp.spec.backend == SecretsBackend::Local {
-        debug!(secrets_provider = %name, "Local backend uses shared '{}' ClusterSecretStore", LOCAL_WEBHOOK_STORE_NAME);
-        return Ok(());
-    }
-
-    let vault_provider = build_vault_provider(sp)?;
-    let provider_spec = ProviderSpec {
-        vault: Some(vault_provider),
-        webhook: None,
-    };
-
-    let css = ClusterSecretStore::new(
-        &name,
-        ClusterSecretStoreSpec {
-            provider: provider_spec,
+    let provider_value = serde_json::Value::Object(sp.spec.provider.clone());
+    let css_json = serde_json::json!({
+        "apiVersion": "external-secrets.io/v1",
+        "kind": "ClusterSecretStore",
+        "metadata": {
+            "name": name,
+            "labels": {
+                LABEL_MANAGED_BY: LABEL_MANAGED_BY_LATTICE,
+                "lattice.dev/secrets-provider": name,
+            }
         },
-    );
+        "spec": {
+            "provider": provider_value
+        }
+    });
 
-    // Serialize to JSON for dynamic API
-    let css_json = serde_json::to_value(&css).map_err(|e| {
-        ReconcileError::Internal(format!("failed to serialize ClusterSecretStore: {e}"))
-    })?;
-
-    // Use dynamic API to apply ClusterSecretStore
     let api_resource = ClusterSecretStore::api_resource();
     let css_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
     let css_obj: DynamicObject = serde_json::from_value(css_json).map_err(|e| {
@@ -315,112 +299,20 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
     Ok(())
 }
 
-/// Build VaultProvider from SecretsProvider spec
-fn build_vault_provider(sp: &SecretsProvider) -> Result<VaultProvider, ReconcileError> {
-    let auth = build_vault_auth(sp)?;
-
-    Ok(VaultProvider {
-        server: sp.spec.server.clone(),
-        path: sp
-            .spec
-            .path
-            .clone()
-            .unwrap_or_else(|| DEFAULT_PATH.to_string()),
-        version: DEFAULT_VAULT_VERSION.to_string(),
-        namespace: sp.spec.namespace.clone(),
-        ca_bundle: sp.spec.ca_bundle.clone(),
-        auth,
-    })
-}
-
-/// Build Vault auth configuration based on auth method.
-///
-/// Uses `sp.k8s_secret_ref()` which resolves to either the ESO-synced
-/// credential secret or the manually-provided `credentialsSecretRef`.
-fn build_vault_auth(sp: &SecretsProvider) -> Result<VaultAuth, ReconcileError> {
-    match sp.spec.auth_method {
-        VaultAuthMethod::Token => {
-            let secret_ref = sp.k8s_secret_ref().ok_or_else(|| {
-                ReconcileError::Validation(
-                    "Token auth requires credentials or credentialsSecretRef".to_string(),
-                )
-            })?;
-            Ok(VaultAuth {
-                token_secret_ref: Some(SecretKeyRef {
-                    name: secret_ref.name.clone(),
-                    namespace: secret_ref.namespace.clone(),
-                    key: "token".to_string(),
-                }),
-                kubernetes: None,
-                app_role: None,
-            })
-        }
-        VaultAuthMethod::Kubernetes => {
-            let mount_path = sp
-                .spec
-                .kubernetes_mount_path
-                .clone()
-                .unwrap_or_else(|| DEFAULT_MOUNT_PATH.to_string());
-            let role = sp
-                .spec
-                .kubernetes_role
-                .clone()
-                .unwrap_or_else(|| DEFAULT_ROLE.to_string());
-            Ok(VaultAuth {
-                token_secret_ref: None,
-                kubernetes: Some(KubernetesAuth {
-                    mount_path,
-                    role,
-                    service_account_ref: ServiceAccountRef {
-                        name: ESO_SERVICE_ACCOUNT.to_string(),
-                        namespace: ESO_NAMESPACE.to_string(),
-                    },
-                }),
-                app_role: None,
-            })
-        }
-        VaultAuthMethod::AppRole => {
-            let secret_ref = sp.k8s_secret_ref().ok_or_else(|| {
-                ReconcileError::Validation(
-                    "AppRole auth requires credentials or credentialsSecretRef".to_string(),
-                )
-            })?;
-            let mount_path = sp
-                .spec
-                .approle_mount_path
-                .clone()
-                .unwrap_or_else(|| DEFAULT_APPROLE_PATH.to_string());
-            Ok(VaultAuth {
-                token_secret_ref: None,
-                kubernetes: None,
-                app_role: Some(AppRoleAuth {
-                    path: mount_path,
-                    role_ref: SecretKeyRef {
-                        name: secret_ref.name.clone(),
-                        namespace: secret_ref.namespace.clone(),
-                        key: "role_id".to_string(),
-                    },
-                    secret_ref: SecretKeyRef {
-                        name: secret_ref.name.clone(),
-                        namespace: secret_ref.namespace.clone(),
-                        key: "secret_id".to_string(),
-                    },
-                }),
-            })
-        }
-    }
-}
-
 /// Update SecretsProvider status
 async fn update_status(
     client: &Client,
     sp: &SecretsProvider,
     phase: SecretsProviderPhase,
     message: Option<String>,
+    provider_type: Option<String>,
 ) -> Result<(), ReconcileError> {
     // Check if status already matches - avoid update loop
     if let Some(ref current_status) = sp.status {
-        if current_status.phase == phase && current_status.message == message {
+        if current_status.phase == phase
+            && current_status.message == message
+            && current_status.provider_type == provider_type
+        {
             debug!(secrets_provider = %sp.name_any(), "Status unchanged, skipping update");
             return Ok(());
         }
@@ -435,6 +327,7 @@ async fn update_status(
         phase,
         message,
         last_validated: Some(chrono::Utc::now().to_rfc3339()),
+        provider_type,
     };
 
     let patch = serde_json::json!({
@@ -456,191 +349,6 @@ async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{SecretRef, SecretsProviderSpec};
-
-    /// Helper to assert that a provider requires credentials
-    fn assert_requires_credentials<F>(mut provider_fn: F)
-    where
-        F: FnMut() -> SecretsProvider,
-    {
-        let mut sp = provider_fn();
-        sp.spec.credentials_secret_ref = None;
-        sp.spec.credentials = None;
-        let result = build_vault_provider(&sp);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("credentials"));
-    }
-
-    fn sample_token_provider() -> SecretsProvider {
-        SecretsProvider::new(
-            "vault-prod",
-            SecretsProviderSpec {
-                backend: SecretsBackend::default(),
-                server: "https://vault.example.com".to_string(),
-                path: Some("secret/data/myapp".to_string()),
-                auth_method: VaultAuthMethod::Token,
-                credentials_secret_ref: Some(SecretRef {
-                    name: "vault-token".to_string(),
-                    namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
-                }),
-                credentials: None,
-                credential_data: None,
-                kubernetes_mount_path: None,
-                kubernetes_role: None,
-                approle_mount_path: None,
-                namespace: None,
-                ca_bundle: None,
-            },
-        )
-    }
-
-    fn sample_k8s_auth_provider() -> SecretsProvider {
-        SecretsProvider::new(
-            "vault-k8s",
-            SecretsProviderSpec {
-                backend: SecretsBackend::default(),
-                server: "https://vault.example.com".to_string(),
-                path: Some("secret".to_string()),
-                auth_method: VaultAuthMethod::Kubernetes,
-                credentials_secret_ref: None,
-                credentials: None,
-                credential_data: None,
-                kubernetes_mount_path: Some("kubernetes".to_string()),
-                kubernetes_role: Some("my-role".to_string()),
-                approle_mount_path: None,
-                namespace: None,
-                ca_bundle: None,
-            },
-        )
-    }
-
-    #[test]
-    fn token_auth_builds_correct_provider() {
-        let sp = sample_token_provider();
-        let provider = build_vault_provider(&sp).expect("should build provider");
-
-        assert_eq!(provider.server, "https://vault.example.com");
-        assert!(provider.auth.token_secret_ref.is_some());
-        assert!(provider.auth.kubernetes.is_none());
-        assert!(provider.auth.app_role.is_none());
-
-        let token_ref = provider.auth.token_secret_ref.unwrap();
-        assert_eq!(token_ref.key, "token");
-    }
-
-    #[test]
-    fn kubernetes_auth_builds_correct_provider() {
-        let sp = sample_k8s_auth_provider();
-        let provider = build_vault_provider(&sp).expect("should build provider");
-
-        assert!(provider.auth.kubernetes.is_some());
-        let k8s = provider.auth.kubernetes.unwrap();
-        assert_eq!(k8s.role, "my-role");
-        assert_eq!(k8s.mount_path, "kubernetes");
-    }
-
-    #[test]
-    fn token_auth_requires_credentials_ref() {
-        assert_requires_credentials(sample_token_provider);
-    }
-
-    // =========================================================================
-    // AppRole Auth Tests
-    // =========================================================================
-
-    fn sample_approle_provider() -> SecretsProvider {
-        SecretsProvider::new(
-            "vault-approle",
-            SecretsProviderSpec {
-                backend: SecretsBackend::default(),
-                server: "https://vault.example.com".to_string(),
-                path: Some("secret/data/myapp".to_string()),
-                auth_method: VaultAuthMethod::AppRole,
-                credentials_secret_ref: Some(SecretRef {
-                    name: "vault-approle".to_string(),
-                    namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
-                }),
-                credentials: None,
-                credential_data: None,
-                kubernetes_mount_path: None,
-                kubernetes_role: None,
-                approle_mount_path: None,
-                namespace: Some("my-vault-namespace".to_string()),
-                ca_bundle: Some("LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t".to_string()),
-            },
-        )
-    }
-
-    #[test]
-    fn approle_auth_builds_correct_provider() {
-        let sp = sample_approle_provider();
-        let provider = build_vault_provider(&sp).expect("should build provider");
-
-        assert_eq!(provider.server, "https://vault.example.com");
-        assert_eq!(provider.namespace, Some("my-vault-namespace".to_string()));
-        assert_eq!(
-            provider.ca_bundle,
-            Some("LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t".to_string())
-        );
-
-        assert!(provider.auth.app_role.is_some());
-        let approle = provider.auth.app_role.unwrap();
-        assert_eq!(approle.path, "approle");
-        assert_eq!(approle.role_ref.name, "vault-approle");
-        assert_eq!(approle.role_ref.key, "role_id");
-        assert_eq!(approle.secret_ref.name, "vault-approle");
-        assert_eq!(approle.secret_ref.key, "secret_id");
-    }
-
-    #[test]
-    fn approle_auth_requires_credentials_ref() {
-        assert_requires_credentials(sample_approle_provider);
-    }
-
-    #[test]
-    fn approle_auth_uses_custom_mount_path() {
-        let mut sp = sample_approle_provider();
-        sp.spec.approle_mount_path = Some("custom-approle".to_string());
-
-        let provider = build_vault_provider(&sp).expect("should build provider");
-        let approle = provider.auth.app_role.expect("should have appRole");
-        assert_eq!(approle.path, "custom-approle");
-    }
-
-    // =========================================================================
-    // Kubernetes Auth Default Tests
-    // =========================================================================
-
-    #[test]
-    fn kubernetes_auth_uses_defaults() {
-        let sp = SecretsProvider::new(
-            "vault-k8s-default",
-            SecretsProviderSpec {
-                backend: SecretsBackend::default(),
-                server: "https://vault.example.com".to_string(),
-                path: None, // Should default to "secret"
-                auth_method: VaultAuthMethod::Kubernetes,
-                credentials_secret_ref: None,
-                credentials: None,
-                credential_data: None,
-                kubernetes_mount_path: None, // Should default to "kubernetes"
-                kubernetes_role: None,       // Should default to "external-secrets"
-                approle_mount_path: None,
-                namespace: None,
-                ca_bundle: None,
-            },
-        );
-        let provider = build_vault_provider(&sp).expect("should build provider");
-
-        assert_eq!(provider.path, "secret");
-
-        let k8s = provider
-            .auth
-            .kubernetes
-            .expect("should have kubernetes auth");
-        assert_eq!(k8s.mount_path, "kubernetes");
-        assert_eq!(k8s.role, "external-secrets");
-    }
 
     // =========================================================================
     // Error Detection Tests
@@ -675,42 +383,10 @@ mod tests {
     }
 
     // =========================================================================
-    // Spec Building Edge Cases
-    // =========================================================================
-
-    #[test]
-    fn token_auth_uses_default_path() {
-        let sp = SecretsProvider::new(
-            "vault-token-default",
-            SecretsProviderSpec {
-                backend: SecretsBackend::default(),
-                server: "https://vault.example.com".to_string(),
-                path: None, // Should default to "secret"
-                auth_method: VaultAuthMethod::Token,
-                credentials_secret_ref: Some(SecretRef {
-                    name: "token".to_string(),
-                    namespace: "default".to_string(),
-                }),
-                credentials: None,
-                credential_data: None,
-                kubernetes_mount_path: None,
-                kubernetes_role: None,
-                approle_mount_path: None,
-                namespace: None,
-                ca_bundle: None,
-            },
-        );
-        let provider = build_vault_provider(&sp).expect("should build provider");
-
-        assert_eq!(provider.path, "secret");
-    }
-
-    // =========================================================================
     // Reconcile Action Tests
     // =========================================================================
 
     /// Test helper to compute the expected Action for a given reconcile result.
-    /// This mirrors the logic in reconcile() without requiring a Kubernetes client.
     fn compute_expected_action(result: Result<(), ReconcileError>) -> Action {
         match result {
             Ok(()) => Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)),
@@ -762,11 +438,8 @@ mod tests {
 
     #[test]
     fn requeue_constants_have_expected_values() {
-        // Success path: 5 minutes for drift detection
         assert_eq!(REQUEUE_SUCCESS_SECS, 300);
-        // CRD not found: 30 seconds for faster ESO installation detection
         assert_eq!(REQUEUE_CRD_NOT_FOUND_SECS, 30);
-        // Error path: 1 minute for backoff
         assert_eq!(REQUEUE_ERROR_SECS, 60);
     }
 

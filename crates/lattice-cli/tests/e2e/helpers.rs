@@ -2259,11 +2259,11 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 // Local Secrets Helpers
 // =============================================================================
 
-/// Create a SecretsProvider CRD with `backend: local`
+/// Create a SecretsProvider CRD with a webhook provider pointing at the local secrets service
 #[cfg(feature = "provider-e2e")]
 async fn create_local_secrets_provider(kubeconfig: &str, name: &str) -> Result<(), String> {
     info!(
-        "[LocalSecrets] Creating SecretsProvider '{}' with backend: local...",
+        "[LocalSecrets] Creating SecretsProvider '{}' with webhook provider...",
         name
     );
 
@@ -2274,8 +2274,12 @@ metadata:
   name: {name}
   namespace: {namespace}
 spec:
-  backend: local
-  server: ""
+  provider:
+    webhook:
+      url: "http://lattice-local-secrets.lattice-system.svc:8787/secret/{{{{ .remoteRef.key }}}}"
+      method: GET
+      result:
+        jsonPath: "$"
 "#,
         name = name,
         namespace = LATTICE_SYSTEM_NAMESPACE,
