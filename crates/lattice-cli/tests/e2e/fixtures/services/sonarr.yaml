@@ -36,7 +36,16 @@ spec:
       http:
         port: 8989
         protocol: TCP
+  imagePullSecrets:
+    - ghcr-creds
   resources:
+    # Registry credentials for GHCR images
+    ghcr-creds:
+      type: secret
+      id: local-regcreds
+      params:
+        provider: local-test
+        refreshInterval: 1h
     # Owned volume (private to this service)
     config:
       type: volume

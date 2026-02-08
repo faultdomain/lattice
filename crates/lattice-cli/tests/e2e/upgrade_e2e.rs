@@ -30,7 +30,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, Patch, PatchParams};
 use serde_json::json;
 use tracing::{error, info};
 
@@ -40,10 +40,10 @@ use lattice_common::crd::LatticeCluster;
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::context::init_e2e_test;
 use super::helpers::{
-    build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
+    build_and_push_lattice_image, client_from_kubeconfig, create_with_retry, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd, run_id, watch_cluster_phases, DEFAULT_LATTICE_IMAGE,
-    MGMT_CLUSTER_NAME,
+    load_registry_credentials, patch_with_retry, run_cmd, run_id, watch_cluster_phases,
+    DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
 use super::integration::setup;
 use super::mesh_tests::{start_mesh_test, wait_for_mesh_test_cycles};
@@ -152,9 +152,7 @@ async fn run_upgrade_test() -> Result<(), String> {
     );
 
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
-    api.create(&PostParams::default(), &workload_cluster)
-        .await
-        .map_err(|e| format!("Failed to create workload cluster: {}", e))?;
+    create_with_retry(&api, &workload_cluster, UPGRADE_WORKLOAD_CLUSTER_NAME).await?;
 
     // Wait for cluster to be ready
     watch_cluster_phases(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME, Some(600)).await?;
@@ -209,14 +207,13 @@ async fn run_upgrade_test() -> Result<(), String> {
         }
     });
 
-    workload_api
-        .patch(
-            UPGRADE_WORKLOAD_CLUSTER_NAME,
-            &PatchParams::apply("lattice-e2e"),
-            &Patch::Merge(&patch),
-        )
-        .await
-        .map_err(|e| format!("Failed to trigger upgrade: {}", e))?;
+    patch_with_retry(
+        &workload_api,
+        UPGRADE_WORKLOAD_CLUSTER_NAME,
+        &PatchParams::apply("lattice-e2e"),
+        &Patch::Merge(patch),
+    )
+    .await?;
 
     // Monitor upgrade with policy checks
     info!("[Phase 6] Monitoring upgrade (chaos active)...");

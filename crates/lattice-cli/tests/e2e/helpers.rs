@@ -233,6 +233,59 @@ where
     .await
 }
 
+/// Patch a Kubernetes resource with retry logic (survives port-forward restarts).
+#[cfg(feature = "provider-e2e")]
+pub async fn patch_with_retry<K>(
+    api: &Api<K>,
+    name: &str,
+    params: &kube::api::PatchParams,
+    patch: &kube::api::Patch<serde_json::Value>,
+) -> Result<K, String>
+where
+    K: kube::Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let api = api.clone();
+    let name = name.to_string();
+    let params = params.clone();
+    let patch = patch.clone();
+    let op_name = format!("patch_{}", name);
+    retry_with_backoff(&RetryConfig::infinite(), &op_name, || {
+        let api = api.clone();
+        let name = name.clone();
+        let params = params.clone();
+        let patch = patch.clone();
+        async move {
+            api.patch(&name, &params, &patch)
+                .await
+                .map_err(|e| format!("Failed to patch {}: {}", name, e))
+        }
+    })
+    .await
+}
+
+/// List Kubernetes resources with retry logic (survives port-forward restarts).
+#[cfg(feature = "provider-e2e")]
+pub async fn list_with_retry<K>(
+    api: &Api<K>,
+    lp: &kube::api::ListParams,
+) -> Result<kube::api::ObjectList<K>, String>
+where
+    K: kube::Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let api = api.clone();
+    let lp = lp.clone();
+    retry_with_backoff(&RetryConfig::infinite(), "list", || {
+        let api = api.clone();
+        let lp = lp.clone();
+        async move {
+            api.list(&lp)
+                .await
+                .map_err(|e| format!("Failed to list resources: {}", e))
+        }
+    })
+    .await
+}
+
 /// Inner function for client creation (called by retry wrapper).
 #[cfg(feature = "provider-e2e")]
 async fn client_from_kubeconfig_inner(path: &str) -> Result<Client, String> {

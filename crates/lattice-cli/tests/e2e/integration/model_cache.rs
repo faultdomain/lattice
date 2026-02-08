@@ -18,14 +18,14 @@
 
 use std::time::Duration;
 
-use kube::api::{Api, PostParams};
+use kube::api::Api;
 use lattice_common::crd::{LatticeService, ModelArtifact, ModelArtifactSpec};
 use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
-    client_from_kubeconfig, ensure_fresh_namespace, load_service_config, run_cmd,
-    wait_for_condition,
+    client_from_kubeconfig, create_with_retry, ensure_fresh_namespace, list_with_retry,
+    load_service_config, run_cmd, wait_for_condition,
 };
 
 /// Test namespace for model cache integration tests
@@ -84,10 +84,7 @@ async fn verify_model_artifact_creation(kubeconfig: &str) -> Result<(), String> 
     service.metadata.namespace = Some(TEST_NAMESPACE.to_string());
 
     let svc_api: Api<LatticeService> = Api::namespaced(client.clone(), TEST_NAMESPACE);
-    svc_api
-        .create(&PostParams::default(), &service)
-        .await
-        .map_err(|e| format!("Failed to create LatticeService: {}", e))?;
+    create_with_retry(&svc_api, &service, "model-test").await?;
     info!("[ModelCache] LatticeService 'model-test' created");
 
     // Wait for ModelArtifact to appear (created by discover_models mapper)
@@ -124,10 +121,7 @@ async fn verify_model_artifact_creation(kubeconfig: &str) -> Result<(), String> 
     .await?;
 
     // Verify the ModelArtifact has correct spec
-    let list = ma_api
-        .list(&Default::default())
-        .await
-        .map_err(|e| format!("Failed to list ModelArtifacts: {}", e))?;
+    let list = list_with_retry(&ma_api, &Default::default()).await?;
 
     let artifact = list.items.first().ok_or("No ModelArtifact found")?;
     if artifact.spec.uri != "file:///tmp/test-model" {
@@ -156,10 +150,7 @@ async fn verify_prefetch_job_created(kubeconfig: &str) -> Result<(), String> {
     let ma_api: Api<ModelArtifact> = Api::namespaced(client.clone(), TEST_NAMESPACE);
 
     // Get the artifact name to derive expected job name
-    let list = ma_api
-        .list(&Default::default())
-        .await
-        .map_err(|e| format!("Failed to list ModelArtifacts: {}", e))?;
+    let list = list_with_retry(&ma_api, &Default::default()).await?;
     let artifact = list.items.first().ok_or("No ModelArtifact found")?;
     let artifact_name = artifact
         .metadata
@@ -284,10 +275,7 @@ async fn verify_phase_transitions(kubeconfig: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig).await?;
     let ma_api: Api<ModelArtifact> = Api::namespaced(client.clone(), TEST_NAMESPACE);
 
-    let list = ma_api
-        .list(&Default::default())
-        .await
-        .map_err(|e| format!("Failed to list ModelArtifacts: {}", e))?;
+    let list = list_with_retry(&ma_api, &Default::default()).await?;
     let artifact = list.items.first().ok_or("No ModelArtifact found")?;
     let artifact_name = artifact
         .metadata
@@ -401,10 +389,7 @@ async fn verify_failed_retry(kubeconfig: &str) -> Result<(), String> {
     let mut artifact = artifact;
     artifact.metadata.namespace = Some(TEST_NAMESPACE.to_string());
 
-    ma_api
-        .create(&PostParams::default(), &artifact)
-        .await
-        .map_err(|e| format!("Failed to create test ModelArtifact: {}", e))?;
+    create_with_retry(&ma_api, &artifact, test_name).await?;
     info!("[ModelCache] Created test artifact '{}'", test_name);
 
     // Wait for it to leave Pending (controller picks it up)

@@ -38,7 +38,7 @@
 
 use std::sync::Arc;
 
-use kube::api::{Api, PostParams};
+use kube::api::Api;
 use tracing::info;
 
 use lattice_cli::commands::install::Installer;
@@ -47,9 +47,10 @@ use lattice_common::crd::LatticeCluster;
 use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::super::context::{ClusterLevel, InfraContext};
 use super::super::helpers::{
-    build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
-    get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials,
-    run_cmd, wait_for_operator_ready, watch_cluster_phases, ProxySession,
+    build_and_push_lattice_image, client_from_kubeconfig, create_with_retry,
+    ensure_docker_network, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
+    load_registry_credentials, run_cmd, wait_for_operator_ready, watch_cluster_phases,
+    ProxySession,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, cedar, scaling};
@@ -358,9 +359,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     info!("[Setup/Phase 3] Creating workload cluster...");
 
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
-    api.create(&PostParams::default(), &workload_cluster)
-        .await
-        .map_err(|e| format!("Failed to create workload LatticeCluster: {}", e))?;
+    create_with_retry(&api, &workload_cluster, WORKLOAD_CLUSTER_NAME).await?;
 
     info!("[Setup] Workload LatticeCluster created, waiting for Ready...");
 
@@ -422,10 +421,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         let workload_client = client_from_kubeconfig(&workload_proxy_kc).await?;
         let workload_api: Api<LatticeCluster> = Api::all(workload_client.clone());
 
-        workload_api
-            .create(&PostParams::default(), &workload2_cluster)
-            .await
-            .map_err(|e| format!("Failed to create workload2: {}", e))?;
+        create_with_retry(&workload_api, &workload2_cluster, WORKLOAD2_CLUSTER_NAME).await?;
 
         info!("[Setup] Workload2 LatticeCluster created, waiting for Ready (workers joining in parallel)...");
 
@@ -631,9 +627,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     let mgmt_client = client_from_kubeconfig(&result.ctx.mgmt_kubeconfig).await?;
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
 
-    api.create(&PostParams::default(), &workload_cluster)
-        .await
-        .map_err(|e| format!("Failed to create workload LatticeCluster: {}", e))?;
+    create_with_retry(&api, &workload_cluster, WORKLOAD_CLUSTER_NAME).await?;
 
     // Watch for Ready state
     watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME, None).await?;

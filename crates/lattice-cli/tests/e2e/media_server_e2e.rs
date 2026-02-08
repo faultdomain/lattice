@@ -5,18 +5,16 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 use tracing::info;
 
-use k8s_openapi::api::core::v1::Namespace;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, PostParams};
+use kube::api::Api;
 
 use lattice_common::crd::LatticeService;
 
 use super::helpers::{
-    client_from_kubeconfig, create_with_retry, load_service_config, run_cmd, wait_for_condition,
+    client_from_kubeconfig, create_with_retry, ensure_fresh_namespace, load_service_config, run_cmd,
+    run_kubectl_with_retry, setup_regcreds_infrastructure, wait_for_condition,
 };
 
 const NAMESPACE: &str = "media";
@@ -28,42 +26,25 @@ const NAMESPACE: &str = "media";
 async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     info!("Deploying media server services...");
 
+    // Create namespace with retry for transient connection failures
+    ensure_fresh_namespace(kubeconfig_path, NAMESPACE).await?;
+
+    // Set up regcreds infrastructure — all services need ghcr-creds for image pulls
+    setup_regcreds_infrastructure(kubeconfig_path).await?;
+
+    // Label for Istio ambient mesh
+    run_kubectl_with_retry(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "label",
+        "namespace",
+        NAMESPACE,
+        "istio.io/dataplane-mode=ambient",
+        "--overwrite",
+    ])
+    .await?;
+
     let client = client_from_kubeconfig(kubeconfig_path).await?;
-
-    // Create namespace
-    let ns_api: Api<Namespace> = Api::all(client.clone());
-    let ns = Namespace {
-        metadata: ObjectMeta {
-            name: Some(NAMESPACE.into()),
-            labels: Some(BTreeMap::from([(
-                "istio.io/dataplane-mode".into(),
-                "ambient".into(),
-            )])),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    match ns_api.create(&PostParams::default(), &ns).await {
-        Ok(_) => info!("Created namespace {}", NAMESPACE),
-        Err(kube::Error::Api(e)) if e.code == 409 => {
-            let patch = serde_json::json!({
-                "metadata": {
-                    "labels": {
-                        "istio.io/dataplane-mode": "ambient"
-                    }
-                }
-            });
-            let _ = ns_api
-                .patch(
-                    NAMESPACE,
-                    &kube::api::PatchParams::default(),
-                    &kube::api::Patch::Merge(&patch),
-                )
-                .await;
-        }
-        Err(e) => return Err(format!("Failed to create namespace: {}", e)),
-    }
 
     // Load and deploy services from YAML fixtures
     let api: Api<LatticeService> = Api::namespaced(client, NAMESPACE);

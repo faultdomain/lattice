@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::try_join_all;
-use kube::api::{Api, PostParams};
+use kube::api::Api;
 use kube::Client;
 use tracing::{error, info};
 
@@ -36,10 +36,11 @@ use lattice_common::crd::LatticeCluster;
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::context::init_e2e_test;
 use super::helpers::{
-    build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
-    ensure_docker_network, extract_docker_cluster_kubeconfig, force_delete_docker_cluster,
-    get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials, run_id,
-    watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    build_and_push_lattice_image, client_from_kubeconfig, create_with_retry,
+    delete_cluster_and_wait, ensure_docker_network, extract_docker_cluster_kubeconfig,
+    force_delete_docker_cluster, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
+    load_registry_credentials, run_id, watch_cluster_phases, DEFAULT_LATTICE_IMAGE,
+    MGMT_CLUSTER_NAME,
 };
 use super::integration::setup;
 use super::providers::InfraProvider;
@@ -288,17 +289,12 @@ async fn create_clusters_parallel(
         .map(|cluster| {
             let api = api.clone();
             let cluster = cluster.clone();
-            async move {
-                api.create(&PostParams::default(), &cluster)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "Failed to create {}: {}",
-                            cluster.metadata.name.as_deref().unwrap_or("unknown"),
-                            e
-                        )
-                    })
-            }
+            let name = cluster
+                .metadata
+                .name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            async move { create_with_retry(&api, &cluster, &name).await }
         })
         .collect();
 
