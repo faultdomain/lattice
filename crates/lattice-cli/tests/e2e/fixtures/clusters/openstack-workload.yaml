@@ -30,13 +30,15 @@ spec:
   nodes:
     controlPlane:
       replicas: 1
-      instanceType: "b2-30"
+      instanceType:
+        name: b2-30
       rootVolume:
         sizeGb: 50
     workerPools:
       default:
         replicas: 1
-        instanceType: "b2-15"
+        instanceType:
+          name: b2-15
         rootVolume:
           sizeGb: 50
   parentConfig:

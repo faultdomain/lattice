@@ -380,56 +380,68 @@ fn is_default_sockets(v: &u32) -> bool {
 
 /// Instance type specification — either a named type (AWS/OpenStack) or explicit resources (Proxmox)
 ///
-/// Uses `#[serde(untagged)]` for clean YAML:
-/// - `instanceType: m5.xlarge` → `Named("m5.xlarge")`
-/// - `instanceType: { cores: 16, memoryGib: 32, diskGib: 50 }` → `Resources(NodeResourceSpec)`
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(untagged)]
-pub enum InstanceType {
-    /// Named instance type (e.g., "m5.xlarge", "b2-30")
-    Named(String),
-    /// Explicit resource specification
-    Resources(NodeResourceSpec),
-}
+/// YAML examples:
+/// - `instanceType: { name: m5.xlarge }` → named cloud instance
+/// - `instanceType: { cores: 16, memoryGib: 32, diskGib: 50 }` → explicit resources
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceType {
+    /// Named instance type (e.g., "m5.xlarge", "b2-30") for cloud providers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 
-// Manual JsonSchema impl: Kubernetes structural schemas forbid `type` and `description`
-// inside anyOf items, which schemars generates for untagged enums. Serde's untagged
-// deserialization handles runtime validation.
-impl JsonSchema for InstanceType {
-    fn schema_name() -> String {
-        "InstanceType".to_string()
-    }
+    /// Number of CPU cores (for explicit resource specification, e.g. Proxmox)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cores: Option<u32>,
 
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        schemars::schema::SchemaObject {
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "Instance type: a named string (e.g. \"m5.xlarge\") or a resource spec object \
-                     with cores, memoryGib, diskGib, sockets fields"
-                        .to_string(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
-        .into()
-    }
+    /// Memory in GiB
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_gib: Option<u32>,
+
+    /// Disk size in GiB
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u32>,
+
+    /// Number of CPU sockets (default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sockets: Option<u32>,
 }
 
 impl InstanceType {
-    /// Get the named instance type string, if this is a Named variant
-    pub fn as_named(&self) -> Option<&str> {
-        match self {
-            Self::Named(s) => Some(s),
-            Self::Resources(_) => None,
+    /// Create a named instance type (e.g., "m5.xlarge")
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: Some(name.into()),
+            ..Default::default()
         }
     }
 
-    /// Get the resource specification, if this is a Resources variant
-    pub fn as_resources(&self) -> Option<&NodeResourceSpec> {
-        match self {
-            Self::Named(_) => None,
-            Self::Resources(r) => Some(r),
+    /// Create an explicit resource specification
+    pub fn resources(spec: NodeResourceSpec) -> Self {
+        Self {
+            cores: Some(spec.cores),
+            memory_gib: Some(spec.memory_gib),
+            disk_gib: Some(spec.disk_gib),
+            sockets: Some(spec.sockets),
+            ..Default::default()
+        }
+    }
+
+    /// Get the named instance type string
+    pub fn as_named(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Get the resource specification, if resource fields are set
+    pub fn as_resources(&self) -> Option<NodeResourceSpec> {
+        match (self.cores, self.memory_gib, self.disk_gib) {
+            (Some(cores), Some(memory_gib), Some(disk_gib)) => Some(NodeResourceSpec {
+                cores,
+                memory_gib,
+                disk_gib,
+                sockets: self.sockets.unwrap_or(1),
+            }),
+            _ => None,
         }
     }
 }
@@ -1164,9 +1176,8 @@ mod tests {
 
         #[test]
         fn test_instance_type_named_serde() {
-            let it = InstanceType::Named("m5.xlarge".to_string());
+            let it = InstanceType::named("m5.xlarge");
             let json = serde_json::to_string(&it).unwrap();
-            assert_eq!(json, r#""m5.xlarge""#);
             let parsed: InstanceType = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.as_named(), Some("m5.xlarge"));
             assert!(parsed.as_resources().is_none());
@@ -1174,7 +1185,7 @@ mod tests {
 
         #[test]
         fn test_instance_type_resources_serde() {
-            let it = InstanceType::Resources(NodeResourceSpec {
+            let it = InstanceType::resources(NodeResourceSpec {
                 cores: 16,
                 memory_gib: 32,
                 disk_gib: 50,
@@ -1194,7 +1205,7 @@ mod tests {
         fn test_control_plane_spec_serde() {
             let spec = ControlPlaneSpec {
                 replicas: 3,
-                instance_type: Some(InstanceType::Named("m5.xlarge".to_string())),
+                instance_type: Some(InstanceType::named("m5.xlarge")),
                 root_volume: Some(RootVolume {
                     size_gb: 50,
                     type_: Some("gp3".to_string()),
@@ -1237,7 +1248,7 @@ mod tests {
             let pool = WorkerPoolSpec {
                 display_name: Some("GPU Workers".to_string()),
                 replicas: 3,
-                instance_type: Some(InstanceType::Named("gpu-large".to_string())),
+                instance_type: Some(InstanceType::named("gpu-large")),
                 root_volume: None,
                 labels: std::collections::BTreeMap::from([(
                     "nvidia.com/gpu".to_string(),

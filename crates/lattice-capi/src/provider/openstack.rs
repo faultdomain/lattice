@@ -335,14 +335,14 @@ mod tests {
                 nodes: NodeSpec {
                     control_plane: ControlPlaneSpec {
                         replicas: 3,
-                        instance_type: Some(InstanceType::Named("b2-30".to_string())),
+                        instance_type: Some(InstanceType::named("b2-30")),
                         root_volume: None,
                     },
                     worker_pools: std::collections::BTreeMap::from([(
                         "default".to_string(),
                         WorkerPoolSpec {
                             replicas: 5,
-                            instance_type: Some(InstanceType::Named("b2-15".to_string())),
+                            instance_type: Some(InstanceType::named("b2-15")),
                             ..Default::default()
                         },
                     )]),

@@ -414,7 +414,7 @@ mod tests {
                 nodes: NodeSpec {
                     control_plane: ControlPlaneSpec {
                         replicas: 3,
-                        instance_type: Some(InstanceType::Resources(NodeResourceSpec {
+                        instance_type: Some(InstanceType::resources(NodeResourceSpec {
                             cores: 4,
                             memory_gib: 8,
                             disk_gib: 50,
@@ -426,7 +426,7 @@ mod tests {
                         "default".to_string(),
                         WorkerPoolSpec {
                             replicas: 5,
-                            instance_type: Some(InstanceType::Resources(NodeResourceSpec {
+                            instance_type: Some(InstanceType::resources(NodeResourceSpec {
                                 cores: 4,
                                 memory_gib: 8,
                                 disk_gib: 100,

@@ -34,14 +34,16 @@ spec:
   nodes:
     controlPlane:
       replicas: 1
-      instanceType: "m7i-flex.large"
+      instanceType:
+        name: m7i-flex.large
       rootVolume:
         sizeGb: 50
         type: "gp3"
     workerPools:
       default:
         replicas: 1
-        instanceType: "t3.small"
+        instanceType:
+          name: t3.small
         rootVolume:
           sizeGb: 50
           type: "gp3"
