@@ -82,9 +82,9 @@ pub struct InstallArgs {
     #[arg(long, value_parser = parse_bootstrap_provider)]
     pub bootstrap: Option<BootstrapProvider>,
 
-    /// Dry run - show what would be done without making changes
+    /// Validate configuration and show install plan without making changes
     #[arg(long)]
-    pub dry_run: bool,
+    pub validate: bool,
 
     /// Write kubeconfig to this path after installation
     #[arg(long)]
@@ -738,16 +738,7 @@ impl Installer {
 
     /// Installs CAPI controllers on the management cluster using the native installer.
     async fn install_capi_on_management(&self) -> Result<()> {
-        use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
-
-        let config = CapiProviderConfig::new(self.provider())
-            .map_err(|e| Error::command_failed(e.to_string()))?;
-
-        let installer = NativeInstaller::new();
-        installer
-            .ensure(&config)
-            .await
-            .map_err(|e| Error::command_failed(e.to_string()))
+        crate::commands::ensure_capi_providers(self.provider()).await
     }
 
     /// Waits for CAPI and Lattice controllers to be ready on the management cluster.
@@ -1142,7 +1133,7 @@ fn add_deployment_env(deployment_json: &str, vars: &[(&str, &str)]) -> String {
 pub async fn run(args: InstallArgs) -> Result<()> {
     let installer = Installer::from_args(&args).await?;
 
-    if args.dry_run {
+    if args.validate {
         info!("Dry run for cluster: {}", installer.cluster_name());
         info!("Provider: {}", installer.provider());
         info!("1. Create bootstrap kind cluster");

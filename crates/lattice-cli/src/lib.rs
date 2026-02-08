@@ -31,10 +31,8 @@ pub enum Commands {
     Token(commands::token::TokenArgs),
     /// Get Lattice resources (clusters, services, hierarchy)
     Get(commands::get::GetArgs),
-    /// Trigger an on-demand backup
-    Backup(commands::backup::BackupArgs),
-    /// Restore from a Velero backup
-    Restore(commands::restore::RestoreArgs),
+    /// Clear saved credentials and proxy kubeconfig
+    Logout(commands::logout::LogoutArgs),
 }
 
 impl Cli {
@@ -47,8 +45,7 @@ impl Cli {
             Commands::Uninstall(args) => commands::uninstall::run(args).await,
             Commands::Token(args) => commands::token::run(args).await,
             Commands::Get(args) => commands::get::run(args).await,
-            Commands::Backup(args) => commands::backup::run(args).await,
-            Commands::Restore(args) => commands::restore::run(args).await,
+            Commands::Logout(args) => commands::logout::run(args).await,
         }
     }
 }

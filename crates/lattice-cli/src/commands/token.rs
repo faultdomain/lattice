@@ -70,15 +70,18 @@ impl ExecCredential {
 
 /// Run the token command
 ///
-/// Creates a fresh ServiceAccount token using kubectl and outputs it
-/// in ExecCredential format for use as a kubeconfig exec plugin.
+/// Creates a fresh ServiceAccount token using the Kubernetes TokenRequest API
+/// and outputs it in ExecCredential format for use as a kubeconfig exec plugin.
 pub async fn run(args: TokenArgs) -> Result<()> {
-    let token = super::create_sa_token(
-        &args.kubeconfig,
+    let duration_secs = super::parse_duration(&args.duration)?;
+    let client = super::kube_client_from_path(&args.kubeconfig).await?;
+    let token = super::create_sa_token_native(
+        &client,
         &args.namespace,
         &args.service_account,
-        &args.duration,
-    )?;
+        duration_secs,
+    )
+    .await?;
 
     let credential = ExecCredential::new(token);
     let json = serde_json::to_string(&credential)

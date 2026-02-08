@@ -80,12 +80,9 @@ pub(crate) async fn resolve_proxy_connection(
                 "Creating SA token (namespace={}, sa={})",
                 params.namespace, params.service_account
             );
-            super::create_sa_token(
-                kubeconfig_path,
-                &params.namespace,
-                &params.service_account,
-                "1h",
-            )?
+            let client = super::kube_client_from_path(kubeconfig_path).await?;
+            super::create_sa_token_native(&client, &params.namespace, &params.service_account, 3600)
+                .await?
         }
     };
 

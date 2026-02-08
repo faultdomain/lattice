@@ -17,13 +17,12 @@ use std::time::{Duration, Instant};
 use kube::config::Kubeconfig;
 use tracing::{debug, info, warn};
 
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+
 use crate::{Error, Result};
 
 /// Default service name for the Lattice cell (hosts the auth proxy).
 const PROXY_SERVICE_NAME: &str = "lattice-cell";
-
-/// Default namespace for Lattice system resources.
-const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";
 
 /// How often the watchdog checks the port-forward process.
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);

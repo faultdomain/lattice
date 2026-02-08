@@ -287,19 +287,16 @@ After pivot, the cluster is independent. The parent can be deleted without affec
 
 | Command | Description |
 |---------|-------------|
+| `lattice login` | Authenticate with a Lattice cluster |
+| `lattice logout` | Clear saved credentials and proxy kubeconfig |
+| `lattice use <cluster>` | Switch active cluster context |
 | `lattice install -f cluster.yaml` | Provision a self-managing cluster |
 | `lattice uninstall -k kubeconfig` | Tear down a cluster (reverse pivot) |
-| `lattice login` | Authenticate with a Lattice cluster |
-| `lattice use <cluster>` | Switch active cluster context |
 | `lattice token` | ServiceAccount token (exec credential plugin) |
 | `lattice get clusters` | List your fleet |
 | `lattice get cluster <name>` | Detail view of one cluster |
-| `lattice get services` | List LatticeService resources |
 | `lattice get hierarchy` | ASCII tree of parent-child topology |
 | `lattice get health` | Fleet health with node counts and heartbeats |
-| `lattice get backups` | List backup policies and recent backups |
-| `lattice backup` | Create a Velero backup |
-| `lattice restore <name>` | Restore from backup (supports Lattice-aware ordering) |
 
 ---
 
@@ -319,7 +316,7 @@ cargo test --features provider-e2e --test e2e
 
 ```
 crates/
-├── lattice-cli/            CLI (install, uninstall, get, token, login)
+├── lattice-cli/            CLI (login, logout, use, install, uninstall, get, token)
 ├── lattice-operator/       Kubernetes operator and controller dispatch
 ├── lattice-common/         Shared CRDs, types, and utilities
 ├── lattice-service/        Service dependency -> network policy compiler

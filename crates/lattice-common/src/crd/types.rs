@@ -383,13 +383,37 @@ fn is_default_sockets(v: &u32) -> bool {
 /// Uses `#[serde(untagged)]` for clean YAML:
 /// - `instanceType: m5.xlarge` → `Named("m5.xlarge")`
 /// - `instanceType: { cores: 16, memoryGib: 32, diskGib: 50 }` → `Resources(NodeResourceSpec)`
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum InstanceType {
     /// Named instance type (e.g., "m5.xlarge", "b2-30")
     Named(String),
     /// Explicit resource specification
     Resources(NodeResourceSpec),
+}
+
+// Manual JsonSchema impl: Kubernetes structural schemas forbid `type` and `description`
+// inside anyOf items, which schemars generates for untagged enums. Serde's untagged
+// deserialization handles runtime validation.
+impl JsonSchema for InstanceType {
+    fn schema_name() -> String {
+        "InstanceType".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        schemars::schema::SchemaObject {
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "Instance type: a named string (e.g. \"m5.xlarge\") or a resource spec object \
+                     with cores, memoryGib, diskGib, sockets fields"
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .into()
+    }
 }
 
 impl InstanceType {

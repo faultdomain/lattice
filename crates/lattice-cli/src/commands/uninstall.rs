@@ -448,16 +448,7 @@ impl Uninstaller {
     }
 
     async fn install_capi_providers(&self) -> Result<()> {
-        use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
-
-        let config = CapiProviderConfig::new(self.provider)
-            .map_err(|e| Error::command_failed(e.to_string()))?;
-
-        let installer = NativeInstaller::new();
-        installer
-            .ensure(&config)
-            .await
-            .map_err(|e| Error::command_failed(e.to_string()))
+        crate::commands::ensure_capi_providers(self.provider).await
     }
 }
 

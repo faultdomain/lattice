@@ -2,7 +2,6 @@
 
 use std::fmt::Display;
 use std::future::Future;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use kube::config::{KubeConfigOptions, Kubeconfig};
@@ -11,14 +10,13 @@ use tracing::{debug, warn};
 
 use crate::{Error, Result};
 
-pub mod backup;
 pub mod get;
 pub mod install;
 pub mod kind_utils;
 pub mod login;
+pub mod logout;
 pub mod port_forward;
 pub mod proxy;
-pub mod restore;
 pub mod token;
 pub mod uninstall;
 pub mod use_cluster;
@@ -250,42 +248,83 @@ pub async fn kube_client_from_kubeconfig(
     Client::try_from(config).cmd_err()
 }
 
-/// Create a ServiceAccount token using kubectl.
+/// Ensure CAPI providers are installed for the given provider type.
+pub async fn ensure_capi_providers(provider: lattice_common::crd::ProviderType) -> Result<()> {
+    use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
+
+    let config = CapiProviderConfig::new(provider).cmd_err()?;
+    NativeInstaller::new().ensure(&config).await.cmd_err()
+}
+
+/// Create a ServiceAccount token using the Kubernetes TokenRequest API.
 ///
-/// Shells out to `kubectl create token` to generate a short-lived token
-/// for the given ServiceAccount. Used by `lattice token` and `lattice login`.
-pub fn create_sa_token(
-    kubeconfig: &str,
+/// Generates a short-lived token for the given ServiceAccount without
+/// shelling out to kubectl.
+pub async fn create_sa_token_native(
+    client: &Client,
     namespace: &str,
     service_account: &str,
-    duration: &str,
+    duration_secs: i64,
 ) -> Result<String> {
-    let output = Command::new("kubectl")
-        .args([
-            "--kubeconfig",
-            kubeconfig,
-            "create",
-            "token",
-            service_account,
-            "-n",
-            namespace,
-            &format!("--duration={}", duration),
-        ])
-        .output()
-        .map_err(|e| Error::command_failed(format!("failed to run kubectl: {}", e)))?;
+    use k8s_openapi::api::authentication::v1::{TokenRequest, TokenRequestSpec};
+    use k8s_openapi::api::core::v1::ServiceAccount;
+    use kube::Api;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::command_failed(format!(
-            "kubectl create token failed: {}",
-            stderr
-        )));
-    }
+    let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), namespace);
 
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let token_request = TokenRequest {
+        metadata: Default::default(),
+        spec: TokenRequestSpec {
+            audiences: vec![],
+            expiration_seconds: Some(duration_secs),
+            bound_object_ref: None,
+        },
+        status: None,
+    };
+
+    let result = sa_api
+        .create_token_request(service_account, &Default::default(), &token_request)
+        .await
+        .map_err(|e| Error::command_failed(format!("token request failed: {}", e)))?;
+
+    let token = result
+        .status
+        .ok_or_else(|| Error::command_failed("token response missing status"))?
+        .token;
+
     if token.is_empty() {
-        return Err(Error::command_failed("kubectl returned empty token"));
+        return Err(Error::command_failed("server returned empty token"));
     }
 
     Ok(token)
+}
+
+/// Parse a human-friendly duration string into seconds.
+///
+/// Supports `Nh` (hours), `Nm` (minutes), and `Ns` (seconds).
+/// Examples: "1h" → 3600, "30m" → 1800, "3600s" → 3600.
+pub fn parse_duration(s: &str) -> Result<i64> {
+    let s = s.trim();
+    if let Some(hours) = s.strip_suffix('h') {
+        let n: i64 = hours
+            .parse()
+            .map_err(|_| Error::validation(format!("invalid duration: {}", s)))?;
+        Ok(n * 3600)
+    } else if let Some(minutes) = s.strip_suffix('m') {
+        let n: i64 = minutes
+            .parse()
+            .map_err(|_| Error::validation(format!("invalid duration: {}", s)))?;
+        Ok(n * 60)
+    } else if let Some(secs) = s.strip_suffix('s') {
+        secs.parse()
+            .map_err(|_| Error::validation(format!("invalid duration: {}", s)))
+    } else {
+        // Try parsing as raw seconds
+        s.parse().map_err(|_| {
+            Error::validation(format!(
+                "invalid duration '{}', expected e.g. 1h, 30m, 3600s",
+                s
+            ))
+        })
+    }
 }
