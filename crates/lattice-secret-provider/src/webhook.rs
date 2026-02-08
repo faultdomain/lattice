@@ -1,19 +1,21 @@
 //! Local secrets webhook handler
 //!
-//! Serves K8s Secrets from the `lattice-secrets` namespace as flat JSON maps
-//! for ESO's webhook provider. Only secrets with the `lattice.dev/secret-source: "true"`
-//! label are served; all others return 404.
+//! Serves K8s Secrets from the `lattice-secrets` namespace for ESO's webhook
+//! provider. Only secrets with the `lattice.dev/secret-source: "true"` label
+//! are served; all others return 404.
 //!
 //! ESO protocol:
-//! - `GET /secret/{name}` → flat JSON `{"key1":"val1", "key2":"val2"}`
+//! - `GET /secret/{name}` → flat JSON `{"key1":"val1", "key2":"val2"}` (for dataFrom)
+//! - `GET /secret/{name}/{property}` → single JSON string `"val1"` (for data entries)
 //! - `remoteRef.key` becomes the `{name}` path parameter
-//! - `result.jsonPath: "$"` tells ESO to use the full response map
+//! - `remoteRef.property` becomes the `{property}` path parameter
+//! - `result.jsonPath: "$"` tells ESO to use the response as-is
 
 use std::collections::BTreeMap;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::Json;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use kube::api::Api;
@@ -28,6 +30,7 @@ const SECRET_SOURCE_LABEL: &str = "lattice.dev/secret-source";
 /// Build the webhook router with a shared `Client` state
 fn webhook_routes(client: Client) -> Router {
     Router::new()
+        .route("/secret/{name}/{property}", get(get_secret_property))
         .route("/secret/{name}", get(get_secret))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(client)
@@ -52,22 +55,21 @@ pub async fn start_webhook_server(client: Client) {
     }
 }
 
-/// Handle `GET /secret/{name}` — look up a K8s Secret and return its data as flat JSON
-async fn get_secret(
-    State(client): State<Client>,
-    Path(name): Path<String>,
-) -> Result<Json<BTreeMap<String, String>>, (StatusCode, String)> {
+/// Fetch and decode a labeled K8s Secret from the `lattice-secrets` namespace.
+async fn fetch_secret_data(
+    client: Client,
+    name: &str,
+) -> Result<BTreeMap<String, String>, (StatusCode, String)> {
     let api: Api<k8s_openapi::api::core::v1::Secret> =
         Api::namespaced(client, LOCAL_SECRETS_NAMESPACE);
 
-    let secret = api.get(&name).await.map_err(|e| {
+    let secret = api.get(name).await.map_err(|e| {
         (
             StatusCode::NOT_FOUND,
             format!("secret '{}' not found: {}", name, e),
         )
     })?;
 
-    // Only serve secrets explicitly labeled as sources
     if !is_labeled_source(&secret) {
         return Err((
             StatusCode::NOT_FOUND,
@@ -77,7 +79,6 @@ async fn get_secret(
 
     let mut result = BTreeMap::new();
 
-    // Decode base64-encoded `data` entries
     if let Some(data) = secret.data {
         for (key, value) in data {
             let decoded =
@@ -86,12 +87,51 @@ async fn get_secret(
         }
     }
 
-    // `stringData` entries are plain text (unusual on read, but handle gracefully)
     if let Some(string_data) = secret.string_data {
         result.extend(string_data);
     }
 
-    Ok(Json(result))
+    Ok(result)
+}
+
+/// Handle `GET /secret/{name}` — return all keys as a flat JSON map.
+///
+/// Used by ESO `dataFrom.extract` (no property) and ESO templates.
+async fn get_secret(
+    State(client): State<Client>,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let data = fetch_secret_data(client, &name).await?;
+    Ok(axum::Json(data))
+}
+
+/// Handle `GET /secret/{name}/{property}` — return a single key's value.
+///
+/// Used by ESO `data` entries with `remoteRef.property`. The ClusterSecretStore
+/// URL template renders `{{ .remoteRef.property }}` into the path, so ESO
+/// requests e.g. `/secret/local-db-creds/password` and gets just `"s3cret-p@ss"`.
+async fn get_secret_property(
+    State(client): State<Client>,
+    Path((name, property)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    let data = fetch_secret_data(client, &name).await?;
+
+    if property.is_empty() {
+        return Ok(axum::Json(data).into_response());
+    }
+
+    match data.get(&property) {
+        Some(value) => Ok(axum::Json(value).into_response()),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!(
+                "property '{}' not found in secret '{}' (available: {:?})",
+                property,
+                name,
+                data.keys().collect::<Vec<_>>()
+            ),
+        )),
+    }
 }
 
 /// Check whether a K8s Secret has the `lattice.dev/secret-source: "true"` label.

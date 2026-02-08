@@ -279,21 +279,22 @@ fn build_webhook_provider() -> WebhookProvider {
     // Go template placeholders for ESO — kept as consts to avoid fragile `{{{{`
     // escaping that `format!` would require for literal double-braces.
     const ESO_REMOTE_REF_KEY: &str = "{{ .remoteRef.key }}";
-    // Extract specific property from the JSON response.
-    // For data entries with property="password", this becomes "$.password".
-    // For dataFrom (no property), this becomes "$." which is equivalent to "$".
-    const ESO_PROPERTY_JSONPATH: &str = "$.{{ .remoteRef.property }}";
+    // Property extraction happens server-side: the webhook returns just the
+    // requested property value when a property path segment is present.
+    // For dataFrom (no property), the template renders an empty segment and
+    // the webhook returns the full JSON map.
+    const ESO_REMOTE_REF_PROPERTY: &str = "{{ .remoteRef.property }}";
 
     let base = format!(
         "http://{}.{}.svc:{}/secret/",
         LOCAL_SECRETS_SERVICE, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT
     );
-    let url = format!("{}{}", base, ESO_REMOTE_REF_KEY);
+    let url = format!("{}{}/{}", base, ESO_REMOTE_REF_KEY, ESO_REMOTE_REF_PROPERTY);
     WebhookProvider {
         url,
         method: "GET".to_string(),
         result: WebhookResult {
-            json_path: ESO_PROPERTY_JSONPATH.to_string(),
+            json_path: "$".to_string(),
         },
     }
 }
@@ -533,13 +534,18 @@ mod tests {
         );
         assert!(
             provider.url.contains("{{ .remoteRef.key }}"),
-            "URL should contain Go template placeholder: {}",
+            "URL should contain key placeholder: {}",
+            provider.url
+        );
+        assert!(
+            provider.url.contains("{{ .remoteRef.property }}"),
+            "URL should contain property placeholder: {}",
             provider.url
         );
         assert_eq!(provider.method, "GET");
         assert_eq!(
-            provider.result.json_path, "$.{{ .remoteRef.property }}",
-            "jsonPath should extract by remoteRef.property"
+            provider.result.json_path, "$",
+            "jsonPath should be $ (property extraction is server-side)"
         );
     }
 
