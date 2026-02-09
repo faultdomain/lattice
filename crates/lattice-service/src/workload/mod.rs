@@ -2943,6 +2943,112 @@ mod tests {
     }
 
     // =========================================================================
+    // Story: EmptyDir Writable Paths with Read-Only RootFS
+    // =========================================================================
+
+    #[test]
+    fn story_emptydir_in_deployment_with_readonly_rootfs() {
+        // Simulate nginx pattern: read-only rootfs + emptyDir for writable paths
+        let mut service = make_service("nginx-app", "default");
+        let container = service.spec.containers.get_mut("main").unwrap();
+        container.volumes.insert(
+            "/var/cache/nginx".to_string(),
+            lattice_common::crd::VolumeMount {
+                source: None,
+                path: None,
+                read_only: None,
+                medium: None,
+                size_limit: None,
+            },
+        );
+        container.volumes.insert(
+            "/var/run".to_string(),
+            lattice_common::crd::VolumeMount {
+                source: None,
+                path: None,
+                read_only: None,
+                medium: None,
+                size_limit: None,
+            },
+        );
+        container.volumes.insert(
+            "/tmp".to_string(),
+            lattice_common::crd::VolumeMount {
+                source: None,
+                path: None,
+                read_only: None,
+                medium: None,
+                size_limit: None,
+            },
+        );
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        // Container should have read-only rootfs (secure default)
+        let main = &deployment.spec.template.spec.containers[0];
+        let sec = main.security_context.as_ref().expect("should have security context");
+        assert_eq!(sec.read_only_root_filesystem, Some(true));
+
+        // Container should have 3 emptyDir volume mounts
+        let emptydir_mounts: Vec<_> = main
+            .volume_mounts
+            .iter()
+            .filter(|vm| vm.name.starts_with("emptydir-"))
+            .collect();
+        assert_eq!(emptydir_mounts.len(), 3);
+
+        // Pod should have 3 emptyDir volumes
+        let emptydir_vols: Vec<_> = deployment
+            .spec
+            .template
+            .spec
+            .volumes
+            .iter()
+            .filter(|v| v.empty_dir.is_some())
+            .collect();
+        assert_eq!(emptydir_vols.len(), 3);
+
+        // Verify specific volume names
+        let vol_names: Vec<_> = emptydir_vols.iter().map(|v| v.name.as_str()).collect();
+        assert!(vol_names.contains(&"emptydir-var-cache-nginx"));
+        assert!(vol_names.contains(&"emptydir-var-run"));
+        assert!(vol_names.contains(&"emptydir-tmp"));
+    }
+
+    #[test]
+    fn story_emptydir_tmpfs_flows_to_deployment() {
+        let mut service = make_service("my-app", "default");
+        let container = service.spec.containers.get_mut("main").unwrap();
+        container.volumes.insert(
+            "/dev/shm".to_string(),
+            lattice_common::crd::VolumeMount {
+                source: None,
+                path: None,
+                read_only: None,
+                medium: Some("Memory".to_string()),
+                size_limit: Some("256Mi".to_string()),
+            },
+        );
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        let shm_vol = deployment
+            .spec
+            .template
+            .spec
+            .volumes
+            .iter()
+            .find(|v| v.name == "emptydir-dev-shm")
+            .expect("should have emptyDir volume for /dev/shm");
+
+        let ed = shm_vol.empty_dir.as_ref().expect("should be emptyDir");
+        assert_eq!(ed.medium, Some("Memory".to_string()));
+        assert_eq!(ed.size_limit, Some("256Mi".to_string()));
+    }
+
+    // =========================================================================
     // Story: Init Containers Separated
     // =========================================================================
 

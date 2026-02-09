@@ -2487,6 +2487,54 @@ workload:
         assert!(volume.source.as_ref().unwrap().has_placeholders());
     }
 
+    #[test]
+    fn test_volume_mount_sourceless_parses() {
+        let yaml = r#"
+containers:
+  main:
+    image: nginx:latest
+    volumes:
+      /tmp: {}
+      /var/cache/nginx: {}
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec =
+            serde_json::from_value(value).expect("sourceless volume YAML should parse");
+
+        let tmp = &spec.containers["main"].volumes["/tmp"];
+        assert!(tmp.source.is_none());
+        assert!(tmp.medium.is_none());
+        assert!(tmp.size_limit.is_none());
+
+        let cache = &spec.containers["main"].volumes["/var/cache/nginx"];
+        assert!(cache.source.is_none());
+    }
+
+    #[test]
+    fn test_volume_mount_with_medium_and_size_limit_parses() {
+        let yaml = r#"
+containers:
+  main:
+    image: nginx:latest
+    volumes:
+      /dev/shm:
+        medium: Memory
+      /scratch:
+        sizeLimit: 5Gi
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec =
+            serde_json::from_value(value).expect("emptyDir with medium/sizeLimit should parse");
+
+        let shm = &spec.containers["main"].volumes["/dev/shm"];
+        assert!(shm.source.is_none());
+        assert_eq!(shm.medium, Some("Memory".to_string()));
+
+        let scratch = &spec.containers["main"].volumes["/scratch"];
+        assert!(scratch.source.is_none());
+        assert_eq!(scratch.size_limit, Some("5Gi".to_string()));
+    }
+
     // =========================================================================
     // Probe Tests (Score/K8s compatible)
     // =========================================================================

@@ -21,6 +21,7 @@ spec:
           /tv:
             source: ${resources.media-storage}
             path: library
+          /tmp: {}
         resources:
           requests:
             cpu: 100m
@@ -32,11 +33,7 @@ spec:
           httpGet:
             path: /ping
             port: 8989
-    service:
-      ports:
-        http:
-          port: 8989
-          protocol: TCP
+            protocol: TCP
     imagePullSecrets:
       - ghcr-creds
     resources:

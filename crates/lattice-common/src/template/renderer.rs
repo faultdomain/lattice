@@ -1553,6 +1553,60 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_render_volume_sourceless_emptydir() {
+        let ctx = TemplateContext::builder()
+            .metadata("api", std::collections::HashMap::new())
+            .build();
+
+        let mut volumes = BTreeMap::new();
+        volumes.insert(
+            "/tmp".to_string(),
+            VolumeMount {
+                source: None,
+                path: None,
+                read_only: None,
+                medium: None,
+                size_limit: None,
+            },
+        );
+        volumes.insert(
+            "/dev/shm".to_string(),
+            VolumeMount {
+                source: None,
+                path: None,
+                read_only: None,
+                medium: Some("Memory".to_string()),
+                size_limit: Some("256Mi".to_string()),
+            },
+        );
+
+        let container = ContainerSpec {
+            image: "nginx:latest".to_string(),
+            volumes,
+            ..Default::default()
+        };
+
+        let renderer = TemplateRenderer::new();
+        let rendered = renderer
+            .render_container("main", &container, &ctx)
+            .expect("sourceless volumes should render successfully");
+
+        // Source should be None for emptyDir volumes
+        assert!(rendered.volumes["/tmp"].source.is_none());
+        assert!(rendered.volumes["/dev/shm"].source.is_none());
+
+        // medium/size_limit should pass through
+        assert_eq!(
+            rendered.volumes["/dev/shm"].medium,
+            Some("Memory".to_string())
+        );
+        assert_eq!(
+            rendered.volumes["/dev/shm"].size_limit,
+            Some("256Mi".to_string())
+        );
+    }
+
     // =========================================================================
     // Story: parse_secret_ref
     // =========================================================================

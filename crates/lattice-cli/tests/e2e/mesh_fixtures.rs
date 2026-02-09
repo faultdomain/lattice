@@ -11,7 +11,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use lattice_common::crd::{
     ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec,
-    ResourceType, ServicePortsSpec, WorkloadSpec,
+    ResourceType, ServicePortsSpec, VolumeMount, WorkloadSpec,
 };
 
 use super::helpers::{CURL_IMAGE, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY};
@@ -28,18 +28,49 @@ pub const TOTAL_SERVICES: usize = 10; // 9 original + 1 public-api (wildcard)
 // Shared Builders
 // =============================================================================
 
+/// EmptyDir volume mount (no source = emptyDir).
+///
+/// Used to make paths writable under read-only rootfs (the secure default).
+fn emptydir(medium: Option<&str>, size_limit: Option<&str>) -> VolumeMount {
+    VolumeMount {
+        source: None,
+        path: None,
+        read_only: None,
+        medium: medium.map(String::from),
+        size_limit: size_limit.map(String::from),
+    }
+}
+
+/// Nginx container with emptyDir volumes for writable paths.
+///
+/// Nginx needs `/var/cache/nginx`, `/var/run`, and `/tmp` writable.
+/// With read-only rootfs (our secure default), these must be emptyDir mounts.
 pub fn nginx_container() -> ContainerSpec {
+    let mut volumes = BTreeMap::new();
+    volumes.insert("/var/cache/nginx".to_string(), emptydir(None, None));
+    volumes.insert("/var/run".to_string(), emptydir(None, None));
+    volumes.insert("/tmp".to_string(), emptydir(None, None));
+
     ContainerSpec {
         image: NGINX_IMAGE.to_string(),
+        volumes,
         ..Default::default()
     }
 }
 
+/// Curl container with emptyDir for `/tmp`.
+///
+/// Curl writes temp files during HTTP operations. With read-only rootfs,
+/// `/tmp` must be an emptyDir mount.
 pub fn curl_container(script: String) -> ContainerSpec {
+    let mut volumes = BTreeMap::new();
+    volumes.insert("/tmp".to_string(), emptydir(None, None));
+
     ContainerSpec {
         image: CURL_IMAGE.to_string(),
         command: Some(vec!["/bin/sh".to_string()]),
         args: Some(vec!["-c".to_string(), script]),
+        volumes,
         ..Default::default()
     }
 }

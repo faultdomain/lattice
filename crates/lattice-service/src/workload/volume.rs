@@ -1076,4 +1076,229 @@ mod tests {
         let mounts = output.volume_mounts.get("main").unwrap();
         assert_eq!(mounts.len(), 2);
     }
+
+    // =========================================================================
+    // Story: EmptyDir Volumes (sourceless mounts)
+    // =========================================================================
+
+    fn make_emptydir_spec(
+        mounts: Vec<(&str, Option<&str>, Option<&str>)>, // (path, medium, size_limit)
+    ) -> LatticeServiceSpec {
+        let mut volumes = BTreeMap::new();
+        for (path, medium, size_limit) in mounts {
+            volumes.insert(
+                path.to_string(),
+                crate::crd::VolumeMount {
+                    source: None,
+                    path: None,
+                    read_only: None,
+                    medium: medium.map(String::from),
+                    size_limit: size_limit.map(String::from),
+                },
+            );
+        }
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "nginx:latest".to_string(),
+                volumes,
+                ..Default::default()
+            },
+        );
+
+        LatticeServiceSpec {
+            containers,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn story_emptydir_volume_from_sourceless_mount() {
+        let spec = make_emptydir_spec(vec![("/tmp", None, None)]);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+
+        // Should generate an emptyDir pod volume
+        assert_eq!(output.volumes.len(), 1);
+        let vol = &output.volumes[0];
+        assert_eq!(vol.name, "emptydir-tmp");
+        assert!(vol.persistent_volume_claim.is_none());
+        let ed = vol.empty_dir.as_ref().expect("should be emptyDir");
+        assert!(ed.medium.is_none());
+        assert!(ed.size_limit.is_none());
+
+        // Should generate a volume mount
+        let mounts = output.volume_mounts.get("main").unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].name, "emptydir-tmp");
+        assert_eq!(mounts[0].mount_path, "/tmp");
+    }
+
+    #[test]
+    fn story_emptydir_tmpfs_medium() {
+        let spec = make_emptydir_spec(vec![("/dev/shm", Some("Memory"), None)]);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+
+        let vol = &output.volumes[0];
+        let ed = vol.empty_dir.as_ref().unwrap();
+        assert_eq!(ed.medium, Some("Memory".to_string()));
+        assert!(ed.size_limit.is_none());
+    }
+
+    #[test]
+    fn story_emptydir_size_limit() {
+        let spec = make_emptydir_spec(vec![("/scratch", None, Some("5Gi"))]);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+
+        let vol = &output.volumes[0];
+        let ed = vol.empty_dir.as_ref().unwrap();
+        assert!(ed.medium.is_none());
+        assert_eq!(ed.size_limit, Some("5Gi".to_string()));
+    }
+
+    #[test]
+    fn story_mixed_resource_and_emptydir_volumes() {
+        let mut spec = make_spec_with_volumes(
+            vec![("data", None, "10Gi", None)],
+            vec![],
+            vec![("/data", "data")],
+        );
+
+        // Add emptyDir volumes to the same container
+        let container = spec.containers.get_mut("main").unwrap();
+        container.volumes.insert(
+            "/tmp".to_string(),
+            crate::crd::VolumeMount {
+                source: None,
+                path: None,
+                read_only: None,
+                medium: None,
+                size_limit: None,
+            },
+        );
+        container.volumes.insert(
+            "/var/cache/nginx".to_string(),
+            crate::crd::VolumeMount {
+                source: None,
+                path: None,
+                read_only: None,
+                medium: None,
+                size_limit: None,
+            },
+        );
+
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+
+        // 1 PVC volume + 2 emptyDir volumes = 3 total
+        assert_eq!(output.volumes.len(), 3);
+
+        let pvc_vols: Vec<_> = output
+            .volumes
+            .iter()
+            .filter(|v| v.persistent_volume_claim.is_some())
+            .collect();
+        let empty_vols: Vec<_> = output
+            .volumes
+            .iter()
+            .filter(|v| v.empty_dir.is_some())
+            .collect();
+        assert_eq!(pvc_vols.len(), 1);
+        assert_eq!(empty_vols.len(), 2);
+
+        // All 3 mounts present
+        let mounts = output.volume_mounts.get("main").unwrap();
+        assert_eq!(mounts.len(), 3);
+    }
+
+    #[test]
+    fn story_emptydir_volume_name_sanitization() {
+        let spec = make_emptydir_spec(vec![
+            ("/var/cache/nginx", None, None),
+            ("/tmp", None, None),
+            ("/dev/shm", Some("Memory"), None),
+        ]);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+
+        let names: Vec<_> = output.volumes.iter().map(|v| v.name.as_str()).collect();
+        assert!(names.contains(&"emptydir-dev-shm"));
+        assert!(names.contains(&"emptydir-tmp"));
+        assert!(names.contains(&"emptydir-var-cache-nginx"));
+    }
+
+    #[test]
+    fn story_sidecar_emptydir_volumes() {
+        use crate::crd::SidecarSpec;
+
+        let mut spec = LatticeServiceSpec {
+            containers: {
+                let mut c = BTreeMap::new();
+                c.insert(
+                    "main".to_string(),
+                    ContainerSpec {
+                        image: "app:latest".to_string(),
+                        ..Default::default()
+                    },
+                );
+                c
+            },
+            ..Default::default()
+        };
+
+        let mut sidecar_volumes = BTreeMap::new();
+        sidecar_volumes.insert(
+            "/tmp".to_string(),
+            crate::crd::VolumeMount {
+                source: None,
+                path: None,
+                read_only: None,
+                medium: None,
+                size_limit: None,
+            },
+        );
+
+        spec.sidecars.insert(
+            "logger".to_string(),
+            SidecarSpec {
+                image: "fluentbit:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                resources: None,
+                files: BTreeMap::new(),
+                volumes: sidecar_volumes,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                init: None,
+                security: None,
+            },
+        );
+
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+
+        // Sidecar should get emptyDir volume
+        assert_eq!(output.volumes.len(), 1);
+        assert!(output.volumes[0].empty_dir.is_some());
+        assert_eq!(output.volumes[0].name, "emptydir-tmp");
+
+        // Sidecar should get volume mount
+        let mounts = output.volume_mounts.get("logger").unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].mount_path, "/tmp");
+    }
+
+    #[test]
+    fn story_emptydir_only_no_resources_needed() {
+        // EmptyDir volumes should work even with zero resource declarations
+        let spec = make_emptydir_spec(vec![("/tmp", None, None), ("/var/run", None, None)]);
+        assert!(spec.resources.is_empty());
+
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+
+        assert_eq!(output.volumes.len(), 2);
+        assert_eq!(output.pvcs.len(), 0); // No PVCs needed
+        let mounts = output.volume_mounts.get("main").unwrap();
+        assert_eq!(mounts.len(), 2);
+    }
 }

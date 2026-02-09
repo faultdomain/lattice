@@ -18,6 +18,7 @@ spec:
           /media:
             source: ${resources.media-storage}
             path: library
+          /tmp: {}
         resources:
           requests:
             cpu: 500m
@@ -29,11 +30,7 @@ spec:
           httpGet:
             path: /health
             port: 8096
-    service:
-      ports:
-        http:
-          port: 8096
-          protocol: TCP
+            protocol: TCP
     imagePullSecrets:
       - ghcr-creds
     resources:
