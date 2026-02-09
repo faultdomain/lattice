@@ -1027,8 +1027,8 @@ impl GeneratedWorkloads {
 // =============================================================================
 
 use crate::crd::{
-    AutoscalingMetric, DeployStrategy, GPUSpec, LatticeService, LatticeServiceSpec, ProviderType,
-    WorkloadSpec,
+    AutoscalingMetric, DeployStrategy, GpuParams, LatticeService, LatticeServiceSpec, ProviderType,
+    ReplicaSpec, WorkloadSpec,
 };
 use lattice_common::mesh;
 use lattice_common::template::RenderedContainer;
@@ -1040,7 +1040,7 @@ use lattice_common::template::RenderedContainer;
 /// `nvidia.com/gpumem` and/or `nvidia.com/gpucores`.
 pub(crate) fn merge_gpu_resources(
     resources: Option<ResourceRequirements>,
-    gpu: &Option<GPUSpec>,
+    gpu: Option<&GpuParams>,
 ) -> Option<ResourceRequirements> {
     let gpu = match gpu {
         Some(g) => g,
@@ -1064,9 +1064,9 @@ pub(crate) fn merge_gpu_resources(
 }
 
 /// Build GPU tolerations for a pod spec.
-pub(crate) fn gpu_tolerations(gpu: &Option<GPUSpec>) -> Vec<Toleration> {
+pub(crate) fn gpu_tolerations(gpu: Option<&GpuParams>) -> Vec<Toleration> {
     match gpu {
-        Some(g) if g.tolerations => vec![Toleration {
+        Some(g) if g.tolerations.unwrap_or(true) => vec![Toleration {
             key: Some("nvidia.com/gpu".to_string()),
             operator: Some("Exists".to_string()),
             effect: Some("NoSchedule".to_string()),
@@ -1076,18 +1076,13 @@ pub(crate) fn gpu_tolerations(gpu: &Option<GPUSpec>) -> Vec<Toleration> {
     }
 }
 
-/// Build GPU node selector for a pod spec.
-pub(crate) fn gpu_node_selector(gpu: &Option<GPUSpec>) -> Option<BTreeMap<String, String>> {
-    gpu.as_ref().and_then(|g| g.node_selector())
-}
-
 /// Build SHM volume and mount for GPU pods.
 ///
 /// GPU workloads (NCCL, PyTorch DataLoader) require a large `/dev/shm` for
 /// shared-memory IPC. The default 64MB is insufficient. This adds an emptyDir
 /// volume with `medium: Memory` (tmpfs) mounted at `/dev/shm`.
-pub(crate) fn gpu_shm_volume(gpu: &Option<GPUSpec>) -> Option<(Volume, VolumeMount)> {
-    gpu.as_ref().map(|_| {
+pub(crate) fn gpu_shm_volume(gpu: Option<&GpuParams>) -> Option<(Volume, VolumeMount)> {
+    gpu.map(|_| {
         (
             Volume {
                 name: "dshm".to_string(),
@@ -1167,6 +1162,7 @@ impl WorkloadCompiler {
         let pod_template = PodTemplateCompiler::compile(
             name,
             workload,
+            &spec.runtime,
             volumes,
             provider_type,
             container_data,
@@ -1181,16 +1177,16 @@ impl WorkloadCompiler {
         }
 
         // Generate PDB for HA services (min replicas >= 2)
-        if workload.replicas.min >= 2 {
-            output.pdb = Some(Self::compile_pdb(name, namespace, workload));
+        if spec.replicas.min >= 2 {
+            output.pdb = Some(Self::compile_pdb(name, namespace, &spec.replicas));
         }
 
         // Generate KEDA ScaledObject if max replicas is set
-        if workload.replicas.max.is_some() {
+        if spec.replicas.max.is_some() {
             output.scaled_object = Some(Self::compile_scaled_object(
                 name,
                 namespace,
-                workload,
+                &spec.replicas,
                 monitoring_enabled,
             )?);
         }
@@ -1221,7 +1217,7 @@ impl WorkloadCompiler {
             kind: "Deployment".to_string(),
             metadata: ObjectMeta::new(name, namespace),
             spec: DeploymentSpec {
-                replicas: spec.workload.replicas.min,
+                replicas: spec.replicas.min,
                 selector: LabelSelector {
                     match_labels: {
                         let mut selector = BTreeMap::new();
@@ -1278,13 +1274,13 @@ impl WorkloadCompiler {
     }
 
     /// Compile a PodDisruptionBudget for HA services.
-    fn compile_pdb(name: &str, namespace: &str, workload: &WorkloadSpec) -> PodDisruptionBudget {
+    fn compile_pdb(name: &str, namespace: &str, replicas: &ReplicaSpec) -> PodDisruptionBudget {
         PodDisruptionBudget {
             api_version: "policy/v1".to_string(),
             kind: "PodDisruptionBudget".to_string(),
             metadata: ObjectMeta::new(name, namespace),
             spec: PdbSpec {
-                min_available: Some(workload.replicas.min.saturating_sub(1).max(1)),
+                min_available: Some(replicas.min.saturating_sub(1).max(1)),
                 selector: LabelSelector {
                     match_labels: {
                         let mut labels = BTreeMap::new();
@@ -1336,18 +1332,18 @@ impl WorkloadCompiler {
     fn compile_scaled_object(
         name: &str,
         namespace: &str,
-        workload: &WorkloadSpec,
+        replicas: &ReplicaSpec,
         monitoring_enabled: bool,
     ) -> Result<ScaledObject, CompilationError> {
         use lattice_infra::bootstrap::prometheus::{vmselect_url, VMSELECT_PATH, VMSELECT_PORT};
 
-        let autoscaling = if workload.replicas.autoscaling.is_empty() {
+        let autoscaling = if replicas.autoscaling.is_empty() {
             vec![AutoscalingMetric {
                 metric: "cpu".to_string(),
                 target: 80,
             }]
         } else {
-            workload.replicas.autoscaling.clone()
+            replicas.autoscaling.clone()
         };
 
         let custom_metrics: Vec<String> = autoscaling
@@ -1403,8 +1399,8 @@ impl WorkloadCompiler {
                     kind: "Deployment".to_string(),
                     name: name.to_string(),
                 },
-                min_replica_count: workload.replicas.min,
-                max_replica_count: workload.replicas.max.unwrap_or(workload.replicas.min),
+                min_replica_count: replicas.min,
+                max_replica_count: replicas.max.unwrap_or(replicas.min),
                 triggers,
             },
         })
@@ -1419,8 +1415,8 @@ impl WorkloadCompiler {
 mod tests {
     use super::*;
     use crate::crd::{
-        AutoscalingMetric, ContainerSpec, GPUSpec, PortSpec, ReplicaSpec, ServicePortsSpec,
-        WorkloadSpec,
+        AutoscalingMetric, ContainerSpec, PortSpec, ReplicaSpec, ResourceSpec, ResourceType,
+        ServicePortsSpec, WorkloadSpec,
     };
     use lattice_common::template::TemplateString;
 
@@ -1491,8 +1487,13 @@ mod tests {
             .namespace
             .as_deref()
             .expect("test service must have a namespace");
-        let volumes = VolumeCompiler::compile(name, namespace, &service.spec.workload)
-            .expect("test volume compilation should succeed");
+        let volumes = VolumeCompiler::compile(
+            name,
+            namespace,
+            &service.spec.workload,
+            &service.spec.runtime.sidecars,
+        )
+        .expect("test volume compilation should succeed");
 
         let rendered_containers = build_test_rendered_containers(service);
 
@@ -1726,7 +1727,7 @@ mod tests {
     #[test]
     fn scaled_object_generated_with_max_replicas() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 2,
             max: Some(10),
             autoscaling: vec![],
@@ -1754,7 +1755,7 @@ mod tests {
     #[test]
     fn scaled_object_default_cpu_80() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 1,
             max: Some(5),
             autoscaling: vec![],
@@ -1771,7 +1772,7 @@ mod tests {
     #[test]
     fn scaled_object_custom_cpu_threshold() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 1,
             max: Some(5),
             autoscaling: vec![AutoscalingMetric {
@@ -1789,7 +1790,7 @@ mod tests {
     #[test]
     fn scaled_object_memory_trigger() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 1,
             max: Some(5),
             autoscaling: vec![AutoscalingMetric {
@@ -1809,7 +1810,7 @@ mod tests {
     #[test]
     fn scaled_object_prometheus_trigger() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 1,
             max: Some(10),
             autoscaling: vec![AutoscalingMetric {
@@ -1849,7 +1850,7 @@ mod tests {
     #[test]
     fn scaled_object_multi_signal() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 1,
             max: Some(10),
             autoscaling: vec![
@@ -1873,7 +1874,7 @@ mod tests {
     #[test]
     fn scaled_object_defaults_to_cpu_when_no_autoscaling() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 2,
             max: Some(8),
             autoscaling: vec![],
@@ -1889,7 +1890,7 @@ mod tests {
     #[test]
     fn scaled_object_custom_metrics_require_monitoring() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 1,
             max: Some(10),
             autoscaling: vec![AutoscalingMetric {
@@ -1909,7 +1910,7 @@ mod tests {
     #[test]
     fn scaled_object_cpu_memory_work_without_monitoring() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 1,
             max: Some(5),
             autoscaling: vec![
@@ -1939,7 +1940,7 @@ mod tests {
     #[test]
     fn pdb_generated_for_ha_services() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 3,
             max: None,
             autoscaling: vec![],
@@ -1971,7 +1972,7 @@ mod tests {
     #[test]
     fn pdb_min_available_for_two_replicas() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.replicas = ReplicaSpec {
+        service.spec.replicas = ReplicaSpec {
             min: 2,
             max: None,
             autoscaling: vec![],
@@ -2214,7 +2215,7 @@ mod tests {
         use crate::crd::SidecarSpec;
 
         let mut service = make_service("my-app", "default");
-        service.spec.workload.sidecars.insert(
+        service.spec.runtime.sidecars.insert(
             "logger".to_string(),
             SidecarSpec {
                 image: "fluentbit:latest".to_string(),
@@ -2408,13 +2409,13 @@ mod tests {
     #[test]
     fn story_pod_security_context_sysctls() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.sysctls.insert(
+        service.spec.runtime.sysctls.insert(
             "net.ipv4.conf.all.src_valid_mark".to_string(),
             "1".to_string(),
         );
         service
             .spec
-            .workload
+            .runtime
             .sysctls
             .insert("net.core.somaxconn".to_string(), "65535".to_string());
 
@@ -2577,7 +2578,7 @@ mod tests {
         use crate::crd::SidecarSpec;
 
         let mut service = make_service("my-app", "default");
-        service.spec.workload.sidecars.insert(
+        service.spec.runtime.sidecars.insert(
             "init-setup".to_string(),
             SidecarSpec {
                 image: "busybox:latest".to_string(),
@@ -2587,7 +2588,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        service.spec.workload.sidecars.insert(
+        service.spec.runtime.sidecars.insert(
             "vpn".to_string(),
             SidecarSpec {
                 image: "wireguard:latest".to_string(),
@@ -2633,7 +2634,7 @@ mod tests {
         use crate::crd::{SecurityContext, SidecarSpec};
 
         let mut service = make_service("my-app", "default");
-        service.spec.workload.sidecars.insert(
+        service.spec.runtime.sidecars.insert(
             "vpn".to_string(),
             SidecarSpec {
                 image: "wireguard:latest".to_string(),
@@ -2679,8 +2680,8 @@ mod tests {
     #[test]
     fn story_host_network_and_share_process_namespace() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.host_network = Some(true);
-        service.spec.workload.share_process_namespace = Some(true);
+        service.spec.runtime.host_network = Some(true);
+        service.spec.runtime.share_process_namespace = Some(true);
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2756,10 +2757,18 @@ mod tests {
     #[test]
     fn gpu_full_gpu_in_limits() {
         let mut service = make_service("gpu-app", "default");
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 1,
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2774,10 +2783,18 @@ mod tests {
     #[test]
     fn gpu_multi_gpu() {
         let mut service = make_service("gpu-app", "default");
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 4,
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(4));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2790,12 +2807,20 @@ mod tests {
     #[test]
     fn gpu_hami_fractional() {
         let mut service = make_service("gpu-app", "default");
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 1,
-            memory: Some("20Gi".to_string()),
-            compute: Some(30),
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p.insert("memory".to_string(), serde_json::json!("20Gi"));
+                    p.insert("compute".to_string(), serde_json::json!(30));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2810,11 +2835,19 @@ mod tests {
     #[test]
     fn gpu_memory_only_no_compute() {
         let mut service = make_service("gpu-app", "default");
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 1,
-            memory: Some("8Gi".to_string()),
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p.insert("memory".to_string(), serde_json::json!("8Gi"));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2829,10 +2862,18 @@ mod tests {
     #[test]
     fn gpu_toleration_added_by_default() {
         let mut service = make_service("gpu-app", "default");
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 1,
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2847,11 +2888,19 @@ mod tests {
     #[test]
     fn gpu_toleration_disabled() {
         let mut service = make_service("gpu-app", "default");
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 1,
-            tolerations: false,
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p.insert("tolerations".to_string(), serde_json::json!(false));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2861,11 +2910,19 @@ mod tests {
     #[test]
     fn gpu_model_node_selector() {
         let mut service = make_service("gpu-app", "default");
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 4,
-            model: Some("H100".to_string()),
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(4));
+                    p.insert("model".to_string(), serde_json::json!("H100"));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2905,10 +2962,18 @@ mod tests {
                 ..Default::default()
             },
         );
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 1,
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2948,10 +3013,18 @@ mod tests {
                 memory: Some("16Gi".to_string()),
             }),
         });
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 1,
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2986,10 +3059,18 @@ mod tests {
     #[test]
     fn gpu_deployment_has_shm_volume() {
         let mut service = make_service("gpu-app", "default");
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 1,
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -3019,10 +3100,18 @@ mod tests {
     #[test]
     fn gpu_deployment_has_runtime_class() {
         let mut service = make_service("gpu-app", "default");
-        service.spec.workload.gpu = Some(GPUSpec {
-            count: 1,
-            ..Default::default()
-        });
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -3320,7 +3409,7 @@ mod tests {
     #[test]
     fn story_image_pull_secrets_resolved_from_secret_refs() {
         let mut service = make_service("myapp", "prod");
-        service.spec.workload.image_pull_secrets = vec!["ghcr-creds".to_string()];
+        service.spec.runtime.image_pull_secrets = vec!["ghcr-creds".to_string()];
         service.spec.workload.resources.insert(
             "ghcr-creds".to_string(),
             crate::crd::ResourceSpec {
@@ -3358,7 +3447,7 @@ mod tests {
     #[test]
     fn story_image_pull_secrets_error_missing_resource() {
         let mut service = make_service("myapp", "prod");
-        service.spec.workload.image_pull_secrets = vec!["nonexistent".to_string()];
+        service.spec.runtime.image_pull_secrets = vec!["nonexistent".to_string()];
 
         let secret_refs = BTreeMap::new();
         let result = compile_service_with_secret_refs(&service, &secret_refs);
@@ -3370,7 +3459,7 @@ mod tests {
     #[test]
     fn story_image_pull_secrets_error_wrong_type() {
         let mut service = make_service("myapp", "prod");
-        service.spec.workload.image_pull_secrets = vec!["db".to_string()];
+        service.spec.runtime.image_pull_secrets = vec!["db".to_string()];
         service.spec.workload.resources.insert(
             "db".to_string(),
             crate::crd::ResourceSpec {

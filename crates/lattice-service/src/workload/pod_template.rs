@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::crd::{ProviderType, WorkloadSpec};
+use crate::crd::{GpuParams, ProviderType, RuntimeSpec, WorkloadSpec};
 
 use super::error::CompilationError;
 use super::volume::GeneratedVolumes;
@@ -16,7 +16,7 @@ use super::{
     ResourceRequirements, SeccompProfile, Sysctl, Volume,
 };
 use super::{
-    gpu_node_selector, gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources,
+    gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources,
     SecretRef, TopologySpreadConstraint,
 };
 
@@ -61,15 +61,21 @@ impl PodTemplateCompiler {
     pub fn compile(
         name: &str,
         workload: &WorkloadSpec,
+        runtime: &RuntimeSpec,
         volumes: &GeneratedVolumes,
         provider_type: ProviderType,
         container_data: &ContainerCompilationData<'_>,
     ) -> Result<CompiledPodTemplate, CompilationError> {
+        // Extract GPU params from resources (find the `type: gpu` resource)
+        let gpu = Self::extract_gpu(workload);
+        let gpu_ref = gpu.as_ref();
+
         // Compile main containers with volume mounts
-        let mut containers = Self::compile_containers(workload, volumes, container_data)?;
+        let mut containers =
+            Self::compile_containers(workload, gpu_ref, volumes, container_data)?;
 
         // Compile sidecars (init + regular)
-        let (init_containers, sidecar_containers) = Self::compile_sidecars(workload, volumes);
+        let (init_containers, sidecar_containers) = Self::compile_sidecars(runtime, volumes);
 
         // Merge sidecar containers with main containers
         containers.extend(sidecar_containers);
@@ -101,7 +107,7 @@ impl PodTemplateCompiler {
             .collect();
 
         // Add SHM volume for GPU pods
-        if let Some((shm_vol, _)) = gpu_shm_volume(&workload.gpu) {
+        if let Some((shm_vol, _)) = gpu_shm_volume(gpu_ref) {
             pod_volumes.push(shm_vol);
         }
 
@@ -117,11 +123,11 @@ impl PodTemplateCompiler {
         }
 
         // Compile pod-level security context (always returns secure defaults)
-        let security_context = Some(Self::compile_pod_security_context(workload));
+        let security_context = Some(Self::compile_pod_security_context(runtime));
 
         // Resolve imagePullSecrets from spec resource names to K8s Secret names
         let image_pull_secrets =
-            Self::compile_image_pull_secrets(workload, container_data.secret_refs)?;
+            Self::compile_image_pull_secrets(runtime, workload, container_data.secret_refs)?;
 
         Ok(CompiledPodTemplate {
             containers,
@@ -131,8 +137,8 @@ impl PodTemplateCompiler {
             service_account_name: name.to_string(),
             affinity: volumes.affinity.clone(),
             security_context,
-            host_network: workload.host_network,
-            share_process_namespace: workload.share_process_namespace,
+            host_network: runtime.host_network,
+            share_process_namespace: runtime.share_process_namespace,
             topology_spread_constraints: vec![TopologySpreadConstraint {
                 max_skew: 1,
                 topology_key: provider_type.topology_spread_key().to_string(),
@@ -148,17 +154,27 @@ impl PodTemplateCompiler {
                     },
                 },
             }],
-            node_selector: gpu_node_selector(&workload.gpu),
-            tolerations: gpu_tolerations(&workload.gpu),
-            runtime_class_name: workload.gpu.as_ref().map(|_| "nvidia".to_string()),
+            node_selector: gpu_ref.and_then(|g| g.node_selector()),
+            tolerations: gpu_tolerations(gpu_ref),
+            runtime_class_name: gpu_ref.map(|_| "nvidia".to_string()),
             scheduling_gates: volumes.scheduling_gates.clone(),
             image_pull_secrets,
         })
     }
 
+    /// Extract GPU params from workload resources.
+    fn extract_gpu(workload: &WorkloadSpec) -> Option<GpuParams> {
+        workload
+            .resources
+            .values()
+            .find(|r| r.type_.is_gpu())
+            .and_then(|r| r.gpu_params().ok().flatten())
+    }
+
     /// Compile containers from a WorkloadSpec using rendered container data
     pub fn compile_containers(
         workload: &WorkloadSpec,
+        gpu: Option<&GpuParams>,
         volumes: &GeneratedVolumes,
         container_data: &ContainerCompilationData<'_>,
     ) -> Result<Vec<Container>, CompilationError> {
@@ -236,7 +252,7 @@ impl PodTemplateCompiler {
 
                 // Merge GPU resources into limits (first container only)
                 let resources = if idx == 0 {
-                    merge_gpu_resources(resources, &workload.gpu)
+                    merge_gpu_resources(resources, gpu)
                 } else {
                     resources
                 };
@@ -271,7 +287,7 @@ impl PodTemplateCompiler {
 
                 // Add SHM volume mount for GPU pods (first container only)
                 if idx == 0 {
-                    if let Some((_, shm_mount)) = gpu_shm_volume(&workload.gpu) {
+                    if let Some((_, shm_mount)) = gpu_shm_volume(gpu) {
                         volume_mounts.push(shm_mount);
                     }
                 }
@@ -456,12 +472,12 @@ impl PodTemplateCompiler {
     }
 
     /// Compile pod-level security context with secure defaults.
-    pub fn compile_pod_security_context(workload: &WorkloadSpec) -> PodSecurityContext {
-        let sysctls = if workload.sysctls.is_empty() {
+    pub fn compile_pod_security_context(runtime: &RuntimeSpec) -> PodSecurityContext {
+        let sysctls = if runtime.sysctls.is_empty() {
             None
         } else {
             Some(
-                workload
+                runtime
                     .sysctls
                     .iter()
                     .map(|(name, value)| Sysctl {
@@ -486,13 +502,13 @@ impl PodTemplateCompiler {
 
     /// Compile sidecars into init containers and regular sidecar containers
     fn compile_sidecars(
-        workload: &WorkloadSpec,
+        runtime: &RuntimeSpec,
         volumes: &GeneratedVolumes,
     ) -> (Vec<Container>, Vec<Container>) {
         let mut init_containers = Vec::new();
         let mut sidecar_containers = Vec::new();
 
-        for (sidecar_name, sidecar_spec) in &workload.sidecars {
+        for (sidecar_name, sidecar_spec) in &runtime.sidecars {
             let env: Vec<EnvVar> = sidecar_spec
                 .variables
                 .iter()
@@ -569,10 +585,11 @@ impl PodTemplateCompiler {
 
     /// Resolve `imagePullSecrets` resource names to K8s Secret names
     pub fn compile_image_pull_secrets(
+        runtime: &RuntimeSpec,
         workload: &WorkloadSpec,
         secret_refs: &BTreeMap<String, SecretRef>,
     ) -> Result<Vec<LocalObjectReference>, CompilationError> {
-        workload
+        runtime
             .image_pull_secrets
             .iter()
             .map(|resource_name| {

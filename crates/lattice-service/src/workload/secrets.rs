@@ -70,6 +70,7 @@ impl SecretsCompiler {
         service_name: &str,
         namespace: &str,
         workload: &WorkloadSpec,
+        image_pull_secrets: &[String],
     ) -> Result<GeneratedSecrets, CompilationError> {
         let mut output = GeneratedSecrets::new();
 
@@ -113,8 +114,7 @@ impl SecretsCompiler {
 
             // Determine K8s Secret type: explicit param > imagePullSecrets inference > Opaque
             let secret_type = params.secret_type.as_deref().or_else(|| {
-                workload
-                    .image_pull_secrets
+                image_pull_secrets
                     .contains(resource_name)
                     .then_some("kubernetes.io/dockerconfigjson")
             });
@@ -222,7 +222,7 @@ mod tests {
             Some("1h"),
         )]);
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
 
         assert_eq!(output.external_secrets.len(), 1);
         let es = &output.external_secrets[0];
@@ -254,7 +254,7 @@ mod tests {
             None,
         )]);
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
 
         let secret_ref = output
             .secret_refs
@@ -277,7 +277,7 @@ mod tests {
             None,
         )]);
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
 
         let es = &output.external_secrets[0];
 
@@ -312,7 +312,7 @@ mod tests {
             resource.id = None;
         }
 
-        let result = SecretsCompiler::compile("myapp", "prod", &spec);
+        let result = SecretsCompiler::compile("myapp", "prod", &spec, &[]);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -337,7 +337,7 @@ mod tests {
             }
         }
 
-        let result = SecretsCompiler::compile("myapp", "prod", &spec);
+        let result = SecretsCompiler::compile("myapp", "prod", &spec, &[]);
         assert!(result.is_err());
     }
 
@@ -364,7 +364,7 @@ mod tests {
             ),
         ]);
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
 
         assert_eq!(output.external_secrets.len(), 2);
         assert_eq!(output.secret_refs.len(), 2);
@@ -381,7 +381,7 @@ mod tests {
     fn story_no_secrets_returns_empty() {
         let spec = WorkloadSpec::default();
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
 
         assert!(output.is_empty());
     }

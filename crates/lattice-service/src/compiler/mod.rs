@@ -235,16 +235,22 @@ impl<'a> ServiceCompiler<'a> {
         let workload = &service.spec.workload;
 
         // Compile volumes first (PVCs must exist before Deployment references them)
-        let compiled_volumes = VolumeCompiler::compile(name, namespace, workload)?;
+        let compiled_volumes =
+            VolumeCompiler::compile(name, namespace, workload, &service.spec.runtime.sidecars)?;
 
         // Compile secrets (ExternalSecrets for syncing from Vault via ESO)
-        let compiled_secrets = SecretsCompiler::compile(name, namespace, workload)?;
+        let compiled_secrets = SecretsCompiler::compile(
+            name,
+            namespace,
+            workload,
+            &service.spec.runtime.image_pull_secrets,
+        )?;
 
         // Authorize secret access via Cedar — default-deny
         self.authorize_secrets(name, namespace, workload).await?;
 
         // Authorize security overrides via Cedar — default-deny
-        self.authorize_security_overrides(name, namespace, workload)
+        self.authorize_security_overrides(name, namespace, workload, &service.spec.runtime)
             .await?;
 
         // Build template context and render all containers
@@ -366,7 +372,7 @@ impl<'a> ServiceCompiler<'a> {
         }
 
         // Inject Velero backup annotations into pod template if backup is configured
-        if let Some(ref backup_spec) = workload.backup {
+        if let Some(ref backup_spec) = service.spec.backup {
             let backup_annotations =
                 crate::workload::backup::compile_backup_annotations(backup_spec);
             if let Some(ref mut deployment) = workloads.deployment {
@@ -513,8 +519,9 @@ impl<'a> ServiceCompiler<'a> {
         name: &str,
         namespace: &str,
         workload: &crate::crd::WorkloadSpec,
+        runtime: &crate::crd::RuntimeSpec,
     ) -> Result<(), CompilationError> {
-        let overrides = collect_security_overrides(workload);
+        let overrides = collect_security_overrides(workload, runtime);
 
         if overrides.is_empty() {
             return Ok(());
@@ -549,23 +556,26 @@ impl<'a> ServiceCompiler<'a> {
     }
 }
 
-/// Collect security overrides from a WorkloadSpec.
+/// Collect security overrides from WorkloadSpec + RuntimeSpec.
 ///
 /// Scans pod-level and container-level fields for any deviation from the
 /// PSS restricted profile defaults. Returns an empty vec if the service
 /// doesn't relax any security defaults.
-fn collect_security_overrides(workload: &crate::crd::WorkloadSpec) -> Vec<SecurityOverrideRequest> {
+fn collect_security_overrides(
+    workload: &crate::crd::WorkloadSpec,
+    runtime: &crate::crd::RuntimeSpec,
+) -> Vec<SecurityOverrideRequest> {
     let mut overrides = Vec::new();
 
-    // Pod-level overrides
-    if workload.host_network == Some(true) {
+    // Pod-level overrides (from RuntimeSpec)
+    if runtime.host_network == Some(true) {
         overrides.push(SecurityOverrideRequest {
             override_id: "hostNetwork".into(),
             category: "pod".into(),
             container: None,
         });
     }
-    if workload.share_process_namespace == Some(true) {
+    if runtime.share_process_namespace == Some(true) {
         overrides.push(SecurityOverrideRequest {
             override_id: "shareProcessNamespace".into(),
             category: "pod".into(),
@@ -573,11 +583,11 @@ fn collect_security_overrides(workload: &crate::crd::WorkloadSpec) -> Vec<Securi
         });
     }
 
-    // Container-level overrides (main containers + sidecars)
+    // Container-level overrides (main containers from WorkloadSpec + sidecars from RuntimeSpec)
     for (name, container) in &workload.containers {
         collect_container_overrides(&mut overrides, name, container.security.as_ref());
     }
-    for (name, sidecar) in &workload.sidecars {
+    for (name, sidecar) in &runtime.sidecars {
         collect_container_overrides(&mut overrides, name, sidecar.security.as_ref());
     }
 
@@ -891,7 +901,6 @@ mod tests {
                 containers,
                 resources,
                 service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
             },
             ..Default::default()
         }
@@ -1140,7 +1149,7 @@ mod tests {
         let cedar = PolicyEngine::new();
 
         let mut service = make_service("my-db", "prod");
-        service.spec.workload.backup = Some(ServiceBackupSpec {
+        service.spec.backup = Some(ServiceBackupSpec {
             hooks: Some(BackupHooksSpec {
                 pre: vec![BackupHook {
                     name: "freeze".to_string(),
@@ -1405,7 +1414,7 @@ mod tests {
     fn story_collect_security_overrides_empty() {
         // Default service has no security overrides
         let service = make_service("my-app", "default");
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert!(overrides.is_empty());
     }
 
@@ -1418,7 +1427,7 @@ mod tests {
                 ..Default::default()
             });
 
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 2);
         assert_eq!(overrides[0].override_id, "capability:NET_ADMIN");
         assert_eq!(overrides[0].category, "capability");
@@ -1435,7 +1444,7 @@ mod tests {
                 ..Default::default()
             });
 
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].override_id, "privileged");
         assert_eq!(overrides[0].category, "container");
@@ -1450,7 +1459,7 @@ mod tests {
                 run_as_user: Some(0),
                 ..Default::default()
             });
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].override_id, "runAsRoot");
 
@@ -1466,7 +1475,7 @@ mod tests {
             run_as_non_root: Some(false),
             ..Default::default()
         });
-        let overrides2 = collect_security_overrides(&service2.spec.workload);
+        let overrides2 = collect_security_overrides(&service2.spec.workload, &service2.spec.runtime);
         assert_eq!(overrides2.len(), 1);
         assert_eq!(overrides2[0].override_id, "runAsRoot");
     }
@@ -1474,10 +1483,10 @@ mod tests {
     #[test]
     fn story_collect_security_overrides_pod_level() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.host_network = Some(true);
-        service.spec.workload.share_process_namespace = Some(true);
+        service.spec.runtime.host_network = Some(true);
+        service.spec.runtime.share_process_namespace = Some(true);
 
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 2);
 
         let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
@@ -1497,7 +1506,7 @@ mod tests {
                 ..Default::default()
             });
 
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 2);
 
         let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
@@ -1515,7 +1524,7 @@ mod tests {
                 ..Default::default()
             });
 
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].override_id, "readWriteRootFilesystem");
     }
@@ -1529,7 +1538,7 @@ mod tests {
                 ..Default::default()
             });
 
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].override_id, "allowPrivilegeEscalation");
     }
@@ -1537,7 +1546,7 @@ mod tests {
     #[test]
     fn story_collect_security_overrides_sidecars() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.sidecars.insert(
+        service.spec.runtime.sidecars.insert(
             "vpn".to_string(),
             SidecarSpec {
                 image: "vpn:latest".to_string(),
@@ -1549,7 +1558,7 @@ mod tests {
             },
         );
 
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].override_id, "capability:NET_ADMIN");
         assert_eq!(overrides[0].container.as_deref(), Some("vpn"));
@@ -1570,7 +1579,7 @@ mod tests {
                 ..Default::default()
             });
 
-        let overrides = collect_security_overrides(&service.spec.workload);
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert!(overrides.is_empty());
     }
 

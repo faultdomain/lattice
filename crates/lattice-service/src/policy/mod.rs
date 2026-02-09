@@ -236,7 +236,6 @@ mod tests {
                 containers,
                 resources,
                 service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
             },
             ..Default::default()
         }

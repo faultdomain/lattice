@@ -22,9 +22,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::Condition;
+use super::workload::backup::ServiceBackupSpec;
 use super::workload::deploy::DeploySpec;
 use super::workload::ingress::IngressSpec;
-use super::workload::spec::WorkloadSpec;
+use super::workload::scaling::ReplicaSpec;
+use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 // =============================================================================
 // Service Phase
@@ -75,8 +77,20 @@ impl std::fmt::Display for ServicePhase {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeServiceSpec {
-    /// Shared workload specification (containers, resources, ports, etc.)
+    /// Score-compatible workload specification (containers, resources, ports)
     pub workload: WorkloadSpec,
+
+    /// Replica scaling configuration
+    #[serde(default)]
+    pub replicas: ReplicaSpec,
+
+    /// Lattice runtime extensions (sidecars, sysctls, hostNetwork, etc.)
+    #[serde(default, flatten)]
+    pub runtime: RuntimeSpec,
+
+    /// Backup configuration (Velero hooks and volume policies)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<ServiceBackupSpec>,
 
     /// Deployment strategy configuration
     #[serde(default)]
@@ -85,6 +99,45 @@ pub struct LatticeServiceSpec {
     /// Ingress configuration for external access via Gateway API
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<IngressSpec>,
+}
+
+impl LatticeServiceSpec {
+    /// Validate the service specification (workload + replicas + pod)
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        self.workload.validate()?;
+
+        // Validate replica counts
+        if let Some(max) = self.replicas.max {
+            if self.replicas.min > max {
+                return Err(crate::Error::validation(
+                    "min replicas cannot exceed max replicas",
+                ));
+            }
+        }
+
+        // Validate autoscaling metrics
+        if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
+            return Err(crate::Error::validation(
+                "autoscaling metrics require max replicas to be set",
+            ));
+        }
+        for m in &self.replicas.autoscaling {
+            if m.target == 0 {
+                return Err(crate::Error::validation(format!(
+                    "autoscaling metric '{}' target must be greater than 0",
+                    m.metric
+                )));
+            }
+            if (m.metric == "cpu" || m.metric == "memory") && m.target > 100 {
+                return Err(crate::Error::validation(format!(
+                    "autoscaling metric '{}' target cannot exceed 100%",
+                    m.metric
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // =============================================================================
@@ -255,9 +308,9 @@ workload:
     ports:
       http:
         port: 80
-  replicas:
-    min: 1
-    max: 3
+replicas:
+  min: 1
+  max: 3
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
@@ -265,8 +318,8 @@ workload:
 
         assert_eq!(spec.workload.containers.len(), 1);
         assert_eq!(spec.workload.containers["main"].image, "nginx:latest");
-        assert_eq!(spec.workload.replicas.min, 1);
-        assert_eq!(spec.workload.replicas.max, Some(3));
+        assert_eq!(spec.replicas.min, 1);
+        assert_eq!(spec.replicas.max, Some(3));
 
         let ports = spec.workload.ports();
         assert_eq!(ports.get("http"), Some(&80));
@@ -737,44 +790,27 @@ workload:
     }
 
     // =========================================================================
-    // Model Resource Tests
+    // GPU Validation Tests
     // =========================================================================
 
     #[test]
-    fn test_model_params_from_yaml() {
+    fn gpu_resource_validation_in_service_spec() {
         let yaml = r#"
 workload:
   containers:
     main:
       image: vllm/vllm-openai:latest
   resources:
-    llm:
-      type: model
+    my-gpu:
+      type: gpu
       params:
-        uri: "huggingface://meta-llama/Llama-3.3-70B-Instruct"
-        revision: main
-        size: "140Gi"
+        count: 0
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_json::from_value(value).expect("model resource should parse");
+            serde_json::from_value(value).expect("gpu resource should parse");
 
-        let resource = spec
-            .workload
-            .resources
-            .get("llm")
-            .expect("llm should exist");
-        assert!(resource.type_.is_model());
-        assert!(resource.type_.is_volume_like());
-
-        let params = resource.model_params().expect("should parse model params");
-        let params = params.expect("should be Some for model resource");
-        assert_eq!(
-            params.uri,
-            "huggingface://meta-llama/Llama-3.3-70B-Instruct"
-        );
-        assert_eq!(params.revision.as_deref(), Some("main"));
-        assert_eq!(params.pvc_size(), "140Gi");
+        assert!(spec.workload.validate().is_err());
     }
 
     // =========================================================================
@@ -828,8 +864,8 @@ workload:
     sonarr:
       type: service
       direction: inbound
-  replicas:
-    min: 1
+replicas:
+  min: 1
 ingress:
   hosts:
     - jellyfin.home.local
@@ -951,28 +987,28 @@ workload:
   containers:
     main:
       image: myapp:latest
-  sidecars:
-    setup:
-      image: busybox:latest
-      init: true
-      command: ["sh", "-c"]
-      args: ["chown -R 1000:1000 /data"]
-      security:
-        runAsUser: 0
-    vpn:
-      image: wireguard:latest
-      init: false
-      security:
-        capabilities: [NET_ADMIN]
+sidecars:
+  setup:
+    image: busybox:latest
+    init: true
+    command: ["sh", "-c"]
+    args: ["chown -R 1000:1000 /data"]
+    security:
+      runAsUser: 0
+  vpn:
+    image: wireguard:latest
+    init: false
+    security:
+      capabilities: [NET_ADMIN]
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Sidecar YAML should parse");
 
-        assert_eq!(spec.workload.sidecars.len(), 2);
+        assert_eq!(spec.runtime.sidecars.len(), 2);
 
         let setup = spec
-            .workload
+            .runtime
             .sidecars
             .get("setup")
             .expect("setup should exist");
@@ -983,7 +1019,7 @@ workload:
             Some(Some(0))
         );
 
-        let vpn = spec.workload.sidecars.get("vpn").expect("vpn should exist");
+        let vpn = spec.runtime.sidecars.get("vpn").expect("vpn should exist");
         assert_eq!(vpn.image, "wireguard:latest");
         assert_eq!(vpn.init, Some(false));
         assert_eq!(
@@ -999,28 +1035,28 @@ workload:
   containers:
     main:
       image: myapp:latest
-  sidecars:
-    logging:
-      image: fluent-bit:latest
-      command: ["/fluent-bit/bin/fluent-bit"]
-      args: ["-c", "/config/fluent-bit.conf"]
-      variables:
-        LOG_LEVEL: info
-      resources:
-        requests:
-          cpu: 50m
-          memory: 64Mi
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 2020
+sidecars:
+  logging:
+    image: fluent-bit:latest
+    command: ["/fluent-bit/bin/fluent-bit"]
+    args: ["-c", "/config/fluent-bit.conf"]
+    variables:
+      LOG_LEVEL: info
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 2020
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Full sidecar spec should parse");
 
         let logging = spec
-            .workload
+            .runtime
             .sidecars
             .get("logging")
             .expect("logging should exist");
@@ -1037,35 +1073,35 @@ workload:
     // =========================================================================
 
     #[test]
-    fn story_pod_level_settings_parse() {
+    fn story_runtime_settings_parse() {
         let yaml = r#"
 workload:
   containers:
     main:
       image: myapp:latest
-  sysctls:
-    net.ipv4.conf.all.src_valid_mark: "1"
-    net.core.somaxconn: "65535"
-  hostNetwork: true
-  shareProcessNamespace: true
+sysctls:
+  net.ipv4.conf.all.src_valid_mark: "1"
+  net.core.somaxconn: "65535"
+hostNetwork: true
+shareProcessNamespace: true
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_json::from_value(value).expect("Pod-level settings should parse");
+            serde_json::from_value(value).expect("Runtime settings should parse");
 
-        assert_eq!(spec.workload.sysctls.len(), 2);
+        assert_eq!(spec.runtime.sysctls.len(), 2);
         assert_eq!(
-            spec.workload
+            spec.runtime
                 .sysctls
                 .get("net.ipv4.conf.all.src_valid_mark"),
             Some(&"1".to_string())
         );
         assert_eq!(
-            spec.workload.sysctls.get("net.core.somaxconn"),
+            spec.runtime.sysctls.get("net.core.somaxconn"),
             Some(&"65535".to_string())
         );
-        assert_eq!(spec.workload.host_network, Some(true));
-        assert_eq!(spec.workload.share_process_namespace, Some(true));
+        assert_eq!(spec.runtime.host_network, Some(true));
+        assert_eq!(spec.runtime.share_process_namespace, Some(true));
     }
 
     #[test]
@@ -1077,17 +1113,17 @@ workload:
       image: linuxserver/nzbget:latest
       variables:
         PUID: "1000"
-  sysctls:
-    net.ipv4.conf.all.src_valid_mark: "1"
-  sidecars:
-    vpn:
-      image: linuxserver/wireguard:latest
-      security:
-        capabilities: [NET_ADMIN, SYS_MODULE]
   service:
     ports:
       http:
         port: 6789
+sysctls:
+  net.ipv4.conf.all.src_valid_mark: "1"
+sidecars:
+  vpn:
+    image: linuxserver/wireguard:latest
+    security:
+      capabilities: [NET_ADMIN, SYS_MODULE]
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
@@ -1095,12 +1131,12 @@ workload:
 
         assert!(spec.workload.containers.contains_key("main"));
         assert!(spec
-            .workload
+            .runtime
             .sysctls
             .contains_key("net.ipv4.conf.all.src_valid_mark"));
 
         let vpn = spec
-            .workload
+            .runtime
             .sidecars
             .get("vpn")
             .expect("vpn sidecar should exist");
@@ -1125,10 +1161,10 @@ workload:
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Spec without sidecars should parse");
 
-        assert!(spec.workload.sidecars.is_empty());
-        assert!(spec.workload.sysctls.is_empty());
-        assert!(spec.workload.host_network.is_none());
-        assert!(spec.workload.share_process_namespace.is_none());
+        assert!(spec.runtime.sidecars.is_empty());
+        assert!(spec.runtime.sysctls.is_empty());
+        assert!(spec.runtime.host_network.is_none());
+        assert!(spec.runtime.share_process_namespace.is_none());
     }
 
     // =========================================================================
@@ -1142,28 +1178,28 @@ workload:
   containers:
     main:
       image: postgres:16
-  backup:
-    hooks:
-      pre:
-        - name: freeze-db
-          container: main
-          command: ["/bin/sh", "-c", "pg_dump -U postgres mydb -Fc -f /backup/dump.sql"]
-          timeout: "600s"
-          onError: Fail
-      post:
-        - name: cleanup
-          container: main
-          command: ["/bin/sh", "-c", "rm -f /backup/dump.sql"]
-    volumes:
-      include: [data, wal]
-      exclude: [tmp]
-      defaultPolicy: opt-in
+backup:
+  hooks:
+    pre:
+      - name: freeze-db
+        container: main
+        command: ["/bin/sh", "-c", "pg_dump -U postgres mydb -Fc -f /backup/dump.sql"]
+        timeout: "600s"
+        onError: Fail
+    post:
+      - name: cleanup
+        container: main
+        command: ["/bin/sh", "-c", "rm -f /backup/dump.sql"]
+  volumes:
+    include: [data, wal]
+    exclude: [tmp]
+    defaultPolicy: opt-in
 "#;
 
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("should parse spec with backup");
-        let backup = spec.workload.backup.expect("should have backup spec");
+        let backup = spec.backup.expect("should have backup spec");
 
         let hooks = backup.hooks.expect("should have hooks");
         assert_eq!(hooks.pre.len(), 1);
@@ -1188,17 +1224,17 @@ workload:
   containers:
     main:
       image: nginx:latest
-  backup:
-    hooks:
-      pre:
-        - name: sync
-          container: main
-          command: ["/bin/sh", "-c", "sync"]
+backup:
+  hooks:
+    pre:
+      - name: sync
+        container: main
+        command: ["/bin/sh", "-c", "sync"]
 "#;
 
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("should parse spec");
-        let backup = spec.workload.backup.expect("should have backup");
+        let backup = spec.backup.expect("should have backup");
         let hooks = backup.hooks.expect("should have hooks");
 
         assert!(matches!(hooks.pre[0].on_error, HookErrorAction::Continue));
@@ -1218,69 +1254,82 @@ workload:
 
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("should parse spec");
-        assert!(spec.workload.backup.is_none());
+        assert!(spec.backup.is_none());
     }
 
     // =========================================================================
-    // GPU YAML Integration Tests
+    // GPU Resource Tests
     // =========================================================================
 
     #[test]
-    fn gpu_yaml_roundtrip() {
+    fn gpu_resource_yaml_roundtrip() {
         let yaml = r#"
 workload:
   containers:
     main:
       image: vllm/vllm:latest
-  gpu:
-    count: 1
-    memory: 8Gi
-    compute: 20
-    model: L4
+  resources:
+    my-gpu:
+      type: gpu
+      params:
+        count: 1
+        memory: 8Gi
+        compute: 20
+        model: L4
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
-            serde_json::from_value(value).expect("GPU YAML should parse");
+            serde_json::from_value(value).expect("GPU resource YAML should parse");
 
-        let gpu = spec.workload.gpu.expect("should have gpu");
+        let gpu_resource = spec.workload.resources.get("my-gpu").expect("should have gpu resource");
+        assert!(gpu_resource.type_.is_gpu());
+        let gpu = gpu_resource.gpu_params().expect("parse gpu params").expect("should have params");
         assert_eq!(gpu.count, 1);
         assert_eq!(gpu.memory, Some("8Gi".to_string()));
         assert_eq!(gpu.compute, Some(20));
         assert_eq!(gpu.model, Some("L4".to_string()));
-        assert!(gpu.tolerations);
     }
 
     #[test]
-    fn gpu_tolerations_default_true() {
+    fn gpu_resource_tolerations_default_none() {
         let yaml = r#"
 workload:
   containers:
     main:
       image: myapp:latest
-  gpu:
-    count: 2
+  resources:
+    my-gpu:
+      type: gpu
+      params:
+        count: 2
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("parse");
-        let gpu = spec.workload.gpu.expect("should have gpu");
-        assert!(gpu.tolerations);
+        let gpu = spec.workload.resources["my-gpu"]
+            .gpu_params().expect("parse").expect("params");
+        assert_eq!(gpu.count, 2);
+        assert!(gpu.tolerations.is_none());
     }
 
     #[test]
-    fn gpu_tolerations_explicit_false() {
+    fn gpu_resource_tolerations_explicit_false() {
         let yaml = r#"
 workload:
   containers:
     main:
       image: myapp:latest
-  gpu:
-    count: 1
-    tolerations: false
+  resources:
+    my-gpu:
+      type: gpu
+      params:
+        count: 1
+        tolerations: false
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("parse");
-        let gpu = spec.workload.gpu.expect("should have gpu");
-        assert!(!gpu.tolerations);
+        let gpu = spec.workload.resources["my-gpu"]
+            .gpu_params().expect("parse").expect("params");
+        assert_eq!(gpu.tolerations, Some(false));
     }
 
     // =========================================================================
@@ -1361,13 +1410,16 @@ workload:
                     c
                 },
                 resources,
+                ..Default::default()
+            },
+            runtime: RuntimeSpec {
                 image_pull_secrets: vec!["ghcr-creds".to_string()],
                 ..Default::default()
             },
             ..Default::default()
         };
 
-        assert_eq!(spec.workload.image_pull_secrets, vec!["ghcr-creds"]);
+        assert_eq!(spec.runtime.image_pull_secrets, vec!["ghcr-creds"]);
         assert!(spec.workload.resources.contains_key("ghcr-creds"));
     }
 

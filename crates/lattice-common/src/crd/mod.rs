@@ -63,17 +63,16 @@ pub use workload::container::{
     SidecarSpec, VolumeMount,
 };
 pub use workload::deploy::{CanarySpec, DeploySpec, DeployStrategy};
-pub use workload::gpu::GPUSpec;
 pub use workload::ingress::{
     CertIssuerRef, IngressPath, IngressSpec, IngressTls, PathMatchType, TlsMode,
 };
 pub use workload::ports::{PortSpec, ServicePortsSpec};
 pub use workload::resources::{
-    DependencyDirection, ResourceMetadata, ResourceQuantity, ResourceRequirements, ResourceSpec,
-    ResourceType, VolumeAccessMode, VolumeParams,
+    DependencyDirection, GpuParams, ResourceMetadata, ResourceQuantity, ResourceRequirements,
+    ResourceSpec, ResourceType, VolumeAccessMode, VolumeParams,
 };
 pub use workload::scaling::{AutoscalingMetric, ReplicaSpec};
-pub use workload::spec::WorkloadSpec;
+pub use workload::spec::{RuntimeSpec, WorkloadSpec};
 pub use service_policy::{
     LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,
     LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,

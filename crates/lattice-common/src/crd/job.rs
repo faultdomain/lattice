@@ -9,7 +9,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::workload::spec::WorkloadSpec;
+use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 // =============================================================================
 // Phase
@@ -83,6 +83,10 @@ pub struct JobTaskSpec {
 
     /// Shared workload spec (containers, volumes, env, etc.)
     pub workload: WorkloadSpec,
+
+    /// Lattice runtime extensions (sidecars, sysctls, hostNetwork, etc.)
+    #[serde(default, flatten)]
+    pub runtime: RuntimeSpec,
 
     /// Pod restart policy
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -182,6 +186,7 @@ mod tests {
         let task = JobTaskSpec {
             replicas: 2,
             workload: WorkloadSpec::default(),
+            runtime: RuntimeSpec::default(),
             restart_policy: Some(RestartPolicy::OnFailure),
         };
         assert!(task.workload.containers.is_empty());
@@ -196,6 +201,7 @@ mod tests {
             JobTaskSpec {
                 replicas: 1,
                 workload: WorkloadSpec::default(),
+                runtime: RuntimeSpec::default(),
                 restart_policy: None,
             },
         );
@@ -204,6 +210,7 @@ mod tests {
             JobTaskSpec {
                 replicas: 4,
                 workload: WorkloadSpec::default(),
+                runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::OnFailure),
             },
         );

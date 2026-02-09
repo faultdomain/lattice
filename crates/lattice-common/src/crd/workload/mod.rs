@@ -6,7 +6,6 @@
 pub mod backup;
 pub mod container;
 pub mod deploy;
-pub mod gpu;
 pub mod ingress;
 pub mod ports;
 pub mod resources;

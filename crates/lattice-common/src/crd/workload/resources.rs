@@ -57,8 +57,8 @@ pub enum ResourceType {
     Volume,
     /// Secret from SecretProvider (ESO ExternalSecret)
     Secret,
-    /// Model artifact (pre-fetched to PVC, managed by ModelCache controller)
-    Model,
+    /// GPU resource (fractional via HAMi or full allocation)
+    Gpu,
     /// Custom resource type (escape hatch for extensibility)
     /// Validated at parse time: lowercase alphanumeric with hyphens, starts with letter
     Custom(String),
@@ -82,7 +82,7 @@ impl JsonSchema for ResourceType {
             instance_type: Some(schemars::schema::InstanceType::String.into()),
             metadata: Some(Box::new(schemars::schema::Metadata {
                 description: Some(
-                    "Resource type: 'service', 'external-service', 'volume', 'secret', 'model', or custom type"
+                    "Resource type: 'service', 'external-service', 'volume', 'secret', 'gpu', or custom type"
                         .to_string(),
                 ),
                 ..Default::default()
@@ -109,7 +109,7 @@ impl ResourceType {
             Self::ExternalService => "external-service",
             Self::Volume => "volume",
             Self::Secret => "secret",
-            Self::Model => "model",
+            Self::Gpu => "gpu",
             Self::Custom(s) => s.as_str(),
         }
     }
@@ -129,17 +129,9 @@ impl ResourceType {
         matches!(self, Self::Secret)
     }
 
-    /// Returns true if this is a model resource
-    pub fn is_model(&self) -> bool {
-        matches!(self, Self::Model)
-    }
-
-    /// Returns true if this is a volume-like resource (volume or model)
-    ///
-    /// Model resources are a specialized volume type — pre-fetched to a PVC
-    /// from a remote URI.
-    pub fn is_volume_like(&self) -> bool {
-        matches!(self, Self::Volume | Self::Model)
+    /// Returns true if this is a GPU resource
+    pub fn is_gpu(&self) -> bool {
+        matches!(self, Self::Gpu)
     }
 
     /// Returns true if this is a custom resource type
@@ -166,7 +158,7 @@ impl<'de> Deserialize<'de> for ResourceType {
             "external-service" => Ok(Self::ExternalService),
             "volume" => Ok(Self::Volume),
             "secret" => Ok(Self::Secret),
-            "model" => Ok(Self::Model),
+            "gpu" => Ok(Self::Gpu),
             _ => {
                 validate_custom_type(&s).map_err(serde::de::Error::custom)?;
                 Ok(Self::Custom(s))
@@ -360,6 +352,121 @@ pub struct SecretParams {
 }
 
 // =============================================================================
+// GPU Resource Configuration (parsed from Score params)
+// =============================================================================
+
+/// Parsed GPU parameters from Score's generic `params` field
+///
+/// GPU becomes a resource type (`type: gpu`) instead of a top-level field.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuParams {
+    /// Number of GPUs requested (must be > 0)
+    pub count: u32,
+
+    /// GPU memory limit (e.g., "20Gi", "512Mi"). Enables HAMi fractional sharing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+
+    /// GPU compute percentage (1-100). Enables HAMi fractional sharing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<u32>,
+
+    /// GPU model selector (e.g., "H100", "A100", "L4"). Maps to node selector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Whether to add nvidia.com/gpu toleration (default: true at compile time)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerations: Option<bool>,
+}
+
+impl GpuParams {
+    /// Validate the GPU specification
+    pub fn validate(&self) -> Result<(), String> {
+        if self.count == 0 {
+            return Err("gpu count must be greater than 0".to_string());
+        }
+        if let Some(compute) = self.compute {
+            if compute == 0 || compute > 100 {
+                return Err("gpu compute must be between 1 and 100".to_string());
+            }
+        }
+        if let Some(ref memory) = self.memory {
+            parse_gpu_memory_mib(memory)?;
+        }
+        Ok(())
+    }
+
+    /// Returns true if HAMi fractional sharing is needed (memory or compute set)
+    pub fn needs_hami(&self) -> bool {
+        self.memory.is_some() || self.compute.is_some()
+    }
+
+    /// Returns true if this is a full GPU allocation (no fractional fields)
+    pub fn is_full_gpu(&self) -> bool {
+        !self.needs_hami()
+    }
+
+    /// Parse the memory field into MiB, if present.
+    pub fn memory_mib(&self) -> Option<Result<u64, String>> {
+        self.memory.as_ref().map(|m| parse_gpu_memory_mib(m))
+    }
+
+    /// Map a short GPU model name to the `nvidia.com/gpu.product` NFD label value.
+    pub fn product_label(&self) -> Option<String> {
+        self.model.as_ref().map(|model| match model.to_uppercase().as_str() {
+            "H100" => "NVIDIA-H100-80GB-HBM3".to_string(),
+            "H100SXM" => "NVIDIA-H100-80GB-HBM3".to_string(),
+            "H100PCIE" => "NVIDIA-H100-PCIe".to_string(),
+            "A100" => "NVIDIA-A100-SXM4-80GB".to_string(),
+            "A100-80G" => "NVIDIA-A100-SXM4-80GB".to_string(),
+            "A100-40G" => "NVIDIA-A100-SXM4-40GB".to_string(),
+            "A10G" => "NVIDIA-A10G".to_string(),
+            "L40S" => "NVIDIA-L40S".to_string(),
+            "L40" => "NVIDIA-L40".to_string(),
+            "L4" => "NVIDIA-L4".to_string(),
+            "T4" => "NVIDIA-Tesla-T4".to_string(),
+            "V100" => "NVIDIA-Tesla-V100-SXM2-16GB".to_string(),
+            _ => model.to_string(),
+        })
+    }
+
+    /// Build a node selector map for GPU model selection.
+    pub fn node_selector(&self) -> Option<std::collections::BTreeMap<String, String>> {
+        self.product_label().map(|label| {
+            let mut selector = std::collections::BTreeMap::new();
+            selector.insert("nvidia.com/gpu.product".to_string(), label);
+            selector
+        })
+    }
+}
+
+/// Parse a GPU memory string into MiB.
+///
+/// Accepts "20Gi" -> 20480, "512Mi" -> 512, bare number -> MiB.
+fn parse_gpu_memory_mib(memory: &str) -> Result<u64, String> {
+    let memory = memory.trim();
+    if memory.ends_with("Gi") {
+        let num = memory
+            .trim_end_matches("Gi")
+            .parse::<u64>()
+            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))?;
+        Ok(num * 1024)
+    } else if memory.ends_with("Mi") {
+        memory
+            .trim_end_matches("Mi")
+            .parse::<u64>()
+            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))
+    } else {
+        // Bare number treated as MiB
+        memory
+            .parse::<u64>()
+            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))
+    }
+}
+
+// =============================================================================
 // ResourceSpec Implementation
 // =============================================================================
 
@@ -418,26 +525,21 @@ impl ResourceSpec {
         })
     }
 
-    /// Parse model params from the generic Score `params` field
-    ///
-    /// Returns:
-    /// - `Ok(None)` if this is not a model resource
-    /// - `Ok(Some(params))` if params parsed successfully
-    /// - `Err(msg)` if JSON conversion failed or required fields missing
-    pub fn model_params(&self) -> Result<Option<crate::crd::model::ModelParams>, String> {
-        if !self.type_.is_model() {
+    /// Parse GPU params from the generic Score `params` field
+    pub fn gpu_params(&self) -> Result<Option<GpuParams>, String> {
+        if !self.type_.is_gpu() {
             return Ok(None);
         }
         match &self.params {
             Some(params) => {
                 let value = serde_json::to_value(params)
-                    .map_err(|e| format!("failed to serialize model params: {}", e))?;
-                let model_params: crate::crd::model::ModelParams = serde_json::from_value(value)
-                    .map_err(|e| format!("invalid model params: {}", e))?;
-                model_params.validate()?;
-                Ok(Some(model_params))
+                    .map_err(|e| format!("failed to serialize gpu params: {}", e))?;
+                let gpu_params: GpuParams = serde_json::from_value(value)
+                    .map_err(|e| format!("invalid gpu params: {}", e))?;
+                gpu_params.validate()?;
+                Ok(Some(gpu_params))
             }
-            None => Err("model resource requires params with at least 'uri'".to_string()),
+            None => Ok(Some(GpuParams::default())),
         }
     }
 
@@ -644,8 +746,8 @@ mod tests {
         assert!(matches!(t, ResourceType::Volume));
         assert!(!t.is_custom());
 
-        let t: ResourceType = serde_json::from_str("\"model\"").unwrap();
-        assert!(matches!(t, ResourceType::Model));
+        let t: ResourceType = serde_json::from_str("\"gpu\"").unwrap();
+        assert!(matches!(t, ResourceType::Gpu));
         assert!(!t.is_custom());
     }
 
@@ -680,21 +782,16 @@ mod tests {
 
         assert!(ResourceType::Volume.is_volume());
         assert!(!ResourceType::Service.is_volume());
-        assert!(!ResourceType::Model.is_volume());
+        assert!(!ResourceType::Gpu.is_volume());
         assert!(!ResourceType::Custom("postgres".to_string()).is_volume());
 
-        assert!(ResourceType::Model.is_model());
-        assert!(!ResourceType::Service.is_model());
-        assert!(!ResourceType::Volume.is_model());
-
-        assert!(ResourceType::Volume.is_volume_like());
-        assert!(ResourceType::Model.is_volume_like());
-        assert!(!ResourceType::Service.is_volume_like());
-        assert!(!ResourceType::Custom("postgres".to_string()).is_volume_like());
+        assert!(ResourceType::Gpu.is_gpu());
+        assert!(!ResourceType::Service.is_gpu());
+        assert!(!ResourceType::Volume.is_gpu());
 
         assert!(!ResourceType::Service.is_custom());
         assert!(!ResourceType::Volume.is_custom());
-        assert!(!ResourceType::Model.is_custom());
+        assert!(!ResourceType::Gpu.is_custom());
         assert!(ResourceType::Custom("redis".to_string()).is_custom());
     }
 
@@ -703,7 +800,7 @@ mod tests {
         assert_eq!(ResourceType::Service.as_str(), "service");
         assert_eq!(ResourceType::ExternalService.as_str(), "external-service");
         assert_eq!(ResourceType::Volume.as_str(), "volume");
-        assert_eq!(ResourceType::Model.as_str(), "model");
+        assert_eq!(ResourceType::Gpu.as_str(), "gpu");
         assert_eq!(
             ResourceType::Custom("postgres".to_string()).as_str(),
             "postgres"
@@ -721,31 +818,165 @@ mod tests {
     }
 
     #[test]
-    fn test_model_params_returns_none_for_non_model() {
+    fn test_gpu_params_returns_none_for_non_gpu() {
         let resource = ResourceSpec {
             type_: ResourceType::Volume,
             ..Default::default()
         };
-        assert!(resource.model_params().unwrap().is_none());
+        assert!(resource.gpu_params().unwrap().is_none());
     }
 
     #[test]
-    fn test_model_params_errors_without_params() {
+    fn test_gpu_params_defaults_without_params() {
         let resource = ResourceSpec {
-            type_: ResourceType::Model,
+            type_: ResourceType::Gpu,
             ..Default::default()
         };
-        let err = resource.model_params().unwrap_err();
-        assert!(err.contains("requires params"));
+        // gpu_params returns default GpuParams when no params are specified
+        let gpu = resource.gpu_params().unwrap().unwrap();
+        assert_eq!(gpu.count, 0);
     }
 
     #[test]
-    fn test_model_type_serialization() {
-        let model = ResourceType::Model;
-        let serialized = serde_json::to_string(&model).unwrap();
-        assert_eq!(serialized, "\"model\"");
+    fn test_gpu_type_serialization() {
+        let gpu = ResourceType::Gpu;
+        let serialized = serde_json::to_string(&gpu).unwrap();
+        assert_eq!(serialized, "\"gpu\"");
 
         let deserialized: ResourceType = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized, model);
+        assert_eq!(deserialized, gpu);
+    }
+
+    #[test]
+    fn test_gpu_params_validation() {
+        let params = GpuParams {
+            count: 2,
+            memory: None,
+            compute: None,
+            model: Some("H100".to_string()),
+            tolerations: None,
+        };
+        assert!(params.validate().is_ok());
+        assert!(params.is_full_gpu());
+        assert!(!params.needs_hami());
+    }
+
+    #[test]
+    fn test_gpu_params_validation_zero_count() {
+        let params = GpuParams {
+            count: 0,
+            ..Default::default()
+        };
+        let err = params.validate().unwrap_err();
+        assert!(err.contains("count must be greater than 0"));
+    }
+
+    #[test]
+    fn test_gpu_params_validation_invalid_compute() {
+        let params = GpuParams {
+            count: 1,
+            compute: Some(0),
+            ..Default::default()
+        };
+        assert!(params.validate().is_err());
+
+        let params = GpuParams {
+            count: 1,
+            compute: Some(101),
+            ..Default::default()
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn test_gpu_params_hami_detection() {
+        let full = GpuParams {
+            count: 1,
+            memory: None,
+            compute: None,
+            model: None,
+            tolerations: None,
+        };
+        assert!(!full.needs_hami());
+        assert!(full.is_full_gpu());
+
+        let fractional = GpuParams {
+            count: 1,
+            memory: Some("20Gi".to_string()),
+            compute: Some(50),
+            model: None,
+            tolerations: None,
+        };
+        assert!(fractional.needs_hami());
+        assert!(!fractional.is_full_gpu());
+    }
+
+    #[test]
+    fn test_gpu_params_product_label() {
+        let params = GpuParams {
+            count: 1,
+            model: Some("H100".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(params.product_label(), Some("NVIDIA-H100-80GB-HBM3".to_string()));
+
+        let params = GpuParams {
+            count: 1,
+            model: Some("L4".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(params.product_label(), Some("NVIDIA-L4".to_string()));
+
+        let params = GpuParams {
+            count: 1,
+            model: None,
+            ..Default::default()
+        };
+        assert_eq!(params.product_label(), None);
+    }
+
+    #[test]
+    fn test_gpu_params_node_selector() {
+        let params = GpuParams {
+            count: 1,
+            model: Some("A100".to_string()),
+            ..Default::default()
+        };
+        let selector = params.node_selector().unwrap();
+        assert_eq!(
+            selector.get("nvidia.com/gpu.product"),
+            Some(&"NVIDIA-A100-SXM4-80GB".to_string())
+        );
+
+        let params = GpuParams {
+            count: 1,
+            model: None,
+            ..Default::default()
+        };
+        assert!(params.node_selector().is_none());
+    }
+
+    #[test]
+    fn test_parse_gpu_memory_gi() {
+        assert_eq!(parse_gpu_memory_mib("20Gi").unwrap(), 20480);
+        assert_eq!(parse_gpu_memory_mib("1Gi").unwrap(), 1024);
+    }
+
+    #[test]
+    fn test_parse_gpu_memory_mi() {
+        assert_eq!(parse_gpu_memory_mib("512Mi").unwrap(), 512);
+        assert_eq!(parse_gpu_memory_mib("8192Mi").unwrap(), 8192);
+    }
+
+    #[test]
+    fn test_parse_gpu_memory_bare_number() {
+        assert_eq!(parse_gpu_memory_mib("1024").unwrap(), 1024);
+    }
+
+    #[test]
+    fn test_parse_gpu_memory_invalid() {
+        assert!(parse_gpu_memory_mib("abc").is_err());
+        assert!(parse_gpu_memory_mib("").is_err());
+        assert!(parse_gpu_memory_mib("10Xi").is_err());
     }
 }

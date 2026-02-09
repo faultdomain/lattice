@@ -564,7 +564,6 @@ mod tests {
                 containers,
                 resources,
                 service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
             },
             ..Default::default()
         }
@@ -641,7 +640,6 @@ mod tests {
                         },
                     )]),
                 }),
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -853,7 +851,6 @@ mod tests {
                         },
                     )]),
                 }),
-                ..Default::default()
             },
             ..Default::default()
         };

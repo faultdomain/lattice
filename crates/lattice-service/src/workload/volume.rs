@@ -213,29 +213,26 @@ pub const VOLUME_OWNER_LABEL_PREFIX: &str = "lattice.dev/volume-owner-";
 pub struct VolumeCompiler;
 
 impl VolumeCompiler {
-    /// Compile volume and model resources for a workload
+    /// Compile volume resources for a workload.
     ///
-    /// Handles both `type: volume` and `type: model` resources:
-    /// - Volumes: PVCs with owner/reference pattern, RWO affinity
-    /// - Models: Content-addressable PVCs, read-only mounts, scheduling gates
+    /// Generates PVCs for owned volumes, pod affinity for RWO references,
+    /// and volume mounts for containers and sidecars.
     ///
     /// # Arguments
     /// * `service_name` - Name of the service
     /// * `namespace` - Target namespace
-    /// * `workload` - Workload spec (shared across LatticeService, LatticeJob, LatticeModel)
-    ///
-    /// # Returns
-    /// Generated volume resources including PVCs, pod labels, affinity rules,
-    /// volume mounts, and scheduling gates.
+    /// * `workload` - WorkloadSpec (containers + resources)
+    /// * `sidecars` - Sidecar specs from RuntimeSpec (for sidecar volume mounts)
     pub fn compile(
         service_name: &str,
         namespace: &str,
         workload: &WorkloadSpec,
+        sidecars: &BTreeMap<String, crate::crd::SidecarSpec>,
     ) -> Result<GeneratedVolumes, CompilationError> {
         let mut output = GeneratedVolumes::new();
 
         // -----------------------------------------------------------------
-        // Process regular volume resources
+        // Process volume resources
         // -----------------------------------------------------------------
         let volume_resources: Vec<_> = workload
             .resources
@@ -308,57 +305,12 @@ impl VolumeCompiler {
         }
 
         // -----------------------------------------------------------------
-        // Process model resources
-        // -----------------------------------------------------------------
-        let model_resources: Vec<_> = workload
-            .resources
-            .iter()
-            .filter(|(_, r)| r.type_.is_model())
-            .collect();
-
-        for (resource_name, resource_spec) in &model_resources {
-            let params = resource_spec
-                .model_params()
-                .map_err(|e| {
-                    CompilationError::volume(format!("resource '{}': {}", resource_name, e))
-                })?
-                .ok_or_else(|| {
-                    CompilationError::volume(format!(
-                        "resource '{}': expected model params",
-                        resource_name
-                    ))
-                })?;
-
-            let pvc_name = params.cache_pvc_name();
-
-            // PVC is created by the ModelCache controller (owned by ModelArtifact).
-            // We only generate the pod volume reference here.
-
-            // Generate pod volume (read-only — model data is immutable once cached)
-            output.volumes.push(PodVolume {
-                name: resource_name.to_string(),
-                persistent_volume_claim: Some(PvcVolumeSource {
-                    claim_name: pvc_name,
-                    read_only: Some(true),
-                }),
-                empty_dir: None,
-            });
-        }
-
-        // Add scheduling gate if any model resources are present
-        if !model_resources.is_empty() {
-            output.scheduling_gates.push(super::SchedulingGate {
-                name: crate::crd::MODEL_READY_GATE.to_string(),
-            });
-        }
-
-        // -----------------------------------------------------------------
-        // Generate volume mounts (for both volume/model resources and emptyDir)
+        // Generate volume mounts (for volume resources and emptyDir)
         // -----------------------------------------------------------------
         let all_mountable: Vec<_> = workload
             .resources
             .iter()
-            .filter(|(_, r)| r.type_.is_volume_like())
+            .filter(|(_, r)| r.type_.is_volume())
             .collect();
 
         // Container volume mounts
@@ -372,7 +324,7 @@ impl VolumeCompiler {
         }
 
         // Sidecar volume mounts
-        for (sidecar_name, sidecar_spec) in &workload.sidecars {
+        for (sidecar_name, sidecar_spec) in sidecars {
             let (mounts, extra_vols) = Self::resolve_mounts(&sidecar_spec.volumes, &all_mountable);
             if !mounts.is_empty() {
                 output.volume_mounts.insert(sidecar_name.clone(), mounts);
@@ -485,7 +437,7 @@ impl VolumeCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec, MODEL_READY_GATE};
+    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec};
     use lattice_common::template::TemplateString;
 
     fn make_spec_with_volumes(
@@ -577,7 +529,8 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -595,7 +548,8 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new()).unwrap();
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -617,7 +571,8 @@ mod tests {
             }
         }
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.storage_class_name, Some("local-path".to_string()));
@@ -636,7 +591,8 @@ mod tests {
             vec![("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("jellyfin", "media", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("jellyfin", "media", &spec, &BTreeMap::new()).unwrap();
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.access_modes, vec!["ReadWriteMany"]);
@@ -654,7 +610,8 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new()).unwrap();
 
         // No PVCs - this is a reference
         assert!(output.pvcs.is_empty());
@@ -689,7 +646,8 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new()).unwrap();
 
         // Should have owner label for RWO volume
         assert_eq!(
@@ -713,7 +671,8 @@ mod tests {
             vec![("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("jellyfin", "media", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("jellyfin", "media", &spec, &BTreeMap::new()).unwrap();
 
         // No owner label for RWX - no affinity needed
         assert!(output.pod_labels.is_empty());
@@ -731,7 +690,8 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new()).unwrap();
 
         // Should have affinity to owner
         let affinity = output.affinity.expect("should have affinity");
@@ -757,7 +717,8 @@ mod tests {
             vec![("/downloads", "downloads"), ("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new()).unwrap();
 
         let affinity = output.affinity.expect("should have affinity");
         let pod_affinity = affinity.pod_affinity.expect("should have pod affinity");
@@ -778,7 +739,8 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         let mounts = output
             .volume_mounts
@@ -797,7 +759,8 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         assert_eq!(output.volumes.len(), 1);
         assert_eq!(output.volumes[0].name, "config");
@@ -834,111 +797,10 @@ mod tests {
     fn story_no_volumes_returns_empty() {
         let spec = WorkloadSpec::default();
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         assert!(output.is_empty());
-    }
-
-    // =========================================================================
-    // Story: Model Cache PVC Generation
-    // =========================================================================
-
-    fn make_model_spec(
-        model_mounts: Vec<(&str, &str)>, // (mount_path, resource_name)
-    ) -> WorkloadSpec {
-        let mut resources = BTreeMap::new();
-        let mut params = BTreeMap::new();
-        params.insert(
-            "uri".to_string(),
-            serde_json::json!("huggingface://meta-llama/Llama-3.3-70B-Instruct"),
-        );
-        params.insert("size".to_string(), serde_json::json!("140Gi"));
-        resources.insert(
-            "llm".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Model,
-                params: Some(params),
-                ..Default::default()
-            },
-        );
-
-        let mut volumes = BTreeMap::new();
-        for (mount_path, resource_name) in model_mounts {
-            volumes.insert(
-                mount_path.to_string(),
-                crate::crd::VolumeMount {
-                    source: Some(TemplateString::from(format!(
-                        "${{resources.{}}}",
-                        resource_name
-                    ))),
-                    path: None,
-                    read_only: None,
-                    medium: None,
-                    size_limit: None,
-                },
-            );
-        }
-
-        let mut containers = BTreeMap::new();
-        containers.insert(
-            "main".to_string(),
-            ContainerSpec {
-                image: "vllm/vllm-openai:latest".to_string(),
-                volumes,
-                ..Default::default()
-            },
-        );
-
-        WorkloadSpec {
-            containers,
-            resources,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn story_no_pvc_for_model_resources() {
-        // Model PVCs are created by the ModelCache controller, not VolumeCompiler
-        let spec = make_model_spec(vec![("/models", "llm")]);
-        let output = VolumeCompiler::compile("llm-service", "prod", &spec).unwrap();
-
-        assert!(
-            output.pvcs.is_empty(),
-            "VolumeCompiler should not create PVCs for model resources"
-        );
-    }
-
-    #[test]
-    fn story_model_volume_is_read_only() {
-        let spec = make_model_spec(vec![("/models", "llm")]);
-        let output = VolumeCompiler::compile("llm-service", "prod", &spec).unwrap();
-
-        let pod_vol = &output.volumes[0];
-        let pvc_source = pod_vol.persistent_volume_claim.as_ref().unwrap();
-        assert_eq!(pvc_source.read_only, Some(true));
-    }
-
-    #[test]
-    fn story_model_adds_scheduling_gate() {
-        let spec = make_model_spec(vec![("/models", "llm")]);
-        let output = VolumeCompiler::compile("llm-service", "prod", &spec).unwrap();
-
-        assert_eq!(output.scheduling_gates.len(), 1);
-        assert_eq!(output.scheduling_gates[0].name, MODEL_READY_GATE);
-    }
-
-    #[test]
-    fn story_model_generates_volume_mount() {
-        let spec = make_model_spec(vec![("/models", "llm")]);
-        let output = VolumeCompiler::compile("llm-service", "prod", &spec).unwrap();
-
-        let mounts = output
-            .volume_mounts
-            .get("main")
-            .expect("should have mounts for main");
-        assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].name, "llm");
-        assert_eq!(mounts[0].mount_path, "/models");
     }
 
     #[test]
@@ -949,120 +811,9 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
         assert!(output.scheduling_gates.is_empty());
-    }
-
-    #[test]
-    fn story_model_pod_volume_is_content_addressable() {
-        // Same model URI should produce the same PVC claim_name regardless of service name
-        let spec1 = make_model_spec(vec![("/models", "llm")]);
-        let spec2 = make_model_spec(vec![("/models", "llm")]);
-
-        let out1 = VolumeCompiler::compile("service-a", "prod", &spec1).unwrap();
-        let out2 = VolumeCompiler::compile("service-b", "prod", &spec2).unwrap();
-
-        let claim1 = &out1.volumes[0]
-            .persistent_volume_claim
-            .as_ref()
-            .unwrap()
-            .claim_name;
-        let claim2 = &out2.volumes[0]
-            .persistent_volume_claim
-            .as_ref()
-            .unwrap()
-            .claim_name;
-        assert_eq!(claim1, claim2);
-    }
-
-    // =========================================================================
-    // Story: Mixed Volume and Model Resources
-    // =========================================================================
-
-    #[test]
-    fn story_mixed_volumes_and_models() {
-        let mut resources = BTreeMap::new();
-
-        // Regular volume
-        let mut vol_params = BTreeMap::new();
-        vol_params.insert("size".to_string(), serde_json::json!("10Gi"));
-        resources.insert(
-            "data".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Volume,
-                params: Some(vol_params),
-                ..Default::default()
-            },
-        );
-
-        // Model resource
-        let mut model_params = BTreeMap::new();
-        model_params.insert(
-            "uri".to_string(),
-            serde_json::json!("huggingface://meta-llama/Llama-3.3-70B-Instruct"),
-        );
-        resources.insert(
-            "llm".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Model,
-                params: Some(model_params),
-                ..Default::default()
-            },
-        );
-
-        let mut volumes = BTreeMap::new();
-        volumes.insert(
-            "/data".to_string(),
-            crate::crd::VolumeMount {
-                source: Some(TemplateString::from("${resources.data}")),
-                path: None,
-                read_only: None,
-                medium: None,
-                size_limit: None,
-            },
-        );
-        volumes.insert(
-            "/models".to_string(),
-            crate::crd::VolumeMount {
-                source: Some(TemplateString::from("${resources.llm}")),
-                path: None,
-                read_only: None,
-                medium: None,
-                size_limit: None,
-            },
-        );
-
-        let mut containers = BTreeMap::new();
-        containers.insert(
-            "main".to_string(),
-            ContainerSpec {
-                image: "myapp:latest".to_string(),
-                volumes,
-                ..Default::default()
-            },
-        );
-
-        let spec = WorkloadSpec {
-            containers,
-            resources,
-            ..Default::default()
-        };
-
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
-
-        // 1 PVC: only the regular volume (model PVC is created by ModelCache controller)
-        assert_eq!(output.pvcs.len(), 1);
-
-        // 2 pod volumes
-        assert_eq!(output.volumes.len(), 2);
-
-        // Scheduling gate from model
-        assert_eq!(output.scheduling_gates.len(), 1);
-        assert_eq!(output.scheduling_gates[0].name, MODEL_READY_GATE);
-
-        // Both mounts present
-        let mounts = output.volume_mounts.get("main").unwrap();
-        assert_eq!(mounts.len(), 2);
     }
 
     // =========================================================================
@@ -1105,7 +856,8 @@ mod tests {
     #[test]
     fn story_emptydir_volume_from_sourceless_mount() {
         let spec = make_emptydir_spec(vec![("/tmp", None, None)]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         // Should generate an emptyDir pod volume
         assert_eq!(output.volumes.len(), 1);
@@ -1126,7 +878,8 @@ mod tests {
     #[test]
     fn story_emptydir_tmpfs_medium() {
         let spec = make_emptydir_spec(vec![("/dev/shm", Some("Memory"), None)]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         let vol = &output.volumes[0];
         let ed = vol.empty_dir.as_ref().unwrap();
@@ -1137,7 +890,8 @@ mod tests {
     #[test]
     fn story_emptydir_size_limit() {
         let spec = make_emptydir_spec(vec![("/scratch", None, Some("5Gi"))]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         let vol = &output.volumes[0];
         let ed = vol.empty_dir.as_ref().unwrap();
@@ -1176,7 +930,8 @@ mod tests {
             },
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         // 1 PVC volume + 2 emptyDir volumes = 3 total
         assert_eq!(output.volumes.len(), 3);
@@ -1206,7 +961,8 @@ mod tests {
             ("/tmp", None, None),
             ("/dev/shm", Some("Memory"), None),
         ]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         let names: Vec<_> = output.volumes.iter().map(|v| v.name.as_str()).collect();
         assert!(names.contains(&"emptydir-dev-shm"));
@@ -1218,7 +974,7 @@ mod tests {
     fn story_sidecar_emptydir_volumes() {
         use crate::crd::SidecarSpec;
 
-        let mut spec = WorkloadSpec {
+        let spec = WorkloadSpec {
             containers: {
                 let mut c = BTreeMap::new();
                 c.insert(
@@ -1245,7 +1001,8 @@ mod tests {
             },
         );
 
-        spec.sidecars.insert(
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
             "logger".to_string(),
             SidecarSpec {
                 image: "fluentbit:latest".to_string(),
@@ -1254,7 +1011,7 @@ mod tests {
             },
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &sidecars).unwrap();
 
         // Sidecar should get emptyDir volume
         assert_eq!(output.volumes.len(), 1);
@@ -1273,7 +1030,8 @@ mod tests {
         let spec = make_emptydir_spec(vec![("/tmp", None, None), ("/var/run", None, None)]);
         assert!(spec.resources.is_empty());
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
         assert_eq!(output.volumes.len(), 2);
         assert_eq!(output.pvcs.len(), 0); // No PVCs needed

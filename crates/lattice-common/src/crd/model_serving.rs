@@ -9,7 +9,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::workload::spec::WorkloadSpec;
+use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 // =============================================================================
 // Phase
@@ -61,6 +61,10 @@ pub struct ModelRoleSpec {
 
     /// Shared workload spec (containers, volumes, env, etc.)
     pub workload: WorkloadSpec,
+
+    /// Lattice runtime extensions (sidecars, sysctls, hostNetwork, etc.)
+    #[serde(default, flatten)]
+    pub runtime: RuntimeSpec,
 }
 
 fn default_one() -> u32 {
@@ -152,6 +156,7 @@ mod tests {
             replicas: 2,
             worker_replicas: 4,
             workload: WorkloadSpec::default(),
+            runtime: RuntimeSpec::default(),
         };
         assert!(role.workload.containers.is_empty());
         assert_eq!(role.replicas, 2);
@@ -167,6 +172,7 @@ mod tests {
                 replicas: 1,
                 worker_replicas: 0,
                 workload: WorkloadSpec::default(),
+                runtime: RuntimeSpec::default(),
             },
         );
         roles.insert(
@@ -175,6 +181,7 @@ mod tests {
                 replicas: 2,
                 worker_replicas: 4,
                 workload: WorkloadSpec::default(),
+                runtime: RuntimeSpec::default(),
             },
         );
 

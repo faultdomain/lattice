@@ -1,4 +1,7 @@
-//! `WorkloadSpec` — the shared core specification for LatticeService, LatticeJob, and LatticeModel.
+//! `WorkloadSpec` — the Score-compatible workload specification shared across all Lattice CRDs.
+//!
+//! `WorkloadSpec` contains only Score-standard fields: containers, resources, and service.
+//! Lattice-specific runtime extensions live in `RuntimeSpec`, composed by CRDs that need them.
 
 use std::collections::BTreeMap;
 
@@ -7,17 +10,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::crd::types::ServiceRef;
 
-use super::backup::ServiceBackupSpec;
 use super::container::{ContainerSpec, SidecarSpec};
-use super::gpu::GPUSpec;
 use super::ports::ServicePortsSpec;
 use super::resources::{ResourceSpec, ResourceType};
-use super::scaling::ReplicaSpec;
 
-/// Shared workload specification (Score core + Lattice extensions)
+/// Score-compatible workload specification.
 ///
 /// Contains the container/resource/service core shared across all Lattice
 /// workload types: LatticeService, LatticeJob, LatticeModel.
+///
+/// Lattice-specific pod-level settings (sidecars, sysctls, backup, etc.)
+/// live in `RuntimeSpec`, composed separately by each CRD.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadSpec {
@@ -31,11 +34,16 @@ pub struct WorkloadSpec {
     /// Service port configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ServicePortsSpec>,
+}
 
-    /// Replica scaling configuration
-    #[serde(default)]
-    pub replicas: ReplicaSpec,
-
+/// Lattice runtime extensions beyond the Score spec.
+///
+/// Contains runtime settings shared across Lattice CRDs but NOT part of
+/// the Score workload specification. Composed into each CRD's spec via
+/// `#[serde(flatten)]` for flat YAML representation.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSpec {
     /// Sidecar containers (VPN, logging, metrics, etc.)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sidecars: BTreeMap<String, SidecarSpec>,
@@ -51,14 +59,6 @@ pub struct WorkloadSpec {
     /// Share PID namespace between containers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_process_namespace: Option<bool>,
-
-    /// Backup configuration (Velero hooks and volume policies)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup: Option<ServiceBackupSpec>,
-
-    /// GPU resource specification
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpu: Option<GPUSpec>,
 
     /// Image pull secrets — resource names referencing `type: secret` resources
     ///
@@ -183,36 +183,6 @@ impl WorkloadSpec {
             ));
         }
 
-        // Validate replica counts
-        if let Some(max) = self.replicas.max {
-            if self.replicas.min > max {
-                return Err(crate::Error::validation(
-                    "min replicas cannot exceed max replicas",
-                ));
-            }
-        }
-
-        // Validate autoscaling metrics
-        if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
-            return Err(crate::Error::validation(
-                "autoscaling metrics require max replicas to be set",
-            ));
-        }
-        for m in &self.replicas.autoscaling {
-            if m.target == 0 {
-                return Err(crate::Error::validation(format!(
-                    "autoscaling metric '{}' target must be greater than 0",
-                    m.metric
-                )));
-            }
-            if (m.metric == "cpu" || m.metric == "memory") && m.target > 100 {
-                return Err(crate::Error::validation(format!(
-                    "autoscaling metric '{}' target cannot exceed 100%",
-                    m.metric
-                )));
-            }
-        }
-
         // Validate containers
         for (name, container) in &self.containers {
             container.validate(name)?;
@@ -223,19 +193,33 @@ impl WorkloadSpec {
             svc.validate()?;
         }
 
-        // Validate GPU spec
-        if let Some(ref gpu) = self.gpu {
-            gpu.validate().map_err(crate::Error::validation)?;
+        // Validate GPU resource params if present
+        for (name, resource) in &self.resources {
+            if resource.type_.is_gpu() {
+                if let Some(params) = &resource.params {
+                    let value = serde_json::to_value(params).map_err(|e| {
+                        crate::Error::validation(format!(
+                            "resource '{}': failed to serialize gpu params: {}",
+                            name, e
+                        ))
+                    })?;
+                    let gpu_params: super::resources::GpuParams =
+                        serde_json::from_value(value).map_err(|e| {
+                            crate::Error::validation(format!(
+                                "resource '{}': invalid gpu params: {}",
+                                name, e
+                            ))
+                        })?;
+                    gpu_params
+                        .validate()
+                        .map_err(|e| crate::Error::validation(format!("resource '{}': {}", name, e)))?;
+                }
+            }
         }
 
         Ok(())
     }
 }
-
-// No methods on LatticeServiceSpec — all shared behavior lives on WorkloadSpec.
-// Mesh methods (dependencies, allowed_callers, etc.) operate on WorkloadSpec.resources.
-// Validation lives on WorkloadSpec::validate().
-// Callers access via spec.workload.dependencies(), spec.workload.validate(), etc.
 
 // =============================================================================
 // Tests
@@ -245,7 +229,6 @@ impl WorkloadSpec {
 mod tests {
     use super::*;
     use super::super::resources::{DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType};
-    use super::super::scaling::{AutoscalingMetric, ReplicaSpec};
     use super::super::container::ContainerSpec;
 
     fn simple_container() -> ContainerSpec {
@@ -289,19 +272,6 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("at least one container"));
-    }
-
-    #[test]
-    fn story_invalid_replicas_fails() {
-        let mut spec = sample_workload();
-        spec.replicas = ReplicaSpec {
-            min: 5,
-            max: Some(3),
-            autoscaling: vec![],
-        };
-        let result = spec.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("min replicas"));
     }
 
     #[test]
@@ -470,75 +440,18 @@ mod tests {
     }
 
     #[test]
-    fn autoscaling_target_zero_fails() {
+    fn gpu_resource_validation_wired_into_spec() {
         let mut spec = sample_workload();
-        spec.replicas.max = Some(10);
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "cpu".to_string(),
-            target: 0,
-        }];
-        let result = spec.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("greater than 0"));
-    }
-
-    #[test]
-    fn autoscaling_cpu_over_100_fails() {
-        let mut spec = sample_workload();
-        spec.replicas.max = Some(10);
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "cpu".to_string(),
-            target: 120,
-        }];
-        let result = spec.validate();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot exceed 100%"));
-    }
-
-    #[test]
-    fn autoscaling_memory_over_100_fails() {
-        let mut spec = sample_workload();
-        spec.replicas.max = Some(10);
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "memory".to_string(),
-            target: 150,
-        }];
-        assert!(spec.validate().is_err());
-    }
-
-    #[test]
-    fn autoscaling_without_max_fails() {
-        let mut spec = sample_workload();
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "cpu".to_string(),
-            target: 80,
-        }];
-        let result = spec.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("max replicas"));
-    }
-
-    #[test]
-    fn autoscaling_custom_metric_over_100_allowed() {
-        let mut spec = sample_workload();
-        spec.replicas.max = Some(10);
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "vllm_num_requests_waiting".to_string(),
-            target: 200,
-        }];
-        assert!(spec.validate().is_ok());
-    }
-
-    #[test]
-    fn gpu_validation_wired_into_spec() {
-        let mut spec = sample_workload();
-        spec.gpu = Some(super::super::gpu::GPUSpec {
-            count: 0,
-            ..Default::default()
-        });
+        let mut params = BTreeMap::new();
+        params.insert("count".to_string(), serde_json::json!(0));
+        spec.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some(params),
+                ..Default::default()
+            },
+        );
         assert!(spec.validate().is_err());
     }
 }
