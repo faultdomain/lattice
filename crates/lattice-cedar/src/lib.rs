@@ -24,8 +24,8 @@ mod entities;
 mod secret_auth;
 mod security_auth;
 
-pub use engine::{ClusterAttributes, Error, PolicyEngine};
-pub use secret_auth::{DenialReason, SecretAuthzRequest, SecretAuthzResult, SecretDenial};
+pub use engine::{ClusterAttributes, DenialReason, Error, PolicyEngine};
+pub use secret_auth::{SecretAuthzRequest, SecretAuthzResult, SecretDenial};
 pub use security_auth::{
     SecurityAuthzRequest, SecurityAuthzResult, SecurityDenial, SecurityOverrideRequest,
 };

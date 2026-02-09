@@ -4,11 +4,8 @@
 //! (capabilities, privileged mode, host networking, etc.). Default-deny:
 //! no policies = no security relaxations allowed.
 
-use cedar_policy::{Context, Decision, Entities};
-
-use crate::engine::{Error, PolicyEngine};
+use crate::engine::{DenialReason, Error, PolicyEngine};
 use crate::entities::{build_entity_uid, build_security_override_entity, build_service_entity};
-use crate::secret_auth::DenialReason;
 
 // =============================================================================
 // Types
@@ -114,58 +111,23 @@ struct SecurityEvalContext<'a> {
 
 impl SecurityEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), SecurityDenial> {
-        // Build entities
         let service_entity = build_service_entity(self.namespace, self.service_name)
             .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-        let principal_uid = service_entity.uid().clone();
-
         let override_entity = build_security_override_entity(
             &self.override_req.override_id,
             &self.override_req.category,
         )
         .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-        let resource_uid = override_entity.uid().clone();
 
-        let entities = Entities::from_entities(vec![service_entity, override_entity], None)
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-
-        // Evaluate
-        let response = self
-            .engine
-            .evaluate_raw(
-                &principal_uid,
+        self.engine
+            .evaluate_service_action(
+                &service_entity,
+                &override_entity,
                 self.action_uid,
-                &resource_uid,
-                Context::empty(),
-                &entities,
                 self.policy_set,
+                "OverrideSecurity",
             )
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-
-        // Record metrics
-        match response.decision() {
-            Decision::Allow => {
-                lattice_common::metrics::record_cedar_decision(
-                    lattice_common::metrics::AuthDecision::Allow,
-                    "OverrideSecurity",
-                );
-                Ok(())
-            }
-            Decision::Deny => {
-                lattice_common::metrics::record_cedar_decision(
-                    lattice_common::metrics::AuthDecision::Deny,
-                    "OverrideSecurity",
-                );
-
-                let reason = if response.diagnostics().reason().next().is_some() {
-                    DenialReason::ExplicitForbid
-                } else {
-                    DenialReason::NoPermitPolicy
-                };
-
-                Err(self.denial(reason))
-            }
-        }
+            .map_err(|reason| self.denial(reason))
     }
 
     fn denial(&self, reason: DenialReason) -> SecurityDenial {

@@ -16,8 +16,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use std::fmt;
+
 use cedar_policy::{
-    Authorizer, Context, Decision, Entities, EntityUid, PolicySet, Request, Response,
+    Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request, Response,
 };
 use kube::api::ListParams;
 use kube::{Api, Client};
@@ -51,6 +53,30 @@ pub enum Error {
 
 /// Result type for Cedar policy operations
 pub type Result<T> = std::result::Result<T, Error>;
+
+// ============================================================================
+// DenialReason
+// ============================================================================
+
+/// Why a Cedar authorization was denied
+///
+/// Shared by both secret access and security override authorization.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DenialReason {
+    /// No permit policy matched this request
+    NoPermitPolicy,
+    /// An explicit forbid policy denied access
+    ExplicitForbid,
+}
+
+impl fmt::Display for DenialReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoPermitPolicy => write!(f, "no permit policy for this service and secret path"),
+            Self::ExplicitForbid => write!(f, "access explicitly forbidden by policy"),
+        }
+    }
+}
 
 // ============================================================================
 // Constants
@@ -248,6 +274,60 @@ impl PolicyEngine {
     /// Get a read lock on the policy set
     pub(crate) async fn read_policy_set(&self) -> tokio::sync::RwLockReadGuard<'_, PolicySet> {
         self.policy_set.read().await
+    }
+
+    /// Evaluate a service authorization request and record metrics.
+    ///
+    /// Shared evaluation core for both secret access and security override
+    /// authorization. Builds the entity set, evaluates the Cedar request,
+    /// records metrics, and returns `DenialReason` on denial.
+    pub(crate) fn evaluate_service_action(
+        &self,
+        principal: &Entity,
+        resource: &Entity,
+        action_uid: &EntityUid,
+        policy_set: &PolicySet,
+        action_label: &str,
+    ) -> std::result::Result<(), DenialReason> {
+        let principal_uid = principal.uid().clone();
+        let resource_uid = resource.uid().clone();
+
+        let entities =
+            Entities::from_entities(vec![principal.clone(), resource.clone()], None)
+                .map_err(|_| DenialReason::NoPermitPolicy)?;
+
+        let response = self
+            .evaluate_raw(
+                &principal_uid,
+                action_uid,
+                &resource_uid,
+                Context::empty(),
+                &entities,
+                policy_set,
+            )
+            .map_err(|_| DenialReason::NoPermitPolicy)?;
+
+        match response.decision() {
+            Decision::Allow => {
+                lattice_common::metrics::record_cedar_decision(
+                    lattice_common::metrics::AuthDecision::Allow,
+                    action_label,
+                );
+                Ok(())
+            }
+            Decision::Deny => {
+                lattice_common::metrics::record_cedar_decision(
+                    lattice_common::metrics::AuthDecision::Deny,
+                    action_label,
+                );
+                let reason = if response.diagnostics().reason().next().is_some() {
+                    DenialReason::ExplicitForbid
+                } else {
+                    DenialReason::NoPermitPolicy
+                };
+                Err(reason)
+            }
+        }
     }
 
     // ========================================================================

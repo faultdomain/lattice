@@ -3,34 +3,12 @@
 //! Evaluates Cedar policies to authorize a service's access to its declared
 //! secret paths. Default-deny: no policies = no secrets.
 
-use std::fmt;
-
-use cedar_policy::{Context, Decision, Entities};
-
-use crate::engine::{Error, PolicyEngine};
+use crate::engine::{DenialReason, Error, PolicyEngine};
 use crate::entities::{build_entity_uid, build_secret_path_entity, build_service_entity};
 
 // =============================================================================
 // Types
 // =============================================================================
-
-/// Structured denial reason — stable for tests, future UX, and structured status
-#[derive(Debug, Clone, PartialEq)]
-pub enum DenialReason {
-    /// No permit policy matched this service+path combination
-    NoPermitPolicy,
-    /// An explicit forbid policy denied access
-    ExplicitForbid,
-}
-
-impl fmt::Display for DenialReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoPermitPolicy => write!(f, "no permit policy for this service and secret path"),
-            Self::ExplicitForbid => write!(f, "access explicitly forbidden by policy"),
-        }
-    }
-}
 
 /// Request to authorize a service's access to its declared secret paths
 pub struct SecretAuthzRequest {
@@ -113,8 +91,6 @@ impl PolicyEngine {
 }
 
 /// Context for evaluating a single secret path authorization.
-///
-/// Groups the parameters needed for evaluation to avoid excessive function arguments.
 struct SecretEvalContext<'a> {
     engine: &'a PolicyEngine,
     namespace: &'a str,
@@ -128,60 +104,22 @@ struct SecretEvalContext<'a> {
 
 impl SecretEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), SecretDenial> {
-        // Build entities
         let service_entity = build_service_entity(self.namespace, self.service_name)
             .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-        let principal_uid = service_entity.uid().clone();
-
         let secret_entity = build_secret_path_entity(self.provider, self.remote_key)
             .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-        let resource_uid = secret_entity.uid().clone();
 
-        let entities = Entities::from_entities(vec![service_entity, secret_entity], None)
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-
-        // Evaluate
-        let response = self
-            .engine
-            .evaluate_raw(
-                &principal_uid,
+        self.engine
+            .evaluate_service_action(
+                &service_entity,
+                &secret_entity,
                 self.action_uid,
-                &resource_uid,
-                Context::empty(),
-                &entities,
                 self.policy_set,
+                "AccessSecret",
             )
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-
-        // Record metrics
-        match response.decision() {
-            Decision::Allow => {
-                lattice_common::metrics::record_cedar_decision(
-                    lattice_common::metrics::AuthDecision::Allow,
-                    "AccessSecret",
-                );
-                Ok(())
-            }
-            Decision::Deny => {
-                lattice_common::metrics::record_cedar_decision(
-                    lattice_common::metrics::AuthDecision::Deny,
-                    "AccessSecret",
-                );
-
-                // Determine reason: check if any forbid policies were satisfied
-                // Cedar reports forbid policies in diagnostics.reason() when they cause denial
-                let reason = if response.diagnostics().reason().next().is_some() {
-                    DenialReason::ExplicitForbid
-                } else {
-                    DenialReason::NoPermitPolicy
-                };
-
-                Err(self.denial(reason))
-            }
-        }
+            .map_err(|reason| self.denial(reason))
     }
 
-    /// Build a denial with the current context's identifiers
     fn denial(&self, reason: DenialReason) -> SecretDenial {
         SecretDenial {
             resource_name: self.resource_name.to_string(),
