@@ -1109,7 +1109,10 @@ mod tests {
         );
 
         LatticeServiceSpec {
-            containers,
+            workload: WorkloadSpec {
+                containers,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1166,7 +1169,7 @@ mod tests {
         );
 
         // Add emptyDir volumes to the same container
-        let container = spec.containers.get_mut("main").unwrap();
+        let container = spec.workload.containers.get_mut("main").unwrap();
         container.volumes.insert(
             "/tmp".to_string(),
             crate::crd::VolumeMount {
@@ -1231,16 +1234,19 @@ mod tests {
         use crate::crd::SidecarSpec;
 
         let mut spec = LatticeServiceSpec {
-            containers: {
-                let mut c = BTreeMap::new();
-                c.insert(
-                    "main".to_string(),
-                    ContainerSpec {
-                        image: "app:latest".to_string(),
-                        ..Default::default()
-                    },
-                );
-                c
+            workload: WorkloadSpec {
+                containers: {
+                    let mut c = BTreeMap::new();
+                    c.insert(
+                        "main".to_string(),
+                        ContainerSpec {
+                            image: "app:latest".to_string(),
+                            ..Default::default()
+                        },
+                    );
+                    c
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1257,7 +1263,7 @@ mod tests {
             },
         );
 
-        spec.sidecars.insert(
+        spec.workload.sidecars.insert(
             "logger".to_string(),
             SidecarSpec {
                 image: "fluentbit:latest".to_string(),
@@ -1292,7 +1298,7 @@ mod tests {
     fn story_emptydir_only_no_resources_needed() {
         // EmptyDir volumes should work even with zero resource declarations
         let spec = make_emptydir_spec(vec![("/tmp", None, None), ("/var/run", None, None)]);
-        assert!(spec.resources.is_empty());
+        assert!(spec.workload.resources.is_empty());
 
         let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 

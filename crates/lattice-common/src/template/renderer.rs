@@ -745,8 +745,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
 
@@ -942,8 +940,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
 
@@ -2004,8 +2000,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
 

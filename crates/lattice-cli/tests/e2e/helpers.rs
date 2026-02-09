@@ -1596,8 +1596,8 @@ pub fn create_service_with_secrets(
 
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType,
-        ServicePortsSpec, WorkloadSpec,
+        ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ResourceQuantity,
+        ResourceRequirements, ResourceSpec, ResourceType, ServicePortsSpec, WorkloadSpec,
     };
 
     let mut resources = BTreeMap::new();
@@ -1640,6 +1640,16 @@ pub fn create_service_with_secrets(
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
             command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
             ..Default::default()
         },
     );
@@ -2555,8 +2565,8 @@ pub fn create_service_with_all_secret_routes(
 
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        ContainerSpec, FileMount, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec,
-        ResourceType, ServicePortsSpec, WorkloadSpec,
+        ContainerSpec, FileMount, LatticeService, LatticeServiceSpec, PortSpec, ResourceQuantity,
+        ResourceRequirements, ResourceSpec, ResourceType, ServicePortsSpec, WorkloadSpec,
     };
     use lattice_common::template::TemplateString;
 
@@ -2604,6 +2614,16 @@ pub fn create_service_with_all_secret_routes(
             command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             variables,
             files,
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
             ..Default::default()
         },
     );

@@ -336,6 +336,9 @@ pub struct PodMeta {
 pub struct PodSpec {
     /// Service account name
     pub service_account_name: String,
+    /// Whether to automount the service account token into pods
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automount_service_account_token: Option<bool>,
     /// Containers
     pub containers: Vec<Container>,
     /// Init containers (run before main containers)
@@ -423,6 +426,9 @@ pub struct Container {
     pub name: String,
     /// Image
     pub image: String,
+    /// Image pull policy (Always, IfNotPresent, Never)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_pull_policy: Option<String>,
     /// Command
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
@@ -709,6 +715,12 @@ pub struct PodSecurityContext {
     /// Require all containers to run as non-root
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_as_non_root: Option<bool>,
+    /// GID applied to all volumes so files are group-readable
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_group: Option<i64>,
+    /// Policy for applying fsGroup to volumes (OnRootMismatch or Always)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_group_change_policy: Option<String>,
     /// Pod-level seccomp profile
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seccomp_profile: Option<SeccompProfile>,
@@ -852,6 +864,38 @@ pub struct ServiceAccount {
     pub kind: String,
     /// Metadata
     pub metadata: ObjectMeta,
+    /// Whether to automount the service account token into pods
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automount_service_account_token: Option<bool>,
+}
+
+// =============================================================================
+// PodDisruptionBudget
+// =============================================================================
+
+/// Kubernetes PodDisruptionBudget for ensuring availability during node drains
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PodDisruptionBudget {
+    /// API version
+    pub api_version: String,
+    /// Kind
+    pub kind: String,
+    /// Metadata
+    pub metadata: ObjectMeta,
+    /// Spec
+    pub spec: PdbSpec,
+}
+
+/// PDB spec
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PdbSpec {
+    /// Minimum number of pods that must remain available
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_available: Option<u32>,
+    /// Label selector to match pods
+    pub selector: LabelSelector,
 }
 
 // =============================================================================
@@ -934,6 +978,8 @@ pub struct GeneratedWorkloads {
     pub service: Option<Service>,
     /// Kubernetes ServiceAccount
     pub service_account: Option<ServiceAccount>,
+    /// PodDisruptionBudget for HA services
+    pub pdb: Option<PodDisruptionBudget>,
     /// KEDA ScaledObject for autoscaling
     pub scaled_object: Option<ScaledObject>,
     /// ConfigMaps for non-sensitive env vars (one per container)
@@ -963,6 +1009,7 @@ impl GeneratedWorkloads {
         self.deployment.is_none()
             && self.service.is_none()
             && self.service_account.is_none()
+            && self.pdb.is_none()
             && self.scaled_object.is_none()
             && self.env_config_maps.is_empty()
             && self.env_secrets.is_empty()
@@ -1059,12 +1106,24 @@ fn gpu_shm_volume(gpu: &Option<GPUSpec>) -> Option<(Volume, VolumeMount)> {
     })
 }
 
+/// Compute image pull policy from the image reference.
+///
+/// Returns `Always` when the tag is `:latest` or absent (bare image name),
+/// `IfNotPresent` for any other explicit tag or digest.
+fn image_pull_policy(image: &str) -> String {
+    if image.ends_with(":latest") || !image.contains(':') {
+        "Always".to_string()
+    } else {
+        "IfNotPresent".to_string()
+    }
+}
+
 /// Per-container compilation data bundled from earlier pipeline stages.
 ///
 /// Groups the five per-container maps that flow from `SecretsCompiler`,
 /// `TemplateRenderer`, `env::compile`, and `files::compile` into a single
 /// parameter object. This avoids passing each map individually through
-/// `WorkloadCompiler::compile` → `compile_deployment` → `compile_containers_with_volumes`.
+/// `WorkloadCompiler::compile` → `compile_deployment` → `compile_containers`.
 pub struct ContainerCompilationData<'a> {
     /// Secret references from ESO for `${secret.*}` resolution
     pub secret_refs: &'a BTreeMap<String, SecretRef>,
@@ -1135,6 +1194,11 @@ impl WorkloadCompiler {
             output.service = Some(Self::compile_service(name, namespace, &service.spec));
         }
 
+        // Generate PDB for HA services (min replicas >= 2)
+        if service.spec.workload.replicas.min >= 2 {
+            output.pdb = Some(Self::compile_pdb(name, namespace, &service.spec));
+        }
+
         // Generate KEDA ScaledObject if max replicas is set
         if service.spec.workload.replicas.max.is_some() {
             output.scaled_object = Some(Self::compile_scaled_object(
@@ -1154,7 +1218,7 @@ impl WorkloadCompiler {
     /// (`${secret.RESOURCE.KEY}`) are compiled to K8s `secretKeyRef` env vars.
     /// Non-secret env vars come via `envFrom` (ConfigMap/Secret from env::compile).
     /// File volumes/mounts come from files::compile.
-    fn compile_containers_with_volumes(
+    fn compile_containers(
         spec: &LatticeServiceSpec,
         volumes: &GeneratedVolumes,
         container_data: &ContainerCompilationData<'_>,
@@ -1280,6 +1344,7 @@ impl WorkloadCompiler {
 
                 Ok(Container {
                     name: container_name.clone(),
+                    image_pull_policy: Some(image_pull_policy(&image)),
                     image,
                     command,
                     args,
@@ -1521,6 +1586,8 @@ impl WorkloadCompiler {
 
         PodSecurityContext {
             run_as_non_root: Some(true),
+            fs_group: Some(65534),
+            fs_group_change_policy: Some("OnRootMismatch".to_string()),
             seccomp_profile: Some(SeccompProfile {
                 type_: "RuntimeDefault".to_string(),
                 localhost_profile: None,
@@ -1594,6 +1661,7 @@ impl WorkloadCompiler {
 
             let container = Container {
                 name: sidecar_name.clone(),
+                image_pull_policy: Some(image_pull_policy(&sidecar_spec.image)),
                 image: sidecar_spec.image.clone(),
                 command: sidecar_spec.command.clone(),
                 args: sidecar_spec.args.clone(),
@@ -1623,6 +1691,7 @@ impl WorkloadCompiler {
             api_version: "v1".to_string(),
             kind: "ServiceAccount".to_string(),
             metadata: ObjectMeta::new(name, namespace),
+            automount_service_account_token: Some(false),
         }
     }
 
@@ -1646,7 +1715,7 @@ impl WorkloadCompiler {
         container_data: &ContainerCompilationData<'_>,
     ) -> Result<Deployment, CompilationError> {
         // Compile main containers with volume mounts
-        let mut containers = Self::compile_containers_with_volumes(spec, volumes, container_data)?;
+        let mut containers = Self::compile_containers(spec, volumes, container_data)?;
 
         // Compile sidecars (init + regular)
         let (init_containers, sidecar_containers) = Self::compile_sidecars(spec, volumes);
@@ -1725,6 +1794,7 @@ impl WorkloadCompiler {
                     },
                     spec: PodSpec {
                         service_account_name: name.to_string(),
+                        automount_service_account_token: Some(false),
                         containers,
                         init_containers,
                         volumes: pod_volumes,
@@ -1809,6 +1879,28 @@ impl WorkloadCompiler {
                 })
             })
             .collect()
+    }
+
+    /// Compile a PodDisruptionBudget for HA services.
+    ///
+    /// Only generated when `replicas.min >= 2`. Sets `minAvailable` to
+    /// `replicas.min - 1`, allowing exactly one pod to be disrupted at a time.
+    fn compile_pdb(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> PodDisruptionBudget {
+        PodDisruptionBudget {
+            api_version: "policy/v1".to_string(),
+            kind: "PodDisruptionBudget".to_string(),
+            metadata: ObjectMeta::new(name, namespace),
+            spec: PdbSpec {
+                min_available: Some(spec.workload.replicas.min.saturating_sub(1).max(1)),
+                selector: LabelSelector {
+                    match_labels: {
+                        let mut labels = BTreeMap::new();
+                        labels.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
+                        labels
+                    },
+                },
+            },
+        }
     }
 
     fn compile_service(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Service {
@@ -2132,6 +2224,7 @@ mod tests {
         assert_eq!(sa.metadata.namespace, "default");
         assert_eq!(sa.api_version, "v1");
         assert_eq!(sa.kind, "ServiceAccount");
+        assert_eq!(sa.automount_service_account_token, Some(false));
     }
 
     // =========================================================================
@@ -2454,6 +2547,57 @@ mod tests {
         assert_eq!(so.spec.triggers.len(), 2);
         assert_eq!(so.spec.triggers[0].type_, "cpu");
         assert_eq!(so.spec.triggers[1].type_, "memory");
+    }
+
+    // =========================================================================
+    // Story: PodDisruptionBudget for HA Services
+    // =========================================================================
+
+    #[test]
+    fn pdb_generated_for_ha_services() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.replicas = ReplicaSpec {
+            min: 3,
+            max: None,
+            autoscaling: vec![],
+        };
+
+        let output = compile_service(&service);
+
+        let pdb = output.pdb.expect("should have PDB");
+        assert_eq!(pdb.api_version, "policy/v1");
+        assert_eq!(pdb.kind, "PodDisruptionBudget");
+        assert_eq!(pdb.metadata.name, "my-app");
+        assert_eq!(pdb.spec.min_available, Some(2));
+        assert_eq!(
+            pdb.spec
+                .selector
+                .match_labels
+                .get(lattice_common::LABEL_NAME),
+            Some(&"my-app".to_string())
+        );
+    }
+
+    #[test]
+    fn no_pdb_for_single_replica() {
+        let service = make_service("my-app", "default");
+        let output = compile_service(&service);
+        assert!(output.pdb.is_none());
+    }
+
+    #[test]
+    fn pdb_min_available_for_two_replicas() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.replicas = ReplicaSpec {
+            min: 2,
+            max: None,
+            autoscaling: vec![],
+        };
+
+        let output = compile_service(&service);
+
+        let pdb = output.pdb.expect("should have PDB");
+        assert_eq!(pdb.spec.min_available, Some(1));
     }
 
     // =========================================================================
@@ -2950,7 +3094,7 @@ mod tests {
     fn story_emptydir_in_deployment_with_readonly_rootfs() {
         // Simulate nginx pattern: read-only rootfs + emptyDir for writable paths
         let mut service = make_service("nginx-app", "default");
-        let container = service.spec.containers.get_mut("main").unwrap();
+        let container = service.spec.workload.containers.get_mut("main").unwrap();
         container.volumes.insert(
             "/var/cache/nginx".to_string(),
             lattice_common::crd::VolumeMount {
@@ -2987,7 +3131,10 @@ mod tests {
 
         // Container should have read-only rootfs (secure default)
         let main = &deployment.spec.template.spec.containers[0];
-        let sec = main.security_context.as_ref().expect("should have security context");
+        let sec = main
+            .security_context
+            .as_ref()
+            .expect("should have security context");
         assert_eq!(sec.read_only_root_filesystem, Some(true));
 
         // Container should have 3 emptyDir volume mounts
@@ -3019,7 +3166,7 @@ mod tests {
     #[test]
     fn story_emptydir_tmpfs_flows_to_deployment() {
         let mut service = make_service("my-app", "default");
-        let container = service.spec.containers.get_mut("main").unwrap();
+        let container = service.spec.workload.containers.get_mut("main").unwrap();
         container.volumes.insert(
             "/dev/shm".to_string(),
             lattice_common::crd::VolumeMount {

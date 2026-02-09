@@ -475,8 +475,6 @@ mod tests {
             metadata: None,
             params: None,
             namespace: None,
-            inbound: None,
-            outbound: None,
         };
 
         let outputs = provisioner
@@ -511,8 +509,6 @@ mod tests {
             metadata: None,
             params: None,
             namespace: None,
-            inbound: None,
-            outbound: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -538,8 +534,6 @@ mod tests {
             metadata: None,
             params: None,
             namespace: None,
-            inbound: None,
-            outbound: None,
         };
 
         let outputs = provisioner
@@ -569,8 +563,6 @@ mod tests {
             metadata: None,
             params: None,
             namespace: None,
-            inbound: None,
-            outbound: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -609,8 +601,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
 
@@ -698,8 +688,6 @@ mod tests {
                 serde_json::json!("10Gi"),
             )])),
             namespace: None,
-            inbound: None,
-            outbound: None,
         };
 
         let outputs = provisioner
@@ -730,8 +718,6 @@ mod tests {
                 serde_json::json!("1Ti"),
             )])),
             namespace: None,
-            inbound: None,
-            outbound: None,
         };
 
         let outputs = provisioner

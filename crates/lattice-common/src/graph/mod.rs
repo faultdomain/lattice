@@ -531,8 +531,6 @@ mod tests {
                     metadata: None,
                     params: None,
                     namespace: None,
-                    inbound: None,
-                    outbound: None,
                 },
             );
         }
@@ -547,8 +545,6 @@ mod tests {
                     metadata: None,
                     params: None,
                     namespace: None,
-                    inbound: None,
-                    outbound: None,
                 },
             );
         }
@@ -619,8 +615,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: Some("backend".to_string()), // Cross-namespace!
-                inbound: None,
-                outbound: None,
             },
         );
 
@@ -833,8 +827,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: Some("backend".to_string()),
-                inbound: None,
-                outbound: None,
             },
         );
 

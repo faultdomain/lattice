@@ -53,12 +53,12 @@ pub use secrets_provider::{
 pub use service::{
     AutoscalingMetric, BackupHook, BackupHooksSpec, CertIssuerRef, ContainerSpec,
     DependencyDirection, DeploySpec, DeployStrategy, ExecProbe, FileMount, GPUSpec,
-    HookErrorAction, HttpGetProbe, HttpHeader, InboundPolicy, IngressPath, IngressSpec, IngressTls,
-    LatticeService, LatticeServiceSpec, LatticeServiceStatus, OutboundPolicy, PathMatchType,
-    PortSpec, Probe, ReplicaSpec, ResourceMetadata, ResourceQuantity, ResourceRequirements,
-    ResourceSpec, ResourceType, RetryConfig, SecurityContext, ServiceBackupSpec, ServicePhase,
-    ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode, VolumeAccessMode, VolumeBackupDefault,
-    VolumeBackupSpec, VolumeMount, VolumeParams, WorkloadSpec,
+    HookErrorAction, HttpGetProbe, HttpHeader, IngressPath, IngressSpec, IngressTls,
+    LatticeService, LatticeServiceSpec, LatticeServiceStatus, PathMatchType, PortSpec, Probe,
+    ReplicaSpec, ResourceMetadata, ResourceQuantity, ResourceRequirements, ResourceSpec,
+    ResourceType, SecurityContext, ServiceBackupSpec, ServicePhase, ServicePortsSpec, SidecarSpec,
+    TlsMode, VolumeAccessMode, VolumeBackupDefault, VolumeBackupSpec, VolumeMount, VolumeParams,
+    WorkloadSpec,
 };
 pub use service_policy::{
     LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,

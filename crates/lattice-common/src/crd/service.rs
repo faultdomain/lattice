@@ -201,8 +201,6 @@ pub struct ResourceMetadata {
 ///
 /// ## Lattice Extensions
 /// - `direction`: Bilateral agreement direction (inbound/outbound/both)
-/// - `inbound`: L7 policies for inbound traffic (rate limiting)
-/// - `outbound`: L7 policies for outbound traffic (retries, timeouts)
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceSpec {
@@ -254,53 +252,6 @@ pub struct ResourceSpec {
     /// Use this to reference services in other namespaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
-
-    /// L7 policies for inbound traffic (Lattice extension)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inbound: Option<InboundPolicy>,
-
-    /// L7 policies for outbound traffic (Lattice extension)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outbound: Option<OutboundPolicy>,
-}
-
-/// L7 policies for inbound traffic (Lattice extension)
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct InboundPolicy {}
-
-/// L7 policies for outbound traffic (Lattice extension)
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct OutboundPolicy {
-    /// Retry configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retries: Option<RetryConfig>,
-    /// Timeout configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<TimeoutConfig>,
-}
-
-/// Retry configuration
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RetryConfig {
-    /// Number of retry attempts
-    pub attempts: u32,
-    /// Timeout per attempt
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub per_try_timeout: Option<String>,
-    /// Conditions that trigger a retry
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub retry_on: Vec<String>,
-}
-
-/// Timeout configuration
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TimeoutConfig {
-    /// Request timeout
-    pub request: String,
 }
 
 // =============================================================================
@@ -1549,10 +1500,22 @@ impl ContainerSpec {
         // Validate image format
         validate_image(&self.image, container_name)?;
 
-        // Validate resource quantities
-        if let Some(ref resources) = self.resources {
-            resources.validate(container_name)?;
+        // Resource limits are required for every container
+        let resources = self.resources.as_ref().ok_or_else(|| {
+            crate::Error::validation(format!(
+                "container '{}' must have resource limits",
+                container_name
+            ))
+        })?;
+        if resources.limits.is_none() {
+            return Err(crate::Error::validation(format!(
+                "container '{}' must have resource limits",
+                container_name
+            )));
         }
+
+        // Validate resource quantities
+        resources.validate(container_name)?;
 
         // Validate file mount modes
         for (path, file_mount) in &self.files {
@@ -1829,6 +1792,13 @@ mod tests {
     fn simple_container() -> ContainerSpec {
         ContainerSpec {
             image: "nginx:latest".to_string(),
+            resources: Some(ResourceRequirements {
+                limits: Some(ResourceQuantity {
+                    memory: Some("256Mi".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }
@@ -1889,8 +1859,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
         resources.insert(
@@ -1903,8 +1871,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
 
@@ -1931,8 +1897,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
         resources.insert(
@@ -1945,8 +1909,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
 
@@ -1973,8 +1935,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
 
@@ -2008,8 +1968,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
         resources.insert(
@@ -2022,8 +1980,6 @@ mod tests {
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
 
@@ -2346,6 +2302,38 @@ deploy:
         assert!(validate_image(".", "main").is_ok());
     }
 
+    /// Story: Container without resource limits fails validation
+    #[test]
+    fn test_container_without_resource_limits_fails() {
+        let container = ContainerSpec {
+            image: "nginx:latest".to_string(),
+            ..Default::default()
+        };
+        let result = container.validate("main");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must have resource limits"));
+    }
+
+    /// Story: Container with limits but no memory still passes (limits exist)
+    #[test]
+    fn test_container_with_limits_passes() {
+        let container = ContainerSpec {
+            image: "nginx:latest".to_string(),
+            resources: Some(ResourceRequirements {
+                limits: Some(ResourceQuantity {
+                    cpu: Some("1".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(container.validate("main").is_ok());
+    }
+
     /// Story: Duplicate service ports fail validation
     #[test]
     fn test_duplicate_service_ports_fail() {
@@ -2490,47 +2478,49 @@ workload:
     #[test]
     fn test_volume_mount_sourceless_parses() {
         let yaml = r#"
-containers:
-  main:
-    image: nginx:latest
-    volumes:
-      /tmp: {}
-      /var/cache/nginx: {}
+workload:
+  containers:
+    main:
+      image: nginx:latest
+      volumes:
+        /tmp: {}
+        /var/cache/nginx: {}
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("sourceless volume YAML should parse");
 
-        let tmp = &spec.containers["main"].volumes["/tmp"];
+        let tmp = &spec.workload.containers["main"].volumes["/tmp"];
         assert!(tmp.source.is_none());
         assert!(tmp.medium.is_none());
         assert!(tmp.size_limit.is_none());
 
-        let cache = &spec.containers["main"].volumes["/var/cache/nginx"];
+        let cache = &spec.workload.containers["main"].volumes["/var/cache/nginx"];
         assert!(cache.source.is_none());
     }
 
     #[test]
     fn test_volume_mount_with_medium_and_size_limit_parses() {
         let yaml = r#"
-containers:
-  main:
-    image: nginx:latest
-    volumes:
-      /dev/shm:
-        medium: Memory
-      /scratch:
-        sizeLimit: 5Gi
+workload:
+  containers:
+    main:
+      image: nginx:latest
+      volumes:
+        /dev/shm:
+          medium: Memory
+        /scratch:
+          sizeLimit: 5Gi
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("emptyDir with medium/sizeLimit should parse");
 
-        let shm = &spec.containers["main"].volumes["/dev/shm"];
+        let shm = &spec.workload.containers["main"].volumes["/dev/shm"];
         assert!(shm.source.is_none());
         assert_eq!(shm.medium, Some("Memory".to_string()));
 
-        let scratch = &spec.containers["main"].volumes["/scratch"];
+        let scratch = &spec.workload.containers["main"].volumes["/scratch"];
         assert!(scratch.source.is_none());
         assert_eq!(scratch.size_limit, Some("5Gi".to_string()));
     }
@@ -2643,6 +2633,9 @@ workload:
   containers:
     main:
       image: "."
+      resources:
+        limits:
+          memory: 256Mi
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value)
@@ -2670,8 +2663,6 @@ workload:
                     serde_json::json!(size),
                 )])),
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
         spec
@@ -2689,8 +2680,6 @@ workload:
                 metadata: None,
                 params: None, // No params = reference
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
         spec
@@ -2802,9 +2791,9 @@ workload:
         assert_eq!(media.id, Some("media-library".to_string()));
     }
 
-    /// Story: Lattice extensions for bilateral agreements with L7 policies
+    /// Story: Lattice bilateral agreement directions parse correctly
     #[test]
-    fn test_lattice_bilateral_agreement_extensions() {
+    fn test_lattice_bilateral_agreement_directions() {
         let yaml = r#"
 workload:
   containers:
@@ -2814,50 +2803,29 @@ workload:
     sonarr:
       type: service
       direction: inbound
-      inbound: {}
     nzbget:
       type: service
       direction: outbound
-      outbound:
-        retries:
-          attempts: 3
-          perTryTimeout: 5s
-          retryOn:
-            - 5xx
-            - connect-failure
-        timeout:
-          request: 30s
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Bilateral agreement YAML should parse");
 
-        // Verify inbound policy
+        // Verify inbound direction
         let sonarr = spec
             .workload
             .resources
             .get("sonarr")
             .expect("sonarr should exist");
         assert_eq!(sonarr.direction, DependencyDirection::Inbound);
-        assert!(sonarr.inbound.is_some());
 
-        // Verify outbound policy
+        // Verify outbound direction
         let nzbget = spec
             .workload
             .resources
             .get("nzbget")
             .expect("nzbget should exist");
         assert_eq!(nzbget.direction, DependencyDirection::Outbound);
-        let outbound = nzbget
-            .outbound
-            .as_ref()
-            .expect("outbound policy should exist");
-        let retries = outbound.retries.as_ref().expect("retries should exist");
-        assert_eq!(retries.attempts, 3);
-        assert_eq!(retries.per_try_timeout, Some("5s".to_string()));
-        assert_eq!(retries.retry_on, vec!["5xx", "connect-failure"]);
-        let timeout = outbound.timeout.as_ref().expect("timeout should exist");
-        assert_eq!(timeout.request, "30s");
     }
 
     /// Story: Full media-server jellyfin-style spec parses correctly
@@ -3158,8 +3126,6 @@ workload:
             metadata: None,
             params: None,
             namespace: None,
-            inbound: None,
-            outbound: None,
         };
         assert!(resource.model_params().unwrap().is_none());
     }
@@ -3175,8 +3141,6 @@ workload:
             metadata: None,
             params: None,
             namespace: None,
-            inbound: None,
-            outbound: None,
         };
         let err = resource.model_params().unwrap_err();
         assert!(err.contains("requires params"));

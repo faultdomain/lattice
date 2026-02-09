@@ -57,21 +57,9 @@ spec:
       nzbget:
         type: service
         direction: outbound
-        outbound:
-          retries:
-            attempts: 3
-            perTryTimeout: 10s
-            retryOn:
-              - 5xx
-              - connect-failure
-          timeout:
-            request: 30s
       jellyfin:
         type: service
         direction: outbound
-        outbound:
-          timeout:
-            request: 60s
     replicas:
       min: 1
   ingress:

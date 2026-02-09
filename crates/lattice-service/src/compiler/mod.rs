@@ -126,6 +126,7 @@ impl CompiledService {
             self.workloads.deployment.is_some(),
             self.workloads.service.is_some(),
             self.workloads.service_account.is_some(),
+            self.workloads.pdb.is_some(),
             self.workloads.scaled_object.is_some(),
         ]
         .iter()

@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use lattice_common::crd::{
-    ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec,
-    ResourceType, ServicePortsSpec, VolumeMount, WorkloadSpec,
+    ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec,
+    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, ServicePortsSpec,
+    VolumeMount, WorkloadSpec,
 };
 
 use super::helpers::{CURL_IMAGE, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY};
@@ -54,6 +55,16 @@ pub fn nginx_container() -> ContainerSpec {
     ContainerSpec {
         image: NGINX_IMAGE.to_string(),
         volumes,
+        resources: Some(ResourceRequirements {
+            requests: Some(ResourceQuantity {
+                cpu: Some("50m".to_string()),
+                memory: Some("64Mi".to_string()),
+            }),
+            limits: Some(ResourceQuantity {
+                cpu: Some("200m".to_string()),
+                memory: Some("128Mi".to_string()),
+            }),
+        }),
         ..Default::default()
     }
 }
@@ -71,6 +82,16 @@ pub fn curl_container(script: String) -> ContainerSpec {
         command: Some(vec!["/bin/sh".to_string()]),
         args: Some(vec!["-c".to_string(), script]),
         volumes,
+        resources: Some(ResourceRequirements {
+            requests: Some(ResourceQuantity {
+                cpu: Some("50m".to_string()),
+                memory: Some("64Mi".to_string()),
+            }),
+            limits: Some(ResourceQuantity {
+                cpu: Some("200m".to_string()),
+                memory: Some("128Mi".to_string()),
+            }),
+        }),
         ..Default::default()
     }
 }
@@ -94,13 +115,7 @@ pub fn outbound_dep(name: &str) -> (String, ResourceSpec) {
         ResourceSpec {
             type_: ResourceType::Service,
             direction: DependencyDirection::Outbound,
-            id: None,
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-            inbound: None,
-            outbound: None,
+            ..Default::default()
         },
     )
 }
@@ -111,13 +126,7 @@ pub fn inbound_allow(name: &str) -> (String, ResourceSpec) {
         ResourceSpec {
             type_: ResourceType::Service,
             direction: DependencyDirection::Inbound,
-            id: None,
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-            inbound: None,
-            outbound: None,
+            ..Default::default()
         },
     )
 }
@@ -129,12 +138,7 @@ pub fn inbound_allow_all() -> (String, ResourceSpec) {
             type_: ResourceType::Service,
             direction: DependencyDirection::Inbound,
             id: Some("*".to_string()),
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-            inbound: None,
-            outbound: None,
+            ..Default::default()
         },
     )
 }
@@ -145,13 +149,7 @@ pub fn external_outbound_dep(name: &str) -> (String, ResourceSpec) {
         ResourceSpec {
             type_: ResourceType::ExternalService,
             direction: DependencyDirection::Outbound,
-            id: None,
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-            inbound: None,
-            outbound: None,
+            ..Default::default()
         },
     )
 }

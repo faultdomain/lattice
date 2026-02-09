@@ -43,8 +43,6 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
     }
@@ -59,8 +57,6 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 metadata: None,
                 params: None,
                 namespace: None,
-                inbound: None,
-                outbound: None,
             },
         );
     }
