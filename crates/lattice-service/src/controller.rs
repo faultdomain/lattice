@@ -62,6 +62,7 @@ pub struct DiscoveredCrds {
     pub http_route: Option<ApiResource>,
     pub certificate: Option<ApiResource>,
     pub scaled_object: Option<ApiResource>,
+    pub service_monitor: Option<ApiResource>,
 }
 
 impl DiscoveredCrds {
@@ -101,6 +102,11 @@ impl DiscoveredCrds {
             http_route: Self::find_resource(&discovery, "gateway.networking.k8s.io", "HTTPRoute"),
             certificate: Self::find_resource(&discovery, "cert-manager.io", "Certificate"),
             scaled_object: Self::find_resource(&discovery, "keda.sh", "ScaledObject"),
+            service_monitor: Self::find_resource(
+                &discovery,
+                "monitoring.coreos.com",
+                "ServiceMonitor",
+            ),
         }
     }
 
@@ -146,6 +152,10 @@ impl DiscoveredCrds {
             http_route: Some(HttpRoute::api_resource()),
             certificate: Some(Certificate::api_resource()),
             scaled_object: Some(ScaledObject::api_resource()),
+            service_monitor: Some(lattice_common::kube_utils::build_api_resource(
+                "monitoring.coreos.com/v1",
+                "ServiceMonitor",
+            )),
         }
     }
 }

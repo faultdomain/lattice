@@ -31,6 +31,7 @@ use lattice_common::crd::{
 use lattice_common::ControllerContext;
 use lattice_model_cache::{self as model_cache_ctrl, ModelCacheContext};
 use lattice_secret_provider as secrets_provider_ctrl;
+use lattice_service::compiler::ServiceMonitorPhase;
 use lattice_service::controller::{
     error_policy as service_error_policy, error_policy_external, reconcile as service_reconcile,
     reconcile_external, DiscoveredCrds, ServiceContext,
@@ -83,14 +84,17 @@ pub fn build_service_controllers(
     monitoring_enabled: bool,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
-    let service_ctx = Arc::new(ServiceContext::from_client(
+    let service_monitor_ar = crds.service_monitor.clone();
+    let mut service_ctx = ServiceContext::from_client(
         client.clone(),
         cluster_name,
         provider_type,
         cedar,
         crds,
         monitoring_enabled,
-    ));
+    );
+    service_ctx.extension_phases = vec![Arc::new(ServiceMonitorPhase::new(service_monitor_ar))];
+    let service_ctx = Arc::new(service_ctx);
 
     let services: Api<LatticeService> = Api::all(client.clone());
     let services_for_watch = services.clone();

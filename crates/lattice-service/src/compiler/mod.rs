@@ -27,7 +27,9 @@
 //! 2. Falls back to namespace
 
 mod phase;
+mod service_monitor;
 pub use phase::{CompilationContext, CompilerPhase};
+pub use service_monitor::ServiceMonitorPhase;
 
 use std::sync::Arc;
 
