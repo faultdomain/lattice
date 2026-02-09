@@ -214,12 +214,16 @@ pub struct RenderedFile {
 /// Rendered volume mount
 #[derive(Clone, Debug)]
 pub struct RenderedVolume {
-    /// Rendered source reference
-    pub source: String,
+    /// Rendered source reference (None for emptyDir volumes)
+    pub source: Option<String>,
     /// Sub path
     pub path: Option<String>,
     /// Read only flag
     pub read_only: Option<bool>,
+    /// Storage medium for emptyDir ("Memory" for tmpfs)
+    pub medium: Option<String>,
+    /// Size limit for emptyDir (e.g., "1Gi")
+    pub size_limit: Option<String>,
 }
 
 /// Extract `${secret.RESOURCE.KEY}` references from content and replace with ESO Go templates.
@@ -599,12 +603,17 @@ impl TemplateRenderer {
         vol: &VolumeMount,
         ctx: &TemplateContext,
     ) -> Result<RenderedVolume, TemplateError> {
-        let source = self.engine.render(vol.source.as_str(), ctx)?;
+        let source = match &vol.source {
+            Some(s) => Some(self.engine.render(s.as_str(), ctx)?),
+            None => None,
+        };
 
         Ok(RenderedVolume {
             source,
             path: vol.path.clone(),
             read_only: vol.read_only,
+            medium: vol.medium.clone(),
+            size_limit: vol.size_limit.clone(),
         })
     }
 
@@ -1379,9 +1388,11 @@ mod tests {
         volumes.insert(
             "/data".to_string(),
             VolumeMount {
-                source: TemplateString::from("${resources.storage.name}"),
+                source: Some(TemplateString::from("${resources.storage.name}")),
                 path: Some("subdir".to_string()),
                 read_only: Some(true),
+                medium: None,
+                size_limit: None,
             },
         );
 
@@ -1396,7 +1407,7 @@ mod tests {
             .render_container("main", &container, &ctx)
             .expect("container rendering should succeed");
 
-        assert_eq!(rendered.volumes["/data"].source, "my-pvc");
+        assert_eq!(rendered.volumes["/data"].source, Some("my-pvc".to_string()));
         assert_eq!(rendered.volumes["/data"].path, Some("subdir".to_string()));
         assert_eq!(rendered.volumes["/data"].read_only, Some(true));
     }
@@ -1413,9 +1424,13 @@ mod tests {
         volumes.insert(
             "/cache".to_string(),
             VolumeMount {
-                source: TemplateString::from("${cluster.name}-${config.storage_class}-cache"),
+                source: Some(TemplateString::from(
+                    "${cluster.name}-${config.storage_class}-cache",
+                )),
                 path: None,
                 read_only: None,
+                medium: None,
+                size_limit: None,
             },
         );
 
@@ -1432,7 +1447,7 @@ mod tests {
 
         assert_eq!(
             rendered.volumes["/cache"].source,
-            "prod-cluster-fast-ssd-cache"
+            Some("prod-cluster-fast-ssd-cache".to_string())
         );
     }
 
@@ -1446,9 +1461,11 @@ mod tests {
         volumes.insert(
             "/logs".to_string(),
             VolumeMount {
-                source: TemplateString::from("shared-logs-pvc"),
+                source: Some(TemplateString::from("shared-logs-pvc")),
                 path: Some("app-logs".to_string()),
                 read_only: Some(false),
+                medium: None,
+                size_limit: None,
             },
         );
 
@@ -1463,7 +1480,10 @@ mod tests {
             .render_container("main", &container, &ctx)
             .expect("container rendering should succeed");
 
-        assert_eq!(rendered.volumes["/logs"].source, "shared-logs-pvc");
+        assert_eq!(
+            rendered.volumes["/logs"].source,
+            Some("shared-logs-pvc".to_string())
+        );
     }
 
     #[test]
@@ -1476,9 +1496,11 @@ mod tests {
         volumes.insert(
             "/data".to_string(),
             VolumeMount {
-                source: TemplateString::from("${resources.missing.name}"),
+                source: Some(TemplateString::from("${resources.missing.name}")),
                 path: None,
                 read_only: None,
+                medium: None,
+                size_limit: None,
             },
         );
 

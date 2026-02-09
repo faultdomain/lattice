@@ -151,6 +151,9 @@ pub struct PodVolume {
     /// PVC volume source
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistent_volume_claim: Option<PvcVolumeSource>,
+    /// EmptyDir volume source
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_dir: Option<super::EmptyDirVolumeSource>,
 }
 
 impl GeneratedVolumes {
@@ -167,6 +170,29 @@ impl GeneratedVolumes {
             && self.volumes.is_empty()
             && self.volume_mounts.is_empty()
             && self.scheduling_gates.is_empty()
+    }
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/// Convert a mount path to a valid K8s volume name.
+///
+/// E.g., `/var/cache/nginx` → `emptydir-var-cache-nginx`
+///
+/// K8s volume names must be lowercase alphanumeric + `-`, max 63 chars.
+fn sanitize_volume_name(mount_path: &str) -> String {
+    let sanitized: String = mount_path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    let name = format!("emptydir-{}", trimmed);
+    if name.len() > 63 {
+        name[..63].trim_end_matches('-').to_string()
+    } else {
+        name
     }
 }
 
@@ -271,6 +297,7 @@ impl VolumeCompiler {
                     claim_name: pvc_name,
                     read_only: None,
                 }),
+                empty_dir: None,
             });
         }
 
@@ -308,6 +335,7 @@ impl VolumeCompiler {
                     claim_name: pvc_name,
                     read_only: Some(true),
                 }),
+                empty_dir: None,
             });
         }
 
@@ -319,7 +347,7 @@ impl VolumeCompiler {
         }
 
         // -----------------------------------------------------------------
-        // Generate volume mounts (for both volume and model resources)
+        // Generate volume mounts (for both volume/model resources and emptyDir)
         // -----------------------------------------------------------------
         let all_mountable: Vec<_> = spec
             .resources
@@ -327,24 +355,24 @@ impl VolumeCompiler {
             .filter(|(_, r)| r.type_.is_volume_like())
             .collect();
 
-        if all_mountable.is_empty() {
-            return Ok(output);
-        }
-
         // Container volume mounts
         for (container_name, container_spec) in &spec.containers {
-            let mounts = Self::resolve_mounts(&container_spec.volumes, &all_mountable);
+            let (mounts, extra_vols) =
+                Self::resolve_mounts(&container_spec.volumes, &all_mountable);
             if !mounts.is_empty() {
                 output.volume_mounts.insert(container_name.clone(), mounts);
             }
+            output.volumes.extend(extra_vols);
         }
 
         // Sidecar volume mounts
         for (sidecar_name, sidecar_spec) in &spec.sidecars {
-            let mounts = Self::resolve_mounts(&sidecar_spec.volumes, &all_mountable);
+            let (mounts, extra_vols) =
+                Self::resolve_mounts(&sidecar_spec.volumes, &all_mountable);
             if !mounts.is_empty() {
                 output.volume_mounts.insert(sidecar_name.clone(), mounts);
             }
+            output.volumes.extend(extra_vols);
         }
 
         Ok(output)
@@ -380,23 +408,48 @@ impl VolumeCompiler {
 
     /// Resolve volume mounts from a container's volume declarations
     ///
-    /// Matches `${resources.name}` template strings against the set of
-    /// mountable resources (volumes and models).
+    /// Handles two cases:
+    /// 1. **Source present**: matches `${resources.name}` against mountable resources (PVC-backed)
+    /// 2. **Source absent**: generates an emptyDir volume + mount
+    ///
+    /// Returns (volume_mounts, extra_pod_volumes) where extra_pod_volumes are
+    /// emptyDir volumes that need to be added to the pod spec.
     fn resolve_mounts(
         volumes: &BTreeMap<String, crate::crd::VolumeMount>,
         mountable_resources: &[(&String, &crate::crd::ResourceSpec)],
-    ) -> Vec<super::VolumeMount> {
+    ) -> (Vec<super::VolumeMount>, Vec<PodVolume>) {
         let mut mounts = Vec::new();
+        let mut extra_volumes = Vec::new();
 
         for (mount_path, volume_mount) in volumes {
-            if let Some(resource_name) = Self::parse_volume_source(&volume_mount.source.to_string())
-            {
-                if mountable_resources
-                    .iter()
-                    .any(|(name, _)| name.as_str() == resource_name)
-                {
+            match &volume_mount.source {
+                Some(source) => {
+                    if let Some(resource_name) = Self::parse_volume_source(&source.to_string()) {
+                        if mountable_resources
+                            .iter()
+                            .any(|(name, _)| name.as_str() == resource_name)
+                        {
+                            mounts.push(super::VolumeMount {
+                                name: resource_name.to_string(),
+                                mount_path: mount_path.clone(),
+                                sub_path: volume_mount.path.clone(),
+                                read_only: volume_mount.read_only,
+                            });
+                        }
+                    }
+                }
+                None => {
+                    let vol_name = sanitize_volume_name(mount_path);
+                    extra_volumes.push(PodVolume {
+                        name: vol_name.clone(),
+                        persistent_volume_claim: None,
+                        empty_dir: Some(super::EmptyDirVolumeSource {
+                            medium: volume_mount.medium.clone(),
+                            size_limit: volume_mount.size_limit.clone(),
+                        }),
+                    });
                     mounts.push(super::VolumeMount {
-                        name: resource_name.to_string(),
+                        name: vol_name,
                         mount_path: mount_path.clone(),
                         sub_path: volume_mount.path.clone(),
                         read_only: volume_mount.read_only,
@@ -405,7 +458,7 @@ impl VolumeCompiler {
             }
         }
 
-        mounts
+        (mounts, extra_volumes)
     }
 
     /// Parse volume source template to extract resource name
@@ -478,9 +531,14 @@ mod tests {
             volumes.insert(
                 mount_path.to_string(),
                 crate::crd::VolumeMount {
-                    source: TemplateString::from(format!("${{resources.{}}}", resource_name)),
+                    source: Some(TemplateString::from(format!(
+                        "${{resources.{}}}",
+                        resource_name
+                    ))),
                     path: None,
                     read_only: None,
+                    medium: None,
+                    size_limit: None,
                 },
             );
         }
@@ -804,9 +862,14 @@ mod tests {
             volumes.insert(
                 mount_path.to_string(),
                 crate::crd::VolumeMount {
-                    source: TemplateString::from(format!("${{resources.{}}}", resource_name)),
+                    source: Some(TemplateString::from(format!(
+                        "${{resources.{}}}",
+                        resource_name
+                    ))),
                     path: None,
                     read_only: None,
+                    medium: None,
+                    size_limit: None,
                 },
             );
         }
@@ -946,17 +1009,21 @@ mod tests {
         volumes.insert(
             "/data".to_string(),
             crate::crd::VolumeMount {
-                source: TemplateString::from("${resources.data}"),
+                source: Some(TemplateString::from("${resources.data}")),
                 path: None,
                 read_only: None,
+                medium: None,
+                size_limit: None,
             },
         );
         volumes.insert(
             "/models".to_string(),
             crate::crd::VolumeMount {
-                source: TemplateString::from("${resources.llm}"),
+                source: Some(TemplateString::from("${resources.llm}")),
                 path: None,
                 read_only: None,
+                medium: None,
+                size_limit: None,
             },
         );
 

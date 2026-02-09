@@ -733,6 +733,9 @@ pub struct EmptyDirVolumeSource {
     /// Storage medium ("Memory" for tmpfs, empty for default)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub medium: Option<String>,
+    /// Size limit for the emptyDir (e.g., "1Gi")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_limit: Option<String>,
 }
 
 /// Volume mount
@@ -1006,6 +1009,7 @@ fn gpu_shm_volume(gpu: &Option<GPUSpec>) -> Option<(Volume, VolumeMount)> {
                 secret: None,
                 empty_dir: Some(EmptyDirVolumeSource {
                     medium: Some("Memory".to_string()),
+                    size_limit: None,
                 }),
                 persistent_volume_claim: None,
             },
@@ -1573,7 +1577,7 @@ impl WorkloadCompiler {
             labels.insert(k.clone(), v.clone());
         }
 
-        // Build pod volumes from PVCs
+        // Build pod volumes from PVCs and emptyDir
         let mut pod_volumes: Vec<Volume> = volumes
             .volumes
             .iter()
@@ -1581,7 +1585,7 @@ impl WorkloadCompiler {
                 name: pv.name.clone(),
                 config_map: None,
                 secret: None,
-                empty_dir: None,
+                empty_dir: pv.empty_dir.clone(),
                 persistent_volume_claim: pv.persistent_volume_claim.clone(),
             })
             .collect();

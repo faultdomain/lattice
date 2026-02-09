@@ -796,8 +796,10 @@ pub struct FileMount {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeMount {
-    /// External volume reference (supports `${...}` placeholders)
-    pub source: TemplateString,
+    /// External volume reference (supports `${...}` placeholders).
+    /// When omitted, creates an emptyDir volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<TemplateString>,
 
     /// Sub path in the volume
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -806,6 +808,14 @@ pub struct VolumeMount {
     /// Mount as read-only
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
+
+    /// Storage medium for emptyDir ("Memory" for tmpfs). Only used when source is None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<String>,
+
+    /// Size limit for emptyDir (e.g., "1Gi"). Only used when source is None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_limit: Option<String>,
 }
 
 /// Container security context
@@ -2426,7 +2436,7 @@ containers:
             serde_json::from_value(value).expect("volume source YAML should parse successfully");
         let volume = &spec.containers["main"].volumes["/data"];
 
-        assert!(volume.source.has_placeholders());
+        assert!(volume.source.as_ref().unwrap().has_placeholders());
     }
 
     // =========================================================================
