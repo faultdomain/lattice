@@ -35,8 +35,9 @@ use lattice_capi::installer::{CapiInstaller, NativeInstaller};
 use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
+use lattice_common::crd::LatticeCluster;
 use lattice_common::crd::{CedarPolicy, LatticeService, OIDCProvider};
-use lattice_common::crd::{CloudProvider, LatticeCluster};
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::telemetry::{init_telemetry, PrometheusHandle, TelemetryConfig};
 use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
@@ -46,8 +47,8 @@ use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
 use lattice_operator::forwarder::SubtreeForwarder;
 use lattice_operator::startup::{
-    ensure_cluster_crds, ensure_infrastructure, ensure_provider_crds, ensure_service_crds,
-    get_cell_server_sans, re_register_existing_clusters, start_ca_rotation, wait_for_api_ready_for,
+    ensure_cluster_crds, ensure_infrastructure, ensure_service_crds, get_cell_server_sans,
+    re_register_existing_clusters, start_ca_rotation, wait_for_api_ready_for,
 };
 use lattice_service::controller::DiscoveredCrds;
 
@@ -72,7 +73,6 @@ struct Cli {
 /// - `All`: Complete operator (default for single-deployment scenarios)
 /// - `Cluster`: Cluster lifecycle (provisioning, pivoting, scaling) + cell infrastructure
 /// - `Service`: Service mesh (policies, workloads, ingress) - no cell infrastructure
-/// - `Provider`: Provider validation only (CloudProvider, SecretProvider)
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 pub enum ControllerMode {
     /// Run all controllers and infrastructure
@@ -82,8 +82,6 @@ pub enum ControllerMode {
     Cluster,
     /// Run service mesh controller only (no cell infrastructure)
     Service,
-    /// Run provider validation controllers only (CloudProvider, SecretProvider)
-    Provider,
 }
 
 #[derive(Subcommand, Debug)]
@@ -204,7 +202,6 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     let handle = match mode {
         ControllerMode::Cluster => run_cluster_slice(&client).await?,
         ControllerMode::Service => run_service_slice(&client).await?,
-        ControllerMode::Provider => run_provider_slice(&client).await?,
         ControllerMode::All => run_all_slices(&client).await?,
     };
 
@@ -339,44 +336,14 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     })
 }
 
-/// Provider slice: Provider CRDs, API readiness, provider controllers
-async fn run_provider_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
-    // 1. Install provider CRDs
-    ensure_provider_crds(client).await?;
-
-    // 2. Wait for API readiness using CloudProvider
-    wait_for_api_ready_for::<CloudProvider>(client).await?;
-
-    // 3. Build controller futures (no Cedar, no cell infra)
-    let controllers = controller_runner::build_provider_controllers(client.clone());
-
-    // 4. Ensure local webhook infrastructure (namespace, Service, ClusterSecretStore)
-    lattice_secret_provider::ensure_local_webhook_infrastructure(client)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to ensure local webhook infrastructure: {e}"))?;
-
-    // 5. Start local secrets webhook
-    tokio::spawn(lattice_secret_provider::start_webhook_server(
-        client.clone(),
-    ));
-
-    Ok(SliceHandle {
-        controllers,
-        parent_servers: None,
-        agent_token: None,
-        auth_proxy_handle: None,
-    })
-}
-
 /// All slices: union of Cluster + Service + Provider. Same behavior as the
 /// monolithic path, but composed from the individual pieces.
 async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
 
-    // 1. Install ALL CRDs (union of all modes)
+    // 1. Install ALL CRDs (union of cluster + service modes)
     ensure_cluster_crds(client).await?;
     ensure_service_crds(client).await?;
-    ensure_provider_crds(client).await?;
 
     // 2. Install full infrastructure (reads from LatticeCluster CRD)
     ensure_infrastructure(client, Some(&*capi_installer)).await?;
@@ -420,9 +387,17 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     ));
 
     // Ensure local webhook infrastructure + start webhook server
-    lattice_secret_provider::ensure_local_webhook_infrastructure(client)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to ensure local webhook infrastructure: {e}"))?;
+    //    Retries indefinitely — ESO webhook may not have endpoints yet at startup.
+    retry_with_backoff(
+        &RetryConfig {
+            initial_delay: Duration::from_secs(2),
+            ..RetryConfig::infinite()
+        },
+        "ensure local webhook infrastructure (waiting for ESO)",
+        || async { lattice_secret_provider::ensure_local_webhook_infrastructure(client).await },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to ensure local webhook infrastructure: {e}"))?;
     tokio::spawn(lattice_secret_provider::start_webhook_server(
         client.clone(),
     ));

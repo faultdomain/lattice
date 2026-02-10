@@ -78,29 +78,6 @@ fn service_crds() -> Vec<CrdDef> {
     ]
 }
 
-/// CRDs needed by Provider mode:
-/// CloudProvider, SecretProvider, CedarPolicy, OIDCProvider
-fn provider_crds() -> Vec<CrdDef> {
-    vec![
-        CrdDef {
-            name: "cloudproviders.lattice.dev",
-            crd: CloudProvider::crd(),
-        },
-        CrdDef {
-            name: "secretproviders.lattice.dev",
-            crd: SecretProvider::crd(),
-        },
-        CrdDef {
-            name: "cedarpolicies.lattice.dev",
-            crd: CedarPolicy::crd(),
-        },
-        CrdDef {
-            name: "oidcproviders.lattice.dev",
-            crd: OIDCProvider::crd(),
-        },
-    ]
-}
-
 /// Install a set of CRDs using server-side apply
 async fn install_crds(client: &Client, crds_to_install: Vec<CrdDef>) -> anyhow::Result<()> {
     let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
@@ -129,13 +106,5 @@ pub async fn ensure_service_crds(client: &Client) -> anyhow::Result<()> {
     tracing::info!("Installing Service mode CRDs...");
     install_crds(client, service_crds()).await?;
     tracing::info!("Service mode CRDs installed/updated");
-    Ok(())
-}
-
-/// Ensure CRDs needed by Provider mode are installed
-pub async fn ensure_provider_crds(client: &Client) -> anyhow::Result<()> {
-    tracing::info!("Installing Provider mode CRDs...");
-    install_crds(client, provider_crds()).await?;
-    tracing::info!("Provider mode CRDs installed/updated");
     Ok(())
 }
