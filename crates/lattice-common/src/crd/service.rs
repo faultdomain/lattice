@@ -1091,9 +1091,7 @@ shareProcessNamespace: true
 
         assert_eq!(spec.runtime.sysctls.len(), 2);
         assert_eq!(
-            spec.runtime
-                .sysctls
-                .get("net.ipv4.conf.all.src_valid_mark"),
+            spec.runtime.sysctls.get("net.ipv4.conf.all.src_valid_mark"),
             Some(&"1".to_string())
         );
         assert_eq!(
@@ -1281,9 +1279,16 @@ workload:
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("GPU resource YAML should parse");
 
-        let gpu_resource = spec.workload.resources.get("my-gpu").expect("should have gpu resource");
+        let gpu_resource = spec
+            .workload
+            .resources
+            .get("my-gpu")
+            .expect("should have gpu resource");
         assert!(gpu_resource.type_.is_gpu());
-        let gpu = gpu_resource.gpu_params().expect("parse gpu params").expect("should have params");
+        let gpu = gpu_resource
+            .gpu_params()
+            .expect("parse gpu params")
+            .expect("should have params");
         assert_eq!(gpu.count, 1);
         assert_eq!(gpu.memory, Some("8Gi".to_string()));
         assert_eq!(gpu.compute, Some(20));
@@ -1306,7 +1311,9 @@ workload:
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("parse");
         let gpu = spec.workload.resources["my-gpu"]
-            .gpu_params().expect("parse").expect("params");
+            .gpu_params()
+            .expect("parse")
+            .expect("params");
         assert_eq!(gpu.count, 2);
         assert!(gpu.tolerations.is_none());
     }
@@ -1328,7 +1335,9 @@ workload:
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("parse");
         let gpu = spec.workload.resources["my-gpu"]
-            .gpu_params().expect("parse").expect("params");
+            .gpu_params()
+            .expect("parse")
+            .expect("params");
         assert_eq!(gpu.tolerations, Some(false));
     }
 

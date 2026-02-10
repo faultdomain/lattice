@@ -12,12 +12,9 @@ use super::error::CompilationError;
 use super::volume::GeneratedVolumes;
 use super::{
     gpu_node_selector, gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources,
-    SecretRef, TopologySpreadConstraint,
-};
-use super::{
     AppArmorProfile, Capabilities, Container, ContainerCompilationData, ContainerPort, EnvVar,
     K8sSecurityContext, LabelSelector, LocalObjectReference, PodSecurityContext, ResourceQuantity,
-    ResourceRequirements, SeccompProfile, Sysctl, Volume,
+    ResourceRequirements, SeccompProfile, SecretRef, Sysctl, TopologySpreadConstraint, Volume,
 };
 
 /// Compiled pod template — all the fields needed to build a K8s PodTemplateSpec.
@@ -71,8 +68,7 @@ impl PodTemplateCompiler {
         let gpu_ref = gpu.as_ref();
 
         // Compile main containers with volume mounts
-        let mut containers =
-            Self::compile_containers(workload, gpu_ref, volumes, container_data)?;
+        let mut containers = Self::compile_containers(workload, gpu_ref, volumes, container_data)?;
 
         // Compile sidecars (init + regular)
         let (init_containers, sidecar_containers) = Self::compile_sidecars(runtime, volumes);

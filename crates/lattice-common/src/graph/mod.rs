@@ -29,6 +29,18 @@ pub enum ServiceType {
     Unknown,
 }
 
+/// Port information carrying both service-facing and container-facing ports.
+///
+/// L7 policy (Istio AuthorizationPolicy) uses `service_port` — what the waypoint sees.
+/// L4 policy (CiliumNetworkPolicy) uses `container_port` — what the pod listens on after DNAT.
+#[derive(Clone, Copy, Debug)]
+pub struct PortInfo {
+    /// Service port (what clients connect to, what L7 policy sees)
+    pub service_port: u16,
+    /// Container port (what the pod listens on, what L4 policy sees after DNAT)
+    pub container_port: u16,
+}
+
 /// A node in the service graph representing a service
 #[derive(Clone, Debug)]
 pub struct ServiceNode {
@@ -46,8 +58,8 @@ pub struct ServiceNode {
     pub allows_all: bool,
     /// Container image (for local services)
     pub image: Option<String>,
-    /// Exposed ports: name -> port
-    pub ports: BTreeMap<String, u16>,
+    /// Exposed ports: name -> port info
+    pub ports: BTreeMap<String, PortInfo>,
     /// Parsed endpoints (for external services)
     pub endpoints: BTreeMap<String, ParsedEndpoint>,
     /// Resolution strategy (for external services)
@@ -87,10 +99,23 @@ impl ServiceNode {
             image: spec.workload.primary_image().map(String::from),
             ports: spec
                 .workload
-                .ports()
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
+                .service
+                .as_ref()
+                .map(|svc| {
+                    svc.ports
+                        .iter()
+                        .map(|(name, ps)| {
+                            (
+                                name.clone(),
+                                PortInfo {
+                                    service_port: ps.port,
+                                    container_port: ps.target_port.unwrap_or(ps.port),
+                                },
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             endpoints: BTreeMap::new(),
             resolution: None,
         }
@@ -165,10 +190,6 @@ pub struct ActiveEdge {
     pub callee_namespace: String,
     /// Target service name
     pub callee_name: String,
-    /// Caller's ports
-    pub caller_ports: BTreeMap<String, u16>,
-    /// Callee's ports
-    pub callee_ports: BTreeMap<String, u16>,
 }
 
 /// Thread-safe service graph using DashMap
@@ -378,8 +399,6 @@ impl ServiceGraph {
                     caller_name: caller_name.clone(),
                     callee_namespace: namespace.to_string(),
                     callee_name: name.to_string(),
-                    caller_ports: caller.ports.clone(),
-                    callee_ports: service.ports.clone(),
                 })
             })
             .collect()
@@ -387,9 +406,9 @@ impl ServiceGraph {
 
     /// Get active outbound edges for a service (callees with bilateral agreement)
     pub fn get_active_outbound_edges(&self, namespace: &str, name: &str) -> Vec<ActiveEdge> {
-        let Some(caller) = self.get_service(namespace, name) else {
+        if self.get_service(namespace, name).is_none() {
             return vec![];
-        };
+        }
 
         let key = (namespace.to_string(), name.to_string());
         let Some(outgoing) = self.edges_out.get(&key) else {
@@ -423,8 +442,6 @@ impl ServiceGraph {
                     caller_name: name.to_string(),
                     callee_namespace: callee_ns.clone(),
                     callee_name: callee_name.clone(),
-                    caller_ports: caller.ports.clone(),
-                    callee_ports: callee.ports.clone(),
                 })
             })
             .collect()

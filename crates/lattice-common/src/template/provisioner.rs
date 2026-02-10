@@ -159,12 +159,12 @@ impl ResourceProvisioner for ServiceProvisioner {
 
         let host = ctx.service_fqdn(service_name);
 
-        // Get the primary port (first one, or "http" if exists)
+        // Get the primary service port (first one, or "http" if exists)
         let port = node
             .ports
             .get("http")
             .or_else(|| node.ports.values().next())
-            .copied();
+            .map(|pi| pi.service_port);
 
         let url = port.map(|p| format!("http://{}:{}", host, p));
 

@@ -162,7 +162,7 @@ impl WorkloadSpec {
             .collect()
     }
 
-    /// Get the ports this workload exposes
+    /// Get the service-facing ports (what clients connect to).
     pub fn ports(&self) -> BTreeMap<&str, u16> {
         self.service
             .as_ref()
@@ -203,16 +203,16 @@ impl WorkloadSpec {
                             name, e
                         ))
                     })?;
-                    let gpu_params: super::resources::GpuParams =
-                        serde_json::from_value(value).map_err(|e| {
+                    let gpu_params: super::resources::GpuParams = serde_json::from_value(value)
+                        .map_err(|e| {
                             crate::Error::validation(format!(
                                 "resource '{}': invalid gpu params: {}",
                                 name, e
                             ))
                         })?;
-                    gpu_params
-                        .validate()
-                        .map_err(|e| crate::Error::validation(format!("resource '{}': {}", name, e)))?;
+                    gpu_params.validate().map_err(|e| {
+                        crate::Error::validation(format!("resource '{}': {}", name, e))
+                    })?;
                 }
             }
         }

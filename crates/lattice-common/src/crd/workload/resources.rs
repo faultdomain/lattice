@@ -415,21 +415,23 @@ impl GpuParams {
 
     /// Map a short GPU model name to the `nvidia.com/gpu.product` NFD label value.
     pub fn product_label(&self) -> Option<String> {
-        self.model.as_ref().map(|model| match model.to_uppercase().as_str() {
-            "H100" => "NVIDIA-H100-80GB-HBM3".to_string(),
-            "H100SXM" => "NVIDIA-H100-80GB-HBM3".to_string(),
-            "H100PCIE" => "NVIDIA-H100-PCIe".to_string(),
-            "A100" => "NVIDIA-A100-SXM4-80GB".to_string(),
-            "A100-80G" => "NVIDIA-A100-SXM4-80GB".to_string(),
-            "A100-40G" => "NVIDIA-A100-SXM4-40GB".to_string(),
-            "A10G" => "NVIDIA-A10G".to_string(),
-            "L40S" => "NVIDIA-L40S".to_string(),
-            "L40" => "NVIDIA-L40".to_string(),
-            "L4" => "NVIDIA-L4".to_string(),
-            "T4" => "NVIDIA-Tesla-T4".to_string(),
-            "V100" => "NVIDIA-Tesla-V100-SXM2-16GB".to_string(),
-            _ => model.to_string(),
-        })
+        self.model
+            .as_ref()
+            .map(|model| match model.to_uppercase().as_str() {
+                "H100" => "NVIDIA-H100-80GB-HBM3".to_string(),
+                "H100SXM" => "NVIDIA-H100-80GB-HBM3".to_string(),
+                "H100PCIE" => "NVIDIA-H100-PCIe".to_string(),
+                "A100" => "NVIDIA-A100-SXM4-80GB".to_string(),
+                "A100-80G" => "NVIDIA-A100-SXM4-80GB".to_string(),
+                "A100-40G" => "NVIDIA-A100-SXM4-40GB".to_string(),
+                "A10G" => "NVIDIA-A10G".to_string(),
+                "L40S" => "NVIDIA-L40S".to_string(),
+                "L40" => "NVIDIA-L40".to_string(),
+                "L4" => "NVIDIA-L4".to_string(),
+                "T4" => "NVIDIA-Tesla-T4".to_string(),
+                "V100" => "NVIDIA-Tesla-V100-SXM2-16GB".to_string(),
+                _ => model.to_string(),
+            })
     }
 
     /// Build a node selector map for GPU model selection.
@@ -922,7 +924,10 @@ mod tests {
             model: Some("H100".to_string()),
             ..Default::default()
         };
-        assert_eq!(params.product_label(), Some("NVIDIA-H100-80GB-HBM3".to_string()));
+        assert_eq!(
+            params.product_label(),
+            Some("NVIDIA-H100-80GB-HBM3".to_string())
+        );
 
         let params = GpuParams {
             count: 1,

@@ -405,26 +405,37 @@ impl<'a> ServiceCompiler<'a> {
         let ingress = if let Some(ref ingress_spec) = service.spec.ingress {
             let ingress = IngressCompiler::compile(name, namespace, ingress_spec, service_port);
 
-            // Add gateway allow policy for north-south traffic
-            let ports: Vec<u16> = workload
+            // Add gateway allow policies for north-south traffic
+            let gateway_name = mesh::ingress_gateway_name(namespace);
+
+            // L7 (Istio AuthorizationPolicy): waypoint sees the service port
+            let service_ports: Vec<u16> = workload
                 .service
                 .as_ref()
                 .map(|s| s.ports.values().map(|p| p.port).collect())
                 .unwrap_or_default();
-
-            let gateway_name = mesh::ingress_gateway_name(namespace);
             let gateway_policy =
-                policy_compiler.compile_gateway_allow_policy(name, namespace, &ports);
+                policy_compiler.compile_gateway_allow_policy(name, namespace, &service_ports);
             policies.authorization_policies.push(gateway_policy);
 
-            // Add Cilium L4 rule: allow Istio gateway proxy → service
+            // L4 (Cilium): operates on pod network, sees container port after DNAT
+            let container_ports: Vec<u16> = workload
+                .service
+                .as_ref()
+                .map(|s| {
+                    s.ports
+                        .values()
+                        .map(|p| p.target_port.unwrap_or(p.port))
+                        .collect()
+                })
+                .unwrap_or_default();
             if let Some(cilium_policy) = policies.cilium_policies.first_mut() {
                 cilium_policy
                     .spec
                     .ingress
                     .push(PolicyCompiler::compile_gateway_ingress_rule(
                         &gateway_name,
-                        &ports,
+                        &container_ports,
                     ));
             }
 
@@ -1492,7 +1503,8 @@ mod tests {
             run_as_non_root: Some(false),
             ..Default::default()
         });
-        let overrides2 = collect_security_overrides(&service2.spec.workload, &service2.spec.runtime);
+        let overrides2 =
+            collect_security_overrides(&service2.spec.workload, &service2.spec.runtime);
         assert_eq!(overrides2.len(), 1);
         assert_eq!(overrides2[0].override_id, "runAsRoot");
     }

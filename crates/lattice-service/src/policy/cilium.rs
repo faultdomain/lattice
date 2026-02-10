@@ -49,14 +49,14 @@ impl<'a> PolicyCompiler<'a> {
                     ports: service
                         .ports
                         .values()
-                        .flat_map(|p| {
+                        .flat_map(|pi| {
                             vec![
                                 CiliumPort {
-                                    port: p.to_string(),
+                                    port: pi.container_port.to_string(),
                                     protocol: "TCP".to_string(),
                                 },
                                 CiliumPort {
-                                    port: p.to_string(),
+                                    port: pi.container_port.to_string(),
                                     protocol: "UDP".to_string(),
                                 },
                             ]
@@ -286,7 +286,10 @@ impl<'a> PolicyCompiler<'a> {
         (fqdns, cidrs)
     }
 
-    /// Build port rules for a local service (TCP and UDP)
+    /// Build port rules for a local service (TCP and UDP).
+    ///
+    /// Uses container_port (target_port) since Cilium operates at L4 on the pod
+    /// network and sees the post-DNAT destination port.
     fn build_port_rules_for_service(callee: &ServiceNode) -> Vec<CiliumPortRule> {
         if callee.ports.is_empty() {
             vec![]
@@ -295,14 +298,14 @@ impl<'a> PolicyCompiler<'a> {
                 ports: callee
                     .ports
                     .values()
-                    .flat_map(|p| {
+                    .flat_map(|pi| {
                         vec![
                             CiliumPort {
-                                port: p.to_string(),
+                                port: pi.container_port.to_string(),
                                 protocol: "TCP".to_string(),
                             },
                             CiliumPort {
-                                port: p.to_string(),
+                                port: pi.container_port.to_string(),
                                 protocol: "UDP".to_string(),
                             },
                         ]
