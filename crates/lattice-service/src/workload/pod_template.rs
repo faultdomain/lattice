@@ -90,17 +90,7 @@ impl PodTemplateCompiler {
         }
 
         // Build pod volumes from PVCs and emptyDir
-        let mut pod_volumes: Vec<Volume> = volumes
-            .volumes
-            .iter()
-            .map(|pv| Volume {
-                name: pv.name.clone(),
-                config_map: None,
-                secret: None,
-                empty_dir: pv.empty_dir.clone(),
-                persistent_volume_claim: pv.persistent_volume_claim.clone(),
-            })
-            .collect();
+        let mut pod_volumes: Vec<Volume> = volumes.volumes.clone();
 
         // Add SHM volume for GPU pods
         if let Some((shm_vol, _)) = gpu_shm_volume(gpu_ref) {
@@ -109,11 +99,10 @@ impl PodTemplateCompiler {
 
         // Add file volumes from files::compile (deduplicate by name)
         for file_vols in container_data.per_container_file_volumes.values() {
-            for vol in file_vols {
-                if !pod_volumes.iter().any(|v| v.name == vol.name) {
-                    pod_volumes.push(vol.clone());
-                }
-            }
+            super::volume::VolumeCompiler::extend_volumes_dedup(
+                &mut pod_volumes,
+                file_vols.clone(),
+            );
         }
 
         // Compile pod-level security context (always returns secure defaults)

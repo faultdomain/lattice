@@ -260,103 +260,100 @@ async fn verify_node_colocation(kubeconfig_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Write a marker file in one deploy, then poll-read it from another deploy.
+async fn verify_volume_marker(
+    kubeconfig_path: &str,
+    writer_deploy: &str,
+    writer_path: &str,
+    reader_deploy: &str,
+    reader_path: &str,
+    marker: &str,
+) -> Result<(), String> {
+    let kp = kubeconfig_path.to_string();
+    let writer_target = format!("deploy/{}", writer_deploy);
+    let reader_target = format!("deploy/{}", reader_deploy);
+    let write_cmd = format!("echo '{}' > {}", marker, writer_path);
+    let read_cmd = format!("cat {}", reader_path);
+    let marker = marker.to_string();
+
+    wait_for_condition(
+        &format!(
+            "{} to read {}'s marker via shared volume",
+            reader_deploy, writer_deploy
+        ),
+        Duration::from_secs(60),
+        Duration::from_secs(3),
+        || {
+            let kp = kp.clone();
+            let writer_target = writer_target.clone();
+            let reader_target = reader_target.clone();
+            let write_cmd = write_cmd.clone();
+            let read_cmd = read_cmd.clone();
+            let marker = marker.clone();
+            async move {
+                let _ = run_kubectl(&[
+                    "--kubeconfig",
+                    &kp,
+                    "exec",
+                    "-n",
+                    NAMESPACE,
+                    &writer_target,
+                    "--",
+                    "sh",
+                    "-c",
+                    &write_cmd,
+                ])
+                .await;
+                match run_kubectl(&[
+                    "--kubeconfig",
+                    &kp,
+                    "exec",
+                    "-n",
+                    NAMESPACE,
+                    &reader_target,
+                    "--",
+                    "sh",
+                    "-c",
+                    &read_cmd,
+                ])
+                .await
+                {
+                    Ok(result) => Ok(result.contains(&marker)),
+                    Err(_) => Ok(false),
+                }
+            }
+        },
+    )
+    .await
+}
+
 async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying volume sharing...");
 
     // jellyfin writes to library/, sonarr reads it
-    let kp = kubeconfig_path.to_string();
-    wait_for_condition(
-        "sonarr to read jellyfin's marker via shared volume",
-        Duration::from_secs(60),
-        Duration::from_secs(3),
-        || {
-            let kp = kp.clone();
-            async move {
-                let deploy_jellyfin = format!("deploy/{}", "jellyfin");
-                let _ = run_kubectl(&[
-                    "--kubeconfig",
-                    &kp,
-                    "exec",
-                    "-n",
-                    NAMESPACE,
-                    &deploy_jellyfin,
-                    "--",
-                    "sh",
-                    "-c",
-                    "echo 'jellyfin-marker' > /media/.test-marker",
-                ])
-                .await;
-                let deploy_sonarr = format!("deploy/{}", "sonarr");
-                match run_kubectl(&[
-                    "--kubeconfig",
-                    &kp,
-                    "exec",
-                    "-n",
-                    NAMESPACE,
-                    &deploy_sonarr,
-                    "--",
-                    "sh",
-                    "-c",
-                    "cat /tv/.test-marker",
-                ])
-                .await
-                {
-                    Ok(result) => Ok(result.contains("jellyfin-marker")),
-                    Err(_) => Ok(false),
-                }
-            }
-        },
+    verify_volume_marker(
+        kubeconfig_path,
+        "jellyfin",
+        "/media/.test-marker",
+        "sonarr",
+        "/tv/.test-marker",
+        "jellyfin-marker",
     )
     .await?;
 
     // nzbget writes to downloads/, sonarr reads it
-    let kp = kubeconfig_path.to_string();
-    wait_for_condition(
-        "sonarr to read nzbget's marker via shared volume",
-        Duration::from_secs(60),
-        Duration::from_secs(3),
-        || {
-            let kp = kp.clone();
-            async move {
-                let deploy_nzbget = format!("deploy/{}", "nzbget");
-                let _ = run_kubectl(&[
-                    "--kubeconfig",
-                    &kp,
-                    "exec",
-                    "-n",
-                    NAMESPACE,
-                    &deploy_nzbget,
-                    "--",
-                    "sh",
-                    "-c",
-                    "echo 'nzbget-marker' > /downloads/.test-marker",
-                ])
-                .await;
-                let deploy_sonarr = format!("deploy/{}", "sonarr");
-                match run_kubectl(&[
-                    "--kubeconfig",
-                    &kp,
-                    "exec",
-                    "-n",
-                    NAMESPACE,
-                    &deploy_sonarr,
-                    "--",
-                    "sh",
-                    "-c",
-                    "cat /downloads/.test-marker",
-                ])
-                .await
-                {
-                    Ok(result) => Ok(result.contains("nzbget-marker")),
-                    Err(_) => Ok(false),
-                }
-            }
-        },
+    verify_volume_marker(
+        kubeconfig_path,
+        "nzbget",
+        "/downloads/.test-marker",
+        "sonarr",
+        "/downloads/.test-marker",
+        "nzbget-marker",
     )
     .await?;
 
     // Verify subpath isolation - jellyfin should NOT see nzbget's marker in its /media mount
-    let deploy_jellyfin = format!("deploy/{}", "jellyfin");
+    let deploy_jellyfin = "deploy/jellyfin".to_string();
     let isolated = match run_kubectl(&[
         "--kubeconfig",
         kubeconfig_path,
@@ -429,7 +426,7 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     info!("Verifying bilateral agreements...");
 
     // sonarr -> jellyfin (allowed)
-    let deploy_sonarr = format!("deploy/{}", "sonarr");
+    let deploy_sonarr = "deploy/sonarr".to_string();
     let code = run_kubectl(&[
         "--kubeconfig", kubeconfig_path,
         "exec", "-n", NAMESPACE, &deploy_sonarr,
@@ -462,7 +459,7 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     info!("sonarr->nzbget: {} (allowed)", code);
 
     // jellyfin -> sonarr (should be blocked)
-    let deploy_jellyfin = format!("deploy/{}", "jellyfin");
+    let deploy_jellyfin = "deploy/jellyfin".to_string();
     let code = run_kubectl(&[
         "--kubeconfig", kubeconfig_path,
         "exec", "-n", NAMESPACE, &deploy_jellyfin,
@@ -473,7 +470,13 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     .unwrap_or_else(|_| "000".to_string())
     .trim()
     .to_string();
-    info!("jellyfin->sonarr: {} (expected 403)", code);
+    if code != "403" {
+        return Err(format!(
+            "jellyfin->sonarr should be blocked (403) but got {}",
+            code
+        ));
+    }
+    info!("jellyfin->sonarr: {} (blocked as expected)", code);
 
     Ok(())
 }

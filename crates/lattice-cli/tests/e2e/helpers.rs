@@ -18,7 +18,7 @@ use lattice_common::crd::{BootstrapProvider, ClusterPhase, LatticeService};
 #[cfg(feature = "provider-e2e")]
 use lattice_common::{
     retry::{retry_with_backoff, RetryConfig},
-    LABEL_NAME, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE,
+    LABEL_NAME, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_WEBHOOK_STORE_NAME,
 };
 #[cfg(feature = "provider-e2e")]
 use tokio::time::sleep;
@@ -115,10 +115,10 @@ pub static BUSYBOX_IMAGE: LazyLock<String> =
 
 /// SecretProvider name used for GHCR registry credentials across all tests.
 ///
-/// Every test that deploys LatticeServices needs a local SecretProvider with
-/// this name, plus a seeded `local-regcreds` source secret.
+/// Points at the operator's built-in `lattice-local` ClusterSecretStore
+/// (created by `ensure_local_webhook_infrastructure()` at startup).
 #[cfg(feature = "provider-e2e")]
-pub const REGCREDS_PROVIDER: &str = "local-test";
+pub const REGCREDS_PROVIDER: &str = LOCAL_WEBHOOK_STORE_NAME;
 
 /// Remote key for the GHCR registry credentials secret in the local webhook store.
 #[cfg(feature = "provider-e2e")]
@@ -418,7 +418,7 @@ pub fn ensure_docker_network() -> Result<(), String> {
 // Command Execution Helpers
 // =============================================================================
 
-/// Run a shell command with 10s timeout
+/// Run a shell command with 30s timeout
 #[cfg(feature = "provider-e2e")]
 pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     use std::io::Read;
@@ -1373,17 +1373,6 @@ pub async fn get_sa_token(
     namespace: &str,
     sa_name: &str,
 ) -> Result<String, String> {
-    get_sa_token_with_duration(kubeconfig, namespace, sa_name, "8h").await
-}
-
-/// Get a ServiceAccount token with custom duration
-#[cfg(feature = "provider-e2e")]
-async fn get_sa_token_with_duration(
-    kubeconfig: &str,
-    namespace: &str,
-    sa_name: &str,
-    duration: &str,
-) -> Result<String, String> {
     let token = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
@@ -1392,7 +1381,7 @@ async fn get_sa_token_with_duration(
         sa_name,
         "-n",
         namespace,
-        &format!("--duration={}", duration),
+        "--duration=8h",
     ])
     .await?;
     Ok(token.trim().to_string())
@@ -1554,87 +1543,41 @@ fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
 // LatticeService Test Helpers
 // =============================================================================
 
-/// Create a LatticeService with secret resources for testing.
+/// Build a LatticeService with busybox boilerplate: ghcr-creds, ports (http:8080),
+/// ObjectMeta, RuntimeSpec with imagePullSecrets.
 ///
-/// This is the canonical builder for test services with secrets.
-/// Used by both Cedar secret tests and ESO pipeline tests.
-///
-/// # Arguments
-/// * `name` - Service name
-/// * `namespace` - Target namespace
-/// * `secrets` - Vec of (resource_name, remote_key, provider, optional_keys)
+/// Callers provide their own `containers` and `resources`; this helper adds
+/// ghcr-creds to `resources` and wraps everything in the standard shell.
 #[cfg(feature = "provider-e2e")]
-pub fn create_service_with_secrets(
+pub fn build_busybox_service(
     name: &str,
     namespace: &str,
-    secrets: Vec<(&str, &str, &str, Option<Vec<&str>>)>,
+    containers: std::collections::BTreeMap<String, lattice_common::crd::ContainerSpec>,
+    mut resources: std::collections::BTreeMap<String, lattice_common::crd::ResourceSpec>,
 ) -> lattice_common::crd::LatticeService {
     use std::collections::BTreeMap;
 
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ResourceQuantity,
-        ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec, ServicePortsSpec,
-        WorkloadSpec,
+        LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType, RuntimeSpec,
+        ServicePortsSpec, WorkloadSpec,
     };
 
-    let mut resources = BTreeMap::new();
-    for (resource_name, remote_key, provider, keys) in secrets {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!(provider));
-        if let Some(ks) = keys {
-            params.insert("keys".to_string(), serde_json::json!(ks));
-        }
-        params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
-
+    // Add ghcr-creds only if not already provided by the caller
+    if !resources.contains_key("ghcr-creds") {
+        let mut reg_params = BTreeMap::new();
+        reg_params.insert("provider".to_string(), serde_json::json!(REGCREDS_PROVIDER));
+        reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
         resources.insert(
-            resource_name.to_string(),
+            "ghcr-creds".to_string(),
             ResourceSpec {
                 type_: ResourceType::Secret,
-                id: Some(remote_key.to_string()),
-                params: Some(params),
+                id: Some(REGCREDS_REMOTE_KEY.to_string()),
+                params: Some(reg_params),
                 ..Default::default()
             },
         );
     }
-
-    // Every service needs ghcr-creds for pulling GHCR images
-    let mut reg_params = BTreeMap::new();
-    reg_params.insert("provider".to_string(), serde_json::json!(REGCREDS_PROVIDER));
-    reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
-    resources.insert(
-        "ghcr-creds".to_string(),
-        ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some(REGCREDS_REMOTE_KEY.to_string()),
-            params: Some(reg_params),
-            ..Default::default()
-        },
-    );
-
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: BUSYBOX_IMAGE.to_string(),
-            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
-            resources: Some(ResourceRequirements {
-                requests: Some(ResourceQuantity {
-                    cpu: Some("50m".to_string()),
-                    memory: Some("64Mi".to_string()),
-                }),
-                limits: Some(ResourceQuantity {
-                    cpu: Some("200m".to_string()),
-                    memory: Some("128Mi".to_string()),
-                }),
-            }),
-            security: Some(lattice_common::crd::SecurityContext {
-                apparmor_profile: Some("Unconfined".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
 
     let mut ports = BTreeMap::new();
     ports.insert(
@@ -1666,6 +1609,74 @@ pub fn create_service_with_secrets(
         },
         status: None,
     }
+}
+
+/// Create a LatticeService with secret resources for testing.
+///
+/// This is the canonical builder for test services with secrets.
+/// Used by both Cedar secret tests and ESO pipeline tests.
+///
+/// # Arguments
+/// * `name` - Service name
+/// * `namespace` - Target namespace
+/// * `secrets` - Vec of (resource_name, remote_key, provider, optional_keys)
+#[cfg(feature = "provider-e2e")]
+pub fn create_service_with_secrets(
+    name: &str,
+    namespace: &str,
+    secrets: Vec<(&str, &str, &str, Option<Vec<&str>>)>,
+) -> lattice_common::crd::LatticeService {
+    use std::collections::BTreeMap;
+
+    use lattice_common::crd::{
+        ContainerSpec, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
+    };
+
+    let mut resources = BTreeMap::new();
+    for (resource_name, remote_key, provider, keys) in secrets {
+        let mut params = BTreeMap::new();
+        params.insert("provider".to_string(), serde_json::json!(provider));
+        if let Some(ks) = keys {
+            params.insert("keys".to_string(), serde_json::json!(ks));
+        }
+        params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+
+        resources.insert(
+            resource_name.to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                id: Some(remote_key.to_string()),
+                params: Some(params),
+                ..Default::default()
+            },
+        );
+    }
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
+            security: Some(lattice_common::crd::SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    build_busybox_service(name, namespace, containers, resources)
 }
 
 /// Set the main container to run as root (busybox needs this).
@@ -2435,38 +2446,6 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 // Local Secrets Helpers
 // =============================================================================
 
-/// Create a SecretProvider CRD with a webhook provider pointing at the local secrets service
-#[cfg(feature = "provider-e2e")]
-async fn create_local_secrets_provider(kubeconfig: &str, name: &str) -> Result<(), String> {
-    info!(
-        "[LocalSecrets] Creating SecretProvider '{}' with webhook provider...",
-        name
-    );
-
-    let provider_yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: SecretProvider
-metadata:
-  name: {name}
-  namespace: {namespace}
-spec:
-  provider:
-    webhook:
-      url: "http://lattice-local-secrets.lattice-system.svc:8787/secret/{{{{ .remoteRef.key }}}}/{{{{ .remoteRef.property }}}}"
-      method: GET
-      result:
-        jsonPath: "$"
-"#,
-        name = name,
-        namespace = LATTICE_SYSTEM_NAMESPACE,
-    );
-
-    apply_yaml_with_retry(kubeconfig, &provider_yaml).await?;
-
-    info!("[LocalSecrets] SecretProvider '{}' created", name);
-    Ok(())
-}
-
 /// Seed a K8s Secret in the `lattice-secrets` namespace with the source label.
 ///
 /// The secret will be labeled with `lattice.dev/secret-source: "true"` so the
@@ -2527,52 +2506,45 @@ metadata:
     apply_yaml_with_retry(kubeconfig, &ns_yaml).await
 }
 
-/// Wait for a SecretProvider CRD to reach the Ready phase.
+/// Wait for a ClusterSecretStore to exist in the cluster.
 ///
-/// Polls the `.status.phase` field until it reads "Ready" or "Failed".
-/// Used by local-backed secret provider tests.
+/// The operator creates `lattice-local` at startup via
+/// `ensure_local_webhook_infrastructure()`. This polls until the object
+/// exists, which means the operator has completed its startup sequence.
 #[cfg(feature = "provider-e2e")]
-pub async fn wait_for_secrets_provider_ready(
+pub async fn wait_for_cluster_secret_store_ready(
     kubeconfig: &str,
-    provider_name: &str,
+    store_name: &str,
 ) -> Result<(), String> {
     info!(
-        "[SecretProvider] Waiting for '{}' to be Ready...",
-        provider_name
+        "[ClusterSecretStore] Waiting for '{}' to exist...",
+        store_name
     );
 
     wait_for_condition(
-        &format!("SecretProvider '{}' to be Ready", provider_name),
-        Duration::from_secs(600),
-        Duration::from_secs(5),
+        &format!("ClusterSecretStore '{}' to exist", store_name),
+        Duration::from_secs(120),
+        Duration::from_secs(3),
         || async move {
             let output = run_kubectl(&[
                 "--kubeconfig",
                 kubeconfig,
                 "get",
-                "secretprovider",
-                provider_name,
-                "-n",
-                LATTICE_SYSTEM_NAMESPACE,
+                "clustersecretstore",
+                store_name,
                 "-o",
-                "jsonpath={.status.phase}",
+                "jsonpath={.metadata.name}",
             ])
             .await;
 
             match output {
-                Ok(raw) => {
-                    let phase = raw.trim();
-                    info!("[SecretProvider] '{}' phase: {}", provider_name, phase);
-                    if phase == "Ready" {
-                        return Ok(true);
-                    }
-                    if phase == "Failed" {
-                        return Err(format!("SecretProvider '{}' failed", provider_name));
-                    }
-                    Ok(false)
+                Ok(name) if name.trim() == store_name => {
+                    info!("[ClusterSecretStore] '{}' exists", store_name);
+                    Ok(true)
                 }
+                Ok(_) => Ok(false),
                 Err(e) => {
-                    info!("[SecretProvider] Error checking '{}': {}", provider_name, e);
+                    info!("[ClusterSecretStore] '{}' not found yet: {}", store_name, e);
                     Ok(false)
                 }
             }
@@ -2664,11 +2636,9 @@ pub fn create_service_with_all_secret_routes(
 ) -> lattice_common::crd::LatticeService {
     use std::collections::BTreeMap;
 
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        ContainerSpec, FileMount, LatticeService, LatticeServiceSpec, PortSpec, ResourceQuantity,
-        ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec, ServicePortsSpec,
-        WorkloadSpec,
+        ContainerSpec, FileMount, ResourceQuantity, ResourceRequirements, ResourceSpec,
+        ResourceType,
     };
     use lattice_common::template::TemplateString;
 
@@ -2784,7 +2754,7 @@ pub fn create_service_with_all_secret_routes(
         },
     );
 
-    // Route 4: ghcr-creds for imagePullSecrets
+    // Route 4: ghcr-creds for imagePullSecrets (custom provider)
     let mut reg_params = BTreeMap::new();
     reg_params.insert("provider".to_string(), serde_json::json!(provider));
     reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
@@ -2798,36 +2768,7 @@ pub fn create_service_with_all_secret_routes(
         },
     );
 
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 8080,
-            target_port: None,
-            protocol: None,
-        },
-    );
-
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                resources,
-                service: Some(ServicePortsSpec { ports }),
-            },
-            runtime: RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-        status: None,
-    }
+    build_busybox_service(name, namespace, containers, resources)
 }
 
 // =============================================================================
@@ -3125,17 +3066,16 @@ pub async fn verify_synced_secret_keys(
 // Regcreds Infrastructure Setup
 // =============================================================================
 
-/// Set up the local SecretProvider, seed GHCR regcreds, and apply a broad
-/// Cedar policy permitting all services to access them.
+/// Wait for the operator's built-in ClusterSecretStore, seed GHCR regcreds,
+/// and apply a broad Cedar policy permitting all services to access them.
 ///
 /// Call this before deploying any LatticeService in a test — every service
 /// declares `ghcr-creds` as an imagePullSecret resource pointing at
 /// `local-regcreds`, so the local webhook must be ready to serve it.
 #[cfg(feature = "provider-e2e")]
 pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), String> {
-    // Create the local SecretProvider (idempotent — uses kubectl apply)
-    create_local_secrets_provider(kubeconfig, REGCREDS_PROVIDER).await?;
-    wait_for_secrets_provider_ready(kubeconfig, REGCREDS_PROVIDER).await?;
+    // Wait for the operator's built-in lattice-local ClusterSecretStore
+    wait_for_cluster_secret_store_ready(kubeconfig, REGCREDS_PROVIDER).await?;
 
     // Seed the GHCR credentials as a source secret for the webhook
     seed_local_regcreds(kubeconfig, REGCREDS_REMOTE_KEY).await?;

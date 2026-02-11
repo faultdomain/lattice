@@ -44,7 +44,7 @@ spec:
         type: secret
         id: local-regcreds
         params:
-          provider: local-test
+          provider: lattice-local
           refreshInterval: 1h
       # Owned volumes (private to this service)
       config:

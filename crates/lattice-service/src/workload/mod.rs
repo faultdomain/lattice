@@ -21,7 +21,7 @@ pub use error::CompilationError;
 pub use pod_template::{CompiledPodTemplate, PodTemplateCompiler};
 pub use secrets::{GeneratedSecrets, SecretRef, SecretsCompiler};
 pub use volume::{
-    Affinity, GeneratedVolumes, PersistentVolumeClaim, PodAffinity, PodVolume, PvcVolumeSource,
+    Affinity, GeneratedVolumes, PersistentVolumeClaim, PodAffinity, PvcVolumeSource,
     VolumeCompiler, VOLUME_OWNER_LABEL_PREFIX,
 };
 

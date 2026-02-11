@@ -17,7 +17,6 @@ use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::mesh_tests::{run_mesh_test, run_random_mesh_test, start_mesh_test};
-use super::super::providers::InfraProvider;
 use super::cedar::apply_e2e_default_policy;
 
 /// Run all mesh bilateral agreement tests
@@ -132,11 +131,6 @@ pub fn mesh_tests_enabled() -> bool {
     std::env::var("LATTICE_ENABLE_MESH_TEST")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(true) // Enabled by default
-}
-
-/// Helper to determine if provider is Docker
-pub fn is_docker_provider(ctx: &InfraContext) -> bool {
-    ctx.provider == InfraProvider::Docker
 }
 
 // =============================================================================

@@ -59,6 +59,12 @@ pub const LOCAL_SECRETS_NAMESPACE: &str = "lattice-secrets";
 /// Port for the local secrets webhook (ESO webhook backend)
 pub const LOCAL_SECRETS_PORT: u16 = 8787;
 
+/// ClusterSecretStore name for the built-in local webhook backend.
+///
+/// Created by the operator on startup via `ensure_local_webhook_infrastructure()`.
+/// Tests and fixture YAMLs should reference this name as their secret provider.
+pub const LOCAL_WEBHOOK_STORE_NAME: &str = "lattice-local";
+
 /// Construct the CAPI namespace for a cluster.
 ///
 /// CAPI resources for each cluster are stored in a dedicated namespace

@@ -31,6 +31,7 @@
 use std::time::Duration;
 
 use lattice_common::crd::LatticeService;
+use lattice_common::LOCAL_WEBHOOK_STORE_NAME;
 use tracing::info;
 
 use super::super::context::InfraContext;
@@ -48,9 +49,6 @@ use super::cedar::apply_e2e_default_policy;
 // =============================================================================
 // Constants
 // =============================================================================
-
-/// Local test SecretProvider name
-const LOCAL_TEST_PROVIDER: &str = "local-test";
 
 /// Namespace for basic local secret test
 const BASIC_TEST_NAMESPACE: &str = "local-secrets-test";
@@ -245,7 +243,7 @@ async fn run_basic_secret_test(kubeconfig: &str) -> Result<(), String> {
         vec![(
             "db-creds",
             "local-db-creds",
-            LOCAL_TEST_PROVIDER,
+            LOCAL_WEBHOOK_STORE_NAME,
             Some(vec!["username", "password"]),
         )],
     ));
@@ -265,7 +263,7 @@ async fn run_basic_secret_test(kubeconfig: &str) -> Result<(), String> {
         kubeconfig,
         BASIC_TEST_NAMESPACE,
         "local-api-db-creds",
-        LOCAL_TEST_PROVIDER,
+        LOCAL_WEBHOOK_STORE_NAME,
         "local-db-creds",
         Some(&["username", "password"]),
     )
@@ -300,7 +298,7 @@ async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String>
         vec![(
             "db-creds",
             "local-db-creds",
-            LOCAL_TEST_PROVIDER,
+            LOCAL_WEBHOOK_STORE_NAME,
             Some(vec!["username", "password"]),
         )],
     ));
@@ -360,7 +358,7 @@ async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), Strin
         vec![(
             "db-creds",
             "local-db-creds",
-            LOCAL_TEST_PROVIDER,
+            LOCAL_WEBHOOK_STORE_NAME,
             Some(vec!["username", "password"]),
         )],
     ));
@@ -406,7 +404,7 @@ async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), Strin
     let service = with_run_as_root(create_service_with_all_secret_routes(
         "route3-file-mount",
         ROUTES_TEST_NAMESPACE,
-        LOCAL_TEST_PROVIDER,
+        LOCAL_WEBHOOK_STORE_NAME,
     ));
 
     deploy_and_wait_for_phase(
@@ -452,7 +450,7 @@ async fn run_route4_image_pull_secrets_test(kubeconfig: &str) -> Result<(), Stri
     let service = with_run_as_root(create_service_with_all_secret_routes(
         "route4-pull-secrets",
         ROUTES_TEST_NAMESPACE,
-        LOCAL_TEST_PROVIDER,
+        LOCAL_WEBHOOK_STORE_NAME,
     ));
 
     deploy_and_wait_for_phase(
@@ -490,7 +488,7 @@ async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
         vec![(
             "all-db-config",
             "local-database-config",
-            LOCAL_TEST_PROVIDER,
+            LOCAL_WEBHOOK_STORE_NAME,
             None, // No explicit keys -> dataFrom
         )],
     ));
@@ -509,7 +507,7 @@ async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
         "route5-data-from-all-db-config",
-        LOCAL_TEST_PROVIDER,
+        LOCAL_WEBHOOK_STORE_NAME,
         "local-database-config",
         None,
     )
@@ -534,7 +532,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     let service = with_run_as_root(create_service_with_all_secret_routes(
         "secret-routes-combined",
         ROUTES_TEST_NAMESPACE,
-        LOCAL_TEST_PROVIDER,
+        LOCAL_WEBHOOK_STORE_NAME,
     ));
 
     deploy_and_wait_for_phase(

@@ -17,14 +17,12 @@ use lattice_common::kube_utils::HasApiResource;
 use lattice_common::{
     ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE,
     LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT,
+    LOCAL_WEBHOOK_STORE_NAME,
 };
 
 use crate::eso::{
     ClusterSecretStore, ClusterSecretStoreSpec, ProviderSpec, WebhookProvider, WebhookResult,
 };
-
-/// Well-known name for the local webhook ClusterSecretStore
-pub(crate) const LOCAL_WEBHOOK_STORE_NAME: &str = "lattice-local";
 
 /// Service name for the local secrets webhook
 const LOCAL_SECRETS_SERVICE: &str = "lattice-local-secrets";

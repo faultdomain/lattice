@@ -133,25 +133,11 @@ pub struct GeneratedVolumes {
     /// Pod affinity rules (for RWO volume co-location)
     pub affinity: Option<Affinity>,
     /// Volumes to add to pod spec
-    pub volumes: Vec<PodVolume>,
+    pub volumes: Vec<super::Volume>,
     /// Volume mounts per container (container_name -> mounts)
     pub volume_mounts: BTreeMap<String, Vec<super::VolumeMount>>,
     /// Scheduling gates to add to pod spec
     pub scheduling_gates: Vec<super::SchedulingGate>,
-}
-
-/// Volume definition for pod spec
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PodVolume {
-    /// Volume name
-    pub name: String,
-    /// PVC volume source
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persistent_volume_claim: Option<PvcVolumeSource>,
-    /// EmptyDir volume source
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub empty_dir: Option<super::EmptyDirVolumeSource>,
 }
 
 impl GeneratedVolumes {
@@ -292,8 +278,10 @@ impl VolumeCompiler {
             }
 
             // Generate pod volume
-            output.volumes.push(PodVolume {
+            output.volumes.push(super::Volume {
                 name: resource_name.to_string(),
+                config_map: None,
+                secret: None,
                 persistent_volume_claim: Some(PvcVolumeSource {
                     claim_name: pvc_name,
                     read_only: None,
@@ -305,16 +293,11 @@ impl VolumeCompiler {
         // -----------------------------------------------------------------
         // Generate volume mounts (for volume resources and emptyDir)
         // -----------------------------------------------------------------
-        let all_mountable: Vec<_> = workload
-            .resources
-            .iter()
-            .filter(|(_, r)| r.type_.is_volume())
-            .collect();
 
         // Container volume mounts
         for (container_name, container_spec) in &workload.containers {
             let (mounts, extra_vols) =
-                Self::resolve_mounts(&container_spec.volumes, &all_mountable);
+                Self::resolve_mounts(&container_spec.volumes, &volume_resources);
             if !mounts.is_empty() {
                 output.volume_mounts.insert(container_name.clone(), mounts);
             }
@@ -323,7 +306,8 @@ impl VolumeCompiler {
 
         // Sidecar volume mounts
         for (sidecar_name, sidecar_spec) in sidecars {
-            let (mounts, extra_vols) = Self::resolve_mounts(&sidecar_spec.volumes, &all_mountable);
+            let (mounts, extra_vols) =
+                Self::resolve_mounts(&sidecar_spec.volumes, &volume_resources);
             if !mounts.is_empty() {
                 output.volume_mounts.insert(sidecar_name.clone(), mounts);
             }
@@ -372,7 +356,7 @@ impl VolumeCompiler {
     fn resolve_mounts(
         volumes: &BTreeMap<String, crate::crd::VolumeMount>,
         mountable_resources: &[(&String, &crate::crd::ResourceSpec)],
-    ) -> (Vec<super::VolumeMount>, Vec<PodVolume>) {
+    ) -> (Vec<super::VolumeMount>, Vec<super::Volume>) {
         let mut mounts = Vec::new();
         let mut extra_volumes = Vec::new();
 
@@ -395,8 +379,10 @@ impl VolumeCompiler {
                 }
                 None => {
                     let vol_name = sanitize_volume_name(mount_path);
-                    extra_volumes.push(PodVolume {
+                    extra_volumes.push(super::Volume {
                         name: vol_name.clone(),
+                        config_map: None,
+                        secret: None,
                         persistent_volume_claim: None,
                         empty_dir: Some(super::EmptyDirVolumeSource {
                             medium: volume_mount.medium.clone(),
@@ -421,7 +407,7 @@ impl VolumeCompiler {
     /// When multiple containers (main + sidecars) declare the same emptyDir
     /// mount (e.g., `/tmp: {}`), they produce identically-named volumes.
     /// K8s rejects duplicate volume names, so we deduplicate here.
-    fn extend_volumes_dedup(existing: &mut Vec<PodVolume>, new: Vec<PodVolume>) {
+    pub(crate) fn extend_volumes_dedup(existing: &mut Vec<super::Volume>, new: Vec<super::Volume>) {
         for vol in new {
             if !existing.iter().any(|v| v.name == vol.name) {
                 existing.push(vol);
