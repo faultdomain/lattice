@@ -333,24 +333,64 @@ impl LeaderElector {
     }
 
     /// Renewal loop that runs while we hold leadership
+    ///
+    /// Transient errors (API timeouts, 503s) are retried until the lease is
+    /// close to expiring. Only a definitive loss (`Ok(false)` = 409 Conflict)
+    /// or exhausting the lease grace period triggers leadership loss.
     async fn renewal_loop(&self, lost_tx: oneshot::Sender<()>) {
+        let mut consecutive_failures: u32 = 0;
+        // How many consecutive renewal failures we tolerate before giving up.
+        // With a 30s lease and 10s renew interval, we get 2 retries before
+        // another pod could plausibly take over the expired lease.
+        let max_failures = (self.lease_duration.as_secs() / self.renew_interval.as_secs())
+            .saturating_sub(1)
+            .max(1) as u32;
+
         loop {
             tokio::time::sleep(self.renew_interval).await;
 
             match self.try_acquire_or_renew().await {
-                Ok(true) => {} // Still leader
-                Ok(false) | Err(_) => {
-                    warn!(identity = %self.identity, "Leadership lost");
-                    // Remove leader label FIRST to stop traffic immediately
-                    if let Err(e) = self.remove_leader_label().await {
-                        warn!(identity = %self.identity, error = %e, "Failed to remove leader label");
-                    }
-                    self.is_leader.store(false, Ordering::SeqCst);
-                    let _ = lost_tx.send(());
+                Ok(true) => {
+                    consecutive_failures = 0;
+                }
+                Ok(false) => {
+                    // 409 Conflict — someone else holds the lease now
+                    warn!(identity = %self.identity, "Leadership lost (lease conflict)");
+                    self.signal_leadership_lost(lost_tx).await;
                     return;
+                }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= max_failures {
+                        warn!(
+                            identity = %self.identity,
+                            error = %e,
+                            consecutive_failures,
+                            "Leadership lost (renewal failed {} times, lease may have expired)",
+                            consecutive_failures,
+                        );
+                        self.signal_leadership_lost(lost_tx).await;
+                        return;
+                    }
+                    warn!(
+                        identity = %self.identity,
+                        error = %e,
+                        consecutive_failures,
+                        max_failures,
+                        "Lease renewal failed, retrying (lease still valid)",
+                    );
                 }
             }
         }
+    }
+
+    /// Remove leader label, clear state, and signal leadership loss
+    async fn signal_leadership_lost(&self, lost_tx: oneshot::Sender<()>) {
+        if let Err(e) = self.remove_leader_label().await {
+            warn!(identity = %self.identity, error = %e, "Failed to remove leader label");
+        }
+        self.is_leader.store(false, Ordering::SeqCst);
+        let _ = lost_tx.send(());
     }
 
     /// Remove leader label from this pod
