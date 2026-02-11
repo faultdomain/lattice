@@ -35,11 +35,13 @@ use tracing::info;
 
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    apply_cedar_secret_policy_for_service, create_service_with_all_secret_routes,
-    create_service_with_secrets, delete_cedar_policies_by_label, delete_namespace,
-    deploy_and_wait_for_phase, ensure_fresh_namespace, run_kubectl, seed_all_local_test_secrets,
-    seed_local_secret, service_pod_selector, setup_regcreds_infrastructure, verify_pod_env_var,
+    apply_cedar_secret_policy_for_service, apply_run_as_root_override_policy,
+    create_service_with_all_secret_routes, create_service_with_secrets,
+    delete_cedar_policies_by_label, delete_namespace, deploy_and_wait_for_phase,
+    ensure_fresh_namespace, run_kubectl, seed_all_local_test_secrets, seed_local_secret,
+    service_pod_selector, setup_regcreds_infrastructure, verify_pod_env_var,
     verify_pod_file_content, verify_pod_image_pull_secrets, verify_synced_secret_keys,
+    with_run_as_root,
 };
 use super::cedar::apply_e2e_default_policy;
 
@@ -215,6 +217,9 @@ pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
     )
     .await?;
 
+    // busybox runs as root
+    apply_run_as_root_override_policy(kubeconfig, BASIC_TEST_NAMESPACE, "local-api").await?;
+
     let result = run_basic_secret_test(kubeconfig).await;
 
     // Clean up services before policies — the controller re-checks Cedar on every
@@ -234,7 +239,7 @@ pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
 async fn run_basic_secret_test(kubeconfig: &str) -> Result<(), String> {
     ensure_fresh_namespace(kubeconfig, BASIC_TEST_NAMESPACE).await?;
 
-    let service = create_service_with_secrets(
+    let service = with_run_as_root(create_service_with_secrets(
         "local-api",
         BASIC_TEST_NAMESPACE,
         vec![(
@@ -243,7 +248,7 @@ async fn run_basic_secret_test(kubeconfig: &str) -> Result<(), String> {
             LOCAL_TEST_PROVIDER,
             Some(vec!["username", "password"]),
         )],
-    );
+    ));
 
     info!("[Secrets/Basic] Deploying LatticeService local-api...");
     deploy_and_wait_for_phase(
@@ -289,7 +294,7 @@ async fn run_basic_secret_test(kubeconfig: &str) -> Result<(), String> {
 async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String> {
     info!("[Route1] Testing pure secret env var (secretKeyRef)...");
 
-    let service = create_service_with_secrets(
+    let service = with_run_as_root(create_service_with_secrets(
         "route1-pure-env",
         ROUTES_TEST_NAMESPACE,
         vec![(
@@ -298,7 +303,7 @@ async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String>
             LOCAL_TEST_PROVIDER,
             Some(vec!["username", "password"]),
         )],
-    );
+    ));
 
     // Patch to add the env var reference
     let service = add_secret_env_vars(
@@ -349,7 +354,7 @@ async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String>
 async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), String> {
     info!("[Route2] Testing mixed-content env var (ESO template)...");
 
-    let service = create_service_with_secrets(
+    let service = with_run_as_root(create_service_with_secrets(
         "route2-mixed-env",
         ROUTES_TEST_NAMESPACE,
         vec![(
@@ -358,7 +363,7 @@ async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), Strin
             LOCAL_TEST_PROVIDER,
             Some(vec!["username", "password"]),
         )],
-    );
+    ));
 
     let service = add_secret_env_vars(
         service,
@@ -398,11 +403,11 @@ async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), Strin
 async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), String> {
     info!("[Route3] Testing file mount with secrets...");
 
-    let service = create_service_with_all_secret_routes(
+    let service = with_run_as_root(create_service_with_all_secret_routes(
         "route3-file-mount",
         ROUTES_TEST_NAMESPACE,
         LOCAL_TEST_PROVIDER,
-    );
+    ));
 
     deploy_and_wait_for_phase(
         kubeconfig,
@@ -444,11 +449,11 @@ async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), Strin
 async fn run_route4_image_pull_secrets_test(kubeconfig: &str) -> Result<(), String> {
     info!("[Route4] Testing imagePullSecrets...");
 
-    let service = create_service_with_all_secret_routes(
+    let service = with_run_as_root(create_service_with_all_secret_routes(
         "route4-pull-secrets",
         ROUTES_TEST_NAMESPACE,
         LOCAL_TEST_PROVIDER,
-    );
+    ));
 
     deploy_and_wait_for_phase(
         kubeconfig,
@@ -479,7 +484,7 @@ async fn run_route4_image_pull_secrets_test(kubeconfig: &str) -> Result<(), Stri
 async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
     info!("[Route5] Testing dataFrom (all keys)...");
 
-    let service = create_service_with_secrets(
+    let service = with_run_as_root(create_service_with_secrets(
         "route5-data-from",
         ROUTES_TEST_NAMESPACE,
         vec![(
@@ -488,7 +493,7 @@ async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
             LOCAL_TEST_PROVIDER,
             None, // No explicit keys -> dataFrom
         )],
-    );
+    ));
 
     deploy_and_wait_for_phase(
         kubeconfig,
@@ -526,11 +531,11 @@ async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
 async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     info!("[Combined] Testing all 5 secret routes in a single service...");
 
-    let service = create_service_with_all_secret_routes(
+    let service = with_run_as_root(create_service_with_all_secret_routes(
         "secret-routes-combined",
         ROUTES_TEST_NAMESPACE,
         LOCAL_TEST_PROVIDER,
-    );
+    ));
 
     deploy_and_wait_for_phase(
         kubeconfig,
@@ -643,6 +648,18 @@ pub async fn run_secrets_route_tests(ctx: &InfraContext) -> Result<(), String> {
         &["local-db-creds", "local-api-key", "local-database-config"],
     )
     .await?;
+
+    // busybox runs as root
+    for svc in [
+        "route1-pure-env",
+        "route2-mixed-env",
+        "route3-file-mount",
+        "route4-pull-secrets",
+        "route5-data-from",
+        "secret-routes-combined",
+    ] {
+        apply_run_as_root_override_policy(kubeconfig, ROUTES_TEST_NAMESPACE, svc).await?;
+    }
 
     let result = async {
         ensure_fresh_namespace(kubeconfig, ROUTES_TEST_NAMESPACE).await?;

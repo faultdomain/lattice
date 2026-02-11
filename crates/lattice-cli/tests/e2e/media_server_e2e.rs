@@ -13,8 +13,9 @@ use kube::api::Api;
 use lattice_common::crd::LatticeService;
 
 use super::helpers::{
-    client_from_kubeconfig, create_with_retry, ensure_fresh_namespace, load_service_config,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
+    apply_cedar_policy_crd, apply_run_as_root_override_policy, client_from_kubeconfig,
+    create_with_retry, ensure_fresh_namespace, load_service_config, run_kubectl,
+    setup_regcreds_infrastructure, wait_for_condition,
 };
 
 const NAMESPACE: &str = "media";
@@ -31,6 +32,27 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
 
     // Set up regcreds infrastructure — all services need ghcr-creds for image pulls
     setup_regcreds_infrastructure(kubeconfig_path).await?;
+
+    // Cedar: permit security overrides for media services
+    for svc in ["jellyfin", "nzbget", "sonarr"] {
+        apply_run_as_root_override_policy(kubeconfig_path, NAMESPACE, svc).await?;
+    }
+    // nzbget vpn sidecar needs NET_ADMIN + SYS_MODULE
+    apply_cedar_policy_crd(
+        kubeconfig_path,
+        "permit-nzbget-vpn-caps",
+        "e2e",
+        50,
+        r#"permit(
+  principal == Lattice::Service::"media/nzbget",
+  action == Lattice::Action::"OverrideSecurity",
+  resource
+) when {
+  resource == Lattice::SecurityOverride::"capability:NET_ADMIN" ||
+  resource == Lattice::SecurityOverride::"capability:SYS_MODULE"
+};"#,
+    )
+    .await?;
 
     // Label for Istio ambient mesh
     run_kubectl(&[

@@ -25,6 +25,7 @@ spec:
             source: ${resources.media-storage}
             path: library
           /tmp: {}
+          /run: {}
         resources:
           requests:
             cpu: 100m

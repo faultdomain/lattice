@@ -318,7 +318,7 @@ impl VolumeCompiler {
             if !mounts.is_empty() {
                 output.volume_mounts.insert(container_name.clone(), mounts);
             }
-            output.volumes.extend(extra_vols);
+            Self::extend_volumes_dedup(&mut output.volumes, extra_vols);
         }
 
         // Sidecar volume mounts
@@ -327,7 +327,7 @@ impl VolumeCompiler {
             if !mounts.is_empty() {
                 output.volume_mounts.insert(sidecar_name.clone(), mounts);
             }
-            output.volumes.extend(extra_vols);
+            Self::extend_volumes_dedup(&mut output.volumes, extra_vols);
         }
 
         Ok(output)
@@ -414,6 +414,19 @@ impl VolumeCompiler {
         }
 
         (mounts, extra_volumes)
+    }
+
+    /// Extend volumes, skipping entries whose name already exists.
+    ///
+    /// When multiple containers (main + sidecars) declare the same emptyDir
+    /// mount (e.g., `/tmp: {}`), they produce identically-named volumes.
+    /// K8s rejects duplicate volume names, so we deduplicate here.
+    fn extend_volumes_dedup(existing: &mut Vec<PodVolume>, new: Vec<PodVolume>) {
+        for vol in new {
+            if !existing.iter().any(|v| v.name == vol.name) {
+                existing.push(vol);
+            }
+        }
     }
 
     /// Parse volume source template to extract resource name
@@ -1002,6 +1015,87 @@ mod tests {
         let mounts = output.volume_mounts.get("logger").unwrap();
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].mount_path, "/tmp");
+    }
+
+    #[test]
+    fn story_shared_emptydir_between_main_and_sidecar_deduplicates() {
+        use crate::crd::SidecarSpec;
+
+        // Main container declares /tmp and /run
+        let mut main_volumes = BTreeMap::new();
+        for path in ["/tmp", "/run"] {
+            main_volumes.insert(
+                path.to_string(),
+                crate::crd::VolumeMount {
+                    source: None,
+                    path: None,
+                    read_only: None,
+                    medium: None,
+                    size_limit: None,
+                },
+            );
+        }
+
+        let spec = WorkloadSpec {
+            containers: {
+                let mut c = BTreeMap::new();
+                c.insert(
+                    "main".to_string(),
+                    ContainerSpec {
+                        image: "app:latest".to_string(),
+                        volumes: main_volumes,
+                        ..Default::default()
+                    },
+                );
+                c
+            },
+            ..Default::default()
+        };
+
+        // Sidecar also declares /tmp and /run
+        let mut sidecar_volumes = BTreeMap::new();
+        for path in ["/tmp", "/run"] {
+            sidecar_volumes.insert(
+                path.to_string(),
+                crate::crd::VolumeMount {
+                    source: None,
+                    path: None,
+                    read_only: None,
+                    medium: None,
+                    size_limit: None,
+                },
+            );
+        }
+
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            "vpn".to_string(),
+            SidecarSpec {
+                image: "wireguard:latest".to_string(),
+                volumes: sidecar_volumes,
+                ..Default::default()
+            },
+        );
+
+        let output = VolumeCompiler::compile("nzbget", "media", &spec, &sidecars).unwrap();
+
+        // Should have exactly 2 volumes (deduplicated), not 4
+        let emptydir_volumes: Vec<_> = output
+            .volumes
+            .iter()
+            .filter(|v| v.empty_dir.is_some())
+            .collect();
+        assert_eq!(emptydir_volumes.len(), 2);
+
+        let names: Vec<_> = emptydir_volumes.iter().map(|v| v.name.as_str()).collect();
+        assert!(names.contains(&"emptydir-tmp"));
+        assert!(names.contains(&"emptydir-run"));
+
+        // Both containers should have mounts pointing to the shared volumes
+        let main_mounts = output.volume_mounts.get("main").unwrap();
+        assert_eq!(main_mounts.len(), 2);
+        let vpn_mounts = output.volume_mounts.get("vpn").unwrap();
+        assert_eq!(vpn_mounts.len(), 2);
     }
 
     #[test]

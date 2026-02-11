@@ -1668,6 +1668,17 @@ pub fn create_service_with_secrets(
     }
 }
 
+/// Set the main container to run as root (busybox needs this).
+pub fn with_run_as_root(mut service: LatticeService) -> LatticeService {
+    if let Some(container) = service.spec.workload.containers.get_mut("main") {
+        let security = container
+            .security
+            .get_or_insert_with(lattice_common::crd::SecurityContext::default);
+        security.run_as_user = Some(0);
+    }
+    service
+}
+
 /// Create a test LatticeService with security overrides.
 ///
 /// Builds a minimal service with the specified security context on the main container
@@ -1978,6 +1989,27 @@ pub async fn apply_apparmor_override_policy(kubeconfig: &str) -> Result<(), Stri
   action == Lattice::Action::"OverrideSecurity",
   resource == Lattice::SecurityOverride::"unconfined:apparmor"
 );"#,
+    )
+    .await
+}
+
+pub async fn apply_run_as_root_override_policy(
+    kubeconfig: &str,
+    namespace: &str,
+    service_name: &str,
+) -> Result<(), String> {
+    apply_cedar_policy_crd(
+        kubeconfig,
+        &format!("permit-run-as-root-{}", service_name),
+        "e2e",
+        50,
+        &format!(
+            r#"permit(
+  principal == Lattice::Service::"{namespace}/{service_name}",
+  action == Lattice::Action::"OverrideSecurity",
+  resource == Lattice::SecurityOverride::"runAsRoot"
+);"#
+        ),
     )
     .await
 }
@@ -2694,6 +2726,10 @@ pub fn create_service_with_all_secret_routes(
                     memory: Some("128Mi".to_string()),
                 }),
             }),
+            security: Some(lattice_common::crd::SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
@@ -3120,7 +3156,7 @@ pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), Strin
     )
     .await?;
 
-    // Docker KIND clusters don't have AppArmor — permit the Unconfined override
+    // KIND clusters don't have AppArmor
     apply_apparmor_override_policy(kubeconfig).await?;
 
     info!("[Regcreds] Infrastructure ready (provider + source secret + Cedar policies)");

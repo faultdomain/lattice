@@ -9,6 +9,7 @@ spec:
       main:
         image: docker.io/jellyfin/jellyfin:latest
         security:
+          runAsUser: 0
           apparmorProfile: Unconfined
         variables:
           JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"

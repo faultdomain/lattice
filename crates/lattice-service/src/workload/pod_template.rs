@@ -108,11 +108,9 @@ impl PodTemplateCompiler {
         }
 
         // Add file volumes from files::compile (deduplicate by name)
-        let existing_vol_names: std::collections::HashSet<_> =
-            pod_volumes.iter().map(|v| v.name.clone()).collect();
         for file_vols in container_data.per_container_file_volumes.values() {
             for vol in file_vols {
-                if !existing_vol_names.contains(&vol.name) {
+                if !pod_volumes.iter().any(|v| v.name == vol.name) {
                     pod_volumes.push(vol.clone());
                 }
             }

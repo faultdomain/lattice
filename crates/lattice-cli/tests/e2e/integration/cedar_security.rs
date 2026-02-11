@@ -47,6 +47,7 @@ const NS_ISOLATION_A: &str = "cedar-sec-t4a";
 const NS_ISOLATION_B: &str = "cedar-sec-t4b";
 const NS_LIFECYCLE: &str = "cedar-sec-t5";
 const NS_NO_OVERRIDES: &str = "cedar-sec-t6";
+const NS_RUN_AS_ROOT: &str = "cedar-sec-t7";
 
 const TEST_LABEL: &str = "cedar-security";
 
@@ -127,6 +128,18 @@ fn service_with_privileged(name: &str, namespace: &str) -> LatticeService {
         namespace,
         SecurityContext {
             privileged: Some(true),
+            ..Default::default()
+        },
+        None,
+    )
+}
+
+fn service_with_run_as_root(name: &str, namespace: &str) -> LatticeService {
+    create_service_with_security_overrides(
+        name,
+        namespace,
+        SecurityContext {
+            run_as_user: Some(0),
             ..Default::default()
         },
         None,
@@ -319,6 +332,46 @@ async fn test_no_overrides_no_policy(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Test 7: runAsRoot denied without policy, permitted with policy
+async fn test_run_as_root(kubeconfig: &str) -> Result<(), String> {
+    info!("[CedarSecurity] Test 7: runAsRoot override...");
+    ensure_fresh_namespace(kubeconfig, NS_RUN_AS_ROOT).await?;
+
+    // No policy for runAsRoot -> denied
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_RUN_AS_ROOT,
+        service_with_run_as_root("svc-root-denied", NS_RUN_AS_ROOT),
+        "Failed",
+        Some("security override denied"),
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    // Apply permit for runAsRoot -> recover
+    apply_security_permit_specific(
+        kubeconfig,
+        "permit-test7-root",
+        &format!("{}/svc-root-permitted", NS_RUN_AS_ROOT),
+        "runAsRoot",
+    )
+    .await?;
+
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_RUN_AS_ROOT,
+        service_with_run_as_root("svc-root-permitted", NS_RUN_AS_ROOT),
+        "Ready",
+        None,
+        Duration::from_secs(90),
+    )
+    .await?;
+
+    delete_namespace(kubeconfig, NS_RUN_AS_ROOT).await;
+    info!("[CedarSecurity] Test 7 passed: runAsRoot override works");
+    Ok(())
+}
+
 // =============================================================================
 // Orchestrators
 // =============================================================================
@@ -352,6 +405,7 @@ pub async fn run_cedar_security_tests(ctx: &InfraContext) -> Result<(), String> 
         test_namespace_isolation(kubeconfig),
         test_policy_lifecycle(kubeconfig),
         test_no_overrides_no_policy(kubeconfig),
+        test_run_as_root(kubeconfig),
     );
 
     // Always clean up policies, even on failure
