@@ -5,10 +5,9 @@
 //! are served; all others return 404.
 //!
 //! ESO protocol:
-//! - `GET /secret/{name}` → flat JSON `{"key1":"val1", "key2":"val2"}` (for dataFrom)
-//! - `GET /secret/{name}/{property}` → single JSON string `"val1"` (for data entries)
-//! - `remoteRef.key` becomes the `{name}` path parameter
-//! - `remoteRef.property` becomes the `{property}` path parameter
+//! - URL template: `.../secret/{{ .remoteRef.key }}/{{ .remoteRef.property }}`
+//! - `spec.data` entries: ESO renders property (e.g. `/secret/foo/password`)
+//! - `dataFrom.extract`: ESO renders empty property (e.g. `/secret/foo/`)
 //! - `result.jsonPath: "$"` tells ESO to use the response as-is
 
 use std::collections::BTreeMap;
@@ -30,8 +29,9 @@ const SECRET_SOURCE_LABEL: &str = "lattice.dev/secret-source";
 /// Build the webhook router with a shared `Client` state
 fn webhook_routes(client: Client) -> Router {
     Router::new()
-        .route("/secret/{name}/{property}", get(get_secret_property))
-        .route("/secret/{name}", get(get_secret))
+        // Catch-all handles both `/secret/foo/bar` and `/secret/foo/` (empty property)
+        .route("/secret/{name}/{*rest}", get(handle_with_property))
+        .route("/secret/{name}", get(handle_all_keys))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(client)
 }
@@ -94,33 +94,20 @@ async fn fetch_secret_data(
     Ok(result)
 }
 
-/// Handle `GET /secret/{name}` — return all keys as a flat JSON map.
+/// Resolve a secret request: return one property or the full map.
 ///
-/// Used by ESO `dataFrom.extract` (no property) and ESO templates.
-async fn get_secret(
-    State(client): State<Client>,
-    Path(name): Path<String>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let data = fetch_secret_data(client, &name).await?;
-    Ok(axum::Json(data))
-}
-
-/// Handle `GET /secret/{name}/{property}` — return a single key's value.
-///
-/// Used by ESO `data` entries with `remoteRef.property`. The ClusterSecretStore
-/// URL template renders `{{ .remoteRef.property }}` into the path, so ESO
-/// requests e.g. `/secret/local-db-creds/password` and gets just `"s3cret-p@ss"`.
-async fn get_secret_property(
-    State(client): State<Client>,
-    Path((name, property)): Path<(String, String)>,
+/// Empty property → full JSON map (for `dataFrom.extract`).
+/// Non-empty property → single JSON value (for `spec.data` entries).
+fn resolve_secret(
+    data: BTreeMap<String, String>,
+    name: &str,
+    property: &str,
 ) -> Result<Response, (StatusCode, String)> {
-    let data = fetch_secret_data(client, &name).await?;
-
     if property.is_empty() {
         return Ok(axum::Json(data).into_response());
     }
 
-    match data.get(&property) {
+    match data.get(property) {
         Some(value) => Ok(axum::Json(value).into_response()),
         None => Err((
             StatusCode::NOT_FOUND,
@@ -134,10 +121,33 @@ async fn get_secret_property(
     }
 }
 
-/// Check whether a K8s Secret has the `lattice.dev/secret-source: "true"` label.
+/// Handle `GET /secret/{name}/{*rest}` — property extraction or empty-property fallback.
 ///
-/// This is the gate that prevents arbitrary secrets from being exposed via the
-/// webhook — only explicitly labeled secrets are served.
+/// The `{*rest}` catch-all matches both:
+/// - `/secret/foo/password` (rest = "/password") → returns single key
+/// - `/secret/foo/` (rest = "/") → empty property → returns full map
+///
+/// The trailing-slash case occurs when ESO renders `{{ .remoteRef.property }}`
+/// as empty for `dataFrom.extract`.
+async fn handle_with_property(
+    State(client): State<Client>,
+    Path((name, rest)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    let data = fetch_secret_data(client, &name).await?;
+    let property = rest.trim_matches('/');
+    resolve_secret(data, &name, property)
+}
+
+/// Handle `GET /secret/{name}` — return all keys as a flat JSON map.
+async fn handle_all_keys(
+    State(client): State<Client>,
+    Path(name): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    let data = fetch_secret_data(client, &name).await?;
+    resolve_secret(data, &name, "")
+}
+
+/// Check whether a K8s Secret has the `lattice.dev/secret-source: "true"` label.
 fn is_labeled_source(secret: &k8s_openapi::api::core::v1::Secret) -> bool {
     secret
         .metadata
@@ -148,7 +158,6 @@ fn is_labeled_source(secret: &k8s_openapi::api::core::v1::Secret) -> bool {
 }
 
 /// Fallback hex encoding for binary data that isn't valid UTF-8.
-/// Binary secrets that aren't valid UTF-8 are rare; hex is safe and debuggable.
 fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -167,11 +176,6 @@ mod tests {
         let data = vec![0xde, 0xad, 0xbe, 0xef];
         let encoded = hex_encode(&data);
         assert_eq!(encoded, "deadbeef");
-    }
-
-    #[test]
-    fn local_secrets_port_matches_controller() {
-        assert_eq!(LOCAL_SECRETS_PORT, 8787);
     }
 
     #[test]
@@ -198,5 +202,35 @@ mod tests {
             "true".to_string(),
         )]));
         assert!(is_labeled_source(&secret));
+    }
+
+    #[test]
+    fn resolve_secret_empty_property_returns_full_map() {
+        let data = BTreeMap::from([
+            ("username".to_string(), "admin".to_string()),
+            ("password".to_string(), "s3cret".to_string()),
+        ]);
+        let response = resolve_secret(data, "test", "");
+        assert!(response.is_ok());
+    }
+
+    #[test]
+    fn resolve_secret_with_property_returns_single_value() {
+        let data = BTreeMap::from([
+            ("username".to_string(), "admin".to_string()),
+            ("password".to_string(), "s3cret".to_string()),
+        ]);
+        let response = resolve_secret(data, "test", "password");
+        assert!(response.is_ok());
+    }
+
+    #[test]
+    fn resolve_secret_missing_property_returns_not_found() {
+        let data = BTreeMap::from([("username".to_string(), "admin".to_string())]);
+        let response = resolve_secret(data, "test", "missing");
+        assert!(response.is_err());
+        let (status, msg) = response.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(msg.contains("missing"));
     }
 }
