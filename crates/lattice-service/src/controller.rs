@@ -7,6 +7,7 @@
 //! The controller maintains a ServiceGraph for tracking service dependencies
 //! and allowed callers for network policy generation.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,10 +35,12 @@ use lattice_common::NoopEventPublisher;
 use crate::compiler::{ApplyLayer, CompiledService, CompilerPhase, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
-    LatticeService, LatticeServiceSpec, LatticeServiceStatus, ProviderType, ServicePhase,
+    LatticeService, LatticeServicePolicy, LatticeServiceSpec, LatticeServiceStatus, ProviderType,
+    ServiceBackupSpec, ServicePhase,
 };
 use crate::graph::ServiceGraph;
 use crate::ingress::{Certificate, Gateway, HttpRoute};
+use crate::workload::backup::merge_backup_specs;
 use crate::Error;
 use lattice_common::mesh;
 
@@ -207,6 +210,12 @@ pub trait ServiceKubeClient: Send + Sync {
     /// List all LatticeExternalServices across all namespaces
     async fn list_external_services(&self) -> Result<Vec<LatticeExternalService>, Error>;
 
+    /// List all LatticeServicePolicies across all namespaces
+    async fn list_policies(&self) -> Result<Vec<LatticeServicePolicy>, Error>;
+
+    /// Get labels for a namespace (returns empty map if namespace not found)
+    async fn get_namespace_labels(&self, name: &str) -> Result<BTreeMap<String, String>, Error>;
+
     /// Apply compiled workloads and policies to the cluster
     async fn apply_compiled_service(
         &self,
@@ -339,6 +348,22 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let api: Api<LatticeExternalService> = Api::all(self.client.clone());
         let list = api.list(&Default::default()).await?;
         Ok(list.items)
+    }
+
+    async fn list_policies(&self) -> Result<Vec<LatticeServicePolicy>, Error> {
+        let api: Api<LatticeServicePolicy> = Api::all(self.client.clone());
+        let list = api.list(&Default::default()).await?;
+        Ok(list.items)
+    }
+
+    async fn get_namespace_labels(&self, name: &str) -> Result<BTreeMap<String, String>, Error> {
+        use k8s_openapi::api::core::v1::Namespace;
+
+        let api: Api<Namespace> = Api::all(self.client.clone());
+        match api.get_opt(name).await? {
+            Some(ns) => Ok(ns.metadata.labels.unwrap_or_default().into_iter().collect()),
+            None => Ok(BTreeMap::new()),
+        }
     }
 
     async fn apply_compiled_service(
@@ -974,6 +999,68 @@ fn check_missing_dependencies(
         .collect()
 }
 
+/// Resolve the effective backup spec for a service by merging matching policies.
+///
+/// 1. Lists all LatticeServicePolicies
+/// 2. Filters to those matching this service (labels + namespace)
+/// 3. Sorts by priority DESC, then name ASC
+/// 4. Merges policy backup specs with the service's inline backup spec
+async fn resolve_effective_backup(
+    service: &LatticeService,
+    namespace: &str,
+    ctx: &ServiceContext,
+) -> Result<Option<ServiceBackupSpec>, Error> {
+    let policies = ctx.kube.list_policies().await?;
+    if policies.is_empty() {
+        return Ok(None);
+    }
+
+    let svc_labels = service.labels();
+    let ns_labels = ctx
+        .kube
+        .get_namespace_labels(namespace)
+        .await
+        .unwrap_or_default();
+
+    // Filter policies to those matching this service
+    let mut matching: Vec<_> = policies
+        .iter()
+        .filter(|p| {
+            let policy_ns = p.namespace().unwrap_or_default();
+            p.spec
+                .selector
+                .matches(svc_labels, &ns_labels, &policy_ns, namespace)
+        })
+        .collect();
+
+    if matching.is_empty() {
+        return Ok(None);
+    }
+
+    // Sort by priority DESC, then name ASC for deterministic ordering
+    matching.sort_by(|a, b| {
+        b.spec
+            .priority
+            .cmp(&a.spec.priority)
+            .then_with(|| a.name_any().cmp(&b.name_any()))
+    });
+
+    // Extract backup specs from matching policies
+    let policy_backup_specs: Vec<&ServiceBackupSpec> = matching
+        .iter()
+        .filter_map(|p| p.spec.backup.as_ref())
+        .collect();
+
+    if policy_backup_specs.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(merge_backup_specs(
+        &policy_backup_specs,
+        service.spec.backup.as_ref(),
+    ))
+}
+
 /// Compile a service and apply the resulting resources to the cluster.
 ///
 /// On compile failure, publishes a warning event and sets the service to Failed.
@@ -984,6 +1071,15 @@ async fn compile_and_apply(
     namespace: &str,
     ctx: &ServiceContext,
 ) -> Result<(), Error> {
+    // Query matching LatticeServicePolicies and merge backup specs
+    let effective_backup = match resolve_effective_backup(service, namespace, ctx).await {
+        Ok(backup) => backup,
+        Err(e) => {
+            debug!(error = %e, "failed to resolve policies, using inline backup only");
+            None
+        }
+    };
+
     let compiler = ServiceCompiler::new(
         &ctx.graph,
         &ctx.cluster_name,
@@ -991,7 +1087,8 @@ async fn compile_and_apply(
         &ctx.cedar,
         ctx.monitoring_enabled,
     )
-    .with_phases(&ctx.extension_phases);
+    .with_phases(&ctx.extension_phases)
+    .with_effective_backup(effective_backup);
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {
@@ -1375,7 +1472,6 @@ mod tests {
         WorkloadSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use std::collections::BTreeMap;
 
     // =========================================================================
     // Test Fixtures
@@ -1490,7 +1586,7 @@ mod tests {
     // Mock Setup
     // =========================================================================
 
-    fn mock_kube_success() -> MockServiceKubeClient {
+    fn mock_kube_with_policies(policies: Vec<LatticeServicePolicy>) -> MockServiceKubeClient {
         let mut mock = MockServiceKubeClient::new();
         mock.expect_patch_service_status()
             .returning(|_, _, _| Ok(()));
@@ -1502,9 +1598,17 @@ mod tests {
         mock.expect_list_services().returning(|| Ok(vec![]));
         mock.expect_list_external_services()
             .returning(|| Ok(vec![]));
+        mock.expect_list_policies()
+            .returning(move || Ok(policies.clone()));
+        mock.expect_get_namespace_labels()
+            .returning(|_| Ok(BTreeMap::new()));
         mock.expect_apply_compiled_service()
             .returning(|_, _, _| Ok(()));
         mock
+    }
+
+    fn mock_kube_success() -> MockServiceKubeClient {
+        mock_kube_with_policies(vec![])
     }
 
     // =========================================================================
@@ -1787,5 +1891,191 @@ mod tests {
 
         // Should be visible via ctx2
         assert!(ctx2.graph.get_service("shared", "svc").is_some());
+    }
+
+    // =========================================================================
+    // Story: Policy-based backup merging in compile_and_apply
+    // =========================================================================
+
+    fn make_policy(
+        name: &str,
+        namespace: &str,
+        priority: i32,
+        backup: Option<crate::crd::ServiceBackupSpec>,
+    ) -> LatticeServicePolicy {
+        use crate::crd::{LatticeServicePolicySpec, ServiceSelector};
+
+        LatticeServicePolicy {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                ..Default::default()
+            },
+            spec: LatticeServicePolicySpec {
+                selector: ServiceSelector::default(), // matches all in same namespace
+                description: None,
+                priority,
+                backup,
+            },
+            status: None,
+        }
+    }
+
+    /// Story: When policies with backup specs match a service, compile_and_apply
+    /// produces backup annotations on the deployment
+    #[tokio::test]
+    async fn story_policy_backup_applied_to_service() {
+        use crate::crd::{
+            BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
+            VolumeBackupSpec,
+        };
+
+        let policy_backup = ServiceBackupSpec {
+            hooks: Some(BackupHooksSpec {
+                pre: vec![crate::crd::BackupHook {
+                    name: "policy-freeze".to_string(),
+                    container: "main".to_string(),
+                    command: vec!["/bin/sh".to_string(), "-c".to_string(), "sync".to_string()],
+                    timeout: Some("60s".to_string()),
+                    on_error: HookErrorAction::Fail,
+                }],
+                post: vec![],
+            }),
+            volumes: Some(VolumeBackupSpec {
+                include: vec!["data".to_string()],
+                exclude: vec![],
+                default_policy: VolumeBackupDefault::OptIn,
+            }),
+        };
+
+        let policy = make_policy("db-backup", "test", 100, Some(policy_backup));
+        let mock_kube = mock_kube_with_policies(vec![policy]);
+
+        let mut service = sample_service("my-db");
+        service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
+
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+        ctx.graph.put_service("test", "my-db", &service.spec);
+
+        let result = reconcile(Arc::new(service), ctx).await;
+        assert!(result.is_ok());
+    }
+
+    /// Story: resolve_effective_backup merges policy + inline correctly
+    #[tokio::test]
+    async fn story_resolve_effective_backup_merges_policies() {
+        use crate::crd::{
+            BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
+            VolumeBackupSpec,
+        };
+
+        // Low-priority policy: hooks + volumes
+        let low_policy = make_policy(
+            "low",
+            "test",
+            10,
+            Some(ServiceBackupSpec {
+                hooks: Some(BackupHooksSpec {
+                    pre: vec![BackupHook {
+                        name: "low-hook".to_string(),
+                        container: "main".to_string(),
+                        command: vec!["/bin/sh".to_string(), "-c".to_string(), "low".to_string()],
+                        timeout: None,
+                        on_error: HookErrorAction::Continue,
+                    }],
+                    post: vec![],
+                }),
+                volumes: Some(VolumeBackupSpec {
+                    include: vec!["low-vol".to_string()],
+                    exclude: vec![],
+                    default_policy: VolumeBackupDefault::OptIn,
+                }),
+            }),
+        );
+
+        // High-priority policy: hooks override low, no volumes
+        let high_policy = make_policy(
+            "high",
+            "test",
+            100,
+            Some(ServiceBackupSpec {
+                hooks: Some(BackupHooksSpec {
+                    pre: vec![BackupHook {
+                        name: "high-hook".to_string(),
+                        container: "main".to_string(),
+                        command: vec!["/bin/sh".to_string(), "-c".to_string(), "high".to_string()],
+                        timeout: None,
+                        on_error: HookErrorAction::Continue,
+                    }],
+                    post: vec![],
+                }),
+                volumes: None,
+            }),
+        );
+
+        let mock_kube = mock_kube_with_policies(vec![low_policy, high_policy]);
+        let service = sample_service("my-app");
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        let result = resolve_effective_backup(&service, "test", &ctx)
+            .await
+            .expect("should resolve");
+
+        let backup = result.expect("should have merged backup");
+        // Hooks from high-priority policy
+        assert_eq!(backup.hooks.as_ref().unwrap().pre[0].name, "high-hook");
+        // Volumes from low-priority (high didn't set them)
+        assert_eq!(backup.volumes.as_ref().unwrap().include, vec!["low-vol"]);
+    }
+
+    /// Story: No matching policies returns None
+    #[tokio::test]
+    async fn story_resolve_effective_backup_no_policies() {
+        let mock_kube = mock_kube_success();
+        let service = sample_service("my-app");
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        let result = resolve_effective_backup(&service, "test", &ctx)
+            .await
+            .expect("should succeed");
+
+        assert!(result.is_none());
+    }
+
+    /// Story: Policy matches only same namespace when no namespace selector
+    #[tokio::test]
+    async fn story_resolve_effective_backup_namespace_scoping() {
+        use crate::crd::{BackupHooksSpec, HookErrorAction, ServiceBackupSpec};
+
+        // Policy in "other" namespace — should NOT match service in "test"
+        let policy = make_policy(
+            "other-ns-policy",
+            "other",
+            100,
+            Some(ServiceBackupSpec {
+                hooks: Some(BackupHooksSpec {
+                    pre: vec![crate::crd::BackupHook {
+                        name: "should-not-match".to_string(),
+                        container: "main".to_string(),
+                        command: vec!["true".to_string()],
+                        timeout: None,
+                        on_error: HookErrorAction::Continue,
+                    }],
+                    post: vec![],
+                }),
+                volumes: None,
+            }),
+        );
+
+        let mock_kube = mock_kube_with_policies(vec![policy]);
+        let service = sample_service("my-app");
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+
+        let result = resolve_effective_backup(&service, "test", &ctx)
+            .await
+            .expect("should succeed");
+
+        // Policy is in "other" namespace, service is in "test" — no match
+        assert!(result.is_none());
     }
 }

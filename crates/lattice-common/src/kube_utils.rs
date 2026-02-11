@@ -821,19 +821,15 @@ async fn run_discovery(client: &Client) -> Result<kube::discovery::Discovery, Er
     use kube::discovery::Discovery;
 
     let client = client.clone();
-    retry_with_backoff(
-        &RetryConfig::with_max_attempts(5),
-        "api-discovery",
-        || {
-            let client = client.clone();
-            async move {
-                Discovery::new(client)
-                    .run()
-                    .await
-                    .map_err(|e| Error::internal_with_context("api-discovery", e.to_string()))
-            }
-        },
-    )
+    retry_with_backoff(&RetryConfig::with_max_attempts(5), "api-discovery", || {
+        let client = client.clone();
+        async move {
+            Discovery::new(client)
+                .run()
+                .await
+                .map_err(|e| Error::internal_with_context("api-discovery", e.to_string()))
+        }
+    })
     .await
 }
 
