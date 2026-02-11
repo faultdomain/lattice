@@ -277,17 +277,18 @@ fn build_webhook_provider() -> WebhookProvider {
     // Go template placeholders for ESO — kept as consts to avoid fragile `{{{{`
     // escaping that `format!` would require for literal double-braces.
     const ESO_REMOTE_REF_KEY: &str = "{{ .remoteRef.key }}";
-    // Property extraction happens server-side: the webhook returns just the
-    // requested property value when a property path segment is present.
-    // For dataFrom (no property), the template renders an empty segment and
-    // the webhook returns the full JSON map.
-    const ESO_REMOTE_REF_PROPERTY: &str = "{{ .remoteRef.property }}";
+    // Conditional property suffix: appends `/{property}` only when remoteRef.property
+    // is non-empty. This handles both ESO paths:
+    //   - spec.data entries (property set)  → /secret/foo/password  → single value
+    //   - dataFrom.extract (property empty) → /secret/foo           → full JSON map
+    const ESO_PROPERTY_SUFFIX: &str =
+        "{{ if .remoteRef.property }}/{{ .remoteRef.property }}{{ end }}";
 
     let base = format!(
         "http://{}.{}.svc:{}/secret/",
         LOCAL_SECRETS_SERVICE, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT
     );
-    let url = format!("{}{}/{}", base, ESO_REMOTE_REF_KEY, ESO_REMOTE_REF_PROPERTY);
+    let url = format!("{}{}{}", base, ESO_REMOTE_REF_KEY, ESO_PROPERTY_SUFFIX);
     WebhookProvider {
         url,
         method: "GET".to_string(),
@@ -536,8 +537,10 @@ mod tests {
             provider.url
         );
         assert!(
-            provider.url.contains("{{ .remoteRef.property }}"),
-            "URL should contain property placeholder: {}",
+            provider
+                .url
+                .contains("{{ if .remoteRef.property }}/{{ .remoteRef.property }}{{ end }}"),
+            "URL should conditionally append property: {}",
             provider.url
         );
         assert_eq!(provider.method, "GET");

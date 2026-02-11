@@ -16,6 +16,7 @@ use kube::discovery::ApiResource;
 use kube::{Client, Config};
 use tracing::{info, trace, warn};
 
+use crate::retry::{retry_with_backoff, RetryConfig};
 use crate::Error;
 
 // =============================================================================
@@ -810,6 +811,32 @@ pub fn extract_kind(manifest: &str) -> &str {
         .unwrap_or("")
 }
 
+/// Run API discovery with retry.
+///
+/// Discovery can transiently fail when aggregated API endpoints (from recently
+/// installed providers like CAPI or cert-manager) haven't registered yet.
+/// Retries are bounded — callers like the reconciler and operator startup
+/// have their own retry/requeue logic for persistent failures.
+async fn run_discovery(client: &Client) -> Result<kube::discovery::Discovery, Error> {
+    use kube::discovery::Discovery;
+
+    let client = client.clone();
+    retry_with_backoff(
+        &RetryConfig::with_max_attempts(5),
+        "api-discovery",
+        || {
+            let client = client.clone();
+            async move {
+                Discovery::new(client)
+                    .run()
+                    .await
+                    .map_err(|e| Error::internal_with_context("api-discovery", e.to_string()))
+            }
+        },
+    )
+    .await
+}
+
 /// Apply multiple manifests with proper ordering and discovery
 ///
 /// Applies in two phases:
@@ -826,8 +853,6 @@ pub async fn apply_manifests_with_discovery(
     manifests: &[impl AsRef<str>],
     options: &ApplyOptions,
 ) -> Result<(), Error> {
-    use kube::discovery::Discovery;
-
     if manifests.is_empty() {
         return Ok(());
     }
@@ -845,26 +870,18 @@ pub async fn apply_manifests_with_discovery(
 
     // Phase 1: Apply foundational resources (Namespaces, CRDs)
     if !foundational.is_empty() {
-        let discovery = Discovery::new(client.clone()).run().await.map_err(|e| {
-            Error::internal_with_context(
-                "apply_manifests_with_discovery",
-                format!("API discovery failed: {}", e),
-            )
-        })?;
+        let discovery = run_discovery(client).await?;
 
         for manifest in &foundational {
             apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
         }
     }
 
-    // Phase 2: Re-run discovery to learn new CRD types, then apply rest
+    // Phase 2: Re-run discovery to learn new CRD types, then apply rest.
+    // Retries indefinitely because aggregated API endpoints from previously
+    // installed providers (e.g., CAPI) may not be ready yet.
     if !rest.is_empty() {
-        let discovery = Discovery::new(client.clone()).run().await.map_err(|e| {
-            Error::internal_with_context(
-                "apply_manifests_with_discovery",
-                format!("API refresh failed: {}", e),
-            )
-        })?;
+        let discovery = run_discovery(client).await?;
 
         for manifest in &rest {
             apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
