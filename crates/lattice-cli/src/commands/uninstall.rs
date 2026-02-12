@@ -22,7 +22,7 @@ use clap::Args;
 use k8s_openapi::api::core::v1::{Secret, Service};
 use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
 use kube::Client;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::{generate_run_id, kind_utils, wait_for_deletion, CommandErrorExt};
 
@@ -213,13 +213,16 @@ impl Uninstaller {
                         "finalizers": null
                     }
                 });
-                let _ = api
+                if let Err(e) = api
                     .patch(
                         &self.cluster_name,
                         &PatchParams::default(),
                         &Patch::Merge(&patch),
                     )
-                    .await;
+                    .await
+                {
+                    warn!(error = %e, "Failed to remove finalizers, continuing uninstall");
+                }
             }
         }
 

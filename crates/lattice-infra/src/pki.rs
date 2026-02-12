@@ -486,15 +486,16 @@ impl CertificateAuthorityBundle {
         if self.cas.len() <= 1 {
             return;
         }
+        // Keep the first (active) CA as a fallback in case all are expired
+        let fallback = self.cas[0].clone();
         self.cas.retain(|ca| {
             ca.cert_info()
                 .map(|info| !info.is_expired())
                 .unwrap_or(true)
         });
-        // Ensure we always have at least one CA
         if self.cas.is_empty() {
-            // This shouldn't happen, but be safe
-            tracing::error!("all CAs expired during prune, this is a critical error");
+            tracing::warn!("all CAs expired during prune, keeping most recent for continuity");
+            self.cas.push(fallback);
         }
     }
 
