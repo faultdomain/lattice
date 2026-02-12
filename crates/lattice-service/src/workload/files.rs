@@ -15,7 +15,7 @@ use lattice_secret_provider::{
 
 use super::error::CompilationError;
 use super::secrets::SecretRef;
-use super::{ConfigMap, ConfigMapVolumeSource, Secret, SecretVolumeSource, Volume, VolumeMount};
+use super::{ConfigMap, Secret, Volume, VolumeMount};
 
 /// Result of compiling file mounts
 #[derive(Debug, Default)]
@@ -111,13 +111,9 @@ fn compile_text_files(
     }
 
     result.config_map = Some(cm);
-    result.volumes.push(Volume {
-        name: vol_name.clone(),
-        config_map: Some(ConfigMapVolumeSource { name: cm_name }),
-        secret: None,
-        empty_dir: None,
-        persistent_volume_claim: None,
-    });
+    result
+        .volumes
+        .push(Volume::from_config_map(&vol_name, cm_name));
 
     for (key, (_, mount_path)) in text_files {
         result.volume_mounts.push(VolumeMount {
@@ -149,13 +145,9 @@ fn compile_binary_files(
     }
 
     result.secret = Some(secret);
-    result.volumes.push(Volume {
-        name: vol_name.clone(),
-        config_map: None,
-        secret: Some(SecretVolumeSource { secret_name }),
-        empty_dir: None,
-        persistent_volume_claim: None,
-    });
+    result
+        .volumes
+        .push(Volume::from_secret(&vol_name, secret_name));
 
     for (key, (_, mount_path)) in binary_files {
         result.volume_mounts.push(VolumeMount {
@@ -237,15 +229,7 @@ fn compile_secret_files(
 
         result.file_external_secrets.push(external_secret);
 
-        result.volumes.push(Volume {
-            name: vol_name.clone(),
-            config_map: None,
-            secret: Some(SecretVolumeSource {
-                secret_name: es_name,
-            }),
-            empty_dir: None,
-            persistent_volume_claim: None,
-        });
+        result.volumes.push(Volume::from_secret(&vol_name, es_name));
 
         result.volume_mounts.push(VolumeMount {
             name: vol_name,

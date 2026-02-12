@@ -403,10 +403,13 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let ar_secret = ApiResource::erase::<K8sSecret>(&());
         let ar_svc = ApiResource::erase::<K8sService>(&());
         let ar_deploy = ApiResource::erase::<K8sDeployment>(&());
+        let ar_pdb =
+            lattice_common::kube_utils::build_api_resource("policy/v1", "PodDisruptionBudget");
 
-        // ── Layer 1: Everything except the Deployment ──
-        // ExternalSecrets trigger ESO to sync K8s Secrets that the Deployment
-        // may reference via imagePullSecrets. Apply them first.
+        // ── Layer 1: Infrastructure ──
+        // Everything except the Deployment and ScaledObject. ExternalSecrets
+        // trigger ESO to sync K8s Secrets that the Deployment may reference
+        // via imagePullSecrets, so they must be applied first.
         let mut layer1 = ApplyBatch::new(self.client.clone(), namespace, &params);
 
         // Workload infrastructure
@@ -431,14 +434,8 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         if let Some(svc) = &compiled.workloads.service {
             layer1.push("Service", &svc.metadata.name, svc, &ar_svc)?;
         }
-
-        // ScaledObject (KEDA)
-        if let Some(so) = &compiled.workloads.scaled_object {
-            if let Some(ar) = &self.crds.scaled_object {
-                layer1.push("ScaledObject", &so.metadata.name, so, ar)?;
-            } else {
-                warn!("ScaledObject CRD not installed, skipping autoscaling");
-            }
+        if let Some(pdb) = &compiled.workloads.pdb {
+            layer1.push("PodDisruptionBudget", &pdb.metadata.name, pdb, &ar_pdb)?;
         }
 
         // ExternalSecrets (ESO syncs secrets from Vault)
@@ -483,6 +480,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
                 warn!("Gateway CRD not installed, skipping ingress");
             }
         }
+
         // Ingress routes and certificates
         layer1.push_crd(
             "HTTPRoute",
@@ -510,20 +508,18 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         )?;
 
         // Waypoint (east-west L7 policies via Istio ambient mesh)
-        if let Some(gw) = &compiled.waypoint.gateway {
-            if let Some(ar) = &self.crds.gateway {
-                layer1.push("Gateway", &gw.metadata.name, gw, ar)?;
-            } else {
-                warn!("Gateway CRD not installed, skipping waypoint");
-            }
-        }
-        if let Some(policy) = &compiled.waypoint.allow_to_waypoint_policy {
-            if let Some(ar) = &self.crds.authorization_policy {
-                layer1.push("AuthorizationPolicy", &policy.metadata.name, policy, ar)?;
-            } else {
-                warn!("AuthorizationPolicy CRD not installed, skipping waypoint policy");
-            }
-        }
+        layer1.push_optional_crd(
+            "Gateway",
+            self.crds.gateway.as_ref(),
+            compiled.waypoint.gateway.as_ref(),
+            |gw| &gw.metadata.name,
+        )?;
+        layer1.push_optional_crd(
+            "AuthorizationPolicy",
+            self.crds.authorization_policy.as_ref(),
+            compiled.waypoint.allow_to_waypoint_policy.as_ref(),
+            |p| &p.metadata.name,
+        )?;
 
         // Extension resources — infrastructure layer
         for ext in &compiled.extensions {
@@ -557,10 +553,22 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
         let layer2_count = layer2.run("deployment").await?;
 
+        // ── Layer 3: ScaledObject (KEDA) ──
+        // Must be applied after the Deployment because KEDA's admission webhook
+        // validates that the scaleTargetRef target exists.
+        let mut layer3 = ApplyBatch::new(self.client.clone(), namespace, &params);
+        layer3.push_optional_crd(
+            "ScaledObject",
+            self.crds.scaled_object.as_ref(),
+            compiled.workloads.scaled_object.as_ref(),
+            |so| &so.metadata.name,
+        )?;
+        let layer3_count = layer3.run("autoscaling").await?;
+
         info!(
             service = %service_name,
             namespace = %namespace,
-            resources = layer1_count + layer2_count,
+            resources = layer1_count + layer2_count + layer3_count,
             "applied compiled resources"
         );
         Ok(())
@@ -668,6 +676,25 @@ impl<'a> ApplyBatch<'a> {
                 kind = kind,
                 "CRD not installed, skipping"
             );
+        }
+        Ok(())
+    }
+
+    /// Push a single optional CRD-backed resource if both it and the CRD exist.
+    fn push_optional_crd<T: serde::Serialize>(
+        &mut self,
+        kind: &str,
+        crd: Option<&ApiResource>,
+        resource: Option<&T>,
+        name_fn: impl Fn(&T) -> &str,
+    ) -> Result<(), Error> {
+        let Some(resource) = resource else {
+            return Ok(());
+        };
+        if let Some(ar) = crd {
+            self.push(kind, name_fn(resource), resource, ar)?;
+        } else {
+            warn!(kind = kind, "CRD not installed, skipping");
         }
         Ok(())
     }

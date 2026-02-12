@@ -24,15 +24,6 @@ use lattice_common::LABEL_NAME;
 use super::PolicyCompiler;
 
 impl<'a> PolicyCompiler<'a> {
-    /// Generate SPIFFE principal for AuthorizationPolicy
-    pub(super) fn spiffe_principal(&self, namespace: &str, service_name: &str) -> String {
-        mesh::trust_domain::principal(&self.cluster_name, namespace, service_name)
-    }
-
-    pub(super) fn waypoint_principal(&self, namespace: &str) -> String {
-        mesh::trust_domain::waypoint_principal(&self.cluster_name, namespace)
-    }
-
     /// Compile a waypoint-enforced AuthorizationPolicy (caller → service).
     ///
     /// Uses `targetRefs` pointing at the K8s Service, so the waypoint evaluates
@@ -49,7 +40,13 @@ impl<'a> PolicyCompiler<'a> {
 
         let principals: Vec<String> = inbound_edges
             .iter()
-            .map(|edge| self.spiffe_principal(&edge.caller_namespace, &edge.caller_name))
+            .map(|edge| {
+                mesh::trust_domain::principal(
+                    &self.cluster_name,
+                    &edge.caller_namespace,
+                    &edge.caller_name,
+                )
+            })
             .collect();
 
         let ports: Vec<String> = service
@@ -119,7 +116,10 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![self.waypoint_principal(namespace)],
+                            principals: vec![mesh::trust_domain::waypoint_principal(
+                                &self.cluster_name,
+                                namespace,
+                            )],
                         },
                     }],
                     to: vec![AuthorizationOperation {
@@ -210,7 +210,11 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![self.spiffe_principal(namespace, caller)],
+                            principals: vec![mesh::trust_domain::principal(
+                                &self.cluster_name,
+                                namespace,
+                                caller,
+                            )],
                         },
                     }],
                     to: if ports.is_empty() {

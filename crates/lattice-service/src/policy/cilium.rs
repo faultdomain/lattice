@@ -100,10 +100,6 @@ impl<'a> PolicyCompiler<'a> {
         kube_dns_labels.insert("k8s:k8s-app".to_string(), "kube-dns".to_string());
         egress_rules.push(CiliumEgressRule {
             to_endpoints: vec![EndpointSelector::from_labels(kube_dns_labels)],
-            to_services: vec![],
-            to_entities: vec![],
-            to_fqdns: vec![],
-            to_cidr: vec![],
             to_ports: vec![CiliumPortRule {
                 ports: vec![
                     CiliumPort {
@@ -126,6 +122,7 @@ impl<'a> PolicyCompiler<'a> {
                     None
                 },
             }],
+            ..Default::default()
         });
 
         // Always allow HBONE to waypoint
@@ -136,10 +133,6 @@ impl<'a> PolicyCompiler<'a> {
         );
         egress_rules.push(CiliumEgressRule {
             to_endpoints: vec![EndpointSelector::from_labels(waypoint_egress_labels)],
-            to_services: vec![],
-            to_entities: vec![],
-            to_fqdns: vec![],
-            to_cidr: vec![],
             to_ports: vec![CiliumPortRule {
                 ports: vec![CiliumPort {
                     port: mesh::HBONE_PORT.to_string(),
@@ -147,6 +140,7 @@ impl<'a> PolicyCompiler<'a> {
                 }],
                 rules: None,
             }],
+            ..Default::default()
         });
 
         // Add egress rules for dependencies
@@ -195,17 +189,13 @@ impl<'a> PolicyCompiler<'a> {
     /// endpoints and translates service ports to targetPorts automatically.
     fn build_local_dependency_rule(edge: &ActiveEdge, egress_rules: &mut Vec<CiliumEgressRule>) {
         egress_rules.push(CiliumEgressRule {
-            to_endpoints: vec![],
             to_services: vec![K8sServiceSelector {
                 k8s_service: K8sServiceRef {
                     service_name: edge.callee_name.clone(),
                     namespace: edge.callee_namespace.clone(),
                 },
             }],
-            to_entities: vec![],
-            to_fqdns: vec![],
-            to_cidr: vec![],
-            to_ports: vec![],
+            ..Default::default()
         });
     }
 
@@ -223,24 +213,18 @@ impl<'a> PolicyCompiler<'a> {
         // Add FQDN-based egress rule if there are FQDN endpoints
         if !fqdns.is_empty() {
             egress_rules.push(CiliumEgressRule {
-                to_endpoints: vec![],
-                to_services: vec![],
-                to_entities: vec![],
                 to_fqdns: fqdns,
-                to_cidr: vec![],
                 to_ports: to_ports.clone(),
+                ..Default::default()
             });
         }
 
         // Add CIDR-based egress rule if there are IP endpoints
         if !cidrs.is_empty() {
             egress_rules.push(CiliumEgressRule {
-                to_endpoints: vec![],
-                to_services: vec![],
-                to_entities: vec![],
-                to_fqdns: vec![],
                 to_cidr: cidrs,
                 to_ports,
+                ..Default::default()
             });
         }
     }

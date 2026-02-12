@@ -993,14 +993,29 @@ mod tests {
         )
     }
 
+    /// Create a fresh graph + cedar pair for tests.
+    fn test_setup() -> (ServiceGraph, PolicyEngine) {
+        (ServiceGraph::new(), PolicyEngine::new())
+    }
+
+    /// Set the security context on the "main" container.
+    fn set_main_security(service: &mut LatticeService, security: SecurityContext) {
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(security);
+    }
+
     // =========================================================================
     // Story: Unified Compilation Delegates to Specialized Compilers
     // =========================================================================
 
     #[tokio::test]
     async fn compile_delegates_to_both_compilers() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let env = "prod";
 
         // api allows gateway
@@ -1033,8 +1048,7 @@ mod tests {
 
     #[tokio::test]
     async fn environment_from_label() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
 
         // Put service in "staging" environment
         let spec = make_service_spec_for_graph(vec![], vec![]);
@@ -1052,8 +1066,7 @@ mod tests {
 
     #[tokio::test]
     async fn environment_falls_back_to_namespace() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
 
         // Put service in "prod-ns" environment (same as namespace)
         let spec = make_service_spec_for_graph(vec![], vec![]);
@@ -1075,8 +1088,7 @@ mod tests {
 
     #[tokio::test]
     async fn workloads_without_graph_entry() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         // Don't add service to graph
 
         let service = make_service("my-app", "default");
@@ -1098,8 +1110,7 @@ mod tests {
 
     #[tokio::test]
     async fn resource_count() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("default", "my-app", &spec);
 
@@ -1122,8 +1133,7 @@ mod tests {
         let empty = CompiledService::default();
         assert!(empty.is_empty());
 
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let service = make_service("my-app", "default");
 
         let compiler = test_compiler(&graph, &cedar);
@@ -1137,8 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_with_ingress_generates_gateway_resources() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
 
@@ -1174,8 +1183,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_without_ingress_has_no_gateway_resources() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
 
@@ -1193,8 +1201,7 @@ mod tests {
 
     #[tokio::test]
     async fn resource_count_includes_ingress() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
 
@@ -1220,8 +1227,7 @@ mod tests {
             VolumeBackupSpec,
         };
 
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
 
         let mut service = make_service("my-db", "prod");
         service.spec.backup = Some(ServiceBackupSpec {
@@ -1272,8 +1278,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_backup_no_annotations() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let service = make_service("my-app", "default");
 
         let compiler = test_compiler(&graph, &cedar);
@@ -1364,8 +1369,7 @@ mod tests {
 
     #[tokio::test]
     async fn compiler_phase_gets_called() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let service = make_service("my-app", "default");
 
         let phase = Arc::new(TrackingPhase::new());
@@ -1406,8 +1410,7 @@ mod tests {
             }
         }
 
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let service = make_service("my-app", "default");
 
         let phases: Vec<Arc<dyn CompilerPhase>> = vec![Arc::new(AddResourcePhase)];
@@ -1438,8 +1441,7 @@ mod tests {
             }
         }
 
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let service = make_service("my-app", "default");
 
         let phases: Vec<Arc<dyn CompilerPhase>> = vec![Arc::new(FailingPhase)];
@@ -1461,8 +1463,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_phases_no_extensions() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
         let service = make_service("my-app", "default");
 
         // No with_phases call — default empty
@@ -1487,16 +1488,13 @@ mod tests {
     #[test]
     fn collect_security_overrides_capabilities() {
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            capabilities: vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()],
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                capabilities: vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()],
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 2);
@@ -1509,16 +1507,13 @@ mod tests {
     #[test]
     fn collect_security_overrides_privileged() {
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            privileged: Some(true),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                privileged: Some(true),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
@@ -1530,32 +1525,26 @@ mod tests {
     fn collect_security_overrides_run_as_root() {
         // runAsUser: 0
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            run_as_user: Some(0),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                run_as_user: Some(0),
+                ..Default::default()
+            },
+        );
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].override_id, "runAsRoot");
 
         // runAsNonRoot: false
         let mut service2 = make_service("my-app", "default");
-        service2
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            run_as_non_root: Some(false),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service2,
+            SecurityContext {
+                run_as_non_root: Some(false),
+                ..Default::default()
+            },
+        );
         let overrides2 =
             collect_security_overrides(&service2.spec.workload, &service2.spec.runtime);
         assert_eq!(overrides2.len(), 1);
@@ -1581,17 +1570,14 @@ mod tests {
     #[test]
     fn collect_security_overrides_profiles() {
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            seccomp_profile: Some("Unconfined".to_string()),
-            apparmor_profile: Some("Unconfined".to_string()),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                seccomp_profile: Some("Unconfined".to_string()),
+                apparmor_profile: Some("Unconfined".to_string()),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 2);
@@ -1605,16 +1591,13 @@ mod tests {
     #[test]
     fn collect_security_overrides_read_write_root_fs() {
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            read_only_root_filesystem: Some(false),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                read_only_root_filesystem: Some(false),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
@@ -1624,16 +1607,13 @@ mod tests {
     #[test]
     fn collect_security_overrides_allow_priv_escalation() {
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            allow_privilege_escalation: Some(true),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                allow_privilege_escalation: Some(true),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
@@ -1665,21 +1645,18 @@ mod tests {
     fn collect_security_overrides_defaults_not_flagged() {
         // Explicitly setting defaults should not trigger overrides
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            privileged: Some(false),
-            read_only_root_filesystem: Some(true),
-            run_as_non_root: Some(true),
-            allow_privilege_escalation: Some(false),
-            seccomp_profile: Some("RuntimeDefault".to_string()),
-            apparmor_profile: Some("RuntimeDefault".to_string()),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                privileged: Some(false),
+                read_only_root_filesystem: Some(true),
+                run_as_non_root: Some(true),
+                allow_privilege_escalation: Some(false),
+                seccomp_profile: Some("RuntimeDefault".to_string()),
+                apparmor_profile: Some("RuntimeDefault".to_string()),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert!(overrides.is_empty());
@@ -1690,16 +1667,13 @@ mod tests {
         // dropCapabilities: [] means the container keeps ALL default caps
         // — this is a huge security relaxation that must require Cedar auth.
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            drop_capabilities: Some(vec![]),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                drop_capabilities: Some(vec![]),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), DEFAULT_CONTAINER_CAPABILITIES.len());
@@ -1718,16 +1692,13 @@ mod tests {
     fn collect_security_overrides_drop_caps_partial() {
         // dropCapabilities: ["NET_RAW", "MKNOD"] means everything else is retained
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            drop_capabilities: Some(vec!["NET_RAW".to_string(), "MKNOD".to_string()]),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                drop_capabilities: Some(vec!["NET_RAW".to_string(), "MKNOD".to_string()]),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
@@ -1751,17 +1722,14 @@ mod tests {
         // If a cap is in both the add list and would be in the retained defaults,
         // only one override should be generated (the explicit add).
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            capabilities: vec!["NET_RAW".to_string()],
-            drop_capabilities: Some(vec![]),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                capabilities: vec!["NET_RAW".to_string()],
+                drop_capabilities: Some(vec![]),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         let net_raw_count = overrides
@@ -1778,16 +1746,13 @@ mod tests {
     fn collect_security_overrides_drop_all_no_retained() {
         // dropCapabilities: ["ALL"] (the PSS default) should NOT generate retained overrides
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            drop_capabilities: Some(vec!["ALL".to_string()]),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                drop_capabilities: Some(vec!["ALL".to_string()]),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert!(overrides.is_empty());
@@ -1797,16 +1762,13 @@ mod tests {
     fn collect_security_overrides_drop_caps_case_insensitive() {
         // Drop list should match case-insensitively
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            drop_capabilities: Some(vec!["net_raw".to_string(), "Mknod".to_string()]),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                drop_capabilities: Some(vec!["net_raw".to_string(), "Mknod".to_string()]),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
@@ -1820,17 +1782,14 @@ mod tests {
         // Privileged containers already get ALL capabilities — the "privileged"
         // override covers it, so drop_capabilities relaxation is irrelevant.
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            privileged: Some(true),
-            drop_capabilities: Some(vec![]),
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                privileged: Some(true),
+                drop_capabilities: Some(vec![]),
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
@@ -1846,16 +1805,13 @@ mod tests {
         // drop_capabilities: None means the compiler applies the default ["ALL"],
         // so no retained capability overrides should be generated.
         let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            drop_capabilities: None,
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                drop_capabilities: None,
+                ..Default::default()
+            },
+        );
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert!(overrides.is_empty());
@@ -1867,20 +1823,16 @@ mod tests {
 
     #[tokio::test]
     async fn compile_fails_when_security_override_denied() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new(); // default-deny
+        let (graph, cedar) = test_setup(); // default-deny
 
         let mut service = make_service("my-app", "prod");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            capabilities: vec!["NET_ADMIN".to_string()],
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                capabilities: vec!["NET_ADMIN".to_string()],
+                ..Default::default()
+            },
+        );
 
         let compiler = test_compiler(&graph, &cedar);
         let err = compiler.compile(&service).await.unwrap_err();
@@ -1906,16 +1858,13 @@ mod tests {
         .unwrap();
 
         let mut service = make_service("my-app", "prod");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            capabilities: vec!["NET_ADMIN".to_string()],
-            ..Default::default()
-        });
+        set_main_security(
+            &mut service,
+            SecurityContext {
+                capabilities: vec!["NET_ADMIN".to_string()],
+                ..Default::default()
+            },
+        );
 
         let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
@@ -1925,8 +1874,7 @@ mod tests {
 
     #[tokio::test]
     async fn compile_no_overrides_no_policy_needed() {
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new(); // default-deny — but no overrides, so should pass
+        let (graph, cedar) = test_setup(); // default-deny — but no overrides, so should pass
 
         let service = make_service("my-app", "default");
 
@@ -1947,8 +1895,7 @@ mod tests {
             VolumeBackupSpec,
         };
 
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
 
         // Service has inline backup with hooks only
         let mut service = make_service("my-db", "prod");
@@ -1995,8 +1942,7 @@ mod tests {
     async fn effective_backup_none_falls_back_to_inline() {
         use crate::crd::{BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec};
 
-        let graph = ServiceGraph::new();
-        let cedar = PolicyEngine::new();
+        let (graph, cedar) = test_setup();
 
         let mut service = make_service("my-db", "prod");
         service.spec.backup = Some(ServiceBackupSpec {

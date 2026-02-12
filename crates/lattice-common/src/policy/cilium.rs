@@ -101,7 +101,7 @@ pub struct CiliumIngressRule {
 }
 
 /// Cilium egress rule
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CiliumEgressRule {
     /// To endpoints (internal services)

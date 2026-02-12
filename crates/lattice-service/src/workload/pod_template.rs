@@ -13,8 +13,8 @@ use super::volume::GeneratedVolumes;
 use super::{
     gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources, AppArmorProfile,
     Capabilities, Container, ContainerCompilationData, ContainerPort, EnvVar, K8sSecurityContext,
-    LabelSelector, LocalObjectReference, PodSecurityContext, ResourceQuantity,
-    ResourceRequirements, SeccompProfile, SecretRef, Sysctl, TopologySpreadConstraint, Volume,
+    LabelSelector, LocalObjectReference, PodSecurityContext, ResourceRequirements, SeccompProfile,
+    SecretRef, Sysctl, TopologySpreadConstraint, Volume,
 };
 
 /// Compiled pod template — all the fields needed to build a K8s PodTemplateSpec.
@@ -213,22 +213,10 @@ impl PodTemplateCompiler {
                     })
                     .unwrap_or_default();
 
-                // Convert resources
                 let resources = container_spec
                     .resources
                     .as_ref()
-                    .map(|r| ResourceRequirements {
-                        requests: r.requests.as_ref().map(|req| ResourceQuantity {
-                            cpu: req.cpu.clone(),
-                            memory: req.memory.clone(),
-                            ..Default::default()
-                        }),
-                        limits: r.limits.as_ref().map(|lim| ResourceQuantity {
-                            cpu: lim.cpu.clone(),
-                            memory: lim.memory.clone(),
-                            ..Default::default()
-                        }),
-                    });
+                    .map(ResourceRequirements::from);
 
                 // Merge GPU resources into limits (first container only)
                 let resources = if idx == 0 {
@@ -498,18 +486,7 @@ impl PodTemplateCompiler {
             let resources = sidecar_spec
                 .resources
                 .as_ref()
-                .map(|r| ResourceRequirements {
-                    requests: r.requests.as_ref().map(|req| ResourceQuantity {
-                        cpu: req.cpu.clone(),
-                        memory: req.memory.clone(),
-                        ..Default::default()
-                    }),
-                    limits: r.limits.as_ref().map(|lim| ResourceQuantity {
-                        cpu: lim.cpu.clone(),
-                        memory: lim.memory.clone(),
-                        ..Default::default()
-                    }),
-                });
+                .map(ResourceRequirements::from);
 
             let is_init = sidecar_spec.init.unwrap_or(false);
             let (liveness_probe, readiness_probe, startup_probe) = if is_init {

@@ -261,16 +261,9 @@ impl VolumeCompiler {
             }
 
             // Generate pod volume
-            output.volumes.push(super::Volume {
-                name: resource_name.to_string(),
-                config_map: None,
-                secret: None,
-                persistent_volume_claim: Some(PvcVolumeSource {
-                    claim_name: pvc_name,
-                    read_only: None,
-                }),
-                empty_dir: None,
-            });
+            output
+                .volumes
+                .push(super::Volume::from_pvc(resource_name.as_str(), pvc_name));
         }
 
         // -----------------------------------------------------------------
@@ -362,16 +355,11 @@ impl VolumeCompiler {
                 }
                 None => {
                     let vol_name = sanitize_volume_name(mount_path);
-                    extra_volumes.push(super::Volume {
-                        name: vol_name.clone(),
-                        config_map: None,
-                        secret: None,
-                        persistent_volume_claim: None,
-                        empty_dir: Some(super::EmptyDirVolumeSource {
-                            medium: volume_mount.medium.clone(),
-                            size_limit: volume_mount.size_limit.clone(),
-                        }),
-                    });
+                    extra_volumes.push(super::Volume::from_empty_dir(
+                        &vol_name,
+                        volume_mount.medium.clone(),
+                        volume_mount.size_limit.clone(),
+                    ));
                     mounts.push(super::VolumeMount {
                         name: vol_name,
                         mount_path: mount_path.clone(),

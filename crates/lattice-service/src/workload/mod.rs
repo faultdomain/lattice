@@ -589,6 +589,25 @@ pub struct ResourceQuantity {
     pub gpu_cores: Option<String>,
 }
 
+impl From<&crate::crd::ResourceQuantity> for ResourceQuantity {
+    fn from(rq: &crate::crd::ResourceQuantity) -> Self {
+        Self {
+            cpu: rq.cpu.clone(),
+            memory: rq.memory.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+impl From<&crate::crd::ResourceRequirements> for ResourceRequirements {
+    fn from(rr: &crate::crd::ResourceRequirements) -> Self {
+        Self {
+            requests: rr.requests.as_ref().map(ResourceQuantity::from),
+            limits: rr.limits.as_ref().map(ResourceQuantity::from),
+        }
+    }
+}
+
 /// Probe specification - maps 1:1 with Kubernetes probe spec
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -755,6 +774,63 @@ pub struct Volume {
     /// PVC source
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistent_volume_claim: Option<volume::PvcVolumeSource>,
+}
+
+impl Volume {
+    /// Create a Volume backed by a ConfigMap.
+    pub fn from_config_map(name: impl Into<String>, cm_name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: cm_name.into(),
+            }),
+            secret: None,
+            empty_dir: None,
+            persistent_volume_claim: None,
+        }
+    }
+
+    /// Create a Volume backed by a Secret.
+    pub fn from_secret(name: impl Into<String>, secret_name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            config_map: None,
+            secret: Some(SecretVolumeSource {
+                secret_name: secret_name.into(),
+            }),
+            empty_dir: None,
+            persistent_volume_claim: None,
+        }
+    }
+
+    /// Create a Volume backed by an emptyDir.
+    pub fn from_empty_dir(
+        name: impl Into<String>,
+        medium: Option<String>,
+        size_limit: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            config_map: None,
+            secret: None,
+            empty_dir: Some(EmptyDirVolumeSource { medium, size_limit }),
+            persistent_volume_claim: None,
+        }
+    }
+
+    /// Create a Volume backed by a PVC.
+    pub fn from_pvc(name: impl Into<String>, claim_name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            config_map: None,
+            secret: None,
+            empty_dir: None,
+            persistent_volume_claim: Some(volume::PvcVolumeSource {
+                claim_name: claim_name.into(),
+                read_only: None,
+            }),
+        }
+    }
 }
 
 /// ConfigMap volume source
@@ -1076,16 +1152,7 @@ pub(crate) fn gpu_tolerations(gpu: Option<&GpuParams>) -> Vec<Toleration> {
 pub(crate) fn gpu_shm_volume(gpu: Option<&GpuParams>) -> Option<(Volume, VolumeMount)> {
     gpu.map(|_| {
         (
-            Volume {
-                name: "dshm".to_string(),
-                config_map: None,
-                secret: None,
-                empty_dir: Some(EmptyDirVolumeSource {
-                    medium: Some("Memory".to_string()),
-                    size_limit: None,
-                }),
-                persistent_volume_claim: None,
-            },
+            Volume::from_empty_dir("dshm", Some("Memory".to_string()), None),
             VolumeMount {
                 name: "dshm".to_string(),
                 mount_path: "/dev/shm".to_string(),
@@ -1562,23 +1629,6 @@ mod tests {
         test_compile(service, &BTreeMap::new()).expect("test workload compilation should succeed")
     }
 
-    /// Helper to compile a service with monitoring config
-    fn compile_service_with_monitoring(
-        service: &LatticeService,
-        monitoring: MonitoringConfig,
-    ) -> GeneratedWorkloads {
-        test_compile_with_monitoring(service, &BTreeMap::new(), monitoring)
-            .expect("test workload compilation should succeed")
-    }
-
-    /// Helper to compile a service with secret refs
-    fn compile_service_with_secret_refs(
-        service: &LatticeService,
-        secret_refs: &BTreeMap<String, SecretRef>,
-    ) -> Result<GeneratedWorkloads, CompilationError> {
-        test_compile(service, secret_refs)
-    }
-
     fn make_service(name: &str, namespace: &str) -> LatticeService {
         let mut containers = BTreeMap::new();
         containers.insert(
@@ -1956,13 +2006,15 @@ mod tests {
         });
 
         // cpu/memory should work even without monitoring
-        let output = compile_service_with_monitoring(
+        let output = test_compile_with_monitoring(
             &service,
+            &BTreeMap::new(),
             MonitoringConfig {
                 enabled: false,
                 ha: false,
             },
-        );
+        )
+        .expect("test workload compilation should succeed");
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.spec.triggers.len(), 2);
         assert_eq!(so.spec.triggers[0].type_, "cpu");
@@ -3282,8 +3334,7 @@ mod tests {
             },
         );
 
-        let output =
-            compile_service_with_secret_refs(&service, &secret_refs).expect("should compile");
+        let output = test_compile(&service, &secret_refs).expect("should compile");
 
         let deployment = output.deployment.expect("should have deployment");
         let env = &deployment.spec.template.spec.containers[0].env;
@@ -3321,8 +3372,7 @@ mod tests {
             },
         );
 
-        let output =
-            compile_service_with_secret_refs(&service, &secret_refs).expect("should compile");
+        let output = test_compile(&service, &secret_refs).expect("should compile");
 
         let env = &output.deployment.unwrap().spec.template.spec.containers[0].env;
 
@@ -3344,7 +3394,7 @@ mod tests {
         service.spec.workload.resources.remove("nonexistent");
 
         let secret_refs = BTreeMap::new();
-        let result = compile_service_with_secret_refs(&service, &secret_refs);
+        let result = test_compile(&service, &secret_refs);
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -3367,7 +3417,7 @@ mod tests {
             crate::crd::ResourceType::Service;
 
         let secret_refs = BTreeMap::new();
-        let result = compile_service_with_secret_refs(&service, &secret_refs);
+        let result = test_compile(&service, &secret_refs);
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -3400,7 +3450,7 @@ mod tests {
             },
         );
 
-        let result = compile_service_with_secret_refs(&service, &secret_refs);
+        let result = test_compile(&service, &secret_refs);
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -3426,7 +3476,7 @@ mod tests {
             },
         );
 
-        let result = compile_service_with_secret_refs(&service, &secret_refs);
+        let result = test_compile(&service, &secret_refs);
         assert!(result.is_ok());
     }
 
@@ -3458,8 +3508,7 @@ mod tests {
             },
         );
 
-        let output =
-            compile_service_with_secret_refs(&service, &secret_refs).expect("should compile");
+        let output = test_compile(&service, &secret_refs).expect("should compile");
 
         let ips = &output
             .deployment
@@ -3478,7 +3527,7 @@ mod tests {
         service.spec.runtime.image_pull_secrets = vec!["nonexistent".to_string()];
 
         let secret_refs = BTreeMap::new();
-        let result = compile_service_with_secret_refs(&service, &secret_refs);
+        let result = test_compile(&service, &secret_refs);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nonexistent"));
@@ -3497,7 +3546,7 @@ mod tests {
         );
 
         let secret_refs = BTreeMap::new();
-        let result = compile_service_with_secret_refs(&service, &secret_refs);
+        let result = test_compile(&service, &secret_refs);
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
