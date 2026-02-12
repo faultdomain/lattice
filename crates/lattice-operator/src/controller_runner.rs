@@ -28,7 +28,7 @@ use lattice_common::crd::{
     LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider, ProviderType,
     SecretProvider,
 };
-use lattice_common::ControllerContext;
+use lattice_common::{ControllerContext, LATTICE_SYSTEM_NAMESPACE};
 use lattice_secret_provider as secrets_provider_ctrl;
 use lattice_service::compiler::ServiceMonitorPhase;
 use lattice_service::controller::{
@@ -97,11 +97,14 @@ pub fn build_service_controllers(
 
     let services: Api<LatticeService> = Api::all(client.clone());
     let services_for_watch = services.clone();
-    let graph_for_watch = service_ctx.graph.clone();
+    let graph_for_dep_watch = service_ctx.graph.clone();
+    let graph_for_cedar_watch = service_ctx.graph.clone();
+    let cedar_policies: Api<CedarPolicy> =
+        Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     let svc_ctrl = Controller::new(services, watcher_config())
         .watches(services_for_watch, watcher_config(), move |service| {
-            let graph = graph_for_watch.clone();
+            let graph = graph_for_dep_watch.clone();
             let namespace = match service.metadata.namespace.as_deref() {
                 Some(ns) => ns,
                 None => return vec![],
@@ -125,6 +128,19 @@ pub fn build_service_controllers(
                 .into_iter()
                 .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
                 .collect()
+        })
+        .watches(cedar_policies, watcher_config(), move |_policy| {
+            let mut refs = Vec::new();
+            for ns in graph_for_cedar_watch.list_namespaces() {
+                for svc in graph_for_cedar_watch.list_services(&ns) {
+                    refs.push(ObjectRef::<LatticeService>::new(&svc.name).within(&ns));
+                }
+            }
+            tracing::info!(
+                service_count = refs.len(),
+                "CedarPolicy changed, re-reconciling all services"
+            );
+            refs
         })
         .shutdown_on_signal()
         .run(service_reconcile, service_error_policy, service_ctx.clone())

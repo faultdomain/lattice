@@ -408,10 +408,15 @@ pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
         test_provider_scoped_access(kubeconfig),
     );
 
-    // Always clean up policies, even on failure
-    cleanup_cedar_secret_policies(kubeconfig).await;
+    // Only clean up policies on success — on failure, leave them in place so the
+    // operator can self-heal after crashes/restarts. The pre-test cleanup (above)
+    // handles leftovers from previous failed runs.
+    let result = result.map_err(|e| e.to_string());
+    if result.is_ok() {
+        cleanup_cedar_secret_policies(kubeconfig).await;
+    }
 
-    result.map_err(|e| e.to_string())?;
+    result?;
 
     info!("[CedarSecrets] All Cedar secret authorization tests passed!");
     Ok(())
