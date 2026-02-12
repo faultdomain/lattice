@@ -195,8 +195,22 @@ impl WorkloadSpec {
             svc.validate()?;
         }
 
-        // Validate GPU resource params if present
+        // Validate resource fields
         for (name, resource) in &self.resources {
+            // Resource id is used in volume owner labels: "volume-owner-{id}" (≤63 chars)
+            if let Some(ref id) = resource.id {
+                if id.len() > 50 {
+                    return Err(crate::Error::validation(format!(
+                        "resource '{}': id '{}' exceeds 50 character limit \
+                         (used in label name with 13-char prefix)",
+                        name, id
+                    )));
+                }
+                super::super::validate_dns_identifier(id, false).map_err(|e| {
+                    crate::Error::validation(format!("resource '{}': id: {}", name, e))
+                })?;
+            }
+
             if resource.type_.is_gpu() {
                 if let Some(params) = &resource.params {
                     let value = serde_json::to_value(params).map_err(|e| {
@@ -491,6 +505,38 @@ mod tests {
         let err = spec.validate().unwrap_err().to_string();
         assert!(err.contains("container name"));
         assert!(err.contains("lowercase alphanumeric"));
+    }
+
+    #[test]
+    fn resource_id_too_long_fails() {
+        let mut spec = sample_workload();
+        spec.resources.insert(
+            "vol".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Outbound,
+                id: Some("a".repeat(51)),
+                ..Default::default()
+            },
+        );
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("exceeds 50 character limit"));
+    }
+
+    #[test]
+    fn resource_id_with_underscores_fails() {
+        let mut spec = sample_workload();
+        spec.resources.insert(
+            "vol".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Outbound,
+                id: Some("my_volume".to_string()),
+                ..Default::default()
+            },
+        );
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("resource 'vol': id"));
     }
 
     #[test]
