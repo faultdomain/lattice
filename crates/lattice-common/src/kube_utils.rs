@@ -871,6 +871,15 @@ pub fn extract_kind(manifest: &str) -> &str {
         .unwrap_or("")
 }
 
+/// Check if a JSON manifest is a Kubernetes Deployment
+pub fn is_deployment_json(manifest: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(manifest) {
+        value.get("kind").and_then(|k| k.as_str()) == Some("Deployment")
+    } else {
+        false
+    }
+}
+
 /// Run API discovery with retry.
 ///
 /// Discovery can transiently fail when aggregated API endpoints (from recently

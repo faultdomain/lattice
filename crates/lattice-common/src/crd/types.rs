@@ -135,11 +135,6 @@ impl BootstrapProvider {
     pub fn is_fips_native(&self) -> bool {
         matches!(self, Self::Rke2)
     }
-
-    /// Returns true if this bootstrap provider may need FIPS relaxation
-    pub fn needs_fips_relax(&self) -> bool {
-        matches!(self, Self::Kubeadm)
-    }
 }
 
 impl std::fmt::Display for BootstrapProvider {
@@ -1435,12 +1430,6 @@ mod tests {
         fn test_fips_native() {
             assert!(!BootstrapProvider::Kubeadm.is_fips_native());
             assert!(BootstrapProvider::Rke2.is_fips_native());
-        }
-
-        #[test]
-        fn test_needs_fips_relax() {
-            assert!(BootstrapProvider::Kubeadm.needs_fips_relax());
-            assert!(!BootstrapProvider::Rke2.needs_fips_relax());
         }
 
         #[test]

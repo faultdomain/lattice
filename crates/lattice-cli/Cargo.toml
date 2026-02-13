@@ -6,7 +6,8 @@ license.workspace = true
 description = "CLI for managing Lattice cluster hierarchies"
 
 [features]
-default = []
+default = ["fips"]
+fips = ["lattice-operator/fips", "lattice-common/fips"]
 provider-e2e = []
 
 [dependencies]

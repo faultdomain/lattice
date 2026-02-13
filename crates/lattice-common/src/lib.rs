@@ -109,16 +109,6 @@ pub fn is_bootstrap_cluster() -> bool {
         .unwrap_or(false)
 }
 
-/// Install the FIPS-validated crypto provider for rustls.
-///
-/// This must be called before creating any TLS connections (including kube clients).
-/// Safe to call multiple times - subsequent calls are no-ops.
-///
-/// Uses aws-lc-rs which provides FIPS 140-2/140-3 validated cryptography.
-pub fn install_crypto_provider() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-}
-
 /// Parsed cell endpoint containing host and ports
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellEndpoint {

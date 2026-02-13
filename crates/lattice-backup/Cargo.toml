@@ -6,7 +6,7 @@ license.workspace = true
 description = "Backup and restore controllers for Lattice - manages Velero Schedule and BackupStorageLocation"
 
 [features]
-default = []
+default = ["fips"]
 fips = ["lattice-common/fips"]
 
 [dependencies]

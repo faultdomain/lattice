@@ -57,6 +57,6 @@ docker build \
     --build-arg IPAM_VERSION="$IPAM_VERSION" \
     --build-arg CERTMANAGER_VERSION="$CERTMANAGER_VERSION" \
     --platform linux/amd64,linux/arm64 \
-    --build-arg FIPS=false \
+    --build-arg FIPS=true \
     "$@" \
     "$PROJECT_ROOT"

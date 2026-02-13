@@ -881,7 +881,7 @@ mod tests {
 
     async fn test_parent_servers() -> Option<ParentServers<MockManifestGenerator>> {
         // Install crypto provider (ok if already installed)
-        lattice_common::install_crypto_provider();
+        lattice_common::fips::install_crypto_provider();
 
         let client = try_test_client().await?;
         let config = ParentConfig {
@@ -915,7 +915,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parent_servers_creation() {
-        lattice_common::install_crypto_provider();
+        lattice_common::fips::install_crypto_provider();
         let Some(client) = try_test_client().await else {
             return; // Skip if no kubeconfig available
         };
@@ -937,7 +937,7 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_running_starts_servers() {
         // Install crypto provider before creating kube client (which uses TLS)
-        lattice_common::install_crypto_provider();
+        lattice_common::fips::install_crypto_provider();
 
         let Some(client) = try_test_client().await else {
             // Skip test if no kubeconfig available
@@ -996,7 +996,7 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_state_available_after_start() {
         // Install crypto provider before creating kube client (which uses TLS)
-        lattice_common::install_crypto_provider();
+        lattice_common::fips::install_crypto_provider();
 
         let Some(servers) = test_parent_servers().await else {
             return; // Skip if no kubeconfig available

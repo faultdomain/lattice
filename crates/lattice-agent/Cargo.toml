@@ -6,7 +6,7 @@ license.workspace = true
 description = "Child cluster (agent) runtime for Lattice"
 
 [features]
-default = []
+default = ["fips"]
 fips = ["lattice-infra/fips", "lattice-common/fips"]
 
 [dependencies]

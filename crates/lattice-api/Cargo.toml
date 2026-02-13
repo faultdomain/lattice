@@ -6,7 +6,7 @@ license.workspace = true
 description = "Auth proxy for Lattice cluster access"
 
 [features]
-default = []
+default = ["fips"]
 fips = ["lattice-common/fips"]
 
 [dependencies]

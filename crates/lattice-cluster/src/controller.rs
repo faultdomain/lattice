@@ -2767,7 +2767,7 @@ mod tests {
 
         /// Get a K8s client for tests, or skip if not available
         async fn test_client() -> Option<Client> {
-            lattice_common::install_crypto_provider();
+            lattice_common::fips::install_crypto_provider();
             Client::try_default().await.ok()
         }
 

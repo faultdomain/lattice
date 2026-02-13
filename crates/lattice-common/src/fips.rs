@@ -1,88 +1,33 @@
-//! FIPS compliance utilities
+//! FIPS 140-3 compliance constants and initialization.
 //!
-//! This module provides shared functions for FIPS 140 compliance handling.
-//! Production clusters run with `GODEBUG=fips140=only` (strict FIPS),
-//! but bootstrap clusters may need `fips140=on` (relaxed FIPS) to communicate
-//! with non-FIPS kind clusters.
-//!
-//! # FIPS Modes
-//!
-//! - `fips140=only` (default in container): Only FIPS-approved algorithms allowed
-//! - `fips140=on`: FIPS mode enabled but fallback to non-FIPS algorithms allowed
-//!
-//! # When to Relax FIPS
-//!
-//! - Bootstrap cluster deploying to non-FIPS kind cluster
-//! - Kubeadm-based clusters (kubeadm itself may use non-FIPS crypto)
-//!
-//! # When NOT to Relax FIPS
-//!
-//! - RKE2-based clusters (RKE2 is FIPS-compliant out of the box)
-//! - Production workload clusters
-//! - Any cluster where FIPS is required by compliance
+//! All Lattice builds enforce FIPS mode via aws-lc-rs. This module provides
+//! the shared constants and initialization function used across all binaries.
 
-/// Add GODEBUG=fips140=on environment variable to a Kubernetes Deployment JSON
+/// FIPS-approved TLS 1.2 cipher suites for Kubernetes API servers.
 ///
-/// This function parses a deployment manifest, adds the GODEBUG env var to all
-/// containers, and returns the modified JSON. Used for bootstrap clusters that
-/// need to communicate with non-FIPS API servers.
+/// These cipher suites are supported by both aws-lc-rs (Rust) and Go's FIPS module.
+/// TLS 1.3 suites (TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384) are always
+/// enabled by Go's crypto/tls and don't need to be listed here.
 ///
-/// # Arguments
-///
-/// * `deployment_json` - A JSON string representing a Kubernetes Deployment
-///
-/// # Returns
-///
-/// The modified deployment JSON with GODEBUG env var added to all containers.
-/// If parsing fails, returns the original JSON unchanged.
-pub fn add_fips_relax_env(deployment_json: &str) -> String {
-    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) {
-        if let Some(containers) = value
-            .pointer_mut("/spec/template/spec/containers")
-            .and_then(|c| c.as_array_mut())
-        {
-            for container in containers {
-                let container_obj = match container.as_object_mut() {
-                    Some(obj) => obj,
-                    None => continue,
-                };
+/// Used for kubeadm and RKE2 API server configurations and kind cluster configs.
+pub const FIPS_TLS_CIPHER_SUITES: &str = "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256";
 
-                // Get or create env array
-                let env = container_obj
-                    .entry("env")
-                    .or_insert_with(|| serde_json::json!([]))
-                    .as_array_mut();
+/// Minimum TLS version for Kubernetes API servers (FIPS requires TLS 1.2+).
+pub const FIPS_TLS_MIN_VERSION: &str = "VersionTLS12";
 
-                if let Some(env) = env {
-                    // Only add if not already present
-                    let has_godebug = env.iter().any(|e| {
-                        e.get("name")
-                            .and_then(|n| n.as_str())
-                            .map(|n| n == "GODEBUG")
-                            .unwrap_or(false)
-                    });
-                    if !has_godebug {
-                        env.push(serde_json::json!({
-                            "name": "GODEBUG",
-                            "value": "fips140=on"
-                        }));
-                    }
-                }
-            }
-        }
-        serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
-    } else {
-        deployment_json.to_string()
-    }
-}
-
-/// Check if a manifest is a Kubernetes Deployment
-pub fn is_deployment(manifest: &str) -> bool {
-    // Handle different JSON formatting (with or without spaces after colons)
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(manifest) {
-        value.get("kind").and_then(|k| k.as_str()) == Some("Deployment")
-    } else {
-        false
+/// Install the FIPS-validated crypto provider for rustls and verify FIPS mode.
+///
+/// This must be called before creating any TLS connections (including kube clients).
+/// Safe to call multiple times — subsequent calls are no-ops.
+///
+/// Panics if FIPS mode cannot be activated (aws-lc-rs not compiled with fips feature).
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    if let Err(e) = aws_lc_rs::try_fips_mode() {
+        panic!(
+            "CRITICAL: FIPS mode failed to activate: {e}. \
+             Ensure aws-lc-rs is compiled with the fips feature."
+        );
     }
 }
 
@@ -90,146 +35,20 @@ pub fn is_deployment(manifest: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn sample_deployment() -> String {
-        serde_json::json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": {
-                "name": "test-deployment",
-                "namespace": "test-ns"
-            },
-            "spec": {
-                "replicas": 1,
-                "template": {
-                    "spec": {
-                        "containers": [{
-                            "name": "test",
-                            "image": "test:latest",
-                            "env": [{
-                                "name": "RUST_LOG",
-                                "value": "info"
-                            }]
-                        }]
-                    }
-                }
-            }
-        })
-        .to_string()
+    #[test]
+    fn fips_mode_activates() {
+        install_crypto_provider();
+        // If we get here, FIPS mode is active
     }
 
     #[test]
-    fn add_fips_relax_env_adds_godebug() {
-        let original = sample_deployment();
-        let modified = add_fips_relax_env(&original);
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&modified).expect("modified JSON should parse successfully");
-        let env = parsed
-            .pointer("/spec/template/spec/containers/0/env")
-            .expect("env pointer should resolve")
-            .as_array()
-            .expect("env should be an array");
-
-        let has_godebug = env.iter().any(|e| {
-            e.get("name").and_then(|n| n.as_str()) == Some("GODEBUG")
-                && e.get("value").and_then(|v| v.as_str()) == Some("fips140=on")
-        });
-        assert!(has_godebug, "Should have GODEBUG=fips140=on env var");
-    }
-
-    #[test]
-    fn add_fips_relax_env_does_not_duplicate() {
-        // Add once
-        let original = sample_deployment();
-        let modified = add_fips_relax_env(&original);
-
-        // Try to add again
-        let double_modified = add_fips_relax_env(&modified);
-
-        let parsed: serde_json::Value = serde_json::from_str(&double_modified)
-            .expect("double modified JSON should parse successfully");
-        let env = parsed
-            .pointer("/spec/template/spec/containers/0/env")
-            .expect("env pointer should resolve")
-            .as_array()
-            .expect("env should be an array");
-
-        let godebug_count = env
-            .iter()
-            .filter(|e| e.get("name").and_then(|n| n.as_str()) == Some("GODEBUG"))
-            .count();
-        assert_eq!(godebug_count, 1, "Should only have one GODEBUG env var");
-    }
-
-    #[test]
-    fn add_fips_relax_env_handles_invalid_json() {
-        let invalid = "not valid json";
-        let result = add_fips_relax_env(invalid);
-        assert_eq!(result, invalid, "Should return original on parse error");
-    }
-
-    #[test]
-    fn add_fips_relax_env_handles_non_deployment() {
-        let namespace = serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": {
-                "name": "test-ns"
-            }
-        })
-        .to_string();
-
-        let result = add_fips_relax_env(&namespace);
-        // Should return unchanged (no containers to modify)
-        assert_eq!(result, namespace);
-    }
-
-    #[test]
-    fn is_deployment_returns_true_for_deployments() {
-        let deployment = sample_deployment();
-        assert!(is_deployment(&deployment));
-    }
-
-    #[test]
-    fn is_deployment_returns_false_for_non_deployments() {
-        let namespace = serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": { "name": "test" }
-        })
-        .to_string();
-        assert!(!is_deployment(&namespace));
-    }
-
-    #[test]
-    fn add_fips_relax_env_creates_env_array_if_missing() {
-        let deployment_no_env = serde_json::json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": { "name": "test" },
-            "spec": {
-                "template": {
-                    "spec": {
-                        "containers": [{
-                            "name": "test",
-                            "image": "test:latest"
-                        }]
-                    }
-                }
-            }
-        })
-        .to_string();
-
-        let modified = add_fips_relax_env(&deployment_no_env);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&modified).expect("modified JSON should parse");
-        let env = parsed
-            .pointer("/spec/template/spec/containers/0/env")
-            .expect("env should now exist")
-            .as_array()
-            .expect("env should be an array");
-
-        assert_eq!(env.len(), 1);
-        assert_eq!(env[0].get("name").and_then(|n| n.as_str()), Some("GODEBUG"));
+    fn cipher_suites_are_fips_approved() {
+        // All listed suites must use AES-GCM (FIPS-approved AEAD)
+        for suite in FIPS_TLS_CIPHER_SUITES.split(',') {
+            assert!(
+                suite.contains("AES") && suite.contains("GCM"),
+                "Non-FIPS cipher suite found: {suite}"
+            );
+        }
     }
 }

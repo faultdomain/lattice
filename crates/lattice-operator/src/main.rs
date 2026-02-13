@@ -123,22 +123,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_crypto() {
-    if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
-        eprintln!("CRITICAL: Failed to install crypto provider: {:?}", e);
-        std::process::exit(1);
-    }
-
-    #[cfg(feature = "fips")]
-    {
-        if let Err(e) = aws_lc_rs::try_fips_mode() {
-            eprintln!("CRITICAL: FIPS mode failed: {}", e);
-            std::process::exit(1);
-        }
-        eprintln!("FIPS mode: ENABLED");
-    }
-
-    #[cfg(not(feature = "fips"))]
-    eprintln!("WARNING: Running without FIPS mode");
+    // Panics on failure — FIPS mode is mandatory
+    lattice_common::fips::install_crypto_provider();
+    eprintln!("FIPS mode: ENABLED");
 }
 
 fn init_telemetry_global() {

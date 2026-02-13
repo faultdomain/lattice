@@ -6,7 +6,7 @@ license.workspace = true
 description = "Distributed clusterctl move implementation for CAPI pivot over gRPC"
 
 [features]
-default = []
+default = ["fips"]
 fips = ["aws-lc-rs/fips"]
 
 [dependencies]

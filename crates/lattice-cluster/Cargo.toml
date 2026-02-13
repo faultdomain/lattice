@@ -6,7 +6,7 @@ license.workspace = true
 description = "Cluster lifecycle management for Lattice"
 
 [features]
-default = []
+default = ["fips"]
 fips = ["lattice-common/fips", "lattice-infra/fips"]
 
 [dependencies]

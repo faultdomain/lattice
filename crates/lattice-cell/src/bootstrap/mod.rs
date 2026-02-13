@@ -231,8 +231,6 @@ pub struct BootstrapBundleConfig<'a> {
     pub provider: ProviderType,
     /// Kubernetes version (e.g., "1.32.0")
     pub k8s_version: &'a str,
-    /// Whether to relax FIPS mode
-    pub relax_fips: bool,
     /// Whether cluster has autoscaling-enabled pools
     pub autoscaling_enabled: bool,
     /// The LatticeCluster manifest (JSON or YAML) to include
@@ -259,20 +257,6 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
             Some(config.provider),
         )
         .await;
-
-    // Apply FIPS relaxation if needed (for kubeadm-based bootstrap or non-FIPS targets)
-    if config.relax_fips {
-        manifests = manifests
-            .into_iter()
-            .map(|m| {
-                if lattice_common::fips::is_deployment(&m) {
-                    lattice_common::fips::add_fips_relax_env(&m)
-                } else {
-                    m
-                }
-            })
-            .collect();
-    }
 
     // Add Cilium LB-IPAM resources
     if let Some(networking) = config.networking {
@@ -899,7 +883,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             cluster_name: &info.cluster_id,
             provider: info.provider,
             k8s_version: &info.k8s_version,
-            relax_fips: info.bootstrap.needs_fips_relax(),
             autoscaling_enabled: info.autoscaling_enabled,
             cluster_manifest: &info.cluster_manifest,
         };
@@ -2340,142 +2323,6 @@ mod tests {
         let csr_response: CsrResponse =
             serde_json::from_slice(&body).expect("JSON parsing should succeed");
         assert!(csr_response.certificate_pem.contains("BEGIN CERTIFICATE"));
-    }
-
-    // ==========================================================================
-    // FIPS Relaxation Tests
-    // ==========================================================================
-    //
-    // These tests verify that FIPS relaxation is correctly applied based on
-    // the bootstrap provider:
-    // - Kubeadm clusters need FIPS relaxation (GODEBUG=fips140=on) because
-    //   kubeadm's API server uses non-FIPS cipher suites
-    // - RKE2 clusters are FIPS-compliant out of the box (no relaxation needed)
-
-    /// Story: Kubeadm clusters get FIPS relaxation in manifests
-    ///
-    /// When a cluster uses kubeadm bootstrap, the generated manifests should
-    /// include GODEBUG=fips140=on to allow the operator to communicate with
-    /// the kubeadm API server which uses non-FIPS cipher suites (like X25519).
-    #[tokio::test]
-    async fn kubeadm_clusters_get_fips_relaxation() {
-        // Use real DefaultManifestGenerator to get actual Deployment
-        let state = BootstrapState::new(
-            DefaultManifestGenerator::new(),
-            Duration::from_secs(3600),
-            test_ca_bundle(),
-            "test:latest".to_string(),
-            None,
-            None,
-        );
-
-        // Register cluster with kubeadm bootstrap
-        let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"kubeadm-test"}}"#.to_string();
-        state.clusters.insert(
-            "kubeadm-test".to_string(),
-            ClusterBootstrapInfo {
-                cluster_id: "kubeadm-test".to_string(),
-                cell_endpoint: "cell:8443:50051".to_string(),
-                ca_certificate: "ca-cert".to_string(),
-                cluster_manifest,
-                token: "test-token".to_string(),
-                token_created: std::time::Instant::now(),
-                token_used: true, // Already bootstrapped
-                networking: None,
-
-                provider: ProviderType::Docker,
-                bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
-                k8s_version: "1.32.0".to_string(),
-                autoscaling_enabled: false,
-            },
-        );
-
-        let info = state
-            .clusters
-            .get("kubeadm-test")
-            .expect("kubeadm-test cluster should exist")
-            .clone();
-        let response = state
-            .generate_response(&info)
-            .await
-            .expect("generate_response should succeed");
-
-        // Should have GODEBUG=fips140=on in the deployment
-        let manifests_str = response.manifests.join("\n");
-        assert!(
-            manifests_str.contains("fips140=on"),
-            "Kubeadm clusters should have FIPS relaxation (GODEBUG=fips140=on)"
-        );
-    }
-
-    /// Story: RKE2 clusters do NOT get FIPS relaxation in manifests
-    ///
-    /// When a cluster uses RKE2 bootstrap, the generated manifests should NOT
-    /// include FIPS relaxation because RKE2 is FIPS-compliant out of the box.
-    /// The container default (fips140=only) is appropriate for RKE2 clusters.
-    #[tokio::test]
-    async fn rke2_clusters_no_fips_relaxation() {
-        // Use real DefaultManifestGenerator to get actual Deployment
-        let state = BootstrapState::new(
-            DefaultManifestGenerator::new(),
-            Duration::from_secs(3600),
-            test_ca_bundle(),
-            "test:latest".to_string(),
-            None,
-            None,
-        );
-
-        // Register cluster with RKE2 bootstrap
-        let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"rke2-test"}}"#.to_string();
-        state.clusters.insert(
-            "rke2-test".to_string(),
-            ClusterBootstrapInfo {
-                cluster_id: "rke2-test".to_string(),
-                cell_endpoint: "cell:8443:50051".to_string(),
-                ca_certificate: "ca-cert".to_string(),
-                cluster_manifest,
-                token: "test-token".to_string(),
-                token_created: std::time::Instant::now(),
-                token_used: true, // Already bootstrapped
-                networking: None,
-
-                provider: ProviderType::Docker,
-                bootstrap: lattice_common::crd::BootstrapProvider::Rke2,
-                k8s_version: "1.32.0".to_string(),
-                autoscaling_enabled: false,
-            },
-        );
-
-        let info = state
-            .clusters
-            .get("rke2-test")
-            .expect("rke2-test cluster should exist")
-            .clone();
-        let response = state
-            .generate_response(&info)
-            .await
-            .expect("generate_response should succeed");
-
-        // Should NOT have GODEBUG=fips140=on in the deployment
-        let manifests_str = response.manifests.join("\n");
-        assert!(
-            !manifests_str.contains("fips140=on"),
-            "RKE2 clusters should NOT have FIPS relaxation (uses container default fips140=only)"
-        );
-    }
-
-    /// Story: BootstrapProvider correctly reports FIPS requirements
-    #[test]
-    fn bootstrap_provider_fips_properties() {
-        use lattice_common::crd::BootstrapProvider;
-
-        // Kubeadm needs FIPS relaxation
-        assert!(BootstrapProvider::Kubeadm.needs_fips_relax());
-        assert!(!BootstrapProvider::Kubeadm.is_fips_native());
-
-        // RKE2 is FIPS-native, no relaxation needed
-        assert!(!BootstrapProvider::Rke2.needs_fips_relax());
-        assert!(BootstrapProvider::Rke2.is_fips_native());
     }
 
     /// Story: AWS clusters get CCM and EBS CSI driver in bootstrap manifests

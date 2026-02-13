@@ -77,7 +77,8 @@ create_kind_cluster() {
         kind delete cluster --name "${KIND_CLUSTER_NAME}"
     fi
 
-    # Create kind cluster with extra port mappings for bootstrap and gRPC
+    # Create kind cluster with extra port mappings for bootstrap and gRPC,
+    # and FIPS-compliant TLS cipher suites on the API server.
     cat <<EOF | kind create cluster --name "${KIND_CLUSTER_NAME}" --config=-
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -93,6 +94,13 @@ nodes:
   - containerPort: 30051
     hostPort: 50051
     protocol: TCP
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        tls-cipher-suites: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        tls-min-version: "VersionTLS12"
 EOF
 
     log_info "Kind cluster created"

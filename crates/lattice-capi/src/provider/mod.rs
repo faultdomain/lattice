@@ -608,7 +608,8 @@ fn build_rke2_kubelet_extra_args(provider_type: ProviderType) -> Vec<String> {
 fn build_rke2_api_server_extra_args(provider_type: ProviderType) -> Vec<String> {
     let mut args = vec![
         "anonymous-auth=true".to_string(),
-        "tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
+        format!("tls-cipher-suites={FIPS_TLS_CIPHER_SUITES}"),
+        format!("tls-min-version={FIPS_TLS_MIN_VERSION}"),
     ];
 
     if uses_external_cloud_provider(provider_type) {
@@ -649,9 +650,15 @@ fn needs_manual_provider_id(provider_type: ProviderType) -> bool {
     !matches!(provider_type, ProviderType::Docker | ProviderType::Aws)
 }
 
+use lattice_common::fips::{FIPS_TLS_CIPHER_SUITES, FIPS_TLS_MIN_VERSION};
+
 /// Build API server extra args based on provider type
 fn build_api_server_extra_args(provider_type: ProviderType) -> Vec<serde_json::Value> {
-    let mut args = vec![serde_json::json!({"name": "bind-address", "value": "0.0.0.0"})];
+    let mut args = vec![
+        serde_json::json!({"name": "bind-address", "value": "0.0.0.0"}),
+        serde_json::json!({"name": "tls-cipher-suites", "value": FIPS_TLS_CIPHER_SUITES}),
+        serde_json::json!({"name": "tls-min-version", "value": FIPS_TLS_MIN_VERSION}),
+    ];
 
     if uses_external_cloud_provider(provider_type) {
         args.push(serde_json::json!({"name": "cloud-provider", "value": "external"}));
@@ -2076,18 +2083,37 @@ mod tests {
         #[test]
         fn test_build_api_server_extra_args_docker() {
             let args = build_api_server_extra_args(ProviderType::Docker);
-            assert_eq!(args.len(), 1);
-            assert!(args[0]["name"].as_str() == Some("bind-address"));
+            assert_eq!(args.len(), 3);
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("bind-address")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("tls-cipher-suites")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("tls-min-version")));
         }
 
         #[test]
         fn test_build_api_server_extra_args_aws() {
             let args = build_api_server_extra_args(ProviderType::Aws);
-            assert_eq!(args.len(), 2);
-            let cloud_provider = args
+            assert_eq!(args.len(), 4);
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("cloud-provider")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("tls-cipher-suites")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("tls-min-version")));
+        }
+
+        #[test]
+        fn kubeadm_api_server_has_fips_tls_config() {
+            let args = build_api_server_extra_args(ProviderType::Docker);
+            let cipher_arg = args
                 .iter()
-                .find(|a| a["name"].as_str() == Some("cloud-provider"));
-            assert!(cloud_provider.is_some());
+                .find(|a| a["name"].as_str() == Some("tls-cipher-suites"))
+                .expect("kubeadm API server args must include tls-cipher-suites for FIPS compliance");
+            let value = cipher_arg["value"].as_str().unwrap();
+            assert!(value.contains("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"));
+            assert!(value.contains("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"));
+
+            let min_version = args
+                .iter()
+                .find(|a| a["name"].as_str() == Some("tls-min-version"))
+                .expect("kubeadm API server args must include tls-min-version for FIPS compliance");
+            assert_eq!(min_version["value"].as_str(), Some("VersionTLS12"));
         }
 
         #[test]
@@ -2109,17 +2135,16 @@ mod tests {
         #[test]
         fn test_build_rke2_api_server_extra_args_docker() {
             let args = build_rke2_api_server_extra_args(ProviderType::Docker);
-            // Should have anonymous-auth and tls-cipher-suites
-            assert_eq!(args.len(), 2);
+            assert_eq!(args.len(), 3);
             assert!(args.iter().any(|a| a.contains("anonymous-auth=true")));
             assert!(args.iter().any(|a| a.contains("tls-cipher-suites")));
+            assert!(args.iter().any(|a| a.contains("tls-min-version")));
         }
 
         #[test]
         fn test_build_rke2_api_server_extra_args_aws() {
             let args = build_rke2_api_server_extra_args(ProviderType::Aws);
-            // AWS adds cloud-provider=external
-            assert_eq!(args.len(), 3);
+            assert_eq!(args.len(), 4);
             assert!(args.iter().any(|a| a == "cloud-provider=external"));
         }
 

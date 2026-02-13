@@ -6,7 +6,7 @@ license.workspace = true
 description = "Cluster API provider management for Lattice"
 
 [features]
-default = []
+default = ["fips"]
 fips = ["lattice-common/fips"]
 
 [dependencies]

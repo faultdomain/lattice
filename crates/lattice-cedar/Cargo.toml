@@ -6,7 +6,7 @@ license.workspace = true
 description = "Cedar policy engine for Lattice authorization"
 
 [features]
-default = []
+default = ["fips"]
 fips = ["lattice-common/fips"]
 
 [dependencies]

@@ -6,7 +6,7 @@ license.workspace = true
 description = "Common types for Lattice: CRDs, errors, and utilities"
 
 [features]
-default = []
+default = ["fips"]
 fips = ["aws-lc-rs/fips"]
 
 [dependencies]

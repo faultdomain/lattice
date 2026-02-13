@@ -12,6 +12,7 @@ use super::CommandErrorExt;
 use crate::{Error, Result};
 
 /// Kind cluster config with Docker socket mount for CAPD (Cluster API Provider Docker)
+/// and FIPS-compliant TLS cipher suites on the API server.
 pub const KIND_CONFIG_WITH_DOCKER: &str = r#"kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -19,6 +20,13 @@ nodes:
   extraMounts:
   - hostPath: /var/run/docker.sock
     containerPath: /var/run/docker.sock
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        tls-cipher-suites: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        tls-min-version: "VersionTLS12"
 "#;
 
 /// Create a kind cluster and export its kubeconfig

@@ -103,7 +103,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 # Crypto
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
-aws-lc-rs = "1.12"
+aws-lc-rs = { version = "1.12", features = ["fips"] }
 
 # PKI
 rcgen = { version = "0.14", features = ["aws_lc_rs", "pem", "x509-parser"] }

@@ -45,7 +45,6 @@ use lattice_common::crd::{
 use lattice_common::credentials::{
     AwsCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
 };
-use lattice_common::fips;
 use lattice_common::kube_utils;
 use lattice_common::{
     capi_namespace, kubeconfig_secret_name, AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE,
@@ -376,9 +375,8 @@ impl Installer {
             .iter()
             .filter(|m: &&String| m.starts_with("{"))
             .map(|s| {
-                if fips::is_deployment(s) {
-                    let with_fips = fips::add_fips_relax_env(s);
-                    let with_env = add_bootstrap_env(&with_fips, &provider_str, provider_ref);
+                if kube_utils::is_deployment_json(s) {
+                    let with_env = add_bootstrap_env(s, &provider_str, provider_ref);
                     add_container_args(&with_env, &["controller", "--mode", "cluster"])
                 } else {
                     s.to_string()
@@ -561,13 +559,6 @@ impl Installer {
             cluster_name: self.cluster_name(),
             provider: self.provider(),
             k8s_version: &self.cluster.spec.provider.kubernetes.version,
-            relax_fips: self
-                .cluster
-                .spec
-                .provider
-                .kubernetes
-                .bootstrap
-                .needs_fips_relax(),
             autoscaling_enabled: self
                 .cluster
                 .spec

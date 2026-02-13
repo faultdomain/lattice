@@ -6,7 +6,7 @@ license.workspace = true
 description = "Lattice Kubernetes operator for multi-cluster lifecycle management"
 
 [features]
-default = []
+default = ["fips"]
 fips = ["lattice-common/fips", "lattice-infra/fips", "lattice-cluster/fips", "lattice-service/fips", "lattice-backup/fips"]
 e2e = []
 aws-e2e = []

@@ -171,7 +171,7 @@ impl InfraContext {
 
 /// Initialize E2E test environment (crypto provider + tracing)
 pub fn init_e2e_test() {
-    lattice_common::install_crypto_provider();
+    lattice_common::fips::install_crypto_provider();
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
