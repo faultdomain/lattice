@@ -57,8 +57,6 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock versions.toml ./
 COPY crates ./crates
 COPY scripts/runtime ./scripts
-# Charts are needed by build.rs to pre-render manifests at compile time
-COPY test-charts ./test-charts
 
 # Build with BuildKit cache mounts for incremental compilation
 # - registry/git: caches downloaded crates
@@ -82,8 +80,8 @@ RUN apt-get update && apt-get install -y \
 # Copy Lattice operator binary (manifests are embedded at build time)
 COPY --from=rust-builder /usr/local/bin/lattice-operator /usr/local/bin/lattice-operator
 
-# Copy CAPI providers from source (pre-downloaded YAML manifests)
-COPY test-providers /providers
+# Copy CAPI providers downloaded by build.rs during compilation
+COPY --from=rust-builder /app/test-providers /providers
 
 # Copy runtime scripts for templating (bootstrap-cluster.sh, etc.)
 COPY scripts/runtime /scripts
