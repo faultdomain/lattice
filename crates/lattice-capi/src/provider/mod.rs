@@ -2084,30 +2084,18 @@ mod tests {
         fn test_build_api_server_extra_args_docker() {
             let args = build_api_server_extra_args(ProviderType::Docker);
             assert_eq!(args.len(), 3);
-            assert!(args
-                .iter()
-                .any(|a| a["name"].as_str() == Some("bind-address")));
-            assert!(args
-                .iter()
-                .any(|a| a["name"].as_str() == Some("tls-cipher-suites")));
-            assert!(args
-                .iter()
-                .any(|a| a["name"].as_str() == Some("tls-min-version")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("bind-address")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("tls-cipher-suites")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("tls-min-version")));
         }
 
         #[test]
         fn test_build_api_server_extra_args_aws() {
             let args = build_api_server_extra_args(ProviderType::Aws);
             assert_eq!(args.len(), 4);
-            assert!(args
-                .iter()
-                .any(|a| a["name"].as_str() == Some("cloud-provider")));
-            assert!(args
-                .iter()
-                .any(|a| a["name"].as_str() == Some("tls-cipher-suites")));
-            assert!(args
-                .iter()
-                .any(|a| a["name"].as_str() == Some("tls-min-version")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("cloud-provider")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("tls-cipher-suites")));
+            assert!(args.iter().any(|a| a["name"].as_str() == Some("tls-min-version")));
         }
 
         #[test]
@@ -2116,9 +2104,7 @@ mod tests {
             let cipher_arg = args
                 .iter()
                 .find(|a| a["name"].as_str() == Some("tls-cipher-suites"))
-                .expect(
-                    "kubeadm API server args must include tls-cipher-suites for FIPS compliance",
-                );
+                .expect("kubeadm API server args must include tls-cipher-suites for FIPS compliance");
             let value = cipher_arg["value"].as_str().unwrap();
             assert!(value.contains("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"));
             assert!(value.contains("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"));

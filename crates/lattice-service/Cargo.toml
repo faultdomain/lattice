@@ -6,6 +6,7 @@ license.workspace = true
 description = "Service mesh management for Lattice"
 
 [features]
+default = ["fips"]
 fips = ["lattice-common/fips", "lattice-infra/fips"]
 
 [dependencies]

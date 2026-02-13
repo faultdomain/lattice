@@ -7,18 +7,7 @@ description = "Lattice Kubernetes operator for multi-cluster lifecycle managemen
 
 [features]
 default = ["fips"]
-fips = [
-    "lattice-common/fips",
-    "lattice-infra/fips",
-    "lattice-agent/fips",
-    "lattice-capi/fips",
-    "lattice-cell/fips",
-    "lattice-cluster/fips",
-    "lattice-service/fips",
-    "lattice-backup/fips",
-    "lattice-api/fips",
-    "lattice-cedar/fips",
-]
+fips = ["lattice-common/fips", "lattice-infra/fips", "lattice-cluster/fips", "lattice-service/fips", "lattice-backup/fips"]
 e2e = []
 aws-e2e = []
 provider-e2e = []

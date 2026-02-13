@@ -7,15 +7,7 @@ description = "CLI for managing Lattice cluster hierarchies"
 
 [features]
 default = ["fips"]
-fips = [
-    "lattice-operator/fips",
-    "lattice-common/fips",
-    "lattice-agent/fips",
-    "lattice-capi/fips",
-    "lattice-cell/fips",
-    "lattice-cluster/fips",
-    "lattice-move/fips",
-]
+fips = ["lattice-operator/fips", "lattice-common/fips"]
 provider-e2e = []
 
 [dependencies]
@@ -25,7 +17,7 @@ lattice-capi.workspace = true
 lattice-cell.workspace = true
 lattice-cluster.workspace = true
 lattice-move.workspace = true
-lattice-operator = { path = "../lattice-operator", default-features = false }
+lattice-operator = { path = "../lattice-operator" }
 
 # CLI
 clap.workspace = true
