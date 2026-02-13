@@ -6,7 +6,7 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kube::api::Api;
 use tokio::time::sleep;
@@ -272,18 +272,48 @@ pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, St
 }
 
 /// Run the fixed 10-service mesh test end-to-end.
+///
+/// After deploying and waiting for pods, polls verification every 15s until
+/// it passes or 5 minutes elapse. This avoids waiting for full cycle counts
+/// on each attempt and lets policy propagation settle naturally.
 pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let handle = start_mesh_test(kubeconfig_path).await?;
-    wait_for_mesh_test_cycles(kubeconfig_path, 2).await?;
 
-    let result = handle.stop_and_verify().await;
-    if result.is_ok() {
-        delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
-    } else {
+    // Wait for at least 1 cycle so there's log data to check
+    wait_for_mesh_test_cycles(kubeconfig_path, 1).await?;
+
+    let timeout = Duration::from_secs(300);
+    let start = Instant::now();
+    let mut attempt = 0;
+    let mut last_err = String::new();
+
+    loop {
+        attempt += 1;
         info!(
-            "[Mesh] Leaving namespace {} for debugging (test failed)",
-            TEST_SERVICES_NAMESPACE
+            "[Fixed Mesh] Verification attempt {} (elapsed: {:.0}s)",
+            attempt,
+            start.elapsed().as_secs_f64()
         );
+
+        match verify_traffic_patterns(kubeconfig_path).await {
+            Ok(()) => {
+                delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
+                return Ok(());
+            }
+            Err(e) => {
+                last_err = e;
+                if start.elapsed() >= timeout {
+                    break;
+                }
+                info!("[Fixed Mesh] Verification failed, retrying in 15s...");
+                sleep(Duration::from_secs(15)).await;
+            }
+        }
     }
-    result
+
+    info!(
+        "[Mesh] Leaving namespace {} for debugging (test failed after {} attempts)",
+        TEST_SERVICES_NAMESPACE, attempt
+    );
+    Err(last_err)
 }
