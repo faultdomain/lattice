@@ -5,8 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::PolicyMetadata;
-use crate::kube_utils::HasApiResource;
+use crate::kube_utils::{HasApiResource, ObjectMeta};
 
 /// Istio ServiceEntry for external service mesh integration
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -19,7 +18,7 @@ pub struct ServiceEntry {
     #[serde(default = "ServiceEntry::kind")]
     pub kind: String,
     /// Metadata
-    pub metadata: PolicyMetadata,
+    pub metadata: ObjectMeta,
     /// Spec
     pub spec: ServiceEntrySpec,
 }
@@ -38,7 +37,7 @@ impl ServiceEntry {
     }
 
     /// Create a new ServiceEntry
-    pub fn new(metadata: PolicyMetadata, spec: ServiceEntrySpec) -> Self {
+    pub fn new(metadata: ObjectMeta, spec: ServiceEntrySpec) -> Self {
         Self {
             api_version: Self::api_version(),
             kind: Self::kind(),

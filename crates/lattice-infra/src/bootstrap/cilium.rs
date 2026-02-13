@@ -6,12 +6,13 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
+use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh::{CILIUM_GATEWAY_NAME_LABEL, HBONE_PORT, ISTIOD_XDS_PORT};
 use lattice_common::policy::{
     CiliumClusterwideNetworkPolicy, CiliumClusterwideSpec, CiliumEgressRule, CiliumIngressRule,
     CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule,
     ClusterwideEgressRule, ClusterwideIngressRule, ClusterwideMetadata, DnsMatch, DnsRules,
-    EnableDefaultDeny, EndpointSelector, FqdnSelector, MatchExpression, PolicyMetadata,
+    EnableDefaultDeny, EndpointSelector, FqdnSelector, MatchExpression,
 };
 use lattice_common::{
     DEFAULT_AUTH_PROXY_PORT, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT,
@@ -334,7 +335,7 @@ pub fn generate_operator_network_policy(
     }
 
     CiliumNetworkPolicy::new(
-        PolicyMetadata::new("lattice-operator", LATTICE_SYSTEM_NAMESPACE),
+        ObjectMeta::new("lattice-operator", LATTICE_SYSTEM_NAMESPACE),
         CiliumNetworkPolicySpec {
             endpoint_selector: EndpointSelector::from_labels(BTreeMap::from([(
                 "app".to_string(),

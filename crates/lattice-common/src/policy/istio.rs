@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::kube_utils::HasApiResource;
+use crate::kube_utils::{HasApiResource, ObjectMeta};
 
 /// Istio AuthorizationPolicy for L7 mTLS identity-based access control
 ///
@@ -24,7 +24,7 @@ pub struct AuthorizationPolicy {
     #[serde(default = "AuthorizationPolicy::kind")]
     pub kind: String,
     /// Metadata
-    pub metadata: PolicyMetadata,
+    pub metadata: ObjectMeta,
     /// Spec
     pub spec: AuthorizationPolicySpec,
 }
@@ -43,40 +43,12 @@ impl AuthorizationPolicy {
     }
 
     /// Create a new AuthorizationPolicy
-    pub fn new(metadata: PolicyMetadata, spec: AuthorizationPolicySpec) -> Self {
+    pub fn new(metadata: ObjectMeta, spec: AuthorizationPolicySpec) -> Self {
         Self {
             api_version: Self::api_version(),
             kind: Self::kind(),
             metadata,
             spec,
-        }
-    }
-}
-
-/// Metadata for policy resources
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct PolicyMetadata {
-    /// Resource name
-    pub name: String,
-    /// Resource namespace
-    pub namespace: String,
-    /// Labels
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
-
-impl PolicyMetadata {
-    /// Create new metadata with standard Lattice labels
-    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            crate::LABEL_MANAGED_BY.to_string(),
-            crate::LABEL_MANAGED_BY_LATTICE.to_string(),
-        );
-        Self {
-            name: name.into(),
-            namespace: namespace.into(),
-            labels,
         }
     }
 }
@@ -178,7 +150,7 @@ pub struct PeerAuthentication {
     #[serde(default = "PeerAuthentication::kind")]
     pub kind: String,
     /// Metadata
-    pub metadata: PolicyMetadata,
+    pub metadata: ObjectMeta,
     /// Spec
     pub spec: PeerAuthenticationSpec,
 }
@@ -197,7 +169,7 @@ impl PeerAuthentication {
     }
 
     /// Create a new PeerAuthentication
-    pub fn new(metadata: PolicyMetadata, spec: PeerAuthenticationSpec) -> Self {
+    pub fn new(metadata: ObjectMeta, spec: PeerAuthenticationSpec) -> Self {
         Self {
             api_version: Self::api_version(),
             kind: Self::kind(),

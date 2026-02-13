@@ -6,10 +6,11 @@
 use std::collections::BTreeMap;
 use std::sync::{LazyLock, OnceLock};
 
+use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::policy::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
-    MtlsConfig, OperationSpec, PeerAuthentication, PeerAuthenticationSpec, PolicyMetadata,
-    TargetRef, WorkloadSelector,
+    MtlsConfig, OperationSpec, PeerAuthentication, PeerAuthenticationSpec, TargetRef,
+    WorkloadSelector,
 };
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
@@ -95,7 +96,7 @@ impl IstioReconciler {
     /// Generate default PeerAuthentication for STRICT mTLS
     pub fn generate_peer_authentication() -> PeerAuthentication {
         PeerAuthentication::new(
-            PolicyMetadata::new("default", "istio-system"),
+            ObjectMeta::new("default", "istio-system"),
             PeerAuthenticationSpec {
                 mtls: MtlsConfig {
                     mode: "STRICT".to_string(),
@@ -111,7 +112,7 @@ impl IstioReconciler {
     /// Must be deployed to istio-system to apply mesh-wide.
     pub fn generate_default_deny() -> AuthorizationPolicy {
         AuthorizationPolicy::new(
-            PolicyMetadata::new("mesh-default-deny", "istio-system"),
+            ObjectMeta::new("mesh-default-deny", "istio-system"),
             AuthorizationPolicySpec {
                 target_refs: vec![],
                 selector: None,
@@ -130,7 +131,7 @@ impl IstioReconciler {
     /// See: https://github.com/istio/istio/issues/54696
     pub fn generate_waypoint_default_deny() -> AuthorizationPolicy {
         AuthorizationPolicy::new(
-            PolicyMetadata::new("waypoint-default-deny", "istio-system"),
+            ObjectMeta::new("waypoint-default-deny", "istio-system"),
             AuthorizationPolicySpec {
                 target_refs: vec![TargetRef {
                     group: "gateway.networking.k8s.io".to_string(),
@@ -153,7 +154,7 @@ impl IstioReconciler {
     /// These connections come from outside the mesh, so we allow any source.
     pub fn generate_operator_allow_policy() -> AuthorizationPolicy {
         AuthorizationPolicy::new(
-            PolicyMetadata::new("lattice-operator-allow", LATTICE_SYSTEM_NAMESPACE),
+            ObjectMeta::new("lattice-operator-allow", LATTICE_SYSTEM_NAMESPACE),
             AuthorizationPolicySpec {
                 target_refs: vec![],
                 selector: Some(WorkloadSelector {

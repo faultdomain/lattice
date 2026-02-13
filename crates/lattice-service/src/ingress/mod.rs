@@ -18,10 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use lattice_common::crd::{IngressSpec, IngressTls, PathMatchType, RouteKind, ServicePortsSpec};
 use lattice_common::kube_utils::HasApiResource;
+use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
 use lattice_common::policy::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
-    OperationSpec, PolicyMetadata, WorkloadSelector,
+    OperationSpec, WorkloadSelector,
 };
 
 // =============================================================================
@@ -58,7 +59,7 @@ pub struct Gateway {
     #[serde(default = "Gateway::default_kind")]
     pub kind: String,
     /// Resource metadata
-    pub metadata: GatewayMetadata,
+    pub metadata: ObjectMeta,
     /// Gateway specification
     pub spec: GatewaySpec,
 }
@@ -72,40 +73,12 @@ impl_api_defaults!(Gateway);
 
 impl Gateway {
     /// Create a new Gateway
-    pub fn new(metadata: GatewayMetadata, spec: GatewaySpec) -> Self {
+    pub fn new(metadata: ObjectMeta, spec: GatewaySpec) -> Self {
         Self {
             api_version: Self::default_api_version(),
             kind: Self::default_kind(),
             metadata,
             spec,
-        }
-    }
-}
-
-/// Metadata for Gateway resources
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct GatewayMetadata {
-    /// Resource name
-    pub name: String,
-    /// Resource namespace
-    pub namespace: String,
-    /// Labels
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
-
-impl GatewayMetadata {
-    /// Create new metadata with standard Lattice labels
-    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            lattice_common::LABEL_MANAGED_BY.to_string(),
-            lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
-        );
-        Self {
-            name: name.into(),
-            namespace: namespace.into(),
-            labels,
         }
     }
 }
@@ -204,7 +177,7 @@ pub struct HttpRoute {
     #[serde(default = "HttpRoute::default_kind")]
     pub kind: String,
     /// Resource metadata
-    pub metadata: GatewayMetadata,
+    pub metadata: ObjectMeta,
     /// HTTPRoute specification
     pub spec: HttpRouteSpec,
 }
@@ -218,7 +191,7 @@ impl_api_defaults!(HttpRoute);
 
 impl HttpRoute {
     /// Create a new HTTPRoute
-    pub fn new(metadata: GatewayMetadata, spec: HttpRouteSpec) -> Self {
+    pub fn new(metadata: ObjectMeta, spec: HttpRouteSpec) -> Self {
         Self {
             api_version: Self::default_api_version(),
             kind: Self::default_kind(),
@@ -352,7 +325,7 @@ pub struct GrpcRoute {
     #[serde(default = "GrpcRoute::default_kind")]
     pub kind: String,
     /// Resource metadata
-    pub metadata: GatewayMetadata,
+    pub metadata: ObjectMeta,
     /// GRPCRoute specification
     pub spec: GrpcRouteSpec,
 }
@@ -366,7 +339,7 @@ impl_api_defaults!(GrpcRoute);
 
 impl GrpcRoute {
     /// Create a new GRPCRoute
-    pub fn new(metadata: GatewayMetadata, spec: GrpcRouteSpec) -> Self {
+    pub fn new(metadata: ObjectMeta, spec: GrpcRouteSpec) -> Self {
         Self {
             api_version: Self::default_api_version(),
             kind: Self::default_kind(),
@@ -436,7 +409,7 @@ pub struct TcpRoute {
     #[serde(default = "TcpRoute::default_kind")]
     pub kind: String,
     /// Resource metadata
-    pub metadata: GatewayMetadata,
+    pub metadata: ObjectMeta,
     /// TCPRoute specification
     pub spec: TcpRouteSpec,
 }
@@ -450,7 +423,7 @@ impl_api_defaults!(TcpRoute);
 
 impl TcpRoute {
     /// Create a new TCPRoute
-    pub fn new(metadata: GatewayMetadata, spec: TcpRouteSpec) -> Self {
+    pub fn new(metadata: ObjectMeta, spec: TcpRouteSpec) -> Self {
         Self {
             api_version: Self::default_api_version(),
             kind: Self::default_kind(),
@@ -493,7 +466,7 @@ pub struct Certificate {
     #[serde(default = "Certificate::default_kind")]
     pub kind: String,
     /// Resource metadata
-    pub metadata: GatewayMetadata,
+    pub metadata: ObjectMeta,
     /// Certificate specification
     pub spec: CertificateSpec,
 }
@@ -507,7 +480,7 @@ impl_api_defaults!(Certificate);
 
 impl Certificate {
     /// Create a new Certificate
-    pub fn new(metadata: GatewayMetadata, spec: CertificateSpec) -> Self {
+    pub fn new(metadata: ObjectMeta, spec: CertificateSpec) -> Self {
         Self {
             api_version: Self::default_api_version(),
             kind: Self::default_kind(),
@@ -627,12 +600,8 @@ impl WaypointCompiler {
 
     fn compile_gateway(namespace: &str) -> Gateway {
         let gateway_name = mesh::waypoint_name(namespace);
-        let mut metadata = GatewayMetadata::new(&gateway_name, namespace);
-
-        metadata.labels.insert(
-            mesh::WAYPOINT_FOR_LABEL.to_string(),
-            mesh::WAYPOINT_FOR_SERVICE.to_string(),
-        );
+        let metadata = ObjectMeta::new(&gateway_name, namespace)
+            .with_label(mesh::WAYPOINT_FOR_LABEL, mesh::WAYPOINT_FOR_SERVICE);
 
         Gateway::new(
             metadata,
@@ -658,7 +627,7 @@ impl WaypointCompiler {
         );
 
         AuthorizationPolicy::new(
-            PolicyMetadata::new("allow-to-waypoint", namespace),
+            ObjectMeta::new("allow-to-waypoint", namespace),
             AuthorizationPolicySpec {
                 target_refs: vec![],
                 selector: Some(WorkloadSelector { match_labels }),
@@ -761,7 +730,7 @@ impl IngressCompiler {
 
         if !all_listeners.is_empty() {
             output.gateway = Some(Gateway::new(
-                GatewayMetadata::new(&gateway_name, namespace),
+                ObjectMeta::new(&gateway_name, namespace),
                 GatewaySpec {
                     gateway_class_name: gateway_class.to_string(),
                     listeners: all_listeners,
@@ -772,20 +741,18 @@ impl IngressCompiler {
         output
     }
 
-    /// Compile an HTTPRoute and its Gateway listeners.
-    fn compile_http_route(
+    /// Build HTTP/HTTPS listeners and parent refs for host-based routes.
+    ///
+    /// Shared by HTTPRoute and GRPCRoute (both use HTTP/HTTPS listeners).
+    fn build_host_listeners(
         service_name: &str,
-        namespace: &str,
         route_name: &str,
         route_spec: &lattice_common::crd::RouteSpec,
         gateway_name: &str,
-        backend_port: u16,
-    ) -> (Vec<GatewayListener>, HttpRoute, Option<Certificate>) {
+        namespace: &str,
+        tls_secret_name: &str,
+    ) -> (Vec<GatewayListener>, Vec<ParentRef>) {
         let has_tls = route_spec.tls.is_some();
-        let tls_secret_name =
-            Self::tls_secret_name(service_name, route_name, route_spec.tls.as_ref());
-
-        // Build listeners
         let mut listeners = Vec::new();
         let mut parent_refs = Vec::new();
 
@@ -816,7 +783,7 @@ impl IngressCompiler {
                         mode: "Terminate".to_string(),
                         certificate_refs: vec![CertificateRef {
                             kind: Some("Secret".to_string()),
-                            name: tls_secret_name.clone(),
+                            name: tls_secret_name.to_string(),
                         }],
                     }),
                     allowed_routes: Some(AllowedRoutes::same_namespace()),
@@ -829,11 +796,34 @@ impl IngressCompiler {
             }
         }
 
-        // Build route matches
+        (listeners, parent_refs)
+    }
+
+    /// Compile an HTTPRoute and its Gateway listeners.
+    fn compile_http_route(
+        service_name: &str,
+        namespace: &str,
+        route_name: &str,
+        route_spec: &lattice_common::crd::RouteSpec,
+        gateway_name: &str,
+        backend_port: u16,
+    ) -> (Vec<GatewayListener>, HttpRoute, Option<Certificate>) {
+        let tls_secret_name =
+            Self::tls_secret_name(service_name, route_name, route_spec.tls.as_ref());
+
+        let (listeners, parent_refs) = Self::build_host_listeners(
+            service_name,
+            route_name,
+            route_spec,
+            gateway_name,
+            namespace,
+            &tls_secret_name,
+        );
+
         let matches = Self::build_http_matches(route_spec);
 
         let http_route = HttpRoute::new(
-            GatewayMetadata::new(format!("{}-{}-route", service_name, route_name), namespace),
+            ObjectMeta::new(format!("{}-{}-route", service_name, route_name), namespace),
             HttpRouteSpec {
                 parent_refs,
                 hostnames: route_spec.hosts.clone(),
@@ -863,59 +853,22 @@ impl IngressCompiler {
         gateway_name: &str,
         backend_port: u16,
     ) -> (Vec<GatewayListener>, GrpcRoute, Option<Certificate>) {
-        let has_tls = route_spec.tls.is_some();
         let tls_secret_name =
             Self::tls_secret_name(service_name, route_name, route_spec.tls.as_ref());
 
-        let mut listeners = Vec::new();
-        let mut parent_refs = Vec::new();
+        let (listeners, parent_refs) = Self::build_host_listeners(
+            service_name,
+            route_name,
+            route_spec,
+            gateway_name,
+            namespace,
+            &tls_secret_name,
+        );
 
-        // gRPC runs over HTTP/2 — same HTTP/HTTPS listeners
-        for (i, host) in route_spec.hosts.iter().enumerate() {
-            let http_listener_name = format!("{}-{}-http-{}", service_name, route_name, i);
-            listeners.push(GatewayListener {
-                name: http_listener_name.clone(),
-                hostname: Some(host.clone()),
-                port: 80,
-                protocol: "HTTP".to_string(),
-                tls: None,
-                allowed_routes: Some(AllowedRoutes::same_namespace()),
-            });
-            parent_refs.push(ParentRef::gateway(
-                gateway_name,
-                namespace,
-                &http_listener_name,
-            ));
-
-            if has_tls {
-                let https_listener_name = format!("{}-{}-https-{}", service_name, route_name, i);
-                listeners.push(GatewayListener {
-                    name: https_listener_name.clone(),
-                    hostname: Some(host.clone()),
-                    port: 443,
-                    protocol: "HTTPS".to_string(),
-                    tls: Some(GatewayTlsConfig {
-                        mode: "Terminate".to_string(),
-                        certificate_refs: vec![CertificateRef {
-                            kind: Some("Secret".to_string()),
-                            name: tls_secret_name.clone(),
-                        }],
-                    }),
-                    allowed_routes: Some(AllowedRoutes::same_namespace()),
-                });
-                parent_refs.push(ParentRef::gateway(
-                    gateway_name,
-                    namespace,
-                    &https_listener_name,
-                ));
-            }
-        }
-
-        // Build gRPC matches
         let grpc_matches = Self::build_grpc_matches(route_spec);
 
         let grpc_route = GrpcRoute::new(
-            GatewayMetadata::new(format!("{}-{}-route", service_name, route_name), namespace),
+            ObjectMeta::new(format!("{}-{}-route", service_name, route_name), namespace),
             GrpcRouteSpec {
                 parent_refs,
                 hostnames: route_spec.hosts.clone(),
@@ -980,7 +933,7 @@ impl IngressCompiler {
         )];
 
         let tcp_route = TcpRoute::new(
-            GatewayMetadata::new(format!("{}-{}-route", service_name, route_name), namespace),
+            ObjectMeta::new(format!("{}-{}-route", service_name, route_name), namespace),
             TcpRouteSpec {
                 parent_refs,
                 rules: vec![TcpRouteRule {
@@ -1089,7 +1042,7 @@ impl IngressCompiler {
         let issuer_ref = tls.issuer_ref.as_ref()?;
 
         Some(Certificate::new(
-            GatewayMetadata::new(format!("{}-{}-cert", service_name, route_name), namespace),
+            ObjectMeta::new(format!("{}-{}-cert", service_name, route_name), namespace),
             CertificateSpec {
                 secret_name: format!("{}-{}-tls", service_name, route_name),
                 dns_names: route_spec.hosts.clone(),

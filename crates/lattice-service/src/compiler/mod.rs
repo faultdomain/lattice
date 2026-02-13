@@ -738,7 +738,11 @@ fn compile_eso_templated_env_vars(
         std::collections::BTreeMap::new();
 
     for (var_name, templated) in eso_templated_variables {
-        let store = resolve_env_var_store(var_name, &templated.secret_refs, secret_refs)?;
+        let store = crate::workload::secrets::resolve_single_store(
+            &templated.secret_refs,
+            secret_refs,
+            &format!("env var '{}'", var_name),
+        )?;
         by_store
             .entry(store)
             .or_default()
@@ -813,43 +817,6 @@ fn compile_eso_templated_env_vars(
     }
 
     Ok((external_secrets, env_from_refs))
-}
-
-/// Validate that a single env var's secret refs all come from the same store.
-fn resolve_env_var_store(
-    var_name: &str,
-    refs: &[lattice_common::template::FileSecretRef],
-    secret_refs: &std::collections::BTreeMap<String, SecretRef>,
-) -> Result<String, CompilationError> {
-    let mut store: Option<String> = None;
-
-    for fref in refs {
-        let sr = secret_refs.get(&fref.resource_name).ok_or_else(|| {
-            CompilationError::file_compilation(format!(
-                "env var '{}' references secret resource '{}' but no SecretRef was compiled",
-                var_name, fref.resource_name
-            ))
-        })?;
-
-        match &store {
-            None => store = Some(sr.store_name.clone()),
-            Some(existing) if existing != &sr.store_name => {
-                return Err(CompilationError::file_compilation(format!(
-                    "env var '{}' references secrets from multiple stores ('{}' and '{}'); \
-                     a single env var can only use one store",
-                    var_name, existing, sr.store_name
-                )));
-            }
-            Some(_) => {}
-        }
-    }
-
-    store.ok_or_else(|| {
-        CompilationError::file_compilation(format!(
-            "env var '{}' has no secret references",
-            var_name
-        ))
-    })
 }
 
 // =============================================================================

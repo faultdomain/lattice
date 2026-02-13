@@ -46,6 +46,47 @@ impl GeneratedSecrets {
     }
 }
 
+/// Validate that all secret refs in a set come from the same ClusterSecretStore.
+///
+/// Used by both env var and file mount compilation to ensure a single
+/// ExternalSecret can be created (ESO requires one store per ExternalSecret).
+///
+/// `context` is used in error messages to identify what's referencing the secrets
+/// (e.g., "env var 'DB_URL'" or "file '/etc/config.yaml'").
+pub(crate) fn resolve_single_store(
+    refs: &[lattice_common::template::FileSecretRef],
+    secret_refs: &BTreeMap<String, SecretRef>,
+    context: &str,
+) -> Result<String, CompilationError> {
+    let mut store: Option<String> = None;
+
+    for fref in refs {
+        let sr = secret_refs.get(&fref.resource_name).ok_or_else(|| {
+            CompilationError::file_compilation(format!(
+                "{} references secret resource '{}' but no SecretRef was compiled \
+                 (is it declared as a type: secret resource?)",
+                context, fref.resource_name
+            ))
+        })?;
+
+        match &store {
+            None => store = Some(sr.store_name.clone()),
+            Some(existing) if existing != &sr.store_name => {
+                return Err(CompilationError::file_compilation(format!(
+                    "{} references secrets from multiple stores ('{}' and '{}'); \
+                     a single file or env var can only use one store",
+                    context, existing, sr.store_name
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+
+    store.ok_or_else(|| {
+        CompilationError::file_compilation(format!("{} has no secret references", context))
+    })
+}
+
 // =============================================================================
 // Secrets Compiler
 // =============================================================================

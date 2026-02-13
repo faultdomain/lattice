@@ -3,6 +3,7 @@
 //! Provides kubectl-equivalent operations without shelling out to kubectl.
 //! FIPS compliant - no external binaries needed.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
@@ -43,6 +44,65 @@ use crate::Error;
 // - Know the exact apiVersion at compile time? -> HasApiResource trait
 // - Have apiVersion from a manifest/config? -> build_api_resource()
 // - Need to query API and want server's preferred version? -> build_api_resource_with_discovery()
+// =============================================================================
+
+// =============================================================================
+// ObjectMeta - Canonical Kubernetes metadata for all compiled resources
+// =============================================================================
+
+/// Standard Kubernetes ObjectMeta for compiled resources.
+///
+/// Used by all resource types (workloads, policies, ingress, certificates)
+/// as the unified metadata representation. Automatically adds Lattice
+/// management labels on construction.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectMeta {
+    /// Resource name
+    pub name: String,
+    /// Resource namespace
+    pub namespace: String,
+    /// Labels
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Annotations
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+}
+
+impl ObjectMeta {
+    /// Create new metadata with standard Lattice labels
+    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
+        let name = name.into();
+        let mut labels = BTreeMap::new();
+        labels.insert(crate::LABEL_NAME.to_string(), name.clone());
+        labels.insert(
+            crate::LABEL_MANAGED_BY.to_string(),
+            crate::LABEL_MANAGED_BY_LATTICE.to_string(),
+        );
+        Self {
+            name,
+            namespace: namespace.into(),
+            labels,
+            annotations: BTreeMap::new(),
+        }
+    }
+
+    /// Add a label
+    pub fn with_label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.labels.insert(key.into(), value.into());
+        self
+    }
+
+    /// Add an annotation
+    pub fn with_annotation(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.annotations.insert(key.into(), value.into());
+        self
+    }
+}
+
+// =============================================================================
+// HasApiResource Trait
 // =============================================================================
 
 /// Trait for types that have a known API group, version, and kind.
@@ -313,9 +373,9 @@ where
 }
 
 /// Default connection timeout for kube clients (5s is plenty for local API server)
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default read timeout for kube clients
-const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Create a kube client from optional kubeconfig path with default timeouts
 pub async fn create_client(kubeconfig: Option<&Path>) -> Result<Client, Error> {

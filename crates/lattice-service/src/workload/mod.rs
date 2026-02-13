@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 
 use aws_lc_rs::digest::{digest, SHA256};
 use lattice_common::kube_utils::HasApiResource;
+pub use lattice_common::kube_utils::ObjectMeta;
 use serde::{Deserialize, Serialize};
 
 /// Compute a config hash from ConfigMap and Secret data
@@ -89,57 +90,6 @@ pub fn compute_config_hash(
         .take(8)
         .map(|b| format!("{:02x}", b))
         .collect()
-}
-
-// =============================================================================
-// Kubernetes Resource Types
-// =============================================================================
-
-/// Standard Kubernetes ObjectMeta
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ObjectMeta {
-    /// Resource name
-    pub name: String,
-    /// Resource namespace
-    pub namespace: String,
-    /// Labels
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-    /// Annotations
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub annotations: BTreeMap<String, String>,
-}
-
-impl ObjectMeta {
-    /// Create new metadata with standard Lattice labels
-    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
-        let name = name.into();
-        let mut labels = BTreeMap::new();
-        labels.insert(lattice_common::LABEL_NAME.to_string(), name.clone());
-        labels.insert(
-            lattice_common::LABEL_MANAGED_BY.to_string(),
-            lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
-        );
-        Self {
-            name,
-            namespace: namespace.into(),
-            labels,
-            annotations: BTreeMap::new(),
-        }
-    }
-
-    /// Add a label
-    pub fn with_label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.labels.insert(key.into(), value.into());
-        self
-    }
-
-    /// Add an annotation
-    pub fn with_annotation(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.annotations.insert(key.into(), value.into());
-        self
-    }
 }
 
 // =============================================================================
@@ -876,6 +826,22 @@ pub struct VolumeMount {
     /// Read only
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
+}
+
+impl VolumeMount {
+    /// Create a readonly file mount with a sub_path key
+    pub fn readonly_file(
+        name: impl Into<String>,
+        mount_path: impl Into<String>,
+        sub_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            mount_path: mount_path.into(),
+            sub_path: Some(sub_path.into()),
+            read_only: Some(true),
+        }
+    }
 }
 
 // =============================================================================

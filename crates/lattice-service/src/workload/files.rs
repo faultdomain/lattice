@@ -116,12 +116,11 @@ fn compile_text_files(
         .push(Volume::from_config_map(&vol_name, cm_name));
 
     for (key, (_, mount_path)) in text_files {
-        result.volume_mounts.push(VolumeMount {
-            name: vol_name.clone(),
-            mount_path: mount_path.clone(),
-            sub_path: Some(key.clone()),
-            read_only: Some(true),
-        });
+        result.volume_mounts.push(VolumeMount::readonly_file(
+            vol_name.clone(),
+            mount_path,
+            key,
+        ));
     }
 }
 
@@ -150,12 +149,11 @@ fn compile_binary_files(
         .push(Volume::from_secret(&vol_name, secret_name));
 
     for (key, (_, mount_path)) in binary_files {
-        result.volume_mounts.push(VolumeMount {
-            name: vol_name.clone(),
-            mount_path: mount_path.clone(),
-            sub_path: Some(key.clone()),
-            read_only: Some(true),
-        });
+        result.volume_mounts.push(VolumeMount::readonly_file(
+            vol_name.clone(),
+            mount_path,
+            key,
+        ));
     }
 }
 
@@ -172,7 +170,11 @@ fn compile_secret_files(
     result: &mut CompiledFiles,
 ) -> Result<(), CompilationError> {
     for (key, (content, mount_path, file_refs)) in secret_files {
-        let store = resolve_store_for_refs(file_refs, secret_refs, &format!("file '{}'", key))?;
+        let store = super::secrets::resolve_single_store(
+            file_refs,
+            secret_refs,
+            &format!("file '{}'", key),
+        )?;
 
         let es_name = format!("{}-file-{}", base_name, key);
         // Volume names must be DNS labels (no dots/underscores/etc).
@@ -231,52 +233,12 @@ fn compile_secret_files(
 
         result.volumes.push(Volume::from_secret(&vol_name, es_name));
 
-        result.volume_mounts.push(VolumeMount {
-            name: vol_name,
-            mount_path: mount_path.clone(),
-            sub_path: Some(key.clone()),
-            read_only: Some(true),
-        });
+        result
+            .volume_mounts
+            .push(VolumeMount::readonly_file(vol_name, mount_path, key));
     }
 
     Ok(())
-}
-
-/// Resolve and validate the store for a set of secret refs.
-///
-/// All refs must come from the same ClusterSecretStore. Returns an error
-/// if refs span multiple stores.
-fn resolve_store_for_refs(
-    refs: &[FileSecretRef],
-    secret_refs: &BTreeMap<String, SecretRef>,
-    context: &str,
-) -> Result<String, CompilationError> {
-    let mut store: Option<String> = None;
-
-    for fref in refs {
-        let sr = secret_refs.get(&fref.resource_name).ok_or_else(|| {
-            CompilationError::file_compilation(format!(
-                "{} references secret resource '{}' but no SecretRef was compiled",
-                context, fref.resource_name
-            ))
-        })?;
-
-        match &store {
-            None => store = Some(sr.store_name.clone()),
-            Some(existing) if existing != &sr.store_name => {
-                return Err(CompilationError::file_compilation(format!(
-                    "{} references secrets from multiple stores ('{}' and '{}'); \
-                     a single file or env var can only use one store",
-                    context, existing, sr.store_name
-                )));
-            }
-            Some(_) => {} // Same store, OK
-        }
-    }
-
-    store.ok_or_else(|| {
-        CompilationError::file_compilation(format!("{} has no secret references", context))
-    })
 }
 
 /// Convert a file path to a valid ConfigMap/Secret key.

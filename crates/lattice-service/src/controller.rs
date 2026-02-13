@@ -1479,22 +1479,24 @@ impl<'a> ExternalStatusUpdate<'a> {
     }
 }
 
-/// Update LatticeExternalService status with the given configuration.
-///
-/// Skips the patch if phase and message already match the current status,
-/// preventing a self-triggering reconcile storm.
+fn is_external_status_unchanged(
+    external: &LatticeExternalService,
+    phase: crate::crd::ExternalServicePhase,
+    message: &str,
+) -> bool {
+    external
+        .status
+        .as_ref()
+        .map(|s| s.phase == phase && s.message.as_deref() == Some(message))
+        .unwrap_or(false)
+}
+
 async fn update_external_status(
     external: &LatticeExternalService,
     ctx: &ServiceContext,
     update: ExternalStatusUpdate<'_>,
 ) -> Result<(), Error> {
-    // Check if status already matches — avoid update loop
-    let unchanged = external
-        .status
-        .as_ref()
-        .map(|s| s.phase == update.phase && s.message.as_deref() == Some(update.message))
-        .unwrap_or(false);
-    if unchanged {
+    if is_external_status_unchanged(external, update.phase, update.message) {
         debug!("external service status unchanged, skipping update");
         return Ok(());
     }

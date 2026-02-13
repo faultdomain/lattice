@@ -13,11 +13,12 @@
 use std::collections::BTreeMap;
 
 use crate::graph::{ActiveEdge, ServiceNode};
+use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
 use lattice_common::policy::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
-    AuthorizationSource, OperationSpec, PolicyMetadata, ServiceEntry, ServiceEntryPort,
-    ServiceEntrySpec, SourceSpec, TargetRef, WorkloadSelector,
+    AuthorizationSource, OperationSpec, ServiceEntry, ServiceEntryPort, ServiceEntrySpec,
+    SourceSpec, TargetRef, WorkloadSelector,
 };
 use lattice_common::LABEL_NAME;
 
@@ -60,7 +61,7 @@ impl<'a> PolicyCompiler<'a> {
         }
 
         Some(AuthorizationPolicy::new(
-            PolicyMetadata::new(format!("allow-to-{}", service.name), namespace),
+            ObjectMeta::new(format!("allow-to-{}", service.name), namespace),
             AuthorizationPolicySpec {
                 target_refs: vec![TargetRef {
                     group: String::new(),
@@ -108,7 +109,7 @@ impl<'a> PolicyCompiler<'a> {
         match_labels.insert(LABEL_NAME.to_string(), service.name.clone());
 
         Some(AuthorizationPolicy::new(
-            PolicyMetadata::new(format!("allow-waypoint-to-{}", service.name), namespace),
+            ObjectMeta::new(format!("allow-waypoint-to-{}", service.name), namespace),
             AuthorizationPolicySpec {
                 target_refs: vec![],
                 selector: Some(WorkloadSelector { match_labels }),
@@ -158,11 +159,8 @@ impl<'a> PolicyCompiler<'a> {
             })
             .collect();
 
-        let mut metadata = PolicyMetadata::new(&service.name, namespace);
-        metadata.labels.insert(
-            mesh::USE_WAYPOINT_LABEL.to_string(),
-            mesh::waypoint_name(namespace),
-        );
+        let metadata = ObjectMeta::new(&service.name, namespace)
+            .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
 
         let resolution = service
             .resolution
@@ -195,7 +193,7 @@ impl<'a> PolicyCompiler<'a> {
             .collect();
 
         AuthorizationPolicy::new(
-            PolicyMetadata::new(
+            ObjectMeta::new(
                 format!("allow-{}-to-{}", caller, external_service.name),
                 namespace,
             ),
@@ -244,7 +242,7 @@ impl<'a> PolicyCompiler<'a> {
         let port_strings: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
 
         AuthorizationPolicy::new(
-            PolicyMetadata::new(format!("allow-gateway-to-{}", service_name), namespace),
+            ObjectMeta::new(format!("allow-gateway-to-{}", service_name), namespace),
             AuthorizationPolicySpec {
                 target_refs: vec![TargetRef {
                     group: String::new(),

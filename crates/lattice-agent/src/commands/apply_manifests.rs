@@ -32,7 +32,7 @@ pub async fn handle(cmd: &ApplyManifestsCommand, ctx: &CommandContext) {
         match String::from_utf8(manifest.clone()) {
             Ok(yaml) => {
                 let (kind, name) = extract_manifest_info(&yaml);
-                if let Err(e) = apply_manifest(&client, &yaml).await {
+                if let Err(e) = lattice_common::kube_utils::apply_manifest(&client, &yaml).await {
                     error!(
                         error = %e,
                         manifest_index = i,
@@ -85,67 +85,15 @@ fn extract_manifest_info_from_value(value: Option<serde_json::Value>) -> (String
     }
 }
 
-/// Apply a Kubernetes manifest using kube-rs server-side apply.
-pub async fn apply_manifest(client: &kube::Client, yaml: &str) -> Result<(), std::io::Error> {
-    use kube::api::{Api, Patch, PatchParams};
-    use kube::core::DynamicObject;
-
-    let value = lattice_common::yaml::parse_yaml(yaml)
-        .map_err(|e| std::io::Error::other(format!("Invalid YAML: {}", e)))?;
-
-    let api_version = value["apiVersion"]
-        .as_str()
-        .ok_or_else(|| std::io::Error::other("Missing apiVersion"))?
-        .to_string();
-    let kind = value["kind"]
-        .as_str()
-        .ok_or_else(|| std::io::Error::other("Missing kind"))?
-        .to_string();
-    let name = value["metadata"]["name"]
-        .as_str()
-        .ok_or_else(|| std::io::Error::other("Missing metadata.name"))?
-        .to_string();
-    let namespace = value["metadata"]["namespace"]
-        .as_str()
-        .map(|s| s.to_string());
-
-    tracing::debug!(
-        api_version = %api_version,
-        kind = %kind,
-        name = %name,
-        namespace = ?namespace,
-        "Applying manifest via kube-rs"
-    );
-
-    let ar = lattice_common::kube_utils::build_api_resource(&api_version, &kind);
-
-    let obj: DynamicObject = serde_json::from_value(value)
-        .map_err(|e| std::io::Error::other(format!("Failed to parse manifest: {}", e)))?;
-
-    let api: Api<DynamicObject> = if let Some(ns) = &namespace {
-        Api::namespaced_with(client.clone(), ns, &ar)
-    } else {
-        Api::all_with(client.clone(), &ar)
-    };
-
-    api.patch(
-        &name,
-        &PatchParams::apply("lattice-agent").force(),
-        &Patch::Apply(&obj),
-    )
-    .await
-    .map_err(|e| std::io::Error::other(format!("Server-side apply failed: {}", e)))?;
-
-    tracing::debug!(name = %name, kind = %kind, "Manifest applied successfully");
-    Ok(())
-}
-
 /// Apply a list of manifests (bytes) using server-side apply.
+///
+/// Thin adapter over `lattice_common::kube_utils::apply_manifest` for protobuf
+/// byte-buffer manifests received from the cell.
 pub async fn apply_manifests(client: &kube::Client, manifests: &[Vec<u8>]) -> Result<(), String> {
     for manifest_bytes in manifests {
         let yaml = String::from_utf8(manifest_bytes.clone())
             .map_err(|e| format!("Invalid UTF-8 in manifest: {}", e))?;
-        apply_manifest(client, &yaml)
+        lattice_common::kube_utils::apply_manifest(client, &yaml)
             .await
             .map_err(|e| format!("Failed to apply manifest: {}", e))?;
     }

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use kube::api::ListParams;
 use kube::config::{KubeConfigOptions, Kubeconfig};
-use kube::Api;
+use kube::{Api, ResourceExt};
 use lattice_common::crd::{LatticeCluster, LatticeClusterStatus};
 use serde::Serialize;
 use tracing::{debug, warn};
@@ -158,7 +158,7 @@ pub async fn discover_tree(
         let mut context_cluster_names = Vec::new();
 
         for cluster in &clusters {
-            let name = cluster.metadata.name.clone().unwrap_or_default();
+            let name = cluster.name_any();
             context_cluster_names.push(name.clone());
 
             let status = cluster.status.as_ref();
@@ -218,14 +218,14 @@ pub async fn discover_tree(
         // - If there's a cluster with parent_config, that's the self cluster (it's the parent)
         // - Child CRDs on a parent context are the non-self clusters
         let self_cluster = if clusters.len() == 1 {
-            clusters[0].metadata.name.clone().unwrap_or_default()
+            clusters[0].name_any()
         } else {
             // The self cluster is the one with parent_config
             clusters
                 .iter()
                 .find(|c| c.spec.is_parent())
-                .and_then(|c| c.metadata.name.clone())
-                .unwrap_or_else(|| clusters[0].metadata.name.clone().unwrap_or_default())
+                .map(|c| c.name_any())
+                .unwrap_or_else(|| clusters[0].name_any())
         };
 
         self_cluster_for_context.insert(ctx_name.clone(), self_cluster);

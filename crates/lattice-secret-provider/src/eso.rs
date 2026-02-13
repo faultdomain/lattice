@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use lattice_common::kube_utils::HasApiResource;
+use lattice_common::kube_utils::{HasApiResource, ObjectMeta};
 
 // =============================================================================
 // ClusterSecretStore
@@ -138,7 +138,7 @@ pub struct ExternalSecret {
     #[serde(default = "ExternalSecret::default_kind")]
     pub kind: String,
     /// Resource metadata
-    pub metadata: ExternalSecretMetadata,
+    pub metadata: ObjectMeta,
     /// ExternalSecret specification
     pub spec: ExternalSecretSpec,
 }
@@ -165,7 +165,7 @@ impl ExternalSecret {
         Self {
             api_version: Self::default_api_version(),
             kind: Self::default_kind(),
-            metadata: ExternalSecretMetadata::new(name, namespace),
+            metadata: ObjectMeta::new(name, namespace),
             spec,
         }
     }
@@ -179,35 +179,6 @@ impl ExternalSecret {
             }
         }
         self
-    }
-}
-
-/// Metadata for ExternalSecret (namespace-scoped)
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ExternalSecretMetadata {
-    /// Resource name
-    pub name: String,
-    /// Resource namespace
-    pub namespace: String,
-    /// Labels
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
-
-impl ExternalSecretMetadata {
-    /// Create new metadata with standard Lattice labels
-    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
-        let name = name.into();
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            lattice_common::LABEL_MANAGED_BY.to_string(),
-            lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
-        );
-        Self {
-            name,
-            namespace: namespace.into(),
-            labels,
-        }
     }
 }
 

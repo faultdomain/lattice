@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use kube::api::{Api, DynamicObject, Patch, PatchParams};
 use serde::{Deserialize, Serialize};
 
-use lattice_common::kube_utils::HasApiResource;
+use lattice_common::kube_utils::{HasApiResource, ObjectMeta};
 use lattice_common::ReconcileError;
 
 /// Velero namespace where Schedule/BSL/Restore resources are created
@@ -65,7 +65,7 @@ pub struct BackupStorageLocation {
     #[serde(default = "BackupStorageLocation::default_kind")]
     pub kind: String,
     /// Resource metadata
-    pub metadata: VeleroMetadata,
+    pub metadata: ObjectMeta,
     /// BSL specification
     pub spec: BackupStorageLocationSpec,
 }
@@ -92,7 +92,7 @@ impl BackupStorageLocation {
         Self {
             api_version: Self::default_api_version(),
             kind: Self::default_kind(),
-            metadata: VeleroMetadata::new(name, namespace),
+            metadata: ObjectMeta::new(name, namespace),
             spec,
         }
     }
@@ -155,7 +155,7 @@ pub struct Schedule {
     #[serde(default = "Schedule::default_kind")]
     pub kind: String,
     /// Resource metadata
-    pub metadata: VeleroMetadata,
+    pub metadata: ObjectMeta,
     /// Schedule specification
     pub spec: ScheduleSpec,
 }
@@ -178,7 +178,7 @@ impl Schedule {
         Self {
             api_version: Self::default_api_version(),
             kind: Self::default_kind(),
-            metadata: VeleroMetadata::new(name, namespace),
+            metadata: ObjectMeta::new(name, namespace),
             spec,
         }
     }
@@ -254,7 +254,7 @@ pub struct Restore {
     #[serde(default = "Restore::default_kind")]
     pub kind: String,
     /// Resource metadata
-    pub metadata: VeleroMetadata,
+    pub metadata: ObjectMeta,
     /// Restore specification
     pub spec: RestoreSpec,
 }
@@ -277,7 +277,7 @@ impl Restore {
         Self {
             api_version: Self::default_api_version(),
             kind: Self::default_kind(),
-            metadata: VeleroMetadata::new(name, namespace),
+            metadata: ObjectMeta::new(name, namespace),
             spec,
         }
     }
@@ -309,34 +309,6 @@ pub struct RestoreSpec {
 // =============================================================================
 // Shared Types
 // =============================================================================
-
-/// Metadata for Velero resources (namespace-scoped)
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct VeleroMetadata {
-    /// Resource name
-    pub name: String,
-    /// Resource namespace
-    pub namespace: String,
-    /// Labels
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
-
-impl VeleroMetadata {
-    /// Create new metadata with standard Lattice labels
-    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            lattice_common::LABEL_MANAGED_BY.to_string(),
-            lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
-        );
-        Self {
-            name: name.into(),
-            namespace: namespace.into(),
-            labels,
-        }
-    }
-}
 
 // =============================================================================
 // Builder Helpers
@@ -559,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_velero_metadata_labels() {
-        let meta = VeleroMetadata::new("test", "velero");
+        let meta = ObjectMeta::new("test", "velero");
         assert_eq!(
             meta.labels.get(lattice_common::LABEL_MANAGED_BY),
             Some(&lattice_common::LABEL_MANAGED_BY_LATTICE.to_string())

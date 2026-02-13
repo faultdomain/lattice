@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::PolicyMetadata;
 use crate::kube_utils::HasApiResource;
+use crate::kube_utils::ObjectMeta;
 
 /// Cilium Network Policy for L4 eBPF-based network enforcement
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -21,7 +21,7 @@ pub struct CiliumNetworkPolicy {
     #[serde(default = "CiliumNetworkPolicy::kind")]
     pub kind: String,
     /// Metadata
-    pub metadata: PolicyMetadata,
+    pub metadata: ObjectMeta,
     /// Spec
     pub spec: CiliumNetworkPolicySpec,
 }
@@ -40,7 +40,7 @@ impl CiliumNetworkPolicy {
     }
 
     /// Create a new CiliumNetworkPolicy
-    pub fn new(metadata: PolicyMetadata, spec: CiliumNetworkPolicySpec) -> Self {
+    pub fn new(metadata: ObjectMeta, spec: CiliumNetworkPolicySpec) -> Self {
         Self {
             api_version: Self::api_version(),
             kind: Self::kind(),

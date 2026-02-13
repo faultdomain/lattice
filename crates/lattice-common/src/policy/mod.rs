@@ -22,6 +22,6 @@ pub use cilium::{
 pub use istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     AuthorizationSource, MtlsConfig, OperationSpec, PeerAuthentication, PeerAuthenticationSpec,
-    PolicyMetadata, SourceSpec, TargetRef, WorkloadSelector,
+    SourceSpec, TargetRef, WorkloadSelector,
 };
 pub use service_entry::{ServiceEntry, ServiceEntryPort, ServiceEntrySpec};

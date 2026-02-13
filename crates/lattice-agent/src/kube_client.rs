@@ -3,12 +3,7 @@
 //! Provides trait-based access to kube::Client creation,
 //! enabling dependency injection and mocking for tests.
 
-use std::time::Duration;
-
-/// Default connection timeout for kube clients (5s is plenty for local API server)
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Default read timeout for kube clients
-const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+use lattice_common::kube_utils::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
 
 /// Trait for creating Kubernetes clients
 ///

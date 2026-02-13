@@ -9,10 +9,11 @@
 use std::collections::BTreeMap;
 
 use crate::graph::{ActiveEdge, ServiceNode, ServiceType};
+use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::policy::{
     CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort,
     CiliumPortRule, DnsMatch, DnsRules, EndpointSelector, FqdnSelector, K8sServiceRef,
-    K8sServiceSelector, PolicyMetadata,
+    K8sServiceSelector,
 };
 use lattice_common::{mesh, CILIUM_LABEL_NAME, CILIUM_LABEL_NAMESPACE};
 
@@ -147,7 +148,7 @@ impl<'a> PolicyCompiler<'a> {
         self.build_egress_rules_for_dependencies(outbound_edges, &mut egress_rules);
 
         CiliumNetworkPolicy::new(
-            PolicyMetadata::new(format!("policy-{}", service.name), namespace),
+            ObjectMeta::new(format!("policy-{}", service.name), namespace),
             CiliumNetworkPolicySpec {
                 endpoint_selector: EndpointSelector::from_labels(endpoint_labels),
                 ingress: ingress_rules,
