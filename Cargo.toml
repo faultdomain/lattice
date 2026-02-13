@@ -137,7 +137,7 @@ uuid = { version = "1.11", features = ["v4"] }
 rand = "0.8"
 
 # Auth
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 cedar-policy = "4"
 
 # Regex
