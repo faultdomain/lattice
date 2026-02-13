@@ -1,48 +1,42 @@
 Lattice Source Available License
-
-Copyright (c) 2024-2026 Lattice Authors. All Rights Reserved.
+Copyright (c) 2026 Lattice Authors. All Rights Reserved.
 
 TERMS AND CONDITIONS
 
 1. GRANT OF LICENSE
 
-   This software and associated documentation files (the "Software") are made
-   available for viewing, inspection, and reference purposes only. No license,
-   express or implied, is granted to use, copy, modify, merge, publish,
-   distribute, sublicense, or sell copies of the Software.
+Lattice hereby grants you a non-exclusive, royalty-free, worldwide, non-transferable license to use, copy, and modify the software and associated documentation files (the "Software") solely for Non-Commercial Purposes.
+
+"Non-Commercial Purposes" means any use that is not primarily intended for or directed toward commercial advantage or monetary compensation. This includes, but is not limited to:
+
+Use in personal "home laboratories" for hobbyist, experimental, or educational purposes.
+
+Use for personal, private research that is not conducted on behalf of a commercial entity.
 
 2. RESTRICTIONS
 
-   You may NOT:
-   - Use the Software for any purpose, commercial or non-commercial
-   - Copy, modify, or create derivative works of the Software
-   - Distribute, publish, or share the Software in any form
-   - Sublicense or transfer any rights to the Software
-   - Use the Software to provide services to third parties
-   - Reverse engineer, decompile, or disassemble the Software
+The following uses are strictly prohibited without a separate written agreement from the Copyright Holder:
 
-3. VIEWING ONLY
+Commercial Use: You may NOT use the Software for any commercial purpose, including use within a commercial enterprise to support its internal operations or revenue-generating activities.
 
-   This Software is made available on a "source available" basis solely for
-   the purpose of inspection and review. Accessing or viewing the source code
-   does not grant any rights to use the Software.
+Service Offering: You may NOT provide the Software to third parties as a hosted or managed service (SaaS), where the primary value of the service is the Software itself.
+
+Sublicensing and Sale: You may NOT sell, lease, or sublicense the Software, or otherwise distribute it for a fee or other charge.
+
+Redistribution: Any redistribution or sharing of the Software must include this original license and copyright notice.
+
+3. SOURCE AVAILABLE STATUS
+
+This Software is made available on a "source available" basis. While you may view, inspect, and modify the source code for the purposes granted in Section 1, you acknowledge that Lattice retains all rights, title, and interest in and to the Software's intellectual property.
 
 4. NO WARRANTY
 
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 5. LIMITATION OF LIABILITY
 
-   IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-   USE OR OTHER DEALINGS IN THE SOFTWARE.
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW WILL ANY COPYRIGHT HOLDER BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER PROGRAMS).
 
 6. TERMINATION
 
-   Any unauthorized use of the Software automatically terminates any implied
-   permission to view the source code and may result in legal action.
-
-For licensing inquiries, contact: licensing@lattice.dev
+Any use of the Software that does not comply with the terms of this License automatically terminates your rights under this License and may result in legal action.
