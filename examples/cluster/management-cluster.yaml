@@ -1,0 +1,36 @@
+# Single Lattice cluster for local development
+# Has parentConfig so it can optionally provision child clusters later
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: management
+spec:
+  providerRef: docker
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm
+      certSANs:
+        - "127.0.0.1"
+        - "localhost"
+    config:
+      docker: {}
+  nodes:
+    controlPlane:
+      replicas: 1
+    workerPools:
+      default:
+        replicas: 1
+  networking:
+    default:
+      cidr: "172.18.255.0/28"
+  services: true
+  monitoring:
+    enabled: false
+  backups:
+    enabled: false
+  parentConfig:
+    grpcPort: 50051
+    bootstrapPort: 8443
+    service:
+      type: LoadBalancer

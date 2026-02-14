@@ -135,7 +135,7 @@ impl IstioReconciler {
                 namespace: KEDA_NAMESPACE,
                 label_key: "app",
                 label_value: "keda-operator-metrics-apiserver",
-                port: "8443",
+                port: "6443",
             },
             WebhookTarget {
                 name: "victoria-metrics-operator",
@@ -238,11 +238,13 @@ impl IstioReconciler {
         cluster_name: &str,
         ha: bool,
     ) -> Vec<AuthorizationPolicy> {
-        // VMAgent → storage (write path)
-        let (write_service, write_port) = if ha {
-            (format!("vminsert-{}", VMCLUSTER_NAME), VMINSERT_PORT)
+        // VM operator labels pods with:
+        //   app.kubernetes.io/name: <component>  (vmsingle, vminsert, vmselect, vmagent)
+        //   app.kubernetes.io/instance: <cr-name> (VMCLUSTER_NAME)
+        let (write_component, write_port) = if ha {
+            ("vminsert", VMINSERT_PORT)
         } else {
-            (format!("vmsingle-{}", VMCLUSTER_NAME), VMSINGLE_PORT)
+            ("vmsingle", VMSINGLE_PORT)
         };
 
         let vmagent_principal = mesh::trust_domain::principal(
@@ -252,19 +254,36 @@ impl IstioReconciler {
         );
 
         // KEDA → query (read path)
-        let (read_service, read_port) = if ha {
-            (format!("vmselect-{}", VMCLUSTER_NAME), VMSELECT_PORT)
+        let (read_component, read_port) = if ha {
+            ("vmselect", VMSELECT_PORT)
         } else {
-            (format!("vmsingle-{}", VMCLUSTER_NAME), VMSINGLE_PORT)
+            ("vmsingle", VMSINGLE_PORT)
         };
 
         let keda_principal =
             mesh::trust_domain::principal(cluster_name, KEDA_NAMESPACE, KEDA_SERVICE_ACCOUNT);
 
+        let vm_instance_label = (
+            "app.kubernetes.io/instance".to_string(),
+            VMCLUSTER_NAME.to_string(),
+        );
+
         // Monitoring namespace has no waypoint — use selector-based policies
         // enforced by ztunnel directly.
-        let write_labels = BTreeMap::from([("app.kubernetes.io/name".to_string(), write_service)]);
-        let read_labels = BTreeMap::from([("app.kubernetes.io/name".to_string(), read_service)]);
+        let write_labels = BTreeMap::from([
+            (
+                "app.kubernetes.io/name".to_string(),
+                write_component.to_string(),
+            ),
+            vm_instance_label.clone(),
+        ]);
+        let read_labels = BTreeMap::from([
+            (
+                "app.kubernetes.io/name".to_string(),
+                read_component.to_string(),
+            ),
+            vm_instance_label,
+        ]);
 
         vec![
             AuthorizationPolicy::allow_to_workload(
@@ -473,7 +492,11 @@ mod tests {
         let selector = vmagent.spec.selector.as_ref().unwrap();
         assert_eq!(
             selector.match_labels.get("app.kubernetes.io/name"),
-            Some(&format!("vmsingle-{}", VMCLUSTER_NAME))
+            Some(&"vmsingle".to_string())
+        );
+        assert_eq!(
+            selector.match_labels.get("app.kubernetes.io/instance"),
+            Some(&VMCLUSTER_NAME.to_string())
         );
         let principal = &vmagent.spec.rules[0].from[0].source.principals[0];
         assert!(principal.contains(VMAGENT_SERVICE_ACCOUNT));
@@ -489,7 +512,11 @@ mod tests {
         let selector = keda.spec.selector.as_ref().unwrap();
         assert_eq!(
             selector.match_labels.get("app.kubernetes.io/name"),
-            Some(&format!("vmsingle-{}", VMCLUSTER_NAME))
+            Some(&"vmsingle".to_string())
+        );
+        assert_eq!(
+            selector.match_labels.get("app.kubernetes.io/instance"),
+            Some(&VMCLUSTER_NAME.to_string())
         );
         let principal = &keda.spec.rules[0].from[0].source.principals[0];
         assert!(principal.contains(KEDA_SERVICE_ACCOUNT));
@@ -509,7 +536,11 @@ mod tests {
         let selector = policies[0].spec.selector.as_ref().unwrap();
         assert_eq!(
             selector.match_labels.get("app.kubernetes.io/name"),
-            Some(&format!("vminsert-{}", VMCLUSTER_NAME))
+            Some(&"vminsert".to_string())
+        );
+        assert_eq!(
+            selector.match_labels.get("app.kubernetes.io/instance"),
+            Some(&VMCLUSTER_NAME.to_string())
         );
         assert_eq!(
             policies[0].spec.rules[0].to[0].operation.ports,
@@ -521,7 +552,11 @@ mod tests {
         let selector = policies[1].spec.selector.as_ref().unwrap();
         assert_eq!(
             selector.match_labels.get("app.kubernetes.io/name"),
-            Some(&format!("vmselect-{}", VMCLUSTER_NAME))
+            Some(&"vmselect".to_string())
+        );
+        assert_eq!(
+            selector.match_labels.get("app.kubernetes.io/instance"),
+            Some(&VMCLUSTER_NAME.to_string())
         );
         assert_eq!(
             policies[1].spec.rules[0].to[0].operation.ports,

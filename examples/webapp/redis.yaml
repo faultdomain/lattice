@@ -1,0 +1,53 @@
+# Redis 7 cache
+# Inbound from: api, worker
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: redis
+  namespace: webapp
+spec:
+  replicas: 1
+  workload:
+    containers:
+      main:
+        image: redis:7-alpine
+        variables:
+          REDIS_PASSWORD: "${secret.redis-credentials.password}"
+        files:
+          /etc/redis/redis.conf:
+            content: |
+              requirepass ${secret.redis-credentials.password}
+              save 60 1000
+              appendonly yes
+        command: ["redis-server", "/etc/redis/redis.conf"]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "redis-cli -a $REDIS_PASSWORD ping"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+    service:
+      ports:
+        tcp:
+          port: 6379
+          protocol: TCP
+    resources:
+      redis-credentials:
+        type: secret
+        id: webapp/redis-credentials
+        params:
+          provider: lattice-local
+          keys:
+            - password
+      api:
+        type: service
+        direction: inbound
+      worker:
+        type: service
+        direction: inbound

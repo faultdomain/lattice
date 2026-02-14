@@ -1,0 +1,71 @@
+# Background job worker - polls API and checks dependencies
+# Outbound to: api, postgres, redis
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: worker
+  namespace: webapp
+spec:
+  replicas: 1
+  workload:
+    containers:
+      main:
+        image: busybox:1.37
+        command: ["/bin/sh", "/app/worker.sh"]
+        variables:
+          API_URL: "http://api.webapp.svc.cluster.local:3000"
+          DB_HOST: "postgres.webapp.svc.cluster.local"
+          DB_PORT: "5432"
+          REDIS_HOST: "redis.webapp.svc.cluster.local"
+          REDIS_PORT: "6379"
+        files:
+          /app/worker.sh:
+            content: |
+              #!/bin/sh
+              touch /tmp/ready
+              echo "Worker started"
+              while true; do
+                echo "--- $(date) ---"
+
+                if wget -q -O- "$API_URL/health" 2>/dev/null; then
+                  echo " [ok] API healthy"
+                else
+                  echo " [err] API unreachable"
+                fi
+
+                if nc -z -w2 "$DB_HOST" "$DB_PORT" 2>/dev/null; then
+                  echo " [ok] Postgres reachable"
+                else
+                  echo " [err] Postgres unreachable"
+                fi
+
+                if nc -z -w2 "$REDIS_HOST" "$REDIS_PORT" 2>/dev/null; then
+                  echo " [ok] Redis reachable"
+                else
+                  echo " [err] Redis unreachable"
+                fi
+
+                sleep 30
+              done
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 64Mi
+        readinessProbe:
+          exec:
+            command: ["test", "-f", "/tmp/ready"]
+          initialDelaySeconds: 2
+          periodSeconds: 10
+    resources:
+      api:
+        type: service
+        direction: outbound
+      postgres:
+        type: service
+        direction: outbound
+      redis:
+        type: service
+        direction: outbound
