@@ -548,6 +548,110 @@ mod tests {
     }
 
     #[test]
+    fn cilium_ingress_allows_hbone_from_callers() {
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        let api_spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let output = compiler.compile("api", ns);
+
+        let cnp = &output.cilium_policies[0];
+
+        // Callers must be allowed on HBONE port (ztunnel wraps all traffic in HBONE)
+        let caller_rule = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| {
+                r.from_endpoints.iter().any(|ep| {
+                    ep.match_labels
+                        .get("k8s:app.kubernetes.io/name")
+                        .map(|v| v == "gateway")
+                        .unwrap_or(false)
+                })
+            })
+            .expect("should have ingress rule for caller");
+
+        let hbone_port = mesh::HBONE_PORT.to_string();
+        assert!(
+            caller_rule
+                .to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port)),
+            "caller ingress must allow HBONE port {hbone_port}, got: {:?}",
+            caller_rule.to_ports
+        );
+    }
+
+    #[test]
+    fn cilium_ingress_no_hbone_without_callers() {
+        let graph = ServiceGraph::new();
+        let ns = "default";
+
+        // Service with no inbound callers
+        let spec = make_service_spec(vec![], vec![]);
+        graph.put_service(ns, "lonely", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("lonely", ns);
+
+        let cnp = &output.cilium_policies[0];
+
+        // No ingress rules at all (no callers, no waypoint)
+        assert!(
+            cnp.spec.ingress.is_empty(),
+            "service with no callers should have no ingress rules"
+        );
+    }
+
+    #[test]
+    fn cilium_waypoint_hbone_only_with_external_deps() {
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // api calls external stripe, gateway calls api (bilateral)
+        let api_spec = make_service_spec(vec!["stripe"], vec!["gateway"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
+
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let output = compiler.compile("api", ns);
+
+        let cnp = &output.cilium_policies[0];
+
+        // Should have both caller HBONE and waypoint HBONE ingress rules
+        let has_waypoint_rule = cnp.spec.ingress.iter().any(|r| {
+            r.from_endpoints.iter().any(|ep| {
+                ep.match_labels
+                    .get(mesh::CILIUM_WAYPOINT_FOR_LABEL)
+                    .map(|v| v == mesh::WAYPOINT_FOR_SERVICE)
+                    .unwrap_or(false)
+            })
+        });
+        assert!(has_waypoint_rule, "should have waypoint HBONE ingress when external deps exist");
+
+        let has_caller_rule = cnp.spec.ingress.iter().any(|r| {
+            r.from_endpoints.iter().any(|ep| {
+                ep.match_labels
+                    .get("k8s:app.kubernetes.io/name")
+                    .map(|v| v == "gateway")
+                    .unwrap_or(false)
+            })
+        });
+        assert!(has_caller_rule, "should have caller HBONE ingress");
+    }
+
+    #[test]
     fn mixed_endpoints_categorized_correctly() {
         use crate::crd::ParsedEndpoint;
 

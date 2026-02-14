@@ -2,9 +2,8 @@
 //!
 //! Generates eBPF-based network enforcement at the kernel level using Cilium.
 //!
-//! Port handling: Cilium service-based policies (`toServices`) automatically
-//! translate K8s Service ports to container targetPorts. For ingress rules,
-//! we specify the service port and Cilium handles the mapping internally.
+//! Port handling: Egress uses `toServices` which auto-resolves ports. Ingress
+//! allows HBONE port 15008 since ztunnel wraps all pod-to-pod traffic in HBONE.
 
 use std::collections::BTreeMap;
 
@@ -49,13 +48,17 @@ impl<'a> PolicyCompiler<'a> {
                 })
                 .collect();
 
-            // Ztunnel delivers directly to the pod on the container target port,
-            // so Cilium ingress must allow the target port (not the service port).
-            let to_ports = Self::build_target_port_rules(service);
-
+            // Ztunnel wraps all pod-to-pod traffic in HBONE (port 15008),
+            // so Cilium ingress must allow HBONE from callers.
             ingress_rules.push(CiliumIngressRule {
                 from_endpoints,
-                to_ports,
+                to_ports: vec![CiliumPortRule {
+                    ports: vec![CiliumPort {
+                        port: mesh::HBONE_PORT.to_string(),
+                        protocol: "TCP".to_string(),
+                    }],
+                    rules: None,
+                }],
             });
         }
 
@@ -261,35 +264,6 @@ impl<'a> PolicyCompiler<'a> {
         (fqdns, cidrs)
     }
 
-    /// Build port rules for ingress using the container target port.
-    ///
-    /// Ztunnel delivers traffic directly to the pod on the target port,
-    /// so Cilium ingress rules must match the target port.
-    fn build_target_port_rules(service: &ServiceNode) -> Vec<CiliumPortRule> {
-        if service.ports.is_empty() {
-            vec![]
-        } else {
-            vec![CiliumPortRule {
-                ports: service
-                    .ports
-                    .values()
-                    .flat_map(|pm| {
-                        vec![
-                            CiliumPort {
-                                port: pm.target_port.to_string(),
-                                protocol: "TCP".to_string(),
-                            },
-                            CiliumPort {
-                                port: pm.target_port.to_string(),
-                                protocol: "UDP".to_string(),
-                            },
-                        ]
-                    })
-                    .collect(),
-                rules: None,
-            }]
-        }
-    }
 
     /// Generate a CiliumIngressRule allowing the Istio gateway proxy to reach
     /// a service. The gateway runs in the same namespace, selected by its
