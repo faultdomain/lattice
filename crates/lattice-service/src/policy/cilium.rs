@@ -264,7 +264,6 @@ impl<'a> PolicyCompiler<'a> {
         (fqdns, cidrs)
     }
 
-
     /// Generate a CiliumIngressRule allowing the Istio gateway proxy to reach
     /// a service. The gateway runs in the same namespace, selected by its
     /// `istio.io/gateway-name` label.

@@ -105,8 +105,36 @@ impl IstioReconciler {
         PeerAuthentication::new(
             ObjectMeta::new("default", "istio-system"),
             PeerAuthenticationSpec {
+                selector: None,
                 mtls: MtlsConfig {
                     mode: "STRICT".to_string(),
+                },
+            },
+        )
+    }
+
+    /// Generate PERMISSIVE PeerAuthentication for KEDA's metrics-apiserver.
+    ///
+    /// KEDA's metrics-apiserver registers a Kubernetes APIService which the
+    /// kube-apiserver health-checks directly. The kube-apiserver isn't in the
+    /// mesh, so it doesn't speak Istio mTLS. With STRICT mode (mesh-wide default),
+    /// ztunnel rejects the apiserver's connection → EOF → the APIService is
+    /// marked FailedDiscoveryCheck → all API discovery fails.
+    ///
+    /// Targets only the metrics-apiserver pod (via selector) so the KEDA
+    /// operator itself stays STRICT for its mTLS communication with VictoriaMetrics.
+    pub fn generate_keda_peer_authentication() -> PeerAuthentication {
+        PeerAuthentication::new(
+            ObjectMeta::new("keda-metrics-apiserver", KEDA_NAMESPACE),
+            PeerAuthenticationSpec {
+                selector: Some(WorkloadSelector {
+                    match_labels: BTreeMap::from([(
+                        "app".to_string(),
+                        "keda-operator-metrics-apiserver".to_string(),
+                    )]),
+                }),
+                mtls: MtlsConfig {
+                    mode: "PERMISSIVE".to_string(),
                 },
             },
         )
@@ -259,6 +287,24 @@ mod tests {
         assert_eq!(policy.metadata.name, "default");
         assert_eq!(policy.metadata.namespace, "istio-system");
         assert_eq!(policy.spec.mtls.mode, "STRICT");
+    }
+
+    #[test]
+    fn test_keda_peer_authentication_permissive() {
+        let policy = IstioReconciler::generate_keda_peer_authentication();
+        assert_eq!(policy.metadata.name, "keda-metrics-apiserver");
+        assert_eq!(policy.metadata.namespace, KEDA_NAMESPACE);
+        assert_eq!(
+            policy.spec.mtls.mode, "PERMISSIVE",
+            "KEDA metrics-apiserver must be PERMISSIVE so kube-apiserver can reach its aggregated APIService"
+        );
+
+        // Must target only the metrics-apiserver, not the whole namespace
+        let selector = policy.spec.selector.as_ref().expect("must have a selector");
+        assert_eq!(
+            selector.match_labels.get("app"),
+            Some(&"keda-operator-metrics-apiserver".to_string())
+        );
     }
 
     #[test]

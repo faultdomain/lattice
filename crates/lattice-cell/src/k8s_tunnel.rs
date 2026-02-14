@@ -137,7 +137,9 @@ async fn send_request(
     lattice_proto::tracing::inject_context(&mut k8s_request);
 
     let (response_tx, response_rx) = mpsc::channel::<KubernetesResponse>(RESPONSE_CHANNEL_SIZE);
-    registry.register_pending_k8s_response(&request_id, response_tx).await;
+    registry
+        .register_pending_k8s_response(&request_id, response_tx)
+        .await;
 
     let command = CellCommand {
         command_id: request_id.clone(),
@@ -158,7 +160,9 @@ async fn send_request(
             .await;
         let Some(new_tx) = new_tx else {
             registry.take_pending_k8s_response(&request_id).await;
-            return Err(TunnelError::SendFailed("agent did not reconnect".to_string()));
+            return Err(TunnelError::SendFailed(
+                "agent did not reconnect".to_string(),
+            ));
         };
 
         if let Err(e) = new_tx.send(command).await {

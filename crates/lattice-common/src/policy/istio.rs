@@ -258,6 +258,9 @@ impl PeerAuthentication {
 /// PeerAuthentication spec
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PeerAuthenticationSpec {
+    /// Workload selector (None = all pods in namespace)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<WorkloadSelector>,
     /// mTLS configuration
     pub mtls: MtlsConfig,
 }

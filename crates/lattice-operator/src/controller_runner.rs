@@ -146,8 +146,18 @@ pub async fn build_service_controllers(
         })
         .watches(service_policies, watcher_config(), move |policy| {
             let graph = graph_for_policy_watch.clone();
-            let policy_name = policy.metadata.name.as_deref().unwrap_or_default().to_string();
-            let policy_ns = policy.metadata.namespace.as_deref().unwrap_or_default().to_string();
+            let policy_name = policy
+                .metadata
+                .name
+                .as_deref()
+                .unwrap_or_default()
+                .to_string();
+            let policy_ns = policy
+                .metadata
+                .namespace
+                .as_deref()
+                .unwrap_or_default()
+                .to_string();
 
             graph.put_policy(lattice_common::graph::PolicyNode::from(&policy));
 
@@ -345,7 +355,10 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
                 let name = svc.metadata.name.as_deref().unwrap_or_default();
                 graph.put_service(ns, name, &svc.spec);
             }
-            tracing::info!(count = list.items.len(), "Warmed ServiceGraph with LatticeServices");
+            tracing::info!(
+                count = list.items.len(),
+                "Warmed ServiceGraph with LatticeServices"
+            );
         }
         Err(e) => tracing::warn!(error = %e, "Failed to list LatticeServices for graph warmup"),
     }
@@ -358,9 +371,14 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
                 let name = ext.metadata.name.as_deref().unwrap_or_default();
                 graph.put_external_service(ns, name, &ext.spec);
             }
-            tracing::info!(count = list.items.len(), "Warmed ServiceGraph with LatticeExternalServices");
+            tracing::info!(
+                count = list.items.len(),
+                "Warmed ServiceGraph with LatticeExternalServices"
+            );
         }
-        Err(e) => tracing::warn!(error = %e, "Failed to list LatticeExternalServices for graph warmup"),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to list LatticeExternalServices for graph warmup")
+        }
     }
 
     let policies: Api<LatticeServicePolicy> = Api::all(client.clone());
@@ -369,9 +387,14 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
             for pol in &list.items {
                 graph.put_policy(pol.into());
             }
-            tracing::info!(count = list.items.len(), "Warmed ServiceGraph with LatticeServicePolicies");
+            tracing::info!(
+                count = list.items.len(),
+                "Warmed ServiceGraph with LatticeServicePolicies"
+            );
         }
-        Err(e) => tracing::warn!(error = %e, "Failed to list LatticeServicePolicies for graph warmup"),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to list LatticeServicePolicies for graph warmup")
+        }
     }
 }
 

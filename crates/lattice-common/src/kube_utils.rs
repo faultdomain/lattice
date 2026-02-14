@@ -159,12 +159,16 @@ pub async fn discover_api_version(
 ) -> Result<String, Error> {
     use kube::discovery::Discovery;
 
-    let discovery = Discovery::new(client.clone()).run().await.map_err(|e| {
-        Error::internal_with_context(
-            "discover_api_version",
-            format!("API discovery failed: {}", e),
-        )
-    })?;
+    let discovery = Discovery::new(client.clone())
+        .filter(&[group])
+        .run()
+        .await
+        .map_err(|e| {
+            Error::internal_with_context(
+                "discover_api_version",
+                format!("API discovery failed: {}", e),
+            )
+        })?;
 
     // Find the group
     for api_group in discovery.groups() {

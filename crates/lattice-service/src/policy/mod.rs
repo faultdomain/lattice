@@ -638,7 +638,10 @@ mod tests {
                     .unwrap_or(false)
             })
         });
-        assert!(has_waypoint_rule, "should have waypoint HBONE ingress when external deps exist");
+        assert!(
+            has_waypoint_rule,
+            "should have waypoint HBONE ingress when external deps exist"
+        );
 
         let has_caller_rule = cnp.spec.ingress.iter().any(|r| {
             r.from_endpoints.iter().any(|ep| {

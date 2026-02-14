@@ -1082,7 +1082,9 @@ mod tests {
         let registry = AgentRegistry::new();
         let (tx, mut rx) = mpsc::channel::<KubernetesResponse>(16);
 
-        registry.register_pending_k8s_response("k8s-req-123", tx).await;
+        registry
+            .register_pending_k8s_response("k8s-req-123", tx)
+            .await;
         assert!(registry.has_pending_k8s_response("k8s-req-123"));
 
         // Get sender and send a response
@@ -1109,7 +1111,9 @@ mod tests {
         let registry = AgentRegistry::new();
         let (tx, mut rx) = mpsc::channel::<KubernetesResponse>(16);
 
-        registry.register_pending_k8s_response("watch-123", tx).await;
+        registry
+            .register_pending_k8s_response("watch-123", tx)
+            .await;
 
         // Send multiple streaming responses
         for i in 0..3 {
@@ -1142,7 +1146,10 @@ mod tests {
     #[tokio::test]
     async fn test_pending_k8s_response_take_nonexistent() {
         let registry = AgentRegistry::new();
-        assert!(registry.take_pending_k8s_response("nonexistent").await.is_none());
+        assert!(registry
+            .take_pending_k8s_response("nonexistent")
+            .await
+            .is_none());
     }
 
     #[test]

@@ -175,6 +175,15 @@ pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, Stri
                 format!("Failed to serialize monitoring AuthorizationPolicy: {}", e)
             })?);
         }
+
+        // KEDA namespace needs PERMISSIVE mTLS so the kube-apiserver can
+        // health-check the KEDA metrics-apiserver's aggregated APIService.
+        manifests.push(
+            serde_json::to_string_pretty(
+                &istio::IstioReconciler::generate_keda_peer_authentication(),
+            )
+            .map_err(|e| format!("Failed to serialize KEDA PeerAuthentication: {}", e))?,
+        );
     }
 
     // Cilium policies (skip on kind/bootstrap clusters) - serialize typed structs to JSON

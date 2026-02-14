@@ -83,14 +83,16 @@ async fn handle_forwarded_exec(req: &ExecRequest, ctx: &CommandContext) {
                         let cancel_token = session.cancel_token.clone();
 
                         // Store the session for stdin/resize forwarding
-                        sessions.insert(
-                            request_id.clone(),
-                            StoredExecSession {
-                                stdin_tx: session.stdin_tx,
-                                resize_tx: session.resize_tx,
-                                cancel_token,
-                            },
-                        ).await;
+                        sessions
+                            .insert(
+                                request_id.clone(),
+                                StoredExecSession {
+                                    stdin_tx: session.stdin_tx,
+                                    resize_tx: session.resize_tx,
+                                    cancel_token,
+                                },
+                            )
+                            .await;
 
                         // Relay data from child back to parent
                         while let Some(mut data) = data_rx.recv().await {

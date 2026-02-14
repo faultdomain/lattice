@@ -118,9 +118,8 @@ impl VolumeEvalContext<'_> {
 
         let principal_uid = service_entity.uid().clone();
         let resource_uid = volume_entity.uid().clone();
-        let entities =
-            Entities::from_entities(vec![service_entity, volume_entity], None)
-                .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
+        let entities = Entities::from_entities(vec![service_entity, volume_entity], None)
+            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
 
         let response = self
             .engine

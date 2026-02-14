@@ -1080,10 +1080,8 @@ async fn resolve_policy_defaults(
     }
 
     // Backup: merge matching policy backup specs with inline spec
-    let policy_backup_specs: Vec<&ServiceBackupSpec> = matched
-        .iter()
-        .filter_map(|p| p.backup.as_ref())
-        .collect();
+    let policy_backup_specs: Vec<&ServiceBackupSpec> =
+        matched.iter().filter_map(|p| p.backup.as_ref()).collect();
     let effective_backup = if policy_backup_specs.is_empty() {
         None
     } else {
