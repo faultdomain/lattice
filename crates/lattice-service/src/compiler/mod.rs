@@ -37,6 +37,7 @@ use std::sync::Arc;
 use kube::discovery::ApiResource;
 use lattice_cedar::{
     PolicyEngine, SecretAuthzRequest, SecurityAuthzRequest, SecurityOverrideRequest,
+    VolumeAuthzRequest,
 };
 
 use lattice_common::mesh;
@@ -256,6 +257,9 @@ impl<'a> ServiceCompiler<'a> {
 
         // Authorize secret access via Cedar — default-deny
         self.authorize_secrets(name, namespace, workload).await?;
+
+        // Authorize volume access — owner consent + Cedar policy
+        self.authorize_volumes(name, namespace, workload).await?;
 
         // Authorize security overrides via Cedar — default-deny
         self.authorize_security_overrides(name, namespace, workload, &service.spec.runtime)
@@ -512,6 +516,93 @@ impl<'a> ServiceCompiler<'a> {
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(CompilationError::secret_access_denied(details));
+        }
+
+        Ok(())
+    }
+
+    /// Authorize volume access for shared volume references.
+    ///
+    /// Two-layer authorization:
+    /// 1. **Owner consent**: The volume owner must list this service in `allowedConsumers`
+    /// 2. **Cedar policy**: If Cedar policies exist, they must permit `AccessVolume`
+    ///
+    /// Only checks references to shared volumes (those with `id` but no `size`).
+    /// Private volumes and owned volumes skip authorization.
+    async fn authorize_volumes(
+        &self,
+        name: &str,
+        namespace: &str,
+        workload: &crate::crd::WorkloadSpec,
+    ) -> Result<(), CompilationError> {
+        // Collect volume references (shared volumes this service doesn't own)
+        let volume_refs: Vec<_> = workload
+            .resources
+            .iter()
+            .filter(|(_, r)| r.is_volume_reference())
+            .filter_map(|(resource_name, r)| {
+                let volume_id = r.id.as_ref()?;
+                // Volume namespace: use resource's namespace override or service namespace
+                let vol_ns = r.namespace.as_deref().unwrap_or(namespace);
+                Some((resource_name.clone(), vol_ns.to_string(), volume_id.clone()))
+            })
+            .collect();
+
+        if volume_refs.is_empty() {
+            return Ok(());
+        }
+
+        // Layer 1: Owner consent via graph
+        let mut denied = Vec::new();
+        for (resource_name, vol_ns, volume_id) in &volume_refs {
+            if let Some(ownership) = self.graph.get_volume_owner(vol_ns, volume_id) {
+                let consumer_key_short = name.to_string();
+                let consumer_key_qualified = format!("{}/{}", namespace, name);
+
+                let allowed = ownership
+                    .params
+                    .allowed_consumers
+                    .as_ref()
+                    .map(|consumers| {
+                        consumers.iter().any(|c| {
+                            c == &consumer_key_qualified
+                                || (c == &consumer_key_short && namespace == vol_ns)
+                        })
+                    })
+                    .unwrap_or(false); // No allowedConsumers = default-deny
+
+                if !allowed {
+                    denied.push(format!(
+                        "'{}': not in allowedConsumers of volume '{}' owned by '{}/{}'",
+                        resource_name, volume_id, ownership.owner_namespace, ownership.owner_name,
+                    ));
+                }
+            }
+            // If no owner found in graph, skip owner consent check (owner may not be compiled yet)
+        }
+
+        if !denied.is_empty() {
+            return Err(CompilationError::volume_access_denied(denied.join("; ")));
+        }
+
+        // Layer 2: Cedar policy authorization (permissive by default)
+        let result = self
+            .cedar
+            .authorize_volumes(&VolumeAuthzRequest {
+                service_name: name.to_string(),
+                namespace: namespace.to_string(),
+                volume_refs,
+            })
+            .await;
+
+        if !result.is_allowed() {
+            let details = result
+                .denied
+                .iter()
+                .map(|d| format!("'{}' (volume '{}'): {}", d.resource_name, d.volume_id, d.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(CompilationError::volume_access_denied(details));
         }
 
         Ok(())

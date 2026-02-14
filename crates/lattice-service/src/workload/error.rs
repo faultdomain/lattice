@@ -56,6 +56,12 @@ pub enum CompilationError {
         details: String,
     },
 
+    /// Volume access denied (owner consent or Cedar policy)
+    VolumeAccessDenied {
+        /// Denial details
+        details: String,
+    },
+
     /// Template rendering error
     Template {
         /// The underlying template error
@@ -106,6 +112,9 @@ impl fmt::Display for CompilationError {
             }
             Self::SecurityOverrideDenied { details } => {
                 write!(f, "security override denied: {}", details)
+            }
+            Self::VolumeAccessDenied { details } => {
+                write!(f, "volume access denied: {}", details)
             }
             Self::Template { source } => {
                 write!(f, "template error: {}", source)
@@ -186,6 +195,13 @@ impl CompilationError {
         }
     }
 
+    /// Create a volume-access-denied error
+    pub fn volume_access_denied(details: impl Into<String>) -> Self {
+        Self::VolumeAccessDenied {
+            details: details.into(),
+        }
+    }
+
     /// Create a file compilation error
     pub fn file_compilation(message: impl Into<String>) -> Self {
         Self::FileCompilation {
@@ -205,7 +221,9 @@ impl CompilationError {
     pub fn is_policy_denied(&self) -> bool {
         matches!(
             self,
-            Self::SecretAccessDenied { .. } | Self::SecurityOverrideDenied { .. }
+            Self::SecretAccessDenied { .. }
+                | Self::SecurityOverrideDenied { .. }
+                | Self::VolumeAccessDenied { .. }
         )
     }
 }

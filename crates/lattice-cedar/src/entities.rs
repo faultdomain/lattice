@@ -196,6 +196,35 @@ pub(crate) fn build_security_override_entity(override_id: &str, category: &str) 
 }
 
 // =============================================================================
+// Volume Entity (for volume access)
+// =============================================================================
+
+/// Build a volume entity for volume access authorization
+///
+/// UID: `Lattice::Volume::"namespace/volume_id"`
+///
+/// Attributes:
+/// - `namespace`: volume namespace
+/// - `volume_id`: the shared volume ID
+pub(crate) fn build_volume_entity(namespace: &str, volume_id: &str) -> Result<Entity> {
+    let uid_str = format!("{}/{}", namespace, volume_id);
+    let uid = build_entity_uid("Volume", &uid_str)?;
+
+    let mut attrs = HashMap::new();
+    attrs.insert(
+        "namespace".to_string(),
+        RestrictedExpression::new_string(namespace.to_string()),
+    );
+    attrs.insert(
+        "volume_id".to_string(),
+        RestrictedExpression::new_string(volume_id.to_string()),
+    );
+
+    Entity::new(uid, attrs, HashSet::new())
+        .map_err(|e| Error::Internal(format!("Failed to create volume entity: {}", e)))
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -281,6 +310,21 @@ mod tests {
         let uid_str = entity.uid().to_string();
         assert!(uid_str.contains("SecurityOverride"));
         assert!(uid_str.contains("capability:NET_ADMIN"));
+    }
+
+    #[test]
+    fn test_build_volume_entity() {
+        let entity = build_volume_entity("media", "media-storage").unwrap();
+        let uid_str = entity.uid().to_string();
+        assert!(uid_str.contains("Volume"));
+        assert!(uid_str.contains("media/media-storage"));
+    }
+
+    #[test]
+    fn test_volume_entity_different_namespaces() {
+        let entity_a = build_volume_entity("media", "shared-vol").unwrap();
+        let entity_b = build_volume_entity("prod", "shared-vol").unwrap();
+        assert_ne!(entity_a.uid(), entity_b.uid());
     }
 
     #[test]

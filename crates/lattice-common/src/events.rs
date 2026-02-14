@@ -141,6 +141,8 @@ pub mod reasons {
     pub const SECRET_ACCESS_DENIED: &str = "SecretAccessDenied";
     /// Cedar denied security override
     pub const SECURITY_OVERRIDE_DENIED: &str = "SecurityOverrideDenied";
+    /// Volume access denied (owner consent or Cedar policy)
+    pub const VOLUME_ACCESS_DENIED: &str = "VolumeAccessDenied";
 }
 
 /// Well-known event action strings.

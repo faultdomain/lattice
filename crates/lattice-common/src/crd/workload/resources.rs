@@ -297,6 +297,17 @@ pub struct VolumeParams {
     /// Access mode: ReadWriteOnce (default), ReadWriteMany, ReadOnlyMany
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<VolumeAccessMode>,
+
+    /// Services allowed to reference this shared volume (owner consent).
+    ///
+    /// Only meaningful on owned volumes (those with `size`). Format:
+    /// - `"service-name"` for same-namespace consumers
+    /// - `"namespace/service-name"` for cross-namespace consumers
+    ///
+    /// Default-deny: if omitted on a shared volume (one with `id`), no consumers
+    /// are allowed. Private volumes (no `id`) don't need this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_consumers: Option<Vec<String>>,
 }
 
 /// Volume access mode

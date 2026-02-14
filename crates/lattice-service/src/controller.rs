@@ -1181,6 +1181,9 @@ async fn compile_and_apply(
                         crate::workload::CompilationError::SecurityOverrideDenied { .. } => {
                             reasons::SECURITY_OVERRIDE_DENIED
                         }
+                        crate::workload::CompilationError::VolumeAccessDenied { .. } => {
+                            reasons::VOLUME_ACCESS_DENIED
+                        }
                         _ => reasons::SECRET_ACCESS_DENIED,
                     }
                 } else {

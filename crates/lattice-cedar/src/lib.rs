@@ -11,10 +11,12 @@
 //! Lattice::Service::"payments/checkout"             (principal — namespace/name)
 //! Lattice::Action::"AccessCluster"                  (action)
 //! Lattice::Action::"AccessSecret"                   (action)
+//! Lattice::Action::"AccessVolume"                   (action)
 //! Lattice::Action::"OverrideSecurity"               (action)
 //! Lattice::Cluster::"prod"                          (resource)
 //! Lattice::SecretPath::"vault-prod:db/creds"        (resource — provider:path)
 //! Lattice::SecurityOverride::"capability:NET_ADMIN" (resource — override id)
+//! Lattice::Volume::"media/media-storage"            (resource — namespace/volume_id)
 //! ```
 
 #![deny(missing_docs)]
@@ -23,9 +25,11 @@ mod engine;
 mod entities;
 mod secret_auth;
 mod security_auth;
+mod volume_auth;
 
 pub use engine::{ClusterAttributes, DenialReason, Error, PolicyEngine};
 pub use secret_auth::{SecretAuthzRequest, SecretAuthzResult, SecretDenial};
 pub use security_auth::{
     SecurityAuthzRequest, SecurityAuthzResult, SecurityDenial, SecurityOverrideRequest,
 };
+pub use volume_auth::{VolumeAuthzRequest, VolumeAuthzResult, VolumeDenial};

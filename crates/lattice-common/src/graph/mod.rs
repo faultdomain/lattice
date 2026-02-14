@@ -15,7 +15,7 @@ use tracing::warn;
 
 use crate::crd::{
     IngressPolicySpec, LatticeExternalServiceSpec, LatticeServiceSpec, ParsedEndpoint, Resolution,
-    ServiceBackupSpec, ServiceSelector,
+    ServiceBackupSpec, ServiceSelector, VolumeParams,
 };
 
 /// Fully qualified service reference: (namespace, name)
@@ -209,6 +209,17 @@ pub struct PolicyNode {
     pub ingress: Option<IngressPolicySpec>,
 }
 
+/// Volume ownership record: who owns a shared volume and who may consume it
+#[derive(Clone, Debug)]
+pub struct VolumeOwnership {
+    /// The service that owns (creates) this volume
+    pub owner_name: String,
+    /// The namespace of the owning service
+    pub owner_namespace: String,
+    /// Volume params (includes allowed_consumers, access_mode, size)
+    pub params: VolumeParams,
+}
+
 /// Thread-safe service graph using DashMap
 ///
 /// Supports cross-namespace dependencies where services can depend on
@@ -232,6 +243,12 @@ pub struct ServiceGraph {
 
     /// Cached namespace labels: namespace -> labels
     ns_labels: DashMap<String, BTreeMap<String, String>>,
+
+    /// Volume ownership index: (namespace, volume_id) -> VolumeOwnership
+    ///
+    /// Only shared volumes (those with both `id` and `size`) are indexed.
+    /// Updated on put_service/delete_service.
+    volume_owners: DashMap<(String, String), VolumeOwnership>,
 }
 
 impl Default for ServiceGraph {
@@ -250,6 +267,7 @@ impl ServiceGraph {
             ns_index: DashMap::new(),
             policies: DashMap::new(),
             ns_labels: DashMap::new(),
+            volume_owners: DashMap::new(),
         }
     }
 
@@ -257,6 +275,7 @@ impl ServiceGraph {
     pub fn put_service(&self, namespace: &str, name: &str, spec: &LatticeServiceSpec) {
         let node = ServiceNode::from_service_spec(namespace, name, spec);
         self.put_node(node);
+        self.update_volume_owners(namespace, name, spec);
     }
 
     /// Insert or update an external service in the graph
@@ -348,6 +367,10 @@ impl ServiceGraph {
         if let Some(mut index) = self.ns_index.get_mut(namespace) {
             index.remove(name);
         }
+
+        // Remove volume ownership entries for this service
+        self.volume_owners
+            .retain(|_, v| !(v.owner_namespace == namespace && v.owner_name == name));
     }
 
     /// Internal: Remove outgoing edges for a service
@@ -583,6 +606,50 @@ impl ServiceGraph {
         matching
     }
 
+    /// Get the owner of a shared volume by namespace and volume ID.
+    ///
+    /// Returns `None` if no service owns a volume with this ID in this namespace.
+    pub fn get_volume_owner(&self, namespace: &str, volume_id: &str) -> Option<VolumeOwnership> {
+        let key = (namespace.to_string(), volume_id.to_string());
+        self.volume_owners.get(&key).map(|v| v.clone())
+    }
+
+    /// Update the volume ownership index for a service.
+    ///
+    /// Removes all previous ownership entries for this service, then indexes
+    /// any owned shared volumes (those with both `id` and `size`).
+    fn update_volume_owners(&self, namespace: &str, name: &str, spec: &LatticeServiceSpec) {
+        // Remove stale entries for this service
+        self.volume_owners
+            .retain(|_, v| !(v.owner_namespace == namespace && v.owner_name == name));
+
+        // Index owned shared volumes
+        for (_resource_name, resource) in &spec.workload.resources {
+            if !resource.type_.is_volume() {
+                continue;
+            }
+            let Some(ref volume_id) = resource.id else {
+                continue;
+            };
+            let params = match resource.volume_params() {
+                Ok(Some(p)) => p,
+                _ => continue,
+            };
+            // Only index if this service owns the volume (has size)
+            if params.size.is_none() {
+                continue;
+            }
+            self.volume_owners.insert(
+                (namespace.to_string(), volume_id.clone()),
+                VolumeOwnership {
+                    owner_name: name.to_string(),
+                    owner_namespace: namespace.to_string(),
+                    params,
+                },
+            );
+        }
+    }
+
     /// Clear all data from the graph
     pub fn clear(&self) {
         self.vertices.clear();
@@ -591,6 +658,7 @@ impl ServiceGraph {
         self.ns_index.clear();
         self.policies.clear();
         self.ns_labels.clear();
+        self.volume_owners.clear();
     }
 }
 
