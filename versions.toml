@@ -177,8 +177,5 @@ version = "1.0.3"
 repo = "kubernetes-sigs/cluster-api-ipam-provider-in-cluster"
 components = ["ipam-components.yaml", "metadata.yaml"]
 
-[providers.cert-manager]
-# cert-manager for CAPI (installed before providers)
-version = "1.19.2"
-repo = "cert-manager/cert-manager"
-components = ["cert-manager.yaml"]
+# cert-manager is now installed via Helm chart (see [charts.cert-manager])
+# with control-plane tolerations baked in at build time.

@@ -29,10 +29,9 @@ fi
 
 echo "Bootstrapping cluster $CLUSTER_NAME from $ENDPOINT"
 
-# Untaint control plane so pods can schedule (CAPI controllers don't have tolerations)
-# Remove kubeadm taint and RKE2 taints (RKE2 taints both control-plane and etcd nodes)
-kubectl --kubeconfig="$KUBECONFIG" taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- || true
-kubectl --kubeconfig="$KUBECONFIG" taint nodes --all node-role.kubernetes.io/etcd:NoExecute- || true
+# Control plane taints are NOT removed. Lattice operator, cert-manager, and CAPI
+# controllers have tolerations to schedule on tainted CP nodes. Everything else
+# (ESO, Istio, monitoring) schedules on workers after pivot.
 
 # Fetch manifests with retry and exponential backoff
 echo "Fetching bootstrap manifests from parent..."

@@ -25,17 +25,18 @@ use crate::phases::reconcile_infrastructure;
 /// 1. Reconciles infrastructure (Cilium policies, Istio, etc.)
 /// 2. Reconciles worker pools (scaling)
 /// 3. Updates status with worker pool information
-/// 4. Ensures control plane is tainted when workers are ready
+/// 4. Requeues with appropriate interval based on worker readiness
 pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Action, Error> {
     let name = cluster.name_any();
 
     debug!("cluster is ready, reconciling infrastructure and worker pools");
 
     // Reconcile infrastructure (Cilium policies, Istio, etc.)
+    // Failures are non-blocking — worker pool scaling must proceed even if
+    // infrastructure components aren't ready yet (they may need workers to schedule).
     if let Some(client) = &ctx.client {
         if let Err(e) = reconcile_infrastructure(client, cluster).await {
             warn!(error = %e, "failed to reconcile infrastructure, will retry");
-            return Ok(Action::requeue(Duration::from_secs(30)));
         }
     }
 
@@ -75,9 +76,7 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
         "node status"
     );
 
-    // Ensure control plane is tainted when workers are ready
     if counts.ready_workers >= total_desired {
-        ensure_control_plane_tainted(ctx, counts.ready_workers).await;
         Ok(Action::requeue(Duration::from_secs(60)))
     } else {
         // Workers not ready yet, poll faster
@@ -224,27 +223,5 @@ async fn update_node_status(
 
     if let Err(e) = ctx.kube.patch_status(name, &updated_status).await {
         warn!(error = %e, "Failed to update node status");
-    }
-}
-
-/// Ensure control plane nodes are tainted when workers are ready.
-async fn ensure_control_plane_tainted(ctx: &Context, ready_workers: u32) {
-    let tainted = ctx
-        .kube
-        .are_control_plane_nodes_tainted()
-        .await
-        .unwrap_or(true);
-
-    if !tainted {
-        info!(
-            workers = ready_workers,
-            "workers ready, re-tainting control plane nodes"
-        );
-
-        if let Err(e) = ctx.kube.taint_control_plane_nodes().await {
-            warn!(error = %e, "failed to taint control plane nodes, will retry");
-        } else {
-            info!("control plane nodes tainted successfully");
-        }
     }
 }

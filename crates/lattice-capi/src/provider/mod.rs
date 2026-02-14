@@ -1201,12 +1201,6 @@ BOOTSTRAP_SCRIPT"#
 
         // Cleanup CA cert
         commands.push(r#"rm -f /tmp/cell-ca.crt"#.to_string());
-    } else {
-        // No bootstrap info - just untaint control plane
-        commands.push(
-            r#"kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- || true"#
-                .to_string(),
-        );
     }
 
     Ok(commands)

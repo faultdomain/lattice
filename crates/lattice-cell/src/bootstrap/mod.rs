@@ -47,7 +47,7 @@ use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, LocalObjectReference, Namespace,
     ObjectFieldSelector, PodSpec, PodTemplateSpec, Probe, Secret, SecretVolumeSource,
-    ServiceAccount, Volume, VolumeMount,
+    ServiceAccount, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -534,6 +534,14 @@ impl DefaultManifestGenerator {
                             }),
                             ..Default::default()
                         }],
+                        tolerations: Some(vec![Toleration {
+                            key: Some(
+                                "node-role.kubernetes.io/control-plane".to_string(),
+                            ),
+                            effect: Some("NoSchedule".to_string()),
+                            operator: Some("Exists".to_string()),
+                            ..Default::default()
+                        }]),
                         ..Default::default()
                     }),
                 },

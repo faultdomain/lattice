@@ -477,7 +477,52 @@ fn main() {
     );
     std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");
 
-    // 12. metrics-server (required for HPA / KEDA CPU triggers)
+    // 12. cert-manager (with control-plane tolerations so it schedules on tainted CP nodes)
+    let yaml = run_helm_template(
+        "cert-manager",
+        &chart(&format!(
+            "cert-manager-v{}.tgz",
+            versions.charts["cert-manager"].version
+        )),
+        "cert-manager",
+        &[
+            "--set",
+            "crds.enabled=true",
+            "--set",
+            "tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "tolerations[0].operator=Exists",
+            "--set",
+            "tolerations[0].effect=NoSchedule",
+            "--set",
+            "webhook.tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "webhook.tolerations[0].operator=Exists",
+            "--set",
+            "webhook.tolerations[0].effect=NoSchedule",
+            "--set",
+            "cainjector.tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "cainjector.tolerations[0].operator=Exists",
+            "--set",
+            "cainjector.tolerations[0].effect=NoSchedule",
+            "--set",
+            "startupapicheck.tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "startupapicheck.tolerations[0].operator=Exists",
+            "--set",
+            "startupapicheck.tolerations[0].effect=NoSchedule",
+        ],
+    );
+    std::fs::write(out_dir.join("cert-manager.yaml"), yaml).expect("write cert-manager.yaml");
+
+    // Set cert-manager version env var
+    println!(
+        "cargo:rustc-env=CERT_MANAGER_VERSION={}",
+        versions.charts["cert-manager"].version
+    );
+
+    // 13. metrics-server (required for HPA / KEDA CPU triggers)
     let yaml = run_helm_template(
         "metrics-server",
         &chart(&format!(

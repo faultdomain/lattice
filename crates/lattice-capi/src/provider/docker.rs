@@ -984,18 +984,15 @@ mod tests {
         use super::*;
         use crate::provider::BootstrapInfo;
 
-        /// Story: All clusters should untaint control plane so it can run pods.
-        /// This is essential for single-node clusters and the pivot flow.
+        /// Story: Clusters without bootstrap info should produce no post-kubeadm commands.
+        /// Control plane taints are preserved; operator/cert-manager/CAPI have tolerations.
         #[test]
-        fn all_clusters_untaint_control_plane() {
+        fn no_bootstrap_info_produces_no_commands() {
             let bootstrap = BootstrapInfo::default();
 
             let commands = build_post_kubeadm_commands("test", &bootstrap).unwrap();
 
-            assert!(!commands.is_empty());
-            let commands_str = commands.join("\n");
-            assert!(commands_str.contains("taint nodes"));
-            assert!(commands_str.contains("NoSchedule-"));
+            assert!(commands.is_empty());
         }
 
         /// Story: Workload clusters with bootstrap info should call the

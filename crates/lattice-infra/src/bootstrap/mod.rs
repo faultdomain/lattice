@@ -8,6 +8,7 @@
 //!
 //! All Helm charts are pre-rendered at build time and embedded into the binary.
 
+pub mod cert_manager;
 pub mod cilium;
 pub mod eso;
 pub mod gpu;

@@ -87,12 +87,6 @@ pub trait KubeClient: Send + Sync {
     /// Returns `(ready_control_plane, ready_workers)`.
     async fn get_ready_node_counts(&self) -> Result<NodeCounts, Error>;
 
-    /// Check if control plane nodes have the NoSchedule taint
-    async fn are_control_plane_nodes_tainted(&self) -> Result<bool, Error>;
-
-    /// Apply NoSchedule taint to all control plane nodes
-    async fn taint_control_plane_nodes(&self) -> Result<(), Error>;
-
     /// Ensure a namespace exists, creating it if it doesn't
     async fn ensure_namespace(&self, name: &str) -> Result<(), Error>;
 
@@ -219,111 +213,6 @@ impl KubeClient for KubeClientImpl {
             ready_control_plane,
             ready_workers,
         })
-    }
-
-    async fn are_control_plane_nodes_tainted(&self) -> Result<bool, Error> {
-        use k8s_openapi::api::core::v1::Node;
-
-        let api: Api<Node> = Api::all(self.client.clone());
-        let nodes = api.list(&Default::default()).await?;
-
-        // Check all control plane nodes have the NoSchedule taint
-        // and all etcd nodes have the NoExecute taint (RKE2)
-        for node in nodes.items.iter() {
-            // Check control-plane taint
-            if is_control_plane_node(node) && !has_control_plane_taint(node) {
-                return Ok(false);
-            }
-
-            // Check etcd taint (RKE2 nodes)
-            if is_etcd_node(node) && !has_etcd_taint(node) {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-
-    async fn taint_control_plane_nodes(&self) -> Result<(), Error> {
-        use k8s_openapi::api::core::v1::Node;
-
-        let api: Api<Node> = Api::all(self.client.clone());
-        let nodes = api.list(&Default::default()).await?;
-
-        // Build list of (node_name, patch) for nodes that need tainting
-        let mut patches_to_apply: Vec<(String, serde_json::Value)> = Vec::new();
-
-        for node in nodes.items.iter() {
-            let is_cp = is_control_plane_node(node);
-            let is_etcd = is_etcd_node(node);
-
-            // Skip nodes that aren't control-plane or etcd
-            if !is_cp && !is_etcd {
-                continue;
-            }
-
-            let node_name = node
-                .metadata
-                .name
-                .as_ref()
-                .ok_or_else(|| Error::provider("node has no name".to_string()))?
-                .clone();
-
-            // Build list of taints to apply based on node roles
-            let mut taints_to_apply = Vec::new();
-
-            if is_cp && !has_control_plane_taint(node) {
-                taints_to_apply.push(serde_json::json!({
-                    "key": "node-role.kubernetes.io/control-plane",
-                    "effect": "NoSchedule"
-                }));
-            }
-
-            if is_etcd && !has_etcd_taint(node) {
-                taints_to_apply.push(serde_json::json!({
-                    "key": "node-role.kubernetes.io/etcd",
-                    "effect": "NoExecute"
-                }));
-            }
-
-            if taints_to_apply.is_empty() {
-                debug!(node = %node_name, "node already has required taints");
-                continue;
-            }
-
-            let patch = serde_json::json!({
-                "spec": {
-                    "taints": taints_to_apply
-                }
-            });
-
-            patches_to_apply.push((node_name, patch));
-        }
-
-        // Apply all taints in parallel
-        if !patches_to_apply.is_empty() {
-            let futures: Vec<_> = patches_to_apply
-                .into_iter()
-                .map(|(node_name, patch)| {
-                    let api = api.clone();
-                    async move {
-                        info!(node = %node_name, "applying taints to node");
-                        api.patch(
-                            &node_name,
-                            &PatchParams::apply("lattice-controller"),
-                            &Patch::Strategic(&patch),
-                        )
-                        .await?;
-                        info!(node = %node_name, "node tainted successfully");
-                        Ok::<(), Error>(())
-                    }
-                })
-                .collect();
-
-            futures::future::try_join_all(futures).await?;
-        }
-
-        Ok(())
     }
 
     async fn ensure_namespace(&self, name: &str) -> Result<(), Error> {
@@ -681,36 +570,6 @@ pub(crate) fn is_node_ready(node: &k8s_openapi::api::core::v1::Node) -> bool {
                 .any(|c| c.type_ == "Ready" && c.status == "True")
         })
         .unwrap_or(false)
-}
-
-/// Check if a node has a specific taint (by key and effect).
-pub(crate) fn has_taint(node: &k8s_openapi::api::core::v1::Node, key: &str, effect: &str) -> bool {
-    node.spec
-        .as_ref()
-        .and_then(|s| s.taints.as_ref())
-        .map(|taints| taints.iter().any(|t| t.key == key && t.effect == effect))
-        .unwrap_or(false)
-}
-
-/// Check if a control plane node has the NoSchedule taint.
-pub(crate) fn has_control_plane_taint(node: &k8s_openapi::api::core::v1::Node) -> bool {
-    has_taint(node, "node-role.kubernetes.io/control-plane", "NoSchedule")
-}
-
-/// Check if a node is an etcd node by looking for the etcd role label.
-/// RKE2 uses this label to identify nodes running etcd.
-pub(crate) fn is_etcd_node(node: &k8s_openapi::api::core::v1::Node) -> bool {
-    node.metadata
-        .labels
-        .as_ref()
-        .map(|labels| labels.contains_key("node-role.kubernetes.io/etcd"))
-        .unwrap_or(false)
-}
-
-/// Check if an etcd node has the NoExecute taint.
-/// RKE2 applies this taint to etcd nodes by default.
-pub(crate) fn has_etcd_taint(node: &k8s_openapi::api::core::v1::Node) -> bool {
-    has_taint(node, "node-role.kubernetes.io/etcd", "NoExecute")
 }
 
 /// Actions that can be taken during the pivot phase.
@@ -1917,9 +1776,6 @@ mod tests {
                     ready_workers: 2,
                 })
             });
-            mock.expect_are_control_plane_nodes_tainted()
-                .returning(|| Ok(true));
-            mock.expect_taint_control_plane_nodes().returning(|| Ok(()));
             // Non-self clusters get a finalizer added on first reconcile
             mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
             // Ready phase updates worker pool status
@@ -2930,15 +2786,6 @@ mod tests {
             assert!(!is_node_ready(&not_ready));
         }
 
-        #[test]
-        fn has_control_plane_taint_detects_no_schedule() {
-            let tainted = make_node("cp", true, true, true);
-            let untainted = make_node("cp-no-taint", true, true, false);
-
-            assert!(has_control_plane_taint(&tainted));
-            assert!(!has_control_plane_taint(&untainted));
-        }
-
         // --- determine_pivot_action tests ---
 
         #[test]
@@ -2960,56 +2807,6 @@ mod tests {
                 determine_pivot_action(false, false),
                 PivotAction::WaitForAgent
             );
-        }
-
-        // --- is_etcd_node / has_etcd_taint tests ---
-
-        fn make_etcd_node(name: &str, has_label: bool, has_taint: bool) -> Node {
-            let mut labels = std::collections::BTreeMap::new();
-            if has_label {
-                labels.insert("node-role.kubernetes.io/etcd".to_string(), "".to_string());
-            }
-
-            let taints = if has_taint {
-                Some(vec![Taint {
-                    key: "node-role.kubernetes.io/etcd".to_string(),
-                    effect: "NoExecute".to_string(),
-                    ..Default::default()
-                }])
-            } else {
-                None
-            };
-
-            Node {
-                metadata: ObjectMeta {
-                    name: Some(name.to_string()),
-                    labels: Some(labels),
-                    ..Default::default()
-                },
-                spec: Some(NodeSpec {
-                    taints,
-                    ..Default::default()
-                }),
-                status: None,
-            }
-        }
-
-        #[test]
-        fn is_etcd_node_detects_etcd_label() {
-            let etcd = make_etcd_node("etcd-0", true, true);
-            let not_etcd = make_etcd_node("worker-0", false, false);
-
-            assert!(is_etcd_node(&etcd));
-            assert!(!is_etcd_node(&not_etcd));
-        }
-
-        #[test]
-        fn has_etcd_taint_detects_no_execute() {
-            let tainted = make_etcd_node("etcd-0", true, true);
-            let untainted = make_etcd_node("etcd-1", true, false);
-
-            assert!(has_etcd_taint(&tainted));
-            assert!(!has_etcd_taint(&untainted));
         }
 
         // --- determine_scaling_action tests ---

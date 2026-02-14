@@ -9,10 +9,16 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 struct Versions {
     providers: HashMap<String, Provider>,
+    charts: HashMap<String, Chart>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Provider {
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Chart {
     version: String,
 }
 
@@ -80,6 +86,6 @@ fn main() {
     );
     println!(
         "cargo:rustc-env=CERT_MANAGER_VERSION={}",
-        versions.providers["cert-manager"].version
+        versions.charts["cert-manager"].version
     );
 }

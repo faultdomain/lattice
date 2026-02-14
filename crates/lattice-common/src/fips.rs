@@ -48,15 +48,15 @@ pub fn install_crypto_provider() {
     #[cfg(not(feature = "fips"))]
     {
         eprintln!();
-        eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         eprintln!("!!  WARNING: FIPS MODE IS DISABLED                         !!");
         eprintln!("!!                                                         !!");
         eprintln!("!!  This build uses non-FIPS cryptography and is NOT       !!");
-        eprintln!("!!  suitable for regulated or production environments.      !!");
-        eprintln!("!!  All production builds MUST enable the `fips` feature.   !!");
+        eprintln!("!!  suitable for regulated or production environments.     !!");
+        eprintln!("!!  All production builds MUST enable the `fips` feature.  !!");
         eprintln!("!!                                                         !!");
         eprintln!("!!  To enable: cargo build --features fips                 !!");
-        eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         eprintln!();
     }
 }

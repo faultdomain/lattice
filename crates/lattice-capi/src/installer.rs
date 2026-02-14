@@ -759,45 +759,6 @@ impl NativeInstaller {
             .collect()
     }
 
-    /// Install cert-manager before CAPI providers (they depend on cert-manager webhooks).
-    async fn install_cert_manager(client: &KubeClient, providers_dir: &Path) -> Result<(), Error> {
-        let cert_manager_version = format!("v{}", env!("CERT_MANAGER_VERSION"));
-        let cert_manager_dir = providers_dir
-            .join("cert-manager")
-            .join(&cert_manager_version);
-        let cert_manager_path = cert_manager_dir.join("cert-manager.yaml");
-
-        if !cert_manager_path.exists() {
-            return Err(Error::capi_installation(format!(
-                "cert-manager manifest not found at {}",
-                cert_manager_path.display()
-            )));
-        }
-
-        info!(version = %cert_manager_version, "Installing cert-manager");
-
-        let yaml = std::fs::read_to_string(&cert_manager_path).map_err(|e| {
-            Error::capi_installation(format!("Failed to read cert-manager manifest: {}", e))
-        })?;
-
-        let documents = Self::split_yaml_documents(&yaml);
-        kube_utils::apply_manifests_with_discovery(client, &documents, &ApplyOptions::default())
-            .await
-            .map_err(|e| {
-                Error::capi_installation(format!("Failed to apply cert-manager: {}", e))
-            })?;
-
-        info!("Waiting for cert-manager deployments...");
-        kube_utils::wait_for_all_deployments(client, "cert-manager", DEPLOYMENT_READY_TIMEOUT)
-            .await
-            .map_err(|e| {
-                Error::capi_installation(format!("cert-manager deployments not ready: {}", e))
-            })?;
-
-        info!("cert-manager ready");
-        Ok(())
-    }
-
     /// Apply a single provider's manifests with env var substitution.
     async fn apply_provider(
         client: &KubeClient,
@@ -838,8 +799,70 @@ impl NativeInstaller {
             ))
         })?;
 
+        // Patch provider deployments with control-plane toleration so they
+        // schedule on tainted CP nodes before workers are available.
+        if let Some(namespace) = provider_namespace(&desired.name, desired.provider_type) {
+            patch_deployments_with_cp_toleration(client, namespace).await?;
+        }
+
         Ok(())
     }
+}
+
+/// Patch all Deployments in a namespace to tolerate the control-plane NoSchedule taint.
+///
+/// Uses strategic merge patch on the pod template spec. This is idempotent —
+/// Kubernetes merges tolerations by key+effect, so re-patching is a no-op.
+/// Only called during provider install/upgrade, not on every reconcile.
+async fn patch_deployments_with_cp_toleration(
+    client: &KubeClient,
+    namespace: &str,
+) -> Result<(), Error> {
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    let list = match deployments.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
+        Err(e) => {
+            return Err(Error::capi_installation(format!(
+                "Failed to list deployments in {}: {}",
+                namespace, e
+            )));
+        }
+    };
+
+    let patch = serde_json::json!({
+        "spec": {
+            "template": {
+                "spec": {
+                    "tolerations": [{
+                        "key": "node-role.kubernetes.io/control-plane",
+                        "operator": "Exists",
+                        "effect": "NoSchedule"
+                    }]
+                }
+            }
+        }
+    });
+
+    for deploy in &list.items {
+        let name = deploy.metadata.name.as_deref().unwrap_or("unknown");
+        deployments
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Strategic(&patch),
+            )
+            .await
+            .map_err(|e| {
+                Error::capi_installation(format!(
+                    "Failed to patch deployment {}/{} with CP toleration: {}",
+                    namespace, name, e
+                ))
+            })?;
+        debug!(namespace = %namespace, deployment = %name, "patched with control-plane toleration");
+    }
+
+    Ok(())
 }
 
 impl Default for NativeInstaller {
@@ -886,8 +909,9 @@ impl CapiInstaller for NativeInstaller {
 
         let providers_dir = Self::providers_dir();
 
-        // Install cert-manager first (all CAPI providers depend on it)
-        Self::install_cert_manager(&client, &providers_dir).await?;
+        // NOTE: cert-manager is installed separately via Helm-rendered manifests
+        // (see lattice-infra::bootstrap::cert_manager). It must be ready before
+        // this function is called.
 
         // Read provider credentials for template substitution
         let env_vars = get_provider_env_vars(&client, config).await;

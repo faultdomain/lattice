@@ -44,8 +44,9 @@ use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
 use lattice_operator::forwarder::SubtreeForwarder;
 use lattice_operator::startup::{
-    ensure_cluster_crds, ensure_infrastructure, ensure_service_crds, get_cell_server_sans,
-    re_register_existing_clusters, start_ca_rotation, wait_for_api_ready_for,
+    ensure_capi_infrastructure, ensure_cluster_crds, ensure_service_crds, get_cell_server_sans,
+    re_register_existing_clusters, spawn_general_infrastructure, start_ca_rotation,
+    wait_for_api_ready_for,
 };
 use lattice_service::controller::DiscoveredCrds;
 
@@ -239,24 +240,22 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
 
-    // 1. Install cluster CRDs
     ensure_cluster_crds(client).await?;
 
-    // 2. Install cluster infrastructure (CAPI, network policies)
-    ensure_infrastructure(client, Some(&*capi_installer)).await?;
+    // cert-manager + CAPI must complete before controllers (they need CAPI to reconcile)
+    ensure_capi_infrastructure(client, Some(&*capi_installer)).await?;
 
-    // 3. Wait for API readiness using LatticeCluster
+    // General infra (Istio, ESO, monitoring) runs in background — needs workers first
+    spawn_general_infrastructure(client.clone(), true);
+
     wait_for_api_ready_for::<LatticeCluster>(client).await?;
 
-    // 4. Cedar policy engine (reloaded by cedar validation controller)
     let cedar = load_cedar_engine(client).await;
 
-    // 5. Cell infrastructure (gRPC, bootstrap, auth proxy)
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
     let (parent_servers, agent_token, auth_proxy_handle) =
         setup_cell_infra(client, &self_cluster_name, cedar.clone()).await?;
 
-    // 6. Build controller futures
     let mut controllers = controller_runner::build_cluster_controllers(
         client.clone(),
         self_cluster_name,
@@ -279,25 +278,20 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
 /// Service slice: Service CRDs, service infra (Istio, Gateway API, ESO, Cilium),
 /// Cedar, DiscoveredCrds, service + provider controllers
 async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
-    // 1. Install service CRDs
     ensure_service_crds(client).await?;
 
-    // 2. Install service infrastructure (Istio, Gateway API, ESO, Cilium)
-    ensure_infrastructure(client, None).await?;
+    // General infra runs in background (no CAPI in service-only mode)
+    spawn_general_infrastructure(client.clone(), false);
 
-    // 3. Wait for API readiness using LatticeService
     wait_for_api_ready_for::<LatticeService>(client).await?;
 
-    // 4. Cedar policy engine (reloaded by cedar validation controller)
     let cedar = load_cedar_engine(client).await;
 
-    // 5. Resolve config from env vars (no LatticeCluster dependency)
     let cluster_name = std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
     let provider_type = controller_runner::resolve_provider_type_from_env();
     let monitoring = controller_runner::resolve_monitoring_from_env();
     let crds = Arc::new(DiscoveredCrds::discover(client).await);
 
-    // 6. Build controller futures
     let mut controllers = controller_runner::build_service_controllers(
         client.clone(),
         cluster_name,
@@ -328,21 +322,20 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     ensure_cluster_crds(client).await?;
     ensure_service_crds(client).await?;
 
-    // 2. Install full infrastructure (reads from LatticeCluster CRD)
-    ensure_infrastructure(client, Some(&*capi_installer)).await?;
+    // cert-manager + CAPI must complete before controllers (they need CAPI to reconcile)
+    ensure_capi_infrastructure(client, Some(&*capi_installer)).await?;
 
-    // 3. Wait for API readiness
+    // General infra (Istio, ESO, monitoring) runs in background — needs workers first
+    spawn_general_infrastructure(client.clone(), true);
+
     wait_for_api_ready_for::<LatticeCluster>(client).await?;
 
-    // 4. Cedar policy engine (reloaded by cedar validation controller)
     let cedar = load_cedar_engine(client).await;
 
-    // 5. Cell infrastructure (gRPC, bootstrap, auth proxy)
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
     let (parent_servers, agent_token, auth_proxy_handle) =
         setup_cell_infra(client, &self_cluster_name, cedar.clone()).await?;
 
-    // 6. Build all controller futures
     let mut controllers = controller_runner::build_cluster_controllers(
         client.clone(),
         self_cluster_name.clone(),
@@ -350,7 +343,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         capi_installer,
     );
 
-    // Service controllers need provider type + monitoring from LatticeCluster
+    // Service controllers need provider type + monitoring from the LatticeCluster CRD
     let provider_type = controller_runner::resolve_provider_type_from_cluster(client).await;
     let monitoring = controller_runner::resolve_monitoring_from_cluster(client).await;
     let cluster_name = self_cluster_name.unwrap_or_else(|| "default".to_string());
@@ -369,21 +362,29 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         cedar,
     ));
 
-    // Ensure local webhook infrastructure + start webhook server
-    //    Retries indefinitely — ESO webhook may not have endpoints yet at startup.
-    retry_with_backoff(
-        &RetryConfig {
-            initial_delay: Duration::from_secs(2),
-            ..RetryConfig::infinite()
-        },
-        "ensure local webhook infrastructure (waiting for ESO)",
-        || async { lattice_secret_provider::ensure_local_webhook_infrastructure(client).await },
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to ensure local webhook infrastructure: {e}"))?;
-    tokio::spawn(lattice_secret_provider::start_webhook_server(
-        client.clone(),
-    ));
+    // Start ESO webhook infrastructure in the background.
+    // ESO pods won't schedule until workers are available (no CP toleration),
+    // so blocking here would deadlock during bootstrap. The webhook comes up
+    // lazily; SecretProvider controller already handles ESO-not-ready with 30s requeues.
+    let webhook_client = client.clone();
+    tokio::spawn(async move {
+        if let Err(e) = retry_with_backoff(
+            &RetryConfig {
+                initial_delay: Duration::from_secs(2),
+                ..RetryConfig::infinite()
+            },
+            "ensure local webhook infrastructure (waiting for ESO)",
+            || async {
+                lattice_secret_provider::ensure_local_webhook_infrastructure(&webhook_client).await
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %e, "failed to ensure local webhook infrastructure");
+            return;
+        }
+        lattice_secret_provider::start_webhook_server(webhook_client).await;
+    });
 
     Ok(SliceHandle {
         controllers,
