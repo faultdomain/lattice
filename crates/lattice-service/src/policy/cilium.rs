@@ -49,7 +49,9 @@ impl<'a> PolicyCompiler<'a> {
                 })
                 .collect();
 
-            let to_ports = Self::build_service_port_rules(service);
+            // Ztunnel delivers directly to the pod on the container target port,
+            // so Cilium ingress must allow the target port (not the service port).
+            let to_ports = Self::build_target_port_rules(service);
 
             ingress_rules.push(CiliumIngressRule {
                 from_endpoints,
@@ -259,11 +261,11 @@ impl<'a> PolicyCompiler<'a> {
         (fqdns, cidrs)
     }
 
-    /// Build port rules for ingress using the K8s Service port.
+    /// Build port rules for ingress using the container target port.
     ///
-    /// Cilium translates service ports to container targetPorts internally,
-    /// so we always specify the service-facing port in policy rules.
-    fn build_service_port_rules(service: &ServiceNode) -> Vec<CiliumPortRule> {
+    /// Ztunnel delivers traffic directly to the pod on the target port,
+    /// so Cilium ingress rules must match the target port.
+    fn build_target_port_rules(service: &ServiceNode) -> Vec<CiliumPortRule> {
         if service.ports.is_empty() {
             vec![]
         } else {
@@ -274,11 +276,11 @@ impl<'a> PolicyCompiler<'a> {
                     .flat_map(|pm| {
                         vec![
                             CiliumPort {
-                                port: pm.service_port.to_string(),
+                                port: pm.target_port.to_string(),
                                 protocol: "TCP".to_string(),
                             },
                             CiliumPort {
-                                port: pm.service_port.to_string(),
+                                port: pm.target_port.to_string(),
                                 protocol: "UDP".to_string(),
                             },
                         ]

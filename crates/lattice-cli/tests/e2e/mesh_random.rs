@@ -123,6 +123,10 @@ impl RandomMesh {
         self.services.len()
     }
 
+    pub fn has_external_services(&self) -> bool {
+        !self.external_services.is_empty()
+    }
+
     pub fn generate(config: &RandomMeshConfig) -> Self {
         let mut rng = match config.seed {
             Some(seed) => StdRng::seed_from_u64(seed),
@@ -760,10 +764,13 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
 
     deploy_random_mesh(&mesh, kubeconfig_path).await?;
     wait_for_services_ready(kubeconfig_path, RANDOM_MESH_NAMESPACE, mesh.service_count()).await?;
+
+    // Pod count = local services + 1 waypoint (always present when external services exist)
+    let expected_pods = mesh.service_count() + if mesh.has_external_services() { 1 } else { 0 };
     wait_for_pods_running(
         kubeconfig_path,
         RANDOM_MESH_NAMESPACE,
-        mesh.service_count(),
+        expected_pods,
         "Random Mesh",
         Duration::from_secs(1200),
         Duration::from_secs(15),

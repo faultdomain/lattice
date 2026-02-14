@@ -432,14 +432,22 @@ impl<'a> ServiceCompiler<'a> {
 
             // Service ports used by both L7 (Istio) and L4 (Cilium) gateway rules.
             // Cilium translates service ports to targetPorts internally.
-            let service_ports: Vec<u16> = workload
+            // Gateway traffic goes through ztunnel directly to the pod,
+            // so both Istio AuthorizationPolicy (ztunnel-enforced) and Cilium
+            // ingress must use the container target port.
+            let target_ports: Vec<u16> = workload
                 .service
                 .as_ref()
-                .map(|s| s.ports.values().map(|p| p.port).collect())
+                .map(|s| {
+                    s.ports
+                        .values()
+                        .map(|p| p.target_port.unwrap_or(p.port))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             let gateway_policy =
-                policy_compiler.compile_gateway_allow_policy(name, namespace, &service_ports);
+                policy_compiler.compile_gateway_allow_policy(name, namespace, &target_ports);
             policies.authorization_policies.push(gateway_policy);
 
             if let Some(cilium_policy) = policies.cilium_policies.first_mut() {
@@ -448,7 +456,7 @@ impl<'a> ServiceCompiler<'a> {
                     .ingress
                     .push(PolicyCompiler::compile_gateway_ingress_rule(
                         &gateway_name,
-                        &service_ports,
+                        &target_ports,
                     ));
             }
 

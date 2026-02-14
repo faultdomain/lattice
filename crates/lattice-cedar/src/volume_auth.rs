@@ -4,6 +4,8 @@
 //! Permissive by default: no policies = all volume access allowed (owner consent
 //! is the primary gate, Cedar is the secondary layer).
 
+use cedar_policy::{Context, Decision, Entities, EntityUid, PolicySet};
+
 use crate::engine::{DenialReason, Error, PolicyEngine};
 use crate::entities::{build_entity_uid, build_service_entity, build_volume_entity};
 
@@ -60,10 +62,10 @@ impl PolicyEngine {
     pub async fn authorize_volumes(&self, request: &VolumeAuthzRequest) -> VolumeAuthzResult {
         let policy_set = self.read_policy_set().await;
 
-        // If no policies are loaded, permit everything (permissive by default)
-        if policy_set.is_empty() {
-            return VolumeAuthzResult { denied: Vec::new() };
-        }
+        // Note: unlike secrets, volume access is permissive by default.
+        // If Cedar returns Deny but no policies matched (no determining policies),
+        // that means no one wrote a volume policy — treat as allowed.
+        // Only an explicit `forbid` policy will deny access.
 
         let action_uid = match build_entity_uid("Action", "AccessVolume") {
             Ok(uid) => uid,
@@ -103,8 +105,8 @@ struct VolumeEvalContext<'a> {
     resource_name: &'a str,
     vol_ns: &'a str,
     volume_id: &'a str,
-    action_uid: &'a cedar_policy::EntityUid,
-    policy_set: &'a cedar_policy::PolicySet,
+    action_uid: &'a EntityUid,
+    policy_set: &'a PolicySet,
 }
 
 impl VolumeEvalContext<'_> {
@@ -114,15 +116,47 @@ impl VolumeEvalContext<'_> {
         let volume_entity = build_volume_entity(self.vol_ns, self.volume_id)
             .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
 
-        self.engine
-            .evaluate_service_action(
-                &service_entity,
-                &volume_entity,
+        let principal_uid = service_entity.uid().clone();
+        let resource_uid = volume_entity.uid().clone();
+        let entities =
+            Entities::from_entities(vec![service_entity, volume_entity], None)
+                .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
+
+        let response = self
+            .engine
+            .evaluate_raw(
+                &principal_uid,
                 self.action_uid,
+                &resource_uid,
+                Context::empty(),
+                &entities,
                 self.policy_set,
-                "AccessVolume",
             )
-            .map_err(|reason| self.denial(reason))
+            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
+
+        match response.decision() {
+            Decision::Allow => {
+                lattice_common::metrics::record_cedar_decision(
+                    lattice_common::metrics::AuthDecision::Allow,
+                    "AccessVolume",
+                );
+                Ok(())
+            }
+            Decision::Deny => {
+                // Permissive by default: if no policies matched (no determining
+                // policies), no one wrote a volume policy — treat as allowed.
+                // Only an explicit `forbid` triggers denial.
+                if response.diagnostics().reason().next().is_some() {
+                    lattice_common::metrics::record_cedar_decision(
+                        lattice_common::metrics::AuthDecision::Deny,
+                        "AccessVolume",
+                    );
+                    Err(self.denial(DenialReason::ExplicitForbid))
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 
     fn denial(&self, reason: DenialReason) -> VolumeDenial {
@@ -235,6 +269,29 @@ mod tests {
     // ========================================================================
     // Permit with Forbid Override Tests
     // ========================================================================
+
+    #[tokio::test]
+    async fn test_unrelated_secret_policies_dont_block_volumes() {
+        let engine = PolicyEngine::with_policies(
+            r#"
+            permit(
+                principal == Lattice::Service::"media/plex",
+                action == Lattice::Action::"AccessSecret",
+                resource == Lattice::SecretPath::"vault:secrets/media/plex"
+            );
+            "#,
+        )
+        .unwrap();
+
+        let request = make_request(
+            "media",
+            "plex",
+            vec![("downloads", "media", "media-storage")],
+        );
+
+        let result = engine.authorize_volumes(&request).await;
+        assert!(result.is_allowed());
+    }
 
     #[tokio::test]
     async fn test_permit_allows_volume_access() {
