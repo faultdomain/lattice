@@ -98,16 +98,10 @@ impl<'a> PolicyCompiler<'a> {
             ..Default::default()
         });
 
-        // Allow HBONE egress to any mesh pod if this service has outbound deps.
+        // Allow HBONE egress if this service has any outbound deps (local or external).
         // Ztunnel wraps all connections in HBONE, so Cilium sees pod-to-pod on
         // port 15008 regardless of the actual service port.
-        let has_local_deps = outbound_edges.iter().any(|edge| {
-            self.graph
-                .get_service(&edge.callee_namespace, &edge.callee_name)
-                .map(|callee| callee.type_ == ServiceType::Local)
-                .unwrap_or(false)
-        });
-        if has_local_deps || has_external_deps {
+        if !outbound_edges.is_empty() {
             egress_rules.push(Self::hbone_egress_rule());
         }
 

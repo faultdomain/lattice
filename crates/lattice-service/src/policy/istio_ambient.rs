@@ -31,15 +31,19 @@ use lattice_common::LABEL_NAME;
 use super::PolicyCompiler;
 
 impl<'a> PolicyCompiler<'a> {
-    /// Compile a waypoint-enforced AuthorizationPolicy (caller → service).
+    /// Compile an AuthorizationPolicy for inbound traffic to a service.
     ///
-    /// Uses `targetRefs` pointing at the K8s Service, so the waypoint evaluates
-    /// this policy. Port matching uses the **service port**.
-    pub(super) fn compile_authorization_policy(
+    /// The enforcement point depends on whether the service has a waypoint:
+    /// - **Waypoint path** (`has_waypoint=true`): `targetRefs` → waypoint evaluates,
+    ///   port matching uses **service port**.
+    /// - **Ztunnel path** (`has_waypoint=false`): `selector` → ztunnel evaluates
+    ///   directly on the destination node, port matching uses **container target port**.
+    pub(super) fn compile_inbound_policy(
         &self,
         service: &ServiceNode,
         namespace: &str,
         inbound_edges: &[ActiveEdge],
+        has_waypoint: bool,
     ) -> Option<AuthorizationPolicy> {
         if inbound_edges.is_empty() {
             return None;
@@ -56,71 +60,35 @@ impl<'a> PolicyCompiler<'a> {
             })
             .collect();
 
-        let ports: Vec<String> = service
-            .ports
-            .values()
-            .map(|pm| pm.service_port.to_string())
-            .collect();
+        let ports: Vec<String> = if has_waypoint {
+            service.ports.values().map(|pm| pm.service_port.to_string()).collect()
+        } else {
+            service.ports.values().map(|pm| pm.target_port.to_string()).collect()
+        };
 
         if ports.is_empty() {
             return None;
         }
 
-        Some(AuthorizationPolicy::allow_to_service(
-            format!("allow-to-{}", service.name),
-            namespace,
-            service.name.clone(),
-            principals,
-            ports,
-        ))
-    }
-
-    /// Compile a ztunnel-enforced AuthorizationPolicy (caller → pod) via label selector.
-    ///
-    /// Used for services that don't need L7 enforcement. Ztunnel sees the original
-    /// caller identity and enforces directly. Port matching uses the **container target port**.
-    pub(super) fn compile_authorization_policy_ztunnel(
-        &self,
-        service: &ServiceNode,
-        namespace: &str,
-        inbound_edges: &[ActiveEdge],
-    ) -> Option<AuthorizationPolicy> {
-        if inbound_edges.is_empty() {
-            return None;
+        if has_waypoint {
+            Some(AuthorizationPolicy::allow_to_service(
+                format!("allow-to-{}", service.name),
+                namespace,
+                service.name.clone(),
+                principals,
+                ports,
+            ))
+        } else {
+            let mut match_labels = BTreeMap::new();
+            match_labels.insert(LABEL_NAME.to_string(), service.name.clone());
+            Some(AuthorizationPolicy::allow_to_workload(
+                format!("allow-to-{}", service.name),
+                namespace,
+                match_labels,
+                principals,
+                ports,
+            ))
         }
-
-        let principals: Vec<String> = inbound_edges
-            .iter()
-            .map(|edge| {
-                mesh::trust_domain::principal(
-                    &self.cluster_name,
-                    &edge.caller_namespace,
-                    &edge.caller_name,
-                )
-            })
-            .collect();
-
-        // Ztunnel delivers to the pod directly, so use target port
-        let ports: Vec<String> = service
-            .ports
-            .values()
-            .map(|pm| pm.target_port.to_string())
-            .collect();
-
-        if ports.is_empty() {
-            return None;
-        }
-
-        let mut match_labels = BTreeMap::new();
-        match_labels.insert(LABEL_NAME.to_string(), service.name.clone());
-
-        Some(AuthorizationPolicy::allow_to_workload(
-            format!("allow-to-{}", service.name),
-            namespace,
-            match_labels,
-            principals,
-            ports,
-        ))
     }
 
     /// Compile a ztunnel-enforced AuthorizationPolicy (waypoint → pod).

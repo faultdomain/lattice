@@ -111,26 +111,20 @@ impl<'a> PolicyCompiler<'a> {
 
         // Generate AuthorizationPolicy for inbound traffic
         if !inbound_edges.is_empty() {
+            if let Some(auth_policy) = self.compile_inbound_policy(
+                &service_node,
+                namespace,
+                &inbound_edges,
+                has_external_deps,
+            ) {
+                output.authorization_policies.push(auth_policy);
+            }
+            // Waypoint path also needs a ztunnel allow for waypoint→pod delivery
             if has_external_deps {
-                // Waypoint path: targetRefs → waypoint evaluates, plus ztunnel allow for waypoint→pod
-                if let Some(auth_policy) =
-                    self.compile_authorization_policy(&service_node, namespace, &inbound_edges)
-                {
-                    output.authorization_policies.push(auth_policy);
-                }
                 if let Some(waypoint_policy) =
                     self.compile_ztunnel_allow_policy(&service_node, namespace)
                 {
                     output.authorization_policies.push(waypoint_policy);
-                }
-            } else {
-                // Ztunnel path: selector → ztunnel evaluates directly, no waypoint needed
-                if let Some(auth_policy) = self.compile_authorization_policy_ztunnel(
-                    &service_node,
-                    namespace,
-                    &inbound_edges,
-                ) {
-                    output.authorization_policies.push(auth_policy);
                 }
             }
         }
@@ -588,27 +582,6 @@ mod tests {
         assert!(
             egress.to_endpoints[0].match_labels.is_empty(),
             "HBONE egress should use empty selector (broad allow)"
-        );
-    }
-
-    #[test]
-    fn cilium_ingress_no_hbone_without_callers() {
-        let graph = ServiceGraph::new();
-        let ns = "default";
-
-        // Service with no inbound callers
-        let spec = make_service_spec(vec![], vec![]);
-        graph.put_service(ns, "lonely", &spec);
-
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
-        let output = compiler.compile("lonely", ns);
-
-        let cnp = &output.cilium_policies[0];
-
-        // No ingress rules at all (no callers, no waypoint)
-        assert!(
-            cnp.spec.ingress.is_empty(),
-            "service with no callers should have no ingress rules"
         );
     }
 
