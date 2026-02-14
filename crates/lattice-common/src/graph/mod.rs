@@ -14,8 +14,8 @@ use dashmap::DashMap;
 use tracing::warn;
 
 use crate::crd::{
-    IngressPolicySpec, LatticeExternalServiceSpec, LatticeServiceSpec, ParsedEndpoint, Resolution,
-    ServiceBackupSpec, ServiceSelector, VolumeParams,
+    IngressPolicySpec, LatticeExternalServiceSpec, LatticeServicePolicy, LatticeServiceSpec,
+    ParsedEndpoint, Resolution, ServiceBackupSpec, ServiceSelector, VolumeParams,
 };
 
 /// Fully qualified service reference: (namespace, name)
@@ -207,6 +207,19 @@ pub struct PolicyNode {
     pub backup: Option<ServiceBackupSpec>,
     /// Ingress defaults
     pub ingress: Option<IngressPolicySpec>,
+}
+
+impl From<&LatticeServicePolicy> for PolicyNode {
+    fn from(policy: &LatticeServicePolicy) -> Self {
+        Self {
+            name: policy.metadata.name.clone().unwrap_or_default(),
+            namespace: policy.metadata.namespace.clone().unwrap_or_default(),
+            selector: policy.spec.selector.clone(),
+            priority: policy.spec.priority,
+            backup: policy.spec.backup.clone(),
+            ingress: policy.spec.ingress.clone(),
+        }
+    }
 }
 
 /// Volume ownership record: who owns a shared volume and who may consume it

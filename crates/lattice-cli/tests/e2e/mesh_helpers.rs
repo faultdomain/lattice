@@ -358,23 +358,16 @@ pub async fn wait_for_cycles(
     .await
 }
 
-/// Wait for pods to be running in a namespace.
-///
-/// Waits until `num_services + 1` pods are running (+1 for the Istio waypoint proxy).
+/// Wait for the expected number of pods to be running in a namespace.
 pub async fn wait_for_pods_running(
     kubeconfig_path: &str,
     namespace: &str,
-    num_services: usize,
+    expected_pods: usize,
     label: &str,
     timeout: Duration,
     poll_interval: Duration,
 ) -> Result<(), String> {
-    let expected_pods = num_services + 1;
-
-    info!(
-        "[{}] Waiting for {} pods ({} services + 1 waypoint)...",
-        label, expected_pods, num_services
-    );
+    info!("[{}] Waiting for {} pods...", label, expected_pods);
 
     wait_for_condition(
         &format!("{} pods in {}", expected_pods, label),
@@ -406,10 +399,7 @@ pub async fn wait_for_pods_running(
             );
 
             if running_count >= expected_pods {
-                info!(
-                    "[{}] All {} pods running ({} services + 1 waypoint)",
-                    label, expected_pods, num_services
-                );
+                info!("[{}] All {} pods running", label, expected_pods);
                 return Ok(true);
             }
 

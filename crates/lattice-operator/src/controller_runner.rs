@@ -74,7 +74,7 @@ pub fn build_cluster_controllers(
 }
 
 /// Build service controller futures (LatticeService, LatticeExternalService, LatticeServicePolicy)
-pub fn build_service_controllers(
+pub async fn build_service_controllers(
     client: Client,
     cluster_name: String,
     provider_type: ProviderType,
@@ -93,6 +93,11 @@ pub fn build_service_controllers(
         monitoring,
     );
     service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(vm_service_scrape_ar))];
+
+    // Warm the service graph before controllers start so existing services
+    // aren't demoted to Compiling on restart due to missing dependency info.
+    warmup_graph(&client, &service_ctx.graph).await;
+
     let service_ctx = Arc::new(service_ctx);
 
     let services: Api<LatticeService> = Api::all(client.clone());
@@ -132,12 +137,7 @@ pub fn build_service_controllers(
                 .collect()
         })
         .watches(cedar_policies, watcher_config(), move |_policy| {
-            let mut refs = Vec::new();
-            for ns in graph_for_cedar_watch.list_namespaces() {
-                for svc in graph_for_cedar_watch.list_services(&ns) {
-                    refs.push(ObjectRef::<LatticeService>::new(&svc.name).within(&ns));
-                }
-            }
+            let refs = all_service_refs(&graph_for_cedar_watch);
             tracing::info!(
                 service_count = refs.len(),
                 "CedarPolicy changed, re-reconciling all services"
@@ -145,29 +145,13 @@ pub fn build_service_controllers(
             refs
         })
         .watches(service_policies, watcher_config(), move |policy| {
-            use lattice_common::graph::PolicyNode;
-
             let graph = graph_for_policy_watch.clone();
             let policy_name = policy.metadata.name.as_deref().unwrap_or_default().to_string();
             let policy_ns = policy.metadata.namespace.as_deref().unwrap_or_default().to_string();
 
-            // Update the graph cache
-            graph.put_policy(PolicyNode {
-                name: policy_name.clone(),
-                namespace: policy_ns.clone(),
-                selector: policy.spec.selector.clone(),
-                priority: policy.spec.priority,
-                backup: policy.spec.backup.clone(),
-                ingress: policy.spec.ingress.clone(),
-            });
+            graph.put_policy(lattice_common::graph::PolicyNode::from(&policy));
 
-            // Re-reconcile all services in namespaces that could match
-            let mut refs = Vec::new();
-            for ns in graph.list_namespaces() {
-                for svc in graph.list_services(&ns) {
-                    refs.push(ObjectRef::<LatticeService>::new(&svc.name).within(&ns));
-                }
-            }
+            let refs = all_service_refs(&graph);
             tracing::info!(
                 policy = %policy_name,
                 namespace = %policy_ns,
@@ -347,6 +331,59 @@ async fn read_first_cluster(client: &Client) -> Option<LatticeCluster> {
             None
         }
     }
+}
+
+/// Pre-populate the ServiceGraph with all existing resources so that
+/// reconciliation after an operator restart doesn't demote Ready services
+/// to Compiling while waiting for dependency information to trickle in.
+async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGraph) {
+    let services: Api<LatticeService> = Api::all(client.clone());
+    match services.list(&kube::api::ListParams::default()).await {
+        Ok(list) => {
+            for svc in &list.items {
+                let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
+                let name = svc.metadata.name.as_deref().unwrap_or_default();
+                graph.put_service(ns, name, &svc.spec);
+            }
+            tracing::info!(count = list.items.len(), "Warmed ServiceGraph with LatticeServices");
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to list LatticeServices for graph warmup"),
+    }
+
+    let externals: Api<LatticeExternalService> = Api::all(client.clone());
+    match externals.list(&kube::api::ListParams::default()).await {
+        Ok(list) => {
+            for ext in &list.items {
+                let ns = ext.metadata.namespace.as_deref().unwrap_or_default();
+                let name = ext.metadata.name.as_deref().unwrap_or_default();
+                graph.put_external_service(ns, name, &ext.spec);
+            }
+            tracing::info!(count = list.items.len(), "Warmed ServiceGraph with LatticeExternalServices");
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to list LatticeExternalServices for graph warmup"),
+    }
+
+    let policies: Api<LatticeServicePolicy> = Api::all(client.clone());
+    match policies.list(&kube::api::ListParams::default()).await {
+        Ok(list) => {
+            for pol in &list.items {
+                graph.put_policy(pol.into());
+            }
+            tracing::info!(count = list.items.len(), "Warmed ServiceGraph with LatticeServicePolicies");
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to list LatticeServicePolicies for graph warmup"),
+    }
+}
+
+/// Collect ObjectRefs for every service in the graph (used to trigger re-reconciliation of all services).
+fn all_service_refs(graph: &lattice_common::graph::ServiceGraph) -> Vec<ObjectRef<LatticeService>> {
+    let mut refs = Vec::new();
+    for ns in graph.list_namespaces() {
+        for svc in graph.list_services(&ns) {
+            refs.push(ObjectRef::<LatticeService>::new(&svc.name).within(&ns));
+        }
+    }
+    refs
 }
 
 /// Creates a closure for logging reconciliation results.

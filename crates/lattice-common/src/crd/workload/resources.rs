@@ -618,6 +618,11 @@ impl ResourceSpec {
         }
     }
 
+    /// Returns true if this is an inbound resource (policy declaration, not a dependency).
+    pub fn is_inbound(&self) -> bool {
+        self.direction == DependencyDirection::Inbound
+    }
+
     /// Returns true if this is a wildcard mesh resource (`id: "*"`).
     ///
     /// Wildcard resources are policy declarations meaning "accept from any caller"

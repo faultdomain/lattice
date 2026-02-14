@@ -1638,16 +1638,8 @@ mod tests {
 
     /// Helper to populate the graph with policies from LatticeServicePolicy objects
     fn populate_graph_policies(ctx: &ServiceContext, policies: &[LatticeServicePolicy]) {
-        use lattice_common::graph::PolicyNode;
         for p in policies {
-            ctx.graph.put_policy(PolicyNode {
-                name: p.metadata.name.clone().unwrap_or_default(),
-                namespace: p.metadata.namespace.clone().unwrap_or_default(),
-                selector: p.spec.selector.clone(),
-                priority: p.spec.priority,
-                backup: p.spec.backup.clone(),
-                ingress: p.spec.ingress.clone(),
-            });
+            ctx.graph.put_policy(p.into());
         }
     }
 
