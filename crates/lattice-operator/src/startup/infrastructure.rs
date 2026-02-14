@@ -65,12 +65,11 @@ pub async fn ensure_capi_infrastructure(
 ///
 /// `cluster_mode` indicates whether a LatticeCluster CRD is expected (true for
 /// cluster/all modes where CAPI was installed).
-pub fn spawn_general_infrastructure(client: Client, cluster_mode: bool) {
-    tokio::spawn(async move {
-        if let Err(e) = ensure_general_infrastructure(&client, cluster_mode).await {
-            tracing::error!(error = %e, "general infrastructure installation failed");
-        }
-    });
+pub fn spawn_general_infrastructure(
+    client: Client,
+    cluster_mode: bool,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move { ensure_general_infrastructure(&client, cluster_mode).await })
 }
 
 /// Internal: resolve config and apply general infrastructure manifests.

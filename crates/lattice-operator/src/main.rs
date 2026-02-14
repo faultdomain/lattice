@@ -93,6 +93,7 @@ struct SliceHandle {
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     agent_token: Option<tokio_util::sync::CancellationToken>,
     auth_proxy_handle: Option<tokio::task::JoinHandle<()>>,
+    infra_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
 #[tokio::main]
@@ -190,6 +191,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         parent_servers,
         agent_token,
         auth_proxy_handle,
+        infra_handle,
     } = handle;
 
     // Run controllers until shutdown signal, controllers exit, or leadership lost
@@ -200,12 +202,35 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 
     let controllers = futures::future::select_all(controllers);
 
+    let infra_future = async {
+        if let Some(handle) = infra_handle {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "General infrastructure installation failed");
+                    return true;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "General infrastructure task panicked");
+                    return true;
+                }
+            }
+        }
+        // Never resolve if infra succeeded — let other branches drive shutdown
+        std::future::pending::<bool>().await
+    };
+
     tokio::select! {
         (_, idx, _) = controllers => {
             tracing::info!(controller_index = idx, "Controller exited");
         }
         _ = guard.lost() => {
             tracing::warn!("Leadership lost, shutting down");
+        }
+        failed = infra_future => {
+            if failed {
+                tracing::error!("Shutting down due to infrastructure failure");
+            }
         }
         _ = shutdown_signal => {}
     }
@@ -246,7 +271,7 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     ensure_capi_infrastructure(client, Some(&*capi_installer)).await?;
 
     // General infra (Istio, ESO, monitoring) runs in background — needs workers first
-    spawn_general_infrastructure(client.clone(), true);
+    let infra_handle = spawn_general_infrastructure(client.clone(), true);
 
     wait_for_api_ready_for::<LatticeCluster>(client).await?;
 
@@ -272,6 +297,7 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         parent_servers: Some(parent_servers),
         agent_token: Some(agent_token),
         auth_proxy_handle,
+        infra_handle: Some(infra_handle),
     })
 }
 
@@ -281,7 +307,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     ensure_service_crds(client).await?;
 
     // General infra runs in background (no CAPI in service-only mode)
-    spawn_general_infrastructure(client.clone(), false);
+    let infra_handle = spawn_general_infrastructure(client.clone(), false);
 
     wait_for_api_ready_for::<LatticeService>(client).await?;
 
@@ -310,6 +336,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         parent_servers: None,
         agent_token: None,
         auth_proxy_handle: None,
+        infra_handle: Some(infra_handle),
     })
 }
 
@@ -326,7 +353,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     ensure_capi_infrastructure(client, Some(&*capi_installer)).await?;
 
     // General infra (Istio, ESO, monitoring) runs in background — needs workers first
-    spawn_general_infrastructure(client.clone(), true);
+    let infra_handle = spawn_general_infrastructure(client.clone(), true);
 
     wait_for_api_ready_for::<LatticeCluster>(client).await?;
 
@@ -391,6 +418,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         parent_servers: Some(parent_servers),
         agent_token: Some(agent_token),
         auth_proxy_handle,
+        infra_handle: Some(infra_handle),
     })
 }
 
