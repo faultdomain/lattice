@@ -176,5 +176,4 @@ mod tests {
         assert_eq!(ingress_gateway_name("prod"), "prod-ingress");
         assert_eq!(ingress_gateway_name("my-ns"), "my-ns-ingress");
     }
-
 }

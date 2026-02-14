@@ -553,7 +553,11 @@ mod tests {
 
         // Check api (has inbound callers, no outbound)
         let api_cnp = &compiler.compile("api", ns).cilium_policies[0];
-        assert_eq!(api_cnp.spec.ingress.len(), 1, "api should have HBONE ingress");
+        assert_eq!(
+            api_cnp.spec.ingress.len(),
+            1,
+            "api should have HBONE ingress"
+        );
         let ingress = &api_cnp.spec.ingress[0];
         assert!(
             ingress.from_endpoints[0].match_labels.is_empty(),
@@ -562,10 +566,14 @@ mod tests {
         assert!(ingress.to_ports[0].ports[0].port == mesh::HBONE_PORT.to_string());
         // api has no outbound deps, so no HBONE egress (only DNS)
         assert!(
-            !api_cnp.spec.egress.iter().any(|e| e
-                .to_ports
+            !api_cnp
+                .spec
+                .egress
                 .iter()
-                .any(|pr| pr.ports.iter().any(|p| p.port == mesh::HBONE_PORT.to_string()))),
+                .any(|e| e.to_ports.iter().any(|pr| pr
+                    .ports
+                    .iter()
+                    .any(|p| p.port == mesh::HBONE_PORT.to_string()))),
             "api should not have HBONE egress (no outbound deps)"
         );
 
@@ -574,11 +582,16 @@ mod tests {
         assert!(gw_cnp.spec.ingress.is_empty(), "gateway has no callers");
         // gateway has outbound local dep, so should have HBONE egress
         let hbone_egress = gw_cnp.spec.egress.iter().find(|e| {
-            e.to_ports
-                .iter()
-                .any(|pr| pr.ports.iter().any(|p| p.port == mesh::HBONE_PORT.to_string()))
+            e.to_ports.iter().any(|pr| {
+                pr.ports
+                    .iter()
+                    .any(|p| p.port == mesh::HBONE_PORT.to_string())
+            })
         });
-        assert!(hbone_egress.is_some(), "gateway should have HBONE egress for local deps");
+        assert!(
+            hbone_egress.is_some(),
+            "gateway should have HBONE egress for local deps"
+        );
         let egress = hbone_egress.unwrap();
         assert!(
             egress.to_endpoints[0].match_labels.is_empty(),
@@ -607,7 +620,9 @@ mod tests {
 
         // Should have broad HBONE ingress (callers + waypoint traffic from externals)
         assert_eq!(cnp.spec.ingress.len(), 1);
-        assert!(cnp.spec.ingress[0].from_endpoints[0].match_labels.is_empty());
+        assert!(cnp.spec.ingress[0].from_endpoints[0]
+            .match_labels
+            .is_empty());
 
         // Should have HBONE egress (external deps route through waypoint via HBONE)
         let hbone_port = mesh::HBONE_PORT.to_string();

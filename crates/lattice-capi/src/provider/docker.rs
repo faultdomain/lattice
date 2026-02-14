@@ -1020,28 +1020,24 @@ mod tests {
         }
 
         /// Story: Cell clusters don't have bootstrap info since
-        /// they ARE the management cluster. They just untaint.
+        /// they ARE the management cluster. No commands generated.
         #[test]
         fn cell_cluster_does_not_call_bootstrap() {
             let bootstrap = BootstrapInfo::default();
 
             let commands = build_post_kubeadm_commands("mgmt", &bootstrap).unwrap();
 
-            let commands_str = commands.join("\n");
-            assert!(!commands_str.contains("/api/clusters"));
-            assert!(commands_str.contains("taint")); // But still untaints
+            assert!(commands.is_empty());
         }
 
-        /// Story: Standalone clusters (no bootstrap info) just untaint,
-        /// no bootstrap endpoint call needed.
+        /// Story: Standalone clusters (no bootstrap info) generate no commands.
         #[test]
-        fn standalone_cluster_only_untaints() {
+        fn standalone_cluster_no_bootstrap() {
             let bootstrap = BootstrapInfo::default();
 
             let commands = build_post_kubeadm_commands("standalone", &bootstrap).unwrap();
 
-            assert_eq!(commands.len(), 1); // Just the untaint command
-            assert!(commands[0].contains("taint"));
+            assert!(commands.is_empty());
         }
     }
 

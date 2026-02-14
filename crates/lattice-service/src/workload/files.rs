@@ -177,8 +177,7 @@ fn compile_secret_files(
         // Volume names must be DNS labels (no dots/underscores/etc).
         let vol_name = super::sanitize_dns_label(&es_name);
 
-        let eso_data =
-            resolve_eso_data(file_refs, secret_refs, &format!("file '{}'", key))?;
+        let eso_data = resolve_eso_data(file_refs, secret_refs, &format!("file '{}'", key))?;
 
         let mut template_data = BTreeMap::new();
         template_data.insert(key.clone(), content.clone());

@@ -367,7 +367,8 @@ fn spawn_webhook_infrastructure(client: kube::Client) {
             },
             "ensure local webhook infrastructure (waiting for ESO)",
             || async {
-                lattice_secret_provider::controller::ensure_local_webhook_infrastructure(&client).await
+                lattice_secret_provider::controller::ensure_local_webhook_infrastructure(&client)
+                    .await
             },
         )
         .await

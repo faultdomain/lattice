@@ -150,10 +150,8 @@ impl IstioReconciler {
         let mut auth_policies = Vec::new();
 
         for target in &targets {
-            let match_labels = BTreeMap::from([(
-                target.label_key.to_string(),
-                target.label_value.to_string(),
-            )]);
+            let match_labels =
+                BTreeMap::from([(target.label_key.to_string(), target.label_value.to_string())]);
 
             peer_auths.push(PeerAuthentication::new(
                 ObjectMeta::new(target.name, target.namespace),
@@ -168,10 +166,7 @@ impl IstioReconciler {
             ));
 
             auth_policies.push(AuthorizationPolicy::new(
-                ObjectMeta::new(
-                    format!("allow-webhook-{}", target.name),
-                    target.namespace,
-                ),
+                ObjectMeta::new(format!("allow-webhook-{}", target.name), target.namespace),
                 AuthorizationPolicySpec {
                     target_refs: vec![],
                     selector: Some(WorkloadSelector { match_labels }),
@@ -350,13 +345,21 @@ mod tests {
         // All PeerAuthentications must be PERMISSIVE with a selector
         for pa in &peer_auths {
             assert_eq!(pa.spec.mtls.mode, "PERMISSIVE");
-            assert!(pa.spec.selector.is_some(), "{} must have a selector", pa.metadata.name);
+            assert!(
+                pa.spec.selector.is_some(),
+                "{} must have a selector",
+                pa.metadata.name
+            );
         }
 
         // All AuthorizationPolicies must be ALLOW with a selector and port
         for authz in &auth_policies {
             assert_eq!(authz.spec.action, "ALLOW");
-            assert!(authz.spec.selector.is_some(), "{} must have a selector", authz.metadata.name);
+            assert!(
+                authz.spec.selector.is_some(),
+                "{} must have a selector",
+                authz.metadata.name
+            );
             assert!(!authz.spec.rules[0].to[0].operation.ports.is_empty());
         }
 

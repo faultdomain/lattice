@@ -879,12 +879,7 @@ fn compile_eso_templated_env_vars(
 
         for (var_name, templated) in vars {
             template_data.insert((*var_name).clone(), templated.rendered_template.clone());
-            all_refs.extend(
-                templated
-                    .secret_refs
-                    .iter()
-                    .map(|r| (var_name.as_str(), r)),
-            );
+            all_refs.extend(templated.secret_refs.iter().map(|r| (var_name.as_str(), r)));
         }
 
         // Collect refs for resolve_eso_data (context uses first var name for errors)
@@ -894,7 +889,11 @@ fn compile_eso_templated_env_vars(
             crate::workload::secrets::resolve_eso_data(&flat_refs, secret_refs, &context)?;
 
         external_secrets.push(ExternalSecret::templated(
-            &es_name, namespace, store_name, template_data, eso_data,
+            &es_name,
+            namespace,
+            store_name,
+            template_data,
+            eso_data,
         ));
 
         env_from_refs.push(EnvFromSource {
@@ -1174,8 +1173,7 @@ mod tests {
         let output = compiler.compile(&service).await.unwrap();
 
         // Deployment + Service + ServiceAccount + CiliumPolicy
-        // + WaypointGateway + WaypointAuthPolicy = 6
-        assert_eq!(output.resource_count(), 6);
+        assert_eq!(output.resource_count(), 4);
     }
 
     // =========================================================================

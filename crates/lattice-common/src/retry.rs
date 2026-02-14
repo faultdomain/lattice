@@ -56,7 +56,6 @@ impl RetryConfig {
             ..Default::default()
         }
     }
-
 }
 
 /// Execute an async operation with exponential backoff and jitter.

@@ -384,7 +384,11 @@ where
             for item in &list.items {
                 insert_fn(item);
             }
-            tracing::info!(count = list.items.len(), "Warmed ServiceGraph with {}", label);
+            tracing::info!(
+                count = list.items.len(),
+                "Warmed ServiceGraph with {}",
+                label
+            );
         }
         Err(e) => tracing::warn!(error = %e, "Failed to list {} for graph warmup", label),
     }

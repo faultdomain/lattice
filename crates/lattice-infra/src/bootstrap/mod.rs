@@ -178,8 +178,7 @@ pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, Stri
 
         // Webhook/APIService pods in the mesh need PERMISSIVE mTLS + ALLOW policies
         // so the kube-apiserver (not in the mesh) can reach them.
-        let (webhook_pas, webhook_authzs) =
-            istio::IstioReconciler::generate_webhook_policies();
+        let (webhook_pas, webhook_authzs) = istio::IstioReconciler::generate_webhook_policies();
         for pa in webhook_pas {
             manifests.push(
                 serde_json::to_string_pretty(&pa)

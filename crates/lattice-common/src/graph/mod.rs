@@ -637,7 +637,7 @@ impl ServiceGraph {
             .retain(|_, v| !(v.owner_namespace == namespace && v.owner_name == name));
 
         // Index owned shared volumes
-        for (_resource_name, resource) in &spec.workload.resources {
+        for resource in spec.workload.resources.values() {
             if !resource.type_.is_volume() {
                 continue;
             }

@@ -6,9 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_secret_provider::eso::{
-    self, ExternalSecret, ExternalSecretData, RemoteRef,
-};
+use lattice_secret_provider::eso::{self, ExternalSecret, ExternalSecretData, RemoteRef};
 
 use super::error::CompilationError;
 use crate::crd::WorkloadSpec;

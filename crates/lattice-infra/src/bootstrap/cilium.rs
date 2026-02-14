@@ -310,7 +310,7 @@ pub fn generate_operator_network_policy(
             // For IP addresses (Docker), use CIDR rule
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
-                    to_entities: vec![],
+                to_entities: vec![],
                 to_fqdns: vec![],
                 to_cidr: vec![format!("{}/32", host)],
                 to_ports: parent_ports,
@@ -319,7 +319,7 @@ pub fn generate_operator_network_policy(
             // For hostnames (AWS NLB, etc.), use FQDN rule
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
-                    to_entities: vec![],
+                to_entities: vec![],
                 to_fqdns: vec![FqdnSelector {
                     match_name: Some(host.to_string()),
                     match_pattern: None,

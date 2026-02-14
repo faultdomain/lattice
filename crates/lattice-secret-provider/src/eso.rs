@@ -492,7 +492,11 @@ pub fn build_templated_external_secret(
     }
 
     Ok(ExternalSecret::templated(
-        name, namespace, store_name, template_data, eso_data,
+        name,
+        namespace,
+        store_name,
+        template_data,
+        eso_data,
     ))
 }
 

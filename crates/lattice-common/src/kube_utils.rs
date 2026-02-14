@@ -850,6 +850,12 @@ pub async fn apply_manifest_with_discovery(
 /// Get priority for a Kubernetes resource kind (lower = apply first)
 ///
 /// Used to sort manifests for proper ordering during apply.
+///
+/// Security policies (PeerAuthentication, AuthorizationPolicy) MUST be applied
+/// before workloads (Deployment, DaemonSet). Otherwise pods start with STRICT
+/// mTLS before PERMISSIVE policies are in place, causing the kube-apiserver
+/// (not in the mesh) to get EOF when reaching aggregated API services like
+/// KEDA's metrics endpoint.
 pub fn kind_priority(kind: &str) -> u8 {
     match kind {
         "Namespace" => 0,
@@ -858,21 +864,44 @@ pub fn kind_priority(kind: &str) -> u8 {
         "ClusterRole" | "Role" => 3,
         "ClusterRoleBinding" | "RoleBinding" => 4,
         "ConfigMap" | "Secret" => 5,
-        "Service" => 6,
-        "Deployment" | "DaemonSet" | "StatefulSet" => 7,
-        "ScaledObject" => 8,
-        _ => 10, // webhooks, policies, etc. come last
+        // Network/security policies before workloads: PERMISSIVE mTLS, ALLOW policies,
+        // and Cilium policies must be active before pods start, or aggregated API
+        // services (e.g. KEDA metrics) break because kube-apiserver can't reach them.
+        "PeerAuthentication"
+        | "AuthorizationPolicy"
+        | "CiliumNetworkPolicy"
+        | "CiliumClusterwideNetworkPolicy" => 6,
+        "Service" => 7,
+        "Deployment" | "DaemonSet" | "StatefulSet" => 8,
+        "ScaledObject" => 9,
+        _ => 10,
     }
 }
 
-/// Extract kind from a YAML manifest (fast, no full parse)
+/// Extract kind from a YAML or JSON manifest (fast, no full parse)
+///
+/// Handles both YAML (`kind: Foo`) and pretty-printed JSON (`"kind": "Foo"`).
+/// JSON support is needed because Istio/Cilium policies are serialized via
+/// `serde_json::to_string_pretty` and must be ordered correctly during apply.
 pub fn extract_kind(manifest: &str) -> &str {
-    manifest
-        .lines()
-        .find(|line| line.starts_with("kind:"))
-        .and_then(|line| line.strip_prefix("kind:"))
-        .map(|k| k.trim())
-        .unwrap_or("")
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+
+        // YAML: `kind: Foo`
+        if let Some(value) = trimmed.strip_prefix("kind:") {
+            return value.trim();
+        }
+
+        // JSON (pretty-printed): `"kind": "Foo"` or `"kind": "Foo",`
+        if let Some(rest) = trimmed.strip_prefix("\"kind\":") {
+            let rest = rest.trim().trim_start_matches('"');
+            if let Some(end) = rest.find('"') {
+                return &rest[..end];
+            }
+        }
+    }
+
+    ""
 }
 
 /// Check if a JSON manifest is a Kubernetes Deployment

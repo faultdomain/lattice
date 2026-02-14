@@ -61,9 +61,17 @@ impl<'a> PolicyCompiler<'a> {
             .collect();
 
         let ports: Vec<String> = if has_waypoint {
-            service.ports.values().map(|pm| pm.service_port.to_string()).collect()
+            service
+                .ports
+                .values()
+                .map(|pm| pm.service_port.to_string())
+                .collect()
         } else {
-            service.ports.values().map(|pm| pm.target_port.to_string()).collect()
+            service
+                .ports
+                .values()
+                .map(|pm| pm.target_port.to_string())
+                .collect()
         };
 
         if ports.is_empty() {
