@@ -519,7 +519,7 @@ impl Installer {
         let manifests = self.generate_bootstrap_manifests().await?;
         info!("Applying {} bootstrap manifests...", manifests.len());
 
-        let retry_config = lattice_common::retry::RetryConfig::infinite();
+        let retry_config = lattice_common::retry::RetryConfig::default();
         for manifest in &manifests {
             let client = mgmt_client.clone();
             let m = manifest.clone();
@@ -643,7 +643,7 @@ impl Installer {
         info!("Looking up Docker port for container: {}", lb_container);
 
         // Retry getting the docker port - LB container may not be ready immediately
-        let retry_config = lattice_common::retry::RetryConfig::infinite();
+        let retry_config = lattice_common::retry::RetryConfig::default();
         let container = lb_container.clone();
         let port: String =
             lattice_common::retry::retry_with_backoff(&retry_config, "docker_port_lookup", || {

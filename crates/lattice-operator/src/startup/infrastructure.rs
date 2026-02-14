@@ -72,8 +72,17 @@ pub fn spawn_general_infrastructure(
     tokio::spawn(async move { ensure_general_infrastructure(&client, cluster_mode).await })
 }
 
+/// Delay before starting background infrastructure to avoid competing with
+/// controller startup for API server resources. Controllers need watches
+/// established quickly; infrastructure manifests can wait.
+const INFRA_STAGGER_DELAY: Duration = Duration::from_secs(5);
+
 /// Internal: resolve config and apply general infrastructure manifests.
 async fn ensure_general_infrastructure(client: &Client, cluster_mode: bool) -> anyhow::Result<()> {
+    // Stagger to avoid competing with controller watch setup for API server capacity.
+    // Controllers are starting concurrently and need to establish ~16 watches.
+    tokio::time::sleep(INFRA_STAGGER_DELAY).await;
+
     let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
     tracing::info!(is_bootstrap, "Installing general infrastructure...");
@@ -159,7 +168,7 @@ async fn find_lattice_cluster(
     // Retry forever — the API server may still be registering the CRD schema.
     let retry = RetryConfig {
         initial_delay: Duration::from_secs(1),
-        ..RetryConfig::infinite()
+        ..RetryConfig::default()
     };
     retry_with_backoff(&retry, "find LatticeCluster", || {
         let clusters = clusters.clone();
@@ -187,7 +196,7 @@ async fn apply_infra(client: &Client, config: &InfrastructureConfig) -> anyhow::
 
     let retry = RetryConfig {
         initial_delay: Duration::from_secs(2),
-        ..RetryConfig::infinite()
+        ..RetryConfig::default()
     };
     retry_with_backoff(&retry, "infrastructure", || {
         let client = client.clone();
@@ -257,7 +266,7 @@ async fn ensure_cert_manager(client: &Client) -> anyhow::Result<()> {
 
     let retry = RetryConfig {
         initial_delay: Duration::from_secs(2),
-        ..RetryConfig::infinite()
+        ..RetryConfig::default()
     };
     retry_with_backoff(&retry, "cert-manager", || {
         let client = client.clone();

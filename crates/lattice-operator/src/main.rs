@@ -363,7 +363,7 @@ fn spawn_webhook_infrastructure(client: kube::Client) {
         if let Err(e) = retry_with_backoff(
             &RetryConfig {
                 initial_delay: Duration::from_secs(2),
-                ..RetryConfig::infinite()
+                ..RetryConfig::default()
             },
             "ensure local webhook infrastructure (waiting for ESO)",
             || async {

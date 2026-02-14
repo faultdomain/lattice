@@ -57,10 +57,6 @@ impl RetryConfig {
         }
     }
 
-    /// Create a config that retries forever (infinite attempts)
-    pub fn infinite() -> Self {
-        Self::default()
-    }
 }
 
 /// Execute an async operation with exponential backoff and jitter.

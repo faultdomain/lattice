@@ -890,11 +890,21 @@ pub fn is_deployment_json(manifest: &str) -> bool {
 /// installed providers like CAPI or cert-manager) haven't registered yet.
 /// Retries are bounded — callers like the reconciler and operator startup
 /// have their own retry/requeue logic for persistent failures.
+///
+/// Uses 1s initial backoff (not the default 100ms) because discovery is an
+/// expensive operation that enumerates all API groups. With 100ms backoff,
+/// 5 retries complete in ~3s which can overwhelm a stressed API server.
+/// With 1s backoff the same 5 retries spread over ~31s.
 async fn run_discovery(client: &Client) -> Result<kube::discovery::Discovery, Error> {
     use kube::discovery::Discovery;
 
+    let config = RetryConfig {
+        max_attempts: 5,
+        initial_delay: Duration::from_secs(1),
+        ..RetryConfig::default()
+    };
     let client = client.clone();
-    retry_with_backoff(&RetryConfig::with_max_attempts(5), "api-discovery", || {
+    retry_with_backoff(&config, "api-discovery", || {
         let client = client.clone();
         async move {
             Discovery::new(client)
@@ -910,8 +920,12 @@ async fn run_discovery(client: &Client) -> Result<kube::discovery::Discovery, Er
 ///
 /// Applies in two phases:
 /// 1. Namespaces and CRDs (foundational resources)
-/// 2. Re-run discovery to learn new CRD types
+/// 2. Re-run discovery only if CRDs were applied (to learn new types)
 /// 3. Everything else (sorted by kind priority)
+///
+/// Discovery is expensive (enumerates all API groups), so we minimize calls:
+/// - Skip discovery entirely when no foundational resources exist (single call)
+/// - Only re-run discovery after CRDs are applied (Namespaces don't register new types)
 ///
 /// # Arguments
 /// * `client` - Kubernetes client
@@ -937,6 +951,12 @@ pub async fn apply_manifests_with_discovery(
     foundational.sort_by_key(|m| kind_priority(extract_kind(m)));
     rest.sort_by_key(|m| kind_priority(extract_kind(m)));
 
+    // Check if any foundational resources are CRDs (not just Namespaces).
+    // Only CRDs register new API types that require re-discovery.
+    let has_crds = foundational
+        .iter()
+        .any(|m| extract_kind(m) == "CustomResourceDefinition");
+
     // Phase 1: Apply foundational resources (Namespaces, CRDs)
     if !foundational.is_empty() {
         let discovery = run_discovery(client).await?;
@@ -944,12 +964,23 @@ pub async fn apply_manifests_with_discovery(
         for manifest in &foundational {
             apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
         }
-    }
 
-    // Phase 2: Re-run discovery to learn new CRD types, then apply rest.
-    // Retries indefinitely because aggregated API endpoints from previously
-    // installed providers (e.g., CAPI) may not be ready yet.
-    if !rest.is_empty() {
+        // Phase 2: Apply remaining resources.
+        // Re-run discovery only if CRDs were applied (they register new API types).
+        // Namespaces don't change the API surface, so reuse the existing discovery.
+        if !rest.is_empty() {
+            let discovery = if has_crds {
+                run_discovery(client).await?
+            } else {
+                discovery
+            };
+
+            for manifest in &rest {
+                apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
+            }
+        }
+    } else if !rest.is_empty() {
+        // No foundational resources — single discovery call for everything
         let discovery = run_discovery(client).await?;
 
         for manifest in &rest {

@@ -225,7 +225,7 @@ where
     let resource = resource.clone();
     let name = name.to_string();
     let op_name = format!("create_{}", name);
-    retry_with_backoff(&RetryConfig::infinite(), &op_name, || {
+    retry_with_backoff(&RetryConfig::default(), &op_name, || {
         let api = api.clone();
         let resource = resource.clone();
         let name = name.clone();
@@ -261,7 +261,7 @@ where
     let params = params.clone();
     let patch = patch.clone();
     let op_name = format!("patch_{}", name);
-    retry_with_backoff(&RetryConfig::infinite(), &op_name, || {
+    retry_with_backoff(&RetryConfig::default(), &op_name, || {
         let api = api.clone();
         let name = name.clone();
         let params = params.clone();
@@ -450,7 +450,7 @@ pub async fn run_kubectl(args: &[&str]) -> Result<String, String> {
     // permanent errors (stops retrying), and Err(e) for transient errors (retried).
     // AlreadyExists is treated as success — the desired state is achieved.
     let result: Result<Result<String, String>, String> =
-        retry_with_backoff(&RetryConfig::infinite(), "kubectl", || {
+        retry_with_backoff(&RetryConfig::default(), "kubectl", || {
             let args = args.clone();
             async move {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
