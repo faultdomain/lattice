@@ -1046,41 +1046,15 @@ fn check_missing_dependencies(
         .collect()
 }
 
-/// Find LatticeServicePolicies matching a service, sorted by priority DESC then name ASC.
-fn matching_policies<'a>(
-    service: &LatticeService,
-    namespace: &str,
-    policies: &'a [LatticeServicePolicy],
-    ns_labels: &BTreeMap<String, String>,
-) -> Vec<&'a LatticeServicePolicy> {
-    let svc_labels = service.labels();
-    let mut matching: Vec<_> = policies
-        .iter()
-        .filter(|p| {
-            let policy_ns = p.namespace().unwrap_or_default();
-            p.spec
-                .selector
-                .matches(svc_labels, ns_labels, &policy_ns, namespace)
-        })
-        .collect();
-
-    matching.sort_by(|a, b| {
-        b.spec
-            .priority
-            .cmp(&a.spec.priority)
-            .then_with(|| a.name_any().cmp(&b.name_any()))
-    });
-
-    matching
-}
-
 /// Resolve policy defaults (backup + ingress) for a service in one pass.
 ///
-/// Lists policies and namespace labels once, then extracts:
+/// Reads cached policies and namespace labels from the ServiceGraph.
+/// On the first reconcile for a namespace, fetches labels from the API
+/// server and caches them in the graph.
+///
+/// Extracts:
 /// - Backup: merged from matching policies (priority-ordered) + inline spec
 /// - Ingress: first matching policy with ingress set wins (no deep merge)
-///
-/// Falls back gracefully: API errors result in (None, None).
 async fn resolve_policy_defaults(
     service: &LatticeService,
     namespace: &str,
@@ -1089,24 +1063,18 @@ async fn resolve_policy_defaults(
     Option<ServiceBackupSpec>,
     Option<crate::crd::IngressPolicySpec>,
 ) {
-    let policies = match ctx.kube.list_policies().await {
-        Ok(p) => p,
-        Err(e) => {
-            debug!(error = %e, "failed to list policies");
-            return (None, None);
+    // Ensure namespace labels are cached
+    if ctx.graph.get_namespace_labels(namespace).is_none() {
+        match ctx.kube.get_namespace_labels(namespace).await {
+            Ok(labels) => ctx.graph.put_namespace_labels(namespace, labels),
+            Err(e) => {
+                debug!(error = %e, "failed to get namespace labels");
+            }
         }
-    };
-    if policies.is_empty() {
-        return (None, None);
     }
 
-    let ns_labels = ctx
-        .kube
-        .get_namespace_labels(namespace)
-        .await
-        .unwrap_or_default();
-
-    let matched = matching_policies(service, namespace, &policies, &ns_labels);
+    let svc_labels = service.labels();
+    let matched = ctx.graph.matching_policies(&svc_labels, namespace);
     if matched.is_empty() {
         return (None, None);
     }
@@ -1114,7 +1082,7 @@ async fn resolve_policy_defaults(
     // Backup: merge matching policy backup specs with inline spec
     let policy_backup_specs: Vec<&ServiceBackupSpec> = matched
         .iter()
-        .filter_map(|p| p.spec.backup.as_ref())
+        .filter_map(|p| p.backup.as_ref())
         .collect();
     let effective_backup = if policy_backup_specs.is_empty() {
         None
@@ -1123,7 +1091,7 @@ async fn resolve_policy_defaults(
     };
 
     // Ingress: first matching policy with ingress wins
-    let ingress_defaults = matched.into_iter().find_map(|p| p.spec.ingress.clone());
+    let ingress_defaults = matched.into_iter().find_map(|p| p.ingress);
 
     (effective_backup, ingress_defaults)
 }
@@ -1665,6 +1633,21 @@ mod tests {
         mock
     }
 
+    /// Helper to populate the graph with policies from LatticeServicePolicy objects
+    fn populate_graph_policies(ctx: &ServiceContext, policies: &[LatticeServicePolicy]) {
+        use lattice_common::graph::PolicyNode;
+        for p in policies {
+            ctx.graph.put_policy(PolicyNode {
+                name: p.metadata.name.clone().unwrap_or_default(),
+                namespace: p.metadata.namespace.clone().unwrap_or_default(),
+                selector: p.spec.selector.clone(),
+                priority: p.spec.priority,
+                backup: p.spec.backup.clone(),
+                ingress: p.spec.ingress.clone(),
+            });
+        }
+    }
+
     fn make_hook(name: &str, cmd: &str) -> BackupHook {
         BackupHook {
             name: name.to_string(),
@@ -2005,12 +1988,13 @@ mod tests {
         };
 
         let policy = make_policy("db-backup", "test", 100, Some(policy_backup));
-        let mock_kube = mock_kube_with_policies(vec![policy]);
+        let mock_kube = mock_kube_with_policies(vec![]);
 
         let mut service = sample_service("my-db");
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
 
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+        populate_graph_policies(&ctx, &[policy]);
         ctx.graph.put_service("test", "my-db", &service.spec);
 
         let result = reconcile(Arc::new(service), ctx).await;
@@ -2052,9 +2036,11 @@ mod tests {
             }),
         );
 
-        let mock_kube = mock_kube_with_policies(vec![low_policy, high_policy]);
+        let policies = vec![low_policy, high_policy];
+        let mock_kube = mock_kube_with_policies(vec![]);
         let service = sample_service("my-app");
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+        populate_graph_policies(&ctx, &policies);
 
         let (backup, _ingress) = resolve_policy_defaults(&service, "test", &ctx).await;
 
@@ -2095,9 +2081,10 @@ mod tests {
             }),
         );
 
-        let mock_kube = mock_kube_with_policies(vec![policy]);
+        let mock_kube = mock_kube_with_policies(vec![]);
         let service = sample_service("my-app");
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+        populate_graph_policies(&ctx, &[policy]);
 
         let (backup, _ingress) = resolve_policy_defaults(&service, "test", &ctx).await;
 

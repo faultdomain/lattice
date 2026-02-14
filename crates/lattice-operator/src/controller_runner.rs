@@ -99,8 +99,10 @@ pub fn build_service_controllers(
     let services_for_watch = services.clone();
     let graph_for_dep_watch = service_ctx.graph.clone();
     let graph_for_cedar_watch = service_ctx.graph.clone();
+    let graph_for_policy_watch = service_ctx.graph.clone();
     let cedar_policies: Api<CedarPolicy> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let service_policies: Api<LatticeServicePolicy> = Api::all(client.clone());
 
     let svc_ctrl = Controller::new(services, watcher_config())
         .watches(services_for_watch, watcher_config(), move |service| {
@@ -139,6 +141,38 @@ pub fn build_service_controllers(
             tracing::info!(
                 service_count = refs.len(),
                 "CedarPolicy changed, re-reconciling all services"
+            );
+            refs
+        })
+        .watches(service_policies, watcher_config(), move |policy| {
+            use lattice_common::graph::PolicyNode;
+
+            let graph = graph_for_policy_watch.clone();
+            let policy_name = policy.metadata.name.as_deref().unwrap_or_default().to_string();
+            let policy_ns = policy.metadata.namespace.as_deref().unwrap_or_default().to_string();
+
+            // Update the graph cache
+            graph.put_policy(PolicyNode {
+                name: policy_name.clone(),
+                namespace: policy_ns.clone(),
+                selector: policy.spec.selector.clone(),
+                priority: policy.spec.priority,
+                backup: policy.spec.backup.clone(),
+                ingress: policy.spec.ingress.clone(),
+            });
+
+            // Re-reconcile all services in namespaces that could match
+            let mut refs = Vec::new();
+            for ns in graph.list_namespaces() {
+                for svc in graph.list_services(&ns) {
+                    refs.push(ObjectRef::<LatticeService>::new(&svc.name).within(&ns));
+                }
+            }
+            tracing::info!(
+                policy = %policy_name,
+                namespace = %policy_ns,
+                service_count = refs.len(),
+                "LatticeServicePolicy changed, re-reconciling services"
             );
             refs
         })

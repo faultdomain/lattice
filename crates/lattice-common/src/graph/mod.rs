@@ -13,7 +13,10 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tracing::warn;
 
-use crate::crd::{LatticeExternalServiceSpec, LatticeServiceSpec, ParsedEndpoint, Resolution};
+use crate::crd::{
+    IngressPolicySpec, LatticeExternalServiceSpec, LatticeServiceSpec, ParsedEndpoint, Resolution,
+    ServiceBackupSpec, ServiceSelector,
+};
 
 /// Fully qualified service reference: (namespace, name)
 pub type QualifiedName = (String, String);
@@ -189,6 +192,23 @@ pub struct ActiveEdge {
     pub callee_name: String,
 }
 
+/// A cached policy node in the service graph
+#[derive(Clone, Debug)]
+pub struct PolicyNode {
+    /// Policy name
+    pub name: String,
+    /// Policy namespace
+    pub namespace: String,
+    /// Selector for matching services
+    pub selector: ServiceSelector,
+    /// Priority (higher = evaluated first)
+    pub priority: i32,
+    /// Backup configuration
+    pub backup: Option<ServiceBackupSpec>,
+    /// Ingress defaults
+    pub ingress: Option<IngressPolicySpec>,
+}
+
 /// Thread-safe service graph using DashMap
 ///
 /// Supports cross-namespace dependencies where services can depend on
@@ -206,6 +226,12 @@ pub struct ServiceGraph {
 
     /// Namespace index: namespace -> [service_names]
     ns_index: DashMap<String, HashSet<String>>,
+
+    /// Cached LatticeServicePolicy nodes: (namespace, name) -> PolicyNode
+    policies: DashMap<QualifiedName, PolicyNode>,
+
+    /// Cached namespace labels: namespace -> labels
+    ns_labels: DashMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for ServiceGraph {
@@ -222,6 +248,8 @@ impl ServiceGraph {
             edges_out: DashMap::new(),
             edges_in: DashMap::new(),
             ns_index: DashMap::new(),
+            policies: DashMap::new(),
+            ns_labels: DashMap::new(),
         }
     }
 
@@ -501,12 +529,68 @@ impl ServiceGraph {
             .unwrap_or(0)
     }
 
+    /// Insert or update a policy in the graph
+    pub fn put_policy(&self, node: PolicyNode) {
+        let key = (node.namespace.clone(), node.name.clone());
+        self.policies.insert(key, node);
+    }
+
+    /// Remove a policy from the graph
+    pub fn delete_policy(&self, namespace: &str, name: &str) {
+        let key = (namespace.to_string(), name.to_string());
+        self.policies.remove(&key);
+    }
+
+    /// Cache namespace labels
+    pub fn put_namespace_labels(&self, namespace: &str, labels: BTreeMap<String, String>) {
+        self.ns_labels.insert(namespace.to_string(), labels);
+    }
+
+    /// Get cached namespace labels (returns None if not yet cached)
+    pub fn get_namespace_labels(&self, namespace: &str) -> Option<BTreeMap<String, String>> {
+        self.ns_labels.get(namespace).map(|v| v.clone())
+    }
+
+    /// Find policies matching a service, sorted by priority DESC then name ASC
+    pub fn matching_policies(
+        &self,
+        service_labels: &BTreeMap<String, String>,
+        service_namespace: &str,
+    ) -> Vec<PolicyNode> {
+        let ns_labels = self
+            .ns_labels
+            .get(service_namespace)
+            .map(|v| v.clone())
+            .unwrap_or_default();
+
+        let mut matching: Vec<PolicyNode> = self
+            .policies
+            .iter()
+            .filter(|entry| {
+                let p = entry.value();
+                p.selector
+                    .matches(service_labels, &ns_labels, &p.namespace, service_namespace)
+            })
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        matching.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        matching
+    }
+
     /// Clear all data from the graph
     pub fn clear(&self) {
         self.vertices.clear();
         self.edges_out.clear();
         self.edges_in.clear();
         self.ns_index.clear();
+        self.policies.clear();
+        self.ns_labels.clear();
     }
 }
 
