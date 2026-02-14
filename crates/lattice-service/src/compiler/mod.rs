@@ -406,8 +406,21 @@ impl<'a> ServiceCompiler<'a> {
         let policy_compiler = PolicyCompiler::new(self.graph, &self.cluster_name);
         let mut policies = policy_compiler.compile(name, namespace);
 
-        // Compile waypoint Gateway for east-west L7 policies (Istio ambient mesh)
-        let waypoint = WaypointCompiler::compile(namespace);
+        // Only deploy waypoint when L7 enforcement is needed (external dependencies).
+        // When no waypoint is needed, ztunnel enforces policies directly.
+        let needs_waypoint = !policies.service_entries.is_empty();
+        let waypoint = if needs_waypoint {
+            // Add use-waypoint label to the K8s Service so traffic routes through waypoint
+            if let Some(ref mut svc) = workloads.service {
+                svc.metadata = svc
+                    .metadata
+                    .clone()
+                    .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
+            }
+            WaypointCompiler::compile(namespace)
+        } else {
+            GeneratedWaypoint::default()
+        };
 
         // Compile ingress resources if configured
         let ingress = if let Some(ref ingress_spec) = service.spec.ingress {
@@ -599,7 +612,12 @@ impl<'a> ServiceCompiler<'a> {
             let details = result
                 .denied
                 .iter()
-                .map(|d| format!("'{}' (volume '{}'): {}", d.resource_name, d.volume_id, d.reason))
+                .map(|d| {
+                    format!(
+                        "'{}' (volume '{}'): {}",
+                        d.resource_name, d.volume_id, d.reason
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(CompilationError::volume_access_denied(details));

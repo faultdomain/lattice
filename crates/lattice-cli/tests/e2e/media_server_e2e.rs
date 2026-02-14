@@ -16,6 +16,7 @@ use super::helpers::{
     apply_cedar_policy_crd, apply_run_as_root_override_policy, client_from_kubeconfig,
     create_with_retry, ensure_fresh_namespace, ensure_test_cluster_issuer, load_service_config,
     run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
+    wait_for_service_phase_with_message,
 };
 
 const NAMESPACE: &str = "media";
@@ -580,6 +581,49 @@ async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
     .await
 }
 
+async fn verify_unauthorized_volume_access_denied(kubeconfig_path: &str) -> Result<(), String> {
+    info!("Verifying unauthorized volume access is denied...");
+
+    // Grant plex the security overrides it needs (runAsUser: 0) so the ONLY
+    // reason it can fail is the volume access check, not security policy.
+    apply_run_as_root_override_policy(kubeconfig_path, NAMESPACE, "plex").await?;
+
+    let client = client_from_kubeconfig(kubeconfig_path).await?;
+    let api: Api<LatticeService> = Api::namespaced(client, NAMESPACE);
+
+    let service = load_service_config("plex.yaml")?;
+    info!("Deploying plex (unauthorized volume consumer)...");
+    create_with_retry(&api, &service, "plex").await?;
+
+    // plex references media-storage but is NOT in jellyfin's allowedConsumers —
+    // the compiler should reject it with a volume access denied error.
+    wait_for_service_phase_with_message(
+        kubeconfig_path,
+        NAMESPACE,
+        "plex",
+        "Failed",
+        "volume access denied",
+        Duration::from_secs(120),
+    )
+    .await?;
+
+    // Clean up — delete the rejected service so it doesn't interfere with other tests
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "delete",
+        "latticeservice",
+        "plex",
+        "-n",
+        NAMESPACE,
+        "--ignore-not-found",
+    ])
+    .await?;
+
+    info!("Unauthorized volume access correctly denied");
+    Ok(())
+}
+
 async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying bilateral agreements...");
 
@@ -654,6 +698,7 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     verify_pvcs(kubeconfig_path).await?;
     verify_node_colocation(kubeconfig_path).await?;
     verify_volume_sharing(kubeconfig_path).await?;
+    verify_unauthorized_volume_access_denied(kubeconfig_path).await?;
     wait_for_waypoint(kubeconfig_path).await?;
     verify_bilateral_agreements(kubeconfig_path).await?;
 

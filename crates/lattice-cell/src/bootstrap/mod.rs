@@ -535,9 +535,7 @@ impl DefaultManifestGenerator {
                             ..Default::default()
                         }],
                         tolerations: Some(vec![Toleration {
-                            key: Some(
-                                "node-role.kubernetes.io/control-plane".to_string(),
-                            ),
+                            key: Some("node-role.kubernetes.io/control-plane".to_string()),
                             effect: Some("NoSchedule".to_string()),
                             operator: Some("Exists".to_string()),
                             ..Default::default()

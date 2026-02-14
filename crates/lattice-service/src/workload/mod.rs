@@ -1065,7 +1065,6 @@ use crate::crd::{
     AutoscalingMetric, AutoscalingSpec, DeployStrategy, GpuParams, LatticeService,
     LatticeServiceSpec, MonitoringConfig, ProviderType, WorkloadSpec,
 };
-use lattice_common::mesh;
 use lattice_common::template::RenderedContainer;
 
 /// Merge GPU resource requests into container limits.
@@ -1363,9 +1362,9 @@ impl WorkloadCompiler {
             })
             .unwrap_or_default();
 
-        // Add use-waypoint label to route traffic through namespace waypoint
-        let metadata = ObjectMeta::new(name, namespace)
-            .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
+        // Waypoint label is applied conditionally by the service compiler
+        // when L7 enforcement is needed (e.g., external dependencies).
+        let metadata = ObjectMeta::new(name, namespace);
 
         Service {
             api_version: "v1".to_string(),

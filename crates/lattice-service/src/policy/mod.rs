@@ -99,19 +99,39 @@ impl<'a> PolicyCompiler<'a> {
         let inbound_edges = self.graph.get_active_inbound_edges(namespace, name);
         let outbound_edges = self.graph.get_active_outbound_edges(namespace, name);
 
-        // Generate L7 AuthorizationPolicy for inbound traffic
-        if !inbound_edges.is_empty() {
-            if let Some(auth_policy) =
-                self.compile_authorization_policy(&service_node, namespace, &inbound_edges)
-            {
-                output.authorization_policies.push(auth_policy);
-            }
+        // Determine if this service needs a waypoint (L7 enforcement).
+        // Currently: service has external outbound dependencies.
+        // Future: also L7 east-west features (rate limiting, header matching).
+        let has_external_deps = outbound_edges.iter().any(|edge| {
+            self.graph
+                .get_service(&edge.callee_namespace, &edge.callee_name)
+                .map(|s| s.type_ == ServiceType::External)
+                .unwrap_or(false)
+        });
 
-            // Generate ztunnel-enforced allow policy (waypoint → pod)
-            if let Some(waypoint_policy) =
-                self.compile_ztunnel_allow_policy(&service_node, namespace)
-            {
-                output.authorization_policies.push(waypoint_policy);
+        // Generate AuthorizationPolicy for inbound traffic
+        if !inbound_edges.is_empty() {
+            if has_external_deps {
+                // Waypoint path: targetRefs → waypoint evaluates, plus ztunnel allow for waypoint→pod
+                if let Some(auth_policy) =
+                    self.compile_authorization_policy(&service_node, namespace, &inbound_edges)
+                {
+                    output.authorization_policies.push(auth_policy);
+                }
+                if let Some(waypoint_policy) =
+                    self.compile_ztunnel_allow_policy(&service_node, namespace)
+                {
+                    output.authorization_policies.push(waypoint_policy);
+                }
+            } else {
+                // Ztunnel path: selector → ztunnel evaluates directly, no waypoint needed
+                if let Some(auth_policy) = self.compile_authorization_policy_ztunnel(
+                    &service_node,
+                    namespace,
+                    &inbound_edges,
+                ) {
+                    output.authorization_policies.push(auth_policy);
+                }
             }
         }
 
@@ -121,6 +141,7 @@ impl<'a> PolicyCompiler<'a> {
             namespace,
             &inbound_edges,
             &outbound_edges,
+            has_external_deps,
         ));
 
         // Generate ServiceEntries and AuthorizationPolicies for external dependencies
@@ -255,6 +276,9 @@ mod tests {
         assert!(!output.authorization_policies.is_empty());
         let auth = &output.authorization_policies[0];
         assert_eq!(auth.metadata.name, "allow-to-api");
+        // No external deps → ztunnel path (selector, no targetRefs)
+        assert!(auth.spec.target_refs.is_empty());
+        assert!(auth.spec.selector.is_some());
         assert!(auth.spec.rules[0].from[0]
             .source
             .principals
@@ -326,12 +350,14 @@ mod tests {
         let cnp = &output.cilium_policies[0];
         assert_eq!(cnp.metadata.name, "policy-my-app");
 
+        // DNS egress always present
         assert!(cnp.spec.egress.iter().any(|e| e
             .to_ports
             .iter()
             .any(|pr| pr.ports.iter().any(|p| p.port == "53"))));
 
-        assert!(cnp
+        // No waypoint HBONE ingress/egress for services without external deps
+        assert!(!cnp
             .spec
             .ingress
             .iter()
@@ -340,15 +366,6 @@ mod tests {
                 .get(mesh::CILIUM_WAYPOINT_FOR_LABEL)
                 .map(|v| v == mesh::WAYPOINT_FOR_SERVICE)
                 .unwrap_or(false))));
-
-        assert!(cnp
-            .spec
-            .ingress
-            .iter()
-            .any(|i| i.to_ports.iter().any(|pr| pr
-                .ports
-                .iter()
-                .any(|p| p.port == mesh::HBONE_PORT.to_string()))));
     }
 
     #[test]
@@ -454,6 +471,9 @@ mod tests {
 
         assert_eq!(policy.metadata.name, "allow-gateway-to-api");
         assert_eq!(policy.spec.action, "ALLOW");
+        // Gateway traffic uses ztunnel path (selector, no targetRefs)
+        assert!(policy.spec.target_refs.is_empty());
+        assert!(policy.spec.selector.is_some());
 
         // Istio gateway proxy runs in the same namespace with SA {namespace}-ingress-istio
         let principals = &policy.spec.rules[0].from[0].source.principals;

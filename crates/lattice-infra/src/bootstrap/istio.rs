@@ -17,7 +17,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::keda::{KEDA_NAMESPACE, KEDA_SERVICE_ACCOUNT};
 use super::prometheus::{
-    MONITORING_NAMESPACE, VMCLUSTER_NAME, VMINSERT_PORT, VMAGENT_SERVICE_ACCOUNT, VMSELECT_PORT,
+    MONITORING_NAMESPACE, VMAGENT_SERVICE_ACCOUNT, VMCLUSTER_NAME, VMINSERT_PORT, VMSELECT_PORT,
     VMSINGLE_PORT,
 };
 
@@ -186,18 +186,23 @@ impl IstioReconciler {
         let keda_principal =
             mesh::trust_domain::principal(cluster_name, KEDA_NAMESPACE, KEDA_SERVICE_ACCOUNT);
 
+        // Monitoring namespace has no waypoint — use selector-based policies
+        // enforced by ztunnel directly.
+        let write_labels = BTreeMap::from([("app.kubernetes.io/name".to_string(), write_service)]);
+        let read_labels = BTreeMap::from([("app.kubernetes.io/name".to_string(), read_service)]);
+
         vec![
-            AuthorizationPolicy::allow_to_service(
+            AuthorizationPolicy::allow_to_workload(
                 "allow-vmagent-write",
                 MONITORING_NAMESPACE,
-                write_service,
+                write_labels,
                 vec![vmagent_principal],
                 vec![write_port.to_string()],
             ),
-            AuthorizationPolicy::allow_to_service(
+            AuthorizationPolicy::allow_to_workload(
                 "allow-keda-query",
                 MONITORING_NAMESPACE,
-                read_service,
+                read_labels,
                 vec![keda_principal],
                 vec![read_port.to_string()],
             ),
@@ -345,16 +350,20 @@ mod tests {
 
     #[test]
     fn test_monitoring_allow_policies_single_node() {
-        let policies =
-            IstioReconciler::generate_monitoring_allow_policies("test-cluster", false);
+        let policies = IstioReconciler::generate_monitoring_allow_policies("test-cluster", false);
         assert_eq!(policies.len(), 2);
 
-        // VMAgent → VMSingle
+        // VMAgent → VMSingle (ztunnel-enforced via selector)
         let vmagent = &policies[0];
         assert_eq!(vmagent.metadata.name, "allow-vmagent-write");
         assert_eq!(vmagent.metadata.namespace, MONITORING_NAMESPACE);
         assert_eq!(vmagent.spec.action, "ALLOW");
-        assert_eq!(vmagent.spec.target_refs[0].name, "vmsingle-lattice-metrics");
+        assert!(vmagent.spec.target_refs.is_empty());
+        let selector = vmagent.spec.selector.as_ref().unwrap();
+        assert_eq!(
+            selector.match_labels.get("app.kubernetes.io/name"),
+            Some(&format!("vmsingle-{}", VMCLUSTER_NAME))
+        );
         let principal = &vmagent.spec.rules[0].from[0].source.principals[0];
         assert!(principal.contains(VMAGENT_SERVICE_ACCOUNT));
         assert_eq!(
@@ -362,10 +371,15 @@ mod tests {
             vec![VMSINGLE_PORT.to_string()]
         );
 
-        // KEDA → VMSingle
+        // KEDA → VMSingle (ztunnel-enforced via selector)
         let keda = &policies[1];
         assert_eq!(keda.metadata.name, "allow-keda-query");
-        assert_eq!(keda.spec.target_refs[0].name, "vmsingle-lattice-metrics");
+        assert!(keda.spec.target_refs.is_empty());
+        let selector = keda.spec.selector.as_ref().unwrap();
+        assert_eq!(
+            selector.match_labels.get("app.kubernetes.io/name"),
+            Some(&format!("vmsingle-{}", VMCLUSTER_NAME))
+        );
         let principal = &keda.spec.rules[0].from[0].source.principals[0];
         assert!(principal.contains(KEDA_SERVICE_ACCOUNT));
         assert_eq!(
@@ -376,24 +390,27 @@ mod tests {
 
     #[test]
     fn test_monitoring_allow_policies_ha() {
-        let policies =
-            IstioReconciler::generate_monitoring_allow_policies("test-cluster", true);
+        let policies = IstioReconciler::generate_monitoring_allow_policies("test-cluster", true);
         assert_eq!(policies.len(), 2);
 
-        // VMAgent → VMInsert (HA write path)
+        // VMAgent → VMInsert (HA write path, ztunnel-enforced)
+        assert!(policies[0].spec.target_refs.is_empty());
+        let selector = policies[0].spec.selector.as_ref().unwrap();
         assert_eq!(
-            policies[0].spec.target_refs[0].name,
-            "vminsert-lattice-metrics"
+            selector.match_labels.get("app.kubernetes.io/name"),
+            Some(&format!("vminsert-{}", VMCLUSTER_NAME))
         );
         assert_eq!(
             policies[0].spec.rules[0].to[0].operation.ports,
             vec![VMINSERT_PORT.to_string()]
         );
 
-        // KEDA → VMSelect (HA read path)
+        // KEDA → VMSelect (HA read path, ztunnel-enforced)
+        assert!(policies[1].spec.target_refs.is_empty());
+        let selector = policies[1].spec.selector.as_ref().unwrap();
         assert_eq!(
-            policies[1].spec.target_refs[0].name,
-            "vmselect-lattice-metrics"
+            selector.match_labels.get("app.kubernetes.io/name"),
+            Some(&format!("vmselect-{}", VMCLUSTER_NAME))
         );
         assert_eq!(
             policies[1].spec.rules[0].to[0].operation.ports,

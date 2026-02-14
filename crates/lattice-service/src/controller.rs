@@ -261,12 +261,13 @@ impl ServiceKubeClientImpl {
     ///
     /// Istio ambient mode requires namespaces to have:
     /// - `istio.io/dataplane-mode: ambient` - enrolls pods into ambient mesh (ztunnel intercepts traffic)
-    /// - `istio.io/use-waypoint: {namespace}-waypoint` - routes all traffic through waypoint for L7 enforcement
+    ///
+    /// Waypoint routing is per-Service (applied by the service compiler when L7 is needed),
+    /// not per-namespace.
     async fn ensure_namespace_with_ambient(&self, name: &str) -> Result<(), Error> {
         use k8s_openapi::api::core::v1::Namespace;
 
         let api: Api<Namespace> = Api::all(self.client.clone());
-        let waypoint = mesh::waypoint_name(name);
 
         let ns = serde_json::json!({
             "apiVersion": "v1",
@@ -274,8 +275,7 @@ impl ServiceKubeClientImpl {
             "metadata": {
                 "name": name,
                 "labels": {
-                    (mesh::DATAPLANE_MODE_LABEL): mesh::DATAPLANE_MODE_AMBIENT,
-                    (mesh::USE_WAYPOINT_LABEL): waypoint
+                    (mesh::DATAPLANE_MODE_LABEL): mesh::DATAPLANE_MODE_AMBIENT
                 }
             }
         });
@@ -287,7 +287,7 @@ impl ServiceKubeClientImpl {
         )
         .await?;
 
-        debug!(namespace = %name, waypoint = %waypoint, "ensured namespace with ambient mode labels");
+        debug!(namespace = %name, "ensured namespace with ambient mode labels");
         Ok(())
     }
 }

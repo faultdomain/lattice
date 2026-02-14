@@ -62,9 +62,7 @@ impl PolicyEngine {
 
         // If no policies are loaded, permit everything (permissive by default)
         if policy_set.is_empty() {
-            return VolumeAuthzResult {
-                denied: Vec::new(),
-            };
+            return VolumeAuthzResult { denied: Vec::new() };
         }
 
         let action_uid = match build_entity_uid("Action", "AccessVolume") {

@@ -1,8 +1,15 @@
 //! Istio policy types
 //!
 //! Types for generating Istio policy resources:
-//! - AuthorizationPolicy: L7 mTLS identity-based access control
+//! - AuthorizationPolicy: mTLS identity-based access control
 //! - PeerAuthentication: mTLS mode configuration
+//!
+//! ## AuthorizationPolicy constructors
+//!
+//! - `allow_to_workload()`: Ztunnel-enforced via pod selector. Default for services
+//!   without L7 needs. Works with or without a waypoint.
+//! - `allow_to_service()`: Waypoint-enforced via Service targetRefs. Use only when
+//!   L7 enforcement is needed (external deps, rate limiting, header matching).
 
 use std::collections::BTreeMap;
 
@@ -52,10 +59,43 @@ impl AuthorizationPolicy {
         }
     }
 
-    /// Create an ALLOW policy targeting a K8s Service from specific principals on specific ports.
+    /// Ztunnel-enforced ALLOW policy targeting pods via label selector.
     ///
-    /// This is the most common pattern: waypoint-enforced L7 access control where
-    /// identified callers are allowed to reach a Service on specific ports.
+    /// Works in any ambient namespace, with or without a waypoint. Ztunnel sees
+    /// the original caller identity and enforces directly. Use this for services
+    /// that don't need L7 enforcement (no waypoint in the traffic path).
+    pub fn allow_to_workload(
+        name: impl Into<String>,
+        namespace: impl Into<String>,
+        match_labels: BTreeMap<String, String>,
+        principals: Vec<String>,
+        ports: Vec<String>,
+    ) -> Self {
+        Self::new(
+            ObjectMeta::new(name, namespace),
+            AuthorizationPolicySpec {
+                target_refs: vec![],
+                selector: Some(WorkloadSelector { match_labels }),
+                action: "ALLOW".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![AuthorizationSource {
+                        source: SourceSpec { principals },
+                    }],
+                    to: vec![AuthorizationOperation {
+                        operation: OperationSpec {
+                            ports,
+                            hosts: vec![],
+                        },
+                    }],
+                }],
+            },
+        )
+    }
+
+    /// Waypoint-enforced ALLOW policy targeting a K8s Service via targetRefs.
+    ///
+    /// The waypoint proxy evaluates this policy. Use this only for services that
+    /// need L7 enforcement (external dependencies, rate limiting, header matching).
     pub fn allow_to_service(
         name: impl Into<String>,
         namespace: impl Into<String>,

@@ -1,23 +1,21 @@
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
 metadata:
-  name: jellyfin
+  name: plex
   namespace: media
 spec:
   workload:
     containers:
       main:
-        image: docker.io/jellyfin/jellyfin:latest
+        image: docker.io/plexinc/pms-docker:latest
         security:
           runAsUser: 0
           apparmorProfile: Unconfined
         variables:
-          JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
+          TZ: "America/New_York"
         volumes:
           /config:
             source: ${resources.config}
-          /cache:
-            source: ${resources.cache}
           /media:
             source: ${resources.media-storage}
             path: library
@@ -29,14 +27,10 @@ spec:
           limits:
             cpu: 4000m
             memory: 8Gi
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8096
     service:
       ports:
         http:
-          port: 8096
+          port: 32400
           protocol: TCP
     resources:
       # Registry credentials for GHCR images
@@ -46,37 +40,15 @@ spec:
         params:
           provider: lattice-local
           refreshInterval: 1h
-      # Owned volumes (private to this service)
+      # Owned volume (private to this service)
       config:
         type: volume
         params:
           size: 10Gi
-      cache:
-        type: volume
-        params:
-          size: 20Gi
-      # Shared media storage (OWNER - has size)
+      # Shared media storage (UNAUTHORIZED REFERENCE - not in allowedConsumers)
       media-storage:
         type: volume
         id: media-storage
-        params:
-          size: 1Ti
-          accessMode: ReadWriteOnce
-          allowedConsumers:
-            - sonarr
-            - nzbget
-      # Service dependencies (bilateral agreement)
-      sonarr:
-        type: service
-        direction: inbound
   imagePullSecrets:
     - ghcr-creds
   replicas: 1
-  ingress:
-    routes:
-      public:
-        hosts:
-          - jellyfin.home.local
-        tls:
-          issuerRef:
-            name: letsencrypt-prod

@@ -74,10 +74,7 @@ pub fn spawn_general_infrastructure(client: Client, cluster_mode: bool) {
 }
 
 /// Internal: resolve config and apply general infrastructure manifests.
-async fn ensure_general_infrastructure(
-    client: &Client,
-    cluster_mode: bool,
-) -> anyhow::Result<()> {
+async fn ensure_general_infrastructure(client: &Client, cluster_mode: bool) -> anyhow::Result<()> {
     let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
     tracing::info!(is_bootstrap, "Installing general infrastructure...");

@@ -171,10 +171,9 @@ pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, Stri
             &config.cluster_name,
             config.monitoring.ha,
         ) {
-            manifests.push(
-                serde_json::to_string_pretty(&policy)
-                    .map_err(|e| format!("Failed to serialize monitoring AuthorizationPolicy: {}", e))?,
-            );
+            manifests.push(serde_json::to_string_pretty(&policy).map_err(|e| {
+                format!("Failed to serialize monitoring AuthorizationPolicy: {}", e)
+            })?);
         }
     }
 

@@ -847,11 +847,7 @@ async fn patch_deployments_with_cp_toleration(
     for deploy in &list.items {
         let name = deploy.metadata.name.as_deref().unwrap_or("unknown");
         deployments
-            .patch(
-                name,
-                &PatchParams::default(),
-                &Patch::Strategic(&patch),
-            )
+            .patch(name, &PatchParams::default(), &Patch::Strategic(&patch))
             .await
             .map_err(|e| {
                 Error::capi_installation(format!(

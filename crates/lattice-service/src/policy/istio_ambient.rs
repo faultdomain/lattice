@@ -3,12 +3,18 @@
 //! Generates mTLS identity-based access control using SPIFFE principals
 //! within the Istio ambient mesh.
 //!
+//! ## Ztunnel-first enforcement model
+//!
+//! By default, policies are enforced by ztunnel directly (no waypoint in the traffic path).
+//! A waypoint is only deployed for services that need L7 features (currently: external
+//! outbound dependencies via ServiceEntry; future: rate limiting, header matching).
+//!
 //! ## Policy enforcement points
 //!
-//! - **Waypoint-enforced** (`targetRefs: Service`): evaluated by the waypoint proxy.
-//!   Uses the K8s **service port** (what clients connect to).
 //! - **Ztunnel-enforced** (`selector`): evaluated by ztunnel on the destination node.
-//!   Uses the **container target port** (what the pod listens on after HBONE delivery).
+//!   Uses the **container target port**. This is the default path.
+//! - **Waypoint-enforced** (`targetRefs: Service`): evaluated by the waypoint proxy.
+//!   Uses the K8s **service port**. Only used when the service has external dependencies.
 
 use std::collections::BTreeMap;
 
@@ -64,6 +70,54 @@ impl<'a> PolicyCompiler<'a> {
             format!("allow-to-{}", service.name),
             namespace,
             service.name.clone(),
+            principals,
+            ports,
+        ))
+    }
+
+    /// Compile a ztunnel-enforced AuthorizationPolicy (caller → pod) via label selector.
+    ///
+    /// Used for services that don't need L7 enforcement. Ztunnel sees the original
+    /// caller identity and enforces directly. Port matching uses the **container target port**.
+    pub(super) fn compile_authorization_policy_ztunnel(
+        &self,
+        service: &ServiceNode,
+        namespace: &str,
+        inbound_edges: &[ActiveEdge],
+    ) -> Option<AuthorizationPolicy> {
+        if inbound_edges.is_empty() {
+            return None;
+        }
+
+        let principals: Vec<String> = inbound_edges
+            .iter()
+            .map(|edge| {
+                mesh::trust_domain::principal(
+                    &self.cluster_name,
+                    &edge.caller_namespace,
+                    &edge.caller_name,
+                )
+            })
+            .collect();
+
+        // Ztunnel delivers to the pod directly, so use target port
+        let ports: Vec<String> = service
+            .ports
+            .values()
+            .map(|pm| pm.target_port.to_string())
+            .collect();
+
+        if ports.is_empty() {
+            return None;
+        }
+
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert(LABEL_NAME.to_string(), service.name.clone());
+
+        Some(AuthorizationPolicy::allow_to_workload(
+            format!("allow-to-{}", service.name),
+            namespace,
+            match_labels,
             principals,
             ports,
         ))
@@ -214,7 +268,10 @@ impl<'a> PolicyCompiler<'a> {
         )
     }
 
-    /// Compile an AuthorizationPolicy to allow the Istio gateway proxy to reach a service
+    /// Compile an AuthorizationPolicy to allow the Istio gateway proxy to reach a service.
+    ///
+    /// Gateway traffic goes directly from the ingress gateway to the pod via ztunnel
+    /// (not through a waypoint), so we use selector-based enforcement.
     pub(crate) fn compile_gateway_allow_policy(
         &self,
         service_name: &str,
@@ -225,34 +282,15 @@ impl<'a> PolicyCompiler<'a> {
             mesh::trust_domain::gateway_principal(&self.cluster_name, namespace);
         let port_strings: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
 
-        AuthorizationPolicy::new(
-            ObjectMeta::new(format!("allow-gateway-to-{}", service_name), namespace),
-            AuthorizationPolicySpec {
-                target_refs: vec![TargetRef {
-                    group: String::new(),
-                    kind: "Service".to_string(),
-                    name: service_name.to_string(),
-                }],
-                selector: None,
-                action: "ALLOW".to_string(),
-                rules: vec![AuthorizationRule {
-                    from: vec![AuthorizationSource {
-                        source: SourceSpec {
-                            principals: vec![gateway_principal],
-                        },
-                    }],
-                    to: if port_strings.is_empty() {
-                        vec![]
-                    } else {
-                        vec![AuthorizationOperation {
-                            operation: OperationSpec {
-                                ports: port_strings,
-                                hosts: vec![],
-                            },
-                        }]
-                    },
-                }],
-            },
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert(LABEL_NAME.to_string(), service_name.to_string());
+
+        AuthorizationPolicy::allow_to_workload(
+            format!("allow-gateway-to-{}", service_name),
+            namespace,
+            match_labels,
+            vec![gateway_principal],
+            port_strings,
         )
     }
 }

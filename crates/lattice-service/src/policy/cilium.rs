@@ -26,6 +26,7 @@ impl<'a> PolicyCompiler<'a> {
         namespace: &str,
         inbound_edges: &[ActiveEdge],
         outbound_edges: &[ActiveEdge],
+        has_external_deps: bool,
     ) -> CiliumNetworkPolicy {
         let mut endpoint_labels = BTreeMap::new();
         endpoint_labels.insert(CILIUM_LABEL_NAME.to_string(), service.name.clone());
@@ -56,24 +57,27 @@ impl<'a> PolicyCompiler<'a> {
             });
         }
 
-        // Allow traffic from waypoint proxy on HBONE port
-        let mut waypoint_ingress_labels = BTreeMap::new();
-        waypoint_ingress_labels.insert(CILIUM_LABEL_NAMESPACE.to_string(), namespace.to_string());
-        waypoint_ingress_labels.insert(
-            mesh::CILIUM_WAYPOINT_FOR_LABEL.to_string(),
-            mesh::WAYPOINT_FOR_SERVICE.to_string(),
-        );
+        // Allow traffic from waypoint proxy on HBONE port (only when waypoint is in the path)
+        if has_external_deps {
+            let mut waypoint_ingress_labels = BTreeMap::new();
+            waypoint_ingress_labels
+                .insert(CILIUM_LABEL_NAMESPACE.to_string(), namespace.to_string());
+            waypoint_ingress_labels.insert(
+                mesh::CILIUM_WAYPOINT_FOR_LABEL.to_string(),
+                mesh::WAYPOINT_FOR_SERVICE.to_string(),
+            );
 
-        ingress_rules.push(CiliumIngressRule {
-            from_endpoints: vec![EndpointSelector::from_labels(waypoint_ingress_labels)],
-            to_ports: vec![CiliumPortRule {
-                ports: vec![CiliumPort {
-                    port: mesh::HBONE_PORT.to_string(),
-                    protocol: "TCP".to_string(),
+            ingress_rules.push(CiliumIngressRule {
+                from_endpoints: vec![EndpointSelector::from_labels(waypoint_ingress_labels)],
+                to_ports: vec![CiliumPortRule {
+                    ports: vec![CiliumPort {
+                        port: mesh::HBONE_PORT.to_string(),
+                        protocol: "TCP".to_string(),
+                    }],
+                    rules: None,
                 }],
-                rules: None,
-            }],
-        });
+            });
+        }
 
         // Build egress rules
         let mut egress_rules = Vec::new();
@@ -126,23 +130,25 @@ impl<'a> PolicyCompiler<'a> {
             ..Default::default()
         });
 
-        // Always allow HBONE to waypoint
-        let mut waypoint_egress_labels = BTreeMap::new();
-        waypoint_egress_labels.insert(
-            mesh::CILIUM_WAYPOINT_FOR_LABEL.to_string(),
-            mesh::WAYPOINT_FOR_SERVICE.to_string(),
-        );
-        egress_rules.push(CiliumEgressRule {
-            to_endpoints: vec![EndpointSelector::from_labels(waypoint_egress_labels)],
-            to_ports: vec![CiliumPortRule {
-                ports: vec![CiliumPort {
-                    port: mesh::HBONE_PORT.to_string(),
-                    protocol: "TCP".to_string(),
+        // Allow HBONE to waypoint (only when waypoint is in the path for external outbound)
+        if has_external_deps {
+            let mut waypoint_egress_labels = BTreeMap::new();
+            waypoint_egress_labels.insert(
+                mesh::CILIUM_WAYPOINT_FOR_LABEL.to_string(),
+                mesh::WAYPOINT_FOR_SERVICE.to_string(),
+            );
+            egress_rules.push(CiliumEgressRule {
+                to_endpoints: vec![EndpointSelector::from_labels(waypoint_egress_labels)],
+                to_ports: vec![CiliumPortRule {
+                    ports: vec![CiliumPort {
+                        port: mesh::HBONE_PORT.to_string(),
+                        protocol: "TCP".to_string(),
+                    }],
+                    rules: None,
                 }],
-                rules: None,
-            }],
-            ..Default::default()
-        });
+                ..Default::default()
+            });
+        }
 
         // Add egress rules for dependencies
         self.build_egress_rules_for_dependencies(outbound_edges, &mut egress_rules);

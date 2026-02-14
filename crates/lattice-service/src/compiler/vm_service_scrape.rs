@@ -6,6 +6,8 @@
 //! errors on ports that don't serve Prometheus metrics (HTTP APIs returning HTML,
 //! gRPC ports, etc.).
 
+use std::collections::BTreeMap;
+
 use kube::discovery::ApiResource;
 use lattice_common::mesh;
 use lattice_common::policy::AuthorizationPolicy;
@@ -115,13 +117,16 @@ impl CompilerPhase for VMServiceScrapePhase {
             VMAGENT_SERVICE_ACCOUNT,
         );
 
+        // VMAgent scrape traffic goes directly through ztunnel (no waypoint),
+        // so use selector-based enforcement.
+        let match_labels = BTreeMap::from([(LABEL_NAME.to_string(), ctx.name.to_string())]);
         output
             .policies
             .authorization_policies
-            .push(AuthorizationPolicy::allow_to_service(
+            .push(AuthorizationPolicy::allow_to_workload(
                 format!("allow-vm-scrape-{}", ctx.name),
                 ctx.namespace,
-                ctx.name,
+                match_labels,
                 vec![vmagent_principal],
                 vec![metrics_port.port.to_string()],
             ));
@@ -311,10 +316,13 @@ mod tests {
         assert_eq!(policy.metadata.namespace, "prod");
         assert_eq!(policy.spec.action, "ALLOW");
 
-        // Targets the Service (waypoint evaluates this)
-        assert_eq!(policy.spec.target_refs.len(), 1);
-        assert_eq!(policy.spec.target_refs[0].kind, "Service");
-        assert_eq!(policy.spec.target_refs[0].name, "my-app");
+        // Ztunnel-enforced via selector (no waypoint in scrape path)
+        assert!(policy.spec.target_refs.is_empty());
+        let selector = policy.spec.selector.as_ref().unwrap();
+        assert_eq!(
+            selector.match_labels.get("app.kubernetes.io/name"),
+            Some(&"my-app".to_string())
+        );
 
         // Allows VMAgent's SPIFFE identity
         let principal = &policy.spec.rules[0].from[0].source.principals[0];

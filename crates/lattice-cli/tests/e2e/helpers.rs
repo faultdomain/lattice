@@ -2774,10 +2774,18 @@ pub async fn verify_pod_env_var(
             async move {
                 let pod_name = get_pod_name(&kc, &ns, &ls).await?;
                 let actual = match run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "exec", &pod_name, "-n", &ns,
-                    "--", "printenv", &vn,
-                ]).await {
+                    "--kubeconfig",
+                    &kc,
+                    "exec",
+                    &pod_name,
+                    "-n",
+                    &ns,
+                    "--",
+                    "printenv",
+                    &vn,
+                ])
+                .await
+                {
                     Ok(v) => v,
                     Err(_) => return Ok(false), // transient exec failure
                 };
@@ -2830,10 +2838,18 @@ pub async fn verify_pod_file_content(
             async move {
                 let pod_name = get_pod_name(&kc, &ns, &ls).await?;
                 let content = match run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "exec", &pod_name, "-n", &ns,
-                    "--", "cat", &fp,
-                ]).await {
+                    "--kubeconfig",
+                    &kc,
+                    "exec",
+                    &pod_name,
+                    "-n",
+                    &ns,
+                    "--",
+                    "cat",
+                    &fp,
+                ])
+                .await
+                {
                     Ok(v) => v,
                     Err(_) => return Ok(false), // transient exec failure
                 };
