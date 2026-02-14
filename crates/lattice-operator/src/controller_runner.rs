@@ -347,54 +347,46 @@ async fn read_first_cluster(client: &Client) -> Option<LatticeCluster> {
 /// reconciliation after an operator restart doesn't demote Ready services
 /// to Compiling while waiting for dependency information to trickle in.
 async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGraph) {
-    let services: Api<LatticeService> = Api::all(client.clone());
-    match services.list(&kube::api::ListParams::default()).await {
-        Ok(list) => {
-            for svc in &list.items {
-                let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
-                let name = svc.metadata.name.as_deref().unwrap_or_default();
-                graph.put_service(ns, name, &svc.spec);
-            }
-            tracing::info!(
-                count = list.items.len(),
-                "Warmed ServiceGraph with LatticeServices"
-            );
-        }
-        Err(e) => tracing::warn!(error = %e, "Failed to list LatticeServices for graph warmup"),
-    }
+    warmup_list::<LatticeService>(client, "LatticeServices", |item| {
+        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
+        let name = item.metadata.name.as_deref().unwrap_or_default();
+        graph.put_service(ns, name, &item.spec);
+    })
+    .await;
 
-    let externals: Api<LatticeExternalService> = Api::all(client.clone());
-    match externals.list(&kube::api::ListParams::default()).await {
-        Ok(list) => {
-            for ext in &list.items {
-                let ns = ext.metadata.namespace.as_deref().unwrap_or_default();
-                let name = ext.metadata.name.as_deref().unwrap_or_default();
-                graph.put_external_service(ns, name, &ext.spec);
-            }
-            tracing::info!(
-                count = list.items.len(),
-                "Warmed ServiceGraph with LatticeExternalServices"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list LatticeExternalServices for graph warmup")
-        }
-    }
+    warmup_list::<LatticeExternalService>(client, "LatticeExternalServices", |item| {
+        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
+        let name = item.metadata.name.as_deref().unwrap_or_default();
+        graph.put_external_service(ns, name, &item.spec);
+    })
+    .await;
 
-    let policies: Api<LatticeServicePolicy> = Api::all(client.clone());
-    match policies.list(&kube::api::ListParams::default()).await {
+    warmup_list::<LatticeServicePolicy>(client, "LatticeServicePolicies", |item| {
+        graph.put_policy(item.into());
+    })
+    .await;
+}
+
+/// List all resources of type T and insert each into the graph via `insert_fn`.
+async fn warmup_list<T>(client: &Client, label: &str, insert_fn: impl Fn(&T))
+where
+    T: kube::Resource<DynamicType = ()>
+        + Clone
+        + std::fmt::Debug
+        + serde::de::DeserializeOwned
+        + Send
+        + Sync
+        + 'static,
+{
+    let api: Api<T> = Api::all(client.clone());
+    match api.list(&kube::api::ListParams::default()).await {
         Ok(list) => {
-            for pol in &list.items {
-                graph.put_policy(pol.into());
+            for item in &list.items {
+                insert_fn(item);
             }
-            tracing::info!(
-                count = list.items.len(),
-                "Warmed ServiceGraph with LatticeServicePolicies"
-            );
+            tracing::info!(count = list.items.len(), "Warmed ServiceGraph with {}", label);
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list LatticeServicePolicies for graph warmup")
-        }
+        Err(e) => tracing::warn!(error = %e, "Failed to list {} for graph warmup", label),
     }
 }
 
