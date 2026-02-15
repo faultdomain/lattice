@@ -604,4 +604,277 @@ mod tests {
         assert_eq!(cidrs.len(), 1);
         assert!(cidrs.contains(&"10.0.0.1/32".to_string()));
     }
+
+    // =========================================================================
+    // Permissive / Webhook policy generation
+    // =========================================================================
+
+    fn make_mesh_member_spec(
+        labels: std::collections::BTreeMap<String, String>,
+        ports: Vec<(&str, u16, lattice_common::crd::PeerAuth)>,
+        callers: Vec<&str>,
+        deps: Vec<&str>,
+    ) -> lattice_common::crd::LatticeMeshMemberSpec {
+        use lattice_common::crd::{
+            CallerRef, MeshMemberPort, MeshMemberTarget, ServiceRef,
+        };
+
+        lattice_common::crd::LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(labels),
+            ports: ports
+                .into_iter()
+                .map(|(name, port, peer_auth)| MeshMemberPort {
+                    port,
+                    name: name.to_string(),
+                    peer_auth,
+                })
+                .collect(),
+            allowed_callers: callers
+                .into_iter()
+                .map(|c| CallerRef {
+                    name: c.to_string(),
+                    namespace: None,
+                })
+                .collect(),
+            dependencies: deps
+                .into_iter()
+                .map(|d| ServiceRef::local(d))
+                .collect(),
+            egress: vec![],
+            allow_peer_traffic: false,
+            ingress: None,
+        }
+    }
+
+    #[test]
+    fn permissive_port_generates_peer_auth_and_authz() {
+        use lattice_common::crd::PeerAuth;
+
+        let graph = ServiceGraph::new();
+        let ns = "webhook-ns";
+
+        let labels = BTreeMap::from([("app".to_string(), "webhook".to_string())]);
+        let spec = make_mesh_member_spec(
+            labels,
+            vec![
+                ("https", 8443, PeerAuth::Strict),
+                ("webhook", 9443, PeerAuth::Permissive),
+            ],
+            vec!["api"],
+            vec![],
+        );
+        graph.put_mesh_member(ns, "webhook-handler", &spec);
+
+        let api_spec = make_service_spec(vec!["webhook-handler"], vec![]);
+        graph.put_service(ns, "api", &api_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("webhook-handler", ns);
+
+        // Should have PeerAuthentication with permissive override on port 9443
+        assert_eq!(output.peer_authentications.len(), 1);
+        let pa = &output.peer_authentications[0];
+        assert!(pa.spec.port_level_mtls.as_ref().unwrap().contains_key("9443"));
+        assert_eq!(pa.spec.port_level_mtls.as_ref().unwrap()["9443"].mode, "PERMISSIVE");
+        assert!(!pa.spec.port_level_mtls.as_ref().unwrap().contains_key("8443"));
+
+        // Should have an AuthorizationPolicy allowing plaintext on port 9443
+        let plaintext_authz = output
+            .authorization_policies
+            .iter()
+            .find(|ap| ap.metadata.name.starts_with("allow-plaintext-"))
+            .expect("should have plaintext allow policy");
+        let ports = &plaintext_authz.spec.rules[0].to[0].operation.ports;
+        assert_eq!(ports, &["9443"]);
+        assert!(
+            plaintext_authz.spec.rules[0].from.is_empty(),
+            "permissive should allow any caller"
+        );
+    }
+
+    #[test]
+    fn webhook_port_generates_peer_auth_and_authz() {
+        use lattice_common::crd::PeerAuth;
+
+        let graph = ServiceGraph::new();
+        let ns = "webhook-ns";
+
+        let labels = BTreeMap::from([("app".to_string(), "admission".to_string())]);
+        let spec = make_mesh_member_spec(
+            labels,
+            vec![("webhook", 9443, PeerAuth::Webhook)],
+            vec![],
+            vec![],
+        );
+        graph.put_mesh_member(ns, "admission-webhook", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("admission-webhook", ns);
+
+        // PeerAuthentication: port 9443 is PERMISSIVE (both Webhook and Permissive need this)
+        assert_eq!(output.peer_authentications.len(), 1);
+        assert!(output.peer_authentications[0]
+            .spec
+            .port_level_mtls
+            .as_ref()
+            .unwrap()
+            .contains_key("9443"));
+
+        // AuthorizationPolicy: empty from (Istio can't distinguish plaintext source)
+        let plaintext_authz = output
+            .authorization_policies
+            .iter()
+            .find(|ap| ap.metadata.name.starts_with("allow-plaintext-"))
+            .expect("should have plaintext allow policy");
+        assert!(plaintext_authz.spec.rules[0].from.is_empty());
+    }
+
+    #[test]
+    fn webhook_port_cilium_restricts_to_kube_apiserver() {
+        use lattice_common::crd::PeerAuth;
+
+        let graph = ServiceGraph::new();
+        let ns = "webhook-ns";
+
+        let labels = BTreeMap::from([("app".to_string(), "admission".to_string())]);
+        let spec = make_mesh_member_spec(
+            labels,
+            vec![("webhook", 9443, PeerAuth::Webhook)],
+            vec![],
+            vec![],
+        );
+        graph.put_mesh_member(ns, "admission-webhook", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("admission-webhook", ns);
+
+        let cnp = &output.cilium_policies[0];
+
+        // Should have an ingress rule with fromEntities: kube-apiserver on port 9443
+        let webhook_rule = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| r.from_entities.contains(&"kube-apiserver".to_string()))
+            .expect("should have kube-apiserver ingress rule");
+        assert!(webhook_rule
+            .to_ports[0]
+            .ports
+            .iter()
+            .any(|p| p.port == "9443"));
+    }
+
+    #[test]
+    fn permissive_port_cilium_allows_any_source() {
+        use lattice_common::crd::PeerAuth;
+
+        let graph = ServiceGraph::new();
+        let ns = "webhook-ns";
+
+        let labels = BTreeMap::from([("app".to_string(), "svc".to_string())]);
+        let spec = make_mesh_member_spec(
+            labels,
+            vec![("metrics", 9090, PeerAuth::Permissive)],
+            vec![],
+            vec![],
+        );
+        graph.put_mesh_member(ns, "metrics-svc", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("metrics-svc", ns);
+
+        let cnp = &output.cilium_policies[0];
+
+        // Should have an ingress rule with empty endpoint selector (any source), NOT fromEntities
+        let broad_rule = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| {
+                r.from_entities.is_empty()
+                    && !r.from_endpoints.is_empty()
+                    && r.to_ports
+                        .iter()
+                        .any(|pr| pr.ports.iter().any(|p| p.port == "9090"))
+            })
+            .expect("should have broad ingress rule for permissive port");
+        assert!(broad_rule.from_endpoints[0].match_labels.is_empty());
+    }
+
+    #[test]
+    fn mixed_permissive_and_webhook_ports() {
+        use lattice_common::crd::PeerAuth;
+
+        let graph = ServiceGraph::new();
+        let ns = "mixed-ns";
+
+        let labels = BTreeMap::from([("app".to_string(), "mixed".to_string())]);
+        let spec = make_mesh_member_spec(
+            labels,
+            vec![
+                ("http", 8080, PeerAuth::Strict),
+                ("metrics", 9090, PeerAuth::Permissive),
+                ("webhook", 9443, PeerAuth::Webhook),
+            ],
+            vec![],
+            vec![],
+        );
+        graph.put_mesh_member(ns, "mixed-svc", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("mixed-svc", ns);
+
+        // PeerAuthentication should have PERMISSIVE on both 9090 and 9443
+        let pa = &output.peer_authentications[0];
+        assert!(pa.spec.port_level_mtls.as_ref().unwrap().contains_key("9090"));
+        assert!(pa.spec.port_level_mtls.as_ref().unwrap().contains_key("9443"));
+        assert!(!pa.spec.port_level_mtls.as_ref().unwrap().contains_key("8080"));
+
+        // Cilium: separate ingress rules for permissive (any) and webhook (kube-apiserver)
+        let cnp = &output.cilium_policies[0];
+        let has_broad = cnp.spec.ingress.iter().any(|r| {
+            r.from_entities.is_empty()
+                && r.to_ports
+                    .iter()
+                    .any(|pr| pr.ports.iter().any(|p| p.port == "9090"))
+        });
+        let has_webhook = cnp.spec.ingress.iter().any(|r| {
+            r.from_entities.contains(&"kube-apiserver".to_string())
+                && r.to_ports
+                    .iter()
+                    .any(|pr| pr.ports.iter().any(|p| p.port == "9443"))
+        });
+        assert!(has_broad, "should have broad ingress for permissive port");
+        assert!(
+            has_webhook,
+            "should have kube-apiserver ingress for webhook port"
+        );
+    }
+
+    #[test]
+    fn strict_only_ports_generate_no_permissive_policies() {
+        let graph = ServiceGraph::new();
+        let ns = "strict-ns";
+
+        let spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service(ns, "api", &spec);
+
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("api", ns);
+
+        assert!(
+            output.peer_authentications.is_empty(),
+            "strict-only should have no PeerAuthentication"
+        );
+        assert!(
+            !output
+                .authorization_policies
+                .iter()
+                .any(|ap| ap.metadata.name.starts_with("allow-plaintext-")),
+            "strict-only should have no plaintext allow policy"
+        );
+    }
 }

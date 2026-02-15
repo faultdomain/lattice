@@ -120,21 +120,8 @@ pub async fn build_service_controllers(
                 None => return vec![],
             };
             let name = service.metadata.name.as_deref().unwrap_or_default();
-
-            let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
-            affected.extend(graph.get_dependents(namespace, name));
-            affected.sort();
-            affected.dedup();
-
-            tracing::debug!(
-                service = %name,
-                namespace = %namespace,
-                affected_count = affected.len(),
-                "Triggering re-reconciliation of affected services"
-            );
-
             let ns = namespace.to_string();
-            affected
+            affected_neighbors(&graph, namespace, name)
                 .into_iter()
                 .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
                 .collect()
@@ -180,22 +167,8 @@ pub async fn build_service_controllers(
                 None => return vec![],
             };
             let name = member.metadata.name.as_deref().unwrap_or_default();
-
-            // MeshMember changes can affect bilateral agreements with services
-            let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
-            affected.extend(graph.get_dependents(namespace, name));
-            affected.sort();
-            affected.dedup();
-
-            tracing::debug!(
-                mesh_member = %name,
-                namespace = %namespace,
-                affected_count = affected.len(),
-                "MeshMember changed, re-reconciling affected services"
-            );
-
             let ns = namespace.to_string();
-            affected
+            affected_neighbors(&graph, namespace, name)
                 .into_iter()
                 .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
                 .collect()
@@ -250,36 +223,13 @@ pub async fn build_service_controllers(
                 None => return vec![],
             };
             let name = member.metadata.name.as_deref().unwrap_or_default();
-
-            // When a MeshMember changes, re-reconcile its dependencies and dependents
-            // so they can update their inbound/outbound policies
-            let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
-            affected.extend(graph.get_dependents(namespace, name));
-            affected.sort();
-            affected.dedup();
-            // Don't re-reconcile self (the controller already handles that)
-            affected.retain(|n| n != name);
-
-            if !affected.is_empty() {
-                tracing::debug!(
-                    mesh_member = %name,
-                    namespace = %namespace,
-                    affected_count = affected.len(),
-                    "MeshMember changed, re-reconciling affected mesh members"
-                );
-            }
-
             let ns = namespace.to_string();
-            affected
+            affected_neighbors(&graph, namespace, name)
                 .into_iter()
                 .filter_map(|dep| {
-                    // Only re-reconcile if the affected service is a MeshMember
                     let node = graph.get_service(&ns, &dep)?;
-                    if node.type_ == lattice_common::graph::ServiceType::MeshMember {
-                        Some(ObjectRef::<LatticeMeshMember>::new(&dep).within(&ns))
-                    } else {
-                        None
-                    }
+                    (node.type_ == lattice_common::graph::ServiceType::MeshMember)
+                        .then(|| ObjectRef::<LatticeMeshMember>::new(&dep).within(&ns))
                 })
                 .collect()
         })
@@ -439,6 +389,22 @@ async fn read_first_cluster(client: &Client) -> Option<LatticeCluster> {
             None
         }
     }
+}
+
+/// Compute the set of affected neighbor names when a service or mesh member changes.
+///
+/// Returns deduplicated names of all dependencies and dependents (excluding `self_name`).
+fn affected_neighbors(
+    graph: &lattice_common::graph::ServiceGraph,
+    namespace: &str,
+    self_name: &str,
+) -> Vec<String> {
+    let mut affected: Vec<String> = graph.get_dependencies(namespace, self_name);
+    affected.extend(graph.get_dependents(namespace, self_name));
+    affected.sort();
+    affected.dedup();
+    affected.retain(|n| n != self_name);
+    affected
 }
 
 /// Pre-populate the ServiceGraph with all existing resources so that

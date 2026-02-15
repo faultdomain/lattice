@@ -155,10 +155,6 @@ pub struct LatticeMeshMemberStatus {
     /// Last observed generation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
-    /// Hash of the graph edges used during last policy compilation.
-    /// Detects when bilateral agreements change without a spec change.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graph_hash: Option<String>,
     /// Status conditions
     #[serde(default)]
     pub conditions: Vec<super::types::Condition>,

@@ -142,6 +142,7 @@ impl MeshMemberDiscoveredCrds {
 // =============================================================================
 
 const FIELD_MANAGER: &str = "lattice-mesh-member-controller";
+const GRAPH_HASH_ANNOTATION: &str = "lattice.dev/graph-hash";
 
 // =============================================================================
 // Reconciliation
@@ -162,11 +163,12 @@ pub async fn reconcile(
     // Validate spec
     if let Err(e) = member.spec.validate() {
         warn!(error = %e, "mesh member validation failed");
-        patch_status(
+        patch_status_with_hash(
             &ctx.client,
             &name,
             namespace,
             status_failed(&e, member.metadata.generation),
+            "",
         )
         .await?;
         return Ok(Action::await_change());
@@ -181,7 +183,7 @@ pub async fn reconcile(
     let graph_hash = compute_edge_hash(&inbound_edges, &outbound_edges);
 
     // Skip reconciliation if spec AND graph state haven't changed
-    if is_status_current(&member, graph_hash.clone()) {
+    if is_status_current(&member, &graph_hash) {
         debug!("generation and graph state unchanged, skipping reconcile");
         return Ok(Action::requeue(Duration::from_secs(60)));
     }
@@ -247,16 +249,17 @@ pub async fn reconcile(
 
     info!(resources = total, "applied mesh member resources");
 
-    // Update status
+    // Update status and graph hash annotation in a single patch
     let scope = match member.spec.target {
         MeshMemberTarget::Selector(_) => MeshMemberScope::Workload,
         MeshMemberTarget::Namespace(_) => MeshMemberScope::Namespace,
     };
-    patch_status(
+    patch_status_with_hash(
         &ctx.client,
         &name,
         namespace,
-        status_ready(scope, member.metadata.generation, graph_hash),
+        status_ready(scope, member.metadata.generation),
+        &graph_hash,
     )
     .await?;
 
@@ -578,38 +581,37 @@ fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String 
     format!("{:016x}", hasher.finish())
 }
 
-fn is_status_current(member: &LatticeMeshMember, current_graph_hash: String) -> bool {
-    member
-        .status
+/// Skip reconciliation when the spec (generation) AND graph topology (edge hash) are unchanged.
+///
+/// This prevents reconcile storms from status patches (which bump resourceVersion
+/// but not generation) while still reacting to bilateral agreement changes from
+/// other members via the graph hash annotation.
+fn is_status_current(member: &LatticeMeshMember, current_graph_hash: &str) -> bool {
+    let status = match member.status.as_ref() {
+        Some(s) if s.phase == MeshMemberPhase::Ready => s,
+        _ => return false,
+    };
+
+    let generation_matches = matches!(
+        (status.observed_generation, member.metadata.generation),
+        (Some(observed), Some(current)) if observed == current
+    );
+
+    let stored_hash = member
+        .metadata
+        .annotations
         .as_ref()
-        .and_then(|s| {
-            // Only skip if phase is Ready, generation matches, AND graph state matches
-            if s.phase == MeshMemberPhase::Ready {
-                match (s.observed_generation, member.metadata.generation) {
-                    (Some(observed), Some(current)) if observed == current => {
-                        // Also check if graph edges have changed
-                        Some(s.graph_hash.as_deref() == Some(&current_graph_hash))
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or(false)
+        .and_then(|a| a.get(GRAPH_HASH_ANNOTATION));
+
+    generation_matches && stored_hash.map(|h| h.as_str()) == Some(current_graph_hash)
 }
 
-fn status_ready(
-    scope: MeshMemberScope,
-    generation: Option<i64>,
-    graph_hash: String,
-) -> LatticeMeshMemberStatus {
+fn status_ready(scope: MeshMemberScope, generation: Option<i64>) -> LatticeMeshMemberStatus {
     LatticeMeshMemberStatus {
         phase: MeshMemberPhase::Ready,
         scope: Some(scope),
         message: Some("Policies applied successfully".to_string()),
         observed_generation: generation,
-        graph_hash: Some(graph_hash),
         conditions: vec![Condition::new(
             "Ready",
             ConditionStatus::True,
@@ -625,7 +627,6 @@ fn status_failed(message: &str, generation: Option<i64>) -> LatticeMeshMemberSta
         scope: None,
         message: Some(message.to_string()),
         observed_generation: generation,
-        graph_hash: None,
         conditions: vec![Condition::new(
             "Ready",
             ConditionStatus::False,
@@ -635,22 +636,26 @@ fn status_failed(message: &str, generation: Option<i64>) -> LatticeMeshMemberSta
     }
 }
 
-async fn patch_status(
+/// Patch status and graph hash annotation in a single API call.
+///
+/// Combining both into one merge patch produces exactly one resourceVersion bump,
+/// which means one watch event (caught by `is_status_current`) instead of two.
+async fn patch_status_with_hash(
     client: &Client,
     name: &str,
     namespace: &str,
     status: LatticeMeshMemberStatus,
+    graph_hash: &str,
 ) -> Result<(), ReconcileError> {
     let api: Api<LatticeMeshMember> = Api::namespaced(client.clone(), namespace);
-    let status_patch = serde_json::json!({ "status": status });
+    let patch = serde_json::json!({
+        "metadata": { "annotations": { GRAPH_HASH_ANNOTATION: graph_hash } },
+        "status": status,
+    });
 
-    api.patch_status(
-        name,
-        &PatchParams::apply(FIELD_MANAGER),
-        &Patch::Merge(&status_patch),
-    )
-    .await
-    .map_err(|e| ReconcileError::Kube(format!("patch status: {e}")))?;
+    api.patch(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+        .await
+        .map_err(|e| ReconcileError::Kube(format!("patch status: {e}")))?;
 
     Ok(())
 }

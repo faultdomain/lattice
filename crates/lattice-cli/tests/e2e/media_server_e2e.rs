@@ -602,9 +602,9 @@ fn is_allowed_code(code: &str) -> bool {
     matches!(code, "200" | "201" | "204" | "301" | "302")
 }
 
-/// Check if a status code indicates a policy block.
+/// Check if a status code indicates a policy block (L4 connection refused or L7 forbidden).
 fn is_blocked_code(code: &str) -> bool {
-    code == "403"
+    matches!(code, "000" | "403")
 }
 
 async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {
@@ -631,7 +631,7 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     let code = exec_curl(kubeconfig_path, "jellyfin", "http://sonarr:8989/").await;
     if !is_blocked_code(&code) {
         return Err(format!(
-            "jellyfin->sonarr should be blocked at L4 (000) but got {}",
+            "jellyfin->sonarr should be blocked (000 or 403) but got {}",
             code
         ));
     }
