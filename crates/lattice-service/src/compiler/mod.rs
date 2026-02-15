@@ -36,8 +36,6 @@ use std::sync::Arc;
 
 use kube::discovery::ApiResource;
 use lattice_cedar::PolicyEngine;
-use lattice_workload::CompilationError;
-
 use lattice_common::crd::{
     CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
 };
@@ -327,13 +325,15 @@ impl<'a> ServiceCompiler<'a> {
             })
             .unwrap_or_default();
 
-        let ports: Vec<MeshMemberPort> = workload
+        let ports: Vec<MeshMemberPort> = service
+            .spec
+            .workload
             .service
             .as_ref()
             .map(|s| {
                 s.ports
                     .iter()
-                    .map(|(port_name, ps)| MeshMemberPort {
+                    .map(|(port_name, ps): (&String, _)| MeshMemberPort {
                         port: ps.target_port.unwrap_or(ps.port),
                         name: port_name.clone(),
                         peer_auth: PeerAuth::Strict,
