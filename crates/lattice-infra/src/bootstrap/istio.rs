@@ -15,7 +15,7 @@ use lattice_common::policy::istio::{
 };
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
-use super::keda::{KEDA_NAMESPACE, KEDA_SERVICE_ACCOUNT};
+use super::keda::{KEDA_METRICS_SERVICE_ACCOUNT, KEDA_NAMESPACE, KEDA_SERVICE_ACCOUNT};
 use super::prometheus::{
     MONITORING_NAMESPACE, VMAGENT_SERVICE_ACCOUNT, VMCLUSTER_NAME, VMINSERT_PORT, VMSELECT_PORT,
     VMSINGLE_PORT,
@@ -136,6 +136,13 @@ impl IstioReconciler {
                 label_key: "app",
                 label_value: "keda-operator-metrics-apiserver",
                 port: "6443",
+            },
+            WebhookTarget {
+                name: "keda-admission-webhooks",
+                namespace: KEDA_NAMESPACE,
+                label_key: "app",
+                label_value: "keda-admission-webhooks",
+                port: "9443",
             },
             WebhookTarget {
                 name: "victoria-metrics-operator",
@@ -263,6 +270,12 @@ impl IstioReconciler {
         let keda_principal =
             mesh::trust_domain::principal(cluster_name, KEDA_NAMESPACE, KEDA_SERVICE_ACCOUNT);
 
+        let keda_metrics_principal = mesh::trust_domain::principal(
+            cluster_name,
+            KEDA_NAMESPACE,
+            KEDA_METRICS_SERVICE_ACCOUNT,
+        );
+
         let vm_instance_label = (
             "app.kubernetes.io/instance".to_string(),
             VMCLUSTER_NAME.to_string(),
@@ -299,6 +312,15 @@ impl IstioReconciler {
                 read_labels,
                 vec![keda_principal],
                 vec![read_port.to_string()],
+            ),
+            // KEDA metrics-apiserver → keda-operator gRPC (port 9666)
+            // The metrics-apiserver aggregates metrics and calls the operator to fetch them.
+            AuthorizationPolicy::allow_to_workload(
+                "allow-keda-metrics-to-operator",
+                KEDA_NAMESPACE,
+                BTreeMap::from([("app".to_string(), "keda-operator".to_string())]),
+                vec![keda_metrics_principal],
+                vec!["9666".to_string()],
             ),
         ]
     }
@@ -358,8 +380,8 @@ mod tests {
     #[test]
     fn test_webhook_policies() {
         let (peer_auths, auth_policies) = IstioReconciler::generate_webhook_policies();
-        assert_eq!(peer_auths.len(), 2);
-        assert_eq!(auth_policies.len(), 2);
+        assert_eq!(peer_auths.len(), 3);
+        assert_eq!(auth_policies.len(), 3);
 
         // All PeerAuthentications must be PERMISSIVE with a selector
         for pa in &peer_auths {
@@ -386,9 +408,13 @@ mod tests {
         assert_eq!(peer_auths[0].metadata.namespace, KEDA_NAMESPACE);
         assert_eq!(auth_policies[0].metadata.namespace, KEDA_NAMESPACE);
 
+        // KEDA admission webhooks
+        assert_eq!(peer_auths[1].metadata.namespace, KEDA_NAMESPACE);
+        assert_eq!(auth_policies[1].metadata.namespace, KEDA_NAMESPACE);
+
         // VictoriaMetrics operator
-        assert_eq!(peer_auths[1].metadata.namespace, MONITORING_NAMESPACE);
-        assert_eq!(auth_policies[1].metadata.namespace, MONITORING_NAMESPACE);
+        assert_eq!(peer_auths[2].metadata.namespace, MONITORING_NAMESPACE);
+        assert_eq!(auth_policies[2].metadata.namespace, MONITORING_NAMESPACE);
     }
 
     #[test]
@@ -481,7 +507,7 @@ mod tests {
     #[test]
     fn test_monitoring_allow_policies_single_node() {
         let policies = IstioReconciler::generate_monitoring_allow_policies("test-cluster", false);
-        assert_eq!(policies.len(), 2);
+        assert_eq!(policies.len(), 3);
 
         // VMAgent → VMSingle (ztunnel-enforced via selector)
         let vmagent = &policies[0];
@@ -524,12 +550,28 @@ mod tests {
             keda.spec.rules[0].to[0].operation.ports,
             vec![VMSINGLE_PORT.to_string()]
         );
+
+        // KEDA metrics-apiserver → keda-operator (gRPC port 9666)
+        let keda_internal = &policies[2];
+        assert_eq!(keda_internal.metadata.name, "allow-keda-metrics-to-operator");
+        assert_eq!(keda_internal.metadata.namespace, KEDA_NAMESPACE);
+        let selector = keda_internal.spec.selector.as_ref().unwrap();
+        assert_eq!(
+            selector.match_labels.get("app"),
+            Some(&"keda-operator".to_string())
+        );
+        let principal = &keda_internal.spec.rules[0].from[0].source.principals[0];
+        assert!(principal.contains(KEDA_METRICS_SERVICE_ACCOUNT));
+        assert_eq!(
+            keda_internal.spec.rules[0].to[0].operation.ports,
+            vec!["9666".to_string()]
+        );
     }
 
     #[test]
     fn test_monitoring_allow_policies_ha() {
         let policies = IstioReconciler::generate_monitoring_allow_policies("test-cluster", true);
-        assert_eq!(policies.len(), 2);
+        assert_eq!(policies.len(), 3);
 
         // VMAgent → VMInsert (HA write path, ztunnel-enforced)
         assert!(policies[0].spec.target_refs.is_empty());

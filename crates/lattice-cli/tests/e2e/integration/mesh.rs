@@ -17,7 +17,7 @@ use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::mesh_random::run_random_mesh_test;
-use super::super::mesh_tests::{run_mesh_test, start_mesh_test};
+use super::super::mesh_tests::run_mesh_test;
 use super::cedar::apply_e2e_default_policy;
 
 /// Run all mesh bilateral agreement tests
@@ -72,59 +72,6 @@ pub async fn run_randomized_mesh_test(ctx: &InfraContext) -> Result<(), String> 
         kubeconfig
     );
     run_random_mesh_test(kubeconfig).await
-}
-
-/// Start mesh tests in background and return a handle
-///
-/// Use this when you want to run mesh tests concurrently with other operations.
-/// The returned handle can be used to wait for completion and get results.
-///
-/// If `is_docker` is true, also runs the media server test.
-pub async fn start_mesh_tests_async(
-    ctx: &InfraContext,
-    is_docker: bool,
-) -> Result<tokio::task::JoinHandle<Result<(), String>>, String> {
-    let kubeconfig = ctx.require_workload()?.to_string();
-
-    let handle = tokio::spawn(async move {
-        info!("[Integration/Mesh] Running service mesh tests in background...");
-
-        // Run all mesh tests in parallel (including media server for Docker)
-        if is_docker {
-            let (r1, r2, r3) = tokio::join!(
-                run_mesh_test(&kubeconfig),
-                run_random_mesh_test(&kubeconfig),
-                super::super::media_server_e2e::run_media_server_test(&kubeconfig)
-            );
-            r1?;
-            r2?;
-            r3?;
-        } else {
-            let (r1, r2) = tokio::join!(
-                run_mesh_test(&kubeconfig),
-                run_random_mesh_test(&kubeconfig)
-            );
-            r1?;
-            r2?;
-        }
-
-        info!("[Integration/Mesh] All background mesh tests complete!");
-        Ok(())
-    });
-
-    Ok(handle)
-}
-
-/// Start mesh test and return handle for later verification
-///
-/// This starts traffic generators but doesn't wait for completion.
-/// Call `stop_and_verify()` on the returned handle when ready to verify results.
-pub async fn start_mesh_test_with_handle(
-    ctx: &InfraContext,
-) -> Result<super::super::mesh_tests::MeshTestHandle, String> {
-    let kubeconfig = ctx.require_workload()?;
-    info!("[Integration/Mesh] Starting mesh test (will verify later)...");
-    start_mesh_test(kubeconfig).await
 }
 
 /// Check if mesh tests should be enabled based on environment

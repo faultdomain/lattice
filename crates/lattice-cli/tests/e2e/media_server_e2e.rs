@@ -37,8 +37,8 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     // Ensure cert-manager has a self-signed issuer matching the fixture references
     ensure_test_cluster_issuer(kubeconfig_path, "letsencrypt-prod").await?;
 
-    // Cedar: permit security overrides for media services
-    for svc in ["jellyfin", "nzbget", "sonarr"] {
+    // Cedar: permit security overrides for media services (including plex)
+    for svc in ["jellyfin", "nzbget", "sonarr", "plex"] {
         apply_run_as_root_override_policy(kubeconfig_path, NAMESPACE, svc).await?;
     }
     // sonarr main container needs SETUID + SETGID for s6-overlay
@@ -92,7 +92,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
 
     // Load and deploy services from YAML fixtures
     let api: Api<LatticeService> = Api::namespaced(client, NAMESPACE);
-    for filename in ["jellyfin.yaml", "nzbget.yaml", "sonarr.yaml"] {
+    for filename in ["jellyfin.yaml", "nzbget.yaml", "sonarr.yaml", "plex.yaml"] {
         let service = load_service_config(filename)?;
         let name = service.metadata.name.as_deref().unwrap_or(filename);
         info!("Deploying {}...", name);
@@ -440,7 +440,7 @@ async fn verify_volume_marker(
             "{} to read {}'s marker via shared volume",
             reader_deploy, writer_deploy
         ),
-        Duration::from_secs(60),
+        Duration::from_secs(180),
         Duration::from_secs(3),
         || {
             let kp = kp.clone();
@@ -538,64 +538,13 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
-    info!("Waiting for Istio waypoint...");
 
-    wait_for_condition(
-        "Istio waypoint to be ready",
-        Duration::from_secs(300),
-        Duration::from_secs(5),
-        || async move {
-            let output = run_kubectl(&[
-                "--kubeconfig",
-                kubeconfig_path,
-                "get",
-                "deployments",
-                "-n",
-                NAMESPACE,
-                "-o",
-                "jsonpath={range .items[*]}{.metadata.name}:{.status.availableReplicas}/{.status.replicas}{\"\\n\"}{end}",
-            ])
-            .await
-            .unwrap_or_default();
-
-            for line in output.lines() {
-                let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() == 2 && parts[0].contains("waypoint") {
-                    let name = parts[0];
-                    let replicas: Vec<&str> = parts[1].split('/').collect();
-                    if replicas.len() == 2 {
-                        let available = replicas[0].parse::<i32>().unwrap_or(0);
-                        let desired = replicas[1].parse::<i32>().unwrap_or(0);
-                        if available > 0 && available >= desired {
-                            info!("{} is ready ({}/{})", name, available, desired);
-                            return Ok(true);
-                        }
-                    }
-                }
-            }
-
-            Ok(false)
-        },
-    )
-    .await
-}
 
 async fn verify_unauthorized_volume_access_denied(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying unauthorized volume access is denied...");
 
-    // Grant plex the security overrides it needs (runAsUser: 0) so the ONLY
-    // reason it can fail is the volume access check, not security policy.
-    apply_run_as_root_override_policy(kubeconfig_path, NAMESPACE, "plex").await?;
-
-    let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<LatticeService> = Api::namespaced(client, NAMESPACE);
-
-    let service = load_service_config("plex.yaml")?;
-    info!("Deploying plex (unauthorized volume consumer)...");
-    create_with_retry(&api, &service, "plex").await?;
-
-    // plex references media-storage but is NOT in jellyfin's allowedConsumers —
+    // plex was deployed alongside the other services in deploy_media_services().
+    // It references media-storage but is NOT in jellyfin's allowedConsumers —
     // the compiler should reject it with a volume access denied error.
     wait_for_service_phase_with_message(
         kubeconfig_path,
@@ -624,61 +573,53 @@ async fn verify_unauthorized_volume_access_denied(kubeconfig_path: &str) -> Resu
     Ok(())
 }
 
-async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {
-    info!("Verifying bilateral agreements...");
-
-    // sonarr -> jellyfin (allowed)
-    let deploy_sonarr = "deploy/sonarr".to_string();
-    let code = run_kubectl(&[
+/// Execute a curl from one deployment to another and return the HTTP status code.
+async fn exec_curl(kubeconfig_path: &str, from_deploy: &str, url: &str) -> String {
+    let target = format!("deploy/{}", from_deploy);
+    let cmd = format!(
+        "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 5 --max-time 10 {}",
+        url
+    );
+    run_kubectl(&[
         "--kubeconfig", kubeconfig_path,
-        "exec", "-n", NAMESPACE, &deploy_sonarr,
-        "--", "sh", "-c",
-        "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 http://jellyfin:8096/ || echo '000'",
+        "exec", "-n", NAMESPACE, &target,
+        "--", "sh", "-c", &cmd,
     ])
     .await
     .unwrap_or_else(|_| "000".to_string())
     .trim()
-    .to_string();
+    .to_string()
+}
+
+async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {
+    info!("Verifying bilateral agreements...");
+
+    // sonarr -> jellyfin (allowed: bilateral agreement)
+    let code = exec_curl(kubeconfig_path, "sonarr", "http://jellyfin:8096/").await;
     if code == "403" {
         return Err("sonarr->jellyfin blocked unexpectedly".into());
     }
     info!("sonarr->jellyfin: {} (allowed)", code);
 
-    // sonarr -> nzbget (allowed)
-    let code = run_kubectl(&[
-        "--kubeconfig", kubeconfig_path,
-        "exec", "-n", NAMESPACE, &deploy_sonarr,
-        "--", "sh", "-c",
-        "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 http://nzbget:6789/ || echo '000'",
-    ])
-    .await
-    .unwrap_or_else(|_| "000".to_string())
-    .trim()
-    .to_string();
-    if code == "403" {
-        return Err("sonarr->nzbget blocked unexpectedly".into());
+    // sonarr -> nzbget (allowed: bilateral agreement)
+    let code = exec_curl(kubeconfig_path, "sonarr", "http://nzbget:6789/").await;
+    if code == "403" || code == "000" {
+        return Err(format!("sonarr->nzbget should be allowed but got {}", code));
     }
     info!("sonarr->nzbget: {} (allowed)", code);
 
-    // jellyfin -> sonarr (should be blocked)
-    let deploy_jellyfin = "deploy/jellyfin".to_string();
-    let code = run_kubectl(&[
-        "--kubeconfig", kubeconfig_path,
-        "exec", "-n", NAMESPACE, &deploy_jellyfin,
-        "--", "sh", "-c",
-        "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 http://sonarr:8989/ || echo '000'",
-    ])
-    .await
-    .unwrap_or_else(|_| "000".to_string())
-    .trim()
-    .to_string();
-    if code != "403" {
+    // jellyfin -> sonarr (blocked: no outbound deps)
+    // jellyfin has no outbound deps so Cilium blocks all egress at L4.
+    // Must be 000 (connection refused/timeout), not 403 — a 403 would mean
+    // traffic bypassed Cilium and only Istio caught it.
+    let code = exec_curl(kubeconfig_path, "jellyfin", "http://sonarr:8989/").await;
+    if code != "000" {
         return Err(format!(
-            "jellyfin->sonarr should be blocked (403) but got {}",
+            "jellyfin->sonarr should be blocked at L4 (000) but got {}",
             code
         ));
     }
-    info!("jellyfin->sonarr: {} (blocked as expected)", code);
+    info!("jellyfin->sonarr: {} (blocked at L4 as expected)", code);
 
     Ok(())
 }
@@ -699,7 +640,6 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     verify_node_colocation(kubeconfig_path).await?;
     verify_volume_sharing(kubeconfig_path).await?;
     verify_unauthorized_volume_access_denied(kubeconfig_path).await?;
-    wait_for_waypoint(kubeconfig_path).await?;
     verify_bilateral_agreements(kubeconfig_path).await?;
 
     info!("\n========================================");

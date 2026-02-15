@@ -6,7 +6,7 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kube::api::Api;
 use tokio::time::sleep;
@@ -18,8 +18,15 @@ use super::helpers::{
     client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
     run_kubectl, setup_regcreds_infrastructure,
 };
-use super::mesh_fixtures::*;
-use super::mesh_helpers::*;
+use super::mesh_fixtures::{
+    create_api_gateway, create_api_orders, create_api_users, create_cache, create_db_orders,
+    create_db_users, create_frontend_admin, create_frontend_mobile, create_frontend_web,
+    create_public_api, TEST_SERVICES_NAMESPACE, TOTAL_SERVICES,
+};
+use super::mesh_helpers::{
+    check_no_incorrectly_allowed, parse_traffic_result, retry_verification, wait_for_cycles,
+    wait_for_pods_running, wait_for_services_ready,
+};
 
 // =============================================================================
 // Expected Results (Fixed Mesh)
@@ -273,43 +280,21 @@ pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, St
 /// Run the fixed 10-service mesh test end-to-end.
 ///
 /// After deploying and waiting for pods, polls verification every 15s until
-/// it passes or 5 minutes elapse. This avoids waiting for full cycle counts
-/// on each attempt and lets policy propagation settle naturally.
+/// it passes or 5 minutes elapse. This handles slow policy propagation gracefully.
 pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let _handle = start_mesh_test(kubeconfig_path).await?;
 
-    let timeout = Duration::from_secs(300);
-    let start = Instant::now();
-    let mut attempt = 0;
-    let mut last_err;
+    let kc = kubeconfig_path.to_string();
+    let result = retry_verification("Fixed Mesh", || verify_traffic_patterns(&kc)).await;
 
-    loop {
-        attempt += 1;
+    if result.is_ok() {
+        delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
+    } else {
         info!(
-            "[Fixed Mesh] Verification attempt {} (elapsed: {:.0}s)",
-            attempt,
-            start.elapsed().as_secs_f64()
+            "[Fixed Mesh] Leaving namespace {} for debugging (test failed)",
+            TEST_SERVICES_NAMESPACE
         );
-
-        match verify_traffic_patterns(kubeconfig_path).await {
-            Ok(()) => {
-                delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
-                return Ok(());
-            }
-            Err(e) => {
-                last_err = e;
-                if start.elapsed() >= timeout {
-                    break;
-                }
-                info!("[Fixed Mesh] Verification failed, retrying in 15s...");
-                sleep(Duration::from_secs(15)).await;
-            }
-        }
     }
 
-    info!(
-        "[Mesh] Leaving namespace {} for debugging (test failed after {} attempts)",
-        TEST_SERVICES_NAMESPACE, attempt
-    );
-    Err(last_err)
+    result
 }

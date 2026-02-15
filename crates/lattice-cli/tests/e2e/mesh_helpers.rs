@@ -5,8 +5,10 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::time::Duration;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
+use tokio::time::sleep;
 use tracing::{info, warn};
 
 use super::helpers::{run_kubectl, wait_for_condition};
@@ -491,6 +493,50 @@ pub async fn wait_for_services_ready(
 // =============================================================================
 // Verification
 // =============================================================================
+
+/// Retry a verification function every 15s for up to 5 minutes.
+///
+/// Used by both fixed and random mesh tests to handle slow policy propagation.
+pub async fn retry_verification<F, Fut>(label: &str, verify: F) -> Result<(), String>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let timeout = Duration::from_secs(300);
+    let start = Instant::now();
+    let mut attempt = 0u32;
+    let mut last_err;
+
+    loop {
+        attempt += 1;
+        info!(
+            "[{}] Verification attempt {} (elapsed: {:.0}s)",
+            label,
+            attempt,
+            start.elapsed().as_secs_f64()
+        );
+
+        match verify().await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e;
+                if start.elapsed() >= timeout {
+                    break;
+                }
+                info!("[{}] Verification failed, retrying in 15s...", label);
+                sleep(Duration::from_secs(15)).await;
+            }
+        }
+    }
+
+    Err(format!(
+        "[{}] Timed out after {} attempts ({:.0}s): {}",
+        label,
+        attempt,
+        start.elapsed().as_secs_f64(),
+        last_err
+    ))
+}
 
 /// Check that no traffic was incorrectly allowed (security violation check).
 pub async fn check_no_incorrectly_allowed(

@@ -1,5 +1,17 @@
 # Lattice Operator - CLAUDE.md
 
+## Debugging: Mesh/Network Issues
+
+**Always check ztunnel logs first** when debugging mesh connectivity or policy issues:
+
+```bash
+kubectl logs -n istio-system -l app=ztunnel --tail=100 | grep -i "denied\|RBAC\|allow"
+```
+
+Ztunnel logs show the exact RBAC decision (allowed/denied), the source/destination SPIFFE identities, and the policy that matched. This is faster and more reliable than guessing from application-level errors.
+
+---
+
 ## Project Overview
 
 Lattice is a Kubernetes operator for multi-cluster lifecycle management. It provisions clusters via CAPI and makes them **fully self-managing** through a pivoting architecture. After pivot, each cluster owns its CAPI resources and operates independently.

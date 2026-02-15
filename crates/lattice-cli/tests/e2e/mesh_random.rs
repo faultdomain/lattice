@@ -29,8 +29,8 @@ use super::mesh_fixtures::{
     nginx_container, outbound_dep,
 };
 use super::mesh_helpers::{
-    generate_test_script, parse_traffic_result, wait_for_pods_running, wait_for_services_ready,
-    TestTarget,
+    generate_test_script, parse_traffic_result, retry_verification, wait_for_pods_running,
+    wait_for_services_ready, TestTarget,
 };
 
 // =============================================================================
@@ -111,14 +111,6 @@ pub struct RandomMesh {
 }
 
 impl RandomMesh {
-    pub fn traffic_generator_names(&self) -> Vec<String> {
-        self.services
-            .values()
-            .filter(|s| s.is_traffic_generator)
-            .map(|s| s.name.clone())
-            .collect()
-    }
-
     pub fn service_count(&self) -> usize {
         self.services.len()
     }
@@ -740,22 +732,11 @@ async fn verify_random_mesh_traffic(
 // Public API
 // =============================================================================
 
-/// Handle for a running random mesh test that can be stopped on demand
-pub struct RandomMeshTestHandle {
-    kubeconfig_path: String,
-    mesh: RandomMesh,
-}
-
-impl RandomMeshTestHandle {
-    pub async fn stop_and_verify(self) -> Result<(), String> {
-        verify_random_mesh_traffic(&self.mesh, &self.kubeconfig_path).await
-    }
-}
-
-/// Start the randomized mesh test and return a handle.
+/// Run the randomized 10-20 service mesh test end-to-end.
 ///
-/// The test script handles policy propagation waiting internally via endpoint checks.
-pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshTestHandle, String> {
+/// Deploys a random mesh topology, waits for pods, then retries verification
+/// every 15s for up to 5 minutes to handle slow policy propagation.
+pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     info!("[Random Mesh] Starting randomized large-scale mesh test (10-20 services)...");
 
     let mesh = RandomMesh::generate(&RandomMeshConfig::default());
@@ -765,7 +746,6 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
     deploy_random_mesh(&mesh, kubeconfig_path).await?;
     wait_for_services_ready(kubeconfig_path, RANDOM_MESH_NAMESPACE, mesh.service_count()).await?;
 
-    // Pod count = local services + 1 waypoint (always present when external services exist)
     let expected_pods = mesh.service_count() + if mesh.has_external_services() { 1 } else { 0 };
     wait_for_pods_running(
         kubeconfig_path,
@@ -777,28 +757,10 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
     )
     .await?;
 
-    Ok(RandomMeshTestHandle {
-        kubeconfig_path: kubeconfig_path.to_string(),
-        mesh,
-    })
-}
+    let kc = kubeconfig_path.to_string();
+    let result =
+        retry_verification("Random Mesh", || verify_random_mesh_traffic(&mesh, &kc)).await;
 
-/// Run the randomized 10-20 service mesh test end-to-end.
-pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
-    let handle = start_random_mesh_test(kubeconfig_path).await?;
-
-    let traffic_generators = handle.mesh.traffic_generator_names();
-    let names: Vec<&str> = traffic_generators.iter().map(|s| s.as_str()).collect();
-    super::mesh_helpers::wait_for_cycles(
-        kubeconfig_path,
-        RANDOM_MESH_NAMESPACE,
-        &names,
-        2,
-        "Random Mesh",
-    )
-    .await?;
-
-    let result = handle.stop_and_verify().await;
     if result.is_ok() {
         delete_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE).await;
     } else {
@@ -807,5 +769,6 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
             RANDOM_MESH_NAMESPACE
         );
     }
+
     result
 }

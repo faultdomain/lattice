@@ -56,11 +56,6 @@ spec:
       media-storage:
         type: volume
         id: media-storage
-      # Wireguard config volume
-      wg-config:
-        type: volume
-        params:
-          size: 100Mi
       # Service dependencies (bilateral agreement)
       sonarr:
         type: service
@@ -72,9 +67,21 @@ spec:
       variables:
         PUID: "1000"
         PGID: "1000"
+      files:
+        # Wireguard config that preserves ztunnel HBONE (port 15008).
+        # Without these PostUp rules, wireguard replaces the pod routing
+        # table and breaks mesh connectivity.
+        /config/wg_confs/wg0.conf:
+          content: |
+            [Interface]
+            # No tunnel — test fixture only. In production, add PrivateKey + Address.
+            PostUp = ORIG_GW=$(ip route | grep default | head -1 | awk '{print $3}'); \
+                     ORIG_IF=$(ip route | grep default | head -1 | awk '{print $5}'); \
+                     ip rule add fwmark 0x2 table 200; \
+                     ip route add default via $ORIG_GW dev $ORIG_IF table 200; \
+                     iptables -t mangle -A INPUT -p tcp --dport 15008 -j MARK --set-mark 0x2; \
+                     iptables -t mangle -A OUTPUT -p tcp --sport 15008 -j MARK --set-mark 0x2
       volumes:
-        /config:
-          source: ${resources.wg-config}
         /tmp: {}
         /run: {}
       security:

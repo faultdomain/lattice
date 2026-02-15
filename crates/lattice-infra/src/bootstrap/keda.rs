@@ -14,6 +14,10 @@ pub const KEDA_NAMESPACE: &str = "keda";
 /// Used to construct SPIFFE identity for AuthorizationPolicy.
 pub const KEDA_SERVICE_ACCOUNT: &str = "keda-operator";
 
+/// KEDA metrics server service account name.
+/// The metrics-apiserver calls keda-operator on port 9666 (gRPC) to fetch metrics.
+pub const KEDA_METRICS_SERVICE_ACCOUNT: &str = "keda-operator-metrics-apiserver";
+
 static KEDA_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = vec![namespace_yaml_ambient(KEDA_NAMESPACE)];
     manifests.extend(split_yaml_documents(include_str!(concat!(
