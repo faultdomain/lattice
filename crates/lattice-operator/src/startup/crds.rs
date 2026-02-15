@@ -10,7 +10,8 @@ use kube::{Client, CustomResourceExt};
 
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
-    LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider, SecretProvider,
+    LatticeMeshMember, LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider,
+    SecretProvider,
 };
 
 /// CRD definition with name and resource
@@ -74,6 +75,10 @@ fn service_crds() -> Vec<CrdDef> {
         CrdDef {
             name: "cedarpolicies.lattice.dev",
             crd: CedarPolicy::crd(),
+        },
+        CrdDef {
+            name: "latticemeshmembers.lattice.dev",
+            crd: LatticeMeshMember::crd(),
         },
     ]
 }

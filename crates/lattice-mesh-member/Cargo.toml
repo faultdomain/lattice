@@ -14,10 +14,14 @@ lattice-common = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }
+k8s-openapi = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Async
+tokio = { workspace = true }
 
 # Logging
 tracing = { workspace = true }

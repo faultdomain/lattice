@@ -23,7 +23,7 @@ use tracing::{debug, error, info, instrument, warn};
 use mockall::automock;
 
 use kube::discovery::ApiResource;
-use lattice_common::kube_utils::HasApiResource;
+use lattice_common::kube_utils::{find_discovered_resource, HasApiResource};
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::events::{actions, reasons, EventPublisher};
@@ -77,45 +77,19 @@ impl DiscoveredCrds {
         };
 
         Self {
-            external_secret: Self::find_resource(
+            external_secret: find_discovered_resource(
                 &discovery,
                 "external-secrets.io",
                 "ExternalSecret",
             ),
-            scaled_object: Self::find_resource(&discovery, "keda.sh", "ScaledObject"),
-            vm_service_scrape: Self::find_resource(
+            scaled_object: find_discovered_resource(&discovery, "keda.sh", "ScaledObject"),
+            vm_service_scrape: find_discovered_resource(
                 &discovery,
                 "operator.victoriametrics.com",
                 "VMServiceScrape",
             ),
-            mesh_member: Self::find_resource(&discovery, "lattice.dev", "LatticeMeshMember"),
+            mesh_member: find_discovered_resource(&discovery, "lattice.dev", "LatticeMeshMember"),
         }
-    }
-
-    /// Look up a single resource in the discovery results.
-    fn find_resource(
-        discovery: &kube::discovery::Discovery,
-        group: &str,
-        kind: &str,
-    ) -> Option<ApiResource> {
-        for api_group in discovery.groups() {
-            if api_group.name() != group {
-                continue;
-            }
-            for (ar, _caps) in api_group.resources_by_stability() {
-                if ar.kind == kind {
-                    info!(
-                        group = %group,
-                        kind = %kind,
-                        api_version = %ar.api_version,
-                        "discovered CRD version"
-                    );
-                    return Some(ar);
-                }
-            }
-        }
-        warn!(group = %group, kind = %kind, "CRD not found in API discovery");
-        None
     }
 
     /// Fall back to hardcoded `HasApiResource` defaults.
@@ -426,8 +400,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }
         }
 
-        // Ingress — Gateway uses per-service field manager for SSA listener merging.
-        // Each service owns its own listeners via a unique field manager, so SSA
         // Extension resources — infrastructure layer
         for ext in &compiled.extensions {
             if ext.layer == ApplyLayer::Infrastructure {

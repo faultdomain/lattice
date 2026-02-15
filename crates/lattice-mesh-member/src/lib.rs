@@ -11,4 +11,6 @@
 //! based on bilateral agreements. The MeshMember controller watches `LatticeMeshMember` CRDs
 //! and applies the generated policies.
 
+pub mod controller;
+pub mod ingress;
 pub mod policy;

@@ -573,11 +573,7 @@ async fn verify_unauthorized_volume_access_denied(kubeconfig_path: &str) -> Resu
 }
 
 /// Execute a curl from one deployment to another and return the HTTP status code.
-async fn exec_curl(
-    kubeconfig_path: &str,
-    from_deploy: &str,
-    url: &str,
-) -> String {
+async fn exec_curl(kubeconfig_path: &str, from_deploy: &str, url: &str) -> String {
     let target = format!("deploy/{}", from_deploy);
     let cmd = format!(
         "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 5 --max-time 10 {} || echo '000'",
@@ -618,7 +614,10 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     // sonarr -> jellyfin (allowed: bilateral agreement)
     let code = exec_curl(kubeconfig_path, "sonarr", "http://jellyfin:8096/").await;
     if !is_allowed_code(&code) {
-        return Err(format!("sonarr->jellyfin should be allowed but got {}", code));
+        return Err(format!(
+            "sonarr->jellyfin should be allowed but got {}",
+            code
+        ));
     }
     info!("sonarr->jellyfin: {} (allowed)", code);
 

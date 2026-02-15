@@ -25,10 +25,11 @@ use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
-    LatticeRestore, LatticeService, LatticeServicePolicy, MonitoringConfig, OIDCProvider,
-    ProviderType, SecretProvider,
+    LatticeMeshMember, LatticeRestore, LatticeService, LatticeServicePolicy, MonitoringConfig,
+    OIDCProvider, ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, LATTICE_SYSTEM_NAMESPACE};
+use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{
@@ -105,9 +106,11 @@ pub async fn build_service_controllers(
     let graph_for_dep_watch = service_ctx.graph.clone();
     let graph_for_cedar_watch = service_ctx.graph.clone();
     let graph_for_policy_watch = service_ctx.graph.clone();
+    let graph_for_mm_watch = service_ctx.graph.clone();
     let cedar_policies: Api<CedarPolicy> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let service_policies: Api<LatticeServicePolicy> = Api::all(client.clone());
+    let mesh_members_for_svc: Api<LatticeMeshMember> = Api::all(client.clone());
 
     let svc_ctrl = Controller::new(services, watcher_config())
         .watches(services_for_watch, watcher_config(), move |service| {
@@ -170,6 +173,33 @@ pub async fn build_service_controllers(
             );
             refs
         })
+        .watches(mesh_members_for_svc, watcher_config(), move |member| {
+            let graph = graph_for_mm_watch.clone();
+            let namespace = match member.metadata.namespace.as_deref() {
+                Some(ns) => ns,
+                None => return vec![],
+            };
+            let name = member.metadata.name.as_deref().unwrap_or_default();
+
+            // MeshMember changes can affect bilateral agreements with services
+            let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
+            affected.extend(graph.get_dependents(namespace, name));
+            affected.sort();
+            affected.dedup();
+
+            tracing::debug!(
+                mesh_member = %name,
+                namespace = %namespace,
+                affected_count = affected.len(),
+                "MeshMember changed, re-reconciling affected services"
+            );
+
+            let ns = namespace.to_string();
+            affected
+                .into_iter()
+                .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
+                .collect()
+        })
         .shutdown_on_signal()
         .run(service_reconcile, service_error_policy, service_ctx.clone())
         .for_each(log_reconcile_result("Service"));
@@ -179,7 +209,11 @@ pub async fn build_service_controllers(
         watcher_config(),
     )
     .shutdown_on_signal()
-    .run(reconcile_external, service_error_policy, service_ctx)
+    .run(
+        reconcile_external,
+        service_error_policy,
+        service_ctx.clone(),
+    )
     .for_each(log_reconcile_result("ExternalService"));
 
     let policy_ctx = Arc::new(ControllerContext::new(client.clone()));
@@ -195,14 +229,36 @@ pub async fn build_service_controllers(
     )
     .for_each(log_reconcile_result("ServicePolicy"));
 
+    // ── MeshMember controller ──
+    let mm_crds = Arc::new(mesh_member_ctrl::MeshMemberDiscoveredCrds::discover(&client).await);
+    let mm_ctx = Arc::new(mesh_member_ctrl::MeshMemberContext {
+        client: client.clone(),
+        graph: service_ctx.graph.clone(),
+        cluster_name: service_ctx.cluster_name.clone(),
+        crds: mm_crds,
+    });
+
+    let mesh_members: Api<LatticeMeshMember> = Api::all(client.clone());
+
+    let mm_ctrl = Controller::new(mesh_members, watcher_config())
+        .shutdown_on_signal()
+        .run(
+            mesh_member_ctrl::reconcile,
+            mesh_member_ctrl::error_policy,
+            mm_ctx,
+        )
+        .for_each(log_reconcile_result("MeshMember"));
+
     tracing::info!("- LatticeService controller");
     tracing::info!("- LatticeExternalService controller");
     tracing::info!("- LatticeServicePolicy controller");
+    tracing::info!("- LatticeMeshMember controller");
 
     vec![
         Box::pin(svc_ctrl),
         Box::pin(ext_ctrl),
         Box::pin(policy_ctrl),
+        Box::pin(mm_ctrl),
     ]
 }
 
@@ -363,6 +419,13 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
 
     warmup_list::<LatticeServicePolicy>(client, "LatticeServicePolicies", |item| {
         graph.put_policy(item.into());
+    })
+    .await;
+
+    warmup_list::<LatticeMeshMember>(client, "LatticeMeshMembers", |item| {
+        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
+        let name = item.metadata.name.as_deref().unwrap_or_default();
+        graph.put_mesh_member(ns, name, &item.spec);
     })
     .await;
 }

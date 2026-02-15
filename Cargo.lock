@@ -2499,10 +2499,12 @@ dependencies = [
 name = "lattice-mesh-member"
 version = "0.1.0"
 dependencies = [
+ "k8s-openapi",
  "kube",
  "lattice-common",
  "serde",
  "serde_json",
+ "tokio",
  "tokio-test",
  "tracing",
 ]
@@ -2561,6 +2563,7 @@ dependencies = [
  "lattice-cluster",
  "lattice-common",
  "lattice-infra",
+ "lattice-mesh-member",
  "lattice-proto",
  "lattice-secret-provider",
  "lattice-service",

@@ -1,0 +1,609 @@
+//! MeshMember controller — watches `LatticeMeshMember` CRDs and applies mesh policies
+//!
+//! Generates and applies:
+//! - CiliumNetworkPolicy (L4 eBPF)
+//! - AuthorizationPolicy (L7 Istio)
+//! - PeerAuthentication (per-port mTLS mode)
+//! - ServiceEntry (external service registration)
+//! - Gateway + Routes (ingress, if configured)
+//! - Waypoint Gateway + AuthorizationPolicy (if external deps exist)
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use kube::api::{Api, DynamicObject, Patch, PatchParams};
+use kube::discovery::ApiResource;
+use kube::runtime::controller::Action;
+use kube::{Client, ResourceExt};
+use tracing::{debug, error, info, instrument, warn};
+
+use lattice_common::crd::{
+    Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberStatus, MeshMemberPhase,
+    MeshMemberScope, MeshMemberTarget,
+};
+use lattice_common::graph::ServiceGraph;
+use lattice_common::kube_utils::{find_discovered_resource, HasApiResource};
+use lattice_common::mesh;
+use lattice_common::ReconcileError;
+
+use crate::ingress::{IngressCompiler, WaypointCompiler};
+use crate::policy::PolicyCompiler;
+
+// =============================================================================
+// Controller context
+// =============================================================================
+
+/// Shared context for the MeshMember controller
+pub struct MeshMemberContext {
+    pub client: Client,
+    pub graph: Arc<ServiceGraph>,
+    pub cluster_name: String,
+    pub crds: Arc<MeshMemberDiscoveredCrds>,
+}
+
+/// Discovered CRD API versions for third-party resources applied by this controller.
+///
+/// Populated at startup via API discovery. Missing CRDs result in `None`
+/// and resources of that type are skipped with a warning.
+pub struct MeshMemberDiscoveredCrds {
+    pub cilium_network_policy: Option<ApiResource>,
+    pub authorization_policy: Option<ApiResource>,
+    pub service_entry: Option<ApiResource>,
+    pub peer_authentication: Option<ApiResource>,
+    pub gateway: Option<ApiResource>,
+    pub http_route: Option<ApiResource>,
+    pub grpc_route: Option<ApiResource>,
+    pub tcp_route: Option<ApiResource>,
+    pub certificate: Option<ApiResource>,
+}
+
+impl MeshMemberDiscoveredCrds {
+    /// Discover installed CRD versions from the API server.
+    pub async fn discover(client: &Client) -> Self {
+        use kube::discovery::Discovery;
+
+        let discovery = match Discovery::new(client.clone()).run().await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(error = %e, "API discovery failed, falling back to hardcoded CRD versions");
+                return Self::hardcoded_defaults();
+            }
+        };
+
+        Self {
+            cilium_network_policy: find_discovered_resource(
+                &discovery,
+                "cilium.io",
+                "CiliumNetworkPolicy",
+            ),
+            authorization_policy: find_discovered_resource(
+                &discovery,
+                "security.istio.io",
+                "AuthorizationPolicy",
+            ),
+            service_entry: find_discovered_resource(
+                &discovery,
+                "networking.istio.io",
+                "ServiceEntry",
+            ),
+            peer_authentication: find_discovered_resource(
+                &discovery,
+                "security.istio.io",
+                "PeerAuthentication",
+            ),
+            gateway: find_discovered_resource(&discovery, "gateway.networking.k8s.io", "Gateway"),
+            http_route: find_discovered_resource(
+                &discovery,
+                "gateway.networking.k8s.io",
+                "HTTPRoute",
+            ),
+            grpc_route: find_discovered_resource(
+                &discovery,
+                "gateway.networking.k8s.io",
+                "GRPCRoute",
+            ),
+            tcp_route: find_discovered_resource(
+                &discovery,
+                "gateway.networking.k8s.io",
+                "TCPRoute",
+            ),
+            certificate: find_discovered_resource(&discovery, "cert-manager.io", "Certificate"),
+        }
+    }
+
+    /// Fall back to hardcoded defaults (used when discovery fails, and in tests).
+    pub fn hardcoded_defaults() -> Self {
+        use lattice_common::kube_utils::build_api_resource;
+        use lattice_common::network::gateway_api::Gateway as GwApiGateway;
+        use lattice_common::network::gateway_api::{Certificate, GrpcRoute, HttpRoute, TcpRoute};
+        use lattice_common::policy::cilium::CiliumNetworkPolicy;
+        use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
+        use lattice_common::policy::service_entry::ServiceEntry;
+
+        Self {
+            cilium_network_policy: Some(CiliumNetworkPolicy::api_resource()),
+            authorization_policy: Some(AuthorizationPolicy::api_resource()),
+            service_entry: Some(ServiceEntry::api_resource()),
+            peer_authentication: Some(PeerAuthentication::api_resource()),
+            gateway: Some(GwApiGateway::api_resource()),
+            http_route: Some(HttpRoute::api_resource()),
+            grpc_route: Some(GrpcRoute::api_resource()),
+            tcp_route: Some(build_api_resource(TcpRoute::API_VERSION, TcpRoute::KIND)),
+            certificate: Some(build_api_resource(
+                Certificate::API_VERSION,
+                Certificate::KIND,
+            )),
+        }
+    }
+}
+
+// =============================================================================
+// Field manager
+// =============================================================================
+
+const FIELD_MANAGER: &str = "lattice-mesh-member-controller";
+
+// =============================================================================
+// Reconciliation
+// =============================================================================
+
+/// Reconcile a LatticeMeshMember resource
+#[instrument(skip(member, ctx), fields(mesh_member = %member.name_any()))]
+pub async fn reconcile(
+    member: Arc<LatticeMeshMember>,
+    ctx: Arc<MeshMemberContext>,
+) -> Result<Action, ReconcileError> {
+    let name = member.name_any();
+    let namespace =
+        member.metadata.namespace.as_deref().ok_or_else(|| {
+            ReconcileError::Validation("LatticeMeshMember missing namespace".into())
+        })?;
+
+    info!("reconciling mesh member");
+
+    // Validate spec
+    if let Err(e) = member.spec.validate() {
+        warn!(error = %e, "mesh member validation failed");
+        patch_status(
+            &ctx.client,
+            &name,
+            namespace,
+            status_failed(&e, member.metadata.generation),
+        )
+        .await?;
+        return Ok(Action::await_change());
+    }
+
+    // Update graph (idempotent — crash recovery)
+    ctx.graph.put_mesh_member(namespace, &name, &member.spec);
+
+    // Ensure namespace has ambient mode label
+    ensure_namespace_ambient(&ctx.client, namespace).await?;
+
+    // Compile policies
+    let permissive_port_numbers: Vec<u16> = member
+        .spec
+        .permissive_ports()
+        .iter()
+        .map(|p| p.port)
+        .collect();
+
+    let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name).compile(
+        &name,
+        namespace,
+        &permissive_port_numbers,
+    );
+
+    // Compile ingress (if configured)
+    let ingress = member
+        .spec
+        .ingress
+        .as_ref()
+        .map(|ingress_spec| IngressCompiler::compile(&name, namespace, ingress_spec, None));
+
+    // Compile waypoint (if service has external dependencies)
+    let outbound_edges = ctx.graph.get_active_outbound_edges(namespace, &name);
+    let has_external_deps = outbound_edges.iter().any(|edge| {
+        ctx.graph
+            .get_service(&edge.callee_namespace, &edge.callee_name)
+            .map(|s| s.type_ == lattice_common::graph::ServiceType::External)
+            .unwrap_or(false)
+    });
+    let waypoint = if has_external_deps {
+        Some(WaypointCompiler::compile(namespace))
+    } else {
+        None
+    };
+
+    // Apply all resources
+    let params = PatchParams::apply(FIELD_MANAGER).force();
+
+    apply_policies(&ctx.client, &ctx.crds, namespace, &params, &policies).await?;
+
+    if let Some(ref ingress_resources) = ingress {
+        apply_ingress(
+            &ctx.client,
+            &ctx.crds,
+            namespace,
+            &params,
+            ingress_resources,
+        )
+        .await?;
+    }
+
+    if let Some(ref waypoint_resources) = waypoint {
+        apply_waypoint(
+            &ctx.client,
+            &ctx.crds,
+            namespace,
+            &params,
+            waypoint_resources,
+        )
+        .await?;
+    }
+
+    let total = policies.total_count()
+        + ingress.as_ref().map_or(0, |i| i.total_count())
+        + waypoint.as_ref().map_or(0, |w| w.total_count());
+
+    info!(resources = total, "applied mesh member resources");
+
+    // Update status
+    let scope = match member.spec.target {
+        MeshMemberTarget::Selector(_) => MeshMemberScope::Workload,
+        MeshMemberTarget::Namespace(_) => MeshMemberScope::Namespace,
+    };
+    patch_status(
+        &ctx.client,
+        &name,
+        namespace,
+        status_ready(scope, member.metadata.generation),
+    )
+    .await?;
+
+    Ok(Action::requeue(Duration::from_secs(60)))
+}
+
+/// Handle mesh member deletion
+pub fn cleanup(member: &LatticeMeshMember, ctx: &MeshMemberContext) {
+    let name = member.name_any();
+    let namespace = match member.metadata.namespace.as_deref() {
+        Some(ns) => ns,
+        None => {
+            warn!(mesh_member = %name, "LatticeMeshMember missing namespace during cleanup");
+            return;
+        }
+    };
+
+    info!(mesh_member = %name, namespace = %namespace, "removing mesh member from graph");
+    ctx.graph.delete_service(namespace, &name);
+}
+
+/// Error policy — requeue after 30s for all errors
+pub fn error_policy(
+    member: Arc<LatticeMeshMember>,
+    error: &ReconcileError,
+    _ctx: Arc<MeshMemberContext>,
+) -> Action {
+    error!(
+        ?error,
+        mesh_member = %member.name_any(),
+        "mesh member reconciliation failed"
+    );
+    Action::requeue(Duration::from_secs(30))
+}
+
+// =============================================================================
+// Namespace ambient enrollment
+// =============================================================================
+
+/// Ensure namespace has `istio.io/dataplane-mode: ambient` label
+async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<(), ReconcileError> {
+    use k8s_openapi::api::core::v1::Namespace;
+
+    let api: Api<Namespace> = Api::all(client.clone());
+    let ns = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": namespace,
+            "labels": {
+                mesh::DATAPLANE_MODE_LABEL: mesh::DATAPLANE_MODE_AMBIENT
+            }
+        }
+    });
+
+    api.patch(
+        namespace,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Apply(&ns),
+    )
+    .await
+    .map_err(|e| ReconcileError::Kube(format!("ensure namespace ambient: {e}")))?;
+
+    debug!(namespace = %namespace, "ensured namespace ambient mode");
+    Ok(())
+}
+
+// =============================================================================
+// SSA apply helpers
+// =============================================================================
+
+/// Apply a single resource via server-side apply using DynamicObject
+async fn apply_resource(
+    client: &Client,
+    namespace: &str,
+    params: &PatchParams,
+    resource: &impl serde::Serialize,
+    ar: &ApiResource,
+    name: &str,
+    kind: &str,
+) -> Result<(), ReconcileError> {
+    let mut json = serde_json::to_value(resource)
+        .map_err(|e| ReconcileError::Internal(format!("serialize {kind}: {e}")))?;
+
+    // Override apiVersion from ApiResource to match what the server serves
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "apiVersion".to_string(),
+            serde_json::Value::String(ar.api_version.clone()),
+        );
+    }
+
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
+    api.patch(name, params, &Patch::Apply(&json))
+        .await
+        .map_err(|e| ReconcileError::Kube(format!("apply {kind} {name}: {e}")))?;
+
+    debug!(name = %name, kind = %kind, "applied resource");
+    Ok(())
+}
+
+/// Apply a resource if the CRD is discovered, warn if not
+async fn apply_if_discovered(
+    client: &Client,
+    namespace: &str,
+    params: &PatchParams,
+    resource: &impl serde::Serialize,
+    crd: Option<&ApiResource>,
+    name: &str,
+    kind: &str,
+) -> Result<(), ReconcileError> {
+    match crd {
+        Some(ar) => apply_resource(client, namespace, params, resource, ar, name, kind).await,
+        None => {
+            warn!(kind = %kind, name = %name, "CRD not installed, skipping");
+            Ok(())
+        }
+    }
+}
+
+/// Apply all compiled policies
+async fn apply_policies(
+    client: &Client,
+    crds: &MeshMemberDiscoveredCrds,
+    namespace: &str,
+    params: &PatchParams,
+    policies: &crate::policy::GeneratedPolicies,
+) -> Result<(), ReconcileError> {
+    for ap in &policies.authorization_policies {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            ap,
+            crds.authorization_policy.as_ref(),
+            &ap.metadata.name,
+            "AuthorizationPolicy",
+        )
+        .await?;
+    }
+
+    for cnp in &policies.cilium_policies {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            cnp,
+            crds.cilium_network_policy.as_ref(),
+            &cnp.metadata.name,
+            "CiliumNetworkPolicy",
+        )
+        .await?;
+    }
+
+    for se in &policies.service_entries {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            se,
+            crds.service_entry.as_ref(),
+            &se.metadata.name,
+            "ServiceEntry",
+        )
+        .await?;
+    }
+
+    for pa in &policies.peer_authentications {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            pa,
+            crds.peer_authentication.as_ref(),
+            &pa.metadata.name,
+            "PeerAuthentication",
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Apply compiled ingress resources
+async fn apply_ingress(
+    client: &Client,
+    crds: &MeshMemberDiscoveredCrds,
+    namespace: &str,
+    params: &PatchParams,
+    ingress: &crate::ingress::GeneratedIngress,
+) -> Result<(), ReconcileError> {
+    if let Some(ref gw) = ingress.gateway {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            gw,
+            crds.gateway.as_ref(),
+            &gw.metadata.name,
+            "Gateway",
+        )
+        .await?;
+    }
+
+    for route in &ingress.http_routes {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            route,
+            crds.http_route.as_ref(),
+            &route.metadata.name,
+            "HTTPRoute",
+        )
+        .await?;
+    }
+
+    for route in &ingress.grpc_routes {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            route,
+            crds.grpc_route.as_ref(),
+            &route.metadata.name,
+            "GRPCRoute",
+        )
+        .await?;
+    }
+
+    for route in &ingress.tcp_routes {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            route,
+            crds.tcp_route.as_ref(),
+            &route.metadata.name,
+            "TCPRoute",
+        )
+        .await?;
+    }
+
+    for cert in &ingress.certificates {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            cert,
+            crds.certificate.as_ref(),
+            &cert.metadata.name,
+            "Certificate",
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Apply compiled waypoint resources
+async fn apply_waypoint(
+    client: &Client,
+    crds: &MeshMemberDiscoveredCrds,
+    namespace: &str,
+    params: &PatchParams,
+    waypoint: &crate::ingress::GeneratedWaypoint,
+) -> Result<(), ReconcileError> {
+    if let Some(ref gw) = waypoint.gateway {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            gw,
+            crds.gateway.as_ref(),
+            &gw.metadata.name,
+            "Gateway",
+        )
+        .await?;
+    }
+
+    if let Some(ref policy) = waypoint.allow_to_waypoint_policy {
+        apply_if_discovered(
+            client,
+            namespace,
+            params,
+            policy,
+            crds.authorization_policy.as_ref(),
+            &policy.metadata.name,
+            "AuthorizationPolicy",
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Status helpers
+// =============================================================================
+
+fn status_ready(scope: MeshMemberScope, generation: Option<i64>) -> LatticeMeshMemberStatus {
+    LatticeMeshMemberStatus {
+        phase: MeshMemberPhase::Ready,
+        scope: Some(scope),
+        message: Some("Policies applied successfully".to_string()),
+        observed_generation: generation,
+        conditions: vec![Condition::new(
+            "Ready",
+            ConditionStatus::True,
+            "PoliciesApplied",
+            "Policies applied successfully",
+        )],
+    }
+}
+
+fn status_failed(message: &str, generation: Option<i64>) -> LatticeMeshMemberStatus {
+    LatticeMeshMemberStatus {
+        phase: MeshMemberPhase::Failed,
+        scope: None,
+        message: Some(message.to_string()),
+        observed_generation: generation,
+        conditions: vec![Condition::new(
+            "Ready",
+            ConditionStatus::False,
+            "ValidationFailed",
+            message,
+        )],
+    }
+}
+
+async fn patch_status(
+    client: &Client,
+    name: &str,
+    namespace: &str,
+    status: LatticeMeshMemberStatus,
+) -> Result<(), ReconcileError> {
+    let api: Api<LatticeMeshMember> = Api::namespaced(client.clone(), namespace);
+    let status_patch = serde_json::json!({ "status": status });
+
+    api.patch_status(
+        name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&status_patch),
+    )
+    .await
+    .map_err(|e| ReconcileError::Kube(format!("patch status: {e}")))?;
+
+    Ok(())
+}
