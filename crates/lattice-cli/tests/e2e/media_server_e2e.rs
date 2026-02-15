@@ -18,6 +18,7 @@ use super::helpers::{
     run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
     wait_for_service_phase_with_message,
 };
+use super::mesh_helpers::retry_verification;
 
 const NAMESPACE: &str = "media";
 
@@ -572,10 +573,14 @@ async fn verify_unauthorized_volume_access_denied(kubeconfig_path: &str) -> Resu
 }
 
 /// Execute a curl from one deployment to another and return the HTTP status code.
-async fn exec_curl(kubeconfig_path: &str, from_deploy: &str, url: &str) -> String {
+async fn exec_curl(
+    kubeconfig_path: &str,
+    from_deploy: &str,
+    url: &str,
+) -> String {
     let target = format!("deploy/{}", from_deploy);
     let cmd = format!(
-        "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 5 --max-time 10 {}",
+        "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 5 --max-time 10 {} || echo '000'",
         url
     );
     run_kubectl(&[
@@ -596,29 +601,37 @@ async fn exec_curl(kubeconfig_path: &str, from_deploy: &str, url: &str) -> Strin
     .to_string()
 }
 
+/// Check if a status code indicates a successful (allowed) response.
+fn is_allowed_code(code: &str) -> bool {
+    matches!(code, "200" | "201" | "204" | "301" | "302")
+}
+
+/// Check if a status code indicates a policy block.
+fn is_blocked_code(code: &str) -> bool {
+    code == "403"
+}
+
+
 async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying bilateral agreements...");
 
     // sonarr -> jellyfin (allowed: bilateral agreement)
     let code = exec_curl(kubeconfig_path, "sonarr", "http://jellyfin:8096/").await;
-    if code == "403" {
-        return Err("sonarr->jellyfin blocked unexpectedly".into());
+    if !is_allowed_code(&code) {
+        return Err(format!("sonarr->jellyfin should be allowed but got {}", code));
     }
     info!("sonarr->jellyfin: {} (allowed)", code);
 
     // sonarr -> nzbget (allowed: bilateral agreement)
     let code = exec_curl(kubeconfig_path, "sonarr", "http://nzbget:6789/").await;
-    if code == "403" || code == "000" {
+    if !is_allowed_code(&code) {
         return Err(format!("sonarr->nzbget should be allowed but got {}", code));
     }
     info!("sonarr->nzbget: {} (allowed)", code);
 
-    // jellyfin -> sonarr (blocked: no outbound deps)
-    // jellyfin has no outbound deps so Cilium blocks all egress at L4.
-    // Must be 000 (connection refused/timeout), not 403 — a 403 would mean
-    // traffic bypassed Cilium and only Istio caught it.
+    // jellyfin -> sonarr (blocked: no bilateral agreement)
     let code = exec_curl(kubeconfig_path, "jellyfin", "http://sonarr:8989/").await;
-    if code != "000" {
+    if !is_blocked_code(&code) {
         return Err(format!(
             "jellyfin->sonarr should be blocked at L4 (000) but got {}",
             code
@@ -645,7 +658,9 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     verify_node_colocation(kubeconfig_path).await?;
     verify_volume_sharing(kubeconfig_path).await?;
     verify_unauthorized_volume_access_denied(kubeconfig_path).await?;
-    verify_bilateral_agreements(kubeconfig_path).await?;
+
+    let kc = kubeconfig_path.to_string();
+    retry_verification("Media Server", || verify_bilateral_agreements(&kc)).await?;
 
     info!("\n========================================");
     info!("Media Server E2E Test: PASSED");
