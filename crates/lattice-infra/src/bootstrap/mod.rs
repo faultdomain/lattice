@@ -24,7 +24,8 @@ use kube::ResourceExt;
 use tracing::debug;
 
 use lattice_common::crd::{
-    BackupsConfig, BootstrapProvider, LatticeCluster, MonitoringConfig, ProviderType,
+    BackupsConfig, BootstrapProvider, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec,
+    MonitoringConfig, ProviderType,
 };
 use lattice_common::DEFAULT_GRPC_PORT;
 
@@ -129,6 +130,14 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
         );
         manifests.extend(keda::generate_keda().iter().cloned());
         manifests.extend(metrics_server::generate_metrics_server().iter().cloned());
+
+        // LMM CRDs for addon mesh policies (KEDA + monitoring)
+        if !config.skip_service_mesh {
+            manifests.extend(serialize_lmms(keda::generate_keda_mesh_members())?);
+            manifests.extend(serialize_lmms(
+                prometheus::generate_monitoring_mesh_members(config.monitoring.ha),
+            )?);
+        }
     }
 
     // GPU stack (NFD + NVIDIA device plugin + HAMi)
@@ -164,24 +173,6 @@ pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, Stri
         serde_json::to_string_pretty(&istio::IstioReconciler::generate_operator_allow_policy())
             .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
     );
-
-    // LatticeMeshMember CRDs for monitoring and KEDA addon policies
-    if config.monitoring.enabled {
-        for lmm in keda::generate_keda_mesh_members() {
-            manifests.push(
-                serde_json::to_string_pretty(&lmm)
-                    .map_err(|e| format!("Failed to serialize KEDA LatticeMeshMember: {}", e))?,
-            );
-        }
-        for lmm in prometheus::generate_monitoring_mesh_members(config.monitoring.ha) {
-            manifests.push(serde_json::to_string_pretty(&lmm).map_err(|e| {
-                format!(
-                    "Failed to serialize monitoring LatticeMeshMember: {}",
-                    e
-                )
-            })?);
-        }
-    }
 
     // Cilium policies (skip on kind/bootstrap clusters) - serialize typed structs to JSON
     if !config.skip_cilium_policies {
@@ -233,6 +224,24 @@ pub(crate) fn namespace_yaml(name: &str) -> String {
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}",
         name
     )
+}
+
+/// Create a namespaced LatticeMeshMember.
+pub(crate) fn lmm(name: &str, namespace: &str, spec: LatticeMeshMemberSpec) -> LatticeMeshMember {
+    let mut member = LatticeMeshMember::new(name, spec);
+    member.metadata.namespace = Some(namespace.to_string());
+    member
+}
+
+/// Serialize a vec of LMMs to JSON manifests.
+fn serialize_lmms(members: Vec<LatticeMeshMember>) -> Result<Vec<String>, String> {
+    members
+        .iter()
+        .map(|m| {
+            serde_json::to_string_pretty(m)
+                .map_err(|e| format!("Failed to serialize LatticeMeshMember: {e}"))
+        })
+        .collect()
 }
 
 /// Create a namespace YAML with Istio ambient mesh enrollment.

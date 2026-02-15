@@ -7,25 +7,17 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use lattice_common::crd::{
-    CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
-    ServiceRef,
+    CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
+    PeerAuth, ServiceRef,
 };
 
 use super::prometheus::MONITORING_NAMESPACE;
-use super::{namespace_yaml_ambient, split_yaml_documents};
+use super::{lmm, namespace_yaml_ambient, split_yaml_documents};
 
 /// Namespace for KEDA components.
 pub const KEDA_NAMESPACE: &str = "keda";
 
-/// KEDA operator service account name (derived from chart defaults).
-/// Used to construct SPIFFE identity for AuthorizationPolicy.
-pub const KEDA_SERVICE_ACCOUNT: &str = "keda-operator";
-
-/// KEDA metrics server service account name.
-/// The metrics-apiserver calls keda-operator on port 9666 (gRPC) to fetch metrics.
-pub const KEDA_METRICS_SERVICE_ACCOUNT: &str = "keda-operator-metrics-apiserver";
-
-/// VM read target LMM name, referenced by KEDA operator's dependency
+/// VM read target LMM name, referenced by KEDA operator's dependency.
 pub const VM_READ_TARGET_LMM_NAME: &str = "vm-read-target";
 
 static KEDA_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
@@ -52,84 +44,77 @@ pub fn generate_keda() -> &'static [String] {
 /// 2. **keda-admission-webhooks** — webhook called by kube-apiserver (Permissive mTLS)
 /// 3. **keda-operator** — receives gRPC from metrics-apiserver, queries VictoriaMetrics
 pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
-    let mut members = Vec::with_capacity(3);
-
-    // 1. keda-metrics-apiserver — webhook called by kube-apiserver
-    let mut metrics_api = LatticeMeshMember::new(
-        "keda-metrics-apiserver",
-        LatticeMeshMemberSpec {
-            target: MeshMemberTarget::Selector(BTreeMap::from([(
-                "app".to_string(),
-                "keda-operator-metrics-apiserver".to_string(),
-            )])),
-            ports: vec![MeshMemberPort {
-                port: 6443,
-                name: "metrics-api".to_string(),
-                peer_auth: PeerAuth::Permissive,
-            }],
-            allowed_callers: vec![], // open to non-mesh callers (apiserver)
-            dependencies: vec![ServiceRef::new(KEDA_NAMESPACE, "keda-operator")],
-            egress: vec![],
-            allow_peer_traffic: false,
-            ingress: None,
-        },
-    );
-    metrics_api.metadata.namespace = Some(KEDA_NAMESPACE.to_string());
-    members.push(metrics_api);
-
-    // 2. keda-admission-webhooks — webhook called by kube-apiserver
-    let mut admission = LatticeMeshMember::new(
-        "keda-admission-webhooks",
-        LatticeMeshMemberSpec {
-            target: MeshMemberTarget::Selector(BTreeMap::from([(
-                "app".to_string(),
-                "keda-admission-webhooks".to_string(),
-            )])),
-            ports: vec![MeshMemberPort {
-                port: 9443,
-                name: "webhook".to_string(),
-                peer_auth: PeerAuth::Permissive,
-            }],
-            allowed_callers: vec![],
-            dependencies: vec![],
-            egress: vec![],
-            allow_peer_traffic: false,
-            ingress: None,
-        },
-    );
-    admission.metadata.namespace = Some(KEDA_NAMESPACE.to_string());
-    members.push(admission);
-
-    // 3. keda-operator — receives gRPC from metrics-apiserver, queries VictoriaMetrics
-    let mut operator = LatticeMeshMember::new(
-        "keda-operator",
-        LatticeMeshMemberSpec {
-            target: MeshMemberTarget::Selector(BTreeMap::from([(
-                "app".to_string(),
-                "keda-operator".to_string(),
-            )])),
-            ports: vec![MeshMemberPort {
-                port: 9666,
-                name: "grpc".to_string(),
-                peer_auth: PeerAuth::Strict,
-            }],
-            allowed_callers: vec![CallerRef {
-                name: "keda-metrics-apiserver".to_string(),
-                namespace: Some(KEDA_NAMESPACE.to_string()),
-            }],
-            dependencies: vec![ServiceRef::new(
-                MONITORING_NAMESPACE,
-                VM_READ_TARGET_LMM_NAME,
-            )],
-            egress: vec![],
-            allow_peer_traffic: false,
-            ingress: None,
-        },
-    );
-    operator.metadata.namespace = Some(KEDA_NAMESPACE.to_string());
-    members.push(operator);
-
-    members
+    vec![
+        // keda-metrics-apiserver — webhook called by kube-apiserver
+        lmm(
+            "keda-metrics-apiserver",
+            KEDA_NAMESPACE,
+            LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(BTreeMap::from([(
+                    "app".to_string(),
+                    "keda-operator-metrics-apiserver".to_string(),
+                )])),
+                ports: vec![MeshMemberPort {
+                    port: 6443,
+                    name: "metrics-api".to_string(),
+                    peer_auth: PeerAuth::Permissive,
+                }],
+                allowed_callers: vec![],
+                dependencies: vec![ServiceRef::new(KEDA_NAMESPACE, "keda-operator")],
+                egress: vec![],
+                allow_peer_traffic: false,
+                ingress: None,
+            },
+        ),
+        // keda-admission-webhooks — webhook called by kube-apiserver
+        lmm(
+            "keda-admission-webhooks",
+            KEDA_NAMESPACE,
+            LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(BTreeMap::from([(
+                    "app".to_string(),
+                    "keda-admission-webhooks".to_string(),
+                )])),
+                ports: vec![MeshMemberPort {
+                    port: 9443,
+                    name: "webhook".to_string(),
+                    peer_auth: PeerAuth::Permissive,
+                }],
+                allowed_callers: vec![],
+                dependencies: vec![],
+                egress: vec![],
+                allow_peer_traffic: false,
+                ingress: None,
+            },
+        ),
+        // keda-operator — receives gRPC from metrics-apiserver, queries VictoriaMetrics
+        lmm(
+            "keda-operator",
+            KEDA_NAMESPACE,
+            LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(BTreeMap::from([(
+                    "app".to_string(),
+                    "keda-operator".to_string(),
+                )])),
+                ports: vec![MeshMemberPort {
+                    port: 9666,
+                    name: "grpc".to_string(),
+                    peer_auth: PeerAuth::Strict,
+                }],
+                allowed_callers: vec![CallerRef {
+                    name: "keda-metrics-apiserver".to_string(),
+                    namespace: Some(KEDA_NAMESPACE.to_string()),
+                }],
+                dependencies: vec![ServiceRef::new(
+                    MONITORING_NAMESPACE,
+                    VM_READ_TARGET_LMM_NAME,
+                )],
+                egress: vec![],
+                allow_peer_traffic: false,
+                ingress: None,
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -153,55 +138,40 @@ mod tests {
     }
 
     #[test]
-    fn keda_mesh_members_count() {
+    fn keda_mesh_members() {
         let members = generate_keda_mesh_members();
         assert_eq!(members.len(), 3);
-    }
 
-    #[test]
-    fn keda_metrics_apiserver_lmm() {
-        let members = generate_keda_mesh_members();
+        // All must be in the keda namespace and pass validation
+        for m in &members {
+            assert_eq!(m.metadata.namespace.as_deref(), Some(KEDA_NAMESPACE));
+            assert!(m.spec.validate().is_ok());
+        }
+
+        // metrics-apiserver
         let m = &members[0];
         assert_eq!(m.metadata.name.as_deref(), Some("keda-metrics-apiserver"));
-        assert_eq!(m.metadata.namespace.as_deref(), Some(KEDA_NAMESPACE));
-        assert_eq!(m.spec.ports.len(), 1);
         assert_eq!(m.spec.ports[0].port, 6443);
         assert_eq!(m.spec.ports[0].peer_auth, PeerAuth::Permissive);
-        assert!(m.spec.allowed_callers.is_empty(), "open to non-mesh callers");
-        assert_eq!(m.spec.dependencies.len(), 1);
+        assert!(m.spec.allowed_callers.is_empty());
         assert_eq!(m.spec.dependencies[0].name, "keda-operator");
-        assert!(m.spec.validate().is_ok());
-    }
 
-    #[test]
-    fn keda_admission_webhooks_lmm() {
-        let members = generate_keda_mesh_members();
+        // admission-webhooks
         let m = &members[1];
         assert_eq!(m.metadata.name.as_deref(), Some("keda-admission-webhooks"));
-        assert_eq!(m.metadata.namespace.as_deref(), Some(KEDA_NAMESPACE));
         assert_eq!(m.spec.ports[0].port, 9443);
         assert_eq!(m.spec.ports[0].peer_auth, PeerAuth::Permissive);
-        assert!(m.spec.allowed_callers.is_empty());
-        assert!(m.spec.dependencies.is_empty());
-        assert!(m.spec.validate().is_ok());
-    }
 
-    #[test]
-    fn keda_operator_lmm() {
-        let members = generate_keda_mesh_members();
+        // operator
         let m = &members[2];
         assert_eq!(m.metadata.name.as_deref(), Some("keda-operator"));
-        assert_eq!(m.metadata.namespace.as_deref(), Some(KEDA_NAMESPACE));
         assert_eq!(m.spec.ports[0].port, 9666);
         assert_eq!(m.spec.ports[0].peer_auth, PeerAuth::Strict);
-        assert_eq!(m.spec.allowed_callers.len(), 1);
         assert_eq!(m.spec.allowed_callers[0].name, "keda-metrics-apiserver");
-        assert_eq!(m.spec.dependencies.len(), 1);
         assert_eq!(m.spec.dependencies[0].name, VM_READ_TARGET_LMM_NAME);
         assert_eq!(
             m.spec.dependencies[0].namespace.as_deref(),
             Some(MONITORING_NAMESPACE)
         );
-        assert!(m.spec.validate().is_ok());
     }
 }

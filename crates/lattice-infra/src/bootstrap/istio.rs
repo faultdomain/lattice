@@ -285,5 +285,4 @@ mod tests {
         assert!(ports.contains(&"8443"));
         assert!(ports.contains(&"50051"));
     }
-
 }
