@@ -49,9 +49,7 @@ pub use model_serving::{
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
 };
-pub use restore::{
-    LatticeRestore, LatticeRestoreSpec, LatticeRestoreStatus, RestoreOrdering, RestorePhase,
-};
+pub use restore::{LatticeRestore, LatticeRestoreSpec, LatticeRestoreStatus, RestorePhase};
 pub use secrets_provider::{
     SecretProvider, SecretProviderPhase, SecretProviderSpec, SecretProviderStatus,
 };

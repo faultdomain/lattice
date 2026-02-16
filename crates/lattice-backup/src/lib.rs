@@ -4,8 +4,7 @@
 //!
 //! - **backup_policy_controller**: Reconciles LatticeBackupPolicy CRDs into Velero
 //!   Schedule and BackupStorageLocation resources
-//! - **restore_controller**: Reconciles LatticeRestore CRDs into Velero Restore
-//!   resources, with optional LatticeAware two-phase ordering
+//! - **restore_controller**: Reconciles LatticeRestore CRDs into Velero Restore resources
 //! - **velero**: Typed structs for Velero resources (Schedule, BSL, Restore)
 
 pub mod backup_policy_controller;

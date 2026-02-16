@@ -90,7 +90,8 @@ pub async fn ensure_webhook_credentials(
             "name": LOCAL_WEBHOOK_AUTH_SECRET,
             "namespace": LATTICE_SYSTEM_NAMESPACE,
             "labels": {
-                LABEL_MANAGED_BY: LABEL_MANAGED_BY_LATTICE
+                LABEL_MANAGED_BY: LABEL_MANAGED_BY_LATTICE,
+                "external-secrets.io/type": "webhook"
             }
         },
         "type": "Opaque",
