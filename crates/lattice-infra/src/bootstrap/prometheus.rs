@@ -240,7 +240,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
         },
     ));
 
-    // victoria-metrics-operator — webhook called by kube-apiserver, manages CRDs
+    // victoria-metrics-operator — webhook + metrics scraped by vmagent
     members.push(lmm(
         "victoria-metrics-operator",
         MONITORING_NAMESPACE,
@@ -249,17 +249,53 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 "app.kubernetes.io/name".to_string(),
                 "victoria-metrics-operator".to_string(),
             )])),
-            ports: vec![MeshMemberPort {
-                port: 9443,
-                name: "webhook".to_string(),
-                peer_auth: PeerAuth::Webhook,
+            ports: vec![
+                MeshMemberPort {
+                    port: 9443,
+                    name: "webhook".to_string(),
+                    peer_auth: PeerAuth::Webhook,
+                },
+                MeshMemberPort {
+                    port: 8080,
+                    name: "http".to_string(),
+                    peer_auth: PeerAuth::Strict,
+                },
+            ],
+            allowed_callers: vec![CallerRef {
+                name: VMAGENT_SERVICE_ACCOUNT.to_string(),
+                namespace: Some(MONITORING_NAMESPACE.to_string()),
             }],
-            allowed_callers: vec![],
             dependencies: vec![],
             egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,
             ingress: None,
-            service_account: None,
+            service_account: Some("vm-victoria-metrics-operator".to_string()),
+        },
+    ));
+
+    // vm-kube-state-metrics — metrics scraped by vmagent
+    members.push(lmm(
+        "vm-kube-state-metrics",
+        MONITORING_NAMESPACE,
+        LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app.kubernetes.io/name".to_string(),
+                "kube-state-metrics".to_string(),
+            )])),
+            ports: vec![MeshMemberPort {
+                port: 8080,
+                name: "http".to_string(),
+                peer_auth: PeerAuth::Strict,
+            }],
+            allowed_callers: vec![CallerRef {
+                name: VMAGENT_SERVICE_ACCOUNT.to_string(),
+                namespace: Some(MONITORING_NAMESPACE.to_string()),
+            }],
+            dependencies: vec![],
+            egress: vec![],
+            allow_peer_traffic: false,
+            ingress: None,
+            service_account: Some("vm-kube-state-metrics".to_string()),
         },
     ));
 

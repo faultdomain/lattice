@@ -55,7 +55,7 @@ pub fn install_crypto_provider() {
         eprintln!("!!  suitable for regulated or production environments.     !!");
         eprintln!("!!  All production builds MUST enable the `fips` feature.  !!");
         eprintln!("!!                                                         !!");
-        eprintln!("!!  To enable: cargo build                !!");
+        eprintln!("!!  To enable: cargo build                                 !!");
         eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         eprintln!();
     }

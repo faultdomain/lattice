@@ -44,7 +44,9 @@ impl<'a> PolicyCompiler<'a> {
         namespace: &str,
         inbound_edges: &[ActiveEdge],
     ) -> Option<AuthorizationPolicy> {
-        if inbound_edges.is_empty() && !service.allow_peer_traffic {
+        let has_infra_callers = self.has_infrastructure_callers(service, inbound_edges);
+
+        if inbound_edges.is_empty() && !service.allow_peer_traffic && !has_infra_callers {
             return None;
         }
 
@@ -61,6 +63,11 @@ impl<'a> PolicyCompiler<'a> {
                 ))
             })
             .collect();
+
+        // Add principals for infrastructure callers (e.g. vmagent) that are in
+        // allowed_callers but don't participate in bilateral agreement edges.
+        // Their CallerRef name is used directly as the service account name.
+        self.add_infrastructure_caller_principals(service, inbound_edges, &mut principals);
 
         // If allow_peer_traffic, add own principal so pods can talk to each other
         if service.allow_peer_traffic {
@@ -296,5 +303,42 @@ impl<'a> PolicyCompiler<'a> {
         );
 
         (vec![peer_auth], vec![auth_policy])
+    }
+
+    /// Check if the service has infrastructure callers — allowed_callers that don't
+    /// exist in the service graph. These are external components (e.g. vmagent) that
+    /// bypass bilateral agreement. Graph services that failed bilateral agreement
+    /// are NOT included (they must declare the outbound dep).
+    pub(super) fn has_infrastructure_callers(
+        &self,
+        service: &ServiceNode,
+        _inbound_edges: &[ActiveEdge],
+    ) -> bool {
+        service
+            .allowed_callers
+            .iter()
+            .any(|(caller_ns, caller_name)| {
+                self.graph.get_service(caller_ns, caller_name).is_none()
+            })
+    }
+
+    /// Add SPIFFE principals for infrastructure callers that don't exist in the
+    /// service graph. The CallerRef name is used directly as the service account
+    /// name since these callers have no graph node.
+    fn add_infrastructure_caller_principals(
+        &self,
+        service: &ServiceNode,
+        _inbound_edges: &[ActiveEdge],
+        principals: &mut Vec<String>,
+    ) {
+        for (caller_ns, caller_name) in &service.allowed_callers {
+            if self.graph.get_service(caller_ns, caller_name).is_none() {
+                principals.push(mesh::trust_domain::principal(
+                    &self.cluster_name,
+                    caller_ns,
+                    caller_name,
+                ));
+            }
+        }
     }
 }

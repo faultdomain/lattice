@@ -503,7 +503,7 @@ mod tests {
             "api should have HBONE ingress"
         );
         let ingress = &api_cnp.spec.ingress[0];
-        assert!(ingress.from_endpoints[0].match_labels.is_empty());
+        assert!(ingress.from_entities.contains(&"cluster".to_string()));
         assert!(ingress.to_ports[0].ports[0].port == mesh::HBONE_PORT.to_string());
         assert!(
             !api_cnp
@@ -552,9 +552,9 @@ mod tests {
         let cnp = &output.cilium_policies[0];
 
         assert_eq!(cnp.spec.ingress.len(), 1);
-        assert!(cnp.spec.ingress[0].from_endpoints[0]
-            .match_labels
-            .is_empty());
+        assert!(cnp.spec.ingress[0]
+            .from_entities
+            .contains(&"cluster".to_string()));
 
         let hbone_port = mesh::HBONE_PORT.to_string();
         assert!(
@@ -769,7 +769,7 @@ mod tests {
                     .any(|tp| tp.ports.iter().any(|p| p.port == "15008"))
             })
             .expect("webhook-only service should have HBONE ingress for ztunnel delivery");
-        assert!(!hbone_rule.from_endpoints.is_empty());
+        assert!(hbone_rule.from_entities.contains(&"cluster".to_string()));
 
         // Should have an ingress rule with fromEntities on port 9443
         // Needs remote-node, kube-apiserver, and host for cross-node DNAT delivery
@@ -779,7 +779,9 @@ mod tests {
             .iter()
             .find(|r| r.from_entities.contains(&"remote-node".to_string()))
             .expect("should have remote-node ingress rule for webhook");
-        assert!(webhook_rule.from_entities.contains(&"kube-apiserver".to_string()));
+        assert!(webhook_rule
+            .from_entities
+            .contains(&"kube-apiserver".to_string()));
         assert!(webhook_rule.from_entities.contains(&"host".to_string()));
         assert!(webhook_rule.to_ports[0]
             .ports

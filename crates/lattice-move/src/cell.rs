@@ -461,7 +461,9 @@ impl<S: MoveCommandSender> CellMover<S> {
             Err(_) => {
                 warn!(cluster = %self.config.cluster_name, "Move timed out after 30 minutes, unpausing source");
                 let _ = unpause_cluster(&self.client, &self.config.source_namespace).await;
-                Err(MoveError::Timeout { seconds: OVERALL_MOVE_TIMEOUT.as_secs() })
+                Err(MoveError::Timeout {
+                    seconds: OVERALL_MOVE_TIMEOUT.as_secs(),
+                })
             }
         }
     }

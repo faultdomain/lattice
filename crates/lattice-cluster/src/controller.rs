@@ -1389,7 +1389,10 @@ async fn handle_deletion(
     // Pause cluster to freeze CAPI state — eliminates TOCTOU window between
     // stability checks and the agent's unpivot pause
     let capi_namespace = capi_namespace(&name);
-    let client = ctx.client.as_ref().ok_or_else(|| Error::internal("no kube client"))?;
+    let client = ctx
+        .client
+        .as_ref()
+        .ok_or_else(|| Error::internal("no kube client"))?;
     if let Err(e) = pause_cluster(client, &capi_namespace).await {
         warn!(cluster = %name, error = %e, "Failed to pause for unpivot");
         return Ok(Action::requeue(Duration::from_secs(10)));

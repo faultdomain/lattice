@@ -73,8 +73,9 @@ impl<'a> PolicyCompiler<'a> {
 
         // HBONE ingress: ztunnel wraps all inbound traffic on port 15008 in ambient mesh.
         // Required whenever this pod accepts any inbound traffic (mesh callers, webhooks,
-        // or permissive ports). Without it, Cilium drops ztunnel's delivery.
-        if !inbound_edges.is_empty() || !ingress_rules.is_empty() {
+        // permissive ports, or infrastructure callers like vmagent).
+        let has_infra_callers = self.has_infrastructure_callers(service, inbound_edges);
+        if !inbound_edges.is_empty() || !ingress_rules.is_empty() || has_infra_callers {
             ingress_rules.insert(0, Self::hbone_ingress_rule());
         }
 
@@ -252,11 +253,15 @@ impl<'a> PolicyCompiler<'a> {
         (fqdns, cidrs)
     }
 
-    /// Broad HBONE ingress: allow any pod to deliver traffic on port 15008.
+    /// Broad HBONE ingress: allow any pod in the cluster to deliver traffic on port 15008.
     /// Identity enforcement is handled by Istio AuthorizationPolicy at L7.
+    ///
+    /// Uses `fromEntities: [cluster]` instead of `fromEndpoints: [{}]` because
+    /// empty endpoint selectors in namespaced CNPs only match same-namespace pods.
+    /// HBONE traffic is cross-namespace (ztunnel on any node delivers to any pod).
     fn hbone_ingress_rule() -> CiliumIngressRule {
         CiliumIngressRule {
-            from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
+            from_entities: vec!["cluster".to_string()],
             to_ports: vec![CiliumPortRule {
                 ports: vec![CiliumPort {
                     port: mesh::HBONE_PORT.to_string(),
@@ -268,10 +273,14 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Broad HBONE egress: allow this pod to reach any pod on port 15008.
+    /// Broad HBONE egress: allow this pod to reach any pod in the cluster on port 15008.
+    ///
+    /// Uses `toEntities: [cluster]` instead of `toEndpoints: [{}]` because
+    /// empty endpoint selectors in namespaced CNPs only match same-namespace pods.
+    /// HBONE traffic is cross-namespace (ztunnel delivers to pods in any namespace).
     fn hbone_egress_rule() -> CiliumEgressRule {
         CiliumEgressRule {
-            to_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
+            to_entities: vec!["cluster".to_string()],
             to_ports: vec![CiliumPortRule {
                 ports: vec![CiliumPort {
                     port: mesh::HBONE_PORT.to_string(),
