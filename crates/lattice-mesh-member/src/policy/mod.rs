@@ -757,6 +757,19 @@ mod tests {
 
         let cnp = &output.cilium_policies[0];
 
+        // Should have HBONE ingress (ztunnel intercepts kube-apiserver webhook calls in ambient)
+        let hbone_rule = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| {
+                r.to_ports
+                    .iter()
+                    .any(|tp| tp.ports.iter().any(|p| p.port == "15008"))
+            })
+            .expect("webhook-only service should have HBONE ingress for ztunnel delivery");
+        assert!(!hbone_rule.from_endpoints.is_empty());
+
         // Should have an ingress rule with fromEntities: kube-apiserver on port 9443
         let webhook_rule = cnp
             .spec

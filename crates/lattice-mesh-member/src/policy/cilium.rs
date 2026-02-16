@@ -44,11 +44,6 @@ impl<'a> PolicyCompiler<'a> {
 
         let mut ingress_rules = Vec::new();
 
-        // HBONE ingress for mesh callers (ztunnel wraps all pod-to-pod on port 15008)
-        if !inbound_edges.is_empty() {
-            ingress_rules.push(Self::hbone_ingress_rule());
-        }
-
         // Direct TCP ingress for broadly permissive ports (any source)
         let broad_ports = service.permissive_port_numbers();
         if !broad_ports.is_empty() {
@@ -67,6 +62,13 @@ impl<'a> PolicyCompiler<'a> {
                 to_ports: Self::build_tcp_port_rules(&webhook_ports),
                 ..Default::default()
             });
+        }
+
+        // HBONE ingress: ztunnel wraps all inbound traffic on port 15008 in ambient mesh.
+        // Required whenever this pod accepts any inbound traffic (mesh callers, webhooks,
+        // or permissive ports). Without it, Cilium drops ztunnel's delivery.
+        if !inbound_edges.is_empty() || !ingress_rules.is_empty() {
+            ingress_rules.insert(0, Self::hbone_ingress_rule());
         }
 
         // Build egress rules
