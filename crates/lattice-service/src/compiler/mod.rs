@@ -589,8 +589,8 @@ mod tests {
         let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
-        // Deployment + Service + ServiceAccount + MeshMember + 4 TracingPolicies
-        assert_eq!(output.resource_count(), 8);
+        // Deployment + Service + ServiceAccount + MeshMember + 1 TracingPolicy (binary whitelist)
+        assert_eq!(output.resource_count(), 5);
     }
 
     // =========================================================================

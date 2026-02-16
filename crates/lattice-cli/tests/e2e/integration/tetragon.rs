@@ -1,8 +1,8 @@
 //! Tetragon runtime enforcement integration tests
 //!
 //! Validates that deploying a LatticeService creates the correct
-//! TracingPolicyNamespaced resources based on security context,
-//! and that shell exemptions for probes/commands work correctly.
+//! TracingPolicyNamespaced binary whitelist policies, and that
+//! entrypoint auto-detection for probes/commands works correctly.
 //!
 //! # Running Standalone
 //!
@@ -33,13 +33,10 @@ use super::super::helpers::{
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
-const NS_WRITABLE_ROOTFS: &str = "tetragon-t2";
-const NS_ROOT_ALLOWED: &str = "tetragon-t3";
-const NS_CAPS_REQUESTED: &str = "tetragon-t4";
-const NS_PROBE_SHELL: &str = "tetragon-t5";
-const NS_CMD_SHELL: &str = "tetragon-t6";
-const NS_SIDECAR_SHELL: &str = "tetragon-t7";
-const NS_ENFORCEMENT: &str = "tetragon-t8";
+const NS_PROBE_SHELL: &str = "tetragon-t2";
+const NS_CMD_SHELL: &str = "tetragon-t3";
+const NS_SIDECAR_SHELL: &str = "tetragon-t4";
+const NS_ENFORCEMENT: &str = "tetragon-t5";
 
 const TEST_LABEL: &str = "tetragon";
 
@@ -242,14 +239,6 @@ fn assert_has(policies: &[String], prefix: &str, svc: &str) {
     );
 }
 
-fn assert_missing(policies: &[String], prefix: &str, svc: &str) {
-    let unexpected = format!("{prefix}-{svc}");
-    assert!(
-        !policies.contains(&unexpected),
-        "Did NOT expect '{unexpected}' in {policies:?}"
-    );
-}
-
 async fn get_policy_yaml(kubeconfig: &str, namespace: &str, name: &str) -> Result<String, String> {
     let output = std::process::Command::new("kubectl")
         .args([
@@ -282,7 +271,7 @@ fn yaml_allows_binary(yaml: &str, binary: &str) -> bool {
 // =============================================================================
 
 async fn test_default_security(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 1: Default security — all 4 policies...");
+    info!("[Tetragon] Test 1: Default security — command whitelisted...");
     ensure_fresh_namespace(kubeconfig, NS_DEFAULT).await?;
 
     let svc = "svc-default";
@@ -298,105 +287,14 @@ async fn test_default_security(kubeconfig: &str) -> Result<(), String> {
 
     let p = wait_for_policies(kubeconfig, NS_DEFAULT, svc, Duration::from_secs(30)).await?;
     assert_has(&p, "allow-binaries", svc);
-    assert_has(&p, "block-rootfs-write", svc);
-    assert_has(&p, "block-setuid", svc);
-    assert_has(&p, "block-capset", svc);
 
     delete_namespace(kubeconfig, NS_DEFAULT).await;
     info!("[Tetragon] Test 1 passed");
     Ok(())
 }
 
-async fn test_writable_rootfs(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 2: Writable rootfs...");
-    ensure_fresh_namespace(kubeconfig, NS_WRITABLE_ROOTFS).await?;
-    apply_security_override(kubeconfig, "permit-tetragon-t2", NS_WRITABLE_ROOTFS).await?;
-
-    let svc = "svc-writable";
-    let sec = SecurityContext {
-        read_only_root_filesystem: Some(false),
-        apparmor_profile: Some("Unconfined".to_string()),
-        ..Default::default()
-    };
-    deploy_and_wait_for_phase(
-        kubeconfig,
-        NS_WRITABLE_ROOTFS,
-        build_service(svc, NS_WRITABLE_ROOTFS, Some(sec), None, None),
-        "Ready",
-        None,
-        Duration::from_secs(90),
-    )
-    .await?;
-
-    let p = wait_for_policies(kubeconfig, NS_WRITABLE_ROOTFS, svc, Duration::from_secs(30)).await?;
-    assert_has(&p, "allow-binaries", svc);
-    assert_missing(&p, "block-rootfs-write", svc);
-
-    delete_namespace(kubeconfig, NS_WRITABLE_ROOTFS).await;
-    info!("[Tetragon] Test 2 passed");
-    Ok(())
-}
-
-async fn test_root_allowed(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 3: Root allowed...");
-    ensure_fresh_namespace(kubeconfig, NS_ROOT_ALLOWED).await?;
-    apply_security_override(kubeconfig, "permit-tetragon-t3", NS_ROOT_ALLOWED).await?;
-
-    let svc = "svc-root";
-    let sec = SecurityContext {
-        run_as_non_root: Some(false),
-        apparmor_profile: Some("Unconfined".to_string()),
-        ..Default::default()
-    };
-    deploy_and_wait_for_phase(
-        kubeconfig,
-        NS_ROOT_ALLOWED,
-        build_service(svc, NS_ROOT_ALLOWED, Some(sec), None, None),
-        "Ready",
-        None,
-        Duration::from_secs(90),
-    )
-    .await?;
-
-    let p = wait_for_policies(kubeconfig, NS_ROOT_ALLOWED, svc, Duration::from_secs(30)).await?;
-    assert_missing(&p, "block-setuid", svc);
-
-    delete_namespace(kubeconfig, NS_ROOT_ALLOWED).await;
-    info!("[Tetragon] Test 3 passed");
-    Ok(())
-}
-
-async fn test_caps_requested(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 4: Capabilities requested...");
-    ensure_fresh_namespace(kubeconfig, NS_CAPS_REQUESTED).await?;
-    apply_security_override(kubeconfig, "permit-tetragon-t4", NS_CAPS_REQUESTED).await?;
-
-    let svc = "svc-caps";
-    let sec = SecurityContext {
-        capabilities: vec!["NET_ADMIN".to_string()],
-        apparmor_profile: Some("Unconfined".to_string()),
-        ..Default::default()
-    };
-    deploy_and_wait_for_phase(
-        kubeconfig,
-        NS_CAPS_REQUESTED,
-        build_service(svc, NS_CAPS_REQUESTED, Some(sec), None, None),
-        "Ready",
-        None,
-        Duration::from_secs(90),
-    )
-    .await?;
-
-    let p = wait_for_policies(kubeconfig, NS_CAPS_REQUESTED, svc, Duration::from_secs(30)).await?;
-    assert_missing(&p, "block-capset", svc);
-
-    delete_namespace(kubeconfig, NS_CAPS_REQUESTED).await;
-    info!("[Tetragon] Test 4 passed");
-    Ok(())
-}
-
 async fn test_probe_shell_exemption(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 5: Probe shell exemption...");
+    info!("[Tetragon] Test 2: Probe shell exemption...");
     ensure_fresh_namespace(kubeconfig, NS_PROBE_SHELL).await?;
 
     let svc = "svc-probe";
@@ -425,12 +323,12 @@ async fn test_probe_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     );
 
     delete_namespace(kubeconfig, NS_PROBE_SHELL).await;
-    info!("[Tetragon] Test 5 passed");
+    info!("[Tetragon] Test 2 passed");
     Ok(())
 }
 
 async fn test_cmd_shell_exemption(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 6: Command shell exemption...");
+    info!("[Tetragon] Test 3: Command shell exemption...");
     ensure_fresh_namespace(kubeconfig, NS_CMD_SHELL).await?;
 
     let svc = "svc-cmd";
@@ -457,13 +355,13 @@ async fn test_cmd_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     );
 
     delete_namespace(kubeconfig, NS_CMD_SHELL).await;
-    info!("[Tetragon] Test 6 passed");
+    info!("[Tetragon] Test 3 passed");
     Ok(())
 }
 
-/// Test 7: Sidecar command shell exemption — /bin/ash auto-allowed
+/// Sidecar command shell exemption — /bin/ash auto-allowed
 async fn test_sidecar_shell_exemption(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 7: Sidecar shell exemption — /bin/ash should be allowed...");
+    info!("[Tetragon] Test 4: Sidecar shell exemption — /bin/ash should be allowed...");
     ensure_fresh_namespace(kubeconfig, NS_SIDECAR_SHELL).await?;
 
     let svc = "svc-sidecar";
@@ -490,7 +388,7 @@ async fn test_sidecar_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     );
 
     delete_namespace(kubeconfig, NS_SIDECAR_SHELL).await;
-    info!("[Tetragon] Test 7 passed");
+    info!("[Tetragon] Test 4 passed");
     Ok(())
 }
 
@@ -531,11 +429,11 @@ async fn exec_in_pod(
 }
 
 async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 8: Enforcement — blocked actions killed, exempted actions allowed...");
+    info!("[Tetragon] Test 5: Enforcement — blocked binaries killed, exempted allowed...");
     ensure_fresh_namespace(kubeconfig, NS_ENFORCEMENT).await?;
     apply_security_override(kubeconfig, "permit-tetragon-t8", NS_ENFORCEMENT).await?;
 
-    // --- Service with default security (all 4 policies, no exemptions) ---
+    // --- Service with default security (binary whitelist, no exemptions) ---
     let svc_block = "svc-enforce";
     deploy_and_wait_for_phase(
         kubeconfig,
@@ -578,22 +476,6 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
     );
     info!("[Tetragon] Check 1 passed — shell was blocked");
 
-    // Check 2: Rootfs write should be blocked
-    // Use /bin/busybox directly since shells are blocked
-    info!("[Tetragon] Check 2: rootfs write should be blocked...");
-    let write_result = exec_in_pod(
-        kubeconfig,
-        NS_ENFORCEMENT,
-        svc_block,
-        &["/bin/busybox", "touch", "/testfile"],
-    )
-    .await;
-    assert!(
-        write_result.is_err(),
-        "Expected rootfs write to be blocked by Tetragon, but it succeeded: {write_result:?}"
-    );
-    info!("[Tetragon] Check 2 passed — rootfs write was blocked");
-
     // --- Service with probe shell exemption (shell should be allowed) ---
     let svc_exempt = "svc-enforce-exempt";
     let probe = Probe {
@@ -627,8 +509,8 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Check 3: Shell should be allowed when exempted via probe
-    info!("[Tetragon] Check 3: exempted shell should succeed...");
+    // Check 2: Shell should be allowed when exempted via probe
+    info!("[Tetragon] Check 2: exempted shell should succeed...");
     let exempt_result = exec_in_pod(
         kubeconfig,
         NS_ENFORCEMENT,
@@ -640,10 +522,10 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
         exempt_result.is_ok(),
         "Expected shell exec to succeed (probe exemption), but it failed: {exempt_result:?}"
     );
-    info!("[Tetragon] Check 3 passed — exempted shell was allowed");
+    info!("[Tetragon] Check 2 passed — exempted shell was allowed");
 
     delete_namespace(kubeconfig, NS_ENFORCEMENT).await;
-    info!("[Tetragon] Test 8 passed");
+    info!("[Tetragon] Test 5 passed");
     Ok(())
 }
 
@@ -711,10 +593,9 @@ fn build_service_with_allowed_binaries(
     }
 }
 
-/// Test 9: allowedBinaries whitelist — allow-binaries policy emitted, listed binaries work,
-/// unlisted binaries get SIGKILL'd
+/// allowedBinaries whitelist — listed binaries work, unlisted get SIGKILL'd
 async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 9: allowedBinaries whitelist...");
+    info!("[Tetragon] Test 6: allowedBinaries whitelist...");
     ensure_fresh_namespace(kubeconfig, NS_ALLOWED_BINARIES).await?;
     apply_security_override(kubeconfig, "permit-tetragon-t9", NS_ALLOWED_BINARIES).await?;
 
@@ -775,13 +656,13 @@ async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
     );
 
     delete_namespace(kubeconfig, NS_ALLOWED_BINARIES).await;
-    info!("[Tetragon] Test 9 passed");
+    info!("[Tetragon] Test 6 passed");
     Ok(())
 }
 
-/// Test 10: Cedar forbid on allowedBinary — compilation rejected
+/// Cedar forbid on allowedBinary — compilation rejected
 async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 10: Cedar deny on allowedBinary...");
+    info!("[Tetragon] Test 7: Cedar deny on allowedBinary...");
     ensure_fresh_namespace(kubeconfig, NS_ALLOWED_BINARIES_CEDAR).await?;
     // No security override permit → Cedar default-deny should reject
 
@@ -802,18 +683,18 @@ async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String
 
     // Should either fail to deploy or land in Failed phase due to Cedar denial
     if result.is_err() {
-        info!("[Tetragon] Test 10 passed — deployment rejected by Cedar");
+        info!("[Tetragon] Test 7 passed — deployment rejected by Cedar");
     } else {
-        info!("[Tetragon] Test 10 passed — service in Failed phase due to Cedar denial");
+        info!("[Tetragon] Test 7 passed — service in Failed phase due to Cedar denial");
     }
 
     delete_namespace(kubeconfig, NS_ALLOWED_BINARIES_CEDAR).await;
     Ok(())
 }
 
-/// Test 11: Wildcard allowedBinaries — no binary restriction policies
+/// Wildcard allowedBinaries — no binary restriction policies
 async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 11: Wildcard allowedBinaries — no binary restrictions...");
+    info!("[Tetragon] Test 8: Wildcard allowedBinaries — no binary restrictions...");
     ensure_fresh_namespace(kubeconfig, NS_WILDCARD_BINARIES).await?;
     apply_security_override(kubeconfig, "permit-tetragon-t11", NS_WILDCARD_BINARIES).await?;
 
@@ -828,15 +709,7 @@ async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> 
     )
     .await?;
 
-    let p = wait_for_policies(
-        kubeconfig,
-        NS_WILDCARD_BINARIES,
-        svc,
-        Duration::from_secs(30),
-    )
-    .await?;
-    assert_missing(&p, "allow-binaries", svc);
-
+    // Wildcard → no binary policy should be created. Wait for pod, then verify.
     wait_for_pod_running(
         kubeconfig,
         NS_WILDCARD_BINARIES,
@@ -844,6 +717,14 @@ async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> 
     )
     .await?;
     tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Verify no binary policy was created
+    let all = list_tracing_policies(kubeconfig, NS_WILDCARD_BINARIES).await?;
+    let matching: Vec<_> = all.iter().filter(|n| n.contains(svc)).collect();
+    assert!(
+        matching.is_empty(),
+        "Expected no policies for wildcard service, got: {matching:?}"
+    );
 
     // Everything should work with wildcard
     let shell = exec_in_pod(
@@ -859,16 +740,16 @@ async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> 
     );
 
     delete_namespace(kubeconfig, NS_WILDCARD_BINARIES).await;
-    info!("[Tetragon] Test 11 passed");
+    info!("[Tetragon] Test 8 passed");
     Ok(())
 }
 
 const NS_IMPLICIT_WILDCARD: &str = "tetragon-t12";
 
-/// Test 12: Implicit wildcard — no command, no allowedBinaries → no binary restrictions.
+/// Implicit wildcard — no command, no allowedBinaries → no binary restrictions.
 /// Verifies the compiler correctly infers wildcard when the image ENTRYPOINT is unknown.
 async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
-    info!("[Tetragon] Test 12: Implicit wildcard — no command, no allowedBinaries...");
+    info!("[Tetragon] Test 9: Implicit wildcard — no command, no allowedBinaries...");
     ensure_fresh_namespace(kubeconfig, NS_IMPLICIT_WILDCARD).await?;
     apply_security_override(kubeconfig, "permit-tetragon-t12", NS_IMPLICIT_WILDCARD).await?;
 
@@ -933,15 +814,7 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    let p = wait_for_policies(
-        kubeconfig,
-        NS_IMPLICIT_WILDCARD,
-        svc,
-        Duration::from_secs(30),
-    )
-    .await?;
-    assert_missing(&p, "allow-binaries", svc);
-
+    // Implicit wildcard → no binary policy should be created. Wait for pod, then verify.
     wait_for_pod_running(
         kubeconfig,
         NS_IMPLICIT_WILDCARD,
@@ -949,6 +822,14 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
     tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Verify no binary policy was created
+    let all = list_tracing_policies(kubeconfig, NS_IMPLICIT_WILDCARD).await?;
+    let matching: Vec<_> = all.iter().filter(|n| n.contains(svc)).collect();
+    assert!(
+        matching.is_empty(),
+        "Expected no policies for implicit wildcard service, got: {matching:?}"
+    );
 
     // Everything should work — no binary restrictions
     let shell = exec_in_pod(
@@ -964,7 +845,7 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
     );
 
     delete_namespace(kubeconfig, NS_IMPLICIT_WILDCARD).await;
-    info!("[Tetragon] Test 12 passed");
+    info!("[Tetragon] Test 9 passed");
     Ok(())
 }
 
@@ -982,9 +863,6 @@ pub async fn run_tetragon_tests(ctx: &InfraContext) -> Result<(), String> {
 
     tokio::try_join!(
         test_default_security(kubeconfig),
-        test_writable_rootfs(kubeconfig),
-        test_root_allowed(kubeconfig),
-        test_caps_requested(kubeconfig),
         test_probe_shell_exemption(kubeconfig),
         test_cmd_shell_exemption(kubeconfig),
         test_sidecar_shell_exemption(kubeconfig),

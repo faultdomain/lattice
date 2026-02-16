@@ -1,16 +1,13 @@
 //! Tetragon runtime policy compilation
 //!
 //! Generates per-service TracingPolicyNamespaced resources from workload and runtime specs.
-//!
-//! Policy tiers:
-//! - Tier 1: Binary execution whitelist (only declared + auto-detected entrypoints may run)
-//! - Tier 2: Enforce security context at kernel level (rootfs, setuid, capabilities)
+//! The only policy is a binary execution whitelist: any binary not in the whitelist is
+//! SIGKILL'd via the `security_bprm_check` kprobe. Security context enforcement
+//! (readOnlyRootFilesystem, runAsNonRoot, capabilities) is handled by the kubelet.
 
 use std::collections::HashSet;
 
-use lattice_common::crd::{
-    has_unknown_binary_entrypoint, Probe, RuntimeSpec, SecurityContext, WorkloadSpec,
-};
+use lattice_common::crd::{has_unknown_binary_entrypoint, Probe, RuntimeSpec, WorkloadSpec};
 use lattice_common::policy::tetragon::{
     KprobeArg, KprobeSpec, MatchArg, PodSelector, Selector, TracingPolicyNamespaced,
     TracingPolicySpec,
@@ -28,7 +25,7 @@ pub fn compile_tracing_policies(
 ) -> Vec<TracingPolicyNamespaced> {
     let mut policies = Vec::new();
 
-    // Tier 1: binary execution whitelist
+    // Binary execution whitelist
     // Explicit allowedBinaries: ["*"] always disables restrictions, even when
     // entrypoints exist (command, probes).
     // If ANY container lacks both `command` and `allowedBinaries`, we can't know
@@ -44,44 +41,6 @@ pub fn compile_tracing_policies(
             namespace,
             &allowed_binaries,
             &entrypoints,
-        ));
-    }
-
-    // Tier 2: enforce declared security constraints at kernel level
-    let security = aggregate_security_context(workload, runtime);
-
-    if security.read_only_root_filesystem.unwrap_or(true) {
-        policies.push(make_policy(
-            "block-rootfs-write",
-            name,
-            namespace,
-            KprobeSpec::with_args(
-                "security_file_open",
-                vec![KprobeArg {
-                    index: 0,
-                    type_: "file".to_string(),
-                    label: Some("path".to_string()),
-                }],
-                vec![Selector::sigkill()],
-            ),
-        ));
-    }
-
-    if security.run_as_non_root.unwrap_or(true) {
-        policies.push(make_policy(
-            "block-setuid",
-            name,
-            namespace,
-            KprobeSpec::simple("security_task_fix_setuid", vec![Selector::sigkill()]),
-        ));
-    }
-
-    if security.capabilities.is_empty() {
-        policies.push(make_policy(
-            "block-capset",
-            name,
-            namespace,
-            KprobeSpec::simple("security_capset", vec![Selector::sigkill()]),
         ));
     }
 
@@ -222,39 +181,6 @@ fn collect_entrypoints(
     }
 }
 
-/// Merge security contexts across all containers — most permissive wins
-/// (if ANY container opts out of a restriction, we can't enforce it at kernel level)
-fn aggregate_security_context(workload: &WorkloadSpec, runtime: &RuntimeSpec) -> SecurityContext {
-    let mut result = SecurityContext::default();
-
-    for container in workload.containers.values() {
-        if let Some(sec) = &container.security {
-            merge_security(&mut result, sec);
-        }
-    }
-    for sidecar in runtime.sidecars.values() {
-        if let Some(sec) = &sidecar.security {
-            merge_security(&mut result, sec);
-        }
-    }
-
-    result
-}
-
-fn merge_security(agg: &mut SecurityContext, sec: &SecurityContext) {
-    if sec.read_only_root_filesystem == Some(false) {
-        agg.read_only_root_filesystem = Some(false);
-    }
-    if sec.run_as_non_root == Some(false) {
-        agg.run_as_non_root = Some(false);
-    }
-    for cap in &sec.capabilities {
-        if !agg.capabilities.contains(cap) {
-            agg.capabilities.push(cap.clone());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -306,23 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn default_security_generates_tier2_policies() {
+    fn no_command_no_allowed_binaries_generates_no_policies() {
         let (w, r) = default_workload(None);
         let policies = compile(&w, &r);
-        let n = names(&policies);
-        assert!(n.contains(&"block-rootfs-write-my-app"));
-        assert!(n.contains(&"block-setuid-my-app"));
-        assert!(n.contains(&"block-capset-my-app"));
-    }
-
-    #[test]
-    fn no_command_no_allowed_binaries_skips_binary_policy() {
-        let (w, r) = default_workload(None);
-        let policies = compile(&w, &r);
-        let n = names(&policies);
         assert!(
-            !n.contains(&"allow-binaries-my-app"),
-            "No binary info → implicit wildcard, no policy"
+            policies.is_empty(),
+            "No command → implicit wildcard → no policies at all"
         );
     }
 
@@ -353,36 +268,6 @@ mod tests {
             !n.contains(&"allow-binaries-my-app"),
             "Container without command → unknown entrypoint → implicit wildcard"
         );
-    }
-
-    #[test]
-    fn writable_rootfs_skips_file_open() {
-        let (w, r) = default_workload(Some(SecurityContext {
-            read_only_root_filesystem: Some(false),
-            ..Default::default()
-        }));
-        let policies = compile(&w, &r);
-        assert!(!names(&policies).contains(&"block-rootfs-write-my-app"));
-    }
-
-    #[test]
-    fn root_allowed_skips_setuid() {
-        let (w, r) = default_workload(Some(SecurityContext {
-            run_as_non_root: Some(false),
-            ..Default::default()
-        }));
-        let policies = compile(&w, &r);
-        assert!(!names(&policies).contains(&"block-setuid-my-app"));
-    }
-
-    #[test]
-    fn capabilities_requested_skips_capset() {
-        let (w, r) = default_workload(Some(SecurityContext {
-            capabilities: vec!["NET_ADMIN".to_string()],
-            ..Default::default()
-        }));
-        let policies = compile(&w, &r);
-        assert!(!names(&policies).contains(&"block-capset-my-app"));
     }
 
     #[test]
