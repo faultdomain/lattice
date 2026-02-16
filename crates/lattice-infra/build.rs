@@ -349,7 +349,28 @@ fn main() {
             versions.charts["external-secrets"].version
         )),
         "external-secrets",
-        &["--set", "installCRDs=true"],
+        &[
+            "--set",
+            "installCRDs=true",
+            "--set",
+            "tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "tolerations[0].operator=Exists",
+            "--set",
+            "tolerations[0].effect=NoSchedule",
+            "--set",
+            "webhook.tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "webhook.tolerations[0].operator=Exists",
+            "--set",
+            "webhook.tolerations[0].effect=NoSchedule",
+            "--set",
+            "certController.tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "certController.tolerations[0].operator=Exists",
+            "--set",
+            "certController.tolerations[0].effect=NoSchedule",
+        ],
     );
     std::fs::write(out_dir.join("external-secrets.yaml"), yaml)
         .expect("write external-secrets.yaml");
@@ -479,7 +500,26 @@ fn main() {
         "keda",
         &chart(&format!("keda-{}.tgz", versions.charts["keda"].version)),
         "keda",
-        &[],
+        &[
+            "--set",
+            "tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "tolerations[0].operator=Exists",
+            "--set",
+            "tolerations[0].effect=NoSchedule",
+            "--set",
+            "webhooks.tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "webhooks.tolerations[0].operator=Exists",
+            "--set",
+            "webhooks.tolerations[0].effect=NoSchedule",
+            "--set",
+            "metricsServer.tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "metricsServer.tolerations[0].operator=Exists",
+            "--set",
+            "metricsServer.tolerations[0].effect=NoSchedule",
+        ],
     );
     std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");
 
