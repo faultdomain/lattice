@@ -65,6 +65,10 @@ spec:
           allowedConsumers:
             - sonarr
             - nzbget
+      # External service dependencies
+      jellyfin-repo:
+        type: external-service
+        direction: outbound
       # Service dependencies (bilateral agreement)
       sonarr:
         type: service

@@ -10,13 +10,13 @@ use tracing::info;
 
 use kube::api::Api;
 
-use lattice_common::crd::LatticeService;
+use lattice_common::crd::{LatticeExternalService, LatticeService};
 
 use super::helpers::{
     apply_cedar_policy_crd, apply_run_as_root_override_policy, client_from_kubeconfig,
-    create_with_retry, ensure_fresh_namespace, ensure_test_cluster_issuer, load_service_config,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
-    wait_for_service_phase_with_message,
+    create_with_retry, ensure_fresh_namespace, ensure_test_cluster_issuer,
+    load_external_service_config, load_service_config, run_kubectl,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_service_phase_with_message,
 };
 use super::mesh_helpers::retry_verification;
 
@@ -90,6 +90,15 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     .await?;
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
+
+    // Deploy external service dependencies before LatticeServices
+    let ext_api: Api<LatticeExternalService> = Api::namespaced(client.clone(), NAMESPACE);
+    for filename in ["jellyfin-repo.yaml"] {
+        let ext_svc = load_external_service_config(filename)?;
+        let name = ext_svc.metadata.name.as_deref().unwrap_or(filename);
+        info!("Deploying external service {}...", name);
+        create_with_retry(&ext_api, &ext_svc, name).await?;
+    }
 
     // Load and deploy services from YAML fixtures
     let api: Api<LatticeService> = Api::namespaced(client, NAMESPACE);

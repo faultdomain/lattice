@@ -20,8 +20,9 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use tracing::info;
 
 use lattice_common::crd::{
-    ContainerSpec, ExecProbe, LatticeService, LatticeServiceSpec, PortSpec, Probe, RuntimeSpec,
-    SecurityContext, ServicePortsSpec, SidecarSpec, WorkloadSpec,
+    ContainerSpec, ExecProbe, LatticeService, LatticeServiceSpec, PortSpec, Probe,
+    ResourceQuantity, ResourceRequirements, RuntimeSpec, SecurityContext, ServicePortsSpec,
+    SidecarSpec, WorkloadSpec,
 };
 
 use super::super::context::InfraContext;
@@ -90,6 +91,13 @@ fn build_service(
             command: command.or(Some(vec!["sleep".to_string(), "infinity".to_string()])),
             security: Some(sec),
             liveness_probe,
+            resources: Some(ResourceRequirements {
+                limits: Some(ResourceQuantity {
+                    cpu: Some("100m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
@@ -135,6 +143,13 @@ fn build_service_with_sidecar_shell(name: &str, namespace: &str) -> LatticeServi
                 apparmor_profile: Some("Unconfined".to_string()),
                 ..Default::default()
             }),
+            resources: Some(ResourceRequirements {
+                limits: Some(ResourceQuantity {
+                    cpu: Some("100m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
@@ -159,6 +174,10 @@ fn build_service_with_sidecar_shell(name: &str, namespace: &str) -> LatticeServi
                 "-c".to_string(),
                 "tail -f /dev/null".to_string(),
             ]),
+            security: Some(SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );

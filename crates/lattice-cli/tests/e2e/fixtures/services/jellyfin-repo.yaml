@@ -1,0 +1,12 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeExternalService
+metadata:
+  name: jellyfin-repo
+  namespace: media
+spec:
+  endpoints:
+    repo: https://repo.jellyfin.org
+  allowedRequesters:
+    - jellyfin
+  resolution: dns
+  description: Jellyfin package repository for plugin and metadata updates

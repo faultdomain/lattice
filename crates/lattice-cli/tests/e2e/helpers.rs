@@ -11,7 +11,7 @@ use kube::{
     config::{KubeConfigOptions, Kubeconfig},
     Client,
 };
-use lattice_common::crd::{BootstrapProvider, ClusterPhase, LatticeService};
+use lattice_common::crd::{BootstrapProvider, ClusterPhase, LatticeExternalService, LatticeService};
 use lattice_common::{
     retry::{retry_with_backoff, RetryConfig},
     LABEL_NAME, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_WEBHOOK_STORE_NAME,
@@ -1133,11 +1133,12 @@ pub fn load_cluster_config(
 }
 
 /// Load a LatticeService config from a fixture file
-pub fn load_service_config(filename: &str) -> Result<lattice_common::crd::LatticeService, String> {
+/// Load any deserializable K8s resource from a YAML fixture file in the services directory.
+pub fn load_fixture_config<T: serde::de::DeserializeOwned>(filename: &str) -> Result<T, String> {
     let path = service_fixtures_dir().join(filename);
 
     if !path.exists() {
-        return Err(format!("Service config not found: {}", path.display()));
+        return Err(format!("Fixture config not found: {}", path.display()));
     }
 
     let content = std::fs::read_to_string(&path)
@@ -1145,10 +1146,18 @@ pub fn load_service_config(filename: &str) -> Result<lattice_common::crd::Lattic
 
     let value = lattice_common::yaml::parse_yaml(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
-    let service: lattice_common::crd::LatticeService = serde_json::from_value(value)
-        .map_err(|e| format!("Invalid service config in {}: {}", path.display(), e))?;
+    serde_json::from_value(value)
+        .map_err(|e| format!("Invalid config in {}: {}", path.display(), e))
+}
 
-    Ok(service)
+/// Load a LatticeService from a YAML fixture file in the services directory.
+pub fn load_service_config(filename: &str) -> Result<lattice_common::crd::LatticeService, String> {
+    load_fixture_config(filename)
+}
+
+/// Load a LatticeExternalService from a YAML fixture file in the services directory.
+pub fn load_external_service_config(filename: &str) -> Result<LatticeExternalService, String> {
+    load_fixture_config(filename)
 }
 
 /// Get a localhost-accessible kubeconfig for a Docker cluster
@@ -1549,10 +1558,26 @@ fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to wait for kubectl: {}", e))?;
 
     if !output.status.success() {
-        return Err(format!(
-            "kubectl apply failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Redact secret data from error messages to avoid leaking credentials in logs
+        let message = if yaml.contains("kind: Secret") {
+            // Strip lines that look like they contain stringData/data payloads
+            stderr
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.starts_with("\"stringData\"")
+                        && !trimmed.starts_with("\"data\"")
+                        && !trimmed.starts_with("{\"auths\"")
+                        && !trimmed.starts_with("{\"stringData\"")
+                        && !trimmed.starts_with("{\"data\"")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            stderr.to_string()
+        };
+        return Err(format!("kubectl apply failed: {}", message));
     }
 
     Ok(())

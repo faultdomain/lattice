@@ -541,9 +541,7 @@ fn main() {
             "--set",
             "tetragon.enablePolicyFilterDebug=false",
             "--set",
-            "rthooks.enabled=true",
-            "--set",
-            "rthooks.interface=nri-hook",
+            "rthooks.enabled=false",
         ],
     );
     std::fs::write(out_dir.join("tetragon.yaml"), yaml).expect("write tetragon.yaml");
