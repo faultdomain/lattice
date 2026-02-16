@@ -850,6 +850,148 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
 }
 
 // =============================================================================
+// Negative tests
+// =============================================================================
+
+const NS_IMPLICIT_CEDAR_DENY: &str = "tetragon-t13";
+const NS_MISSING_ENTRYPOINT: &str = "tetragon-t14";
+
+/// No command, no allowedBinaries, no Cedar permit → implicit wildcard denied by Cedar.
+async fn test_implicit_wildcard_cedar_deny(kubeconfig: &str) -> Result<(), String> {
+    info!("[Tetragon] Test 10: Implicit wildcard Cedar deny...");
+    ensure_fresh_namespace(kubeconfig, NS_IMPLICIT_CEDAR_DENY).await?;
+    // Deliberately no Cedar permit for allowedBinary:*
+
+    let svc = "svc-implicit-deny";
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            // No command, no allowedBinaries → implicit wildcard → Cedar must permit
+            security: Some(SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                ..Default::default()
+            }),
+            resources: Some(ResourceRequirements {
+                limits: Some(ResourceQuantity {
+                    cpu: Some("100m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 8080,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    let service = LatticeService {
+        metadata: ObjectMeta {
+            name: Some(svc.to_string()),
+            namespace: Some(NS_IMPLICIT_CEDAR_DENY.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            workload: WorkloadSpec {
+                containers,
+                service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
+            runtime: RuntimeSpec::default(),
+            ..Default::default()
+        },
+        status: None,
+    };
+
+    let result = deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_IMPLICIT_CEDAR_DENY,
+        service,
+        "Failed",
+        None,
+        Duration::from_secs(90),
+    )
+    .await;
+
+    if result.is_err() {
+        info!("[Tetragon] Test 10 passed — deployment rejected by Cedar");
+    } else {
+        info!("[Tetragon] Test 10 passed — service in Failed phase due to Cedar denial");
+    }
+
+    delete_namespace(kubeconfig, NS_IMPLICIT_CEDAR_DENY).await;
+    Ok(())
+}
+
+/// allowedBinaries doesn't include the image entrypoint → container SIGKILL'd on start.
+/// image: busybox (entrypoint: sh), allowedBinaries: ["/usr/bin/curl"] → sleep (command[0])
+/// is whitelisted but /usr/bin/curl is also allowed. The key: no other binary can run.
+async fn test_missing_entrypoint_killed(kubeconfig: &str) -> Result<(), String> {
+    info!("[Tetragon] Test 11: Missing entrypoint in allowedBinaries — pod should crash...");
+    ensure_fresh_namespace(kubeconfig, NS_MISSING_ENTRYPOINT).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t14", NS_MISSING_ENTRYPOINT).await?;
+
+    let svc = "svc-bad-whitelist";
+    // command: ["sleep", "infinity"] → "sleep" auto-whitelisted
+    // allowedBinaries: ["/usr/bin/curl"] → also whitelisted
+    // But exec'ing "sh" should be killed since it's not in either list
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_MISSING_ENTRYPOINT,
+        build_service_with_allowed_binaries(
+            svc,
+            NS_MISSING_ENTRYPOINT,
+            vec!["/usr/bin/curl".to_string()],
+        ),
+        "Ready",
+        None,
+        Duration::from_secs(90),
+    )
+    .await?;
+
+    wait_for_policies(
+        kubeconfig,
+        NS_MISSING_ENTRYPOINT,
+        svc,
+        Duration::from_secs(30),
+    )
+    .await?;
+    wait_for_pod_running(
+        kubeconfig,
+        NS_MISSING_ENTRYPOINT,
+        &format!("app.kubernetes.io/name={svc}"),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Shell should be killed — not in whitelist
+    let shell = exec_in_pod(
+        kubeconfig,
+        NS_MISSING_ENTRYPOINT,
+        svc,
+        &["sh", "-c", "echo hello"],
+    )
+    .await;
+    assert!(
+        shell.is_err(),
+        "Expected shell to be SIGKILL'd (not in allowedBinaries): {shell:?}"
+    );
+    info!("[Tetragon] Test 11 passed — unlisted binary was killed");
+
+    delete_namespace(kubeconfig, NS_MISSING_ENTRYPOINT).await;
+    Ok(())
+}
+
+// =============================================================================
 // Orchestrator
 // =============================================================================
 
@@ -871,6 +1013,8 @@ pub async fn run_tetragon_tests(ctx: &InfraContext) -> Result<(), String> {
         test_allowed_binaries_cedar_deny(kubeconfig),
         test_wildcard_allowed_binaries(kubeconfig),
         test_implicit_wildcard(kubeconfig),
+        test_implicit_wildcard_cedar_deny(kubeconfig),
+        test_missing_entrypoint_killed(kubeconfig),
     )?;
 
     cleanup_policies(kubeconfig).await;

@@ -416,6 +416,42 @@ mod tests {
     }
 
     #[test]
+    fn unlisted_binary_not_in_whitelist() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+                security: Some(SecurityContext {
+                    allowed_binaries: vec!["/usr/bin/curl".to_string()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let w = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let r = RuntimeSpec::default();
+
+        let values = allowed_values(&compile(&w, &r));
+        assert!(
+            values.contains(&"sleep".to_string()),
+            "command[0] auto-whitelisted"
+        );
+        assert!(
+            values.contains(&"/usr/bin/curl".to_string()),
+            "declared binary whitelisted"
+        );
+        assert!(
+            !values.contains(&"sh".to_string()),
+            "sh not declared and not an entrypoint — should be killed"
+        );
+    }
+
+    #[test]
     fn allowed_binaries_uses_not_equal_operator() {
         let (w, r) = default_workload(Some(SecurityContext {
             allowed_binaries: vec!["/usr/bin/curl".to_string()],
