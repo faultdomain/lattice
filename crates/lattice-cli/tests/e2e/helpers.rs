@@ -2997,7 +2997,7 @@ pub async fn verify_pod_image_pull_secrets(
 }
 
 /// Wait for at least one pod matching `label_selector` to reach the Running phase.
-async fn wait_for_pod_running(
+pub async fn wait_for_pod_running(
     kubeconfig: &str,
     namespace: &str,
     label_selector: &str,
