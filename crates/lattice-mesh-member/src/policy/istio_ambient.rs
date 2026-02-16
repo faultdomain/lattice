@@ -50,12 +50,15 @@ impl<'a> PolicyCompiler<'a> {
 
         let mut principals: Vec<String> = inbound_edges
             .iter()
-            .map(|edge| {
-                mesh::trust_domain::principal(
+            .filter_map(|edge| {
+                let caller = self
+                    .graph
+                    .get_service(&edge.caller_namespace, &edge.caller_name)?;
+                Some(mesh::trust_domain::principal(
                     &self.cluster_name,
                     &edge.caller_namespace,
-                    &edge.caller_name,
-                )
+                    caller.sa_name(),
+                ))
             })
             .collect();
 
@@ -64,7 +67,7 @@ impl<'a> PolicyCompiler<'a> {
             principals.push(mesh::trust_domain::principal(
                 &self.cluster_name,
                 namespace,
-                &service.name,
+                service.sa_name(),
             ));
         }
 
@@ -200,6 +203,12 @@ impl<'a> PolicyCompiler<'a> {
             .map(|ep| ep.port.to_string())
             .collect();
 
+        let caller_sa = self
+            .graph
+            .get_service(namespace, caller)
+            .map(|n| n.sa_name().to_string())
+            .unwrap_or_else(|| caller.to_string());
+
         AuthorizationPolicy::new(
             ObjectMeta::new(
                 derived_name("allow-ext-", &[namespace, caller, &external_service.name]),
@@ -219,7 +228,7 @@ impl<'a> PolicyCompiler<'a> {
                             principals: vec![mesh::trust_domain::principal(
                                 &self.cluster_name,
                                 namespace,
-                                caller,
+                                &caller_sa,
                             )],
                         },
                     }],

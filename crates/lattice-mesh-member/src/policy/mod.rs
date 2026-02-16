@@ -637,6 +637,7 @@ mod tests {
             egress: vec![],
             allow_peer_traffic: false,
             ingress: None,
+            service_account: None,
         }
     }
 
@@ -770,13 +771,16 @@ mod tests {
             .expect("webhook-only service should have HBONE ingress for ztunnel delivery");
         assert!(!hbone_rule.from_endpoints.is_empty());
 
-        // Should have an ingress rule with fromEntities: kube-apiserver on port 9443
+        // Should have an ingress rule with fromEntities on port 9443
+        // Needs remote-node, kube-apiserver, and host for cross-node DNAT delivery
         let webhook_rule = cnp
             .spec
             .ingress
             .iter()
-            .find(|r| r.from_entities.contains(&"kube-apiserver".to_string()))
-            .expect("should have kube-apiserver ingress rule");
+            .find(|r| r.from_entities.contains(&"remote-node".to_string()))
+            .expect("should have remote-node ingress rule for webhook");
+        assert!(webhook_rule.from_entities.contains(&"kube-apiserver".to_string()));
+        assert!(webhook_rule.from_entities.contains(&"host".to_string()));
         assert!(webhook_rule.to_ports[0]
             .ports
             .iter()

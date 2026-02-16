@@ -497,6 +497,8 @@ fn is_transient_kubectl_error(error: &str) -> bool {
         || error.contains("client rate limiter")
         || error.contains("net/http")
         || error.contains("timed out")
+        || error.contains("the server could not find the requested resource")
+        || error.contains("couldn't get current server API group list")
 }
 
 // =============================================================================

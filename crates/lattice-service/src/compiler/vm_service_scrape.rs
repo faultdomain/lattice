@@ -310,6 +310,7 @@ mod tests {
                     egress: vec![],
                     allow_peer_traffic: false,
                     ingress: None,
+                    service_account: None,
                 },
                 status: None,
             }),

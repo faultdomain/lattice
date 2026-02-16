@@ -64,6 +64,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,
                 ingress: None,
+                service_account: None,
             },
         ),
         // keda-admission-webhooks — webhook called by kube-apiserver
@@ -85,6 +86,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,
                 ingress: None,
+                service_account: None,
             },
         ),
         // keda-operator — receives gRPC from metrics-apiserver, scales workloads
@@ -102,7 +104,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                     peer_auth: PeerAuth::Strict,
                 }],
                 allowed_callers: vec![CallerRef {
-                    name: "keda-metrics-apiserver".to_string(),
+                    name: "keda-metrics-server".to_string(),
                     namespace: Some(KEDA_NAMESPACE.to_string()),
                 }],
                 dependencies: vec![ServiceRef::new(
@@ -112,6 +114,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,
                 ingress: None,
+                service_account: None,
             },
         ),
     ]
@@ -167,7 +170,7 @@ mod tests {
         assert_eq!(m.metadata.name.as_deref(), Some("keda-operator"));
         assert_eq!(m.spec.ports[0].port, 9666);
         assert_eq!(m.spec.ports[0].peer_auth, PeerAuth::Strict);
-        assert_eq!(m.spec.allowed_callers[0].name, "keda-metrics-apiserver");
+        assert_eq!(m.spec.allowed_callers[0].name, "keda-metrics-server");
         assert_eq!(m.spec.dependencies[0].name, VM_READ_TARGET_LMM_NAME);
         assert_eq!(
             m.spec.dependencies[0].namespace.as_deref(),

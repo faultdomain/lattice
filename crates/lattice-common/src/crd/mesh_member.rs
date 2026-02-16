@@ -58,6 +58,11 @@ pub struct LatticeMeshMemberSpec {
     /// Ingress configuration for exposing this member externally
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<IngressSpec>,
+
+    /// Kubernetes ServiceAccount name for SPIFFE identity.
+    /// Defaults to the LMM resource name if omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
 }
 
 /// Target workloads for a mesh member
@@ -272,6 +277,7 @@ mod tests {
             egress: vec![],
             allow_peer_traffic: false,
             ingress: None,
+            service_account: None,
         }
     }
 

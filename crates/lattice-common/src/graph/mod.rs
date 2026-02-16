@@ -77,6 +77,8 @@ pub struct ServiceNode {
     pub allow_peer_traffic: bool,
     /// Non-mesh egress rules (entity, CIDR, FQDN targets)
     pub egress_rules: Vec<EgressRule>,
+    /// Override SA name for SPIFFE principal (None = use node name)
+    pub service_account: Option<String>,
 }
 
 impl ServiceNode {
@@ -136,6 +138,7 @@ impl ServiceNode {
             target_namespace: None,
             allow_peer_traffic: false,
             egress_rules: vec![],
+            service_account: None,
         }
     }
 
@@ -173,6 +176,7 @@ impl ServiceNode {
             target_namespace: None,
             allow_peer_traffic: false,
             egress_rules: vec![],
+            service_account: None,
         }
     }
 
@@ -239,6 +243,7 @@ impl ServiceNode {
             target_namespace,
             allow_peer_traffic: spec.allow_peer_traffic,
             egress_rules: spec.egress.clone(),
+            service_account: spec.service_account.clone(),
         }
     }
 
@@ -259,7 +264,14 @@ impl ServiceNode {
             target_namespace: None,
             allow_peer_traffic: false,
             egress_rules: vec![],
+            service_account: None,
         }
+    }
+
+    /// Effective ServiceAccount name for SPIFFE principal generation.
+    /// Returns the explicit `service_account` if set, otherwise falls back to the node name.
+    pub fn sa_name(&self) -> &str {
+        self.service_account.as_deref().unwrap_or(&self.name)
     }
 
     /// Return port numbers by peer auth mode.
@@ -1418,6 +1430,7 @@ mod tests {
             egress: vec![],
             allow_peer_traffic: false,
             ingress: None,
+            service_account: None,
         }
     }
 
@@ -1546,6 +1559,7 @@ mod tests {
             egress: vec![],
             allow_peer_traffic: false,
             ingress: None,
+            service_account: None,
         };
 
         graph.put_mesh_member("default", "kube-api-access", &spec);

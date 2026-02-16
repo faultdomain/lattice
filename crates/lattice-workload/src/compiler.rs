@@ -374,6 +374,7 @@ impl<'a> WorkloadCompiler<'a> {
                     egress: vec![],
                     allow_peer_traffic: false,
                     ingress: self.ingress,
+                    service_account: None,
                 },
             ))
         } else {

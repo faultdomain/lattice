@@ -31,7 +31,7 @@ use lattice_common::{
     capi_namespace, Error, KubeEventPublisher, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE,
     PARENT_CONFIG_SECRET,
 };
-use lattice_move::{CellMover, CellMoverConfig};
+use lattice_move::{pause_cluster, unpause_cluster, CellMover, CellMoverConfig};
 use lattice_proto::AgentState;
 
 use lattice_capi::client::{CAPIClient, CAPIClientImpl};
@@ -1386,9 +1386,17 @@ async fn handle_deletion(
         return Ok(Action::await_change());
     }
 
+    // Pause cluster to freeze CAPI state — eliminates TOCTOU window between
+    // stability checks and the agent's unpivot pause
+    let capi_namespace = capi_namespace(&name);
+    let client = ctx.client.as_ref().ok_or_else(|| Error::internal("no kube client"))?;
+    if let Err(e) = pause_cluster(client, &capi_namespace).await {
+        warn!(cluster = %name, error = %e, "Failed to pause for unpivot");
+        return Ok(Action::requeue(Duration::from_secs(10)));
+    }
+
     // Wait for cluster to be stable before unpivoting (no scaling in progress)
     // Check 1: CAPI resources are stable (no machines provisioning/deleting)
-    let capi_namespace = capi_namespace(&name);
     let capi_stable = match ctx.capi.is_cluster_stable(&name, &capi_namespace).await {
         Ok(stable) => stable,
         Err(e) => {
@@ -1399,6 +1407,7 @@ async fn handle_deletion(
 
     if !capi_stable {
         info!(cluster = %name, "Waiting for CAPI to stabilize before unpivoting");
+        let _ = unpause_cluster(client, &capi_namespace).await;
         let status = cluster
             .status
             .clone()
@@ -1429,6 +1438,7 @@ async fn handle_deletion(
             desired = desired_workers,
             "Waiting for workers to match spec before unpivoting"
         );
+        let _ = unpause_cluster(client, &capi_namespace).await;
         let status = cluster.status.clone().unwrap_or_default().message(format!(
             "Deletion pending: waiting for workers ({}/{})",
             ready_workers, desired_workers

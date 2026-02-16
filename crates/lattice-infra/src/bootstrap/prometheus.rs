@@ -171,6 +171,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 egress: vec![],
                 allow_peer_traffic: false,
                 ingress: None,
+                service_account: None,
             },
         ));
 
@@ -189,6 +190,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 egress: vec![],
                 allow_peer_traffic: false,
                 ingress: None,
+                service_account: None,
             },
         ));
     } else {
@@ -208,6 +210,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 egress: vec![],
                 allow_peer_traffic: false,
                 ingress: None,
+                service_account: None,
             },
         ));
     }
@@ -233,6 +236,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,
             ingress: None,
+            service_account: Some(VMAGENT_SERVICE_ACCOUNT.to_string()),
         },
     ));
 
@@ -255,6 +259,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,
             ingress: None,
+            service_account: None,
         },
     ));
 

@@ -84,12 +84,12 @@ pub async fn prepare_move_objects(
 }
 
 /// Pause Cluster and ClusterClass resources in a namespace
-pub(crate) async fn pause_cluster(client: &Client, namespace: &str) -> Result<(), MoveError> {
+pub async fn pause_cluster(client: &Client, namespace: &str) -> Result<(), MoveError> {
     set_cluster_paused(client, namespace, true).await
 }
 
 /// Unpause Cluster and ClusterClass resources in a namespace
-pub(crate) async fn unpause_cluster(client: &Client, namespace: &str) -> Result<(), MoveError> {
+pub async fn unpause_cluster(client: &Client, namespace: &str) -> Result<(), MoveError> {
     set_cluster_paused(client, namespace, false).await
 }
 
@@ -454,6 +454,19 @@ impl<S: MoveCommandSender> CellMover<S> {
         )
     )]
     pub async fn execute(&mut self) -> Result<MoveResult, MoveError> {
+        const OVERALL_MOVE_TIMEOUT: Duration = Duration::from_secs(1800);
+
+        match tokio::time::timeout(OVERALL_MOVE_TIMEOUT, self.execute_inner()).await {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(cluster = %self.config.cluster_name, "Move timed out after 30 minutes, unpausing source");
+                let _ = unpause_cluster(&self.client, &self.config.source_namespace).await;
+                Err(MoveError::Timeout { seconds: OVERALL_MOVE_TIMEOUT.as_secs() })
+            }
+        }
+    }
+
+    async fn execute_inner(&mut self) -> Result<MoveResult, MoveError> {
         info!(
             move_id = %self.config.move_id,
             cluster = %self.config.cluster_name,
