@@ -24,7 +24,7 @@ use cedar_policy::{
 use kube::api::ListParams;
 use kube::{Api, Client};
 use tokio::sync::RwLock;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
 use lattice_common::crd::CedarPolicy;
@@ -312,6 +312,7 @@ impl PolicyEngine {
                     lattice_common::metrics::AuthDecision::Allow,
                     action_label,
                 );
+                info!(principal = %principal_uid, action = action_label, resource = %resource_uid, "cedar authorization allowed");
                 Ok(())
             }
             Decision::Deny => {
@@ -324,6 +325,7 @@ impl PolicyEngine {
                 } else {
                     DenialReason::NoPermitPolicy
                 };
+                warn!(principal = %principal_uid, action = action_label, resource = %resource_uid, reason = ?reason, "cedar authorization denied");
                 Err(reason)
             }
         }

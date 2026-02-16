@@ -112,6 +112,9 @@ impl TracingPolicyNamespaced {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TracingPolicySpec {
+    /// Pod selector to filter which pods this policy applies to
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_selector: Option<PodSelector>,
     /// Kprobe hooks to attach
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kprobes: Vec<KprobeSpec>,
@@ -203,7 +206,7 @@ pub struct ReturnArg {
 // Selector types
 // =============================================================================
 
-/// Selector for filtering kprobe events by namespace, label, or argument
+/// Selector for filtering kprobe events by namespace or argument
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Selector {
@@ -213,22 +216,15 @@ pub struct Selector {
     /// Match by namespace inclusion/exclusion
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub match_namespaces: Vec<MatchNamespace>,
-    /// Match by pod labels
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub match_labels: Vec<MatchLabel>,
     /// Actions to take on match
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub match_actions: Vec<MatchAction>,
 }
 
 impl Selector {
-    /// Selector that SIGKILLs processes matching a specific service label
-    pub fn sigkill_for_service(service_name: &str) -> Self {
+    /// Selector that SIGKILLs matching processes
+    pub fn sigkill() -> Self {
         Self {
-            match_labels: vec![MatchLabel {
-                key: crate::LABEL_NAME.to_string(),
-                value: service_name.to_string(),
-            }],
             match_actions: vec![MatchAction {
                 action: TracingAction::Sigkill,
             }],
@@ -273,14 +269,24 @@ pub struct MatchNamespace {
     pub values: Vec<String>,
 }
 
-/// Label matching for selectors
+/// Pod selector for filtering which pods a TracingPolicy applies to
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct MatchLabel {
-    /// Label key
-    pub key: String,
-    /// Label value
-    pub value: String,
+pub struct PodSelector {
+    /// Match pods by labels
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub match_labels: std::collections::BTreeMap<String, String>,
+}
+
+impl PodSelector {
+    /// Create a pod selector targeting a specific service by name label
+    pub fn for_service(service_name: &str) -> Self {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert(crate::LABEL_NAME.to_string(), service_name.to_string());
+        Self {
+            match_labels: labels,
+        }
+    }
 }
 
 /// Action to take when a selector matches
@@ -309,6 +315,7 @@ mod tests {
         let policy = TracingPolicy::new(
             "block-ptrace",
             TracingPolicySpec {
+                pod_selector: None,
                 kprobes: vec![KprobeSpec::simple(
                     "security_ptrace_access_check",
                     vec![Selector {
@@ -332,7 +339,10 @@ mod tests {
         let policy = TracingPolicyNamespaced::new(
             "block-shells-myapp",
             "prod",
-            TracingPolicySpec { kprobes: vec![] },
+            TracingPolicySpec {
+                pod_selector: None,
+                kprobes: vec![],
+            },
         );
         assert_eq!(policy.metadata.namespace, "prod");
         assert_eq!(policy.kind, "TracingPolicyNamespaced");
@@ -344,6 +354,7 @@ mod tests {
             "test",
             "default",
             TracingPolicySpec {
+                pod_selector: Some(PodSelector::for_service("test-svc")),
                 kprobes: vec![KprobeSpec::with_args(
                     "security_bprm_check",
                     vec![KprobeArg {
@@ -356,10 +367,6 @@ mod tests {
                             index: 0,
                             operator: "Equal".to_string(),
                             values: vec!["/bin/sh".to_string()],
-                        }],
-                        match_labels: vec![MatchLabel {
-                            key: "app.kubernetes.io/name".to_string(),
-                            value: "my-service".to_string(),
                         }],
                         match_actions: vec![MatchAction {
                             action: TracingAction::Sigkill,
@@ -376,9 +383,15 @@ mod tests {
     }
 
     #[test]
-    fn sigkill_for_service_selector() {
-        let sel = Selector::sigkill_for_service("my-app");
-        assert_eq!(sel.match_labels[0].value, "my-app");
+    fn sigkill_selector() {
+        let sel = Selector::sigkill();
+        assert!(sel.match_args.is_empty());
         assert_eq!(sel.match_actions[0].action, TracingAction::Sigkill);
+    }
+
+    #[test]
+    fn pod_selector_for_service() {
+        let ps = PodSelector::for_service("my-app");
+        assert_eq!(ps.match_labels.get("app.kubernetes.io/name").unwrap(), "my-app");
     }
 }

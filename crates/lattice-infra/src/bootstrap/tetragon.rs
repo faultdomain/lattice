@@ -37,7 +37,6 @@ const BLOCKED_HOOKS: &[&str] = &[
     "security_kernel_module_request",
     "security_sb_mount",
     "security_sb_umount",
-    "security_task_create",
 ];
 
 const SENSITIVE_PATHS: &[&str] = &["/etc/shadow", "/etc/passwd", "/etc/sudoers"];
@@ -74,7 +73,13 @@ pub fn generate_baseline_tracing_policy() -> TracingPolicy {
         }],
     ));
 
-    TracingPolicy::new("lattice-baseline-runtime", TracingPolicySpec { kprobes })
+    TracingPolicy::new(
+        "lattice-baseline-runtime",
+        TracingPolicySpec {
+            pod_selector: None,
+            kprobes,
+        },
+    )
 }
 
 fn namespace_exclusions() -> Vec<MatchNamespace> {

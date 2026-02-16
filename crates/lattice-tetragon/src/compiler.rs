@@ -12,7 +12,8 @@ use lattice_common::crd::{
     ContainerSpec, Probe, RuntimeSpec, SecurityContext, SidecarSpec, WorkloadSpec,
 };
 use lattice_common::policy::tetragon::{
-    KprobeArg, KprobeSpec, MatchArg, Selector, TracingPolicyNamespaced, TracingPolicySpec,
+    KprobeArg, KprobeSpec, MatchArg, PodSelector, Selector, TracingPolicyNamespaced,
+    TracingPolicySpec,
 };
 
 /// Well-known shell paths to block by default
@@ -59,7 +60,7 @@ pub fn compile_tracing_policies(
                     type_: "file".to_string(),
                     label: Some("path".to_string()),
                 }],
-                vec![Selector::sigkill_for_service(name)],
+                vec![Selector::sigkill()],
             ),
         ));
     }
@@ -71,7 +72,7 @@ pub fn compile_tracing_policies(
             namespace,
             KprobeSpec::simple(
                 "security_task_fix_setuid",
-                vec![Selector::sigkill_for_service(name)],
+                vec![Selector::sigkill()],
             ),
         ));
     }
@@ -81,7 +82,7 @@ pub fn compile_tracing_policies(
             "block-capset",
             name,
             namespace,
-            KprobeSpec::simple("security_capset", vec![Selector::sigkill_for_service(name)]),
+            KprobeSpec::simple("security_capset", vec![Selector::sigkill()]),
         ));
     }
 
@@ -98,6 +99,7 @@ fn make_policy(
         format!("{prefix}-{service_name}"),
         namespace,
         TracingPolicySpec {
+            pod_selector: Some(PodSelector::for_service(service_name)),
             kprobes: vec![kprobe],
         },
     )
@@ -121,7 +123,7 @@ fn compile_shell_policy(
     let selectors = if blocked.is_empty() {
         vec![]
     } else {
-        let mut sel = Selector::sigkill_for_service(name);
+        let mut sel = Selector::sigkill();
         sel.match_args = vec![MatchArg {
             index: 0,
             operator: "Equal".to_string(),
