@@ -3225,3 +3225,39 @@ pub async fn apply_cedar_secret_policy_for_service(
 
     apply_cedar_policy_crd(kubeconfig, policy_name, label, 100, &cedar).await
 }
+
+/// List TracingPolicyNamespaced resource names in a namespace
+pub async fn list_tracing_policies(
+    kubeconfig: &str,
+    namespace: &str,
+) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("kubectl")
+        .args([
+            "--kubeconfig",
+            kubeconfig,
+            "get",
+            "tracingpolicynamespaced",
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.items[*].metadata.name}",
+        ])
+        .output()
+        .map_err(|e| format!("kubectl failed: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // CRD not installed — return empty rather than error
+        if stderr.contains("the server doesn't have a resource type") {
+            return Ok(vec![]);
+        }
+        return Err(stderr.to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect())
+}

@@ -2652,6 +2652,7 @@ dependencies = [
  "lattice-common",
  "lattice-infra",
  "lattice-secret-provider",
+ "lattice-tetragon",
  "lattice-workload",
  "mockall",
  "parking_lot",
@@ -2664,6 +2665,14 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+]
+
+[[package]]
+name = "lattice-tetragon"
+version = "0.1.0"
+dependencies = [
+ "lattice-common",
+ "serde_json",
 ]
 
 [[package]]

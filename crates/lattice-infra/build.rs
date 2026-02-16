@@ -217,6 +217,10 @@ fn main() {
         versions.charts["hami"].version
     );
     println!(
+        "cargo:rustc-env=TETRAGON_VERSION={}",
+        versions.charts["tetragon"].version
+    );
+    println!(
         "cargo:rustc-env=KEDA_VERSION={}",
         versions.charts["keda"].version
     );
@@ -523,7 +527,24 @@ fn main() {
     );
     std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");
 
-    // 12. cert-manager (with control-plane tolerations so it schedules on tainted CP nodes)
+    // 12. Tetragon (runtime enforcement via eBPF kprobes)
+    let yaml = run_helm_template(
+        "tetragon",
+        &chart(&format!(
+            "tetragon-{}.tgz",
+            versions.charts["tetragon"].version
+        )),
+        "kube-system",
+        &[
+            "--set",
+            "tetragon.enablePolicyFilter=true",
+            "--set",
+            "tetragon.enablePolicyFilterDebug=false",
+        ],
+    );
+    std::fs::write(out_dir.join("tetragon.yaml"), yaml).expect("write tetragon.yaml");
+
+    // 13. cert-manager (with control-plane tolerations so it schedules on tainted CP nodes)
     let yaml = run_helm_template(
         "cert-manager",
         &chart(&format!(

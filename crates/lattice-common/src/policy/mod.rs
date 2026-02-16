@@ -11,3 +11,4 @@
 pub mod cilium;
 pub mod istio;
 pub mod service_entry;
+pub mod tetragon;

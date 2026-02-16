@@ -16,6 +16,7 @@ pub mod istio;
 pub mod keda;
 pub mod metrics_server;
 pub mod prometheus;
+pub mod tetragon;
 pub mod velero;
 
 use std::sync::LazyLock;
@@ -152,6 +153,13 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
     if config.gpu {
         manifests.extend(gpu::generate_gpu_stack().iter().cloned());
     }
+
+    // Tetragon runtime enforcement (eBPF kprobes on LSM hooks)
+    manifests.extend(tetragon::generate_tetragon().iter().cloned());
+    manifests.push(
+        serde_json::to_string_pretty(&tetragon::generate_baseline_tracing_policy())
+            .map_err(|e| format!("Failed to serialize baseline TracingPolicy: {e}"))?,
+    );
 
     Ok(manifests)
 }

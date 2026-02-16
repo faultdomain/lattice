@@ -58,6 +58,7 @@ pub struct DiscoveredCrds {
     pub scaled_object: Option<ApiResource>,
     pub vm_service_scrape: Option<ApiResource>,
     pub mesh_member: Option<ApiResource>,
+    pub tracing_policy_namespaced: Option<ApiResource>,
 }
 
 impl DiscoveredCrds {
@@ -89,6 +90,11 @@ impl DiscoveredCrds {
                 "VMServiceScrape",
             ),
             mesh_member: find_discovered_resource(&discovery, "lattice.dev", "LatticeMeshMember"),
+            tracing_policy_namespaced: find_discovered_resource(
+                &discovery,
+                "cilium.io",
+                "TracingPolicyNamespaced",
+            ),
         }
     }
 
@@ -109,6 +115,10 @@ impl DiscoveredCrds {
             mesh_member: Some(lattice_common::kube_utils::build_api_resource(
                 "lattice.dev/v1alpha1",
                 "LatticeMeshMember",
+            )),
+            tracing_policy_namespaced: Some(lattice_common::kube_utils::build_api_resource(
+                "cilium.io/v1alpha1",
+                "TracingPolicyNamespaced",
             )),
         }
     }
@@ -397,6 +407,13 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
                     mesh_member,
                     ar,
                 )?;
+            }
+        }
+
+        // Tetragon TracingPolicyNamespaced (runtime enforcement)
+        if let Some(ar) = &self.crds.tracing_policy_namespaced {
+            for tp in &compiled.tracing_policies {
+                layer1.push("TracingPolicyNamespaced", &tp.metadata.name, tp, ar)?;
             }
         }
 

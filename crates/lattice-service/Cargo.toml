@@ -15,6 +15,7 @@ lattice-cedar = { workspace = true }
 lattice-infra = { workspace = true }
 lattice-secret-provider = { workspace = true }
 lattice-workload = { workspace = true }
+lattice-tetragon = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

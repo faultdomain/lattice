@@ -37,6 +37,7 @@ use std::sync::Arc;
 use kube::discovery::ApiResource;
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::LatticeMeshMember;
+use lattice_common::policy::tetragon::TracingPolicyNamespaced;
 use lattice_workload::CompilationError;
 
 use crate::crd::{LatticeService, MonitoringConfig, ProviderType, ServiceBackupSpec};
@@ -81,6 +82,8 @@ pub struct CompiledService {
     pub workloads: GeneratedWorkloads,
     /// LatticeMeshMember CR — the mesh-member controller handles all network concerns
     pub mesh_member: Option<LatticeMeshMember>,
+    /// Tetragon TracingPolicyNamespaced resources for runtime enforcement
+    pub tracing_policies: Vec<TracingPolicyNamespaced>,
     /// Dynamic resources from compiler extension phases
     pub extensions: Vec<DynamicResource>,
 }
@@ -88,7 +91,10 @@ pub struct CompiledService {
 impl CompiledService {
     /// Check if any resources were generated
     pub fn is_empty(&self) -> bool {
-        self.workloads.is_empty() && self.mesh_member.is_none() && self.extensions.is_empty()
+        self.workloads.is_empty()
+            && self.mesh_member.is_none()
+            && self.tracing_policies.is_empty()
+            && self.extensions.is_empty()
     }
 
     /// Total count of all generated resources
@@ -112,6 +118,7 @@ impl CompiledService {
             + self.workloads.pvcs.len()
             + self.workloads.external_secrets.len()
             + self.mesh_member.as_ref().map_or(0, |_| 1)
+            + self.tracing_policies.len()
             + self.extensions.len()
     }
 }
@@ -280,9 +287,17 @@ impl<'a> ServiceCompiler<'a> {
             }
         }
 
+        let tracing_policies = lattice_tetragon::compile_tracing_policies(
+            name,
+            namespace,
+            &service.spec.workload,
+            &service.spec.runtime,
+        );
+
         let mut compiled = CompiledService {
             workloads,
             mesh_member,
+            tracing_policies,
             extensions: Vec::new(),
         };
 
@@ -573,8 +588,8 @@ mod tests {
         let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
-        // Deployment + Service + ServiceAccount + MeshMember
-        assert_eq!(output.resource_count(), 4);
+        // Deployment + Service + ServiceAccount + MeshMember + 4 TracingPolicies
+        assert_eq!(output.resource_count(), 8);
     }
 
     // =========================================================================

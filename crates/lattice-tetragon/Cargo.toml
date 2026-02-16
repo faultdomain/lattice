@@ -1,0 +1,13 @@
+[package]
+name = "lattice-tetragon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tetragon runtime enforcement policy compiler for Lattice"
+
+[dependencies]
+lattice-common = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

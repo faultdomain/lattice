@@ -11,8 +11,17 @@ set -euo pipefail
 CONTAINER="${1:?Usage: $0 <docker-container> <namespace> <pod-or-deploy>}"
 NS="${2:?Usage: $0 <docker-container> <namespace> <pod-or-deploy>}"
 TARGET="${3:?Usage: $0 <docker-container> <namespace> <pod-or-deploy>}"
-KUBECTL="docker exec $CONTAINER kubectl --kubeconfig=/etc/kubernetes/super-admin.conf"
 DURATION="${4:-15}"
+
+# Auto-detect kubeconfig: try kubeadm (super-admin.conf), then RKE2
+if docker exec "$CONTAINER" test -f /etc/kubernetes/super-admin.conf 2>/dev/null; then
+    KUBECTL="docker exec $CONTAINER kubectl --kubeconfig=/etc/kubernetes/super-admin.conf"
+elif docker exec "$CONTAINER" test -f /etc/rancher/rke2/rke2.yaml 2>/dev/null; then
+    KUBECTL="docker exec $CONTAINER kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml"
+else
+    echo "ERROR: Could not find kubeconfig in $CONTAINER (tried /etc/kubernetes/super-admin.conf and /etc/rancher/rke2/rke2.yaml)" >&2
+    exit 1
+fi
 
 # Resolve target to a list of pod names
 resolve_pods() {

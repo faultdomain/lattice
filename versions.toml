@@ -77,6 +77,12 @@ repo = "https://project-hami.github.io/HAMi"
 chart = "hami/hami"
 filename = "hami-{version}.tgz"
 
+[charts.tetragon]
+version = "1.3.0"
+repo = "https://helm.cilium.io/"
+chart = "cilium/tetragon"
+filename = "tetragon-{version}.tgz"
+
 [charts.keda]
 version = "2.19.0"
 repo = "https://kedacore.github.io/charts"

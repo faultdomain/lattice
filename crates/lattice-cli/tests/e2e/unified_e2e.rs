@@ -208,6 +208,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Tetragon runtime enforcement
+    {
+        let ctx2 = ctx.clone();
+        let sem = pool.clone();
+        handles.push((
+            "Tetragon",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::tetragon::run_tetragon_tests(&ctx2).await
+            }),
+        ));
+    }
+
     // Autoscaling: KEDA pod scale-up
     {
         let ctx2 = ctx.clone();
