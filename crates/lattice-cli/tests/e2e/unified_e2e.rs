@@ -78,7 +78,7 @@ async fn run_full_e2e() -> Result<(), String> {
     let mut setup_result = integration::setup::setup_full_hierarchy(&config).await?;
     let ctx = setup_result.ctx.clone();
 
-    // Chaos was stopped inside setup before proxy kubeconfig generation (Phase 7).
+    // Chaos continues running from setup (paused/resumed per-cluster as needed).
     // Ensure port-forwards are alive before continuing.
     setup_result.ensure_proxies_alive().await?;
 
@@ -234,8 +234,9 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
-    // Workload2 deletion (if exists)
+    // Workload2 deletion (if exists) — pause chaos first to avoid log spam
     if ctx.has_workload2() {
+        setup_result.pause_chaos_on_cluster(WORKLOAD2_CLUSTER_NAME);
         let child_kc = ctx.require_workload2()?.to_string();
         let parent_kc = ctx.require_workload()?.to_string();
         let provider = ctx.provider;
@@ -272,6 +273,10 @@ async fn run_full_e2e() -> Result<(), String> {
 
     info!("[Phase 8] Deleting workload cluster (unpivot to mgmt)...");
 
+    // Pause chaos on workload cluster BEFORE deletion to avoid log spam from
+    // chaos trying to apply jobs to a cluster that no longer exists.
+    setup_result.pause_chaos_on_cluster(WORKLOAD_CLUSTER_NAME);
+
     integration::pivot::delete_and_verify_unpivot(
         ctx.require_workload()?,
         &ctx.mgmt_kubeconfig,
@@ -285,7 +290,8 @@ async fn run_full_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 9: Uninstall management cluster
     // =========================================================================
-    // Chaos continues running - uninstall should be resilient to pod restarts
+    // Stop chaos entirely before teardown to avoid retries against disappearing clusters
+    setup_result.stop_chaos().await;
     info!("[Phase 9] Uninstalling management cluster...");
 
     teardown_mgmt_cluster(&ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME).await?;
