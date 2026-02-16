@@ -24,10 +24,12 @@ use kube::ResourceExt;
 use tracing::debug;
 
 use lattice_common::crd::{
-    BackupsConfig, BootstrapProvider, EgressRule, EgressTarget, LatticeCluster, LatticeMeshMember,
-    LatticeMeshMemberSpec, MonitoringConfig, ProviderType,
+    BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
+    LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MonitoringConfig, ProviderType,
 };
-use lattice_common::DEFAULT_GRPC_PORT;
+use lattice_common::{
+    DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE, MONITORING_NAMESPACE, VMAGENT_SA_NAME,
+};
 
 /// Configuration for infrastructure manifest generation
 #[derive(Debug, Clone)]
@@ -137,6 +139,12 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
             manifests.extend(serialize_lmms(
                 prometheus::generate_monitoring_mesh_members(config.monitoring.ha),
             )?);
+
+            // Cedar policy: allow vmagent wildcard outbound for metrics scraping
+            manifests.push(
+                serde_json::to_string_pretty(&generate_vmagent_cedar_policy())
+                    .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?,
+            );
         }
     }
 
@@ -245,6 +253,32 @@ pub(crate) fn lmm(name: &str, namespace: &str, spec: LatticeMeshMemberSpec) -> L
     member
 }
 
+/// Generate the CedarPolicy that permits vmagent's wildcard outbound.
+///
+/// vmagent uses `depends_all: true` to scrape metrics from any service that
+/// exposes a "metrics" port. This Cedar policy authorizes that wildcard.
+fn generate_vmagent_cedar_policy() -> CedarPolicy {
+    let mut policy = CedarPolicy::new(
+        "vmagent-wildcard-outbound",
+        CedarPolicySpec {
+            description: Some("Allow vmagent wildcard outbound for metrics scraping".to_string()),
+            policies: format!(
+                r#"permit(
+    principal == Lattice::Service::"{}/{}",
+    action == Lattice::Action::"AllowWildcard",
+    resource == Lattice::Mesh::"outbound"
+);"#,
+                MONITORING_NAMESPACE, VMAGENT_SA_NAME,
+            ),
+            priority: 0,
+            enabled: true,
+            propagate: true,
+        },
+    );
+    policy.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+    policy
+}
+
 /// Serialize a vec of LMMs to JSON manifests.
 fn serialize_lmms(members: Vec<LatticeMeshMember>) -> Result<Vec<String>, String> {
     members
@@ -278,7 +312,16 @@ pub(crate) fn namespace_yaml_ambient(name: &str) -> String {
 pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
     yaml.split("\n---")
         .map(|doc| doc.trim())
-        .filter(|doc| !doc.is_empty() && doc.contains("kind:") && !doc.contains("helm.sh/hook"))
+        .filter(|doc| {
+            let keep = !doc.is_empty() && doc.contains("kind:") && !doc.contains("helm.sh/hook");
+            if !keep && !doc.is_empty() {
+                tracing::debug!(
+                    doc_preview = &doc[..doc.len().min(100)],
+                    "Filtered out YAML document"
+                );
+            }
+            keep
+        })
         .map(|doc| {
             if doc.starts_with("---") {
                 doc.to_string()

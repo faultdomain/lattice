@@ -40,6 +40,9 @@ reqwest = { workspace = true }
 http = "1.0"
 http-body-util = "0.1"
 
+# URL parsing
+url = { workspace = true }
+
 # Encoding
 base64 = { workspace = true }
 

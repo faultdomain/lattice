@@ -9,6 +9,7 @@ use lattice_common::crd::{
     CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
     PeerAuth, ServiceRef,
 };
+use lattice_common::{MONITORING_NAMESPACE, VMAGENT_SA_NAME};
 
 use super::keda::{KEDA_NAMESPACE, VM_READ_TARGET_LMM_NAME};
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
@@ -17,13 +18,6 @@ use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_docum
 /// Used as `fullnameOverride` so all downstream consumers
 /// reference a stable integration point.
 pub const VMCLUSTER_NAME: &str = "lattice-metrics";
-
-/// Namespace for monitoring components.
-pub const MONITORING_NAMESPACE: &str = "monitoring";
-
-/// VMAgent service account name (derived from chart fullnameOverride).
-/// Used to construct SPIFFE identity for AuthorizationPolicy.
-pub const VMAGENT_SERVICE_ACCOUNT: &str = "vmagent-lattice-metrics";
 
 /// VMSelect query port (Prometheus-compatible read path, HA mode).
 pub const VMSELECT_PORT: u16 = 8481;
@@ -172,6 +166,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 allow_peer_traffic: false,
                 ingress: None,
                 service_account: None,
+                depends_all: false,
             },
         ));
 
@@ -191,6 +186,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 allow_peer_traffic: false,
                 ingress: None,
                 service_account: None,
+                depends_all: false,
             },
         ));
     } else {
@@ -211,6 +207,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 allow_peer_traffic: false,
                 ingress: None,
                 service_account: None,
+                depends_all: false,
             },
         ));
     }
@@ -236,7 +233,8 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,
             ingress: None,
-            service_account: Some(VMAGENT_SERVICE_ACCOUNT.to_string()),
+            service_account: Some(VMAGENT_SA_NAME.to_string()),
+            depends_all: true,
         },
     ));
 
@@ -257,19 +255,17 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 },
                 MeshMemberPort {
                     port: 8080,
-                    name: "http".to_string(),
+                    name: "metrics".to_string(),
                     peer_auth: PeerAuth::Strict,
                 },
             ],
-            allowed_callers: vec![CallerRef {
-                name: VMAGENT_SERVICE_ACCOUNT.to_string(),
-                namespace: Some(MONITORING_NAMESPACE.to_string()),
-            }],
+            allowed_callers: vec![],
             dependencies: vec![],
             egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,
             ingress: None,
             service_account: Some("vm-victoria-metrics-operator".to_string()),
+            depends_all: false,
         },
     ));
 
@@ -284,18 +280,16 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             )])),
             ports: vec![MeshMemberPort {
                 port: 8080,
-                name: "http".to_string(),
+                name: "metrics".to_string(),
                 peer_auth: PeerAuth::Strict,
             }],
-            allowed_callers: vec![CallerRef {
-                name: VMAGENT_SERVICE_ACCOUNT.to_string(),
-                namespace: Some(MONITORING_NAMESPACE.to_string()),
-            }],
+            allowed_callers: vec![],
             dependencies: vec![],
             egress: vec![],
             allow_peer_traffic: false,
             ingress: None,
             service_account: Some("vm-kube-state-metrics".to_string()),
+            depends_all: false,
         },
     ));
 
@@ -349,8 +343,8 @@ mod tests {
     #[test]
     fn monitoring_mesh_members_single_node() {
         let members = generate_monitoring_mesh_members(false);
-        // single-node: 1 merged vmsingle + 1 vmagent + 1 vm-operator = 3
-        assert_eq!(members.len(), 3);
+        // single-node: 1 merged vmsingle + 1 vmagent + 1 vm-operator + 1 kube-state-metrics = 4
+        assert_eq!(members.len(), 4);
 
         // vmsingle (merged read+write target)
         let single = &members[0];
@@ -381,15 +375,14 @@ mod tests {
         );
         assert_eq!(op.spec.ports[0].port, 9443);
         assert_eq!(op.spec.ports[0].peer_auth, PeerAuth::Webhook);
-        assert!(op.spec.allowed_callers.is_empty());
         assert!(op.spec.validate().is_ok());
     }
 
     #[test]
     fn monitoring_mesh_members_ha() {
         let members = generate_monitoring_mesh_members(true);
-        // HA: 1 vminsert + 1 vmselect + 1 vmagent + 1 vm-operator = 4
-        assert_eq!(members.len(), 4);
+        // HA: 1 vminsert + 1 vmselect + 1 vmagent + 1 vm-operator + 1 kube-state-metrics = 5
+        assert_eq!(members.len(), 5);
 
         let write = &members[0];
         assert_eq!(write.metadata.name.as_deref(), Some("vm-write-target"));

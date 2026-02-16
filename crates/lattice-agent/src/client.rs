@@ -1004,26 +1004,23 @@ fn grpc_max_message_size() -> usize {
 }
 
 /// Extract domain name from a URL for TLS verification
-fn extract_domain(url: &str) -> Result<String, String> {
-    if url.is_empty() {
+fn extract_domain(endpoint: &str) -> Result<String, String> {
+    if endpoint.is_empty() {
         return Err("URL is empty".to_string());
     }
-
-    // Remove protocol prefix if present
-    let without_protocol = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-
-    // Take everything before the port or path
-    let domain = without_protocol
-        .split(':')
-        .next()
-        .and_then(|s| s.split('/').next())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| format!("URL has no domain: {}", url))?;
-
-    Ok(domain.to_string())
+    // Ensure we have a scheme for url::Url to parse correctly
+    let with_scheme = if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("https://{}", endpoint)
+    };
+    let parsed =
+        url::Url::parse(&with_scheme).map_err(|e| format!("invalid URL '{}': {}", endpoint, e))?;
+    parsed
+        .host_str()
+        .filter(|h| !h.is_empty())
+        .map(|h| h.to_string())
+        .ok_or_else(|| format!("URL has no host: {}", endpoint))
 }
 
 #[cfg(test)]
@@ -1144,6 +1141,14 @@ mod tests {
     #[test]
     fn test_extract_domain_protocol_only() {
         assert!(extract_domain("https://").is_err());
+    }
+
+    #[test]
+    fn test_extract_domain_ipv6() {
+        assert_eq!(
+            extract_domain("https://[::1]:8080"),
+            Ok("[::1]".to_string())
+        );
     }
 
     #[test]

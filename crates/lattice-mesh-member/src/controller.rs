@@ -17,6 +17,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
+use lattice_cedar::{MeshWildcardRequest, PolicyEngine, WildcardDirection};
 use lattice_common::crd::{
     Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberStatus, MeshMemberPhase,
     MeshMemberScope, MeshMemberTarget,
@@ -39,6 +40,7 @@ pub struct MeshMemberContext {
     pub graph: Arc<ServiceGraph>,
     pub cluster_name: String,
     pub crds: Arc<MeshMemberDiscoveredCrds>,
+    pub cedar: Option<Arc<PolicyEngine>>,
 }
 
 /// Discovered CRD API versions for third-party resources applied by this controller.
@@ -176,6 +178,47 @@ pub async fn reconcile(
 
     // Update graph (idempotent — crash recovery)
     ctx.graph.put_mesh_member(namespace, &name, &member.spec);
+
+    // Cedar-gate wildcard inbound/outbound
+    if let Some(node) = ctx.graph.get_service(namespace, &name) {
+        let checks = [
+            (node.allows_all, WildcardDirection::Inbound),
+            (node.depends_all, WildcardDirection::Outbound),
+        ];
+        for (active, direction) in checks {
+            if !active {
+                continue;
+            }
+            let allowed = match &ctx.cedar {
+                Some(cedar) => {
+                    let req = MeshWildcardRequest {
+                        service_name: name.clone(),
+                        namespace: namespace.to_string(),
+                        direction,
+                    };
+                    cedar.authorize_mesh_wildcard(&req).await.is_allowed()
+                }
+                None => false, // No Cedar engine = no wildcards (default-deny)
+            };
+            if !allowed {
+                let msg = format!(
+                    "Cedar policy denied {direction} for {namespace}/{name}; \
+                     add a permit policy for Action::\"AllowWildcard\" on Mesh::\"{}\"",
+                    direction.resource_id(),
+                );
+                warn!(%msg);
+                patch_status_with_hash(
+                    &ctx.client,
+                    &name,
+                    namespace,
+                    status_failed(&msg, member.metadata.generation),
+                    "",
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+        }
+    }
 
     // Compute edge hash AFTER graph update to capture current bilateral agreements
     let inbound_edges = ctx.graph.get_active_inbound_edges(namespace, &name);

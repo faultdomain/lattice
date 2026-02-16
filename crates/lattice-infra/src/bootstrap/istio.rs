@@ -153,7 +153,11 @@ impl IstioReconciler {
     /// - Workload cluster bootstrap (postKubeadmCommands calling webhook on 8443)
     /// - Workload cluster agents (gRPC on 50051)
     ///
-    /// These connections come from outside the mesh, so we allow any source.
+    /// These connections come from outside the mesh (kubeadm nodes during bootstrap
+    /// have no SPIFFE identity, and agent gRPC uses Lattice's own PKI, not Istio mTLS).
+    /// Restricting `from` principals would break bootstrap. Authentication is handled
+    /// at the application layer: the bootstrap webhook validates cluster tokens, and
+    /// the gRPC server validates Lattice-issued mTLS client certificates.
     pub fn generate_operator_allow_policy() -> AuthorizationPolicy {
         AuthorizationPolicy::new(
             ObjectMeta::new("lattice-operator-allow", LATTICE_SYSTEM_NAMESPACE),

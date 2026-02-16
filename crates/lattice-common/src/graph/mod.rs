@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tracing::warn;
 
 use crate::crd::{
@@ -21,6 +21,8 @@ use crate::crd::{
 
 /// Fully qualified service reference: (namespace, name)
 pub type QualifiedName = (String, String);
+
+use crate::{MONITORING_NAMESPACE, VMAGENT_NODE_NAME};
 
 /// Type of service node in the graph
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +63,8 @@ pub struct ServiceNode {
     pub allowed_callers: HashSet<QualifiedName>,
     /// Whether this service allows all callers (wildcard "*")
     pub allows_all: bool,
+    /// Whether this service depends on all services that allow it (wildcard outbound)
+    pub depends_all: bool,
     /// Container image (for local services)
     pub image: Option<String>,
     /// Exposed ports: name -> port mapping
@@ -111,6 +115,7 @@ impl ServiceNode {
             dependencies,
             allowed_callers,
             allows_all,
+            depends_all: false,
             image: spec.workload.primary_image().map(String::from),
             ports: spec
                 .workload
@@ -168,6 +173,7 @@ impl ServiceNode {
             dependencies: vec![],
             allowed_callers,
             allows_all,
+            depends_all: false,
             image: None,
             ports: BTreeMap::new(),
             endpoints: spec.valid_endpoints(),
@@ -235,6 +241,7 @@ impl ServiceNode {
             dependencies,
             allowed_callers,
             allows_all,
+            depends_all: spec.depends_all,
             image: None,
             ports,
             endpoints: BTreeMap::new(),
@@ -256,6 +263,7 @@ impl ServiceNode {
             dependencies: vec![],
             allowed_callers: HashSet::new(),
             allows_all: false,
+            depends_all: false,
             image: None,
             ports: BTreeMap::new(),
             endpoints: BTreeMap::new(),
@@ -325,11 +333,16 @@ impl ServiceNode {
     }
 
     /// Check if this service allows a specific caller (O(1) lookup)
+    ///
+    /// A service with a "metrics" port implicitly allows vmagent for scraping.
     pub fn allows(&self, caller_namespace: &str, caller_name: &str) -> bool {
         self.allows_all
             || self
                 .allowed_callers
                 .contains(&(caller_namespace.to_string(), caller_name.to_string()))
+            || (self.ports.contains_key("metrics")
+                && caller_name == VMAGENT_NODE_NAME
+                && caller_namespace == MONITORING_NAMESPACE)
     }
 }
 
@@ -411,6 +424,9 @@ pub struct ServiceGraph {
     /// Cached namespace labels: namespace -> labels
     ns_labels: DashMap<String, BTreeMap<String, String>>,
 
+    /// Services with `depends_all: true` (wildcard outbound)
+    depends_all_nodes: DashSet<QualifiedName>,
+
     /// Volume ownership index: (namespace, volume_id) -> VolumeOwnership
     ///
     /// Only shared volumes (those with both `id` and `size`) are indexed.
@@ -434,6 +450,7 @@ impl ServiceGraph {
             ns_index: DashMap::new(),
             policies: DashMap::new(),
             ns_labels: DashMap::new(),
+            depends_all_nodes: DashSet::new(),
             volume_owners: DashMap::new(),
         }
     }
@@ -473,9 +490,17 @@ impl ServiceGraph {
         let dependencies = node.dependencies.clone();
         let namespace = node.namespace.clone();
         let name = node.name.clone();
+        let depends_all = node.depends_all;
 
         // Store the node
         self.vertices.insert(key.clone(), node);
+
+        // Maintain depends_all index
+        if depends_all {
+            self.depends_all_nodes.insert(key.clone());
+        } else {
+            self.depends_all_nodes.remove(&key);
+        }
 
         // Update outgoing edges
         if !dependencies.is_empty() {
@@ -536,6 +561,9 @@ impl ServiceGraph {
         // Remove vertex
         self.vertices.remove(&key);
 
+        // Remove from depends_all index
+        self.depends_all_nodes.remove(&key);
+
         // Remove from namespace index
         if let Some(mut index) = self.ns_index.get_mut(namespace) {
             index.remove(name);
@@ -592,56 +620,91 @@ impl ServiceGraph {
         };
 
         let key = (namespace.to_string(), name.to_string());
-        let Some(incoming) = self.edges_in.get(&key) else {
-            return vec![];
-        };
 
-        incoming
-            .iter()
-            .filter_map(|(caller_ns, caller_name)| {
-                // Check if service allows this caller
+        let mut seen = HashSet::new();
+        let mut edges = Vec::new();
+
+        // Explicit incoming edges (from dependencies declarations)
+        if let Some(incoming) = self.edges_in.get(&key) {
+            for (caller_ns, caller_name) in incoming.iter() {
                 if !service.allows(caller_ns, caller_name) {
-                    return None;
+                    continue;
                 }
 
-                // Get caller details
-                let caller = self.get_service(caller_ns, caller_name)?;
+                let caller = match self.get_service(caller_ns, caller_name) {
+                    Some(c) => c,
+                    None => continue,
+                };
                 if caller.type_ == ServiceType::Unknown {
                     warn!(
                         caller = %format!("{}/{}", caller_ns, caller_name),
                         callee = %format!("{}/{}", namespace, name),
                         "skipping inbound edge from unknown service (check dependency name)"
                     );
-                    return None;
+                    continue;
                 }
 
-                Some(ActiveEdge {
-                    caller_namespace: caller_ns.clone(),
-                    caller_name: caller_name.clone(),
-                    callee_namespace: namespace.to_string(),
-                    callee_name: name.to_string(),
-                })
-            })
-            .collect()
+                let caller_key = (caller_ns.clone(), caller_name.clone());
+                if seen.insert(caller_key) {
+                    edges.push(ActiveEdge {
+                        caller_namespace: caller_ns.clone(),
+                        caller_name: caller_name.clone(),
+                        callee_namespace: namespace.to_string(),
+                        callee_name: name.to_string(),
+                    });
+                }
+            }
+        }
+
+        // depends_all nodes: any service with depends_all that this service allows
+        for entry in self.depends_all_nodes.iter() {
+            let (da_ns, da_name) = entry.key();
+            // Skip self
+            if da_ns == namespace && da_name == name {
+                continue;
+            }
+            let caller_key = (da_ns.clone(), da_name.clone());
+            if seen.contains(&caller_key) {
+                continue;
+            }
+            if !service.allows(da_ns, da_name) {
+                continue;
+            }
+            match self.get_service(da_ns, da_name) {
+                Some(c) if c.type_ != ServiceType::Unknown => {}
+                _ => continue,
+            }
+            seen.insert(caller_key);
+            edges.push(ActiveEdge {
+                caller_namespace: da_ns.clone(),
+                caller_name: da_name.clone(),
+                callee_namespace: namespace.to_string(),
+                callee_name: name.to_string(),
+            });
+        }
+
+        edges
     }
 
     /// Get active outbound edges for a service (callees with bilateral agreement)
     pub fn get_active_outbound_edges(&self, namespace: &str, name: &str) -> Vec<ActiveEdge> {
-        if self.get_service(namespace, name).is_none() {
-            return vec![];
-        }
-
-        let key = (namespace.to_string(), name.to_string());
-        let Some(outgoing) = self.edges_out.get(&key) else {
-            return vec![];
+        let service = match self.get_service(namespace, name) {
+            Some(s) => s,
+            None => return vec![],
         };
 
-        outgoing
-            .iter()
-            .filter_map(|(callee_ns, callee_name)| {
-                let callee = self.get_service(callee_ns, callee_name)?;
+        let key = (namespace.to_string(), name.to_string());
+        let mut seen = HashSet::new();
+        let mut edges = Vec::new();
 
-                // Check bilateral agreement
+        // Explicit outgoing edges
+        if let Some(outgoing) = self.edges_out.get(&key) {
+            for (callee_ns, callee_name) in outgoing.iter() {
+                let callee = match self.get_service(callee_ns, callee_name) {
+                    Some(c) => c,
+                    None => continue,
+                };
+
                 let allowed = match callee.type_ {
                     ServiceType::Local | ServiceType::External | ServiceType::MeshMember => {
                         callee.allows(namespace, name)
@@ -657,17 +720,49 @@ impl ServiceGraph {
                 };
 
                 if !allowed {
-                    return None;
+                    continue;
                 }
 
-                Some(ActiveEdge {
+                let callee_key = (callee_ns.clone(), callee_name.clone());
+                if seen.insert(callee_key) {
+                    edges.push(ActiveEdge {
+                        caller_namespace: namespace.to_string(),
+                        caller_name: name.to_string(),
+                        callee_namespace: callee_ns.clone(),
+                        callee_name: callee_name.clone(),
+                    });
+                }
+            }
+        }
+
+        // depends_all: check all services that allow this caller
+        if service.depends_all {
+            for entry in self.vertices.iter() {
+                let node = entry.value();
+                let callee_key = (node.namespace.clone(), node.name.clone());
+                if callee_key.0 == namespace && callee_key.1 == name {
+                    continue;
+                }
+                if seen.contains(&callee_key) {
+                    continue;
+                }
+                if node.type_ == ServiceType::Unknown {
+                    continue;
+                }
+                if !node.allows(namespace, name) {
+                    continue;
+                }
+                seen.insert(callee_key);
+                edges.push(ActiveEdge {
                     caller_namespace: namespace.to_string(),
                     caller_name: name.to_string(),
-                    callee_namespace: callee_ns.clone(),
-                    callee_name: callee_name.clone(),
-                })
-            })
-            .collect()
+                    callee_namespace: node.namespace.clone(),
+                    callee_name: node.name.clone(),
+                });
+            }
+        }
+
+        edges
     }
 
     /// List all local services in a namespace
@@ -853,6 +948,7 @@ impl ServiceGraph {
         self.ns_index.clear();
         self.policies.clear();
         self.ns_labels.clear();
+        self.depends_all_nodes.clear();
         self.volume_owners.clear();
     }
 }
@@ -863,6 +959,7 @@ pub type SharedServiceGraph = Arc<ServiceGraph>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::VMAGENT_SA_NAME;
     use std::collections::BTreeMap;
 
     fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> LatticeServiceSpec {
@@ -1429,6 +1526,7 @@ mod tests {
                 .collect(),
             egress: vec![],
             allow_peer_traffic: false,
+            depends_all: false,
             ingress: None,
             service_account: None,
         }
@@ -1558,6 +1656,7 @@ mod tests {
             dependencies: vec![],
             egress: vec![],
             allow_peer_traffic: false,
+            depends_all: false,
             ingress: None,
             service_account: None,
         };
@@ -1600,5 +1699,223 @@ mod tests {
         assert!(graph.get_service("monitoring", "prometheus").is_some());
         graph.delete_service("monitoring", "prometheus");
         assert!(graph.get_service("monitoring", "prometheus").is_none());
+    }
+
+    // =========================================================================
+    // Wildcard "Depends All" (Outbound) Tests
+    // =========================================================================
+
+    #[test]
+    fn test_depends_all_sets_flag() {
+        let graph = ServiceGraph::new();
+        let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
+        spec.depends_all = true;
+
+        graph.put_mesh_member("monitoring", "scraper", &spec);
+
+        let node = graph.get_service("monitoring", "scraper").unwrap();
+        assert!(node.depends_all);
+    }
+
+    #[test]
+    fn test_depends_all_outbound_edges() {
+        let graph = ServiceGraph::new();
+
+        // scraper has depends_all
+        let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
+        spec.depends_all = true;
+        graph.put_mesh_member("prod", "scraper", &spec);
+
+        // api allows scraper
+        let api_spec = make_service_spec(vec![], vec!["scraper"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        // worker does NOT allow scraper
+        let worker_spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service("prod", "worker", &worker_spec);
+
+        // scraper should have outbound edge to api but not worker
+        let outbound = graph.get_active_outbound_edges("prod", "scraper");
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].callee_name, "api");
+    }
+
+    #[test]
+    fn test_depends_all_inbound_edges() {
+        let graph = ServiceGraph::new();
+
+        // scraper has depends_all
+        let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
+        spec.depends_all = true;
+        graph.put_mesh_member("prod", "scraper", &spec);
+
+        // api allows scraper
+        let api_spec = make_service_spec(vec![], vec!["scraper"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        // api should see inbound from scraper (even though scraper has no explicit dep on api)
+        let inbound = graph.get_active_inbound_edges("prod", "api");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].caller_name, "scraper");
+    }
+
+    #[test]
+    fn test_depends_all_no_self_edge() {
+        let graph = ServiceGraph::new();
+
+        // Service allows all and depends on all
+        let labels = BTreeMap::from([("app".to_string(), "svc".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec!["*"], vec![]);
+        spec.depends_all = true;
+        graph.put_mesh_member("prod", "svc", &spec);
+
+        let outbound = graph.get_active_outbound_edges("prod", "svc");
+        assert!(outbound.is_empty(), "should not create self-edge");
+
+        let inbound = graph.get_active_inbound_edges("prod", "svc");
+        assert!(inbound.is_empty(), "should not create self-edge");
+    }
+
+    #[test]
+    fn test_depends_all_cross_namespace() {
+        let graph = ServiceGraph::new();
+
+        // scraper in monitoring has depends_all
+        let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
+        spec.depends_all = true;
+        graph.put_mesh_member("monitoring", "scraper", &spec);
+
+        // api in prod allows scraper from monitoring
+        use crate::crd::{
+            ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
+            ServicePortsSpec, WorkloadSpec,
+        };
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "scraper".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Inbound,
+                id: None,
+                class: None,
+                metadata: None,
+                params: None,
+                namespace: Some("monitoring".to_string()),
+            },
+        );
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "api:latest".to_string(),
+                ..Default::default()
+            },
+        );
+        let api_spec = LatticeServiceSpec {
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: Some(ServicePortsSpec {
+                    ports: BTreeMap::from([(
+                        "http".to_string(),
+                        PortSpec {
+                            port: 8080,
+                            target_port: None,
+                            protocol: None,
+                        },
+                    )]),
+                }),
+            },
+            ..Default::default()
+        };
+        graph.put_service("prod", "api", &api_spec);
+
+        // scraper should reach api cross-namespace
+        let outbound = graph.get_active_outbound_edges("monitoring", "scraper");
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].callee_namespace, "prod");
+        assert_eq!(outbound[0].callee_name, "api");
+    }
+
+    #[test]
+    fn test_metrics_port_implicitly_allows_vmagent() {
+        let graph = ServiceGraph::new();
+
+        // Service with a "metrics" port but no explicit vmagent caller
+        let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+        let spec = make_mesh_member_spec(labels, vec![("metrics", 9090)], vec![], vec![]);
+        graph.put_mesh_member("prod", "api", &spec);
+
+        let node = graph.get_service("prod", "api").unwrap();
+        assert!(node.allows("monitoring", "vmagent"));
+        assert!(!node.allows("monitoring", "other-service"));
+        assert!(!node.allows("prod", "vmagent")); // wrong namespace
+    }
+
+    #[test]
+    fn test_no_metrics_port_no_implicit_vmagent() {
+        let graph = ServiceGraph::new();
+
+        // Service without a "metrics" port
+        let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+        let spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
+        graph.put_mesh_member("prod", "api", &spec);
+
+        let node = graph.get_service("prod", "api").unwrap();
+        assert!(!node.allows("monitoring", "vmagent"));
+    }
+
+    #[test]
+    fn test_depends_all_vmagent_reaches_metrics_port() {
+        let graph = ServiceGraph::new();
+
+        // vmagent with depends_all
+        let vmagent_labels = BTreeMap::from([("app".to_string(), "vmagent".to_string())]);
+        let mut vmagent_spec =
+            make_mesh_member_spec(vmagent_labels, vec![("http", 8429)], vec![], vec![]);
+        vmagent_spec.depends_all = true;
+        vmagent_spec.service_account = Some(VMAGENT_SA_NAME.to_string());
+        graph.put_mesh_member("monitoring", VMAGENT_NODE_NAME, &vmagent_spec);
+
+        // Service with metrics port (no explicit allowed_callers)
+        let api_labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+        let api_spec = make_mesh_member_spec(api_labels, vec![("metrics", 9090)], vec![], vec![]);
+        graph.put_mesh_member("prod", "api", &api_spec);
+
+        // vmagent should have outbound edge to api
+        let outbound = graph.get_active_outbound_edges("monitoring", VMAGENT_NODE_NAME);
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].callee_name, "api");
+
+        // api should see inbound from vmagent
+        let inbound = graph.get_active_inbound_edges("prod", "api");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].caller_name, VMAGENT_NODE_NAME);
+    }
+
+    #[test]
+    fn test_depends_all_delete_cleans_index() {
+        let graph = ServiceGraph::new();
+
+        let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
+        spec.depends_all = true;
+        graph.put_mesh_member("prod", "scraper", &spec);
+
+        // api allows scraper
+        let api_spec = make_service_spec(vec![], vec!["scraper"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        assert_eq!(graph.get_active_inbound_edges("prod", "api").len(), 1);
+
+        // Delete scraper
+        graph.delete_service("prod", "scraper");
+
+        // api should no longer see inbound from scraper
+        assert!(graph.get_active_inbound_edges("prod", "api").is_empty());
     }
 }

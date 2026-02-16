@@ -85,11 +85,12 @@ pub async fn build_service_controllers(
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
     let vm_service_scrape_ar = crds.vm_service_scrape.clone();
+    let cedar_for_mm = cedar.clone();
     let mut service_ctx = ServiceContext::from_client(
         client.clone(),
         cluster_name,
         provider_type,
-        cedar,
+        cedar.clone(),
         crds,
         monitoring,
     );
@@ -209,6 +210,7 @@ pub async fn build_service_controllers(
         graph: service_ctx.graph.clone(),
         cluster_name: service_ctx.cluster_name.clone(),
         crds: mm_crds,
+        cedar: Some(cedar_for_mm),
     });
 
     let mesh_members: Api<LatticeMeshMember> = Api::all(client.clone());

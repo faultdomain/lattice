@@ -196,6 +196,21 @@ pub(crate) fn build_security_override_entity(override_id: &str, category: &str) 
 }
 
 // =============================================================================
+// Mesh Wildcard Entity (for mesh wildcard authorization)
+// =============================================================================
+
+/// Build a mesh wildcard entity for wildcard authorization
+///
+/// UID: `Lattice::Mesh::"inbound"` or `Lattice::Mesh::"outbound"`
+///
+/// The direction string is the resource being authorized.
+pub(crate) fn build_mesh_wildcard_entity(direction: &str) -> Result<Entity> {
+    let uid = build_entity_uid("Mesh", direction)?;
+    Entity::new(uid, HashMap::new(), HashSet::new())
+        .map_err(|e| Error::Internal(format!("Failed to create mesh wildcard entity: {}", e)))
+}
+
+// =============================================================================
 // Volume Entity (for volume access)
 // =============================================================================
 

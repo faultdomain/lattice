@@ -270,6 +270,14 @@ pub const CA_KEY_KEY: &str = "ca.key";
 /// Key for CA trust bundle (full chain)
 pub const CA_TRUST_KEY: &str = "ca-trust.crt";
 
+// Monitoring well-known identities
+/// Namespace where VictoriaMetrics and monitoring components are deployed
+pub const MONITORING_NAMESPACE: &str = "monitoring";
+/// vmagent mesh member / node name in the service graph
+pub const VMAGENT_NODE_NAME: &str = "vmagent";
+/// ServiceAccount name for vmagent (used as SPIFFE identity for metrics scraping)
+pub const VMAGENT_SA_NAME: &str = "vmagent-lattice-metrics";
+
 // Service and resource names
 /// Name of the Lattice cell service
 pub const CELL_SERVICE_NAME: &str = "lattice-cell";

@@ -11,8 +11,8 @@ use lattice_common::crd::{
     PeerAuth, ServiceRef,
 };
 
-use super::prometheus::MONITORING_NAMESPACE;
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
+use lattice_common::MONITORING_NAMESPACE;
 
 /// Namespace for KEDA components.
 pub const KEDA_NAMESPACE: &str = "keda";
@@ -65,6 +65,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 allow_peer_traffic: false,
                 ingress: None,
                 service_account: Some("keda-metrics-server".to_string()),
+                depends_all: false,
             },
         ),
         // keda-admission-webhooks — webhook called by kube-apiserver
@@ -87,6 +88,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 allow_peer_traffic: false,
                 ingress: None,
                 service_account: None,
+                depends_all: false,
             },
         ),
         // keda-operator — receives gRPC from metrics-apiserver, scales workloads
@@ -115,6 +117,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 allow_peer_traffic: false,
                 ingress: None,
                 service_account: None,
+                depends_all: false,
             },
         ),
     ]

@@ -23,11 +23,13 @@
 
 mod engine;
 mod entities;
+mod mesh_auth;
 mod secret_auth;
 mod security_auth;
 mod volume_auth;
 
 pub use engine::{ClusterAttributes, DenialReason, Error, PolicyEngine};
+pub use mesh_auth::{MeshWildcardRequest, MeshWildcardResult, WildcardDirection};
 pub use secret_auth::{SecretAuthzRequest, SecretAuthzResult, SecretDenial};
 pub use security_auth::{
     SecurityAuthzRequest, SecurityAuthzResult, SecurityDenial, SecurityOverrideRequest,

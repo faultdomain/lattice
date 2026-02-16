@@ -10,6 +10,7 @@ fips = ["lattice-common/fips"]
 
 [dependencies]
 # Internal
+lattice-cedar = { workspace = true }
 lattice-common = { workspace = true }
 
 # Kubernetes

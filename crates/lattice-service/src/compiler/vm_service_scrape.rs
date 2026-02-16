@@ -7,9 +7,7 @@
 //! gRPC ports, etc.).
 
 use kube::discovery::ApiResource;
-use lattice_common::crd::CallerRef;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
-use lattice_infra::bootstrap::prometheus::{MONITORING_NAMESPACE, VMAGENT_SERVICE_ACCOUNT};
 
 use super::{ApplyLayer, CompiledService, DynamicResource};
 use crate::compiler::phase::{CompilationContext, CompilerPhase};
@@ -106,14 +104,8 @@ impl CompilerPhase for VMServiceScrapePhase {
             layer: ApplyLayer::Infrastructure,
         });
 
-        // Add VMAgent as an allowed caller on the MeshMember so the
-        // MeshMember controller generates the appropriate AuthorizationPolicy.
-        if let Some(ref mut mesh_member) = output.mesh_member {
-            mesh_member.spec.allowed_callers.push(CallerRef {
-                name: VMAGENT_SERVICE_ACCOUNT.to_string(),
-                namespace: Some(MONITORING_NAMESPACE.to_string()),
-            });
-        }
+        // vmagent reaches metrics ports via depends_all + implicit metrics
+        // port allow in the service graph — no explicit allowed_callers needed.
 
         Ok(())
     }
@@ -311,6 +303,7 @@ mod tests {
                     allow_peer_traffic: false,
                     ingress: None,
                     service_account: None,
+                    depends_all: false,
                 },
                 status: None,
             }),
@@ -319,14 +312,10 @@ mod tests {
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
-        // VMAgent should be added as an allowed caller
+        // vmagent reaches metrics ports via depends_all + implicit graph
+        // allow — no explicit allowed_callers entry needed
         let mm = compiled.mesh_member.unwrap();
-        assert_eq!(mm.spec.allowed_callers.len(), 1);
-        assert_eq!(mm.spec.allowed_callers[0].name, VMAGENT_SERVICE_ACCOUNT);
-        assert_eq!(
-            mm.spec.allowed_callers[0].namespace.as_deref(),
-            Some(MONITORING_NAMESPACE)
-        );
+        assert!(mm.spec.allowed_callers.is_empty());
     }
 
     #[test]

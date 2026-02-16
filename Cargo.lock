@@ -2212,6 +2212,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -2501,6 +2502,7 @@ version = "0.1.0"
 dependencies = [
  "k8s-openapi",
  "kube",
+ "lattice-cedar",
  "lattice-common",
  "serde",
  "serde_json",

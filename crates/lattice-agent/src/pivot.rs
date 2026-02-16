@@ -146,7 +146,12 @@ async fn apply_kubeconfig_patch(
 
     let encoded = STANDARD.encode(updated_kubeconfig.as_bytes());
 
-    let patch = serde_json::json!({
+    let ssa_patch = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": secret_name,
+        },
         "data": {
             "value": encoded
         }
@@ -155,8 +160,8 @@ async fn apply_kubeconfig_patch(
     secrets
         .patch(
             secret_name,
-            &PatchParams::apply("lattice"),
-            &Patch::Merge(&patch),
+            &PatchParams::apply("lattice-agent").force(),
+            &Patch::Apply(&ssa_patch),
         )
         .await
         .map_err(|e| PivotError::Internal(format!("failed to patch kubeconfig secret: {}", e)))?;

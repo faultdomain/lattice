@@ -199,9 +199,19 @@ pub fn generate_mesh_proxy_egress_policy() -> CiliumClusterwideNetworkPolicy {
                         rules: None,
                     }],
                 },
-                // Allow proxies to forward traffic to any internal endpoint
+                // Allow proxies to forward traffic to non-system internal endpoints
                 ClusterwideEgressRule {
-                    to_endpoints: vec![EndpointSelector::default()],
+                    to_endpoints: vec![EndpointSelector {
+                        match_labels: BTreeMap::new(),
+                        match_expressions: vec![MatchExpression {
+                            key: "k8s:io.kubernetes.pod.namespace".to_string(),
+                            operator: "NotIn".to_string(),
+                            values: system_namespaces::all()
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
+                        }],
+                    }],
                     to_entities: vec![],
                     to_cidr: vec![],
                     to_ports: vec![],
@@ -244,7 +254,7 @@ pub fn generate_operator_network_policy(
             // Hostname - Cilium needs to intercept DNS to learn the IP
             Some(DnsRules {
                 dns: vec![DnsMatch {
-                    match_pattern: Some("*".to_string()),
+                    match_pattern: Some(host.to_string()),
                 }],
             })
         }
@@ -496,8 +506,11 @@ mod tests {
         );
         let dns_rules = dns_port_rule.rules.as_ref().unwrap();
         assert!(
-            dns_rules.dns.iter().any(|d| d.match_pattern.is_some()),
-            "DNS rules must have a match pattern"
+            dns_rules
+                .dns
+                .iter()
+                .any(|d| d.match_pattern == Some("cell.example.com".to_string())),
+            "DNS rules must match the parent hostname exactly"
         );
 
         // Should have API server egress
@@ -635,6 +648,15 @@ mod tests {
             .ports
             .iter()
             .any(|port| port.port == HBONE_PORT.to_string())));
+
+        // Third egress rule: internal forwarding excludes system namespaces
+        let internal_rule = &policy.spec.egress[2];
+        assert!(!internal_rule.to_endpoints.is_empty());
+        let expr = &internal_rule.to_endpoints[0].match_expressions[0];
+        assert_eq!(expr.key, "k8s:io.kubernetes.pod.namespace");
+        assert_eq!(expr.operator, "NotIn");
+        assert!(expr.values.contains(&"kube-system".to_string()));
+        assert!(expr.values.contains(&"istio-system".to_string()));
     }
 
     #[test]

@@ -21,8 +21,8 @@ use lattice_common::crd::{
 };
 
 use super::helpers::{
-    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
-    run_kubectl, setup_regcreds_infrastructure,
+    apply_mesh_wildcard_inbound_policy, client_from_kubeconfig, create_with_retry,
+    delete_namespace, ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,
@@ -591,6 +591,14 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
         for name in mesh.external_services.keys() {
             let ext_svc = mesh.create_external_service(name, RANDOM_MESH_NAMESPACE);
             create_with_retry(&ext_api, &ext_svc, name).await?;
+        }
+    }
+
+    // Apply Cedar policies for wildcard inbound services
+    for svc in mesh.services.values() {
+        if svc.allows_all_inbound {
+            apply_mesh_wildcard_inbound_policy(kubeconfig_path, RANDOM_MESH_NAMESPACE, &svc.name)
+                .await?;
         }
     }
 

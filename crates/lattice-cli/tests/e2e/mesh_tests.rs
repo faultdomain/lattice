@@ -15,8 +15,8 @@ use tracing::info;
 use lattice_common::crd::LatticeService;
 
 use super::helpers::{
-    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
-    run_kubectl, setup_regcreds_infrastructure,
+    apply_mesh_wildcard_inbound_policy, client_from_kubeconfig, create_with_retry,
+    delete_namespace, ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure,
 };
 use super::mesh_fixtures::{
     create_api_gateway, create_api_orders, create_api_users, create_cache, create_db_orders,
@@ -81,6 +81,10 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::namespaced(client, TEST_SERVICES_NAMESPACE);
+
+    // Cedar policy for public-api's wildcard inbound
+    apply_mesh_wildcard_inbound_policy(kubeconfig_path, TEST_SERVICES_NAMESPACE, "public-api")
+        .await?;
 
     info!("[Fixed Mesh] [Layer 3] Deploying backend services...");
     for (name, svc) in [

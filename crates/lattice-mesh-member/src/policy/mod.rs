@@ -638,6 +638,7 @@ mod tests {
             allow_peer_traffic: false,
             ingress: None,
             service_account: None,
+            depends_all: false,
         }
     }
 

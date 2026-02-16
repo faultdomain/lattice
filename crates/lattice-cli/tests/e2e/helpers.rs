@@ -1959,6 +1959,28 @@ spec:
     Ok(())
 }
 
+/// Apply a Cedar policy permitting wildcard inbound for a specific service.
+pub async fn apply_mesh_wildcard_inbound_policy(
+    kubeconfig: &str,
+    namespace: &str,
+    service_name: &str,
+) -> Result<(), String> {
+    apply_cedar_policy_crd(
+        kubeconfig,
+        &format!("permit-wildcard-inbound-{}", service_name),
+        "mesh-test",
+        50,
+        &format!(
+            r#"permit(
+  principal == Lattice::Service::"{namespace}/{service_name}",
+  action == Lattice::Action::"AllowWildcard",
+  resource == Lattice::Mesh::"inbound"
+);"#
+        ),
+    )
+    .await
+}
+
 /// Apply a Cedar policy permitting AppArmor Unconfined for all services.
 ///
 /// Docker KIND clusters don't have AppArmor enabled, so all e2e fixtures

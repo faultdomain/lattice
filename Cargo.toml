@@ -142,6 +142,9 @@ rand = "0.8"
 jsonwebtoken = "10"
 cedar-policy = "4"
 
+# URL parsing
+url = "2"
+
 # Regex
 regex = "1"
 

@@ -375,6 +375,7 @@ impl<'a> WorkloadCompiler<'a> {
                     allow_peer_traffic: false,
                     ingress: self.ingress,
                     service_account: None,
+                    depends_all: false,
                 },
             ))
         } else {

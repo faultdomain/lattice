@@ -689,11 +689,38 @@ pub fn verify_client_cert(
 
     // Extract cluster ID from CN using shared helper
     match extract_cluster_id(cert_der) {
-        Ok(cluster_id) => Ok(VerificationResult {
-            cluster_id,
-            valid: true,
-            reason: None,
-        }),
+        Ok(cluster_id) => {
+            // Verify the certificate has a SAN matching the expected agent identity.
+            // This prevents a cert issued for cluster X from being presented by cluster Y.
+            let expected_san = format!("lattice-agent-{}", cluster_id);
+            let has_matching_san = cert
+                .subject_alternative_name()
+                .ok()
+                .flatten()
+                .map(|ext| {
+                    ext.value.general_names.iter().any(
+                        |name| matches!(name, GeneralName::DNSName(dns) if *dns == expected_san),
+                    )
+                })
+                .unwrap_or(false);
+
+            if !has_matching_san {
+                return Ok(VerificationResult {
+                    cluster_id: String::new(),
+                    valid: false,
+                    reason: Some(format!(
+                        "certificate missing expected SAN: {}",
+                        expected_san
+                    )),
+                });
+            }
+
+            Ok(VerificationResult {
+                cluster_id,
+                valid: true,
+                reason: None,
+            })
+        }
         Err(e) => Ok(VerificationResult {
             cluster_id: String::new(),
             valid: false,
@@ -813,6 +840,48 @@ mod tests {
 
         assert!(result.valid);
         assert_eq!(result.cluster_id, "prod-us-west-123");
+    }
+
+    #[test]
+    fn cert_with_wrong_san_rejected() {
+        // Create a cert where CN says "cluster-a" but SAN says "cluster-b"
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+
+        use rcgen::{CertificateParams, DistinguishedName, DnType, DnValue, Issuer, KeyPair};
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(
+            DnType::CommonName,
+            DnValue::Utf8String("lattice-agent-cluster-a".to_string()),
+        );
+        params.distinguished_name = dn;
+        // SAN for cluster-b (mismatch with CN cluster-a)
+        let san = rcgen::string::Ia5String::try_from("lattice-agent-cluster-b".to_string())
+            .expect("valid IA5");
+        params.subject_alt_names = vec![SanType::DnsName(san)];
+
+        let (not_before, not_after) = compute_validity(1);
+        params.not_before = not_before;
+        params.not_after = not_after;
+
+        let ca_key = ca.load_key_pair().expect("key pair");
+        let issuer = Issuer::from_ca_cert_pem(ca.ca_cert_pem(), &ca_key).expect("issuer");
+
+        let key_pair = KeyPair::generate().expect("keygen");
+        let signed = params.signed_by(&key_pair, &issuer).expect("sign");
+        let cert_der = parse_pem(&signed.pem()).expect("parse");
+
+        let result =
+            verify_client_cert(&cert_der, ca.ca_cert_pem()).expect("verification should succeed");
+
+        assert!(
+            !result.valid,
+            "cert with mismatched CN/SAN should be rejected"
+        );
+        assert!(result
+            .reason
+            .expect("reason should be set")
+            .contains("missing expected SAN"));
     }
 
     #[test]

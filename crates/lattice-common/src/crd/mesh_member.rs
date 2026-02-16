@@ -55,6 +55,10 @@ pub struct LatticeMeshMemberSpec {
     #[serde(default)]
     pub allow_peer_traffic: bool,
 
+    /// Wildcard outbound: this member can call any service that allows it
+    #[serde(default)]
+    pub depends_all: bool,
+
     /// Ingress configuration for exposing this member externally
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<IngressSpec>,
@@ -276,6 +280,7 @@ mod tests {
             dependencies: vec![],
             egress: vec![],
             allow_peer_traffic: false,
+            depends_all: false,
             ingress: None,
             service_account: None,
         }

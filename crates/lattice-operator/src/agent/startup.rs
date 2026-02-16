@@ -113,9 +113,9 @@ async fn start_agent_if_needed(
                     .map_err(|e| anyhow::anyhow!("failed to get certificate: {}", e))?;
 
             // Store credentials for future restarts
-            if let Err(e) = save_agent_credentials(&secrets, &creds).await {
-                tracing::warn!(error = %e, "Failed to save agent credentials to secret");
-            }
+            save_agent_credentials(&secrets, &creds)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to save agent credentials: {}", e))?;
             creds
         }
     };
