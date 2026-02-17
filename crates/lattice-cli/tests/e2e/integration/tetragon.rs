@@ -329,8 +329,7 @@ enum ExecResult {
     TransientError(String),
 }
 
-/// Exec into a deployment's pod and classify the result.
-async fn exec_in_pod(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&str]) -> ExecResult {
+fn exec_in_pod_sync(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&str]) -> ExecResult {
     let deploy_ref = format!("deploy/{deploy}");
     let mut cmd_args = vec![
         "--kubeconfig",
@@ -343,10 +342,9 @@ async fn exec_in_pod(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&s
     ];
     cmd_args.extend_from_slice(args);
 
-    let output = match tokio::process::Command::new("kubectl")
+    let output = match std::process::Command::new("kubectl")
         .args(&cmd_args)
         .output()
-        .await
     {
         Ok(o) => o,
         Err(e) => {
@@ -419,7 +417,7 @@ async fn wait_for_exec_blocked(
             let args = &args;
             async move {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                match exec_in_pod(kubeconfig, namespace, deploy, &args_ref).await {
+                match exec_in_pod_sync(kubeconfig, namespace, deploy, &args_ref) {
                     ExecResult::Killed => Ok(true),
                     ExecResult::Ok(out) => {
                         warn!("[wait_killed] {deploy} unexpectedly succeeded: {out:?}");
@@ -457,7 +455,7 @@ async fn wait_for_exec_allowed(
             let args = &args;
             async move {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                match exec_in_pod(kubeconfig, namespace, deploy, &args_ref).await {
+                match exec_in_pod_sync(kubeconfig, namespace, deploy, &args_ref) {
                     ExecResult::Ok(_) => Ok(true),
                     ExecResult::Killed => {
                         warn!("[wait_allowed] {deploy} unexpectedly killed");

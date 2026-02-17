@@ -214,7 +214,8 @@ pub async fn apply_binary_wildcard_override_policy(kubeconfig: &str) -> Result<(
 
 /// Apply a Cedar policy permitting test utility binaries (printenv, cat).
 ///
-/// Services that declare `allowedBinaries: ["/bin/printenv", "/bin/cat"]` need Cedar
+<<<<<<< HEAD
+/// Services that declare `allowedBinaries: ["printenv", "cat"]` need Cedar
 /// authorization for each binary. This blanket permit covers all services
 /// so that `kubectl exec -- printenv` and `kubectl exec -- cat` work for
 /// test verification.
@@ -229,8 +230,8 @@ pub async fn apply_test_binaries_override_policy(kubeconfig: &str) -> Result<(),
   action == Lattice::Action::"OverrideSecurity",
   resource
 ) when {
-  resource == Lattice::SecurityOverride::"allowedBinary:/bin/printenv" ||
-  resource == Lattice::SecurityOverride::"allowedBinary:/bin/cat"
+  resource == Lattice::SecurityOverride::"allowedBinary:printenv" ||
+  resource == Lattice::SecurityOverride::"allowedBinary:cat"
 };"#,
     )
     .await
