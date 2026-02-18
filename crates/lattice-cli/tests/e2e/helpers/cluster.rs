@@ -11,9 +11,9 @@ use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use tracing::{info, warn};
 
+use super::super::providers::InfraProvider;
 use super::docker::{docker_containers_deleted, run_cmd, run_kubectl};
 use super::{run_id, wait_for_condition, OPERATOR_LABEL};
-use crate::providers::InfraProvider;
 
 use lattice_cli::commands::port_forward::PortForward as ResilientPortForward;
 
