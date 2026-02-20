@@ -15,7 +15,30 @@ use tracing::{debug, info};
 use crate::kube_client::KubeClientProvider;
 use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
-use lattice_common::{kubeconfig_secret_name, INTERNAL_K8S_ENDPOINT, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{kubeconfig_secret_name, LATTICE_SYSTEM_NAMESPACE};
+
+/// Resolve the Kubernetes API server ClusterIP from the `kubernetes` service.
+///
+/// Using the ClusterIP (routed via kube-proxy/iptables) instead of the DNS name
+/// avoids a circular dependency on CoreDNS during control plane rolling upgrades.
+/// When CoreDNS pods get rescheduled during an upgrade, DNS resolution fails,
+/// which prevents the KCP controller from connecting to its own cluster.
+async fn resolve_kubernetes_cluster_ip(client: &Client) -> Result<String, PivotError> {
+    use k8s_openapi::api::core::v1::Service;
+
+    let svc_api: Api<Service> = Api::namespaced(client.clone(), "default");
+    let svc = svc_api
+        .get("kubernetes")
+        .await
+        .map_err(|e| PivotError::Internal(format!("failed to get kubernetes service: {}", e)))?;
+
+    let cluster_ip = svc
+        .spec
+        .and_then(|s| s.cluster_ip)
+        .ok_or_else(|| PivotError::Internal("kubernetes service has no ClusterIP".to_string()))?;
+
+    Ok(format!("https://{}:443", cluster_ip))
+}
 
 /// Pivot errors
 #[derive(Debug, Error)]
@@ -62,7 +85,11 @@ async fn fetch_kubeconfig_from_secret(
 /// Path to the cluster CA certificate (available in all pods via service account)
 const CLUSTER_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 
-fn update_cluster_entry(cluster_entry: &mut serde_json::Value, cluster_name: &str) -> bool {
+fn update_cluster_entry(
+    cluster_entry: &mut serde_json::Value,
+    cluster_name: &str,
+    endpoint: &str,
+) -> bool {
     let Some(cluster_config) = cluster_entry.get_mut("cluster") else {
         return false;
     };
@@ -72,11 +99,11 @@ fn update_cluster_entry(cluster_entry: &mut serde_json::Value, cluster_name: &st
     };
 
     let old_server = server.as_str().unwrap_or("unknown").to_string();
-    if old_server.contains("kubernetes.default.svc") {
+    if old_server == endpoint {
         return false;
     }
 
-    *server = serde_json::Value::String(INTERNAL_K8S_ENDPOINT.to_string());
+    *server = serde_json::Value::String(endpoint.to_string());
 
     // Remove certificate-authority file path if present (won't work inside pod)
     if let Some(obj) = cluster_config.as_object_mut() {
@@ -111,14 +138,18 @@ fn update_cluster_entry(cluster_entry: &mut serde_json::Value, cluster_name: &st
     info!(
         cluster = %cluster_name,
         old_server = %old_server,
-        new_server = INTERNAL_K8S_ENDPOINT,
-        "Updated kubeconfig server URL"
+        new_server = %endpoint,
+        "Updated kubeconfig server URL to ClusterIP"
     );
 
     true
 }
 
-fn update_all_cluster_entries(kubeconfig: &mut serde_json::Value, cluster_name: &str) -> usize {
+fn update_all_cluster_entries(
+    kubeconfig: &mut serde_json::Value,
+    cluster_name: &str,
+    endpoint: &str,
+) -> usize {
     let Some(clusters) = kubeconfig
         .get_mut("clusters")
         .and_then(|c| c.as_array_mut())
@@ -128,7 +159,7 @@ fn update_all_cluster_entries(kubeconfig: &mut serde_json::Value, cluster_name: 
 
     let mut count = 0;
     for entry in clusters.iter_mut() {
-        if update_cluster_entry(entry, cluster_name) {
+        if update_cluster_entry(entry, cluster_name, endpoint) {
             count += 1;
         }
     }
@@ -169,7 +200,13 @@ async fn apply_kubeconfig_patch(
     Ok(())
 }
 
-/// Patch the kubeconfig secret to use the internal Kubernetes service endpoint.
+/// Patch the kubeconfig secret to use the Kubernetes API server ClusterIP.
+///
+/// Resolves the ClusterIP of the `kubernetes` service at runtime rather than
+/// using the DNS name `kubernetes.default.svc`. This avoids a circular
+/// dependency on CoreDNS during control plane rolling upgrades — when CoreDNS
+/// gets rescheduled, DNS fails, which would prevent the KCP controller from
+/// reaching its own API server.
 pub async fn patch_kubeconfig_for_self_management(
     cluster_name: &str,
     namespace: &str,
@@ -182,12 +219,15 @@ pub async fn patch_kubeconfig_for_self_management(
         .await
         .map_err(|e| PivotError::Internal(format!("failed to create k8s client: {}", e)))?;
 
+    let endpoint = resolve_kubernetes_cluster_ip(&client).await?;
+    info!(cluster = %cluster_name, %endpoint, "Resolved Kubernetes API server ClusterIP");
+
     let secrets: Api<Secret> = Api::namespaced(client, namespace);
     let secret_name = kubeconfig_secret_name(cluster_name);
 
     let mut kubeconfig = fetch_kubeconfig_from_secret(&secrets, &secret_name).await?;
 
-    let updated_count = update_all_cluster_entries(&mut kubeconfig, cluster_name);
+    let updated_count = update_all_cluster_entries(&mut kubeconfig, cluster_name, &endpoint);
 
     if updated_count == 0 {
         debug!(cluster = %cluster_name, "Kubeconfig already uses internal endpoint, skipping patch");
@@ -307,6 +347,8 @@ mod tests {
     use super::*;
     use lattice_common::yaml::parse_yaml;
 
+    const TEST_CLUSTER_IP_ENDPOINT: &str = "https://10.96.0.1:443";
+
     #[test]
     fn test_update_cluster_entry_updates_server() {
         let mut entry = parse_yaml(
@@ -319,17 +361,32 @@ mod tests {
         )
         .unwrap();
 
-        let updated = update_cluster_entry(&mut entry, "test");
+        let updated = update_cluster_entry(&mut entry, "test", TEST_CLUSTER_IP_ENDPOINT);
         assert!(updated);
 
         let server = entry["cluster"]["server"].as_str().unwrap();
-        assert_eq!(server, INTERNAL_K8S_ENDPOINT);
+        assert_eq!(server, TEST_CLUSTER_IP_ENDPOINT);
         // certificate-authority file path should be removed
         assert!(entry["cluster"]["certificate-authority"].is_null());
     }
 
     #[test]
-    fn test_update_cluster_entry_skips_already_internal() {
+    fn test_update_cluster_entry_skips_already_patched_cluster_ip() {
+        let mut entry = parse_yaml(
+            r#"
+            name: test-cluster
+            cluster:
+              server: https://10.96.0.1:443
+            "#,
+        )
+        .unwrap();
+
+        let updated = update_cluster_entry(&mut entry, "test", TEST_CLUSTER_IP_ENDPOINT);
+        assert!(!updated);
+    }
+
+    #[test]
+    fn test_update_cluster_entry_replaces_dns_endpoint() {
         let mut entry = parse_yaml(
             r#"
             name: test-cluster
@@ -339,8 +396,11 @@ mod tests {
         )
         .unwrap();
 
-        let updated = update_cluster_entry(&mut entry, "test");
-        assert!(!updated);
+        let updated = update_cluster_entry(&mut entry, "test", TEST_CLUSTER_IP_ENDPOINT);
+        assert!(updated);
+
+        let server = entry["cluster"]["server"].as_str().unwrap();
+        assert_eq!(server, TEST_CLUSTER_IP_ENDPOINT);
     }
 
     #[test]
@@ -371,7 +431,7 @@ mod tests {
         )
         .unwrap();
 
-        let count = update_all_cluster_entries(&mut kubeconfig, "test");
+        let count = update_all_cluster_entries(&mut kubeconfig, "test", TEST_CLUSTER_IP_ENDPOINT);
         assert_eq!(count, 2);
     }
 
@@ -383,16 +443,16 @@ mod tests {
               - name: external
                 cluster:
                   server: https://172.18.0.2:6443
-              - name: internal
+              - name: dns-based
                 cluster:
                   server: https://kubernetes.default.svc:443
             "#,
         )
         .unwrap();
 
-        let count = update_all_cluster_entries(&mut kubeconfig, "test");
-        // Only the external one should be updated
-        assert_eq!(count, 1);
+        let count = update_all_cluster_entries(&mut kubeconfig, "test", TEST_CLUSTER_IP_ENDPOINT);
+        // Both should be updated: external IP and stale DNS name
+        assert_eq!(count, 2);
     }
 
     #[test]
@@ -405,7 +465,7 @@ mod tests {
         )
         .unwrap();
 
-        let count = update_all_cluster_entries(&mut kubeconfig, "test");
+        let count = update_all_cluster_entries(&mut kubeconfig, "test", TEST_CLUSTER_IP_ENDPOINT);
         assert_eq!(count, 0);
     }
 
@@ -418,7 +478,7 @@ mod tests {
         )
         .unwrap();
 
-        let updated = update_cluster_entry(&mut entry, "test");
+        let updated = update_cluster_entry(&mut entry, "test", TEST_CLUSTER_IP_ENDPOINT);
         assert!(!updated);
     }
 
@@ -433,7 +493,7 @@ mod tests {
         )
         .unwrap();
 
-        let updated = update_cluster_entry(&mut entry, "test");
+        let updated = update_cluster_entry(&mut entry, "test", TEST_CLUSTER_IP_ENDPOINT);
         assert!(!updated);
     }
 }

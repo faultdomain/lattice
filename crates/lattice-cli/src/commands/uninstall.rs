@@ -271,9 +271,9 @@ impl Uninstaller {
     /// Patch the kubeconfig secret to use the external control plane endpoint.
     ///
     /// After CAPI resource move, the kubeconfig secret points to the internal Kubernetes
-    /// endpoint (kubernetes.default.svc:443) which only works from inside the target cluster.
-    /// We patch it to use the external endpoint from the CAPI Cluster's controlPlaneEndpoint
-    /// so CAPI controllers on the kind cluster can reach the target for teardown.
+    /// API server ClusterIP which only works from inside the target cluster. We patch it
+    /// to use the external endpoint from the CAPI Cluster's controlPlaneEndpoint so CAPI
+    /// controllers on the kind cluster can reach the target for teardown.
     async fn patch_kubeconfig_for_direct_access(&self, client: &Client) -> Result<()> {
         let server_url = self.get_control_plane_endpoint(client).await?;
 

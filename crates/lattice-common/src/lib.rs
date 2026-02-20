@@ -290,12 +290,6 @@ pub const CELL_SERVICE_NAME: &str = "lattice-cell";
 /// Name of the Lattice operator deployment and service account
 pub const OPERATOR_NAME: &str = "lattice-operator";
 
-/// Internal Kubernetes service endpoint for self-management
-///
-/// This is the standard in-cluster endpoint that pods use to access the
-/// Kubernetes API from within the cluster.
-pub const INTERNAL_K8S_ENDPOINT: &str = "https://kubernetes.default.svc:443";
-
 /// Label key for provider identification on secrets
 pub const PROVIDER_LABEL: &str = "lattice.dev/provider";
 
