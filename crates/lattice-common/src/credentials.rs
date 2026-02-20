@@ -13,6 +13,7 @@ use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use thiserror::Error;
 use tracing::warn;
+use zeroize::Zeroizing;
 
 use crate::{
     AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET, PROVIDER_LABEL,
@@ -99,12 +100,12 @@ fn build_credential_secret(
 pub struct AwsCredentials {
     /// AWS access key ID
     pub access_key_id: String,
-    /// AWS secret access key
-    pub secret_access_key: String,
+    /// AWS secret access key (zeroized on drop)
+    pub secret_access_key: Zeroizing<String>,
     /// AWS region
     pub region: String,
-    /// Optional session token for temporary credentials
-    pub session_token: Option<String>,
+    /// Optional session token for temporary credentials (zeroized on drop)
+    pub session_token: Option<Zeroizing<String>>,
 }
 
 impl CredentialProvider for AwsCredentials {
@@ -115,12 +116,14 @@ impl CredentialProvider for AwsCredentials {
         Ok(Self {
             access_key_id: std::env::var("AWS_ACCESS_KEY_ID")
                 .map_err(|_| CredentialError::EnvVarNotSet("AWS_ACCESS_KEY_ID"))?,
-            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY")
-                .map_err(|_| CredentialError::EnvVarNotSet("AWS_SECRET_ACCESS_KEY"))?,
+            secret_access_key: Zeroizing::new(
+                std::env::var("AWS_SECRET_ACCESS_KEY")
+                    .map_err(|_| CredentialError::EnvVarNotSet("AWS_SECRET_ACCESS_KEY"))?,
+            ),
             region: std::env::var("AWS_REGION")
                 .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
                 .map_err(|_| CredentialError::EnvVarNotSet("AWS_REGION or AWS_DEFAULT_REGION"))?,
-            session_token: std::env::var("AWS_SESSION_TOKEN").ok(),
+            session_token: std::env::var("AWS_SESSION_TOKEN").ok().map(Zeroizing::new),
         })
     }
 
@@ -130,15 +133,16 @@ impl CredentialProvider for AwsCredentials {
                 .get("AWS_ACCESS_KEY_ID")
                 .cloned()
                 .ok_or(CredentialError::MissingField("AWS_ACCESS_KEY_ID"))?,
-            secret_access_key: data
-                .get("AWS_SECRET_ACCESS_KEY")
-                .cloned()
-                .ok_or(CredentialError::MissingField("AWS_SECRET_ACCESS_KEY"))?,
+            secret_access_key: Zeroizing::new(
+                data.get("AWS_SECRET_ACCESS_KEY")
+                    .cloned()
+                    .ok_or(CredentialError::MissingField("AWS_SECRET_ACCESS_KEY"))?,
+            ),
             region: data
                 .get("AWS_REGION")
                 .cloned()
                 .ok_or(CredentialError::MissingField("AWS_REGION"))?,
-            session_token: data.get("AWS_SESSION_TOKEN").cloned(),
+            session_token: data.get("AWS_SESSION_TOKEN").cloned().map(Zeroizing::new),
         })
     }
 
@@ -147,11 +151,11 @@ impl CredentialProvider for AwsCredentials {
         string_data.insert("AWS_ACCESS_KEY_ID".to_string(), self.access_key_id.clone());
         string_data.insert(
             "AWS_SECRET_ACCESS_KEY".to_string(),
-            self.secret_access_key.clone(),
+            (*self.secret_access_key).clone(),
         );
         string_data.insert("AWS_REGION".to_string(), self.region.clone());
         if let Some(ref token) = self.session_token {
-            string_data.insert("AWS_SESSION_TOKEN".to_string(), token.clone());
+            string_data.insert("AWS_SESSION_TOKEN".to_string(), (**token).clone());
         }
 
         build_credential_secret(Self::SECRET_NAME, Self::PROVIDER_TYPE, string_data)
@@ -168,11 +172,11 @@ impl AwsCredentials {
 
         let mut profile = format!(
             "[default]\naws_access_key_id = {}\naws_secret_access_key = {}\nregion = {}",
-            self.access_key_id, self.secret_access_key, self.region
+            self.access_key_id, *self.secret_access_key, self.region
         );
 
         if let Some(ref token) = self.session_token {
-            profile.push_str(&format!("\naws_session_token = {}", token));
+            profile.push_str(&format!("\naws_session_token = {}", **token));
         }
 
         STANDARD.encode(profile)
@@ -184,10 +188,10 @@ impl AwsCredentials {
 pub struct ProxmoxCredentials {
     /// Proxmox API URL
     pub url: String,
-    /// Proxmox API token ID
-    pub token: String,
-    /// Proxmox API token secret
-    pub secret: String,
+    /// Proxmox API token ID (zeroized on drop)
+    pub token: Zeroizing<String>,
+    /// Proxmox API token secret (zeroized on drop)
+    pub secret: Zeroizing<String>,
 }
 
 impl CredentialProvider for ProxmoxCredentials {
@@ -198,10 +202,14 @@ impl CredentialProvider for ProxmoxCredentials {
         Ok(Self {
             url: std::env::var("PROXMOX_URL")
                 .map_err(|_| CredentialError::EnvVarNotSet("PROXMOX_URL"))?,
-            token: std::env::var("PROXMOX_TOKEN")
-                .map_err(|_| CredentialError::EnvVarNotSet("PROXMOX_TOKEN"))?,
-            secret: std::env::var("PROXMOX_SECRET")
-                .map_err(|_| CredentialError::EnvVarNotSet("PROXMOX_SECRET"))?,
+            token: Zeroizing::new(
+                std::env::var("PROXMOX_TOKEN")
+                    .map_err(|_| CredentialError::EnvVarNotSet("PROXMOX_TOKEN"))?,
+            ),
+            secret: Zeroizing::new(
+                std::env::var("PROXMOX_SECRET")
+                    .map_err(|_| CredentialError::EnvVarNotSet("PROXMOX_SECRET"))?,
+            ),
         })
     }
 
@@ -211,22 +219,24 @@ impl CredentialProvider for ProxmoxCredentials {
                 .get("url")
                 .cloned()
                 .ok_or(CredentialError::MissingField("url"))?,
-            token: data
-                .get("token")
-                .cloned()
-                .ok_or(CredentialError::MissingField("token"))?,
-            secret: data
-                .get("secret")
-                .cloned()
-                .ok_or(CredentialError::MissingField("secret"))?,
+            token: Zeroizing::new(
+                data.get("token")
+                    .cloned()
+                    .ok_or(CredentialError::MissingField("token"))?,
+            ),
+            secret: Zeroizing::new(
+                data.get("secret")
+                    .cloned()
+                    .ok_or(CredentialError::MissingField("secret"))?,
+            ),
         })
     }
 
     fn to_k8s_secret(&self) -> Secret {
         let mut string_data = BTreeMap::new();
         string_data.insert("url".to_string(), self.url.clone());
-        string_data.insert("token".to_string(), self.token.clone());
-        string_data.insert("secret".to_string(), self.secret.clone());
+        string_data.insert("token".to_string(), (*self.token).clone());
+        string_data.insert("secret".to_string(), (*self.secret).clone());
 
         build_credential_secret(Self::SECRET_NAME, Self::PROVIDER_TYPE, string_data)
     }
@@ -235,8 +245,8 @@ impl CredentialProvider for ProxmoxCredentials {
 /// OpenStack credentials for CAPO provider
 #[derive(Debug, Clone)]
 pub struct OpenStackCredentials {
-    /// Full clouds.yaml file content
-    pub clouds_yaml: String,
+    /// Full clouds.yaml file content (contains passwords, zeroized on drop)
+    pub clouds_yaml: Zeroizing<String>,
     /// Cloud name within clouds.yaml (default: "openstack")
     pub cloud_name: String,
     /// Optional CA certificate for self-signed endpoints
@@ -248,13 +258,14 @@ impl CredentialProvider for OpenStackCredentials {
     const SECRET_NAME: &'static str = OPENSTACK_CREDENTIALS_SECRET;
 
     fn from_env() -> Result<Self, CredentialError> {
-        let clouds_yaml = if let Ok(path) = std::env::var("OPENSTACK_CLOUD_CONFIG") {
-            std::fs::read_to_string(&path).map_err(|_| {
-                CredentialError::EnvVarNotSet("OPENSTACK_CLOUD_CONFIG (file not readable)")
-            })?
-        } else {
-            Self::build_clouds_yaml_from_env()?
-        };
+        let clouds_yaml =
+            Zeroizing::new(if let Ok(path) = std::env::var("OPENSTACK_CLOUD_CONFIG") {
+                std::fs::read_to_string(&path).map_err(|_| {
+                    CredentialError::EnvVarNotSet("OPENSTACK_CLOUD_CONFIG (file not readable)")
+                })?
+            } else {
+                Self::build_clouds_yaml_from_env()?
+            });
 
         let cloud_name = std::env::var("OS_CLOUD").unwrap_or_else(|_| "openstack".to_string());
 
@@ -283,10 +294,11 @@ impl CredentialProvider for OpenStackCredentials {
 
     fn from_secret(data: &HashMap<String, String>) -> Result<Self, CredentialError> {
         Ok(Self {
-            clouds_yaml: data
-                .get("clouds.yaml")
-                .cloned()
-                .ok_or(CredentialError::MissingField("clouds.yaml"))?,
+            clouds_yaml: Zeroizing::new(
+                data.get("clouds.yaml")
+                    .cloned()
+                    .ok_or(CredentialError::MissingField("clouds.yaml"))?,
+            ),
             cloud_name: data
                 .get("cloud")
                 .cloned()
@@ -297,7 +309,7 @@ impl CredentialProvider for OpenStackCredentials {
 
     fn to_k8s_secret(&self) -> Secret {
         let mut string_data = BTreeMap::new();
-        string_data.insert("clouds.yaml".to_string(), self.clouds_yaml.clone());
+        string_data.insert("clouds.yaml".to_string(), (*self.clouds_yaml).clone());
         string_data.insert("cloud".to_string(), self.cloud_name.clone());
         if let Some(ref cacert) = self.cacert {
             string_data.insert("cacert".to_string(), cacert.clone());
@@ -348,6 +360,7 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    use zeroize::Zeroizing;
 
     #[test]
     fn test_aws_credentials_from_secret() {
@@ -371,7 +384,10 @@ mod tests {
         secret.insert("AWS_SESSION_TOKEN".to_string(), "token123".to_string());
 
         let creds = AwsCredentials::from_secret(&secret).unwrap();
-        assert_eq!(creds.session_token, Some("token123".to_string()));
+        assert_eq!(
+            creds.session_token,
+            Some(Zeroizing::new("token123".to_string()))
+        );
     }
 
     #[test]
@@ -414,7 +430,7 @@ mod tests {
     fn test_aws_credentials_b64_encoded() {
         let creds = AwsCredentials {
             access_key_id: "AKID".to_string(),
-            secret_access_key: "SECRET".to_string(),
+            secret_access_key: Zeroizing::new("SECRET".to_string()),
             region: "us-west-2".to_string(),
             session_token: None,
         };
@@ -433,9 +449,9 @@ mod tests {
     fn test_aws_credentials_b64_encoded_with_session_token() {
         let creds = AwsCredentials {
             access_key_id: "AKID".to_string(),
-            secret_access_key: "SECRET".to_string(),
+            secret_access_key: Zeroizing::new("SECRET".to_string()),
             region: "us-west-2".to_string(),
-            session_token: Some("my-session-token".to_string()),
+            session_token: Some(Zeroizing::new("my-session-token".to_string())),
         };
 
         let encoded = creds.to_b64_encoded();
@@ -449,7 +465,7 @@ mod tests {
     fn test_aws_credentials_to_k8s_secret() {
         let creds = AwsCredentials {
             access_key_id: "AKID".to_string(),
-            secret_access_key: "SECRET".to_string(),
+            secret_access_key: Zeroizing::new("SECRET".to_string()),
             region: "us-west-2".to_string(),
             session_token: None,
         };
@@ -481,9 +497,9 @@ mod tests {
     fn test_aws_credentials_to_k8s_secret_with_session_token() {
         let creds = AwsCredentials {
             access_key_id: "AKID".to_string(),
-            secret_access_key: "SECRET".to_string(),
+            secret_access_key: Zeroizing::new("SECRET".to_string()),
             region: "us-west-2".to_string(),
-            session_token: Some("token123".to_string()),
+            session_token: Some(Zeroizing::new("token123".to_string())),
         };
 
         let secret = creds.to_k8s_secret();
@@ -512,8 +528,8 @@ mod tests {
 
         let creds = ProxmoxCredentials::from_secret(&secret).unwrap();
         assert_eq!(creds.url, "https://pve.example.com:8006");
-        assert_eq!(creds.token, "user@pam!token");
-        assert_eq!(creds.secret, "secret-value");
+        assert_eq!(&*creds.token, "user@pam!token");
+        assert_eq!(&*creds.secret, "secret-value");
     }
 
     #[test]
@@ -556,8 +572,8 @@ mod tests {
     fn test_proxmox_credentials_to_k8s_secret() {
         let creds = ProxmoxCredentials {
             url: "https://pve.example.com:8006".to_string(),
-            token: "user@pam!token".to_string(),
-            secret: "secret-value".to_string(),
+            token: Zeroizing::new("user@pam!token".to_string()),
+            secret: Zeroizing::new("secret-value".to_string()),
         };
 
         let secret = creds.to_k8s_secret();
@@ -635,7 +651,7 @@ mod tests {
     #[test]
     fn test_openstack_credentials_to_k8s_secret() {
         let creds = OpenStackCredentials {
-            clouds_yaml: "clouds:\n  mycloud:\n    auth: {}".to_string(),
+            clouds_yaml: Zeroizing::new("clouds:\n  mycloud:\n    auth: {}".to_string()),
             cloud_name: "mycloud".to_string(),
             cacert: None,
         };
@@ -665,7 +681,7 @@ mod tests {
     #[test]
     fn test_openstack_credentials_to_k8s_secret_with_cacert() {
         let creds = OpenStackCredentials {
-            clouds_yaml: "clouds: {}".to_string(),
+            clouds_yaml: Zeroizing::new("clouds: {}".to_string()),
             cloud_name: "openstack".to_string(),
             cacert: Some("-----BEGIN CERTIFICATE-----".to_string()),
         };

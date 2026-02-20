@@ -25,6 +25,17 @@ use lattice_proto::{
 
 use lattice_proto::stream_id;
 
+/// Build a K8s success Status JSON for exec sessions that exit cleanly.
+///
+/// kubectl expects a Status object on channel 3 (error/status channel) at
+/// session end. For successful exits, this is `{"status": "Success"}`.
+fn k8s_success_status() -> serde_json::Value {
+    serde_json::json!({
+        "status": "Success",
+        "metadata": {}
+    })
+}
+
 /// Registry for tracking active exec sessions on the agent
 #[derive(Default)]
 pub struct ExecRegistry {
@@ -107,10 +118,10 @@ impl ExecRegistry {
         let count = self.active.len();
         if count > 0 {
             info!(count, "Cancelling all active exec sessions");
-            for entry in self.active.iter() {
-                entry.value().cancel_token.cancel();
-            }
-            self.active.clear();
+            self.active.retain(|_, session| {
+                session.cancel_token.cancel();
+                false
+            });
         }
     }
 }
@@ -325,40 +336,53 @@ pub async fn execute_exec(
         }
     }
 
-    // Cancel reader tasks
+    // Signal cancellation so any still-running reader tasks exit their loops.
     cancel_token.cancel();
-    for h in handles {
-        let _ = h.await;
-    }
 
-    // Get exit status from stream3 and forward to the cell so kubectl
-    // receives the proper exit code. Without this, kubectl always sees exit 0.
-    if let Some(status_future) = attached.take_status() {
-        if let Some(status) = status_future.await {
-            debug!(request_id = %request_id, ?status, "Exec completed");
+    // Do NOT re-await handles here. If the select loop broke via the "all
+    // streams ended" branch, the JoinHandle results were already consumed
+    // through &mut references. Awaiting a consumed JoinHandle hangs forever
+    // because the result has been taken and no waker will fire. Dropping the
+    // handles is sufficient — the spawned tasks will complete independently.
+    drop(handles);
 
-            // Serialize the K8s Status object to JSON — this is what kubectl
-            // expects on the error channel (stream3) to determine exit code.
-            match serde_json::to_vec(&status) {
-                Ok(data) => {
-                    let _ = message_tx
-                        .send(AgentMessage {
-                            cluster_name: cluster_name.clone(),
-                            payload: Some(Payload::ExecData(ExecData {
-                                request_id: request_id.clone(),
-                                stream_id: stream_id::ERROR,
-                                data,
-                                stream_end: true,
-                            })),
-                        })
-                        .await;
-                }
-                Err(e) => {
-                    warn!(request_id = %request_id, error = %e, "Failed to serialize exec status");
-                }
+    // Drop stdin/resize so kube-rs can close the WebSocket connection.
+    drop(stdin_writer);
+    drop(terminal_size_tx);
+
+    // Get exit status and send it on the error channel (K8s protocol requirement).
+    // kubectl expects a JSON Status object on channel 3 before it considers
+    // the session complete. Without this, kubectl hangs waiting for status.
+    // take_status() is a oneshot receiver that resolves as soon as kube-rs
+    // receives channel 3 data — it does NOT wait for the background task to exit.
+    let status_json = match attached.take_status() {
+        Some(status_future) => match status_future.await {
+            Some(status) => {
+                debug!(request_id = %request_id, ?status, "Exec completed with status");
+                serde_json::to_vec(&status).unwrap_or_default()
             }
+            None => {
+                debug!(request_id = %request_id, "Exec completed with no status");
+                serde_json::to_vec(&k8s_success_status()).unwrap_or_default()
+            }
+        },
+        None => {
+            debug!(request_id = %request_id, "Exec completed (no status channel)");
+            serde_json::to_vec(&k8s_success_status()).unwrap_or_default()
         }
-    }
+    };
+
+    let _ = message_tx
+        .send(AgentMessage {
+            cluster_name,
+            payload: Some(Payload::ExecData(ExecData {
+                request_id: request_id.clone(),
+                stream_id: stream_id::ERROR,
+                data: status_json,
+                stream_end: true,
+            })),
+        })
+        .await;
 
     registry.unregister(&request_id);
     info!(request_id = %request_id, "Exec session ended");

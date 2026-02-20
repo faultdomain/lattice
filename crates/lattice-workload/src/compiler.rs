@@ -317,6 +317,8 @@ impl<'a> WorkloadCompiler<'a> {
                     .collect()
             })
             .unwrap_or_default();
+        // Sort for deterministic SSA output (HashSet iteration order is unstable)
+        allowed_callers.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
 
         if service_node.as_ref().is_some_and(|n| n.allows_all) {
             allowed_callers = vec![CallerRef {
@@ -325,7 +327,7 @@ impl<'a> WorkloadCompiler<'a> {
             }];
         }
 
-        let dependencies: Vec<lattice_common::crd::ServiceRef> = service_node
+        let mut dependencies: Vec<lattice_common::crd::ServiceRef> = service_node
             .as_ref()
             .map(|n| {
                 n.dependencies
@@ -341,6 +343,8 @@ impl<'a> WorkloadCompiler<'a> {
                     .collect()
             })
             .unwrap_or_default();
+        // Sort for deterministic SSA output
+        dependencies.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
 
         let ports: Vec<MeshMemberPort> = self
             .workload

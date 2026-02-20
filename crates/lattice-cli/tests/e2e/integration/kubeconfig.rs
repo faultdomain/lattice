@@ -27,13 +27,14 @@ use super::super::helpers::{get_workload_cluster_name, run_kubectl};
 /// Verify that a kubeconfig secret has been patched for proxy access.
 ///
 /// After pivot, the kubeconfig secret moves from parent to child cluster.
-/// This function checks both locations - the parent (pre-pivot) and the child (post-pivot).
+/// This function checks both locations — the parent (pre-pivot) and the child (post-pivot).
 ///
 /// The kubeconfig should point to the parent's proxy URL with the `/clusters/{name}` path,
 /// rather than the direct cluster API endpoint.
 pub async fn verify_kubeconfig_patched(
     parent_kubeconfig: &str,
     cluster_name: &str,
+    child_kubeconfig: Option<&str>,
 ) -> Result<(), String> {
     info!(
         "[Integration/Kubeconfig] Verifying kubeconfig patched for {}...",
@@ -44,7 +45,6 @@ pub async fn verify_kubeconfig_patched(
     let secret_name = kubeconfig_secret_name(cluster_name);
 
     // Try to get the kubeconfig secret from the parent cluster (pre-pivot location)
-    // Use run_kubectl which returns Result - if kubectl fails (e.g., secret not found), it's an Err
     let kubeconfig_b64 = match run_kubectl(&[
         "--kubeconfig",
         parent_kubeconfig,
@@ -60,20 +60,82 @@ pub async fn verify_kubeconfig_patched(
     {
         Ok(data) if !data.trim().is_empty() => data,
         Ok(_) | Err(_) => {
-            // After pivot, the secret is moved to the child cluster
-            // This is expected - the cluster is now self-managing
+            // Secret not on parent — expected after pivot. Check child if we have access.
             info!(
-                "[Integration/Kubeconfig] Kubeconfig secret {}/{} not on parent (expected after pivot)",
+                "[Integration/Kubeconfig] Kubeconfig secret {}/{} not on parent, checking child...",
                 namespace, secret_name
             );
+            return verify_kubeconfig_on_child(
+                cluster_name,
+                &namespace,
+                &secret_name,
+                child_kubeconfig,
+            )
+            .await;
+        }
+    };
+
+    validate_kubeconfig_content(&kubeconfig_b64, cluster_name)
+}
+
+/// Verify the kubeconfig secret exists on the child cluster after pivot.
+async fn verify_kubeconfig_on_child(
+    cluster_name: &str,
+    namespace: &str,
+    secret_name: &str,
+    child_kubeconfig: Option<&str>,
+) -> Result<(), String> {
+    let child_kc = match child_kubeconfig {
+        Some(kc) => kc.to_string(),
+        None => {
+            // No child kubeconfig available — the secret moved to the child during pivot,
+            // which is expected. We can't verify the content without access.
             info!(
-                "[Integration/Kubeconfig] Cluster {} has pivoted - CAPI resources moved to child",
+                "[Integration/Kubeconfig] Cluster {} has pivoted — CAPI resources moved to child",
                 cluster_name
             );
             return Ok(());
         }
     };
 
+    let child_data = run_kubectl(&[
+        "--kubeconfig",
+        &child_kc,
+        "get",
+        "secret",
+        secret_name,
+        "-n",
+        namespace,
+        "-o",
+        "jsonpath={.data.value}",
+    ])
+    .await
+    .map_err(|e| {
+        format!(
+            "Kubeconfig secret {namespace}/{secret_name} not found on parent or child cluster \
+             for {cluster_name}. This means kubeconfig patching is broken. Child error: {e}"
+        )
+    })?;
+
+    if child_data.trim().is_empty() {
+        return Err(format!(
+            "Kubeconfig secret {namespace}/{secret_name} exists on child but has empty value \
+             for {cluster_name}"
+        ));
+    }
+
+    // The CAPI kubeconfig on the child has the direct API endpoint — the /clusters/
+    // proxy path only exists in the parent's patched copy. Existence + non-empty is
+    // sufficient to confirm the secret survived pivot.
+    info!(
+        "[Integration/Kubeconfig] SUCCESS: Kubeconfig secret for {} found on child (post-pivot)",
+        cluster_name
+    );
+    Ok(())
+}
+
+/// Validate that a base64-encoded kubeconfig contains the proxy path.
+fn validate_kubeconfig_content(kubeconfig_b64: &str, cluster_name: &str) -> Result<(), String> {
     let kubeconfig = String::from_utf8(
         STANDARD
             .decode(kubeconfig_b64.trim())
@@ -97,7 +159,9 @@ pub async fn verify_kubeconfig_patched(
 
 /// Verify that Cedar policies are loaded.
 ///
-/// Checks that the CedarPolicy CRD exists and can be queried.
+/// Checks that the CedarPolicy CRD exists, can be queried, and that at least
+/// one policy is present. A cluster with the CRD installed but zero policies
+/// indicates a broken deployment.
 pub async fn verify_cedar_policies_loaded(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/Kubeconfig] Verifying Cedar policies are loaded...");
 
@@ -132,11 +196,19 @@ pub async fn verify_cedar_policies_loaded(kubeconfig: &str) -> Result<(), String
         Ok(policies) => policies.lines().filter(|l| !l.is_empty()).count(),
         Err(_) => 0,
     };
+
+    if policy_count == 0 {
+        return Err(
+            "Cedar CRD is installed but no CedarPolicy resources found. \
+             Expected at least the default Lattice policies to be present."
+                .to_string(),
+        );
+    }
+
     info!(
         "[Integration/Kubeconfig] Found {} Cedar policies",
         policy_count
     );
-
     Ok(())
 }
 
@@ -147,12 +219,22 @@ pub async fn run_kubeconfig_verification(
     workload2_cluster_name: Option<&str>,
 ) -> Result<(), String> {
     // Verify workload kubeconfig is patched
-    verify_kubeconfig_patched(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
+    verify_kubeconfig_patched(
+        &ctx.mgmt_kubeconfig,
+        workload_cluster_name,
+        ctx.workload_kubeconfig.as_deref(),
+    )
+    .await?;
 
     // Verify workload2 kubeconfig is patched (if exists)
     if let Some(w2_name) = workload2_cluster_name {
         if ctx.has_workload() {
-            verify_kubeconfig_patched(ctx.workload_kubeconfig.as_deref().unwrap(), w2_name).await?;
+            verify_kubeconfig_patched(
+                ctx.workload_kubeconfig.as_deref().unwrap(),
+                w2_name,
+                ctx.workload2_kubeconfig.as_deref(),
+            )
+            .await?;
         }
     }
 
@@ -177,9 +259,13 @@ async fn test_kubeconfig_patched() {
         .unwrap();
     let workload_name = get_workload_cluster_name();
 
-    verify_kubeconfig_patched(&session.ctx.mgmt_kubeconfig, &workload_name)
-        .await
-        .unwrap();
+    verify_kubeconfig_patched(
+        &session.ctx.mgmt_kubeconfig,
+        &workload_name,
+        session.ctx.workload_kubeconfig.as_deref(),
+    )
+    .await
+    .unwrap();
 }
 
 /// Standalone test - verify Cedar policies are loaded

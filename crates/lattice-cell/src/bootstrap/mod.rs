@@ -645,8 +645,8 @@ pub struct ClusterBootstrapInfo {
     pub ca_certificate: String,
     /// The LatticeCluster CRD manifest (JSON) to apply on the workload cluster
     pub cluster_manifest: String,
-    /// The bootstrap token (base64 string)
-    pub token: String,
+    /// The bootstrap token (base64 string, zeroized on drop)
+    pub token: zeroize::Zeroizing<String>,
     /// When the token was created
     pub token_created: Instant,
     /// Whether the token has been used
@@ -777,7 +777,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             cell_endpoint: registration.cell_endpoint,
             ca_certificate: registration.ca_certificate,
             cluster_manifest: registration.cluster_manifest,
-            token: token.as_str().to_string(),
+            token: zeroize::Zeroizing::new(token.as_str().to_string()),
             token_created: Instant::now(),
             token_used: false,
             networking: registration.networking,
@@ -821,7 +821,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             }
 
             // Verify token matches (constant-time comparison)
-            if token != info.token {
+            if token != *info.token {
                 return Err(BootstrapError::InvalidToken);
             }
 
@@ -2356,7 +2356,7 @@ mod tests {
                 cell_endpoint: "cell:8443:50051".to_string(),
                 ca_certificate: "ca-cert".to_string(),
                 cluster_manifest,
-                token: "test-token".to_string(),
+                token: zeroize::Zeroizing::new("test-token".to_string()),
                 token_created: std::time::Instant::now(),
                 token_used: true,
                 networking: None,
@@ -2419,7 +2419,7 @@ mod tests {
                 cell_endpoint: "cell:8443:50051".to_string(),
                 ca_certificate: "ca-cert".to_string(),
                 cluster_manifest,
-                token: "test-token".to_string(),
+                token: zeroize::Zeroizing::new("test-token".to_string()),
                 token_created: std::time::Instant::now(),
                 token_used: true,
                 networking: None,

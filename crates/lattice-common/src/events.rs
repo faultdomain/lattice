@@ -129,6 +129,8 @@ pub mod reasons {
     pub const UNPIVOT_STARTED: &str = "UnpivotStarted";
     /// Worker pool scaling triggered
     pub const WORKER_SCALING: &str = "WorkerScaling";
+    /// Kubernetes version upgrade started
+    pub const VERSION_UPGRADE_STARTED: &str = "VersionUpgradeStarted";
     /// Spec validation failed
     pub const VALIDATION_FAILED: &str = "ValidationFailed";
 
@@ -159,6 +161,8 @@ pub mod actions {
     pub const DELETE: &str = "Delete";
     /// Scaling worker pools
     pub const SCALE: &str = "Scale";
+    /// Upgrading Kubernetes version
+    pub const UPGRADE: &str = "Upgrade";
     /// Compiling service resources
     pub const COMPILE: &str = "Compile";
 }

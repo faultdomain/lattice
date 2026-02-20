@@ -14,6 +14,7 @@
 //! override `permit` policies.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use std::fmt;
@@ -67,6 +68,8 @@ pub enum DenialReason {
     NoPermitPolicy,
     /// An explicit forbid policy denied access
     ExplicitForbid,
+    /// Internal error during evaluation (entity construction, engine failure, etc.)
+    InternalError(String),
 }
 
 impl fmt::Display for DenialReason {
@@ -74,6 +77,7 @@ impl fmt::Display for DenialReason {
         match self {
             Self::NoPermitPolicy => write!(f, "no permit policy for this service and secret path"),
             Self::ExplicitForbid => write!(f, "access explicitly forbidden by policy"),
+            Self::InternalError(msg) => write!(f, "internal authorization error: {}", msg),
         }
     }
 }
@@ -142,6 +146,10 @@ pub struct PolicyEngine {
     authorizer: Authorizer,
     /// Parsed policy set (updated when CRDs change)
     policy_set: Arc<RwLock<PolicySet>>,
+    /// Monotonic counter bumped after every successful `reload()`.
+    /// Used by the service controller to detect when cedar policies
+    /// have actually been loaded (as opposed to just watched).
+    reload_epoch: AtomicU64,
 }
 
 impl PolicyEngine {
@@ -150,6 +158,7 @@ impl PolicyEngine {
         Self {
             authorizer: Authorizer::new(),
             policy_set: Arc::new(RwLock::new(PolicySet::new())),
+            reload_epoch: AtomicU64::new(0),
         }
     }
 
@@ -162,6 +171,7 @@ impl PolicyEngine {
         Ok(Self {
             authorizer: Authorizer::new(),
             policy_set: Arc::new(RwLock::new(policy_set)),
+            reload_epoch: AtomicU64::new(0),
         })
     }
 
@@ -176,6 +186,7 @@ impl PolicyEngine {
         Ok(Self {
             authorizer: Authorizer::new(),
             policy_set: Arc::new(RwLock::new(policy_set)),
+            reload_epoch: AtomicU64::new(0),
         })
     }
 
@@ -235,13 +246,27 @@ impl PolicyEngine {
         self.policy_set.read().await.policies().next().is_some()
     }
 
-    /// Reload policies from CRDs
+    /// Reload policies from CRDs.
+    ///
+    /// Bumps `reload_epoch` after loading so consumers can detect that the
+    /// in-memory state has actually changed (vs. just being watched).
     pub async fn reload(&self, client: &Client) -> Result<()> {
         let new_policy_set = Self::load_policies_from_crds(client).await?;
         let mut policy_set = self.policy_set.write().await;
         *policy_set = new_policy_set;
+        drop(policy_set); // release write lock before bumping epoch
+        self.reload_epoch.fetch_add(1, Ordering::Release);
         info!("Reloaded Cedar policies");
         Ok(())
+    }
+
+    /// Read the current reload epoch.
+    ///
+    /// Returns the number of successful `reload()` calls since engine creation.
+    /// Service controllers use this (instead of a watch-handler counter) to
+    /// build an inputs hash that reflects actually-loaded policy state.
+    pub fn reload_epoch(&self) -> u64 {
+        self.reload_epoch.load(Ordering::Acquire)
     }
 
     /// Evaluate a Cedar authorization request with an arbitrary principal, action,
@@ -293,7 +318,7 @@ impl PolicyEngine {
         let resource_uid = resource.uid().clone();
 
         let entities = Entities::from_entities(vec![principal.clone(), resource.clone()], None)
-            .map_err(|_| DenialReason::NoPermitPolicy)?;
+            .map_err(|e| DenialReason::InternalError(format!("entity construction: {}", e)))?;
 
         let response = self
             .evaluate_raw(
@@ -304,7 +329,7 @@ impl PolicyEngine {
                 &entities,
                 policy_set,
             )
-            .map_err(|_| DenialReason::NoPermitPolicy)?;
+            .map_err(|e| DenialReason::InternalError(format!("evaluation: {}", e)))?;
 
         match response.decision() {
             Decision::Allow => {
@@ -320,6 +345,10 @@ impl PolicyEngine {
                     lattice_common::metrics::AuthDecision::Deny,
                     action_label,
                 );
+                // Cedar SDK behavioral contract: when a `forbid` policy causes
+                // the denial, `diagnostics().reason()` yields the forbid policy ID(s).
+                // When denial is due to no matching `permit`, reason() is empty.
+                // Validated by `test_denial_reason_classification` in engine tests.
                 let reason = if response.diagnostics().reason().next().is_some() {
                     DenialReason::ExplicitForbid
                 } else {
@@ -811,5 +840,67 @@ mod tests {
             )
             .await
             .is_err());
+    }
+
+    // ========================================================================
+    // Denial Reason Classification Tests
+    // ========================================================================
+
+    /// Validate the Cedar SDK behavioral contract that `evaluate_service_action`
+    /// relies on to distinguish `ExplicitForbid` from `NoPermitPolicy`:
+    ///
+    /// - `forbid` denial → `diagnostics().reason()` yields the forbid policy ID
+    /// - No matching `permit` → `diagnostics().reason()` is empty
+    ///
+    /// If a Cedar SDK upgrade changes this behavior, this test will catch it.
+    #[test]
+    fn test_denial_reason_classification() {
+        use crate::entities::build_entity_uid;
+        use std::collections::HashSet;
+
+        let engine = PolicyEngine::new();
+
+        let principal_uid = build_entity_uid("Service", "ns/svc").unwrap();
+        let action_uid = build_entity_uid("Action", "AccessSecret").unwrap();
+        let resource_uid = build_entity_uid("SecretPath", "vault:my/secret").unwrap();
+
+        let principal = Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let resource = Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+
+        // Case 1: No permit policy → NoPermitPolicy (empty diagnostics reason)
+        let no_permit_policies: PolicySet = "".parse().unwrap();
+        let result = engine.evaluate_service_action(
+            &principal,
+            &resource,
+            &action_uid,
+            &no_permit_policies,
+            "test",
+        );
+        assert_eq!(result.unwrap_err(), DenialReason::NoPermitPolicy);
+
+        // Case 2: Explicit forbid → ExplicitForbid (diagnostics has reason)
+        let forbid_policies: PolicySet = "forbid(principal, action, resource);".parse().unwrap();
+        let result = engine.evaluate_service_action(
+            &principal,
+            &resource,
+            &action_uid,
+            &forbid_policies,
+            "test",
+        );
+        assert_eq!(result.unwrap_err(), DenialReason::ExplicitForbid);
+
+        // Case 3: Permit + forbid → ExplicitForbid (forbid overrides permit)
+        let both_policies: PolicySet =
+            "permit(principal, action, resource); forbid(principal, action, resource);"
+                .parse()
+                .unwrap();
+        let result = engine.evaluate_service_action(
+            &principal,
+            &resource,
+            &action_uid,
+            &both_policies,
+            "test",
+        );
+        assert_eq!(result.unwrap_err(), DenialReason::ExplicitForbid);
     }
 }

@@ -38,7 +38,12 @@ pub async fn handle_pending(
     if let Some(ref cell_spec) = cluster.spec.parent_config {
         info!("ensuring LoadBalancer Service for cell servers");
         ctx.kube
-            .ensure_cell_service(cell_spec.bootstrap_port, cell_spec.grpc_port)
+            .ensure_cell_service(
+                cell_spec.bootstrap_port,
+                cell_spec.grpc_port,
+                cell_spec.proxy_port,
+                &cluster.spec.provider.provider_type(),
+            )
             .await?;
         info!("cell LoadBalancer Service created/updated");
     }

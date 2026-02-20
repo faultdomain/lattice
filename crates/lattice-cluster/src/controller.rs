@@ -103,9 +103,15 @@ pub trait KubeClient: Send + Sync {
     /// Ensure the cell LoadBalancer Service exists
     ///
     /// Creates a LoadBalancer Service in lattice-system namespace to expose
-    /// cell servers (bootstrap + gRPC) for workload cluster provisioning.
+    /// cell servers (bootstrap, gRPC, proxy, auth-proxy) for workload cluster provisioning.
     /// The LB address is auto-discovered from Service status.
-    async fn ensure_cell_service(&self, bootstrap_port: u16, grpc_port: u16) -> Result<(), Error>;
+    async fn ensure_cell_service(
+        &self,
+        bootstrap_port: u16,
+        grpc_port: u16,
+        proxy_port: u16,
+        provider_type: &lattice_common::crd::ProviderType,
+    ) -> Result<(), Error>;
 
     /// Copy a secret from one namespace to another
     ///
@@ -322,51 +328,27 @@ impl KubeClient for KubeClientImpl {
         Ok(())
     }
 
-    async fn ensure_cell_service(&self, bootstrap_port: u16, grpc_port: u16) -> Result<(), Error> {
-        use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
-        use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+    async fn ensure_cell_service(
+        &self,
+        bootstrap_port: u16,
+        grpc_port: u16,
+        proxy_port: u16,
+        provider_type: &lattice_common::crd::ProviderType,
+    ) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::Service;
 
         let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-        let mut labels = std::collections::BTreeMap::new();
-        labels.insert("app".to_string(), "lattice-operator".to_string());
-
-        let service = Service {
-            metadata: ObjectMeta {
-                name: Some(CELL_SERVICE_NAME.to_string()),
-                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-                labels: Some(labels.clone()),
-                ..Default::default()
-            },
-            spec: Some(ServiceSpec {
-                type_: Some("LoadBalancer".to_string()),
-                selector: Some(labels),
-                ports: Some(vec![
-                    ServicePort {
-                        name: Some("bootstrap".to_string()),
-                        port: bootstrap_port as i32,
-                        target_port: Some(IntOrString::Int(bootstrap_port as i32)),
-                        protocol: Some("TCP".to_string()),
-                        ..Default::default()
-                    },
-                    ServicePort {
-                        name: Some("grpc".to_string()),
-                        port: grpc_port as i32,
-                        target_port: Some(IntOrString::Int(grpc_port as i32)),
-                        protocol: Some("TCP".to_string()),
-                        ..Default::default()
-                    },
-                ]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        // Check if service exists
         if get_optional(&api, CELL_SERVICE_NAME).await?.is_some() {
             debug!("cell service already exists");
         } else {
             info!("creating cell LoadBalancer service");
+            let service = lattice_common::kube_utils::build_cell_service(
+                bootstrap_port,
+                grpc_port,
+                proxy_port,
+                provider_type,
+            );
             api.create(&PostParams::default(), &service).await?;
         }
 
@@ -1304,25 +1286,32 @@ async fn handle_deletion(
         };
 
         if capi_exists {
-            // Wait for CAPI to be stable before deleting (prevents race with provisioning)
-            let is_stable = match ctx.capi.is_cluster_stable(&name, &capi_namespace).await {
-                Ok(stable) => stable,
-                Err(e) => {
-                    debug!(cluster = %name, error = %e, "Failed to check CAPI stability, assuming unstable");
-                    false
-                }
-            };
+            // Only check stability before the first delete attempt (prevents race
+            // with provisioning). Once we've already set the phase to Deleting,
+            // skip the check and keep retrying the delete — under CPU overload the
+            // stability API call can fail repeatedly, which would block deletion
+            // forever if we gate on it every time.
+            let already_deleting = current_phase == Some(&ClusterPhase::Deleting);
+            if !already_deleting {
+                let is_stable = match ctx.capi.is_cluster_stable(&name, &capi_namespace).await {
+                    Ok(stable) => stable,
+                    Err(e) => {
+                        debug!(cluster = %name, error = %e, "Failed to check CAPI stability, assuming unstable");
+                        false
+                    }
+                };
 
-            if !is_stable {
-                info!(cluster = %name, "Waiting for CAPI to stabilize before deletion");
-                let status = cluster
-                    .status
-                    .clone()
-                    .unwrap_or_default()
-                    .phase(ClusterPhase::Deleting)
-                    .message("Waiting for CAPI to stabilize before cleanup");
-                ctx.kube.patch_status(&name, &status).await?;
-                return Ok(Action::requeue(Duration::from_secs(10)));
+                if !is_stable {
+                    info!(cluster = %name, "Waiting for CAPI to stabilize before deletion");
+                    let status = cluster
+                        .status
+                        .clone()
+                        .unwrap_or_default()
+                        .phase(ClusterPhase::Deleting)
+                        .message("Waiting for CAPI to stabilize before cleanup");
+                    ctx.kube.patch_status(&name, &status).await?;
+                    return Ok(Action::requeue(Duration::from_secs(10)));
+                }
             }
 
             // Delete CAPI Cluster to trigger infrastructure cleanup
@@ -1421,6 +1410,8 @@ async fn handle_deletion(
     }
 
     // Check 2: Actual node count matches LatticeCluster spec (prevents TOCTOU with scaling)
+    // Query live node counts — status.ready_workers may be stale because handle_ready
+    // (which normally refreshes it) is bypassed during deletion.
     let desired_workers: u32 = cluster
         .spec
         .nodes
@@ -1428,10 +1419,11 @@ async fn handle_deletion(
         .values()
         .map(|p| p.replicas)
         .sum();
-    let ready_workers = cluster
-        .status
-        .as_ref()
-        .and_then(|s| s.ready_workers)
+    let ready_workers = ctx
+        .kube
+        .get_ready_node_counts()
+        .await
+        .map(|c| c.ready_workers)
         .unwrap_or(0);
 
     if ready_workers < desired_workers {
@@ -1532,6 +1524,10 @@ mod tests {
             async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
             async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
             async fn is_cluster_stable(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
+            async fn get_cp_version(&self, cluster_name: &str, namespace: &str, bootstrap: BootstrapProvider) -> Result<Option<String>, Error>;
+            async fn update_cp_version(&self, cluster_name: &str, namespace: &str, bootstrap: BootstrapProvider, version: &str) -> Result<(), Error>;
+            async fn get_pool_version(&self, cluster_name: &str, pool_id: &str, namespace: &str) -> Result<Option<String>, Error>;
+            async fn update_pool_version(&self, cluster_name: &str, pool_id: &str, namespace: &str, version: &str) -> Result<(), Error>;
             fn kube_client(&self) -> Client;
         }
     }
@@ -1805,6 +1801,16 @@ mod tests {
             capi_mock
                 .expect_get_pool_replicas()
                 .returning(|_, _, _| Ok(Some(2)));
+            // Version matches spec (v1.32.0) - no upgrade needed
+            capi_mock
+                .expect_get_cp_version()
+                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+            capi_mock
+                .expect_is_cluster_stable()
+                .returning(|_, _| Ok(true));
+            capi_mock
+                .expect_get_pool_version()
+                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
             Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),

@@ -11,9 +11,9 @@ use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use tracing::{info, warn};
 
-use super::super::providers::InfraProvider;
 use super::docker::{docker_containers_deleted, run_cmd, run_kubectl};
 use super::{run_id, wait_for_condition, OPERATOR_LABEL};
+use crate::providers::InfraProvider;
 
 use lattice_cli::commands::port_forward::PortForward as ResilientPortForward;
 
@@ -50,7 +50,7 @@ impl HttpResponse {
 ///
 /// Uses curl with the provided bearer token and returns both status code and body.
 /// Returns status_code 0 on connection failure or timeout.
-fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpResponse {
+async fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpResponse {
     // Use -w to append status code after body with a delimiter
     let output = match run_cmd(
         "curl",
@@ -65,7 +65,9 @@ fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpRespons
             &timeout_secs.to_string(),
             url,
         ],
-    ) {
+    )
+    .await
+    {
         Ok(out) => out,
         Err(e) => {
             return HttpResponse {
@@ -120,7 +122,7 @@ pub async fn http_get_with_retry(
         let url = url.clone();
         let token = token.clone();
         async move {
-            let resp = http_get_with_token(&url, &token, timeout_secs);
+            let resp = http_get_with_token(&url, &token, timeout_secs).await;
 
             // Don't retry 4xx errors - these are intentional responses
             if resp.status_code >= 400 && resp.status_code < 500 {
@@ -590,50 +592,36 @@ pub async fn proxy_service_exists(kubeconfig: &str) -> bool {
 ///
 /// Waits up to 2 minutes for the LoadBalancer to get an external IP.
 async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> {
-    use std::sync::Mutex;
-
-    let result_url: Mutex<Option<String>> = Mutex::new(None);
-
     wait_for_condition(
         "LoadBalancer IP to be assigned",
         Duration::from_secs(300),
         Duration::from_secs(5),
-        || {
-            let result_url = &result_url;
-            async move {
-                let result = run_kubectl(
-                    &[
-                        "--kubeconfig",
-                        kubeconfig,
-                        "get",
-                        "svc",
-                        PROXY_SERVICE_NAME,
-                        "-n",
-                        LATTICE_SYSTEM_NAMESPACE,
-                        "-o",
-                        "jsonpath={.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}",
-                    ],
-                )
-                .await;
+        || async move {
+            let result = run_kubectl(
+                &[
+                    "--kubeconfig",
+                    kubeconfig,
+                    "get",
+                    "svc",
+                    PROXY_SERVICE_NAME,
+                    "-n",
+                    LATTICE_SYSTEM_NAMESPACE,
+                    "-o",
+                    "jsonpath={.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}",
+                ],
+            )
+            .await;
 
-                if let Ok(addr) = result {
-                    let addr = addr.trim().to_string();
-                    if !addr.is_empty() {
-                        let url = format!("https://{}:{}", addr, PROXY_PORT);
-                        *result_url.lock().unwrap() = Some(url);
-                        return Ok(true);
-                    }
+            if let Ok(addr) = result {
+                let addr = addr.trim().to_string();
+                if !addr.is_empty() {
+                    return Ok(Some(format!("https://{}:{}", addr, PROXY_PORT)));
                 }
-                Ok(false)
             }
+            Ok(None)
         },
     )
-    .await?;
-
-    result_url
-        .into_inner()
-        .unwrap()
-        .ok_or_else(|| "LoadBalancer IP not available".to_string())
+    .await
 }
 
 /// Get proxy URL, creating a resilient port-forward if necessary.
@@ -647,7 +635,7 @@ pub async fn get_or_create_proxy(
     use lattice_cli::commands::port_forward::check_health;
 
     if let Some(url) = existing_url {
-        if check_health(url, Duration::from_secs(5)).await {
+        if check_health(url, Duration::from_secs(5), None).await {
             info!("[Helpers] Using existing proxy URL: {}", url);
             return Ok((url.to_string(), None));
         }
@@ -796,7 +784,7 @@ pub async fn delete_cluster_and_wait(
             Duration::from_secs(300),
             Duration::from_secs(5),
             || async move {
-                let deleted = docker_containers_deleted(cluster_name);
+                let deleted = docker_containers_deleted(cluster_name).await;
                 if deleted {
                     info!("Docker containers cleaned up by CAPI");
                 }
@@ -965,9 +953,6 @@ impl ProxySession {
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        use std::sync::Mutex;
-
-        let result_path: Mutex<Option<String>> = Mutex::new(None);
         let uses_localhost = self.uses_localhost();
         let local_port = self.local_port();
         let token = self.token.clone();
@@ -980,7 +965,6 @@ impl ProxySession {
                 let client = &client;
                 let url = &url;
                 let token = &token;
-                let result_path = &result_path;
                 async move {
                     let response = match client.get(url.as_str()).bearer_auth(token).send().await {
                         Ok(r) => r,
@@ -989,7 +973,7 @@ impl ProxySession {
                                 "[ProxySession] Network error fetching kubeconfig: {}, retrying...",
                                 e
                             );
-                            return Ok(false);
+                            return Ok(None);
                         }
                     };
 
@@ -1048,24 +1032,18 @@ impl ProxySession {
                             .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
 
                         info!("[ProxySession] Kubeconfig written to {}", path);
-                        *result_path.lock().unwrap() = Some(path);
-                        return Ok(true);
+                        return Ok(Some(path));
                     }
 
                     info!(
                         "[ProxySession] Cluster '{}' not in subtree yet (available: {:?}), retrying...",
                         cluster_name, available_contexts
                     );
-                    Ok(false)
+                    Ok(None)
                 }
             },
         )
-        .await?;
-
-        result_path
-            .into_inner()
-            .unwrap()
-            .ok_or_else(|| format!("No kubeconfig path for cluster '{}'", cluster_name))
+        .await
     }
 }
 

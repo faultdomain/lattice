@@ -2005,6 +2005,7 @@ version = "10.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0529410abe238729a60b108898784df8984c87f6054c9c4fcacc47e4803c1ce1"
 dependencies = [
+ "aws-lc-rs",
  "base64",
  "getrandom 0.2.16",
  "js-sys",
@@ -2213,6 +2214,7 @@ dependencies = [
  "tonic",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -2246,6 +2248,8 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "tracing",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2282,6 +2286,7 @@ dependencies = [
  "tokio-test",
  "toml",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -2318,6 +2323,7 @@ dependencies = [
  "lattice-proto",
  "mockall",
  "moka",
+ "parking_lot",
  "pem",
  "rstest",
  "rustls",
@@ -2334,6 +2340,7 @@ dependencies = [
  "tracing",
  "uuid",
  "x509-parser 0.16.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -2469,6 +2476,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "yaml-rust2",
+ "zeroize",
 ]
 
 [[package]]
@@ -2495,12 +2503,14 @@ dependencies = [
  "tonic",
  "tracing",
  "x509-parser 0.16.0",
+ "zeroize",
 ]
 
 [[package]]
 name = "lattice-mesh-member"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "k8s-openapi",
  "kube",
  "lattice-cedar",
@@ -2599,6 +2609,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "x509-parser 0.16.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -2627,9 +2638,11 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

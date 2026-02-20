@@ -48,24 +48,24 @@ use super::providers::InfraProvider;
 const BATCH_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes per batch
 
 /// Delete all endurance test Docker clusters (mgmt + endurance-*)
-fn delete_endurance_docker_clusters() {
-    force_delete_docker_cluster(MGMT_CLUSTER_NAME);
-    force_delete_docker_cluster("endurance-");
+async fn delete_endurance_docker_clusters() {
+    force_delete_docker_cluster(MGMT_CLUSTER_NAME).await;
+    force_delete_docker_cluster("endurance-").await;
 }
 
 /// Clean up this run's resources
-fn cleanup_all_clusters() {
+async fn cleanup_all_clusters() {
     info!("Cleaning up all test resources...");
-    setup::cleanup_bootstrap_cluster(run_id());
-    delete_endurance_docker_clusters();
+    setup::cleanup_bootstrap_cluster(run_id()).await;
+    delete_endurance_docker_clusters().await;
     info!("Cleanup complete");
 }
 
 /// Clean up orphans and all resources (opt-in via LATTICE_CLEANUP_ORPHANS)
-fn cleanup_orphans_and_all_clusters() {
+async fn cleanup_orphans_and_all_clusters() {
     info!("Cleaning up orphaned and all test resources...");
-    setup::cleanup_orphan_bootstrap_clusters();
-    delete_endurance_docker_clusters();
+    setup::cleanup_orphan_bootstrap_clusters().await;
+    delete_endurance_docker_clusters().await;
     info!("Cleanup complete");
 }
 
@@ -78,10 +78,10 @@ async fn test_endurance_loop() {
     info!("=========================================================");
 
     // Clean up any leftover resources from previous runs (opt-in via LATTICE_CLEANUP_ORPHANS)
-    cleanup_orphans_and_all_clusters();
+    cleanup_orphans_and_all_clusters().await;
 
     if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
-        cleanup_all_clusters();
+        cleanup_all_clusters().await;
         panic!("Failed to build Lattice image: {}", e);
     }
 
@@ -91,7 +91,7 @@ async fn test_endurance_loop() {
     match result {
         Ok(()) => {
             // Only clean up on success
-            cleanup_all_clusters();
+            cleanup_all_clusters().await;
             info!("TEST PASSED");
         }
         Err(e) => {
@@ -114,7 +114,9 @@ async fn run_endurance_test() -> Result<(), String> {
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
     let workload_bootstrap = workload_template.spec.provider.kubernetes.bootstrap.clone();
 
-    ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
+    ensure_docker_network()
+        .await
+        .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
 
     // Install management cluster once
     info!("[SETUP] Installing management cluster...");
@@ -136,7 +138,7 @@ async fn run_endurance_test() -> Result<(), String> {
         .map_err(|e| format!("Installer failed: {}", e))?;
 
     // get_docker_kubeconfig returns the path to the patched kubeconfig (for localhost access)
-    let mgmt_kubeconfig_path = get_docker_kubeconfig(MGMT_CLUSTER_NAME)?;
+    let mgmt_kubeconfig_path = get_docker_kubeconfig(MGMT_CLUSTER_NAME).await?;
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig_path).await?;
 
     // Verify management cluster

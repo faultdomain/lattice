@@ -175,7 +175,12 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     // Service (which selects all operator pods) never routes to a non-listening replica.
     let webhook_client = client.clone();
     tokio::spawn(async move {
-        lattice_secret_provider::webhook::start_webhook_server(webhook_client, webhook_creds).await;
+        if let Err(e) =
+            lattice_secret_provider::webhook::start_webhook_server(webhook_client, webhook_creds)
+                .await
+        {
+            tracing::error!(error = %e, "Local secrets webhook server failed");
+        }
     });
 
     // Acquire leadership using Kubernetes Lease BEFORE any initialization

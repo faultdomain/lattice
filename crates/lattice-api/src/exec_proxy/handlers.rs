@@ -10,35 +10,23 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, AttachParams, TerminalSize};
+use kube::api::{Api, AttachParams};
 use kube::Client;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
+use uuid::Uuid;
 
-use lattice_proto::{parse_exec_command, parse_exec_params, parse_exec_path, stream_id};
+use lattice_proto::{parse_exec_command, parse_exec_params, parse_exec_path};
 
 use crate::backend::ExecTunnelRequest;
 
+use super::io::ExecIo;
+use super::local_io::LocalExecIo;
+use super::remote_io::RemoteExecIo;
 use super::websocket::{
-    build_k8s_message, channel, parse_k8s_message, send_close_normal, send_k8s_error_and_close,
-    K8sMessage,
+    build_k8s_message, parse_k8s_message, send_close_normal, send_k8s_error_and_close, K8sMessage,
 };
 use crate::auth::UserIdentity;
 use crate::server::AppState;
-
-/// Convert ExecParams to kube AttachParams
-fn to_attach_params(params: lattice_proto::ExecParams) -> AttachParams {
-    AttachParams {
-        stdin: params.stdin,
-        stdout: params.stdout,
-        stderr: params.stderr,
-        tty: params.tty,
-        container: params.container,
-        max_stdin_buf_size: None,
-        max_stdout_buf_size: None,
-        max_stderr_buf_size: None,
-    }
-}
 
 /// Check if headers indicate a WebSocket upgrade request
 pub fn has_websocket_upgrade_headers(headers: &axum::http::HeaderMap) -> bool {
@@ -127,18 +115,39 @@ async fn handle_websocket_connection(
     }
 }
 
+/// Convert ExecParams to kube AttachParams
+fn to_attach_params(params: lattice_proto::ExecParams) -> AttachParams {
+    AttachParams {
+        stdin: params.stdin,
+        stdout: params.stdout,
+        stderr: params.stderr,
+        tty: params.tty,
+        container: params.container,
+        max_stdin_buf_size: None,
+        max_stdout_buf_size: None,
+        max_stderr_buf_size: None,
+    }
+}
+
+/// Send an error on the WebSocket and close it, consuming the socket
+async fn send_error_and_close(socket: WebSocket, msg: impl Into<String>) {
+    let (mut ws_sender, _) = socket.split();
+    send_k8s_error_and_close(&mut ws_sender, msg).await;
+}
+
 /// Handle exec for the local cluster using kube-rs
 async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
-    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let request_id = Uuid::new_v4().to_string();
 
     // Parse the path to extract namespace and pod name
     let Some((namespace, pod_name, subresource)) = parse_exec_path(&path) else {
-        error!(path = %path, "Invalid exec path");
-        send_k8s_error_and_close(&mut ws_sender, "Invalid exec path").await;
+        error!(request_id = %request_id, path = %path, "Invalid exec path");
+        send_error_and_close(socket, "Invalid exec path").await;
         return;
     };
 
-    info!(
+    debug!(
+        request_id = %request_id,
         namespace = %namespace,
         pod = %pod_name,
         subresource = %subresource,
@@ -149,8 +158,8 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
     let client = match Client::try_default().await {
         Ok(c) => c,
         Err(e) => {
-            error!(error = %e, "Failed to create K8s client");
-            send_k8s_error_and_close(&mut ws_sender, "Failed to create K8s client").await;
+            error!(request_id = %request_id, error = %e, "Failed to create K8s client");
+            send_error_and_close(socket, "Failed to create K8s client").await;
             return;
         }
     };
@@ -171,140 +180,26 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
             .await
             .map_err(|e| format!("attach failed: {}", e)),
         _ => {
-            send_k8s_error_and_close(
-                &mut ws_sender,
-                format!("Unsupported subresource: {}", subresource),
-            )
-            .await;
+            send_error_and_close(socket, format!("Unsupported subresource: {}", subresource)).await;
             return;
         }
     };
 
-    let mut attached = match result {
+    let attached = match result {
         Ok(a) => a,
         Err(e) => {
-            error!(error = %e, "Failed to start exec");
-            send_k8s_error_and_close(&mut ws_sender, e).await;
+            error!(request_id = %request_id, error = %e, "Failed to start exec");
+            send_error_and_close(socket, e).await;
             return;
         }
     };
 
-    info!(namespace = %namespace, pod = %pod_name, "Local exec session established");
+    info!(request_id = %request_id, namespace = %namespace, pod = %pod_name, "Local exec session established");
 
-    // Create channel for forwarding stdout/stderr to main loop
-    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<(u8, Vec<u8>)>(64);
+    let io = LocalExecIo::new(attached, request_id.clone());
+    run_exec_bridge(socket, Box::new(io)).await;
 
-    // Spawn tasks to read stdout/stderr
-    let mut handles = vec![];
-
-    if let Some(stdout) = attached.stdout() {
-        let tx = output_tx.clone();
-        handles.push(tokio::spawn(async move {
-            forward_reader_to_channel(stdout, tx, |data| (channel::STDOUT, data)).await;
-        }));
-    }
-
-    if let Some(stderr) = attached.stderr() {
-        let tx = output_tx.clone();
-        handles.push(tokio::spawn(async move {
-            forward_reader_to_channel(stderr, tx, |data| (channel::STDERR, data)).await;
-        }));
-    }
-
-    // Drop our copy of the sender so the channel closes when tasks complete
-    drop(output_tx);
-
-    // Handle stdin from WebSocket and output from kube-rs
-    let mut stdin_writer = attached.stdin();
-    let mut terminal_size_tx = attached.terminal_size();
-
-    loop {
-        tokio::select! {
-            ws_msg = ws_receiver.next() => {
-                match ws_msg {
-                    Some(Ok(Message::Binary(data))) => {
-                        if let Some(k8s_msg) = parse_k8s_message(&data) {
-                            match k8s_msg {
-                                K8sMessage::Resize { width, height } => {
-                                    if let Some(ref mut tx) = terminal_size_tx {
-                                        let _ = tx.send(TerminalSize { width, height }).await;
-                                    }
-                                }
-                                K8sMessage::Stdin(payload) | K8sMessage::Raw(payload) => {
-                                    if let Some(ref mut writer) = stdin_writer {
-                                        if writer.write_all(&payload).await.is_err() {
-                                            break;
-                                        }
-                                        let _ = writer.flush().await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Text(text))) => {
-                        if let Some(ref mut writer) = stdin_writer {
-                            if writer.write_all(text.as_bytes()).await.is_err() {
-                                break;
-                            }
-                            let _ = writer.flush().await;
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) => break,
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = ws_sender.send(Message::Pong(data)).await;
-                    }
-                    Some(Ok(Message::Pong(_))) => {}
-                    Some(Err(_)) | None => break,
-                }
-            }
-
-            output = output_rx.recv() => {
-                match output {
-                    Some((stream_id, data)) => {
-                        let msg = build_k8s_message(stream_id, &data);
-                        if ws_sender.send(Message::Binary(msg.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => break, // All output streams closed
-                }
-            }
-        }
-    }
-
-    // Wait for reader tasks
-    for h in handles {
-        let _ = h.await;
-    }
-
-    send_close_normal(&mut ws_sender, "Exec session ended").await;
-    info!(namespace = %namespace, pod = %pod_name, "Local exec session closed");
-}
-
-/// Forward an async reader to a channel
-///
-/// Reads from the async reader in 4KB chunks and sends them to the channel.
-/// Stops when the reader is exhausted, errors, or the channel closes.
-async fn forward_reader_to_channel<R, T, F>(
-    mut reader: R,
-    tx: tokio::sync::mpsc::Sender<T>,
-    transform: F,
-) where
-    R: AsyncRead + Unpin,
-    F: Fn(Vec<u8>) -> T,
-{
-    let mut buf = vec![0u8; 4096];
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                if tx.send(transform(buf[..n].to_vec())).await.is_err() {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
+    info!(request_id = %request_id, namespace = %namespace, pod = %pod_name, "Local exec session closed");
 }
 
 /// Handle exec for remote clusters through backend tunnel
@@ -317,13 +212,11 @@ async fn handle_remote_exec(
     query: String,
     route_info: crate::backend::ProxyRouteInfo,
 ) {
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-
     let agent_id = match route_info.agent_id {
         Some(id) => id,
         None => {
             error!(cluster = %cluster_name, "No agent route available");
-            send_k8s_error_and_close(&mut ws_sender, "No agent route available").await;
+            send_error_and_close(socket, "No agent route available").await;
             return;
         }
     };
@@ -336,7 +229,7 @@ async fn handle_remote_exec(
         source_groups: identity.groups.clone(),
     };
 
-    let (exec_session, mut data_rx) = match state
+    let (exec_session, data_rx) = match state
         .backend
         .start_exec_session(&agent_id, exec_request)
         .await
@@ -344,17 +237,47 @@ async fn handle_remote_exec(
         Ok(session) => session,
         Err(e) => {
             error!(error = %e, "Failed to start exec session");
-            send_k8s_error_and_close(
-                &mut ws_sender,
-                format!("Failed to start exec session: {}", e),
-            )
-            .await;
+            send_error_and_close(socket, format!("Failed to start exec session: {}", e)).await;
             return;
         }
     };
 
     let request_id = exec_session.request_id().to_string();
-    info!(request_id = %request_id, "Remote exec session started");
+    info!(
+        request_id = %request_id,
+        cluster = %cluster_name,
+        user = %identity.username,
+        "Remote exec session started"
+    );
+
+    let io = RemoteExecIo::new(exec_session, data_rx);
+    run_exec_bridge(socket, Box::new(io)).await;
+
+    info!(
+        request_id = %request_id,
+        cluster = %cluster_name,
+        user = %identity.username,
+        "Remote exec session closed"
+    );
+}
+
+/// Unified WebSocket ↔ ExecIo bridge
+///
+/// Handles the common message loop for both local and remote exec sessions:
+/// - WebSocket input → parse K8s messages → send stdin/resize to ExecIo
+/// - ExecIo output → build K8s messages → send to WebSocket
+async fn run_exec_bridge(socket: WebSocket, io: Box<dyn ExecIo>) {
+    let request_id = io.request_id().to_string();
+    let span = tracing::info_span!("exec_bridge", request_id = %request_id);
+    run_exec_bridge_inner(socket, io, &request_id)
+        .instrument(span)
+        .await;
+}
+
+async fn run_exec_bridge_inner(socket: WebSocket, mut io: Box<dyn ExecIo>, request_id: &str) {
+    debug!(request_id = %request_id, "Exec bridge started");
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
 
     loop {
         tokio::select! {
@@ -364,13 +287,10 @@ async fn handle_remote_exec(
                         if let Some(k8s_msg) = parse_k8s_message(&data) {
                             match k8s_msg {
                                 K8sMessage::Resize { width, height } => {
-                                    if let Err(e) = exec_session.send_resize(width as u32, height as u32).await {
-                                        warn!(request_id = %request_id, error = %e, "Failed to send resize");
-                                    }
+                                    io.send_resize(width, height).await;
                                 }
                                 K8sMessage::Stdin(payload) | K8sMessage::Raw(payload) => {
-                                    if let Err(e) = exec_session.send_stdin(payload).await {
-                                        warn!(request_id = %request_id, error = %e, "Failed to send stdin");
+                                    if io.send_stdin(payload).await.is_err() {
                                         break;
                                     }
                                 }
@@ -378,13 +298,12 @@ async fn handle_remote_exec(
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = exec_session.send_stdin(text.as_bytes().to_vec()).await {
-                            warn!(request_id = %request_id, error = %e, "Failed to send stdin text");
+                        if io.send_stdin(text.as_bytes().to_vec()).await.is_err() {
                             break;
                         }
                     }
                     Some(Ok(Message::Close(_))) => {
-                        debug!(request_id = %request_id, "WebSocket closed by client");
+                        debug!(request_id = %request_id, "WebSocket close received");
                         break;
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -402,34 +321,19 @@ async fn handle_remote_exec(
                 }
             }
 
-            exec_data = data_rx.recv() => {
-                match exec_data {
-                    Some(data) => {
-                        // Stream3 (ERROR channel) carries the K8s Status JSON
-                        // with the process exit code. Forward it to kubectl on
-                        // channel 3 so it can extract the exit code, then close.
-                        if data.stream_id == stream_id::ERROR {
-                            let status_msg = String::from_utf8_lossy(&data.data);
-                            debug!(request_id = %request_id, status = %status_msg, "Exec status from agent (stream3)");
-
-                            let msg = build_k8s_message(channel::ERROR, &data.data);
-                            let _ = ws_sender.send(Message::Binary(msg.into())).await;
+            output = io.output_rx().recv() => {
+                match output {
+                    Some(exec_output) => {
+                        let msg = build_k8s_message(exec_output.stream_id, &exec_output.data);
+                        if ws_sender.send(Message::Binary(msg.into())).await.is_err() {
                             break;
                         }
-
-                        let msg = build_k8s_message(data.stream_id as u8, &data.data);
-
-                        if let Err(e) = ws_sender.send(Message::Binary(msg.into())).await {
-                            warn!(request_id = %request_id, error = %e, "Failed to send to WebSocket");
+                        if exec_output.is_terminal {
                             break;
-                        }
-
-                        if data.stream_end && data.stream_id != stream_id::STDIN {
-                            debug!(request_id = %request_id, stream_id = data.stream_id, "Stream ended");
                         }
                     }
                     None => {
-                        debug!(request_id = %request_id, "Exec data channel closed");
+                        debug!(request_id = %request_id, "Output channel closed");
                         break;
                     }
                 }
@@ -437,8 +341,15 @@ async fn handle_remote_exec(
         }
     }
 
+    // Let the backend clean up and send any final messages (e.g., exit status)
+    if let Some(final_msg) = io.finalize().await {
+        let msg = build_k8s_message(final_msg.stream_id, &final_msg.data);
+        let _ = ws_sender.send(Message::Binary(msg.into())).await;
+    }
+
     send_close_normal(&mut ws_sender, "Exec session ended").await;
-    info!(request_id = %request_id, "Remote exec session closed");
+
+    debug!(request_id = %request_id, "Exec bridge ended");
 }
 
 #[cfg(test)]

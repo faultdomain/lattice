@@ -36,21 +36,24 @@ pub enum Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
-            Error::Forbidden(_) => (StatusCode::FORBIDDEN, self.to_string()),
-            Error::ClusterNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
-            Error::Proxy(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+        let (status, client_message) = match &self {
+            Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "authentication failed"),
+            Error::Forbidden(_) => (StatusCode::FORBIDDEN, "authorization failed"),
+            Error::ClusterNotFound(_) => (StatusCode::NOT_FOUND, "cluster not found"),
+            Error::Proxy(_) => (StatusCode::BAD_GATEWAY, "proxy error"),
+            Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+            Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
+
+        // Log the full error detail server-side, return generic message to client
+        tracing::warn!(error = %self, status = %status, "API error response");
 
         // Return K8s-style Status response
         let body = serde_json::json!({
             "kind": "Status",
             "apiVersion": "v1",
             "status": "Failure",
-            "message": message,
+            "message": client_message,
             "code": status.as_u16()
         });
 

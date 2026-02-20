@@ -37,8 +37,8 @@ pub struct CapiProxyConfig {
     pub addr: SocketAddr,
     /// TLS certificate PEM
     pub cert_pem: String,
-    /// TLS private key PEM
-    pub key_pem: String,
+    /// TLS private key PEM (zeroized on drop)
+    pub key_pem: zeroize::Zeroizing<String>,
 }
 
 /// Shared state for proxy handlers
@@ -120,10 +120,12 @@ pub async fn start_capi_proxy(
         .route("/healthz", axum::routing::get(|| async { "ok" }))
         .with_state(state);
 
-    let tls_config =
-        RustlsConfig::from_pem(config.cert_pem.into_bytes(), config.key_pem.into_bytes())
-            .await
-            .map_err(|e| CapiProxyError::TlsConfig(e.to_string()))?;
+    let tls_config = RustlsConfig::from_pem(
+        config.cert_pem.into_bytes(),
+        config.key_pem.as_bytes().to_vec(),
+    )
+    .await
+    .map_err(|e| CapiProxyError::TlsConfig(e.to_string()))?;
 
     info!(addr = %config.addr, "Starting K8s API proxy server");
 

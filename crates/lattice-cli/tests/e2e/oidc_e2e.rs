@@ -28,11 +28,11 @@ async fn test_oidc_e2e() {
     match result {
         Ok(Ok(())) => info!("TEST PASSED: oidc"),
         Ok(Err(e)) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("OIDC E2E failed: {}", e);
         }
         Err(_) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("OIDC E2E timed out after {:?}", E2E_TIMEOUT);
         }
     }

@@ -1,13 +1,14 @@
 //! Tetragon Helm chart embedding and cluster-wide baseline TracingPolicy
 //!
-//! Generates a TracingPolicy that blocks dangerous kernel operations across
-//! all workload namespaces using kprobes on LSM hooks. System namespaces excluded.
+//! Generates a TracingPolicy that blocks dangerous kernel operations for
+//! Lattice-managed workload pods using kprobes on LSM hooks. System pods are
+//! excluded via podSelector (only pods with managed-by=lattice are targeted).
 
 use std::sync::LazyLock;
 
 use super::split_yaml_documents;
 use lattice_common::policy::tetragon::{
-    KprobeArg, KprobeSpec, MatchArg, MatchNamespace, Selector, TracingPolicy, TracingPolicySpec,
+    KprobeSpec, PodSelector, Selector, TracingPolicy, TracingPolicySpec,
 };
 
 static TETRAGON_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
@@ -23,15 +24,7 @@ pub fn generate_tetragon() -> &'static [String] {
     &TETRAGON_MANIFESTS
 }
 
-const EXCLUDED_NAMESPACES: &[&str] = &[
-    "kube-system",
-    "cilium-system",
-    "istio-system",
-    "lattice-system",
-    "cert-manager",
-];
-
-/// LSM hooks unconditionally blocked for workload namespaces
+/// LSM hooks unconditionally blocked for workload pods
 const BLOCKED_HOOKS: &[&str] = &[
     "security_ptrace_access_check",
     "security_kernel_module_request",
@@ -39,58 +32,24 @@ const BLOCKED_HOOKS: &[&str] = &[
     "security_sb_umount",
 ];
 
-const SENSITIVE_PATHS: &[&str] = &["/etc/shadow", "/etc/passwd", "/etc/sudoers"];
-
 /// Cluster-wide baseline TracingPolicy blocking dangerous operations via LSM hooks
+///
+/// Uses podSelector to target only Lattice-managed workload pods, automatically
+/// excluding system pods (kube-system, cilium-system, istio-system, etc.) which
+/// don't carry the managed-by label.
 pub fn generate_baseline_tracing_policy() -> TracingPolicy {
-    let ns_exclusions = namespace_exclusions();
-
-    let mut kprobes: Vec<KprobeSpec> = BLOCKED_HOOKS
+    let kprobes: Vec<KprobeSpec> = BLOCKED_HOOKS
         .iter()
-        .map(|hook| {
-            KprobeSpec::simple(
-                *hook,
-                vec![Selector::sigkill_excluding_namespaces(&ns_exclusions)],
-            )
-        })
+        .map(|hook| KprobeSpec::simple(*hook, vec![Selector::sigkill()]))
         .collect();
-
-    // security_file_open needs path-based arg filtering
-    kprobes.push(KprobeSpec::with_args(
-        "security_file_open",
-        vec![KprobeArg {
-            index: 0,
-            type_: "file".to_string(),
-            label: Some("path".to_string()),
-        }],
-        vec![Selector {
-            match_args: vec![MatchArg {
-                index: 0,
-                operator: "Equal".to_string(),
-                values: SENSITIVE_PATHS.iter().map(|s| s.to_string()).collect(),
-            }],
-            ..Selector::sigkill_excluding_namespaces(&ns_exclusions)
-        }],
-    ));
 
     TracingPolicy::new(
         "lattice-baseline-runtime",
         TracingPolicySpec {
-            pod_selector: None,
+            pod_selector: Some(PodSelector::managed_by_lattice()),
             kprobes,
         },
     )
-}
-
-fn namespace_exclusions() -> Vec<MatchNamespace> {
-    EXCLUDED_NAMESPACES
-        .iter()
-        .map(|ns| MatchNamespace {
-            namespace: "Namespace".to_string(),
-            operator: "NotIn".to_string(),
-            values: vec![ns.to_string()],
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -124,35 +83,20 @@ mod tests {
         for hook in BLOCKED_HOOKS {
             assert!(calls.contains(hook), "missing {hook}");
         }
-        assert!(calls.contains(&"security_file_open"));
     }
 
     #[test]
-    fn baseline_blocks_sensitive_files() {
+    fn baseline_targets_lattice_managed_pods() {
         let p = generate_baseline_tracing_policy();
-        let file_open = p
+        let ps = p
             .spec
-            .kprobes
-            .iter()
-            .find(|k| k.call == "security_file_open")
-            .unwrap();
-        let values = &file_open.selectors[0].match_args[0].values;
-        for path in SENSITIVE_PATHS {
-            assert!(values.contains(&path.to_string()), "missing {path}");
-        }
-    }
-
-    #[test]
-    fn baseline_excludes_system_namespaces() {
-        let p = generate_baseline_tracing_policy();
-        let excluded: Vec<&str> = p.spec.kprobes[0].selectors[0]
-            .match_namespaces
-            .iter()
-            .flat_map(|ns| ns.values.iter().map(|v| v.as_str()))
-            .collect();
-        for ns in EXCLUDED_NAMESPACES {
-            assert!(excluded.contains(ns), "missing exclusion for {ns}");
-        }
+            .pod_selector
+            .as_ref()
+            .expect("podSelector must be set");
+        assert_eq!(
+            ps.match_labels.get("app.kubernetes.io/managed-by").unwrap(),
+            "lattice"
+        );
     }
 
     #[test]

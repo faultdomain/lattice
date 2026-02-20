@@ -1,5 +1,11 @@
 # Lattice Operator - CLAUDE.md
 
+## Important: E2E Tests Always Use Fresh Builds
+
+Every E2E test does a full rebuild with the current code. Never assume or suggest that a bug is caused by "an old binary" or "code not being deployed yet". If a test reproduces an issue, the bug is in the current code.
+
+---
+
 ## Debugging: Mesh/Network Issues
 
 **Always check ztunnel logs first** when debugging mesh connectivity or policy issues:

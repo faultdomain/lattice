@@ -27,11 +27,11 @@ async fn test_kubeconfig_e2e() {
     match result {
         Ok(Ok(())) => info!("TEST PASSED: kubeconfig"),
         Ok(Err(e)) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Kubeconfig E2E failed: {}", e);
         }
         Err(_) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Kubeconfig E2E timed out after {:?}", E2E_TIMEOUT);
         }
     }

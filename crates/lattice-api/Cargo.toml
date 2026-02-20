@@ -53,6 +53,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 base64.workspace = true
 
+# Security
+zeroize = { workspace = true }
+uuid = { workspace = true }
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 rstest = { workspace = true }

@@ -155,6 +155,8 @@ pub struct OidcValidator {
     config: OidcConfig,
     /// JWKS cache
     jwks_cache: Arc<RwLock<Option<JwksCache>>>,
+    /// Serializes JWKS refresh attempts to prevent thundering herd
+    refresh_lock: tokio::sync::Mutex<()>,
     /// HTTP client for fetching JWKS
     http_client: reqwest::Client,
 }
@@ -165,6 +167,7 @@ impl OidcValidator {
         Self {
             config: OidcConfig::default(),
             jwks_cache: Arc::new(RwLock::new(None)),
+            refresh_lock: tokio::sync::Mutex::new(()),
             http_client: reqwest::Client::new(),
         }
     }
@@ -256,6 +259,7 @@ impl OidcValidator {
         Ok(Self {
             config,
             jwks_cache: Arc::new(RwLock::new(None)),
+            refresh_lock: tokio::sync::Mutex::new(()),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -268,6 +272,7 @@ impl OidcValidator {
         Self {
             config,
             jwks_cache: Arc::new(RwLock::new(None)),
+            refresh_lock: tokio::sync::Mutex::new(()),
             http_client: reqwest::Client::new(),
         }
     }
@@ -384,7 +389,19 @@ impl OidcValidator {
         };
 
         if needs_refresh {
-            self.refresh_jwks().await?;
+            // Serialize refresh attempts to prevent thundering herd
+            let _guard = self.refresh_lock.lock().await;
+            // Re-check after acquiring lock — another task may have refreshed already
+            let still_needs_refresh = {
+                let cache = self.jwks_cache.read().await;
+                match &*cache {
+                    None => true,
+                    Some(c) => c.last_refresh.elapsed() > self.config.jwks_refresh_interval,
+                }
+            };
+            if still_needs_refresh {
+                self.refresh_jwks().await?;
+            }
         }
 
         // Get key from cache

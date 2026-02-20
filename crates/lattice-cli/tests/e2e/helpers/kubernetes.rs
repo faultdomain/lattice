@@ -40,7 +40,7 @@ where
     let resource = resource.clone();
     let name = name.to_string();
     let op_name = format!("create_{}", name);
-    retry_with_backoff(&RetryConfig::default(), &op_name, || {
+    retry_with_backoff(&RetryConfig::with_max_attempts(60), &op_name, || {
         let api = api.clone();
         let resource = resource.clone();
         let name = name.clone();
@@ -76,7 +76,7 @@ where
     let params = params.clone();
     let patch = patch.clone();
     let op_name = format!("patch_{}", name);
-    retry_with_backoff(&RetryConfig::default(), &op_name, || {
+    retry_with_backoff(&RetryConfig::with_max_attempts(60), &op_name, || {
         let api = api.clone();
         let name = name.clone();
         let params = params.clone();

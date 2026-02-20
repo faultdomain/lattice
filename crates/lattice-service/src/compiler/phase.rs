@@ -5,6 +5,8 @@
 //! then append `DynamicResource` entries to `compiled.extensions` for things
 //! like Flagger Canaries, VMServiceScrapes, or rate-limiting EnvoyFilters.
 
+use async_trait::async_trait;
+
 use crate::crd::{LatticeService, MonitoringConfig, ProviderType};
 use crate::graph::ServiceGraph;
 
@@ -33,26 +35,9 @@ pub struct CompilationContext<'a> {
 /// Phases run after core compilation (workloads, policies, ingress, waypoint)
 /// and can append dynamic resources to the compiled output.
 ///
-/// # Example
-///
-/// ```ignore
-/// struct VMServiceScrapePhase;
-///
-/// impl CompilerPhase for VMServiceScrapePhase {
-///     fn name(&self) -> &str { "vm-service-scrape" }
-///
-///     fn compile(
-///         &self,
-///         ctx: &CompilationContext<'_>,
-///         output: &mut CompiledService,
-///     ) -> Result<(), String> {
-///         if !ctx.monitoring.enabled { return Ok(()); }
-///         let monitor = build_vm_service_scrape(ctx.name, ctx.namespace);
-///         output.extensions.push(DynamicResource { ... });
-///         Ok(())
-///     }
-/// }
-/// ```
+/// The `compile` method is async to allow phases to perform on-demand API
+/// discovery (e.g. checking if a CRD is installed before emitting resources).
+#[async_trait]
 pub trait CompilerPhase: Send + Sync {
     /// Human-readable name for this phase (used in error messages and logging)
     fn name(&self) -> &str;
@@ -60,7 +45,7 @@ pub trait CompilerPhase: Send + Sync {
     /// Run this phase, optionally appending resources to `output.extensions`.
     ///
     /// Return `Err(message)` to abort compilation with an attribution to this phase.
-    fn compile(
+    async fn compile(
         &self,
         ctx: &CompilationContext<'_>,
         output: &mut CompiledService,

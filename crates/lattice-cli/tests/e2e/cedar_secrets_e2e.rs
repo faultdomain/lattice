@@ -28,11 +28,11 @@ async fn test_cedar_secrets_e2e() {
     match result {
         Ok(Ok(())) => info!("TEST PASSED: cedar_secrets"),
         Ok(Err(e)) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Cedar Secrets E2E failed: {}", e);
         }
         Err(_) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Cedar Secrets E2E timed out after {:?}", E2E_TIMEOUT);
         }
     }

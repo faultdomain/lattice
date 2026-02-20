@@ -18,11 +18,17 @@ use crate::k8s_forwarder::route_to_cluster;
 use crate::routing::strip_cluster_prefix;
 use crate::server::AppState;
 use lattice_cedar::ClusterAttributes;
+use lattice_common::crd::validate_dns_label;
 use lattice_proto::is_exec_path;
+
+/// Validate a path parameter as a K8s DNS label (max 63 chars, RFC 1123).
+pub(crate) fn validate_k8s_name(name: &str, field: &str) -> std::result::Result<(), Error> {
+    validate_dns_label(name, field).map_err(Error::ClusterNotFound)
+}
 
 /// Path parameters for proxy routes
 #[derive(Debug, Deserialize)]
-pub struct ProxyPath {
+pub(crate) struct ProxyPath {
     /// Target cluster name
     pub cluster_name: String,
     /// Remainder of the path (e.g., "v1/pods")
@@ -42,11 +48,23 @@ pub(crate) struct ExecPath {
 }
 
 /// Look up cluster attributes from the backend for Cedar authorization
-pub(crate) async fn cluster_attrs(state: &AppState, cluster_name: &str) -> ClusterAttributes {
+async fn cluster_attrs(state: &AppState, cluster_name: &str) -> ClusterAttributes {
     match state.backend.get_route(cluster_name).await {
         Some(route) => ClusterAttributes::from_labels(&route.labels),
         None => ClusterAttributes::default(),
     }
+}
+
+/// Authenticate a request and authorize it against Cedar policies for a cluster
+///
+/// Combines cluster attribute lookup, token validation, and Cedar authorization.
+pub(crate) async fn authorize_request(
+    state: &AppState,
+    cluster_name: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<crate::auth::UserIdentity, Error> {
+    let attrs = cluster_attrs(state, cluster_name).await;
+    authenticate_and_authorize(&state.auth, &state.cedar, headers, cluster_name, &attrs).await
 }
 
 /// Handle proxy requests to /clusters/{cluster_name}/api/* and /clusters/{cluster_name}/apis/*
@@ -67,6 +85,8 @@ pub(crate) async fn proxy_handler(
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let cluster_name = &params.cluster_name;
+    validate_k8s_name(cluster_name, "cluster name")?;
+
     let method = request.method().clone();
     let uri = request.uri().clone();
     let path = uri.path();
@@ -85,15 +105,7 @@ pub(crate) async fn proxy_handler(
         ));
     }
 
-    let attrs = cluster_attrs(&state, cluster_name).await;
-    let identity = authenticate_and_authorize(
-        &state.auth,
-        &state.cedar,
-        request.headers(),
-        cluster_name,
-        &attrs,
-    )
-    .await?;
+    let identity = authorize_request(&state, cluster_name, request.headers()).await?;
 
     route_to_cluster(&state, cluster_name, &identity, request).await
 }
@@ -114,6 +126,10 @@ pub(crate) async fn exec_handler(
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let cluster_name = &params.cluster_name;
+    validate_k8s_name(cluster_name, "cluster name")?;
+    validate_k8s_name(&params.ns, "namespace")?;
+    validate_k8s_name(&params.pod, "pod name")?;
+
     let uri = request.uri().clone();
     let path = uri.path();
     let query = uri.query().unwrap_or("").to_string();
@@ -126,15 +142,7 @@ pub(crate) async fn exec_handler(
         "Exec WebSocket request received"
     );
 
-    let attrs = cluster_attrs(&state, cluster_name).await;
-    let identity = authenticate_and_authorize(
-        &state.auth,
-        &state.cedar,
-        request.headers(),
-        cluster_name,
-        &attrs,
-    )
-    .await?;
+    let identity = authorize_request(&state, cluster_name, request.headers()).await?;
 
     // Strip the /clusters/{cluster_name} prefix from the path
     let api_path = strip_cluster_prefix(path, cluster_name);

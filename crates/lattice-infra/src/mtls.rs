@@ -4,6 +4,7 @@
 
 use thiserror::Error;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
+use zeroize::Zeroizing;
 
 /// mTLS configuration errors
 #[derive(Debug, Error)]
@@ -29,15 +30,19 @@ pub enum MtlsError {
 pub struct ServerMtlsConfig {
     /// Server certificate PEM
     pub server_cert_pem: String,
-    /// Server private key PEM
-    pub server_key_pem: String,
+    /// Server private key PEM (zeroized on drop)
+    pub server_key_pem: Zeroizing<String>,
     /// CA certificate PEM for verifying clients
     pub ca_cert_pem: String,
 }
 
 impl ServerMtlsConfig {
     /// Create a new server mTLS config
-    pub fn new(server_cert_pem: String, server_key_pem: String, ca_cert_pem: String) -> Self {
+    pub fn new(
+        server_cert_pem: String,
+        server_key_pem: Zeroizing<String>,
+        ca_cert_pem: String,
+    ) -> Self {
         Self {
             server_cert_pem,
             server_key_pem,
@@ -60,8 +65,8 @@ impl ServerMtlsConfig {
 pub struct ClientMtlsConfig {
     /// Client certificate PEM
     pub client_cert_pem: String,
-    /// Client private key PEM
-    pub client_key_pem: String,
+    /// Client private key PEM (zeroized on drop)
+    pub client_key_pem: Zeroizing<String>,
     /// CA certificate PEM for verifying server
     pub ca_cert_pem: String,
     /// Server domain name for verification
@@ -72,7 +77,7 @@ impl ClientMtlsConfig {
     /// Create a new client mTLS config
     pub fn new(
         client_cert_pem: String,
-        client_key_pem: String,
+        client_key_pem: Zeroizing<String>,
         ca_cert_pem: String,
         server_domain: String,
     ) -> Self {
@@ -120,14 +125,14 @@ mod tests {
     use super::*;
     use crate::pki::{AgentCertRequest, CertificateAuthority};
 
-    fn create_test_certs() -> (CertificateAuthority, String, String) {
+    fn create_test_certs() -> (CertificateAuthority, String, Zeroizing<String>) {
         let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
         let agent_req =
             AgentCertRequest::new("test-cluster").expect("agent cert request should succeed");
         let agent_cert = ca
             .sign_csr(agent_req.csr_pem(), "test-cluster")
             .expect("CSR signing should succeed");
-        let agent_key = agent_req.private_key_pem().to_string();
+        let agent_key = Zeroizing::new(agent_req.private_key_pem().to_string());
 
         (ca, agent_cert, agent_key)
     }

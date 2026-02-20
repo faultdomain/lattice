@@ -96,7 +96,10 @@ pub async fn build_service_controllers(
         crds,
         monitoring,
     );
-    service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(vm_service_scrape_ar))];
+    service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(
+        vm_service_scrape_ar,
+        Some(client.clone()),
+    ))];
 
     // Warm the service graph before controllers start so existing services
     // aren't demoted to Compiling on restart due to missing dependency info.
@@ -130,6 +133,10 @@ pub async fn build_service_controllers(
                 .collect()
         })
         .watches(cedar_policies, watcher_config(), move |_policy| {
+            // NOTE: Do NOT bump_policy_epoch here. The cedar validation controller
+            // reloads the PolicyEngine (which bumps its own reload_epoch) and then
+            // patches the CedarPolicy status. That status patch triggers another
+            // watch event, ensuring services re-reconcile after reload is complete.
             let refs = all_service_refs(&graph_for_cedar_watch);
             tracing::info!(
                 service_count = refs.len(),
@@ -153,6 +160,7 @@ pub async fn build_service_controllers(
                 .to_string();
 
             graph.put_policy(lattice_common::graph::PolicyNode::from(&policy));
+            graph.bump_policy_epoch();
 
             let refs = all_service_refs(&graph);
             tracing::info!(

@@ -168,6 +168,7 @@ pub async fn update_status(
         bootstrap_token: current_status.bootstrap_token,
         children_health: current_status.children_health,
         last_heartbeat: current_status.last_heartbeat,
+        version: current_status.version,
     };
 
     // Set pivot_complete if requested (persists pivot completion across restarts)

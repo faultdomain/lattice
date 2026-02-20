@@ -20,7 +20,7 @@ use super::{kubeconfig_local_path, kubeconfig_path, DOCKER_KIND_GATEWAY, DOCKER_
 /// different subnet. This breaks Cilium LB-IPAM which expects IPs in 172.18.255.x.
 ///
 /// This function ensures the network exists with the pinned subnet.
-pub fn ensure_docker_network() -> Result<(), String> {
+pub async fn ensure_docker_network() -> Result<(), String> {
     info!(
         "Ensuring Docker 'kind' network has correct subnet ({})...",
         DOCKER_KIND_SUBNET
@@ -60,7 +60,8 @@ pub fn ensure_docker_network() -> Result<(), String> {
                     "--format",
                     "{{range .Containers}}{{.Name}} {{end}}",
                 ],
-            )?;
+            )
+            .await?;
             if !containers.trim().is_empty() {
                 return Err(format!(
                     "Cannot recreate 'kind' network - containers still attached: {}. Stop them first.",
@@ -69,7 +70,7 @@ pub fn ensure_docker_network() -> Result<(), String> {
             }
 
             // Remove the network
-            run_cmd("docker", &["network", "rm", "kind"])?;
+            run_cmd("docker", &["network", "rm", "kind"]).await?;
         }
         _ => {
             // Network doesn't exist
@@ -88,7 +89,8 @@ pub fn ensure_docker_network() -> Result<(), String> {
             &format!("--gateway={}", DOCKER_KIND_GATEWAY),
             "kind",
         ],
-    )?;
+    )
+    .await?;
 
     info!(
         "Docker 'kind' network created with subnet {}",
@@ -101,48 +103,24 @@ pub fn ensure_docker_network() -> Result<(), String> {
 // Command Execution Helpers
 // =============================================================================
 
-/// Run a shell command with 30s timeout
-pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
-    use std::io::Read;
-    use std::process::Stdio;
+/// Run a shell command with 30s timeout (async, non-blocking).
+pub async fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
+    let output = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::process::Command::new(cmd)
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to spawn {}: {}", cmd, e))
+    })
+    .await
+    .map_err(|_| format!("{} timed out after 30s", cmd))??;
 
-    let timeout = Duration::from_secs(30);
-
-    let mut child = std::process::Command::new(cmd)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn {}: {}", cmd, e))?;
-
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(ref mut out) = child.stdout {
-                    let _ = out.read_to_string(&mut stdout);
-                }
-                if let Some(ref mut err) = child.stderr {
-                    let _ = err.read_to_string(&mut stderr);
-                }
-                if !status.success() {
-                    return Err(format!("{} failed: {}", cmd, stderr));
-                }
-                return Ok(stdout);
-            }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("{} timed out after {:?}", cmd, timeout));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(format!("Error waiting for {}: {}", cmd, e)),
-        }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("{} failed: {}", cmd, stderr));
     }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Run a kubectl command with built-in retry (3 attempts, exponential backoff).
@@ -159,11 +137,11 @@ pub async fn run_kubectl(args: &[&str]) -> Result<String, String> {
     // permanent errors (stops retrying), and Err(e) for transient errors (retried).
     // AlreadyExists is treated as success — the desired state is achieved.
     let result: Result<Result<String, String>, String> =
-        retry_with_backoff(&RetryConfig::default(), "kubectl", || {
+        retry_with_backoff(&RetryConfig::with_max_attempts(60), "kubectl", || {
             let args = args.clone();
             async move {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                match run_cmd("kubectl", &args_ref) {
+                match run_cmd("kubectl", &args_ref).await {
                     Ok(output) => Ok(Ok(output)),
                     Err(e) if is_already_exists(&e) => Ok(Ok(e)),
                     Err(e) if is_transient_kubectl_error(&e) => Err(e),
@@ -285,7 +263,8 @@ pub async fn extract_docker_cluster_kubeconfig(
             "--format",
             "{{.Names}}",
         ],
-    )?;
+    )
+    .await?;
     let cp_container = cp_container.trim();
     if cp_container.is_empty() {
         return Err(format!(
@@ -310,14 +289,14 @@ pub async fn extract_docker_cluster_kubeconfig(
         "extract_kubeconfig",
         || {
             let cp = cp.clone();
-            async move { run_cmd("docker", &["exec", &cp, "cat", kubeconfig_container_path]) }
+            async move { run_cmd("docker", &["exec", &cp, "cat", kubeconfig_container_path]).await }
         },
     )
     .await?;
 
     // Find the load balancer port mapping and patch the kubeconfig for localhost access
     let lb_container = format!("{}-lb", cluster_name);
-    let final_kubeconfig = match run_cmd("docker", &["port", &lb_container, "6443/tcp"]) {
+    let final_kubeconfig = match run_cmd("docker", &["port", &lb_container, "6443/tcp"]).await {
         Ok(port_output) => {
             if let Some(endpoint) = parse_lb_port(&port_output) {
                 info!("Patching kubeconfig server to {}", endpoint);
@@ -346,13 +325,14 @@ pub async fn extract_docker_cluster_kubeconfig(
 }
 
 /// Get a localhost-accessible kubeconfig for a Docker cluster
-pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
+pub async fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
     let kc_path = kubeconfig_path(cluster_name);
     let kubeconfig = std::fs::read_to_string(&kc_path)
         .map_err(|e| format!("Failed to read kubeconfig {}: {}", kc_path, e))?;
 
     let lb_container = format!("{}-lb", cluster_name);
     let port_output = run_cmd("docker", &["port", &lb_container, "6443/tcp"])
+        .await
         .map_err(|_| format!("LB container {} not found", lb_container))?;
 
     let endpoint = parse_lb_port(&port_output)
@@ -372,7 +352,7 @@ pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
 // =============================================================================
 
 /// Force delete all Docker containers for a cluster (Docker provider only)
-pub fn force_delete_docker_cluster(cluster_name: &str) {
+pub async fn force_delete_docker_cluster(cluster_name: &str) {
     if let Ok(containers) = run_cmd(
         "docker",
         &[
@@ -382,17 +362,19 @@ pub fn force_delete_docker_cluster(cluster_name: &str) {
             &format!("name={}", cluster_name),
             "-q",
         ],
-    ) {
+    )
+    .await
+    {
         for id in containers.lines() {
             if !id.trim().is_empty() {
-                let _ = run_cmd("docker", &["rm", "-f", id.trim()]);
+                let _ = run_cmd("docker", &["rm", "-f", id.trim()]).await;
             }
         }
     }
 }
 
 /// Check if all containers for a cluster are deleted
-pub fn docker_containers_deleted(cluster_name: &str) -> bool {
+pub async fn docker_containers_deleted(cluster_name: &str) -> bool {
     match run_cmd(
         "docker",
         &[
@@ -402,7 +384,9 @@ pub fn docker_containers_deleted(cluster_name: &str) -> bool {
             &format!("name={}", cluster_name),
             "-q",
         ],
-    ) {
+    )
+    .await
+    {
         Ok(containers) => containers.trim().is_empty(),
         Err(_) => true, // If docker command fails, assume deleted
     }

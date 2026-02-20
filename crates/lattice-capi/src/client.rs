@@ -77,6 +77,42 @@ pub trait CAPIClient: Send + Sync {
     /// Use this before deletion to avoid disrupting in-progress operations.
     async fn is_cluster_stable(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
 
+    /// Get the version from the control plane resource (KubeadmControlPlane or RKE2ControlPlane).
+    ///
+    /// Returns `spec.version` (e.g., "v1.32.0" or "v1.32.0+rke2r1").
+    async fn get_cp_version(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+        bootstrap: BootstrapProvider,
+    ) -> Result<Option<String>, Error>;
+
+    /// Patch the version on the control plane resource.
+    async fn update_cp_version(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+        bootstrap: BootstrapProvider,
+        version: &str,
+    ) -> Result<(), Error>;
+
+    /// Get the version from a pool's MachineDeployment (`spec.template.spec.version`).
+    async fn get_pool_version(
+        &self,
+        cluster_name: &str,
+        pool_id: &str,
+        namespace: &str,
+    ) -> Result<Option<String>, Error>;
+
+    /// Patch the version on a pool's MachineDeployment.
+    async fn update_pool_version(
+        &self,
+        cluster_name: &str,
+        pool_id: &str,
+        namespace: &str,
+        version: &str,
+    ) -> Result<(), Error>;
+
     /// Get the underlying kube Client for advanced operations
     fn kube_client(&self) -> Client;
 }
@@ -495,6 +531,160 @@ impl CAPIClient for CAPIClientImpl {
 
         debug!(cluster = %cluster_name, "Cluster is stable");
         Ok(true)
+    }
+
+    async fn get_cp_version(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+        bootstrap: BootstrapProvider,
+    ) -> Result<Option<String>, Error> {
+        let (cp_kind, cp_group) = match bootstrap {
+            BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
+            BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
+        };
+
+        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
+            &self.client,
+            cp_group,
+            cp_kind,
+        )
+        .await?;
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+
+        let cp_name = control_plane_name(cluster_name);
+        match api.get(&cp_name).await {
+            Ok(cp) => {
+                let version = cp
+                    .data
+                    .get("spec")
+                    .and_then(|s| s.get("version"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                debug!(cluster = %cluster_name, version = ?version, "Got control plane version");
+                Ok(version)
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                debug!(cluster = %cluster_name, "ControlPlane not found");
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn update_cp_version(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+        bootstrap: BootstrapProvider,
+        version: &str,
+    ) -> Result<(), Error> {
+        let (cp_kind, cp_group) = match bootstrap {
+            BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
+            BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
+        };
+
+        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
+            &self.client,
+            cp_group,
+            cp_kind,
+        )
+        .await?;
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+
+        let cp_name = control_plane_name(cluster_name);
+        let patch = serde_json::json!({ "spec": { "version": version } });
+
+        api.patch(&cp_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+
+        info!(
+            cluster = %cluster_name,
+            version = %version,
+            kind = %cp_kind,
+            "Patched control plane version"
+        );
+        Ok(())
+    }
+
+    async fn get_pool_version(
+        &self,
+        cluster_name: &str,
+        pool_id: &str,
+        namespace: &str,
+    ) -> Result<Option<String>, Error> {
+        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
+            &self.client,
+            "cluster.x-k8s.io",
+            "MachineDeployment",
+        )
+        .await?;
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+
+        let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
+
+        match api.get(&md_name).await {
+            Ok(md) => {
+                let version = md
+                    .data
+                    .get("spec")
+                    .and_then(|s| s.get("template"))
+                    .and_then(|t| t.get("spec"))
+                    .and_then(|s| s.get("version"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                debug!(
+                    cluster = %cluster_name,
+                    pool = %pool_id,
+                    version = ?version,
+                    "Got MachineDeployment version for pool"
+                );
+                Ok(version)
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                debug!(cluster = %cluster_name, pool = %pool_id, "MachineDeployment not found for pool");
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn update_pool_version(
+        &self,
+        cluster_name: &str,
+        pool_id: &str,
+        namespace: &str,
+        version: &str,
+    ) -> Result<(), Error> {
+        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
+            &self.client,
+            "cluster.x-k8s.io",
+            "MachineDeployment",
+        )
+        .await?;
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+
+        let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
+        let patch = serde_json::json!({
+            "spec": {
+                "template": {
+                    "spec": {
+                        "version": version
+                    }
+                }
+            }
+        });
+
+        api.patch(&md_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+
+        info!(
+            cluster = %cluster_name,
+            pool = %pool_id,
+            version = %version,
+            "Patched MachineDeployment version for pool"
+        );
+        Ok(())
     }
 
     fn kube_client(&self) -> Client {

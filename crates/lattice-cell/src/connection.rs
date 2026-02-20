@@ -204,11 +204,12 @@ pub struct AgentRegistry {
     /// Uses mpsc::Sender to support streaming responses (watches).
     /// TTL evicts leaked entries when the agent dies mid-request.
     pending_k8s_responses: Cache<String, K8sResponseSender>,
-    /// Pending exec data responses keyed by request_id
-    /// Routes stdout/stderr from agent exec sessions to proxy handlers
-    pending_exec_data: DashMap<String, ExecDataSender>,
+    /// Pending exec data responses keyed by request_id.
+    /// Routes stdout/stderr from agent exec sessions to proxy handlers.
+    /// TTL evicts leaked entries when the agent dies mid-session.
+    pending_exec_data: moka::sync::Cache<String, ExecDataSender>,
     /// Proxy configuration for kubeconfig patching
-    proxy_config: std::sync::RwLock<Option<KubeconfigProxyConfig>>,
+    proxy_config: parking_lot::RwLock<Option<KubeconfigProxyConfig>>,
     /// Broadcast channel for agent reconnection notifications
     /// Allows waiting requests to retry when an agent reconnects
     connection_tx: broadcast::Sender<ConnectionNotification>,
@@ -238,8 +239,10 @@ impl Default for AgentRegistry {
             pending_k8s_responses: Cache::builder()
                 .time_to_live(Duration::from_secs(300))
                 .build(),
-            pending_exec_data: DashMap::new(),
-            proxy_config: std::sync::RwLock::new(None),
+            pending_exec_data: moka::sync::Cache::builder()
+                .time_to_live(Duration::from_secs(300))
+                .build(),
+            proxy_config: parking_lot::RwLock::new(None),
             connection_tx,
         }
     }
@@ -253,14 +256,12 @@ impl AgentRegistry {
 
     /// Set the proxy configuration for kubeconfig patching
     pub fn set_proxy_config(&self, config: KubeconfigProxyConfig) {
-        if let Ok(mut guard) = self.proxy_config.write() {
-            *guard = Some(config);
-        }
+        *self.proxy_config.write() = Some(config);
     }
 
     /// Get the proxy configuration
     pub fn get_proxy_config(&self) -> Option<KubeconfigProxyConfig> {
-        self.proxy_config.read().ok().and_then(|g| g.clone())
+        self.proxy_config.read().clone()
     }
 
     /// Register an agent connection (new or reconnection)
@@ -623,21 +624,24 @@ impl AgentRegistry {
     ///
     /// Returns a clone of the sender for streaming responses.
     pub fn get_pending_exec_data(&self, request_id: &str) -> Option<ExecDataSender> {
-        self.pending_exec_data.get(request_id).map(|r| r.clone())
+        self.pending_exec_data.get(request_id)
     }
 
     /// Remove and return the pending exec data sender
     ///
     /// Use this when the stream ends or on cancellation.
+    /// Safe to call from sync contexts (e.g. Drop impls).
     pub fn take_pending_exec_data(&self, request_id: &str) -> Option<ExecDataSender> {
-        self.pending_exec_data
-            .remove(request_id)
-            .map(|(_, sender)| sender)
+        let value = self.pending_exec_data.get(request_id);
+        if value.is_some() {
+            self.pending_exec_data.invalidate(request_id);
+        }
+        value
     }
 
     /// Check if an exec session is pending
     pub fn has_pending_exec_data(&self, request_id: &str) -> bool {
-        self.pending_exec_data.contains_key(request_id)
+        self.pending_exec_data.get(request_id).is_some()
     }
 }
 

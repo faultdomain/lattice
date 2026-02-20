@@ -27,6 +27,7 @@ use rcgen::{
 };
 use thiserror::Error;
 use x509_parser::prelude::*;
+use zeroize::Zeroizing;
 
 /// Default validity period for CA certificates (10 years)
 pub const CA_VALIDITY_YEARS: i64 = 10;
@@ -132,6 +133,9 @@ impl CertificateInfo {
     /// Fraction of lifetime elapsed (0.0 to 1.0+)
     pub fn lifetime_fraction(&self) -> f64 {
         let lifetime = self.lifetime_secs() as f64;
+        if lifetime <= 0.0 {
+            return 1.0;
+        }
         let age = self.age_secs() as f64;
         age / lifetime
     }
@@ -178,8 +182,9 @@ pub fn parse_pem(pem_data: &str) -> std::result::Result<Vec<u8>, PkiError> {
 /// Certificate Authority for signing agent CSRs
 #[derive(Clone)]
 pub struct CertificateAuthority {
-    /// CA key pair serialized as PEM (we need to deserialize each time since KeyPair isn't Clone)
-    ca_key_pem: String,
+    /// CA key pair serialized as PEM (we need to deserialize each time since KeyPair isn't Clone).
+    /// Wrapped in `Zeroizing` so memory is wiped on drop.
+    ca_key_pem: Zeroizing<String>,
     /// PEM-encoded CA certificate for distribution
     ca_cert_pem: String,
 }
@@ -202,7 +207,7 @@ impl CertificateAuthority {
         params.distinguished_name = dn;
 
         // CA settings
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
         params.key_usages = vec![
             KeyUsagePurpose::KeyCertSign,
             KeyUsagePurpose::CrlSign,
@@ -219,7 +224,7 @@ impl CertificateAuthority {
             PkiError::KeyGenerationFailed(format!("failed to generate CA key: {}", e))
         })?;
 
-        let ca_key_pem = key_pair.serialize_pem();
+        let ca_key_pem = Zeroizing::new(key_pair.serialize_pem());
 
         let cert = params.self_signed(&key_pair).map_err(|e| {
             PkiError::CertificateGenerationFailed(format!("failed to create CA cert: {}", e))
@@ -243,7 +248,7 @@ impl CertificateAuthority {
         let _ = parse_pem(cert_pem)?;
 
         Ok(Self {
-            ca_key_pem: key_pem.to_string(),
+            ca_key_pem: Zeroizing::new(key_pem.to_string()),
             ca_cert_pem: cert_pem.to_string(),
         })
     }
@@ -278,7 +283,7 @@ impl CertificateAuthority {
     ///
     /// This generates a certificate suitable for TLS server authentication,
     /// signed by this CA. Use this for the bootstrap HTTPS server.
-    pub fn generate_server_cert(&self, sans: &[&str]) -> Result<(String, String)> {
+    pub fn generate_server_cert(&self, sans: &[&str]) -> Result<(String, Zeroizing<String>)> {
         let mut params = CertificateParams::default();
 
         // Set distinguished name
@@ -333,7 +338,7 @@ impl CertificateAuthority {
             PkiError::KeyGenerationFailed(format!("failed to generate server key: {}", e))
         })?;
 
-        let server_key_pem = server_key.serialize_pem();
+        let server_key_pem = Zeroizing::new(server_key.serialize_pem());
 
         // Create the Issuer from our CA certificate and key
         let ca_key = self.load_key_pair()?;
@@ -510,7 +515,7 @@ impl CertificateAuthorityBundle {
     }
 
     /// Generate a server certificate signed by the active CA
-    pub fn generate_server_cert(&self, sans: &[&str]) -> Result<(String, String)> {
+    pub fn generate_server_cert(&self, sans: &[&str]) -> Result<(String, Zeroizing<String>)> {
         self.active().generate_server_cert(sans)
     }
 
@@ -538,8 +543,8 @@ impl CertificateAuthorityBundle {
 
 /// Agent certificate request (generates keypair and CSR locally)
 pub struct AgentCertRequest {
-    /// The generated key pair PEM (kept private)
-    key_pem: String,
+    /// The generated key pair PEM (kept private, zeroized on drop)
+    key_pem: Zeroizing<String>,
     /// CSR in PEM format (sent to cell)
     csr_pem: String,
 }
@@ -552,7 +557,7 @@ impl AgentCertRequest {
             PkiError::KeyGenerationFailed(format!("failed to generate agent key: {}", e))
         })?;
 
-        let key_pem = key_pair.serialize_pem();
+        let key_pem = Zeroizing::new(key_pair.serialize_pem());
 
         // Create CSR params
         let mut params = CertificateParams::default();

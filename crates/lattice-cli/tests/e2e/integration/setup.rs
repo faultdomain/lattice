@@ -181,9 +181,9 @@ impl SetupResult {
 // Setup Functions
 // =============================================================================
 
-fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String, String> {
+async fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String, String> {
     if provider == InfraProvider::Docker {
-        get_docker_kubeconfig(cluster_name)
+        get_docker_kubeconfig(cluster_name).await
     } else {
         Ok(kubeconfig_path(cluster_name))
     }
@@ -193,10 +193,10 @@ fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String,
 ///
 /// This should be called at the end of a test run (success or failure) to clean up
 /// the bootstrap cluster created by this specific run.
-pub fn cleanup_bootstrap_cluster(run_id: &str) {
+pub async fn cleanup_bootstrap_cluster(run_id: &str) {
     let cluster_name = format!("lattice-bootstrap-{}", run_id);
     info!("Cleaning up bootstrap cluster '{}'...", cluster_name);
-    let _ = run_cmd("kind", &["delete", "cluster", "--name", &cluster_name]);
+    let _ = run_cmd("kind", &["delete", "cluster", "--name", &cluster_name]).await;
 }
 
 /// Clean up ALL orphaned bootstrap clusters (opt-in)
@@ -206,15 +206,15 @@ pub fn cleanup_bootstrap_cluster(run_id: &str) {
 ///
 /// **Warning**: This will delete bootstrap clusters from OTHER parallel test runs.
 /// Only use when you're sure no other tests are running.
-pub fn cleanup_orphan_bootstrap_clusters() {
+pub async fn cleanup_orphan_bootstrap_clusters() {
     if std::env::var("LATTICE_CLEANUP_ORPHANS").is_ok() {
         info!("LATTICE_CLEANUP_ORPHANS is set - cleaning up ALL orphaned bootstrap clusters...");
-        if let Ok(clusters) = run_cmd("kind", &["get", "clusters"]) {
+        if let Ok(clusters) = run_cmd("kind", &["get", "clusters"]).await {
             for cluster in clusters.lines() {
                 let cluster = cluster.trim();
                 if cluster.starts_with("lattice-bootstrap-") {
                     info!("Deleting orphaned bootstrap cluster: {}", cluster);
-                    let _ = run_cmd("kind", &["delete", "cluster", "--name", cluster]);
+                    let _ = run_cmd("kind", &["delete", "cluster", "--name", cluster]).await;
                 }
             }
         }
@@ -242,7 +242,7 @@ pub fn cleanup_orphan_bootstrap_clusters() {
 /// ```
 pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, String> {
     // Opt-in cleanup of orphaned clusters from previous failed runs
-    cleanup_orphan_bootstrap_clusters();
+    cleanup_orphan_bootstrap_clusters().await;
 
     // Build image if configured
     if config.build_image {
@@ -258,12 +258,12 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
     let mgmt_bootstrap = mgmt_cluster.spec.provider.kubernetes.bootstrap.clone();
 
-    let (_, workload_cluster) =
+    let (_, mut workload_cluster) =
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
     let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
 
-    let (workload2_cluster, workload2_bootstrap) = if config.skip_workload2 {
+    let (mut workload2_cluster, workload2_bootstrap) = if config.skip_workload2 {
         (None, None)
     } else {
         let (_, cluster) =
@@ -271,6 +271,24 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
         (Some(cluster), Some(bootstrap))
     };
+
+    // Disable extras (monitoring, services) to save CPU when LATTICE_DISABLE_EXTRAS is set
+    let disable_extras = matches!(
+        std::env::var("LATTICE_DISABLE_EXTRAS")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    );
+    if disable_extras {
+        info!("[Setup] LATTICE_DISABLE_EXTRAS is set — disabling monitoring and services");
+        workload_cluster.spec.monitoring.enabled = false;
+        workload_cluster.spec.services = false;
+        if let Some(ref mut c) = workload2_cluster {
+            c.spec.monitoring.enabled = false;
+            c.spec.services = false;
+        }
+    }
 
     info!("[Setup] Configuration:");
     info!("  Management:  {} + {:?}", mgmt_provider, mgmt_bootstrap);
@@ -289,7 +307,9 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     // Setup Docker network if needed
     if mgmt_provider == InfraProvider::Docker {
-        ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
+        ensure_docker_network()
+            .await
+            .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
     }
 
     // Start chaos monkey if configured (uses provider-appropriate intervals)
@@ -334,7 +354,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // =========================================================================
     info!("[Setup/Phase 2] Verifying management cluster is self-managing...");
 
-    let mgmt_kubeconfig_path = get_kubeconfig(MGMT_CLUSTER_NAME, mgmt_provider)?;
+    let mgmt_kubeconfig_path = get_kubeconfig(MGMT_CLUSTER_NAME, mgmt_provider).await?;
     info!("[Setup] Management kubeconfig: {}", mgmt_kubeconfig_path);
 
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig_path).await?;
@@ -544,7 +564,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 /// Useful when you only need a single self-managing cluster.
 pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String> {
     // Opt-in cleanup of orphaned clusters from previous failed runs
-    cleanup_orphan_bootstrap_clusters();
+    cleanup_orphan_bootstrap_clusters().await;
 
     if config.build_image {
         info!("[Setup] Building and pushing Lattice image...");
@@ -556,7 +576,9 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
     let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
 
     if mgmt_provider == InfraProvider::Docker {
-        ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
+        ensure_docker_network()
+            .await
+            .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
     }
 
     // Start chaos monkey if configured (uses provider-appropriate intervals)
@@ -587,7 +609,7 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         .await
         .map_err(|e| format!("Installer failed: {}", e))?;
 
-    let mgmt_kubeconfig_path = get_kubeconfig(MGMT_CLUSTER_NAME, mgmt_provider)?;
+    let mgmt_kubeconfig_path = get_kubeconfig(MGMT_CLUSTER_NAME, mgmt_provider).await?;
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig_path).await?;
 
     let ctx = InfraContext::mgmt_only(mgmt_kubeconfig_path.clone(), mgmt_provider);

@@ -264,6 +264,14 @@ pub struct LatticeClusterStatus {
     /// Last heartbeat timestamp from agent (if this cluster has a parent)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_heartbeat: Option<String>,
+
+    /// Last Kubernetes version successfully reconciled to all CAPI resources (CP + workers).
+    ///
+    /// Set only AFTER all control plane and worker pool versions match the desired version.
+    /// When `status.version == format_capi_version(spec.provider.kubernetes.version)`,
+    /// the version reconciliation loop is skipped entirely (zero CAPI API calls).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {

@@ -11,12 +11,16 @@ use axum::http::Request;
 use axum::response::Response;
 use tracing::{debug, error, info, instrument};
 
-use crate::auth::authenticate_and_authorize;
+use std::sync::OnceLock;
+
 use crate::error::Error;
 use crate::k8s_forwarder::{FileTokenReader, TokenReader, CA_CERT_PATH};
-use crate::proxy::{cluster_attrs, ExecPath};
+use crate::proxy::{authorize_request, validate_k8s_name, ExecPath};
 use crate::routing::strip_cluster_prefix;
 use crate::server::AppState;
+
+/// Shared HTTP client for portforward upgrade requests (HTTP/1.1 only)
+static UPGRADE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Handle portforward requests by transparently proxying the HTTP upgrade
 ///
@@ -35,6 +39,9 @@ pub(crate) async fn portforward_handler(
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let cluster_name = &params.cluster_name;
+    validate_k8s_name(cluster_name, "cluster name")?;
+    validate_k8s_name(&params.ns, "namespace")?;
+    validate_k8s_name(&params.pod, "pod name")?;
 
     debug!(
         cluster = %cluster_name,
@@ -43,15 +50,7 @@ pub(crate) async fn portforward_handler(
         "Portforward request received"
     );
 
-    let attrs = cluster_attrs(&state, cluster_name).await;
-    let identity = authenticate_and_authorize(
-        &state.auth,
-        &state.cedar,
-        request.headers(),
-        cluster_name,
-        &attrs,
-    )
-    .await?;
+    let identity = authorize_request(&state, cluster_name, request.headers()).await?;
 
     let uri = request.uri().clone();
     let path = uri.path();
@@ -65,7 +64,7 @@ pub(crate) async fn portforward_handler(
         .await
         .ok_or_else(|| Error::ClusterNotFound(cluster_name.to_string()))?;
 
-    if route_info.is_self || cluster_name == &state.cluster_name {
+    if route_info.is_self {
         proxy_upgrade_to_k8s(&state.k8s_api_url, &identity, api_path, query, request).await
     } else {
         Err(Error::Proxy("Remote portforward not yet supported".into()))
@@ -103,20 +102,8 @@ async fn proxy_upgrade_to_k8s(
 
     debug!(url = %upstream_url, "Proxying upgrade to K8s API");
 
-    // Build upstream request with HTTP/1.1 (required for upgrade)
-    let ca_cert = tokio::fs::read(CA_CERT_PATH)
-        .await
-        .map_err(|e| Error::Internal(format!("Failed to read CA certificate: {}", e)))?;
-
-    let cert = reqwest::Certificate::from_pem(&ca_cert)
-        .map_err(|e| Error::Internal(format!("Invalid CA certificate: {}", e)))?;
-
-    let upgrade_client = reqwest::Client::builder()
-        .add_root_certificate(cert)
-        .http1_only()
-        .no_proxy()
-        .build()
-        .map_err(|e| Error::Internal(format!("Failed to create upgrade client: {}", e)))?;
+    // Get or initialize the shared HTTP/1.1 client (required for upgrade)
+    let upgrade_client = get_or_init_upgrade_client().await?;
 
     // Start with SA token + impersonation
     let mut upstream_builder = upgrade_client
@@ -202,4 +189,30 @@ async fn proxy_upgrade_to_k8s(
     response_builder
         .body(Body::empty())
         .map_err(|e| Error::Internal(format!("Failed to build upgrade response: {}", e)))
+}
+
+/// Get or initialize the shared HTTP/1.1 client for upgrade requests
+async fn get_or_init_upgrade_client() -> Result<&'static reqwest::Client, Error> {
+    if let Some(client) = UPGRADE_CLIENT.get() {
+        return Ok(client);
+    }
+
+    let ca_cert = tokio::fs::read(CA_CERT_PATH)
+        .await
+        .map_err(|e| Error::Internal(format!("Failed to read CA certificate: {}", e)))?;
+
+    let cert = reqwest::Certificate::from_pem(&ca_cert)
+        .map_err(|e| Error::Internal(format!("Invalid CA certificate: {}", e)))?;
+
+    let client = reqwest::Client::builder()
+        .add_root_certificate(cert)
+        .http1_only()
+        .no_proxy()
+        .build()
+        .map_err(|e| Error::Internal(format!("Failed to create upgrade client: {}", e)))?;
+
+    let _ = UPGRADE_CLIENT.set(client);
+    UPGRADE_CLIENT
+        .get()
+        .ok_or_else(|| Error::Internal("Failed to initialize upgrade client".into()))
 }

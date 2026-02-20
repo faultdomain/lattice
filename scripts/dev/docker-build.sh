@@ -47,7 +47,7 @@ echo "capo: $CAPO_VERSION"
 echo "ipam-in-cluster: $IPAM_VERSION"
 echo "cert-manager: $CERTMANAGER_VERSION"
 
-docker build \
+DOCKER_BUILDKIT=1 docker build \
     --build-arg HELM_VERSION="$HELM_VERSION" \
     --build-arg CAPI_VERSION="$CAPI_VERSION" \
     --build-arg RKE2_VERSION="$RKE2_VERSION" \
@@ -56,7 +56,7 @@ docker build \
     --build-arg CAPO_VERSION="$CAPO_VERSION" \
     --build-arg IPAM_VERSION="$IPAM_VERSION" \
     --build-arg CERTMANAGER_VERSION="$CERTMANAGER_VERSION" \
-    --platform linux/amd64,linux/arm64 \
+    --platform linux/arm64 \
     --build-arg FIPS=true \
     "$@" \
     "$PROJECT_ROOT"

@@ -60,7 +60,7 @@ tokio = { version = "1.43", features = ["full"] }
 # Concurrency
 crossbeam = "0.8"
 dashmap = "6.1"
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
 parking_lot = "0.12"
 once_cell = "1.20"
 
@@ -108,6 +108,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Crypto
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 aws-lc-rs = { version = "1.12" }
+subtle = "2.6"
+zeroize = "1.8"
 
 # PKI
 rcgen = { version = "0.14", features = ["aws_lc_rs", "pem", "x509-parser"] }
@@ -141,7 +143,7 @@ uuid = { version = "1.11", features = ["v4"] }
 rand = "0.8"
 
 # Auth
-jsonwebtoken = "10"
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 cedar-policy = "4"
 
 # URL parsing

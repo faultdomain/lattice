@@ -27,11 +27,11 @@ async fn test_proxy_e2e() {
     match result {
         Ok(Ok(())) => info!("TEST PASSED: proxy"),
         Ok(Err(e)) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Proxy E2E failed: {}", e);
         }
         Err(_) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Proxy E2E timed out after {:?}", E2E_TIMEOUT);
         }
     }

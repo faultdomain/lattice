@@ -53,6 +53,16 @@ pub async fn reconcile(
         }
     }
 
+    // Reload the in-memory policy engine BEFORE patching status. The status
+    // patch generates a watch event that triggers service re-reconciliation.
+    // By reloading first, the PolicyEngine (and its reload_epoch) reflect the
+    // new policies before any service reconcile runs, preventing a race where
+    // services compile with stale cedar state but store a hash that blocks
+    // future recompilation.
+    if let Err(e) = ctx.cedar.reload(client).await {
+        warn!(error = %e, "Failed to reload Cedar policies after validation");
+    }
+
     // Update status
     let namespace = policy
         .namespace()
@@ -85,12 +95,6 @@ pub async fn reconcile(
         errors = new_status.validation_errors.len(),
         "CedarPolicy status updated"
     );
-
-    // Reload the in-memory policy engine so all consumers (service compiler,
-    // auth proxy, security auth) see the updated policies immediately.
-    if let Err(e) = ctx.cedar.reload(client).await {
-        warn!(error = %e, "Failed to reload Cedar policies after validation");
-    }
 
     Ok(Action::requeue(Duration::from_secs(requeue)))
 }

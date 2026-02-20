@@ -2,18 +2,12 @@
 //!
 //! Provides functions for managing the cell LoadBalancer service that children connect to.
 
-use std::collections::BTreeMap;
-
-use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use k8s_openapi::api::core::v1::Service;
 use kube::api::{Api, PostParams};
 use kube::Client;
 
-use lattice_common::{
-    leader_election::{LEADER_LABEL_KEY, LEADER_LABEL_VALUE},
-    DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
-};
+use lattice_common::kube_utils::build_cell_service;
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_common::crd::{LatticeCluster, ProviderType};
 
@@ -33,7 +27,6 @@ pub async fn ensure_cell_service_exists(
     provider_type: ProviderType,
 ) -> anyhow::Result<()> {
     let api: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let auth_proxy_port = DEFAULT_AUTH_PROXY_PORT;
 
     // Check if it already exists
     if api.get("lattice-cell").await.is_ok() {
@@ -41,77 +34,12 @@ pub async fn ensure_cell_service_exists(
         return Ok(());
     }
 
-    let mut labels = BTreeMap::new();
-    labels.insert("app".to_string(), "lattice-operator".to_string());
-
-    // Selector requires both the app label AND the leader label
-    // Only the leader pod will have lattice.dev/leader=true
-    let mut selector = BTreeMap::new();
-    selector.insert("app".to_string(), "lattice-operator".to_string());
-    selector.insert(LEADER_LABEL_KEY.to_string(), LEADER_LABEL_VALUE.to_string());
-
-    // Cloud-specific LoadBalancer annotations
-    let annotations = provider_type.load_balancer_annotations();
-
-    let service = Service {
-        metadata: ObjectMeta {
-            name: Some("lattice-cell".to_string()),
-            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-            labels: Some(labels.clone()),
-            annotations: if annotations.is_empty() {
-                None
-            } else {
-                Some(annotations)
-            },
-            ..Default::default()
-        },
-        spec: Some(ServiceSpec {
-            type_: Some("LoadBalancer".to_string()),
-            // Selector requires leader label - only leader pod gets traffic
-            // Kubernetes readiness probes remove unresponsive pods from Endpoints
-            // before lease expires (30s lease > 15s readiness removal time)
-            selector: Some(selector),
-            ports: Some(vec![
-                ServicePort {
-                    name: Some("bootstrap".to_string()),
-                    port: bootstrap_port as i32,
-                    target_port: Some(IntOrString::Int(bootstrap_port as i32)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                },
-                ServicePort {
-                    name: Some("grpc".to_string()),
-                    port: grpc_port as i32,
-                    target_port: Some(IntOrString::Int(grpc_port as i32)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                },
-                ServicePort {
-                    name: Some("proxy".to_string()),
-                    port: proxy_port as i32,
-                    target_port: Some(IntOrString::Int(proxy_port as i32)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                },
-                ServicePort {
-                    name: Some("auth-proxy".to_string()),
-                    port: auth_proxy_port as i32,
-                    target_port: Some(IntOrString::Int(auth_proxy_port as i32)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                },
-            ]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
+    let service = build_cell_service(bootstrap_port, grpc_port, proxy_port, &provider_type);
     api.create(&PostParams::default(), &service).await?;
     tracing::info!(
         bootstrap_port,
         grpc_port,
         proxy_port,
-        auth_proxy_port,
         "Created lattice-cell LoadBalancer Service"
     );
 

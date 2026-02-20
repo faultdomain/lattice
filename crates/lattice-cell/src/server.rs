@@ -24,23 +24,16 @@ use kube::{Api, Client};
 use lattice_common::crd::LatticeCluster;
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
-use lattice_proto::{agent_message::Payload, AgentMessage, AgentState, CellCommand};
+use lattice_proto::{
+    agent_message::Payload, grpc_max_message_size, AgentMessage, AgentState, CellCommand,
+    SubtreeState,
+};
 
 use crate::connection::K8sResponseRegistry;
 use crate::kubeconfig::patch_kubeconfig_for_proxy;
 use crate::subtree_registry::{ClusterInfo, SubtreeRegistry};
 use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::ServerMtlsConfig;
-use lattice_proto::SubtreeState;
-
-const DEFAULT_GRPC_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
-
-fn grpc_max_message_size() -> usize {
-    std::env::var("LATTICE_GRPC_MAX_MESSAGE_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_GRPC_MAX_MESSAGE_SIZE)
-}
 
 /// Shared reference to SubtreeRegistry
 pub type SharedSubtreeRegistry = std::sync::Arc<SubtreeRegistry>;
@@ -559,18 +552,24 @@ async fn process_agent_message(
                 "Exec data received"
             );
 
-            // Route exec data to pending exec session handler.
-            // Never tear down the channel on individual message failure —
-            // only ExecSession::drop handles cleanup.
+            // Route exec data to the pending exec session handler.
+            // Spawn the send so we don't block the gRPC receive loop if
+            // the channel is full — this guarantees stream3 (exit status)
+            // is never silently dropped.
             if let Some(sender) = registry.get_pending_exec_data(&data.request_id) {
-                if let Err(e) = sender.try_send(data.clone()) {
-                    warn!(
-                        cluster = %cluster_name,
-                        request_id = %data.request_id,
-                        error = %e,
-                        "Failed to deliver exec data"
-                    );
-                }
+                let cluster = cluster_name.to_string();
+                let request_id = data.request_id.clone();
+                let data = data.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = sender.send(data).await {
+                        warn!(
+                            cluster = %cluster,
+                            request_id = %request_id,
+                            error = %e,
+                            "Failed to deliver exec data"
+                        );
+                    }
+                });
             } else {
                 debug!(
                     cluster = %cluster_name,

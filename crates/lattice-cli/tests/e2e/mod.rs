@@ -35,7 +35,7 @@
 //! │  ├─ secrets_e2e.rs           - Local secrets only               │
 
 //! │  ├─ oidc_e2e.rs              - OIDC only                        │
-//! │  ├─ multi_hop_e2e.rs         - Multi-hop proxy only             │
+//! │  ├─ workload2_e2e.rs         - Workload2 (3-cluster hierarchy)  │
 //! │  └─ pivot_standalone_e2e.rs  - Pivot/unpivot only               │
 //! ├─────────────────────────────────────────────────────────────────┤
 //! │  UNIFIED E2E (full lifecycle, all tests in sequence)            │
@@ -99,9 +99,9 @@ mod cedar_secrets_e2e;
 mod cedar_security_e2e;
 mod kubeconfig_e2e;
 mod mesh_e2e;
-mod multi_hop_e2e;
 mod oidc_e2e;
 mod pivot_standalone_e2e;
 mod proxy_e2e;
 mod scaling_e2e;
 mod secrets_e2e;
+mod workload2_e2e;

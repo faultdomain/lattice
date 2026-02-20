@@ -4,7 +4,7 @@
 //! commands through the gRPC tunnel to agents.
 
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use lattice_proto::{cell_command, CellCommand, ExecCancel, ExecData, ExecRequest, ExecResize};
@@ -44,8 +44,15 @@ pub struct ExecSession {
 impl ExecSession {
     /// Send stdin data to the remote process
     pub async fn send_stdin(&self, data: Vec<u8>) -> Result<(), ExecTunnelError> {
+        let command_id = Uuid::new_v4().to_string();
+        debug!(
+            request_id = %self.request_id,
+            command_id = %command_id,
+            bytes = data.len(),
+            "Sending stdin to agent"
+        );
         let command = CellCommand {
-            command_id: Uuid::new_v4().to_string(),
+            command_id,
             command: Some(cell_command::Command::ExecStdin(ExecData {
                 request_id: self.request_id.clone(),
                 stream_id: 0, // STDIN
@@ -62,8 +69,16 @@ impl ExecSession {
 
     /// Send terminal resize event
     pub async fn send_resize(&self, width: u32, height: u32) -> Result<(), ExecTunnelError> {
+        let command_id = Uuid::new_v4().to_string();
+        debug!(
+            request_id = %self.request_id,
+            command_id = %command_id,
+            width,
+            height,
+            "Sending resize to agent"
+        );
         let command = CellCommand {
-            command_id: Uuid::new_v4().to_string(),
+            command_id,
             command: Some(cell_command::Command::ExecResize(ExecResize {
                 request_id: self.request_id.clone(),
                 width,
@@ -79,8 +94,14 @@ impl ExecSession {
 
     /// Close stdin (signal EOF to remote process)
     pub async fn close_stdin(&self) -> Result<(), ExecTunnelError> {
+        let command_id = Uuid::new_v4().to_string();
+        debug!(
+            request_id = %self.request_id,
+            command_id = %command_id,
+            "Sending stdin close (EOF) to agent"
+        );
         let command = CellCommand {
-            command_id: Uuid::new_v4().to_string(),
+            command_id,
             command: Some(cell_command::Command::ExecStdin(ExecData {
                 request_id: self.request_id.clone(),
                 stream_id: 0, // STDIN
@@ -105,11 +126,13 @@ impl Drop for ExecSession {
                 request_id: self.request_id.clone(),
             })),
         };
-        let _ = self.command_tx.try_send(command);
+        if let Err(e) = self.command_tx.try_send(command) {
+            warn!(request_id = %self.request_id, error = %e, "Failed to send exec cancel on drop (channel full or closed)");
+        }
 
         // Clean up pending exec data registration
         self.registry.take_pending_exec_data(&self.request_id);
-        debug!(request_id = %self.request_id, "Exec session dropped, cancel sent");
+        info!(request_id = %self.request_id, "Exec session dropped, cancel sent");
     }
 }
 

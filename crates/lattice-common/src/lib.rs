@@ -24,8 +24,8 @@ pub mod yaml;
 pub use error::{default_error_policy, ControllerContext, Error, ReconcileError};
 pub use events::{EventPublisher, KubeEventPublisher, NoopEventPublisher};
 pub use kube_utils::{
-    apply_manifest_with_discovery, apply_manifests_with_discovery, kind_priority, pluralize_kind,
-    ApplyOptions,
+    apply_manifest_with_discovery, apply_manifests_with_discovery, deterministic_hash,
+    kind_priority, pluralize_kind, ApplyOptions,
 };
 pub use leader_election::{
     LeaderElectionError, LeaderElector, LeaderGuard, LEADER_LABEL_KEY, LEADER_LABEL_VALUE,

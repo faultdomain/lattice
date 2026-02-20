@@ -76,7 +76,8 @@ fn compile_allow_binaries_policy(
     let mut allowed = allowed_binaries.clone();
     allowed.extend(entrypoints.iter().cloned());
 
-    let allowed_list: Vec<String> = allowed.into_iter().collect();
+    let mut allowed_list: Vec<String> = allowed.into_iter().collect();
+    allowed_list.sort();
 
     let selectors = if allowed_list.is_empty() {
         vec![Selector::sigkill()]

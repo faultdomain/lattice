@@ -33,7 +33,7 @@ pub async fn start_agent_with_retry(
     exec_forwarder: SharedExecForwarder,
 ) {
     let mut retry_delay = Duration::from_secs(1);
-    let max_retry_delay = Duration::from_secs(5);
+    let max_retry_delay = Duration::from_secs(30);
 
     loop {
         match start_agent_if_needed(
@@ -67,7 +67,9 @@ pub async fn start_agent_with_retry(
             }
         }
 
-        tokio::time::sleep(retry_delay).await;
+        // Add jitter (0-25% of delay) to prevent thundering herd
+        let jitter_ms = rand::random::<u64>() % (retry_delay.as_millis().max(1) as u64 / 4 + 1);
+        tokio::time::sleep(retry_delay + Duration::from_millis(jitter_ms)).await;
         retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
     }
 }
@@ -162,7 +164,7 @@ async fn load_agent_credentials(secrets: &Api<Secret>) -> anyhow::Result<AgentCr
 
     Ok(AgentCredentials {
         cert_pem: String::from_utf8(cert_pem.0.clone())?,
-        key_pem: String::from_utf8(key_pem.0.clone())?,
+        key_pem: zeroize::Zeroizing::new(String::from_utf8(key_pem.0.clone())?),
         ca_cert_pem: String::from_utf8(ca_pem.0.clone())?,
     })
 }

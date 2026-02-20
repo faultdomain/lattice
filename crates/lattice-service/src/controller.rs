@@ -184,6 +184,15 @@ pub trait ServiceKubeClient: Send + Sync {
         namespace: &str,
         compiled: &CompiledService,
     ) -> Result<(), Error>;
+
+    /// Patch an annotation on a LatticeService
+    async fn patch_service_annotation(
+        &self,
+        name: &str,
+        namespace: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), Error>;
 }
 
 /// Real Kubernetes client implementation
@@ -210,6 +219,18 @@ impl ServiceKubeClientImpl {
     /// Create a new ServiceKubeClientImpl wrapping the given client and discovered CRDs
     pub fn new(client: Client, crds: Arc<DiscoveredCrds>) -> Self {
         Self { client, crds }
+    }
+
+    /// Check if any compiled resources need a CRD that wasn't discovered at startup.
+    ///
+    /// Returns true when re-discovery should be attempted — e.g. ESO CRDs were
+    /// installed in the background after the operator started.
+    fn needs_crd_refresh(&self, compiled: &CompiledService) -> bool {
+        (!compiled.workloads.external_secrets.is_empty() && self.crds.external_secret.is_none())
+            || (compiled.workloads.scaled_object.is_some() && self.crds.scaled_object.is_none())
+            || (compiled.mesh_member.is_some() && self.crds.mesh_member.is_none())
+            || (!compiled.tracing_policies.is_empty()
+                && self.crds.tracing_policy_namespaced.is_none())
     }
 
     /// Ensure a namespace exists with ambient mode labels for Istio traffic routing.
@@ -346,6 +367,17 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         self.ensure_namespace(namespace).await?;
 
+        // If a needed CRD wasn't available at startup (e.g. ESO installed in background),
+        // re-run discovery to pick it up. Only triggers when resources are compiled but
+        // the CRD is None — on subsequent reconciles the service is Ready and the
+        // reconcile guard skips, so this is not called repeatedly.
+        let crds = if self.needs_crd_refresh(compiled) {
+            info!("re-discovering CRDs (needed CRD was missing at startup)");
+            Arc::new(DiscoveredCrds::discover(&self.client).await)
+        } else {
+            self.crds.clone()
+        };
+
         let params = PatchParams::apply("lattice-service-controller").force();
 
         // ApiResources for native K8s types (used by push via DynamicObject)
@@ -393,27 +425,42 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         // ExternalSecrets (ESO syncs secrets from Vault)
         layer1.push_crd(
             "ExternalSecret",
-            self.crds.external_secret.as_ref(),
+            crds.external_secret.as_ref(),
             &compiled.workloads.external_secrets,
             |es| &es.metadata.name,
         )?;
 
         // LatticeMeshMember CR — the MeshMember controller generates all mesh policies
         if let Some(ref mesh_member) = compiled.mesh_member {
-            if let Some(ar) = &self.crds.mesh_member {
+            if let Some(ar) = &crds.mesh_member {
                 layer1.push(
                     "LatticeMeshMember",
                     mesh_member.metadata.name.as_deref().unwrap_or("unknown"),
                     mesh_member,
                     ar,
                 )?;
+            } else {
+                return Err(Error::internal_with_context(
+                    "apply_compiled_service",
+                    "LatticeMeshMember CRD not installed but mesh member needs applying",
+                ));
             }
         }
 
         // Tetragon TracingPolicyNamespaced (runtime enforcement)
-        if let Some(ar) = &self.crds.tracing_policy_namespaced {
-            for tp in &compiled.tracing_policies {
-                layer1.push("TracingPolicyNamespaced", &tp.metadata.name, tp, ar)?;
+        if !compiled.tracing_policies.is_empty() {
+            if let Some(ar) = &crds.tracing_policy_namespaced {
+                for tp in &compiled.tracing_policies {
+                    layer1.push("TracingPolicyNamespaced", &tp.metadata.name, tp, ar)?;
+                }
+            } else {
+                return Err(Error::internal_with_context(
+                    "apply_compiled_service",
+                    format!(
+                        "TracingPolicyNamespaced CRD not installed but {} policies need applying",
+                        compiled.tracing_policies.len()
+                    ),
+                ));
             }
         }
 
@@ -455,7 +502,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let mut layer3 = ApplyBatch::new(self.client.clone(), namespace, &params);
         layer3.push_optional_crd(
             "ScaledObject",
-            self.crds.scaled_object.as_ref(),
+            crds.scaled_object.as_ref(),
             compiled.workloads.scaled_object.as_ref(),
             |so| &so.metadata.name,
         )?;
@@ -467,6 +514,26 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             resources = layer1_count + layer2_count + layer3_count,
             "applied compiled resources"
         );
+        Ok(())
+    }
+
+    async fn patch_service_annotation(
+        &self,
+        name: &str,
+        namespace: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), Error> {
+        let api: Api<LatticeService> = Api::namespaced(self.client.clone(), namespace);
+        let patch = serde_json::json!({
+            "metadata": { "annotations": { key: value } }
+        });
+        api.patch(
+            name,
+            &PatchParams::apply("lattice-service-controller"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -567,11 +634,14 @@ impl<'a> ApplyBatch<'a> {
                 self.push(kind, name_fn(resource), resource, ar)?;
             }
         } else if !resources.is_empty() {
-            warn!(
-                count = resources.len(),
-                kind = kind,
-                "CRD not installed, skipping"
-            );
+            return Err(Error::internal_with_context(
+                "push_crd",
+                format!(
+                    "{} CRD not installed but {} resources need applying",
+                    kind,
+                    resources.len()
+                ),
+            ));
         }
         Ok(())
     }
@@ -796,6 +866,85 @@ impl ServiceContext {
 // LatticeService reconciliation
 // =============================================================================
 
+/// Annotation key for the inputs hash used by the reconcile guard.
+const INPUTS_HASH_ANNOTATION: &str = "lattice.dev/inputs-hash";
+
+/// Compute a stable hash of the inputs that affect service compilation.
+///
+/// When bilateral agreements, cedar policies, or service policies change,
+/// the hash changes even though the service spec/generation doesn't.
+///
+/// Two separate epochs are tracked:
+/// - `policy_epoch`: bumped synchronously in the watch handler when a
+///   LatticeServicePolicy changes (graph-level, safe to read immediately)
+/// - `cedar_epoch`: bumped inside `PolicyEngine::reload()` after new cedar
+///   policies are actually loaded (avoids the race where the watch handler
+///   bumps a counter before the engine has the new state)
+fn compute_inputs_hash(
+    inbound: &[lattice_common::graph::ActiveEdge],
+    outbound: &[lattice_common::graph::ActiveEdge],
+    policy_epoch: u64,
+    cedar_epoch: u64,
+) -> String {
+    use std::fmt::Write;
+
+    // Sort edges so the hash is stable regardless of graph iteration order.
+    // The graph's edges_in Vec can be reordered by put_node remove+re-insert
+    // cycles, which would otherwise cause spurious hash mismatches and tight
+    // reconciliation loops.
+    let mut sorted_in: Vec<_> = inbound
+        .iter()
+        .map(|e| (&e.caller_namespace, &e.caller_name))
+        .collect();
+    sorted_in.sort();
+
+    let mut sorted_out: Vec<_> = outbound
+        .iter()
+        .map(|e| (&e.callee_namespace, &e.callee_name))
+        .collect();
+    sorted_out.sort();
+
+    let mut input = String::new();
+    for (ns, name) in &sorted_in {
+        let _ = write!(input, "in:{ns}/{name}->");
+    }
+    for (ns, name) in &sorted_out {
+        let _ = write!(input, "out:{ns}/{name}->");
+    }
+    let _ = write!(input, "policy:{policy_epoch},cedar:{cedar_epoch}");
+    lattice_common::deterministic_hash(&input)
+}
+
+/// Check if reconciliation can be skipped because nothing has changed.
+///
+/// Returns true when the service is Ready or Failed AND:
+/// - observed_generation matches metadata.generation (spec unchanged)
+/// - stored inputs hash matches the current graph + policy state
+///
+/// For Failed services this prevents tight retry loops when the same
+/// compilation error would recur (e.g. volume access denied). The service
+/// will still retry when its spec changes, bilateral edges change, or
+/// policy epochs advance.
+fn is_reconcile_current(service: &LatticeService, current_inputs_hash: &str) -> bool {
+    let status = match service.status.as_ref() {
+        Some(s) if s.phase == ServicePhase::Ready || s.phase == ServicePhase::Failed => s,
+        _ => return false,
+    };
+
+    let generation_matches = matches!(
+        (status.observed_generation, service.metadata.generation),
+        (Some(observed), Some(current)) if observed == current
+    );
+
+    let stored_hash = service
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(INPUTS_HASH_ANNOTATION));
+
+    generation_matches && stored_hash.map(|h| h.as_str()) == Some(current_inputs_hash)
+}
+
 /// Reconcile a LatticeService resource
 ///
 /// This function is called whenever a LatticeService is created, updated, or deleted.
@@ -877,6 +1026,22 @@ pub async fn reconcile(
             try_compile(&service, &name, namespace, &ctx).await
         }
         ServicePhase::Ready => {
+            // Compute inputs hash from graph state + policy epochs
+            let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
+            let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
+            let inputs_hash = compute_inputs_hash(
+                &active_in,
+                &active_out,
+                ctx.graph.policy_epoch(),
+                ctx.cedar.reload_epoch(),
+            );
+
+            // Skip if spec and external inputs are unchanged
+            if is_reconcile_current(&service, &inputs_hash) {
+                debug!("generation and inputs unchanged, skipping reconcile");
+                return Ok(Action::requeue(Duration::from_secs(60)));
+            }
+
             let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
             if !missing_deps.is_empty() {
                 warn!(?missing_deps, "dependencies no longer available");
@@ -884,9 +1049,27 @@ pub async fn reconcile(
                 return Ok(Action::requeue(Duration::from_secs(10)));
             }
 
-            try_compile(&service, &name, namespace, &ctx).await
+            try_compile_and_record(&service, &name, namespace, &ctx, &inputs_hash).await
         }
-        ServicePhase::Failed => try_compile(&service, &name, namespace, &ctx).await,
+        ServicePhase::Failed => {
+            // Same guard as Ready: skip retry when spec + inputs are unchanged
+            // to avoid tight loops on persistent compilation errors.
+            let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
+            let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
+            let inputs_hash = compute_inputs_hash(
+                &active_in,
+                &active_out,
+                ctx.graph.policy_epoch(),
+                ctx.cedar.reload_epoch(),
+            );
+
+            if is_reconcile_current(&service, &inputs_hash) {
+                debug!("generation and inputs unchanged, skipping failed retry");
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+
+            try_compile_and_record(&service, &name, namespace, &ctx, &inputs_hash).await
+        }
     }
 }
 
@@ -1004,11 +1187,63 @@ async fn try_compile(
 ) -> Result<Action, Error> {
     match compile_and_apply(service, name, namespace, ctx).await {
         Ok(()) => {
-            update_service_status(service, ctx, ServiceStatusUpdate::ready()).await?;
+            update_service_status(
+                service,
+                ctx,
+                ServiceStatusUpdate::ready(service.metadata.generation),
+            )
+            .await?;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         Err(_) => {
             // compile_and_apply already set status to Failed
+            Ok(Action::requeue(Duration::from_secs(30)))
+        }
+    }
+}
+
+/// Like try_compile, but also records the inputs hash annotation on both
+/// success and failure. This enables the reconcile guard to suppress tight
+/// retry loops when nothing has changed (same spec + same graph state =
+/// same compilation outcome).
+async fn try_compile_and_record(
+    service: &LatticeService,
+    name: &str,
+    namespace: &str,
+    ctx: &ServiceContext,
+    inputs_hash: &str,
+) -> Result<Action, Error> {
+    match compile_and_apply(service, name, namespace, ctx).await {
+        Ok(()) => {
+            update_service_status(
+                service,
+                ctx,
+                ServiceStatusUpdate::ready(service.metadata.generation),
+            )
+            .await?;
+            // Store the inputs hash so the guard can detect no-op reconciles.
+            // This is a separate patch (one extra event), but the guard catches
+            // the re-triggered reconcile immediately.
+            if let Err(e) = ctx
+                .kube
+                .patch_service_annotation(name, namespace, INPUTS_HASH_ANNOTATION, inputs_hash)
+                .await
+            {
+                warn!(error = %e, "failed to patch inputs hash annotation");
+            }
+            Ok(Action::requeue(Duration::from_secs(60)))
+        }
+        Err(_) => {
+            // compile_and_apply already set status to Failed.
+            // Store the inputs hash so the Failed-phase guard can suppress
+            // retries until the spec or graph state actually changes.
+            if let Err(e) = ctx
+                .kube
+                .patch_service_annotation(name, namespace, INPUTS_HASH_ANNOTATION, inputs_hash)
+                .await
+            {
+                warn!(error = %e, "failed to patch inputs hash annotation");
+            }
             Ok(Action::requeue(Duration::from_secs(30)))
         }
     }
@@ -1069,7 +1304,7 @@ async fn compile_and_apply(
 
             // Skip redundant events when status hasn't changed (status update
             // itself is guarded by update_service_status's idempotency check).
-            if !is_status_unchanged(service, ServicePhase::Failed, &msg) {
+            if !is_status_unchanged(service, ServicePhase::Failed, &msg, None) {
                 let event_reason = if e.is_policy_denied() {
                     match &e {
                         lattice_workload::CompilationError::SecurityOverrideDenied { .. } => {
@@ -1112,7 +1347,7 @@ async fn compile_and_apply(
         .await
     {
         let msg = e.to_string();
-        if !is_status_unchanged(service, ServicePhase::Failed, &msg) {
+        if !is_status_unchanged(service, ServicePhase::Failed, &msg, None) {
             error!(error = %msg, "failed to apply compiled resources");
         } else {
             debug!(error = %msg, "apply still failing");
@@ -1226,6 +1461,7 @@ struct ServiceStatusUpdate<'a> {
     condition_status: ConditionStatus,
     reason: &'a str,
     set_compiled_at: bool,
+    observed_generation: Option<i64>,
 }
 
 impl<'a> ServiceStatusUpdate<'a> {
@@ -1237,10 +1473,11 @@ impl<'a> ServiceStatusUpdate<'a> {
             condition_status: ConditionStatus::True,
             reason: "DependencyCheck",
             set_compiled_at: false,
+            observed_generation: None,
         }
     }
 
-    fn ready() -> Self {
+    fn ready(generation: Option<i64>) -> Self {
         Self {
             phase: ServicePhase::Ready,
             message: "Service is operational",
@@ -1248,6 +1485,7 @@ impl<'a> ServiceStatusUpdate<'a> {
             condition_status: ConditionStatus::True,
             reason: "ServiceReady",
             set_compiled_at: true,
+            observed_generation: generation,
         }
     }
 
@@ -1259,6 +1497,7 @@ impl<'a> ServiceStatusUpdate<'a> {
             condition_status: ConditionStatus::False,
             reason: "ValidationFailed",
             set_compiled_at: false,
+            observed_generation: None,
         }
     }
 }
@@ -1269,11 +1508,20 @@ impl<'a> ServiceStatusUpdate<'a> {
 /// because `Condition::new()` stamps a fresh `lastTransitionTime` on every call,
 /// making every merge patch "different" and generating a watch event that triggers
 /// another reconcile.
-fn is_status_unchanged(service: &LatticeService, phase: ServicePhase, message: &str) -> bool {
+fn is_status_unchanged(
+    service: &LatticeService,
+    phase: ServicePhase,
+    message: &str,
+    observed_generation: Option<i64>,
+) -> bool {
     service
         .status
         .as_ref()
-        .map(|s| s.phase == phase && s.message.as_deref() == Some(message))
+        .map(|s| {
+            s.phase == phase
+                && s.message.as_deref() == Some(message)
+                && s.observed_generation == observed_generation
+        })
         .unwrap_or(false)
 }
 
@@ -1287,7 +1535,12 @@ async fn update_service_status(
     update: ServiceStatusUpdate<'_>,
 ) -> Result<(), Error> {
     // Check if status already matches — avoid update loop
-    if is_status_unchanged(service, update.phase, update.message) {
+    if is_status_unchanged(
+        service,
+        update.phase,
+        update.message,
+        update.observed_generation,
+    ) {
         debug!("status unchanged, skipping update");
         return Ok(());
     }
@@ -1302,7 +1555,8 @@ async fn update_service_status(
             update.condition_status,
             update.reason,
             update.message,
-        ));
+        ))
+        .observed_generation(update.observed_generation);
 
     if update.set_compiled_at {
         status = status.compiled_at(Utc::now());
@@ -1528,6 +1782,8 @@ mod tests {
             .returning(|_| Ok(BTreeMap::new()));
         mock.expect_apply_compiled_service()
             .returning(|_, _, _| Ok(()));
+        mock.expect_patch_service_annotation()
+            .returning(|_, _, _, _| Ok(()));
         mock
     }
 

@@ -36,15 +36,15 @@ const SECRET_SOURCE_LABEL: &str = "lattice.dev/secret-source";
 pub struct WebhookCredentials {
     /// HTTP Basic auth username
     pub username: String,
-    /// HTTP Basic auth password
-    pub password: String,
+    /// HTTP Basic auth password (zeroized on drop)
+    pub password: zeroize::Zeroizing<String>,
 }
 
 impl WebhookCredentials {
     /// Compute the expected `Authorization` header value
     pub fn basic_auth_header(&self) -> String {
         let encoded = base64::engine::general_purpose::STANDARD
-            .encode(format!("{}:{}", self.username, self.password));
+            .encode(format!("{}:{}", self.username, *self.password));
         format!("Basic {encoded}")
     }
 }
@@ -56,7 +56,12 @@ struct WebhookState {
 }
 
 /// Start the webhook HTTP server on `LOCAL_SECRETS_PORT`
-pub async fn start_webhook_server(client: Client, credentials: WebhookCredentials) {
+///
+/// Returns an error if the server fails to bind or encounters a fatal error.
+pub async fn start_webhook_server(
+    client: Client,
+    credentials: WebhookCredentials,
+) -> Result<(), std::io::Error> {
     let state = Arc::new(WebhookState {
         expected_auth: credentials.basic_auth_header(),
         client,
@@ -67,19 +72,9 @@ pub async fn start_webhook_server(client: Client, credentials: WebhookCredential
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], LOCAL_SECRETS_PORT));
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => {
-            info!(addr = %addr, "Local secrets webhook started (Basic auth enabled)");
-            l
-        }
-        Err(e) => {
-            tracing::error!(error = %e, port = LOCAL_SECRETS_PORT, "Failed to bind local secrets webhook port");
-            return;
-        }
-    };
-    if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!(error = %e, "Local secrets webhook server error");
-    }
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(addr = %addr, "Local secrets webhook started (Basic auth enabled)");
+    axum::serve(listener, app).await
 }
 
 /// Validate the Authorization header against expected credentials.
@@ -92,7 +87,9 @@ fn check_auth(headers: &HeaderMap, expected: &str) -> Result<(), (StatusCode, St
             "missing Authorization header".to_string(),
         ))?;
 
-    if auth != expected {
+    // Use constant-time comparison to prevent timing side-channel attacks
+    use subtle::ConstantTimeEq;
+    if auth.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1 {
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials".to_string()));
     }
 
@@ -277,7 +274,7 @@ mod tests {
     fn basic_auth_header_encodes_correctly() {
         let creds = WebhookCredentials {
             username: "user".to_string(),
-            password: "pass".to_string(),
+            password: zeroize::Zeroizing::new("pass".to_string()),
         };
         let expected_b64 = base64::engine::general_purpose::STANDARD.encode("user:pass");
         assert_eq!(creds.basic_auth_header(), format!("Basic {expected_b64}"));
@@ -287,7 +284,7 @@ mod tests {
     fn check_auth_accepts_valid_credentials() {
         let expected = WebhookCredentials {
             username: "user".to_string(),
-            password: "pass".to_string(),
+            password: zeroize::Zeroizing::new("pass".to_string()),
         }
         .basic_auth_header();
         let mut headers = HeaderMap::new();

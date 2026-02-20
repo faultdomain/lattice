@@ -75,7 +75,7 @@ impl AuthContext {
     ///
     /// Creates a Cedar Context with all available fields. Optional fields
     /// (break_glass_expires, incident_id) are only included when present.
-    pub fn to_cedar_context(&self) -> Context {
+    pub fn to_cedar_context(&self) -> Result<Context, crate::error::Error> {
         let mut pairs: Vec<(String, RestrictedExpression)> = vec![
             (
                 "now".into(),
@@ -109,7 +109,8 @@ impl AuthContext {
             ));
         }
 
-        Context::from_pairs(pairs).expect("valid context")
+        Context::from_pairs(pairs)
+            .map_err(|e| crate::error::Error::Internal(format!("cedar context: {}", e)))
     }
 }
 
@@ -390,7 +391,7 @@ mod tests {
         );
 
         // Verifies to_cedar_context doesn't panic
-        let _cedar_ctx = ctx.to_cedar_context();
+        let _cedar_ctx = ctx.to_cedar_context().unwrap();
     }
 
     #[test]
@@ -406,7 +407,7 @@ mod tests {
         );
 
         // Verifies to_cedar_context doesn't panic with optional fields
-        let _cedar_ctx = ctx.to_cedar_context();
+        let _cedar_ctx = ctx.to_cedar_context().unwrap();
     }
 
     #[test]
@@ -423,6 +424,6 @@ mod tests {
         );
 
         // Verifies to_cedar_context doesn't panic with partial break glass
-        let _cedar_ctx = ctx.to_cedar_context();
+        let _cedar_ctx = ctx.to_cedar_context().unwrap();
     }
 }

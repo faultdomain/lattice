@@ -65,7 +65,14 @@ pub fn parse_k8s_message(data: &[u8]) -> Option<K8sMessage> {
             let height = u16::from_le_bytes([payload[2], payload[3]]);
             Some(K8sMessage::Resize { width, height })
         }
-        channel::STDIN..=channel::ERROR => Some(K8sMessage::Stdin(payload.to_vec())),
+        channel::STDIN => Some(K8sMessage::Stdin(payload.to_vec())),
+        channel::STDOUT | channel::STDERR | channel::ERROR => {
+            tracing::warn!(
+                channel,
+                "received server-only channel from client, treating as stdin"
+            );
+            Some(K8sMessage::Stdin(payload.to_vec()))
+        }
         _ => Some(K8sMessage::Raw(data.to_vec())),
     }
 }

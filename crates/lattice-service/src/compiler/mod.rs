@@ -315,6 +315,7 @@ impl<'a> ServiceCompiler<'a> {
             for phase in self.extension_phases {
                 phase
                     .compile(&phase_ctx, &mut compiled)
+                    .await
                     .map_err(|e| CompilationError::extension(phase.name(), e))?;
             }
         }
@@ -788,12 +789,13 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl CompilerPhase for TrackingPhase {
         fn name(&self) -> &str {
             "tracking"
         }
 
-        fn compile(
+        async fn compile(
             &self,
             _ctx: &CompilationContext<'_>,
             _output: &mut CompiledService,
@@ -821,12 +823,13 @@ mod tests {
     async fn phase_can_add_dynamic_resource() {
         struct AddResourcePhase;
 
+        #[async_trait::async_trait]
         impl CompilerPhase for AddResourcePhase {
             fn name(&self) -> &str {
                 "add-resource"
             }
 
-            fn compile(
+            async fn compile(
                 &self,
                 ctx: &CompilationContext<'_>,
                 output: &mut CompiledService,
@@ -863,12 +866,13 @@ mod tests {
     async fn phase_error_stops_compilation() {
         struct FailingPhase;
 
+        #[async_trait::async_trait]
         impl CompilerPhase for FailingPhase {
             fn name(&self) -> &str {
                 "failing"
             }
 
-            fn compile(
+            async fn compile(
                 &self,
                 _ctx: &CompilationContext<'_>,
                 _output: &mut CompiledService,

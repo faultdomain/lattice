@@ -37,6 +37,9 @@ minijinja = { workspace = true }
 # Random
 rand = { workspace = true }
 
+# Security
+zeroize = { workspace = true }
+
 [build-dependencies]
 toml.workspace = true
 serde = { version = "1.0", features = ["derive"] }

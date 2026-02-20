@@ -209,6 +209,12 @@ impl LatticeServiceStatus {
         self.last_compiled_at = Some(time);
         self
     }
+
+    /// Set the observed generation for change detection
+    pub fn observed_generation(mut self, gen: Option<i64>) -> Self {
+        self.observed_generation = gen;
+        self
+    }
 }
 
 // =============================================================================

@@ -92,15 +92,25 @@ impl PolicyEngine {
         let policy_set = self.read_policy_set().await;
         let action_uid = match build_entity_uid("Action", ACTION_NAME) {
             Ok(uid) => uid,
-            Err(_) => return deny(DenialReason::NoPermitPolicy),
+            Err(e) => return deny(DenialReason::InternalError(format!("action uid: {}", e))),
         };
         let service_entity = match build_service_entity(&request.namespace, &request.service_name) {
             Ok(e) => e,
-            Err(_) => return deny(DenialReason::NoPermitPolicy),
+            Err(e) => {
+                return deny(DenialReason::InternalError(format!(
+                    "service entity: {}",
+                    e
+                )))
+            }
         };
         let resource_entity = match build_mesh_wildcard_entity(request.direction.resource_id()) {
             Ok(e) => e,
-            Err(_) => return deny(DenialReason::NoPermitPolicy),
+            Err(e) => {
+                return deny(DenialReason::InternalError(format!(
+                    "resource entity: {}",
+                    e
+                )))
+            }
         };
 
         match self.evaluate_service_action(

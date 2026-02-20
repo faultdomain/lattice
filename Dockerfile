@@ -84,8 +84,8 @@ COPY scripts/runtime ./scripts
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build -p lattice-operator && \
-    cp /app/target/debug/lattice-operator /usr/local/bin/lattice-operator
+    cargo build --release -p lattice-operator && \
+    cp /app/target/release/lattice-operator /usr/local/bin/lattice-operator
 
 # -----------------------------------------------------------------------------
 # Stage 3: Runtime image (FIPS-validated Red Hat UBI 9 Minimal)

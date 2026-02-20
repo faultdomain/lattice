@@ -30,6 +30,7 @@ async-stream = { workspace = true }
 # Concurrency
 dashmap = { workspace = true }
 moka = { workspace = true }
+parking_lot = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
@@ -53,6 +54,9 @@ thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+
+# Security
+zeroize = { workspace = true }
 
 # Time
 chrono = { workspace = true }

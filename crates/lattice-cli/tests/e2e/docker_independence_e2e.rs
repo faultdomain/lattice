@@ -50,23 +50,23 @@ use super::integration::setup;
 const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Clean up Docker clusters used by this test
-fn cleanup_docker_clusters(mgmt_name: &str, workload_name: &str) {
-    force_delete_docker_cluster(mgmt_name);
-    force_delete_docker_cluster(workload_name);
+async fn cleanup_docker_clusters(mgmt_name: &str, workload_name: &str) {
+    force_delete_docker_cluster(mgmt_name).await;
+    force_delete_docker_cluster(workload_name).await;
 }
 
 /// Clean up this run's resources
-fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
+async fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
     info!("Cleaning up all test resources...");
-    setup::cleanup_bootstrap_cluster(run_id());
-    cleanup_docker_clusters(mgmt_name, workload_name);
+    setup::cleanup_bootstrap_cluster(run_id()).await;
+    cleanup_docker_clusters(mgmt_name, workload_name).await;
 }
 
 /// Clean up orphans and all resources (opt-in via LATTICE_CLEANUP_ORPHANS)
-fn cleanup_orphans_and_clusters(mgmt_name: &str, workload_name: &str) {
+async fn cleanup_orphans_and_clusters(mgmt_name: &str, workload_name: &str) {
     info!("Cleaning up orphaned and test resources...");
-    setup::cleanup_orphan_bootstrap_clusters();
-    cleanup_docker_clusters(mgmt_name, workload_name);
+    setup::cleanup_orphan_bootstrap_clusters().await;
+    cleanup_docker_clusters(mgmt_name, workload_name).await;
 }
 
 #[tokio::test]
@@ -90,10 +90,10 @@ async fn test_docker_independence() {
         .unwrap_or(WORKLOAD_CLUSTER_NAME);
 
     // Opt-in cleanup of orphaned clusters from previous failed runs
-    cleanup_orphans_and_clusters(mgmt_name, workload_name);
+    cleanup_orphans_and_clusters(mgmt_name, workload_name).await;
 
     if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
-        cleanup_clusters(mgmt_name, workload_name);
+        cleanup_clusters(mgmt_name, workload_name).await;
         panic!("Failed to build image: {}", e);
     }
 
@@ -103,7 +103,7 @@ async fn test_docker_independence() {
     )
     .await;
 
-    cleanup_clusters(mgmt_name, workload_name);
+    cleanup_clusters(mgmt_name, workload_name).await;
 
     match result {
         Ok(Ok(())) => {
@@ -122,7 +122,9 @@ async fn run_independence_test(
     mgmt_cluster_name: String,
     workload_cluster_name: String,
 ) -> Result<(), String> {
-    ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
+    ensure_docker_network()
+        .await
+        .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
 
     let (mgmt_config, _) = load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml")?;
     let (_, workload_cluster) =
@@ -156,7 +158,7 @@ async fn run_independence_test(
     // =========================================================================
     info!("[Phase 2] Creating workload cluster...");
 
-    let mgmt_kubeconfig = get_docker_kubeconfig(&mgmt_cluster_name)?;
+    let mgmt_kubeconfig = get_docker_kubeconfig(&mgmt_cluster_name).await?;
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig).await?;
 
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
@@ -203,9 +205,9 @@ async fn run_independence_test(
     info!("[Phase 4] Deleting management cluster (force delete)...");
     info!("This simulates parent failure - workload should survive");
 
-    force_delete_docker_cluster(&mgmt_cluster_name);
+    force_delete_docker_cluster(&mgmt_cluster_name).await;
 
-    if !docker_containers_deleted(&mgmt_cluster_name) {
+    if !docker_containers_deleted(&mgmt_cluster_name).await {
         return Err("Failed to delete management cluster containers".to_string());
     }
 

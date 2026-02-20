@@ -63,7 +63,10 @@ pub async fn ensure_webhook_credentials(
 
             if let (Some(username), Some(password)) = (username, password) {
                 info!("Loaded existing webhook auth credentials");
-                return Ok(WebhookCredentials { username, password });
+                return Ok(WebhookCredentials {
+                    username,
+                    password: zeroize::Zeroizing::new(password),
+                });
             }
             warn!("Webhook auth secret exists but has missing/invalid fields, regenerating");
         }
@@ -111,7 +114,10 @@ pub async fn ensure_webhook_credentials(
     .map_err(|e| ReconcileError::Kube(format!("failed to create webhook auth secret: {e}")))?;
 
     info!("Generated new webhook auth credentials");
-    Ok(WebhookCredentials { username, password })
+    Ok(WebhookCredentials {
+        username,
+        password: zeroize::Zeroizing::new(password),
+    })
 }
 
 /// Ensure the local webhook infrastructure exists.
@@ -525,7 +531,7 @@ async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), Reconcile
         "metadata": {
             "name": LOCAL_SECRETS_NAMESPACE,
             "labels": {
-                "app.kubernetes.io/managed-by": "lattice"
+                "app.kubernetes.io/managed-by": lattice_common::LABEL_MANAGED_BY_LATTICE
             }
         }
     });
@@ -553,7 +559,7 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
             "name": LOCAL_SECRETS_SERVICE,
             "namespace": LATTICE_SYSTEM_NAMESPACE,
             "labels": {
-                "app.kubernetes.io/managed-by": "lattice"
+                "app.kubernetes.io/managed-by": lattice_common::LABEL_MANAGED_BY_LATTICE
             }
         },
         "spec": {

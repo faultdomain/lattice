@@ -32,8 +32,8 @@ use lattice_common::{capi_namespace, CsrRequest, CsrResponse, LATTICE_SYSTEM_NAM
 use lattice_infra::pki::AgentCertRequest;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
-    agent_message::Payload, AgentMessage, AgentReady, AgentState, BootstrapComplete,
-    ClusterDeleting, Heartbeat, MoveObject,
+    agent_message::Payload, grpc_max_message_size, AgentMessage, AgentReady, AgentState,
+    BootstrapComplete, ClusterDeleting, Heartbeat, MoveObject,
 };
 
 use crate::kube_client::{InClusterClientProvider, KubeClientProvider};
@@ -80,8 +80,8 @@ impl Default for AgentClientConfig {
 pub struct AgentCredentials {
     /// Agent certificate PEM (signed by cell CA)
     pub cert_pem: String,
-    /// Agent private key PEM
-    pub key_pem: String,
+    /// Agent private key PEM (zeroized on drop)
+    pub key_pem: zeroize::Zeroizing<String>,
     /// CA certificate PEM (for verifying cell)
     pub ca_cert_pem: String,
 }
@@ -217,6 +217,7 @@ impl AgentClientBuilder {
             forwarded_exec_sessions: Arc::new(
                 Cache::builder()
                     .time_to_live(std::time::Duration::from_secs(1800))
+                    .max_capacity(1000)
                     .build(),
             ),
             forwarder: self.forwarder,
@@ -282,7 +283,7 @@ impl AgentClient {
             .map_err(|e| CertificateError::CsrError(e.to_string()))?;
 
         let csr_pem = cert_request.csr_pem().to_string();
-        let key_pem = cert_request.private_key_pem().to_string();
+        let key_pem = zeroize::Zeroizing::new(cert_request.private_key_pem().to_string());
 
         // Submit CSR to cell
         let url = format!("{}/api/clusters/{}/csr", http_endpoint, cluster_id);
@@ -939,42 +940,33 @@ impl AgentClient {
 }
 
 /// Client errors
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ClientError {
     /// Invalid endpoint URL
+    #[error("invalid endpoint: {0}")]
     InvalidEndpoint(String),
     /// Connection to cell failed
+    #[error("connection failed: {0}")]
     ConnectionFailed(String),
     /// Stream creation failed
+    #[error("stream failed: {0}")]
     StreamFailed(String),
     /// TLS configuration error
+    #[error("TLS error: {0}")]
     TlsError(String),
     /// Not connected to cell
+    #[error("not connected")]
     NotConnected,
     /// Channel closed
+    #[error("channel closed")]
     ChannelClosed,
     /// CAPI installation failed
+    #[error("CAPI installation failed: {0}")]
     CapiInstallFailed(String),
     /// Kubernetes API error
+    #[error("Kubernetes API error: {0}")]
     K8sApiError(String),
 }
-
-impl std::fmt::Display for ClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ClientError::InvalidEndpoint(e) => write!(f, "invalid endpoint: {}", e),
-            ClientError::ConnectionFailed(e) => write!(f, "connection failed: {}", e),
-            ClientError::StreamFailed(e) => write!(f, "stream failed: {}", e),
-            ClientError::TlsError(e) => write!(f, "TLS error: {}", e),
-            ClientError::NotConnected => write!(f, "not connected"),
-            ClientError::ChannelClosed => write!(f, "channel closed"),
-            ClientError::CapiInstallFailed(e) => write!(f, "CAPI installation failed: {}", e),
-            ClientError::K8sApiError(e) => write!(f, "Kubernetes API error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for ClientError {}
 
 impl Drop for AgentClient {
     fn drop(&mut self) {
@@ -992,15 +984,6 @@ impl Drop for AgentClient {
             handle.abort();
         }
     }
-}
-
-const DEFAULT_GRPC_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
-
-fn grpc_max_message_size() -> usize {
-    std::env::var("LATTICE_GRPC_MAX_MESSAGE_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_GRPC_MAX_MESSAGE_SIZE)
 }
 
 /// Extract domain name from a URL for TLS verification
@@ -1155,11 +1138,11 @@ mod tests {
     fn test_credentials_struct() {
         let creds = AgentCredentials {
             cert_pem: "cert".to_string(),
-            key_pem: "key".to_string(),
+            key_pem: zeroize::Zeroizing::new("key".to_string()),
             ca_cert_pem: "ca".to_string(),
         };
         assert_eq!(creds.cert_pem, "cert");
-        assert_eq!(creds.key_pem, "key");
+        assert_eq!(&*creds.key_pem, "key");
         assert_eq!(creds.ca_cert_pem, "ca");
     }
 
@@ -1747,7 +1730,9 @@ mod tests {
     fn credentials_can_be_cloned() {
         let creds = AgentCredentials {
             cert_pem: "-----BEGIN CERTIFICATE-----\nMIIC...\n-----END CERTIFICATE-----".to_string(),
-            key_pem: "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----".to_string(),
+            key_pem: zeroize::Zeroizing::new(
+                "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----".to_string(),
+            ),
             ca_cert_pem: "-----BEGIN CERTIFICATE-----\nMIID...\n-----END CERTIFICATE-----"
                 .to_string(),
         };

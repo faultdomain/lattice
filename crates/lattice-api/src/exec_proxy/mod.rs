@@ -7,6 +7,9 @@
 //! transparent HTTP upgrade proxying.
 
 mod handlers;
+mod io;
+mod local_io;
+mod remote_io;
 mod websocket;
 
 pub use handlers::{handle_exec_websocket, has_websocket_upgrade_headers};

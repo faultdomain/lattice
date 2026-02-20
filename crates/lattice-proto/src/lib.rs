@@ -119,12 +119,15 @@ pub use agent::v1::*;
 /// assert!(is_watch_query("follow=true"));
 /// assert!(!is_watch_query("watch=false"));
 /// assert!(!is_watch_query(""));
+/// assert!(!is_watch_query("mywatch=true"));
 /// ```
 pub fn is_watch_query(query: &str) -> bool {
-    query.contains("watch=true")
-        || query.contains("watch=1")
-        || query.contains("follow=true")
-        || query.contains("follow=1")
+    query.split('&').any(|param| {
+        matches!(
+            param.split_once('='),
+            Some(("watch", "true" | "1")) | Some(("follow", "true" | "1"))
+        )
+    })
 }
 
 /// Check if a path is an exec/attach/portforward request.
@@ -241,29 +244,61 @@ pub fn parse_portforward_ports(query: &str) -> Vec<u16> {
 }
 
 /// Simple percent-decoding for URL query parameters.
+///
+/// Collects decoded bytes into a buffer so multi-byte UTF-8 sequences
+/// (e.g. `%C3%A9` for 'é') are reassembled correctly before conversion.
 fn percent_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.as_bytes().iter();
 
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
+    while let Some(&b) = chars.next() {
+        if b == b'%' {
+            let hi = chars.next().copied();
+            let lo = chars.next().copied();
+            if let (Some(h), Some(l)) = (hi, lo) {
+                let hex = [h, l];
+                if let Ok(decoded) = u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or(""), 16)
+                {
+                    bytes.push(decoded);
                     continue;
                 }
+                // Invalid hex — emit literal
+                bytes.push(b'%');
+                bytes.push(h);
+                bytes.push(l);
+            } else {
+                // Truncated sequence — emit what we have
+                bytes.push(b'%');
+                if let Some(h) = hi {
+                    bytes.push(h);
+                }
             }
-            result.push('%');
-            result.push_str(&hex);
-        } else if c == '+' {
-            result.push(' ');
+        } else if b == b'+' {
+            bytes.push(b' ');
         } else {
-            result.push(c);
+            bytes.push(b);
         }
     }
 
-    result
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+/// Default gRPC max message size (16 MiB)
+const DEFAULT_GRPC_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
+/// Maximum allowed gRPC message size (256 MiB)
+const MAX_GRPC_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
+
+/// Get the configured gRPC max message size.
+///
+/// Reads from `LATTICE_GRPC_MAX_MESSAGE_SIZE` env var, falling back to 16 MiB.
+/// The value is clamped to a maximum of 256 MiB to prevent accidental OOM.
+pub fn grpc_max_message_size() -> usize {
+    std::env::var("LATTICE_GRPC_MAX_MESSAGE_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_GRPC_MAX_MESSAGE_SIZE)
+        .min(MAX_GRPC_MESSAGE_SIZE)
 }
 
 #[cfg(test)]
@@ -286,6 +321,10 @@ mod tests {
         assert!(!is_watch_query("follow=false"));
         assert!(!is_watch_query("labelSelector=app"));
         assert!(!is_watch_query(""));
+        // Substring false positives must not match
+        assert!(!is_watch_query("mywatch=true"));
+        assert!(!is_watch_query("nofollow=true"));
+        assert!(!is_watch_query("watchdog=1"));
     }
 
     #[test]
@@ -367,6 +406,13 @@ mod tests {
         assert_eq!(percent_decode("echo+hello"), "echo hello");
         assert_eq!(percent_decode("normal"), "normal");
         assert_eq!(percent_decode("%2Fbin%2Fsh"), "/bin/sh");
+        // Multi-byte UTF-8: é = U+00E9 = 0xC3 0xA9
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+        // Japanese: 日 = U+65E5 = 0xE6 0x97 0xA5
+        assert_eq!(percent_decode("%E6%97%A5"), "日");
+        // Truncated percent at end
+        assert_eq!(percent_decode("foo%2"), "foo%2");
+        assert_eq!(percent_decode("foo%"), "foo%");
     }
 
     #[test]

@@ -167,7 +167,7 @@ impl Installer {
         let cluster_yaml = tokio::fs::read_to_string(&args.config_file).await?;
         let registry_credentials = match &args.registry_credentials_file {
             Some(path) => Some(tokio::fs::read_to_string(path).await?),
-            None => None,
+            None => credentials_from_env(),
         };
 
         Self::new(
@@ -1175,6 +1175,15 @@ fn add_deployment_env(deployment_json: &str, vars: &[(&str, &str)]) -> String {
     }
 
     serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
+}
+
+/// Build registry credentials from GHCR_USER/GHCR_TOKEN environment variables.
+fn credentials_from_env() -> Option<String> {
+    use base64::Engine;
+    let user = std::env::var("GHCR_USER").ok()?;
+    let token = std::env::var("GHCR_TOKEN").ok()?;
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{token}"));
+    Some(serde_json::json!({"auths": {"ghcr.io": {"auth": auth}}}).to_string())
 }
 
 pub async fn run(args: InstallArgs) -> Result<()> {

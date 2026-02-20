@@ -20,29 +20,6 @@ pub fn strip_cluster_prefix<'a>(full_path: &'a str, cluster_name: &str) -> &'a s
     full_path.strip_prefix(&prefix).unwrap_or(full_path)
 }
 
-/// Extract cluster name from a path that starts with /clusters/{name}/...
-///
-/// # Examples
-///
-/// ```
-/// use lattice_api::routing::extract_cluster_from_path;
-///
-/// assert_eq!(
-///     extract_cluster_from_path("/clusters/my-cluster/api/v1/pods"),
-///     Some("my-cluster")
-/// );
-/// assert_eq!(extract_cluster_from_path("/api/v1/pods"), None);
-/// ```
-pub fn extract_cluster_from_path(path: &str) -> Option<&str> {
-    let path = path.strip_prefix("/clusters/")?;
-    let cluster = path.split('/').next()?;
-    if cluster.is_empty() {
-        None
-    } else {
-        Some(cluster)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,33 +65,5 @@ mod tests {
             strip_cluster_prefix("/clusters/test-cluster", "test-cluster"),
             ""
         );
-    }
-
-    #[test]
-    fn test_extract_cluster_from_path() {
-        assert_eq!(
-            extract_cluster_from_path("/clusters/my-cluster/api/v1/pods"),
-            Some("my-cluster")
-        );
-    }
-
-    #[test]
-    fn test_extract_cluster_from_path_exec() {
-        assert_eq!(
-            extract_cluster_from_path(
-                "/clusters/workload-1/api/v1/namespaces/default/pods/nginx/exec"
-            ),
-            Some("workload-1")
-        );
-    }
-
-    #[test]
-    fn test_extract_cluster_from_path_no_prefix() {
-        assert_eq!(extract_cluster_from_path("/api/v1/pods"), None);
-    }
-
-    #[test]
-    fn test_extract_cluster_from_path_incomplete() {
-        assert_eq!(extract_cluster_from_path("/clusters/"), None);
     }
 }

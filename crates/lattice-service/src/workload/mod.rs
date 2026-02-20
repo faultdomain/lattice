@@ -587,6 +587,21 @@ impl WorkloadCompiler {
             });
         }
 
+        // Validate custom metric names to prevent PromQL injection
+        for m in &metrics {
+            if !matches!(m.metric.as_str(), "cpu" | "memory")
+                && !is_valid_promql_metric_name(&m.metric)
+            {
+                return Err(CompilationError::Resource {
+                    name: m.metric.clone(),
+                    message: format!(
+                        "invalid Prometheus metric name '{}': must match [a-zA-Z_:][a-zA-Z0-9_:]*",
+                        m.metric
+                    ),
+                });
+            }
+        }
+
         let server_address = format!(
             "{}:{}{}",
             query_url(monitoring.ha),
@@ -640,6 +655,22 @@ impl WorkloadCompiler {
             },
         })
     }
+}
+
+/// Validate that a metric name is a valid Prometheus metric identifier.
+///
+/// Prometheus metric names must match `[a-zA-Z_:][a-zA-Z0-9_:]*`.
+/// This prevents PromQL injection when interpolating user-supplied names into queries.
+fn is_valid_promql_metric_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' && first != ':' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
 }
 
 // =============================================================================

@@ -23,8 +23,8 @@ pub struct ServerConfig {
     pub addr: SocketAddr,
     /// TLS certificate PEM
     pub cert_pem: String,
-    /// TLS private key PEM
-    pub key_pem: String,
+    /// TLS private key PEM (zeroized on drop)
+    pub key_pem: zeroize::Zeroizing<String>,
     /// CA certificate PEM - included in generated kubeconfigs for TLS verification
     pub ca_cert_pem: String,
     /// Kubernetes API server URL (for proxying to self)
@@ -101,10 +101,12 @@ pub async fn start_server(
         .route("/clusters/{cluster_name}/{*path}", any(proxy_handler))
         .with_state(state);
 
-    let tls_config =
-        RustlsConfig::from_pem(config.cert_pem.into_bytes(), config.key_pem.into_bytes())
-            .await
-            .map_err(|e| Error::Config(format!("TLS config error: {}", e)))?;
+    let tls_config = RustlsConfig::from_pem(
+        config.cert_pem.into_bytes(),
+        config.key_pem.as_bytes().to_vec(),
+    )
+    .await
+    .map_err(|e| Error::Config(format!("TLS config error: {}", e)))?;
 
     info!(addr = %config.addr, "Starting auth proxy server");
 

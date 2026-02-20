@@ -34,12 +34,13 @@ pub async fn reconcile(
     let name = service.name_any();
     let namespace = service.namespace().unwrap_or_else(|| "default".to_string());
 
-    let backup = match &service.spec.backup {
-        Some(b) if b.schedule.is_some() => b,
-        _ => return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS))),
+    let (backup, cron) = match &service.spec.backup {
+        Some(b) => match b.schedule.as_deref() {
+            Some(schedule) => (b, schedule),
+            None => return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS))),
+        },
+        None => return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS))),
     };
-
-    let cron = backup.schedule.as_deref().unwrap();
     info!(service = %name, namespace = %namespace, schedule = %cron, "Reconciling service backup schedule");
 
     // Resolve BackupStore

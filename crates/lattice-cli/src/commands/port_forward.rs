@@ -91,6 +91,9 @@ impl PortForward {
         let fixed_port = std::env::var("LATTICE_PROXY_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok());
+        // Don't use the kubeconfig's CA for health checks — that CA is for the
+        // K8s API server, not for the auth proxy which has its own lattice-generated
+        // TLS certificate. Health checks use danger_accept_invalid_certs instead.
         let kc_startup = kubeconfig.to_string();
         let (port, initial_child) = tokio::task::spawn_blocking(move || {
             start_port_forward(
@@ -99,6 +102,7 @@ impl PortForward {
                 remote_port,
                 STARTUP_TIMEOUT,
                 STARTUP_MAX_PROBES,
+                None,
             )
         })
         .await
@@ -120,6 +124,7 @@ impl PortForward {
                 local_port: port,
                 remote_port,
                 url: url_clone,
+                ca_cert_pem: None,
                 stop_flag: stop_clone,
                 healthy: healthy_clone,
                 ready_notify: notify_clone,
@@ -180,15 +185,22 @@ impl Drop for PortForward {
 }
 
 /// Check if a proxy URL is healthy by hitting its `/healthz` endpoint.
-pub async fn check_health(url: &str, timeout: Duration) -> bool {
+///
+/// When `ca_cert_pem` is provided, the client verifies the server's TLS certificate
+/// against it. Falls back to skipping verification only when no CA is available.
+pub async fn check_health(url: &str, timeout: Duration, ca_cert_pem: Option<&[u8]>) -> bool {
     let health_url = format!("{}/healthz", url);
 
-    let client = match reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+    let mut builder = reqwest::Client::builder()
         .timeout(timeout)
-        .connect_timeout(timeout)
-        .build()
-    {
+        .connect_timeout(timeout);
+
+    builder = match ca_cert_pem.and_then(|pem| reqwest::Certificate::from_pem(pem).ok()) {
+        Some(cert) => builder.add_root_certificate(cert),
+        None => builder.danger_accept_invalid_certs(true),
+    };
+
+    let client = match builder.build() {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -203,15 +215,19 @@ pub async fn check_health(url: &str, timeout: Duration) -> bool {
 ///
 /// Used only by the watchdog thread so that health probes don't compete with the
 /// caller's tokio runtime for the single-threaded executor.
-fn check_health_blocking(url: &str, timeout: Duration) -> bool {
+fn check_health_blocking(url: &str, timeout: Duration, ca_cert_pem: Option<&[u8]>) -> bool {
     let health_url = format!("{}/healthz", url);
 
-    let client = match reqwest::blocking::Client::builder()
-        .danger_accept_invalid_certs(true)
+    let mut builder = reqwest::blocking::Client::builder()
         .timeout(timeout)
-        .connect_timeout(timeout)
-        .build()
-    {
+        .connect_timeout(timeout);
+
+    builder = match ca_cert_pem.and_then(|pem| reqwest::Certificate::from_pem(pem).ok()) {
+        Some(cert) => builder.add_root_certificate(cert),
+        None => builder.danger_accept_invalid_certs(true),
+    };
+
+    let client = match builder.build() {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -220,6 +236,20 @@ fn check_health_blocking(url: &str, timeout: Duration) -> bool {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     }
+}
+
+/// Extract the CA certificate PEM bytes from a parsed kubeconfig.
+fn extract_ca_from_kubeconfig(kubeconfig: &Kubeconfig) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let cluster = kubeconfig.clusters.first()?;
+    let ca_b64 = cluster
+        .cluster
+        .as_ref()?
+        .certificate_authority_data
+        .as_ref()?;
+    base64::engine::general_purpose::STANDARD
+        .decode(ca_b64)
+        .ok()
 }
 
 /// Spawn `kubectl port-forward` and return the child process.
@@ -318,6 +348,7 @@ fn start_port_forward(
     remote_port: u16,
     timeout: Duration,
     max_probes: u32,
+    ca_cert_pem: Option<&[u8]>,
 ) -> Result<(u16, Child)> {
     let deadline = Instant::now() + timeout;
     let mut attempt = 0u32;
@@ -373,7 +404,7 @@ fn start_port_forward(
                 break;
             }
 
-            if check_health_blocking(&url, STARTUP_PROBE_TIMEOUT) {
+            if check_health_blocking(&url, STARTUP_PROBE_TIMEOUT, ca_cert_pem) {
                 info!(
                     "[PortForward] Ready at {} (attempt {}, probe {})",
                     url, attempt, probe
@@ -410,6 +441,7 @@ struct WatchdogConfig {
     local_port: u16,
     remote_port: u16,
     url: String,
+    ca_cert_pem: Option<Vec<u8>>,
     stop_flag: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
     ready_notify: Arc<tokio::sync::Notify>,
@@ -432,7 +464,7 @@ fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
     let mut total_restarts = 0u64;
 
     loop {
-        if cfg.stop_flag.load(Ordering::Relaxed) {
+        if cfg.stop_flag.load(Ordering::Acquire) {
             info!("[PortForward] Watchdog stopping, killing port-forward");
             let _ = child.kill();
             let _ = child.wait();
@@ -452,7 +484,11 @@ fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
                 // Process alive - periodic active health check
                 if last_health_check.elapsed() >= ACTIVE_HEALTH_CHECK_INTERVAL {
                     last_health_check = Instant::now();
-                    if !check_health_blocking(&cfg.url, WATCHDOG_PROBE_TIMEOUT) {
+                    if !check_health_blocking(
+                        &cfg.url,
+                        WATCHDOG_PROBE_TIMEOUT,
+                        cfg.ca_cert_pem.as_deref(),
+                    ) {
                         consecutive_health_failures += 1;
                         warn!(
                             "[PortForward] Health check failed ({} consecutive)",
@@ -495,7 +531,7 @@ fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
             let mut restart_attempts = 0u32;
 
             loop {
-                if cfg.stop_flag.load(Ordering::Relaxed) {
+                if cfg.stop_flag.load(Ordering::Acquire) {
                     return;
                 }
 
@@ -508,6 +544,7 @@ fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
                     cfg.remote_port,
                     WARM_RESTART_TIMEOUT,
                     WARM_RESTART_MAX_PROBES,
+                    cfg.ca_cert_pem.as_deref(),
                 ) {
                     Ok((_, new_child)) => {
                         child = new_child;
@@ -553,7 +590,8 @@ fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
 pub(crate) async fn ensure_proxy_reachable(kubeconfig: &mut Kubeconfig) -> Option<PortForward> {
     let proxy_base = find_proxy_base_url(kubeconfig)?;
 
-    if check_health(&proxy_base, Duration::from_secs(2)).await {
+    let ca_cert = extract_ca_from_kubeconfig(kubeconfig);
+    if check_health(&proxy_base, Duration::from_secs(2), ca_cert.as_deref()).await {
         debug!(
             "Proxy at {} is reachable, no port-forward needed",
             proxy_base

@@ -5,4 +5,4 @@
 
 mod path;
 
-pub use path::{extract_cluster_from_path, strip_cluster_prefix};
+pub use path::strip_cluster_prefix;

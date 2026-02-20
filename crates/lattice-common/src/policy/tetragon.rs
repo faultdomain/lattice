@@ -231,17 +231,6 @@ impl Selector {
             ..Default::default()
         }
     }
-
-    /// Selector that SIGKILLs processes, excluding system namespaces
-    pub fn sigkill_excluding_namespaces(exclusions: &[MatchNamespace]) -> Self {
-        Self {
-            match_namespaces: exclusions.to_vec(),
-            match_actions: vec![MatchAction {
-                action: TracingAction::Sigkill,
-            }],
-            ..Default::default()
-        }
-    }
 }
 
 /// Argument matching for selectors
@@ -283,6 +272,18 @@ impl PodSelector {
     pub fn for_service(service_name: &str) -> Self {
         let mut labels = std::collections::BTreeMap::new();
         labels.insert(crate::LABEL_NAME.to_string(), service_name.to_string());
+        Self {
+            match_labels: labels,
+        }
+    }
+
+    /// Create a pod selector targeting all Lattice-managed workload pods
+    pub fn managed_by_lattice() -> Self {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert(
+            crate::LABEL_MANAGED_BY.to_string(),
+            crate::LABEL_MANAGED_BY_LATTICE.to_string(),
+        );
         Self {
             match_labels: labels,
         }

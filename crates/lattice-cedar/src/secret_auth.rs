@@ -104,10 +104,17 @@ struct SecretEvalContext<'a> {
 
 impl SecretEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), SecretDenial> {
-        let service_entity = build_service_entity(self.namespace, self.service_name)
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-        let secret_entity = build_secret_path_entity(self.provider, self.remote_key)
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
+        let service_entity =
+            build_service_entity(self.namespace, self.service_name).map_err(|e| {
+                self.denial(DenialReason::InternalError(format!(
+                    "service entity: {}",
+                    e
+                )))
+            })?;
+        let secret_entity =
+            build_secret_path_entity(self.provider, self.remote_key).map_err(|e| {
+                self.denial(DenialReason::InternalError(format!("secret entity: {}", e)))
+            })?;
 
         self.engine
             .evaluate_service_action(

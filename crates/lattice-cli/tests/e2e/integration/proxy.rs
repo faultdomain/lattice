@@ -171,7 +171,8 @@ pub async fn test_proxy_access_to_grandchild(
 /// Verify proxy access to a cluster by fetching namespaces.
 ///
 /// This is the core validation logic used by both direct child and grandchild tests.
-/// Uses retry logic to handle transient failures from chaos testing.
+/// Retries on transient conditions like "not found in subtree" (grandchild hasn't
+/// propagated through the hierarchy yet) and "agent not connected".
 async fn verify_proxy_namespace_access(
     proxy_url: &str,
     token: &str,
@@ -179,66 +180,77 @@ async fn verify_proxy_namespace_access(
     cluster_type: &str,
 ) -> Result<(), String> {
     let url = format!("{}/clusters/{}/api/v1/namespaces", proxy_url, cluster_name);
-    let response = http_get_with_retry(&url, token, 30).await?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
 
-    // Check for successful response
-    if response.is_success() {
-        // Parse the JSON response to count items properly
-        // K8s list responses have items array but don't include "kind" on each item
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response.body) {
-            if json.get("kind").and_then(|k| k.as_str()) == Some("NamespaceList") {
-                let namespace_count = json
-                    .get("items")
-                    .and_then(|items| items.as_array())
-                    .map(|arr| arr.len())
-                    .unwrap_or(0);
+    loop {
+        let response = http_get_with_retry(&url, token, 30).await?;
 
-                // Every cluster has at least kube-system, default, etc.
-                if namespace_count == 0 {
-                    return Err(format!(
-                        "Proxy returned NamespaceList but 0 namespaces visible for {} {} - this indicates a permission issue",
-                        cluster_type, cluster_name
-                    ));
+        // Check for successful response
+        if response.is_success() {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response.body) {
+                if json.get("kind").and_then(|k| k.as_str()) == Some("NamespaceList") {
+                    let namespace_count = json
+                        .get("items")
+                        .and_then(|items| items.as_array())
+                        .map(|arr| arr.len())
+                        .unwrap_or(0);
+
+                    if namespace_count == 0 {
+                        return Err(format!(
+                            "Proxy returned NamespaceList but 0 namespaces visible for {} {} - this indicates a permission issue",
+                            cluster_type, cluster_name
+                        ));
+                    }
+
+                    info!(
+                        "[Integration/Proxy] SUCCESS: {} proxy access to {} worked - {} namespaces visible",
+                        cluster_type, cluster_name, namespace_count
+                    );
+                    return Ok(());
                 }
-
-                info!(
-                    "[Integration/Proxy] SUCCESS: {} proxy access to {} worked - {} namespaces visible",
-                    cluster_type, cluster_name, namespace_count
-                );
-                return Ok(());
             }
         }
-    }
 
-    // Check for specific error types
-    if response.is_forbidden() {
+        // Hard failures — no retry
+        if response.is_forbidden() {
+            return Err(format!(
+                "Proxy access denied (403 Forbidden) to {} {} - Cedar policy may be missing. Response: {}",
+                cluster_type, cluster_name, truncate_response(&response.body)
+            ));
+        }
+
+        if response.is_unauthorized() {
+            return Err(format!(
+                "Proxy authentication failed (401 Unauthorized) to {} {} - token validation failed. Response: {}",
+                cluster_type, cluster_name, truncate_response(&response.body)
+            ));
+        }
+
+        // Transient failures — retry if time remains
+        let is_transient = response.body.contains("not found in subtree")
+            || response.body.contains("agent not connected")
+            || response.body.contains("ClusterNotFound");
+
+        if is_transient && std::time::Instant::now() < deadline {
+            info!(
+                "[Integration/Proxy] {} {} not yet reachable (HTTP {}), retrying... Response: {}",
+                cluster_type,
+                cluster_name,
+                response.status_code,
+                truncate_response(&response.body)
+            );
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
         return Err(format!(
-            "Proxy access denied (403 Forbidden) to {} {} - Cedar policy may be missing. Response: {}",
-            cluster_type, cluster_name, truncate_response(&response.body)
+            "Unexpected proxy response for {} {} (HTTP {}) - expected NamespaceList. Response: {}",
+            cluster_type,
+            cluster_name,
+            response.status_code,
+            truncate_response(&response.body)
         ));
     }
-
-    if response.is_unauthorized() {
-        return Err(format!(
-            "Proxy authentication failed (401 Unauthorized) to {} {} - token validation failed. Response: {}",
-            cluster_type, cluster_name, truncate_response(&response.body)
-        ));
-    }
-
-    if response.body.contains("agent not connected") || response.body.contains("ClusterNotFound") {
-        return Err(format!(
-            "{} {} not reachable - cluster may not be registered or agent disconnected",
-            cluster_type, cluster_name
-        ));
-    }
-
-    Err(format!(
-        "Unexpected proxy response for {} {} (HTTP {}) - expected NamespaceList. Response: {}",
-        cluster_type,
-        cluster_name,
-        response.status_code,
-        truncate_response(&response.body)
-    ))
 }
 
 /// Run proxy tests with proper setup/teardown.

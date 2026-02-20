@@ -8,6 +8,7 @@
 //! can declare dependencies on services in other namespaces.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::{DashMap, DashSet};
@@ -432,6 +433,11 @@ pub struct ServiceGraph {
     /// Only shared volumes (those with both `id` and `size`) are indexed.
     /// Updated on put_service/delete_service.
     volume_owners: DashMap<(String, String), VolumeOwnership>,
+
+    /// Monotonic counter bumped when cedar or service policies change.
+    /// Used by the service controller to detect external state changes
+    /// that require recompilation even when the service spec is unchanged.
+    policy_epoch: AtomicU64,
 }
 
 impl Default for ServiceGraph {
@@ -452,6 +458,7 @@ impl ServiceGraph {
             ns_labels: DashMap::new(),
             depends_all_nodes: DashSet::new(),
             volume_owners: DashMap::new(),
+            policy_epoch: AtomicU64::new(0),
         }
     }
 
@@ -852,6 +859,18 @@ impl ServiceGraph {
     pub fn delete_policy(&self, namespace: &str, name: &str) {
         let key = (namespace.to_string(), name.to_string());
         self.policies.remove(&key);
+    }
+
+    /// Increment the policy epoch to signal that cedar or service policies changed.
+    /// Service controllers use this to detect when recompilation is needed even
+    /// though the service spec itself is unchanged.
+    pub fn bump_policy_epoch(&self) {
+        self.policy_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the current policy epoch.
+    pub fn policy_epoch(&self) -> u64 {
+        self.policy_epoch.load(Ordering::Relaxed)
     }
 
     /// Cache namespace labels

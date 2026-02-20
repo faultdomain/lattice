@@ -75,7 +75,7 @@ async fn test_upgrade_with_mesh_traffic() {
     info!("=========================================================");
 
     // Opt-in cleanup of orphaned clusters from previous failed runs
-    setup::cleanup_orphan_bootstrap_clusters();
+    setup::cleanup_orphan_bootstrap_clusters().await;
 
     if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
         panic!("Failed to build Lattice image: {}", e);
@@ -91,14 +91,14 @@ async fn test_upgrade_with_mesh_traffic() {
             error!("=========================================================");
             error!("UPGRADE TEST FAILED: {}", e);
             error!("=========================================================");
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Upgrade test failed: {}", e);
         }
         Err(_) => {
             error!("=========================================================");
             error!("UPGRADE TEST TIMED OUT");
             error!("=========================================================");
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Upgrade test timed out after {:?}", TEST_TIMEOUT);
         }
     }
@@ -121,7 +121,9 @@ async fn run_upgrade_test() -> Result<(), String> {
     workload_cluster.spec.provider.kubernetes.version = from_version.clone();
     workload_cluster.metadata.name = Some(UPGRADE_WORKLOAD_CLUSTER_NAME.to_string());
 
-    ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
+    ensure_docker_network()
+        .await
+        .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
 
     // Install management cluster
     info!("[Phase 1] Installing management cluster...");
@@ -142,7 +144,7 @@ async fn run_upgrade_test() -> Result<(), String> {
         .await
         .map_err(|e| format!("Installer failed: {}", e))?;
 
-    let mgmt_kubeconfig = get_docker_kubeconfig(MGMT_CLUSTER_NAME)?;
+    let mgmt_kubeconfig = get_docker_kubeconfig(MGMT_CLUSTER_NAME).await?;
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig).await?;
 
     // Create workload cluster at from_version
@@ -240,7 +242,8 @@ async fn run_upgrade_test() -> Result<(), String> {
             "-f",
             &format!("{}-control-plane", UPGRADE_WORKLOAD_CLUSTER_NAME),
         ],
-    );
+    )
+    .await;
     let _ = run_cmd(
         "docker",
         &[
@@ -248,7 +251,8 @@ async fn run_upgrade_test() -> Result<(), String> {
             "-f",
             &format!("{}-worker", UPGRADE_WORKLOAD_CLUSTER_NAME),
         ],
-    );
+    )
+    .await;
 
     info!(
         "Upgrade test complete: v{} -> v{}",

@@ -29,6 +29,7 @@ rand.workspace = true
 base64.workspace = true
 dashmap.workspace = true
 regex.workspace = true
+zeroize.workspace = true
 
 # OpenTelemetry
 opentelemetry.workspace = true

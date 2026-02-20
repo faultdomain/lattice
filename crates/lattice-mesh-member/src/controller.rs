@@ -263,10 +263,19 @@ pub async fn reconcile(
         None
     };
 
+    // If a needed CRD wasn't available at startup (e.g. Istio installed in background),
+    // re-run discovery to pick it up.
+    let crds = if needs_crd_refresh(&ctx.crds, &policies, ingress.as_ref(), waypoint.as_ref()) {
+        info!("re-discovering CRDs (needed CRD was missing at startup)");
+        Arc::new(MeshMemberDiscoveredCrds::discover(&ctx.client).await)
+    } else {
+        ctx.crds.clone()
+    };
+
     // Apply all resources
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    apply_policies(&ctx.client, &ctx.crds, namespace, &params, &policies).await?;
+    apply_policies(&ctx.client, &crds, namespace, &params, &policies).await?;
 
     if let Some(ref ingress_resources) = ingress {
         // Use a per-member field manager for the Gateway so each member owns
@@ -277,7 +286,7 @@ pub async fn reconcile(
         let gateway_params = PatchParams::apply(&gateway_field_manager).force();
         apply_ingress(
             &ctx.client,
-            &ctx.crds,
+            &crds,
             namespace,
             &params,
             &gateway_params,
@@ -287,14 +296,7 @@ pub async fn reconcile(
     }
 
     if let Some(ref waypoint_resources) = waypoint {
-        apply_waypoint(
-            &ctx.client,
-            &ctx.crds,
-            namespace,
-            &params,
-            waypoint_resources,
-        )
-        .await?;
+        apply_waypoint(&ctx.client, &crds, namespace, &params, waypoint_resources).await?;
     }
 
     let total = policies.total_count()
@@ -382,6 +384,37 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
 }
 
 // =============================================================================
+// CRD refresh
+// =============================================================================
+
+/// Check if any compiled resources need a CRD that wasn't discovered at startup.
+///
+/// Returns true when re-discovery should be attempted — e.g. Istio or Cilium CRDs
+/// were installed in the background after the operator started.
+fn needs_crd_refresh(
+    crds: &MeshMemberDiscoveredCrds,
+    policies: &crate::policy::GeneratedPolicies,
+    ingress: Option<&crate::ingress::GeneratedIngress>,
+    waypoint: Option<&crate::ingress::GeneratedWaypoint>,
+) -> bool {
+    (!policies.authorization_policies.is_empty() && crds.authorization_policy.is_none())
+        || (!policies.cilium_policies.is_empty() && crds.cilium_network_policy.is_none())
+        || (!policies.service_entries.is_empty() && crds.service_entry.is_none())
+        || (!policies.peer_authentications.is_empty() && crds.peer_authentication.is_none())
+        || ingress.is_some_and(|i| {
+            (i.gateway.is_some() && crds.gateway.is_none())
+                || (!i.http_routes.is_empty() && crds.http_route.is_none())
+                || (!i.grpc_routes.is_empty() && crds.grpc_route.is_none())
+                || (!i.tcp_routes.is_empty() && crds.tcp_route.is_none())
+                || (!i.certificates.is_empty() && crds.certificate.is_none())
+        })
+        || waypoint.is_some_and(|w| {
+            (w.gateway.is_some() && crds.gateway.is_none())
+                || (w.allow_to_waypoint_policy.is_some() && crds.authorization_policy.is_none())
+        })
+}
+
+// =============================================================================
 // SSA apply helpers
 // =============================================================================
 
@@ -415,7 +448,7 @@ async fn apply_resource(
     Ok(())
 }
 
-/// Apply a resource if the CRD is discovered, warn if not
+/// Apply a resource if the CRD is discovered, error if not
 async fn apply_if_discovered(
     client: &Client,
     namespace: &str,
@@ -427,14 +460,17 @@ async fn apply_if_discovered(
 ) -> Result<(), ReconcileError> {
     match crd {
         Some(ar) => apply_resource(client, namespace, params, resource, ar, name, kind).await,
-        None => {
-            warn!(kind = %kind, name = %name, "CRD not installed, skipping");
-            Ok(())
-        }
+        None => Err(ReconcileError::Internal(format!(
+            "{kind} CRD not installed but resource '{name}' needs applying"
+        ))),
     }
 }
 
-/// Apply all compiled policies
+/// Apply all compiled policies in parallel via server-side apply.
+///
+/// Pre-serializes all resources to JSON, then applies them concurrently
+/// using `try_join_all`. Returns an error if any CRD type has compiled
+/// resources but its CRD is not discovered on the cluster.
 async fn apply_policies(
     client: &Client,
     crds: &MeshMemberDiscoveredCrds,
@@ -442,56 +478,90 @@ async fn apply_policies(
     params: &PatchParams,
     policies: &crate::policy::GeneratedPolicies,
 ) -> Result<(), ReconcileError> {
-    for ap in &policies.authorization_policies {
-        apply_if_discovered(
-            client,
-            namespace,
-            params,
-            ap,
-            crds.authorization_policy.as_ref(),
-            &ap.metadata.name,
-            "AuthorizationPolicy",
-        )
-        .await?;
+    use futures::future::try_join_all;
+
+    let mut items: Vec<(String, &'static str, serde_json::Value, ApiResource)> = Vec::new();
+
+    serialize_crd_batch(
+        &mut items,
+        &policies.authorization_policies,
+        crds.authorization_policy.as_ref(),
+        "AuthorizationPolicy",
+        |ap| &ap.metadata.name,
+    )?;
+    serialize_crd_batch(
+        &mut items,
+        &policies.cilium_policies,
+        crds.cilium_network_policy.as_ref(),
+        "CiliumNetworkPolicy",
+        |cnp| &cnp.metadata.name,
+    )?;
+    serialize_crd_batch(
+        &mut items,
+        &policies.service_entries,
+        crds.service_entry.as_ref(),
+        "ServiceEntry",
+        |se| &se.metadata.name,
+    )?;
+    serialize_crd_batch(
+        &mut items,
+        &policies.peer_authentications,
+        crds.peer_authentication.as_ref(),
+        "PeerAuthentication",
+        |pa| &pa.metadata.name,
+    )?;
+
+    if items.is_empty() {
+        return Ok(());
     }
 
-    for cnp in &policies.cilium_policies {
-        apply_if_discovered(
-            client,
-            namespace,
-            params,
-            cnp,
-            crds.cilium_network_policy.as_ref(),
-            &cnp.metadata.name,
-            "CiliumNetworkPolicy",
-        )
-        .await?;
-    }
+    try_join_all(items.into_iter().map(|(name, kind, json, ar)| {
+        let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+        let params = params.clone();
+        async move {
+            api.patch(&name, &params, &Patch::Apply(&json))
+                .await
+                .map_err(|e| ReconcileError::Kube(format!("apply {kind} {name}: {e}")))?;
+            debug!(name = %name, kind = kind, "applied resource");
+            Ok(())
+        }
+    }))
+    .await?;
 
-    for se in &policies.service_entries {
-        apply_if_discovered(
-            client,
-            namespace,
-            params,
-            se,
-            crds.service_entry.as_ref(),
-            &se.metadata.name,
-            "ServiceEntry",
-        )
-        .await?;
-    }
+    Ok(())
+}
 
-    for pa in &policies.peer_authentications {
-        apply_if_discovered(
-            client,
-            namespace,
-            params,
-            pa,
-            crds.peer_authentication.as_ref(),
-            &pa.metadata.name,
-            "PeerAuthentication",
-        )
-        .await?;
+/// Serialize a batch of CRD-backed resources into (name, kind, json, ApiResource) tuples.
+///
+/// Returns an error if the CRD is not discovered but resources need applying.
+/// Resources are serialized eagerly so the actual API calls can run fully in parallel.
+fn serialize_crd_batch<T: serde::Serialize>(
+    items: &mut Vec<(String, &'static str, serde_json::Value, ApiResource)>,
+    resources: &[T],
+    crd: Option<&ApiResource>,
+    kind: &'static str,
+    name_fn: impl Fn(&T) -> &str,
+) -> Result<(), ReconcileError> {
+    let Some(ar) = crd else {
+        if !resources.is_empty() {
+            return Err(ReconcileError::Internal(format!(
+                "{kind} CRD not installed but {} resources need applying",
+                resources.len()
+            )));
+        }
+        return Ok(());
+    };
+
+    for resource in resources {
+        let mut json = serde_json::to_value(resource)
+            .map_err(|e| ReconcileError::Internal(format!("serialize {kind}: {e}")))?;
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert(
+                "apiVersion".to_string(),
+                serde_json::Value::String(ar.api_version.clone()),
+            );
+        }
+        items.push((name_fn(resource).to_string(), kind, json, ar.clone()));
     }
 
     Ok(())
@@ -623,20 +693,32 @@ async fn apply_waypoint(
 /// When bilateral agreements change (e.g., a new caller declares a dependency),
 /// the edge hash changes even though this member's spec/generation doesn't.
 fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
-    use std::collections::hash_map::DefaultHasher;
     use std::fmt::Write;
-    use std::hash::{Hash, Hasher};
+
+    // Sort edges so the hash is stable regardless of graph iteration order.
+    // The graph's edges_in Vec can be reordered by put_node remove+re-insert
+    // cycles, which would otherwise cause spurious hash mismatches and tight
+    // reconciliation loops.
+    let mut sorted_in: Vec<_> = inbound
+        .iter()
+        .map(|e| (&e.caller_namespace, &e.caller_name))
+        .collect();
+    sorted_in.sort();
+
+    let mut sorted_out: Vec<_> = outbound
+        .iter()
+        .map(|e| (&e.callee_namespace, &e.callee_name))
+        .collect();
+    sorted_out.sort();
 
     let mut input = String::new();
-    for e in inbound {
-        let _ = write!(input, "in:{}/{}->", e.caller_namespace, e.caller_name);
+    for (ns, name) in &sorted_in {
+        let _ = write!(input, "in:{ns}/{name}->");
     }
-    for e in outbound {
-        let _ = write!(input, "out:{}/{}->", e.callee_namespace, e.callee_name);
+    for (ns, name) in &sorted_out {
+        let _ = write!(input, "out:{ns}/{name}->");
     }
-    let mut hasher = DefaultHasher::new();
-    input.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    lattice_common::deterministic_hash(&input)
 }
 
 /// Skip reconciliation when the spec (generation) AND graph topology (edge hash) are unchanged.

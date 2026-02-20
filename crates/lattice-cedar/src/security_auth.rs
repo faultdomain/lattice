@@ -111,13 +111,23 @@ struct SecurityEvalContext<'a> {
 
 impl SecurityEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), SecurityDenial> {
-        let service_entity = build_service_entity(self.namespace, self.service_name)
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
+        let service_entity =
+            build_service_entity(self.namespace, self.service_name).map_err(|e| {
+                self.denial(DenialReason::InternalError(format!(
+                    "service entity: {}",
+                    e
+                )))
+            })?;
         let override_entity = build_security_override_entity(
             &self.override_req.override_id,
             &self.override_req.category,
         )
-        .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
+        .map_err(|e| {
+            self.denial(DenialReason::InternalError(format!(
+                "override entity: {}",
+                e
+            )))
+        })?;
 
         self.engine
             .evaluate_service_action(

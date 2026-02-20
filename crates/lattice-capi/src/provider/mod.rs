@@ -126,8 +126,8 @@ impl CAPIManifest {
 pub struct BootstrapInfo {
     /// The parent cell's bootstrap endpoint URL (HTTPS)
     pub bootstrap_endpoint: Option<String>,
-    /// One-time bootstrap token for authentication
-    pub bootstrap_token: Option<String>,
+    /// One-time bootstrap token for authentication (zeroized on drop)
+    pub bootstrap_token: Option<zeroize::Zeroizing<String>>,
     /// CA certificate PEM for verifying the cell's TLS certificate
     pub ca_cert_pem: Option<String>,
 }
@@ -137,7 +137,7 @@ impl BootstrapInfo {
     pub fn new(bootstrap_endpoint: String, token: String, ca_cert_pem: String) -> Self {
         Self {
             bootstrap_endpoint: Some(bootstrap_endpoint),
-            bootstrap_token: Some(token),
+            bootstrap_token: Some(zeroize::Zeroizing::new(token)),
             ca_cert_pem: Some(ca_cert_pem),
         }
     }
@@ -461,6 +461,23 @@ pub fn control_plane_name(cluster_name: &str) -> String {
     format!("{}-control-plane", cluster_name)
 }
 
+/// Format a Kubernetes version string for CAPI resources.
+///
+/// Normalizes the version with a `v` prefix and appends the appropriate suffix
+/// for the bootstrap provider (e.g., `+rke2r1` for RKE2).
+pub fn format_capi_version(
+    raw_version: &str,
+    bootstrap: &lattice_common::crd::BootstrapProvider,
+) -> String {
+    use lattice_common::crd::BootstrapProvider;
+
+    let v = raw_version.trim_start_matches('v');
+    match bootstrap {
+        BootstrapProvider::Kubeadm => format!("v{}", v),
+        BootstrapProvider::Rke2 => format!("v{}+rke2r1", v),
+    }
+}
+
 /// Autoscaler annotation keys
 const AUTOSCALER_MIN_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size";
 const AUTOSCALER_MAX_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size";
@@ -480,16 +497,11 @@ pub fn generate_machine_deployment_for_pool(
     let deployment_name = format!("{}-{}", config.name, suffix);
 
     // Bootstrap config template kind and version suffix depend on bootstrap provider
-    let (bootstrap_config_kind, version) = match config.bootstrap {
-        BootstrapProvider::Kubeadm => (
-            "KubeadmConfigTemplate",
-            format!("v{}", config.k8s_version.trim_start_matches('v')),
-        ),
-        BootstrapProvider::Rke2 => (
-            "RKE2ConfigTemplate",
-            format!("v{}+rke2r1", config.k8s_version.trim_start_matches('v')),
-        ),
+    let bootstrap_config_kind = match config.bootstrap {
+        BootstrapProvider::Kubeadm => "KubeadmConfigTemplate",
+        BootstrapProvider::Rke2 => "RKE2ConfigTemplate",
     };
+    let version = format_capi_version(config.k8s_version, &config.bootstrap);
 
     let spec = serde_json::json!({
         "clusterName": config.name,
@@ -977,7 +989,7 @@ fn generate_kubeadm_control_plane(
     // In CAPI v1beta2, infrastructureRef is nested under machineTemplate.spec
     let spec = serde_json::json!({
         "replicas": cp_config.replicas,
-        "version": format!("v{}", config.k8s_version.trim_start_matches('v')),
+        "version": format_capi_version(config.k8s_version, &config.bootstrap),
         "machineTemplate": {
             "spec": {
                 "infrastructureRef": {
@@ -1057,7 +1069,7 @@ fn generate_rke2_control_plane(
 
     let mut spec = serde_json::json!({
         "replicas": cp_config.replicas,
-        "version": format!("v{}+rke2r1", config.k8s_version.trim_start_matches('v')),
+        "version": format_capi_version(config.k8s_version, &config.bootstrap),
         "registrationMethod": "control-plane-endpoint",
         "machineTemplate": {
             "infrastructureRef": {
@@ -1943,6 +1955,43 @@ mod tests {
         }
     }
 
+    mod format_capi_version_tests {
+        use super::*;
+        use lattice_common::crd::BootstrapProvider;
+
+        #[test]
+        fn kubeadm_adds_v_prefix() {
+            assert_eq!(
+                format_capi_version("1.32.0", &BootstrapProvider::Kubeadm),
+                "v1.32.0"
+            );
+        }
+
+        #[test]
+        fn kubeadm_preserves_existing_v_prefix() {
+            assert_eq!(
+                format_capi_version("v1.31.0", &BootstrapProvider::Kubeadm),
+                "v1.31.0"
+            );
+        }
+
+        #[test]
+        fn rke2_adds_suffix() {
+            assert_eq!(
+                format_capi_version("1.32.0", &BootstrapProvider::Rke2),
+                "v1.32.0+rke2r1"
+            );
+        }
+
+        #[test]
+        fn rke2_preserves_existing_v_prefix() {
+            assert_eq!(
+                format_capi_version("v1.31.0", &BootstrapProvider::Rke2),
+                "v1.31.0+rke2r1"
+            );
+        }
+    }
+
     mod shared_helpers {
         use super::*;
 
@@ -2195,7 +2244,7 @@ mod tests {
             assert!(!empty.is_some());
 
             let with_token = BootstrapInfo {
-                bootstrap_token: Some("token".to_string()),
+                bootstrap_token: Some(zeroize::Zeroizing::new("token".to_string())),
                 ..Default::default()
             };
             assert!(with_token.is_some());
@@ -2212,7 +2261,10 @@ mod tests {
                 info.bootstrap_endpoint,
                 Some("https://cell:8080".to_string())
             );
-            assert_eq!(info.bootstrap_token, Some("token123".to_string()));
+            assert_eq!(
+                info.bootstrap_token,
+                Some(zeroize::Zeroizing::new("token123".to_string()))
+            );
             assert_eq!(
                 info.ca_cert_pem,
                 Some("-----BEGIN CERTIFICATE-----".to_string())

@@ -28,7 +28,7 @@ use lattice_common::crd::{
 use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_policy_crd, delete_cedar_policies_by_label, delete_namespace,
-    deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies,
+    deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_pod_running, TestHarness,
     BUSYBOX_IMAGE, NGINX_IMAGE,
 };
@@ -262,34 +262,24 @@ async fn wait_for_policies(
     service_name: &str,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
-    use std::sync::Mutex;
-
-    let result: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
     wait_for_condition(
         &format!("TracingPolicy for {service_name} in {namespace}"),
         timeout,
         Duration::from_secs(5),
-        || {
-            let result = &result;
-            async move {
-                let all = list_tracing_policies(kubeconfig, namespace).await?;
-                let matching: Vec<String> = all
-                    .into_iter()
-                    .filter(|n| n.ends_with(&format!("-{service_name}")))
-                    .collect();
-                if !matching.is_empty() {
-                    *result.lock().unwrap() = matching;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
+        || async move {
+            let all = list_tracing_policies(kubeconfig, namespace).await?;
+            let matching: Vec<String> = all
+                .into_iter()
+                .filter(|n| n.ends_with(&format!("-{service_name}")))
+                .collect();
+            if !matching.is_empty() {
+                Ok(Some(matching))
+            } else {
+                Ok(None)
             }
         },
     )
-    .await?;
-
-    Ok(result.into_inner().unwrap())
+    .await
 }
 
 fn assert_has(policies: &[String], prefix: &str, svc: &str) {
@@ -339,7 +329,8 @@ enum ExecResult {
     TransientError(String),
 }
 
-fn exec_in_pod_sync(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&str]) -> ExecResult {
+/// Exec into a deployment's pod and classify the result.
+async fn exec_in_pod(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&str]) -> ExecResult {
     let deploy_ref = format!("deploy/{deploy}");
     let mut cmd_args = vec![
         "--kubeconfig",
@@ -352,9 +343,10 @@ fn exec_in_pod_sync(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&st
     ];
     cmd_args.extend_from_slice(args);
 
-    let output = match std::process::Command::new("kubectl")
+    let output = match tokio::process::Command::new("kubectl")
         .args(&cmd_args)
         .output()
+        .await
     {
         Ok(o) => o,
         Err(e) => {
@@ -399,7 +391,7 @@ fn exec_in_pod_sync(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&st
     // Unknown non-zero exit — could be Tetragon or something else. Log clearly.
     info!("[exec] {deploy} in {namespace}: UNKNOWN_FAIL (exit={exit_code:?}, stderr={stderr:?})");
     // Treat exit code > 128 as signal-killed (128+signal_number)
-    if exit_code.map_or(false, |c| c > 128) {
+    if exit_code.is_some_and(|c| c > 128) {
         ExecResult::Killed
     } else {
         ExecResult::TransientError(stderr)
@@ -427,7 +419,7 @@ async fn wait_for_exec_blocked(
             let args = &args;
             async move {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                match exec_in_pod_sync(kubeconfig, namespace, deploy, &args_ref) {
+                match exec_in_pod(kubeconfig, namespace, deploy, &args_ref).await {
                     ExecResult::Killed => Ok(true),
                     ExecResult::Ok(out) => {
                         warn!("[wait_killed] {deploy} unexpectedly succeeded: {out:?}");
@@ -465,7 +457,7 @@ async fn wait_for_exec_allowed(
             let args = &args;
             async move {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                match exec_in_pod_sync(kubeconfig, namespace, deploy, &args_ref) {
+                match exec_in_pod(kubeconfig, namespace, deploy, &args_ref).await {
                     ExecResult::Ok(_) => Ok(true),
                     ExecResult::Killed => {
                         warn!("[wait_allowed] {deploy} unexpectedly killed");
@@ -717,6 +709,7 @@ async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
     apply_security_override(kubeconfig, "permit-tetragon-t6", NS_ALLOWED_BINARIES).await?;
 
     let svc = "svc-binaries";
+    // Allow only /bin/busybox (needed to exec anything in the busybox image)
     deploy_and_wait_for_phase(
         kubeconfig,
         NS_ALLOWED_BINARIES,
@@ -776,26 +769,62 @@ async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
 async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 7: Cedar deny on allowedBinary...");
     ensure_fresh_namespace(kubeconfig, NS_ALLOWED_BINARIES_CEDAR).await?;
+    // No security override permit → Cedar default-deny should reject the allowedBinary
 
     let svc = "svc-cedar-deny";
-    let result = deploy_and_wait_for_phase(
+    let svc_obj = build_service_with_allowed_binaries(
+        svc,
+        NS_ALLOWED_BINARIES_CEDAR,
+        vec!["/usr/bin/curl".to_string()],
+    );
+
+    // The service must reach "Failed" phase — Cedar default-deny should reject
+    // the allowedBinary override because no OverrideSecurity permit exists.
+    // deploy_and_wait_for_phase returns Ok when the target phase is reached,
+    // or Err on timeout. Both "Failed" and timeout-with-rejection are acceptable,
+    // but reaching "Ready" means Cedar deny is broken.
+    match deploy_and_wait_for_phase(
         kubeconfig,
         NS_ALLOWED_BINARIES_CEDAR,
-        build_service_with_allowed_binaries(
-            svc,
-            NS_ALLOWED_BINARIES_CEDAR,
-            vec!["/usr/bin/curl".to_string()],
-        ),
+        svc_obj,
         "Failed",
         None,
         Duration::from_secs(90),
     )
-    .await;
+    .await
+    {
+        Ok(_) => {
+            info!("[Tetragon] Test 7 passed — service reached Failed phase (Cedar denial)");
+        }
+        Err(e) => {
+            // Timeout is acceptable only if the service did NOT reach Ready.
+            // Check the current phase to distinguish "never scheduled" from "succeeded".
+            let phase = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "latticeservice",
+                svc,
+                "-n",
+                NS_ALLOWED_BINARIES_CEDAR,
+                "-o",
+                "jsonpath={.status.phase}",
+            ])
+            .await
+            .unwrap_or_default();
 
-    if result.is_err() {
-        info!("[Tetragon] Test 7 passed — deployment rejected by Cedar");
-    } else {
-        info!("[Tetragon] Test 7 passed — service in Failed phase due to Cedar denial");
+            if phase.trim() == "Ready" {
+                delete_namespace(kubeconfig, NS_ALLOWED_BINARIES_CEDAR).await;
+                return Err(format!(
+                    "Cedar deny BROKEN: service reached Ready phase instead of Failed. \
+                     The OverrideSecurity Cedar policy is not blocking allowedBinaries. Error: {e}"
+                ));
+            }
+            info!(
+                "[Tetragon] Test 7 passed — deployment rejected by Cedar (phase={}, err={e})",
+                phase.trim()
+            );
+        }
     }
 
     delete_namespace(kubeconfig, NS_ALLOWED_BINARIES_CEDAR).await;
@@ -907,7 +936,10 @@ async fn test_implicit_wildcard_cedar_deny(kubeconfig: &str) -> Result<(), Strin
     ensure_fresh_namespace(kubeconfig, NS_IMPLICIT_CEDAR_DENY).await?;
 
     let svc = "svc-implicit-deny";
-    let result = deploy_and_wait_for_phase(
+
+    // The service must reach "Failed" — Cedar default-deny should reject
+    // the implicit wildcard because no OverrideSecurity permit exists.
+    match deploy_and_wait_for_phase(
         kubeconfig,
         NS_IMPLICIT_CEDAR_DENY,
         build_service_no_command(svc, NS_IMPLICIT_CEDAR_DENY),
@@ -915,12 +947,38 @@ async fn test_implicit_wildcard_cedar_deny(kubeconfig: &str) -> Result<(), Strin
         None,
         Duration::from_secs(90),
     )
-    .await;
+    .await
+    {
+        Ok(_) => {
+            info!("[Tetragon] Test 10 passed — service reached Failed phase (Cedar denial)");
+        }
+        Err(e) => {
+            let phase = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "latticeservice",
+                svc,
+                "-n",
+                NS_IMPLICIT_CEDAR_DENY,
+                "-o",
+                "jsonpath={.status.phase}",
+            ])
+            .await
+            .unwrap_or_default();
 
-    if result.is_err() {
-        info!("[Tetragon] Test 10 passed — deployment rejected by Cedar");
-    } else {
-        info!("[Tetragon] Test 10 passed — service in Failed phase due to Cedar denial");
+            if phase.trim() == "Ready" {
+                delete_namespace(kubeconfig, NS_IMPLICIT_CEDAR_DENY).await;
+                return Err(format!(
+                    "Cedar deny BROKEN: implicit wildcard service reached Ready instead of Failed. \
+                     The OverrideSecurity Cedar policy is not blocking implicit wildcards. Error: {e}"
+                ));
+            }
+            info!(
+                "[Tetragon] Test 10 passed — deployment rejected by Cedar (phase={}, err={e})",
+                phase.trim()
+            );
+        }
     }
 
     delete_namespace(kubeconfig, NS_IMPLICIT_CEDAR_DENY).await;
@@ -935,6 +993,9 @@ async fn test_missing_entrypoint_killed(kubeconfig: &str) -> Result<(), String> 
     ensure_fresh_namespace(kubeconfig, NS_MISSING_ENTRYPOINT).await?;
     apply_security_override(kubeconfig, "permit-tetragon-t11", NS_MISSING_ENTRYPOINT).await?;
 
+    // command: ["sleep", "infinity"] → "sleep" auto-whitelisted
+    // allowedBinaries: ["/usr/bin/curl"] → also whitelisted
+    // But exec'ing "sh" should be killed since it's not in either list
     let svc = "svc-bad-whitelist";
     deploy_and_wait_for_phase(
         kubeconfig,

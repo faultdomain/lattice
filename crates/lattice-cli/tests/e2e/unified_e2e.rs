@@ -1,20 +1,20 @@
 //! Unified E2E test for Lattice: full lifecycle with all integration tests
 //!
 //! This test validates the complete Lattice lifecycle by running ALL integration
-//! tests in sequence against a shared cluster hierarchy. Use this when you want
-//! comprehensive coverage in a single run.
+//! tests in sequence against a 2-cluster hierarchy (mgmt -> workload). Use this
+//! when you want comprehensive coverage in a single run.
 //!
+//! For the 3-cluster hierarchy (workload2), see `workload2_e2e.rs`.
 //! For isolated, per-integration E2E tests, see the individual `*_e2e.rs` files.
 //!
 //! # Phases
 //!
-//! 1. Set up cluster hierarchy (mgmt -> workload, optionally -> workload2)
+//! 1. Set up cluster hierarchy (mgmt -> workload)
 //! 2. Kubeconfig + proxy verification
 //! 3. Cedar cluster-access policy enforcement
-//! 4. Multi-hop proxy (if workload2)
-//! 5. Mesh + secrets + Cedar secret + autoscaling tests (parallel) + workload2 deletion
-//! 6. Workload deletion (unpivot to mgmt)
-//! 7. Management cluster uninstall
+//! 4. Mesh + secrets + Cedar secret + autoscaling tests (parallel)
+//! 5. Workload deletion (unpivot to mgmt)
+//! 6. Management cluster uninstall
 //!
 //! # Running
 //!
@@ -32,8 +32,7 @@ use tracing::info;
 
 use super::context::init_e2e_test;
 use super::helpers::{
-    run_id, teardown_mgmt_cluster, TestHarness, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME,
-    WORKLOAD_CLUSTER_NAME,
+    run_id, teardown_mgmt_cluster, TestHarness, MGMT_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::{self, setup};
 use super::providers::InfraProvider;
@@ -52,11 +51,11 @@ async fn test_configurable_provider_pivot() {
             info!("TEST PASSED");
         }
         Ok(Err(e)) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("E2E test failed: {} (manual cleanup may be required)", e);
         }
         Err(_) => {
-            setup::cleanup_bootstrap_cluster(run_id());
+            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!(
                 "E2E test timed out after {:?} (manual cleanup required)",
                 E2E_TIMEOUT
@@ -89,20 +88,10 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("[Phase 6.5] Verifying kubeconfig patching and proxy access...");
 
     // Verify kubeconfigs are patched for proxy
-    let workload2_name = if ctx.has_workload2() {
-        Some(WORKLOAD2_CLUSTER_NAME)
-    } else {
-        None
-    };
-    integration::kubeconfig::run_kubeconfig_verification(
-        &ctx,
-        WORKLOAD_CLUSTER_NAME,
-        workload2_name,
-    )
-    .await?;
+    integration::kubeconfig::run_kubeconfig_verification(&ctx, WORKLOAD_CLUSTER_NAME, None).await?;
 
     // Test proxy access through the hierarchy
-    integration::proxy::run_proxy_tests(&ctx, WORKLOAD_CLUSTER_NAME, workload2_name).await?;
+    integration::proxy::run_proxy_tests(&ctx, WORKLOAD_CLUSTER_NAME, None).await?;
 
     info!("SUCCESS: Kubeconfig and proxy verification complete!");
 
@@ -116,28 +105,14 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("[Phase 6.6] Testing Cedar policy enforcement (chaos paused on mgmt)...");
 
     // Test Cedar policies for access from mgmt -> workload
-    // (Multi-hop tests in Phase 6.7 validate the full mgmt -> workload -> workload2 chain)
     integration::cedar::run_cedar_hierarchy_tests(&ctx, WORKLOAD_CLUSTER_NAME).await?;
 
     info!("SUCCESS: Cedar policy enforcement verified!");
 
     // =========================================================================
-    // Phase 6.7: Test multi-hop proxy operations (if workload2 exists)
+    // Phase 7: Run mesh + secrets + Cedar secret + autoscaling tests (pool)
     // =========================================================================
-    if ctx.has_workload2() {
-        info!("[Phase 6.7] Testing multi-hop proxy operations (mgmt -> workload -> workload2)...");
-        integration::multi_hop::run_multi_hop_proxy_tests(&ctx).await?;
-        info!("SUCCESS: Multi-hop proxy tests complete!");
-    }
-
-    // =========================================================================
-    // Phase 7: Run mesh + secrets + Cedar secret + autoscaling tests + delete workload2 (pool)
-    // =========================================================================
-    if ctx.has_workload2() {
-        info!("[Phase 7] Running mesh/secrets/cedar/autoscaling tests + deleting workload2 (pool=3)...");
-    } else {
-        info!("[Phase 7] Running mesh/secrets/cedar/autoscaling tests (pool=3, workload2 disabled)...");
-    }
+    info!("[Phase 7] Running mesh/secrets/cedar/autoscaling tests (pool=3)...");
 
     // Limit concurrent proxy load — at most 3 tasks run simultaneously
     // (some tasks may spawn internal concurrency, e.g. secrets runs up to 3 sub-tests)
@@ -235,28 +210,6 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
-    // Workload2 deletion (if exists) — pause chaos first to avoid log spam
-    if ctx.has_workload2() {
-        setup_result.pause_chaos_on_cluster(WORKLOAD2_CLUSTER_NAME);
-        let child_kc = ctx.require_workload2()?.to_string();
-        let parent_kc = ctx.require_workload()?.to_string();
-        let provider = ctx.provider;
-        let sem = pool.clone();
-        handles.push((
-            "Workload2 deletion",
-            tokio::spawn(async move {
-                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::pivot::delete_and_verify_unpivot(
-                    &child_kc,
-                    &parent_kc,
-                    WORKLOAD2_CLUSTER_NAME,
-                    provider,
-                )
-                .await
-            }),
-        ));
-    }
-
     // Wait for all tasks and collect results
     let harness = TestHarness::new("E2E Phase 7");
     for (name, handle) in handles {
@@ -264,9 +217,9 @@ async fn run_full_e2e() -> Result<(), String> {
         let result = handle.await;
         let duration = start.elapsed();
         match result {
-            Ok(Ok(())) => harness.record(&name, true, duration, None),
-            Ok(Err(e)) => harness.record(&name, false, duration, Some(e)),
-            Err(e) => harness.record(&name, false, duration, Some(format!("PANIC: {e}"))),
+            Ok(Ok(())) => harness.record(name, true, duration, None),
+            Ok(Err(e)) => harness.record(name, false, duration, Some(e)),
+            Err(e) => harness.record(name, false, duration, Some(format!("PANIC: {e}"))),
         }
     }
     harness.finish()?;

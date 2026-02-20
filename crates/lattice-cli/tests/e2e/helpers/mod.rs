@@ -30,26 +30,51 @@ pub use test_harness::*;
 // Generic Polling Helper
 // =============================================================================
 
-/// Poll an async condition until it returns `true` or the timeout expires.
+/// Trait that abstracts over condition return types for `wait_for_condition`.
 ///
-/// Replaces 15+ hand-rolled polling loops across the test suite with a single
-/// reusable helper. The `condition` closure returns `Ok(true)` when done,
-/// `Ok(false)` to keep polling, or `Err` to abort immediately.
+/// Implemented for `bool` (returns `()`) and `Option<T>` (returns `T`), so the
+/// same polling helper works for both fire-and-forget conditions and conditions
+/// that produce a value.
+pub trait ConditionResult {
+    type Value;
+    fn is_met(&self) -> bool;
+    fn into_value(self) -> Self::Value;
+}
+
+impl ConditionResult for bool {
+    type Value = ();
+    fn is_met(&self) -> bool {
+        *self
+    }
+    fn into_value(self) -> Self::Value {}
+}
+
+impl<T> ConditionResult for Option<T> {
+    type Value = T;
+    fn is_met(&self) -> bool {
+        self.is_some()
+    }
+    fn into_value(self) -> T {
+        self.expect("into_value called on None (should only be called when is_met() is true)")
+    }
+}
+
+/// Poll an async condition until it succeeds or the timeout expires.
 ///
-/// # Arguments
-/// * `description` - Human-readable label for log messages
-/// * `timeout` - Maximum wall-clock time to poll
-/// * `poll_interval` - Sleep duration between polls
-/// * `condition` - Async closure checked each iteration
-pub async fn wait_for_condition<F, Fut>(
+/// The condition closure returns `Ok(R)` where `R` implements `ConditionResult`:
+/// - `bool`: `Ok(true)` = done, `Ok(false)` = keep polling. Returns `()`.
+/// - `Option<T>`: `Ok(Some(val))` = done with value, `Ok(None)` = keep polling. Returns `T`.
+/// - `Err(String)` aborts immediately in both cases.
+pub async fn wait_for_condition<F, Fut, R>(
     description: &str,
     timeout: Duration,
     poll_interval: Duration,
     condition: F,
-) -> Result<(), String>
+) -> Result<R::Value, String>
 where
     F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<bool, String>>,
+    Fut: std::future::Future<Output = Result<R, String>>,
+    R: ConditionResult,
 {
     let start = std::time::Instant::now();
     loop {
@@ -60,8 +85,8 @@ where
             ));
         }
         match condition().await {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
+            Ok(r) if r.is_met() => return Ok(r.into_value()),
+            Ok(_) => {}
             Err(e) => return Err(e),
         }
         sleep(poll_interval).await;

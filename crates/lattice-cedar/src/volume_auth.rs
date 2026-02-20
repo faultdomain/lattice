@@ -111,15 +111,21 @@ struct VolumeEvalContext<'a> {
 
 impl VolumeEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), VolumeDenial> {
-        let service_entity = build_service_entity(self.namespace, self.service_name)
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
-        let volume_entity = build_volume_entity(self.vol_ns, self.volume_id)
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
+        let service_entity =
+            build_service_entity(self.namespace, self.service_name).map_err(|e| {
+                self.denial(DenialReason::InternalError(format!(
+                    "service entity: {}",
+                    e
+                )))
+            })?;
+        let volume_entity = build_volume_entity(self.vol_ns, self.volume_id).map_err(|e| {
+            self.denial(DenialReason::InternalError(format!("volume entity: {}", e)))
+        })?;
 
         let principal_uid = service_entity.uid().clone();
         let resource_uid = volume_entity.uid().clone();
         let entities = Entities::from_entities(vec![service_entity, volume_entity], None)
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
+            .map_err(|e| self.denial(DenialReason::InternalError(format!("entities: {}", e))))?;
 
         let response = self
             .engine
@@ -131,7 +137,7 @@ impl VolumeEvalContext<'_> {
                 &entities,
                 self.policy_set,
             )
-            .map_err(|_| self.denial(DenialReason::NoPermitPolicy))?;
+            .map_err(|e| self.denial(DenialReason::InternalError(format!("evaluation: {}", e))))?;
 
         match response.decision() {
             Decision::Allow => {
