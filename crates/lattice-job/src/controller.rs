@@ -7,7 +7,7 @@
 //! - Layer 1: ConfigMaps, Secrets, ExternalSecrets, PVCs, MeshMembers, TracingPolicies
 //! - Layer 2: VCJob (only after mesh/security is ready)
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use kube::api::{Api, DynamicObject, Patch, PatchParams};
@@ -19,58 +19,11 @@ use tracing::{error, info, warn};
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{JobPhase, LatticeJob, LatticeJobStatus, ProviderType};
 use lattice_common::graph::ServiceGraph;
-use lattice_common::kube_utils::{find_discovered_resource, ApplyBatch};
+use lattice_common::kube_utils::ApplyBatch;
+use lattice_common::{CrdKind, CrdRegistry};
 
 use crate::compiler::{compile_job, CompiledJob};
 use crate::error::JobError;
-
-/// Discovered CRD API versions for job resources.
-///
-/// Shared CRDs (external_secret, mesh_member, tracing_policy_namespaced) are
-/// passed from the service controller and always available at startup.
-/// Volcano Job is job-specific and may arrive later (installed as an addon).
-pub struct JobDiscoveredCrds {
-    pub external_secret: Option<ApiResource>,
-    pub mesh_member: Option<ApiResource>,
-    pub tracing_policy_namespaced: Option<ApiResource>,
-    pub volcano_job: Option<ApiResource>,
-}
-
-impl JobDiscoveredCrds {
-    /// Discover Volcano Job CRD, reusing already-discovered shared CRDs.
-    pub async fn from_shared(
-        client: &Client,
-        external_secret: Option<ApiResource>,
-        mesh_member: Option<ApiResource>,
-        tracing_policy_namespaced: Option<ApiResource>,
-    ) -> Self {
-        let volcano_job = discover_volcano(client).await;
-        Self {
-            external_secret,
-            mesh_member,
-            tracing_policy_namespaced,
-            volcano_job,
-        }
-    }
-}
-
-/// Discover the Volcano Job CRD via API discovery.
-async fn discover_volcano(client: &Client) -> Option<ApiResource> {
-    use kube::discovery::Discovery;
-
-    let discovery = match Discovery::new(client.clone()).run().await {
-        Ok(d) => d,
-        Err(e) => {
-            warn!(error = %e, "API discovery failed, cannot detect Volcano Job CRD");
-            return None;
-        }
-    };
-    let ar = find_discovered_resource(&discovery, "batch.volcano.sh", "Job");
-    if ar.is_none() {
-        warn!("Volcano Job CRD (batch.volcano.sh/Job) not found in API discovery");
-    }
-    ar
-}
 
 /// Shared context for the LatticeJob controller
 pub struct JobContext {
@@ -79,54 +32,27 @@ pub struct JobContext {
     pub cluster_name: String,
     pub provider_type: ProviderType,
     pub cedar: Arc<PolicyEngine>,
-    /// Shared CRDs passed from the service controller (immutable after startup).
-    pub crds: Arc<JobDiscoveredCrds>,
-    /// Lazily resolved Volcano Job API resource. Populated from startup discovery
-    /// if available, otherwise resolved on first use via API discovery and cached
-    /// permanently. `OnceLock` gives zero-cost reads after initialization.
-    volcano_api: OnceLock<ApiResource>,
+    pub registry: Arc<CrdRegistry>,
 }
 
 impl JobContext {
+    /// Create a new JobContext with a shared CRD registry
     pub fn new(
         client: Client,
         graph: Arc<ServiceGraph>,
         cluster_name: String,
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
-        crds: Arc<JobDiscoveredCrds>,
+        registry: Arc<CrdRegistry>,
     ) -> Self {
-        let volcano_api = OnceLock::new();
-        if let Some(ar) = &crds.volcano_job {
-            let _ = volcano_api.set(ar.clone());
-        }
         Self {
             client,
             graph,
             cluster_name,
             provider_type,
             cedar,
-            crds,
-            volcano_api,
+            registry,
         }
-    }
-
-    /// Get the Volcano Job API resource, discovering lazily if not yet available.
-    ///
-    /// On first call (when Volcano wasn't installed at startup), runs API discovery
-    /// and caches the result in a `OnceLock`. Subsequent calls return immediately
-    /// with no discovery overhead. Returns `None` if Volcano is still not installed.
-    async fn resolve_volcano_api(&self) -> Option<&ApiResource> {
-        if let Some(ar) = self.volcano_api.get() {
-            return Some(ar);
-        }
-
-        info!("Volcano Job CRD was missing at startup, attempting discovery");
-        if let Some(ar) = discover_volcano(&self.client).await {
-            // First writer wins; concurrent discovery is harmless (idempotent).
-            let _ = self.volcano_api.set(ar);
-        }
-        self.volcano_api.get()
     }
 }
 
@@ -193,7 +119,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 );
             }
 
-            let volcano_api = match ctx.resolve_volcano_api().await {
+            let volcano_api = match ctx.registry.resolve(CrdKind::VolcanoJob).await {
                 Some(ar) => ar,
                 None => {
                     warn!(job = %name, "cannot check VCJob status: Volcano CRD not discovered");
@@ -201,7 +127,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 }
             };
 
-            match check_vcjob_status(&ctx.client, &name, namespace, volcano_api).await {
+            match check_vcjob_status(&ctx.client, &name, namespace, &volcano_api).await {
                 Some(VCJobPhase::Completed) => {
                     info!(job = %name, "job succeeded");
                     cleanup_graph(&job, &ctx.graph, namespace);
@@ -279,18 +205,27 @@ async fn apply_compiled_job(
     ensure_namespace(client, namespace).await?;
 
     let volcano_api = ctx
-        .resolve_volcano_api()
+        .registry
+        .resolve(CrdKind::VolcanoJob)
         .await
         .ok_or(JobError::VolcanoCrdMissing)?;
 
-    apply_layers(client, namespace, compiled, &ctx.crds, volcano_api, &params).await
+    apply_layers(
+        client,
+        namespace,
+        compiled,
+        &ctx.registry,
+        &volcano_api,
+        &params,
+    )
+    .await
 }
 
 async fn apply_layers(
     client: &Client,
     namespace: &str,
     compiled: &CompiledJob,
-    crds: &JobDiscoveredCrds,
+    registry: &CrdRegistry,
     volcano_api: &ApiResource,
     params: &PatchParams,
 ) -> Result<(), JobError> {
@@ -330,24 +265,27 @@ async fn apply_layers(
     for secret in &compiled.config.files_secrets {
         layer1.push("Secret", &secret.metadata.name, secret, &secret_ar)?;
     }
+    let es_ar = registry.resolve(CrdKind::ExternalSecret).await;
     layer1.push_crd(
         "ExternalSecret",
-        crds.external_secret.as_ref(),
+        es_ar.as_ref(),
         &compiled.config.external_secrets,
         |es| &es.metadata.name,
     )?;
     for pvc in &compiled.config.pvcs {
         layer1.push("PersistentVolumeClaim", &pvc.metadata.name, pvc, &pvc_ar)?;
     }
+    let mm_ar = registry.resolve(CrdKind::MeshMember).await;
     layer1.push_crd(
         "LatticeMeshMember",
-        crds.mesh_member.as_ref(),
+        mm_ar.as_ref(),
         &compiled.mesh_members,
         |mm| mm.metadata.name.as_deref().unwrap_or("unknown"),
     )?;
+    let tp_ar = registry.resolve(CrdKind::TracingPolicyNamespaced).await;
     layer1.push_crd(
         "TracingPolicyNamespaced",
-        crds.tracing_policy_namespaced.as_ref(),
+        tp_ar.as_ref(),
         &compiled.tracing_policies,
         |tp| &tp.metadata.name,
     )?;

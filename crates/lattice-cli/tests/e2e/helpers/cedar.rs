@@ -317,33 +317,25 @@ pub async fn list_tracing_policies(
     kubeconfig: &str,
     namespace: &str,
 ) -> Result<Vec<String>, String> {
-    let output = std::process::Command::new("kubectl")
-        .args([
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "tracingpolicynamespaced",
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.items[*].metadata.name}",
-        ])
-        .output()
-        .map_err(|e| format!("kubectl failed: {e}"))?;
+    let output = super::docker::run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "tracingpolicynamespaced",
+        "-n",
+        namespace,
+        "-o",
+        "jsonpath={.items[*].metadata.name}",
+    ])
+    .await;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // CRD not installed — return empty rather than error
-        if stderr.contains("the server doesn't have a resource type") {
-            return Ok(vec![]);
-        }
-        return Err(stderr.to_string());
+    match output {
+        Ok(stdout) => Ok(stdout
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()),
+        Err(e) if e.contains("the server doesn't have a resource type") => Ok(vec![]),
+        Err(e) => Err(e),
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .split_whitespace()
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect())
 }

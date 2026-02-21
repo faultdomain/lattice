@@ -14,6 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use kube::api::{Api, Patch, PatchParams};
+use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
 use kube::{Client, Resource, ResourceExt};
@@ -22,8 +23,7 @@ use tracing::{debug, error, info, instrument, warn};
 #[cfg(test)]
 use mockall::automock;
 
-use kube::discovery::ApiResource;
-use lattice_common::kube_utils::{find_discovered_resource, HasApiResource};
+use lattice_common::{CrdKind, CrdRegistry};
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::events::{actions, reasons, EventPublisher};
@@ -40,89 +40,6 @@ use crate::crd::{
 use crate::graph::ServiceGraph;
 use crate::Error;
 use lattice_workload::backup::merge_backup_specs;
-
-// =============================================================================
-// Discovered CRD versions
-// =============================================================================
-
-/// Cache of discovered API versions for third-party CRDs.
-///
-/// At operator startup, we discover which CRDs are installed and their API versions
-/// via Kubernetes API discovery. This avoids hardcoding versions like `v1beta1` that
-/// may differ from what's actually installed (e.g., the cluster has `v1` only).
-///
-/// If a CRD isn't installed, its field is `None` and resources of that type are
-/// skipped with a warning during apply.
-pub struct DiscoveredCrds {
-    pub external_secret: Option<ApiResource>,
-    pub scaled_object: Option<ApiResource>,
-    pub vm_service_scrape: Option<ApiResource>,
-    pub mesh_member: Option<ApiResource>,
-    pub tracing_policy_namespaced: Option<ApiResource>,
-}
-
-impl DiscoveredCrds {
-    /// Discover installed CRD versions from the API server.
-    ///
-    /// Runs a single API discovery and looks up each third-party CRD.
-    /// Missing CRDs result in `None` (not an error).
-    pub async fn discover(client: &Client) -> Self {
-        use kube::discovery::Discovery;
-
-        let discovery = match Discovery::new(client.clone()).run().await {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(error = %e, "API discovery failed, falling back to hardcoded CRD versions");
-                return Self::hardcoded_defaults();
-            }
-        };
-
-        Self {
-            external_secret: find_discovered_resource(
-                &discovery,
-                "external-secrets.io",
-                "ExternalSecret",
-            ),
-            scaled_object: find_discovered_resource(&discovery, "keda.sh", "ScaledObject"),
-            vm_service_scrape: find_discovered_resource(
-                &discovery,
-                "operator.victoriametrics.com",
-                "VMServiceScrape",
-            ),
-            mesh_member: find_discovered_resource(&discovery, "lattice.dev", "LatticeMeshMember"),
-            tracing_policy_namespaced: find_discovered_resource(
-                &discovery,
-                "cilium.io",
-                "TracingPolicyNamespaced",
-            ),
-        }
-    }
-
-    /// Fall back to hardcoded `HasApiResource` defaults.
-    ///
-    /// Used when API discovery fails entirely, and in tests.
-    pub fn hardcoded_defaults() -> Self {
-        use crate::workload::ScaledObject;
-        use lattice_secret_provider::eso::ExternalSecret;
-
-        Self {
-            external_secret: Some(ExternalSecret::api_resource()),
-            scaled_object: Some(ScaledObject::api_resource()),
-            vm_service_scrape: Some(lattice_common::kube_utils::build_api_resource(
-                "operator.victoriametrics.com/v1beta1",
-                "VMServiceScrape",
-            )),
-            mesh_member: Some(lattice_common::kube_utils::build_api_resource(
-                "lattice.dev/v1alpha1",
-                "LatticeMeshMember",
-            )),
-            tracing_policy_namespaced: Some(lattice_common::kube_utils::build_api_resource(
-                "cilium.io/v1alpha1",
-                "TracingPolicyNamespaced",
-            )),
-        }
-    }
-}
 
 // =============================================================================
 // Traits for dependency injection and testability
@@ -198,7 +115,7 @@ pub trait ServiceKubeClient: Send + Sync {
 /// Real Kubernetes client implementation
 pub struct ServiceKubeClientImpl {
     client: Client,
-    crds: Arc<DiscoveredCrds>,
+    registry: Arc<CrdRegistry>,
 }
 
 /// Fetch labels for a Kubernetes namespace. Returns empty map if not found.
@@ -216,21 +133,9 @@ pub(crate) async fn fetch_namespace_labels(
 }
 
 impl ServiceKubeClientImpl {
-    /// Create a new ServiceKubeClientImpl wrapping the given client and discovered CRDs
-    pub fn new(client: Client, crds: Arc<DiscoveredCrds>) -> Self {
-        Self { client, crds }
-    }
-
-    /// Check if any compiled resources need a CRD that wasn't discovered at startup.
-    ///
-    /// Returns true when re-discovery should be attempted — e.g. ESO CRDs were
-    /// installed in the background after the operator started.
-    fn needs_crd_refresh(&self, compiled: &CompiledService) -> bool {
-        (!compiled.workloads.external_secrets.is_empty() && self.crds.external_secret.is_none())
-            || (compiled.workloads.scaled_object.is_some() && self.crds.scaled_object.is_none())
-            || (compiled.mesh_member.is_some() && self.crds.mesh_member.is_none())
-            || (!compiled.tracing_policies.is_empty()
-                && self.crds.tracing_policy_namespaced.is_none())
+    /// Create a new ServiceKubeClientImpl wrapping the given client and CRD registry
+    pub fn new(client: Client, registry: Arc<CrdRegistry>) -> Self {
+        Self { client, registry }
     }
 
     /// Ensure a namespace exists with ambient mode labels for Istio traffic routing.
@@ -367,17 +272,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         self.ensure_namespace(namespace).await?;
 
-        // If a needed CRD wasn't available at startup (e.g. ESO installed in background),
-        // re-run discovery to pick it up. Only triggers when resources are compiled but
-        // the CRD is None — on subsequent reconciles the service is Ready and the
-        // reconcile guard skips, so this is not called repeatedly.
-        let crds = if self.needs_crd_refresh(compiled) {
-            info!("re-discovering CRDs (needed CRD was missing at startup)");
-            Arc::new(DiscoveredCrds::discover(&self.client).await)
-        } else {
-            self.crds.clone()
-        };
-
         let params = PatchParams::apply("lattice-service-controller").force();
 
         // ApiResources for native K8s types (used by push via DynamicObject)
@@ -423,44 +317,51 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // ExternalSecrets (ESO syncs secrets from Vault)
+        let es_ar = self.registry.resolve(CrdKind::ExternalSecret).await;
         layer1.push_crd(
             "ExternalSecret",
-            crds.external_secret.as_ref(),
+            es_ar.as_ref(),
             &compiled.workloads.external_secrets,
             |es| &es.metadata.name,
         )?;
 
         // LatticeMeshMember CR — the MeshMember controller generates all mesh policies
         if let Some(ref mesh_member) = compiled.mesh_member {
-            if let Some(ar) = &crds.mesh_member {
-                layer1.push(
-                    "LatticeMeshMember",
-                    mesh_member.metadata.name.as_deref().unwrap_or("unknown"),
-                    mesh_member,
-                    ar,
-                )?;
-            } else {
-                return Err(Error::internal_with_context(
-                    "apply_compiled_service",
-                    "LatticeMeshMember CRD not installed but mesh member needs applying",
-                ));
-            }
+            let ar = self
+                .registry
+                .resolve(CrdKind::MeshMember)
+                .await
+                .ok_or_else(|| {
+                    Error::internal_with_context(
+                        "apply_compiled_service",
+                        "LatticeMeshMember CRD not installed but mesh member needs applying",
+                    )
+                })?;
+            layer1.push(
+                "LatticeMeshMember",
+                mesh_member.metadata.name.as_deref().unwrap_or("unknown"),
+                mesh_member,
+                &ar,
+            )?;
         }
 
         // Tetragon TracingPolicyNamespaced (runtime enforcement)
         if !compiled.tracing_policies.is_empty() {
-            if let Some(ar) = &crds.tracing_policy_namespaced {
-                for tp in &compiled.tracing_policies {
-                    layer1.push("TracingPolicyNamespaced", &tp.metadata.name, tp, ar)?;
-                }
-            } else {
-                return Err(Error::internal_with_context(
-                    "apply_compiled_service",
-                    format!(
+            let ar = self
+                .registry
+                .resolve(CrdKind::TracingPolicyNamespaced)
+                .await
+                .ok_or_else(|| {
+                    Error::internal_with_context(
+                        "apply_compiled_service",
+                        format!(
                         "TracingPolicyNamespaced CRD not installed but {} policies need applying",
                         compiled.tracing_policies.len()
                     ),
-                ));
+                    )
+                })?;
+            for tp in &compiled.tracing_policies {
+                layer1.push("TracingPolicyNamespaced", &tp.metadata.name, tp, &ar)?;
             }
         }
 
@@ -500,9 +401,10 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         // Must be applied after the Deployment because KEDA's admission webhook
         // validates that the scaleTargetRef target exists.
         let mut layer3 = ApplyBatch::new(self.client.clone(), namespace, &params);
+        let so_ar = self.registry.resolve(CrdKind::ScaledObject).await;
         layer3.push_optional_crd(
             "ScaledObject",
-            crds.scaled_object.as_ref(),
+            so_ar.as_ref(),
             compiled.workloads.scaled_object.as_ref(),
             |so| &so.metadata.name,
         )?;
@@ -677,7 +579,7 @@ impl ServiceContext {
         }
     }
 
-    /// Create a new ServiceContext from a Kubernetes client with discovered CRDs
+    /// Create a new ServiceContext from a Kubernetes client with a CRD registry
     ///
     /// This creates a new ServiceGraph and default-deny PolicyEngine.
     /// For shared state, create dependencies externally and use the constructor.
@@ -686,7 +588,7 @@ impl ServiceContext {
         cluster_name: impl Into<String>,
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
-        crds: Arc<DiscoveredCrds>,
+        registry: Arc<CrdRegistry>,
         monitoring: MonitoringConfig,
     ) -> Self {
         let events = Arc::new(KubeEventPublisher::new(
@@ -694,7 +596,7 @@ impl ServiceContext {
             "lattice-service-controller",
         ));
         Self {
-            kube: Arc::new(ServiceKubeClientImpl::new(client, crds)),
+            kube: Arc::new(ServiceKubeClientImpl::new(client, registry)),
             graph: Arc::new(ServiceGraph::new()),
             cluster_name: cluster_name.into(),
             provider_type,

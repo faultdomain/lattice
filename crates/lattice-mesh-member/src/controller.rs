@@ -23,9 +23,8 @@ use lattice_common::crd::{
     MeshMemberScope, MeshMemberTarget,
 };
 use lattice_common::graph::{ActiveEdge, ServiceGraph};
-use lattice_common::kube_utils::{find_discovered_resource, HasApiResource};
 use lattice_common::mesh;
-use lattice_common::ReconcileError;
+use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
 
 use crate::ingress::{IngressCompiler, WaypointCompiler};
 use crate::policy::PolicyCompiler;
@@ -39,104 +38,8 @@ pub struct MeshMemberContext {
     pub client: Client,
     pub graph: Arc<ServiceGraph>,
     pub cluster_name: String,
-    pub crds: Arc<MeshMemberDiscoveredCrds>,
+    pub registry: Arc<CrdRegistry>,
     pub cedar: Option<Arc<PolicyEngine>>,
-}
-
-/// Discovered CRD API versions for third-party resources applied by this controller.
-///
-/// Populated at startup via API discovery. Missing CRDs result in `None`
-/// and resources of that type are skipped with a warning.
-pub struct MeshMemberDiscoveredCrds {
-    pub cilium_network_policy: Option<ApiResource>,
-    pub authorization_policy: Option<ApiResource>,
-    pub service_entry: Option<ApiResource>,
-    pub peer_authentication: Option<ApiResource>,
-    pub gateway: Option<ApiResource>,
-    pub http_route: Option<ApiResource>,
-    pub grpc_route: Option<ApiResource>,
-    pub tcp_route: Option<ApiResource>,
-    pub certificate: Option<ApiResource>,
-}
-
-impl MeshMemberDiscoveredCrds {
-    /// Discover installed CRD versions from the API server.
-    pub async fn discover(client: &Client) -> Self {
-        use kube::discovery::Discovery;
-
-        let discovery = match Discovery::new(client.clone()).run().await {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(error = %e, "API discovery failed, falling back to hardcoded CRD versions");
-                return Self::hardcoded_defaults();
-            }
-        };
-
-        Self {
-            cilium_network_policy: find_discovered_resource(
-                &discovery,
-                "cilium.io",
-                "CiliumNetworkPolicy",
-            ),
-            authorization_policy: find_discovered_resource(
-                &discovery,
-                "security.istio.io",
-                "AuthorizationPolicy",
-            ),
-            service_entry: find_discovered_resource(
-                &discovery,
-                "networking.istio.io",
-                "ServiceEntry",
-            ),
-            peer_authentication: find_discovered_resource(
-                &discovery,
-                "security.istio.io",
-                "PeerAuthentication",
-            ),
-            gateway: find_discovered_resource(&discovery, "gateway.networking.k8s.io", "Gateway"),
-            http_route: find_discovered_resource(
-                &discovery,
-                "gateway.networking.k8s.io",
-                "HTTPRoute",
-            ),
-            grpc_route: find_discovered_resource(
-                &discovery,
-                "gateway.networking.k8s.io",
-                "GRPCRoute",
-            ),
-            tcp_route: find_discovered_resource(
-                &discovery,
-                "gateway.networking.k8s.io",
-                "TCPRoute",
-            ),
-            certificate: find_discovered_resource(&discovery, "cert-manager.io", "Certificate"),
-        }
-    }
-
-    /// Fall back to hardcoded defaults (used when discovery fails, and in tests).
-    pub fn hardcoded_defaults() -> Self {
-        use lattice_common::kube_utils::build_api_resource;
-        use lattice_common::network::gateway_api::Gateway as GwApiGateway;
-        use lattice_common::network::gateway_api::{Certificate, GrpcRoute, HttpRoute, TcpRoute};
-        use lattice_common::policy::cilium::CiliumNetworkPolicy;
-        use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
-        use lattice_common::policy::service_entry::ServiceEntry;
-
-        Self {
-            cilium_network_policy: Some(CiliumNetworkPolicy::api_resource()),
-            authorization_policy: Some(AuthorizationPolicy::api_resource()),
-            service_entry: Some(ServiceEntry::api_resource()),
-            peer_authentication: Some(PeerAuthentication::api_resource()),
-            gateway: Some(GwApiGateway::api_resource()),
-            http_route: Some(HttpRoute::api_resource()),
-            grpc_route: Some(GrpcRoute::api_resource()),
-            tcp_route: Some(build_api_resource(TcpRoute::API_VERSION, TcpRoute::KIND)),
-            certificate: Some(build_api_resource(
-                Certificate::API_VERSION,
-                Certificate::KIND,
-            )),
-        }
-    }
 }
 
 // =============================================================================
@@ -263,19 +166,10 @@ pub async fn reconcile(
         None
     };
 
-    // If a needed CRD wasn't available at startup (e.g. Istio installed in background),
-    // re-run discovery to pick it up.
-    let crds = if needs_crd_refresh(&ctx.crds, &policies, ingress.as_ref(), waypoint.as_ref()) {
-        info!("re-discovering CRDs (needed CRD was missing at startup)");
-        Arc::new(MeshMemberDiscoveredCrds::discover(&ctx.client).await)
-    } else {
-        ctx.crds.clone()
-    };
-
     // Apply all resources
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    apply_policies(&ctx.client, &crds, namespace, &params, &policies).await?;
+    apply_policies(&ctx.client, &ctx.registry, namespace, &params, &policies).await?;
 
     if let Some(ref ingress_resources) = ingress {
         // Use a per-member field manager for the Gateway so each member owns
@@ -286,7 +180,7 @@ pub async fn reconcile(
         let gateway_params = PatchParams::apply(&gateway_field_manager).force();
         apply_ingress(
             &ctx.client,
-            &crds,
+            &ctx.registry,
             namespace,
             &params,
             &gateway_params,
@@ -296,7 +190,14 @@ pub async fn reconcile(
     }
 
     if let Some(ref waypoint_resources) = waypoint {
-        apply_waypoint(&ctx.client, &crds, namespace, &params, waypoint_resources).await?;
+        apply_waypoint(
+            &ctx.client,
+            &ctx.registry,
+            namespace,
+            &params,
+            waypoint_resources,
+        )
+        .await?;
     }
 
     let total = policies.total_count()
@@ -384,37 +285,6 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
 }
 
 // =============================================================================
-// CRD refresh
-// =============================================================================
-
-/// Check if any compiled resources need a CRD that wasn't discovered at startup.
-///
-/// Returns true when re-discovery should be attempted — e.g. Istio or Cilium CRDs
-/// were installed in the background after the operator started.
-fn needs_crd_refresh(
-    crds: &MeshMemberDiscoveredCrds,
-    policies: &crate::policy::GeneratedPolicies,
-    ingress: Option<&crate::ingress::GeneratedIngress>,
-    waypoint: Option<&crate::ingress::GeneratedWaypoint>,
-) -> bool {
-    (!policies.authorization_policies.is_empty() && crds.authorization_policy.is_none())
-        || (!policies.cilium_policies.is_empty() && crds.cilium_network_policy.is_none())
-        || (!policies.service_entries.is_empty() && crds.service_entry.is_none())
-        || (!policies.peer_authentications.is_empty() && crds.peer_authentication.is_none())
-        || ingress.is_some_and(|i| {
-            (i.gateway.is_some() && crds.gateway.is_none())
-                || (!i.http_routes.is_empty() && crds.http_route.is_none())
-                || (!i.grpc_routes.is_empty() && crds.grpc_route.is_none())
-                || (!i.tcp_routes.is_empty() && crds.tcp_route.is_none())
-                || (!i.certificates.is_empty() && crds.certificate.is_none())
-        })
-        || waypoint.is_some_and(|w| {
-            (w.gateway.is_some() && crds.gateway.is_none())
-                || (w.allow_to_waypoint_policy.is_some() && crds.authorization_policy.is_none())
-        })
-}
-
-// =============================================================================
 // SSA apply helpers
 // =============================================================================
 
@@ -473,7 +343,7 @@ async fn apply_if_discovered(
 /// resources but its CRD is not discovered on the cluster.
 async fn apply_policies(
     client: &Client,
-    crds: &MeshMemberDiscoveredCrds,
+    registry: &CrdRegistry,
     namespace: &str,
     params: &PatchParams,
     policies: &crate::policy::GeneratedPolicies,
@@ -482,31 +352,35 @@ async fn apply_policies(
 
     let mut items: Vec<(String, &'static str, serde_json::Value, ApiResource)> = Vec::new();
 
+    let auth_ar = registry.resolve(CrdKind::AuthorizationPolicy).await;
     serialize_crd_batch(
         &mut items,
         &policies.authorization_policies,
-        crds.authorization_policy.as_ref(),
+        auth_ar.as_ref(),
         "AuthorizationPolicy",
         |ap| &ap.metadata.name,
     )?;
+    let cilium_ar = registry.resolve(CrdKind::CiliumNetworkPolicy).await;
     serialize_crd_batch(
         &mut items,
         &policies.cilium_policies,
-        crds.cilium_network_policy.as_ref(),
+        cilium_ar.as_ref(),
         "CiliumNetworkPolicy",
         |cnp| &cnp.metadata.name,
     )?;
+    let se_ar = registry.resolve(CrdKind::ServiceEntry).await;
     serialize_crd_batch(
         &mut items,
         &policies.service_entries,
-        crds.service_entry.as_ref(),
+        se_ar.as_ref(),
         "ServiceEntry",
         |se| &se.metadata.name,
     )?;
+    let pa_ar = registry.resolve(CrdKind::PeerAuthentication).await;
     serialize_crd_batch(
         &mut items,
         &policies.peer_authentications,
-        crds.peer_authentication.as_ref(),
+        pa_ar.as_ref(),
         "PeerAuthentication",
         |pa| &pa.metadata.name,
     )?;
@@ -573,71 +447,76 @@ fn serialize_crd_batch<T: serde::Serialize>(
 /// and `params` (shared field manager) for routes and certificates.
 async fn apply_ingress(
     client: &Client,
-    crds: &MeshMemberDiscoveredCrds,
+    registry: &CrdRegistry,
     namespace: &str,
     params: &PatchParams,
     gateway_params: &PatchParams,
     ingress: &crate::ingress::GeneratedIngress,
 ) -> Result<(), ReconcileError> {
     if let Some(ref gw) = ingress.gateway {
+        let gw_ar = registry.resolve(CrdKind::Gateway).await;
         apply_if_discovered(
             client,
             namespace,
             gateway_params,
             gw,
-            crds.gateway.as_ref(),
+            gw_ar.as_ref(),
             &gw.metadata.name,
             "Gateway",
         )
         .await?;
     }
 
+    let http_ar = registry.resolve(CrdKind::HttpRoute).await;
     for route in &ingress.http_routes {
         apply_if_discovered(
             client,
             namespace,
             params,
             route,
-            crds.http_route.as_ref(),
+            http_ar.as_ref(),
             &route.metadata.name,
             "HTTPRoute",
         )
         .await?;
     }
 
+    let grpc_ar = registry.resolve(CrdKind::GrpcRoute).await;
     for route in &ingress.grpc_routes {
         apply_if_discovered(
             client,
             namespace,
             params,
             route,
-            crds.grpc_route.as_ref(),
+            grpc_ar.as_ref(),
             &route.metadata.name,
             "GRPCRoute",
         )
         .await?;
     }
 
+    let tcp_ar = registry.resolve(CrdKind::TcpRoute).await;
     for route in &ingress.tcp_routes {
         apply_if_discovered(
             client,
             namespace,
             params,
             route,
-            crds.tcp_route.as_ref(),
+            tcp_ar.as_ref(),
             &route.metadata.name,
             "TCPRoute",
         )
         .await?;
     }
 
+    let cert_ar = registry.resolve(CrdKind::Certificate).await;
     for cert in &ingress.certificates {
         apply_if_discovered(
             client,
             namespace,
             params,
             cert,
-            crds.certificate.as_ref(),
+            cert_ar.as_ref(),
             &cert.metadata.name,
             "Certificate",
         )
@@ -650,18 +529,19 @@ async fn apply_ingress(
 /// Apply compiled waypoint resources
 async fn apply_waypoint(
     client: &Client,
-    crds: &MeshMemberDiscoveredCrds,
+    registry: &CrdRegistry,
     namespace: &str,
     params: &PatchParams,
     waypoint: &crate::ingress::GeneratedWaypoint,
 ) -> Result<(), ReconcileError> {
     if let Some(ref gw) = waypoint.gateway {
+        let gw_ar = registry.resolve(CrdKind::Gateway).await;
         apply_if_discovered(
             client,
             namespace,
             params,
             gw,
-            crds.gateway.as_ref(),
+            gw_ar.as_ref(),
             &gw.metadata.name,
             "Gateway",
         )
@@ -669,12 +549,13 @@ async fn apply_waypoint(
     }
 
     if let Some(ref policy) = waypoint.allow_to_waypoint_policy {
+        let auth_ar = registry.resolve(CrdKind::AuthorizationPolicy).await;
         apply_if_discovered(
             client,
             namespace,
             params,
             policy,
-            crds.authorization_policy.as_ref(),
+            auth_ar.as_ref(),
             &policy.metadata.name,
             "AuthorizationPolicy",
         )

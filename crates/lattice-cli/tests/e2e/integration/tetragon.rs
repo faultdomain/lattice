@@ -312,24 +312,18 @@ fn assert_has(policies: &[String], prefix: &str, svc: &str) {
 }
 
 async fn get_policy_yaml(kubeconfig: &str, namespace: &str, name: &str) -> Result<String, String> {
-    let output = std::process::Command::new("kubectl")
-        .args([
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "tracingpolicynamespaced",
-            name,
-            "-n",
-            namespace,
-            "-o",
-            "yaml",
-        ])
-        .output()
-        .map_err(|e| format!("kubectl failed: {e}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "tracingpolicynamespaced",
+        name,
+        "-n",
+        namespace,
+        "-o",
+        "yaml",
+    ])
+    .await
 }
 
 /// Check if a binary appears in the allow-binaries policy's NotEqual values list.

@@ -77,17 +77,24 @@ where
     R: ConditionResult,
 {
     let start = std::time::Instant::now();
+    let mut last_error: Option<String> = None;
     loop {
         if start.elapsed() > timeout {
-            return Err(format!(
-                "Timeout after {:?} waiting for: {}",
-                timeout, description
-            ));
+            let mut msg = format!("Timeout after {:?} waiting for: {}", timeout, description);
+            if let Some(e) = &last_error {
+                msg.push_str(&format!(" (last error: {e})"));
+            }
+            return Err(msg);
         }
         match condition().await {
             Ok(r) if r.is_met() => return Ok(r.into_value()),
-            Ok(_) => {}
-            Err(e) => return Err(e),
+            Ok(_) => {
+                last_error = None;
+            }
+            Err(e) => {
+                tracing::warn!("Transient error while waiting for {}: {}", description, e);
+                last_error = Some(e);
+            }
         }
         sleep(poll_interval).await;
     }

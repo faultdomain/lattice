@@ -36,6 +36,7 @@ use lattice_common::crd::LatticeCluster;
 use lattice_common::crd::{LatticeService, OIDCProvider};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::telemetry::{init_telemetry, TelemetryConfig};
+use lattice_common::CrdRegistry;
 use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
     DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
@@ -48,7 +49,6 @@ use lattice_operator::startup::{
     re_register_existing_clusters, spawn_general_infrastructure, start_ca_rotation,
     wait_for_api_ready_for,
 };
-use lattice_service::controller::DiscoveredCrds;
 
 mod controller_runner;
 
@@ -324,7 +324,7 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
 }
 
 /// Service slice: Service CRDs, service infra (Istio, Gateway API, ESO, Cilium),
-/// Cedar, DiscoveredCrds, service + provider controllers
+/// Cedar, CrdRegistry, service + provider controllers
 async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     ensure_service_crds(client).await?;
 
@@ -338,14 +338,14 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     let cluster_name = std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
     let provider_type = controller_runner::resolve_provider_type_from_env();
     let monitoring = controller_runner::resolve_monitoring_from_env();
-    let crds = Arc::new(DiscoveredCrds::discover(client).await);
+    let registry = Arc::new(CrdRegistry::discover(client.clone()).await);
 
     let (mut controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
         cluster_name.clone(),
         provider_type,
         cedar.clone(),
-        crds.clone(),
+        registry.clone(),
         monitoring,
     )
     .await;
@@ -357,7 +357,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
             provider_type,
             cedar.clone(),
             graph,
-            &crds,
+            registry,
         )
         .await,
     );
@@ -437,13 +437,13 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     let provider_type = controller_runner::resolve_provider_type_from_cluster(client).await;
     let monitoring = controller_runner::resolve_monitoring_from_cluster(client).await;
     let cluster_name = self_cluster_name.unwrap_or_else(|| "default".to_string());
-    let crds = Arc::new(DiscoveredCrds::discover(client).await);
+    let registry = Arc::new(CrdRegistry::discover(client.clone()).await);
     let (service_controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
         cluster_name.clone(),
         provider_type,
         cedar.clone(),
-        crds.clone(),
+        registry.clone(),
         monitoring,
     )
     .await;
@@ -456,7 +456,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
             provider_type,
             cedar.clone(),
             graph,
-            &crds,
+            registry,
         )
         .await,
     );

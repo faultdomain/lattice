@@ -30,13 +30,13 @@ use lattice_common::crd::{
     LatticeExternalService, LatticeJob, LatticeMeshMember, LatticeRestore, LatticeService,
     LatticeServicePolicy, MonitoringConfig, OIDCProvider, ProviderType, SecretProvider,
 };
-use lattice_common::{ControllerContext, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{ControllerContext, CrdKind, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{
     error_policy as service_error_policy, reconcile as service_reconcile, reconcile_external,
-    DiscoveredCrds, ServiceContext,
+    ServiceContext,
 };
 use lattice_service::policy_controller as service_policy_ctrl;
 
@@ -84,21 +84,21 @@ pub async fn build_service_controllers(
     cluster_name: String,
     provider_type: ProviderType,
     cedar: Arc<PolicyEngine>,
-    crds: Arc<DiscoveredCrds>,
+    registry: Arc<CrdRegistry>,
     monitoring: MonitoringConfig,
 ) -> (
     Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
     Arc<lattice_common::graph::ServiceGraph>,
 ) {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
-    let vm_service_scrape_ar = crds.vm_service_scrape.clone();
+    let vm_service_scrape_ar = registry.resolve(CrdKind::VMServiceScrape).await;
     let cedar_for_mm = cedar.clone();
     let mut service_ctx = ServiceContext::from_client(
         client.clone(),
         cluster_name,
         provider_type,
         cedar.clone(),
-        crds,
+        registry.clone(),
         monitoring,
     );
     service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(
@@ -219,12 +219,11 @@ pub async fn build_service_controllers(
     .for_each(log_reconcile_result("ServicePolicy"));
 
     // ── MeshMember controller ──
-    let mm_crds = Arc::new(mesh_member_ctrl::MeshMemberDiscoveredCrds::discover(&client).await);
     let mm_ctx = Arc::new(mesh_member_ctrl::MeshMemberContext {
         client: client.clone(),
         graph: service_ctx.graph.clone(),
         cluster_name: service_ctx.cluster_name.clone(),
-        crds: mm_crds,
+        registry,
         cedar: Some(cedar_for_mm),
     });
 
@@ -283,18 +282,9 @@ pub async fn build_job_controllers(
     provider_type: ProviderType,
     cedar: Arc<PolicyEngine>,
     graph: Arc<lattice_common::graph::ServiceGraph>,
-    shared_crds: &DiscoveredCrds,
+    registry: Arc<CrdRegistry>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
-    let crds = Arc::new(
-        lattice_job::controller::JobDiscoveredCrds::from_shared(
-            &client,
-            shared_crds.external_secret.clone(),
-            shared_crds.mesh_member.clone(),
-            shared_crds.tracing_policy_namespaced.clone(),
-        )
-        .await,
-    );
 
     let ctx = Arc::new(lattice_job::controller::JobContext::new(
         client.clone(),
@@ -302,7 +292,7 @@ pub async fn build_job_controllers(
         cluster_name,
         provider_type,
         cedar,
-        crds,
+        registry,
     ));
 
     let jobs: Api<LatticeJob> = Api::all(client);

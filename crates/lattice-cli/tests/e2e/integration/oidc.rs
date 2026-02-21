@@ -136,27 +136,20 @@ async fn wait_for_oidc_provider_ready(kubeconfig: &str) -> Result<(), String> {
         "OIDCProvider to become Ready",
         Duration::from_secs(60),
         Duration::from_secs(3),
-        || {
-            let kubeconfig = kubeconfig.to_string();
-            async move {
-                let output = std::process::Command::new("kubectl")
-                    .args([
-                        "--kubeconfig",
-                        &kubeconfig,
-                        "get",
-                        "oidcprovider",
-                        "keycloak-test",
-                        "-n",
-                        LATTICE_SYSTEM_NAMESPACE,
-                        "-o",
-                        "jsonpath={.status.phase}",
-                    ])
-                    .output()
-                    .map_err(|e| format!("kubectl failed: {}", e))?;
-
-                let phase = String::from_utf8_lossy(&output.stdout).to_string();
-                Ok(phase == "Ready")
-            }
+        || async move {
+            let phase = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "oidcprovider",
+                "keycloak-test",
+                "-n",
+                LATTICE_SYSTEM_NAMESPACE,
+                "-o",
+                "jsonpath={.status.phase}",
+            ])
+            .await?;
+            Ok(phase.trim() == "Ready")
         },
     )
     .await

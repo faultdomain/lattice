@@ -4,6 +4,7 @@
 
 pub mod capi_lifecycle;
 pub mod crd;
+pub mod crd_registry;
 pub mod credentials;
 pub mod error;
 pub mod events;
@@ -21,6 +22,7 @@ pub mod telemetry;
 pub mod template;
 pub mod yaml;
 
+pub use crd_registry::{CrdKind, CrdRegistry};
 pub use error::{default_error_policy, ControllerContext, Error, ReconcileError};
 pub use events::{EventPublisher, KubeEventPublisher, NoopEventPublisher};
 pub use kube_utils::{
