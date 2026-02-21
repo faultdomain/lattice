@@ -24,8 +24,11 @@ pub const CERT: &[&str] = &["cert-manager"];
 /// External Secrets Operator namespace
 pub const ESO: &[&str] = &["external-secrets"];
 
-/// GPU infrastructure namespaces (GPU Operator + HAMi)
-pub const GPU: &[&str] = &["gpu-operator", "hami-system"];
+/// GPU infrastructure namespace (GPU Operator)
+pub const GPU: &[&str] = &["gpu-operator"];
+
+/// Volcano gang scheduling namespace
+pub const VOLCANO: &[&str] = &["volcano-system"];
 
 /// Monitoring namespaces (VictoriaMetrics + KEDA)
 pub const MONITORING: &[&str] = &["monitoring", "keda"];
@@ -56,6 +59,7 @@ pub fn all() -> Vec<&'static str> {
         .chain(CERT.iter())
         .chain(ESO.iter())
         .chain(GPU.iter())
+        .chain(VOLCANO.iter())
         .chain(MONITORING.iter())
         .chain(CAPI.iter())
         .copied()

@@ -1,0 +1,48 @@
+[package]
+name = "lattice-job"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LatticeJob controller and compiler for Lattice batch workloads"
+
+[features]
+fips = ["lattice-common/fips", "lattice-workload/fips", "aws-lc-rs/fips"]
+
+[dependencies]
+# Internal
+lattice-common = { workspace = true }
+lattice-workload = { workspace = true }
+lattice-tetragon = { workspace = true }
+lattice-volcano = { workspace = true }
+lattice-cedar = { workspace = true }
+lattice-secret-provider = { workspace = true }
+
+# Crypto (FIPS)
+aws-lc-rs = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async utilities
+futures = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+serde_json = { workspace = true }

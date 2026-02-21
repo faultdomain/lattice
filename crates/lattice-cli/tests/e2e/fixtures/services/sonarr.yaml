@@ -7,7 +7,7 @@ spec:
   workload:
     containers:
       main:
-        image: docker.io/linuxserver/sonarr:latest
+        image: ghcr.io/evan-hines-js/sonarr:latest
         security:
           runAsUser: 0
           apparmorProfile: Unconfined

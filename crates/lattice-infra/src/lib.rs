@@ -36,6 +36,15 @@ pub mod mtls;
 pub mod pki;
 pub mod system_namespaces;
 
+/// Upstream container registries extracted at build time from all rendered Helm charts.
+/// Used by lattice-capi to generate containerd mirror configuration.
+pub fn upstream_registries() -> Vec<&'static str> {
+    env!("UPSTREAM_REGISTRIES")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 // Re-export mTLS types (commonly used across many crates)
 pub use mtls::{
     extract_cluster_id_from_cert, verify_cert_chain, ClientMtlsConfig, MtlsError, ServerMtlsConfig,

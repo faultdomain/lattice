@@ -18,6 +18,7 @@ pub mod metrics_server;
 pub mod prometheus;
 pub mod tetragon;
 pub mod velero;
+pub mod volcano;
 
 use std::sync::LazyLock;
 
@@ -49,7 +50,7 @@ pub struct InfrastructureConfig {
     pub parent_host: Option<String>,
     /// Parent cell gRPC port (used with parent_host)
     pub parent_grpc_port: u16,
-    /// Enable GPU infrastructure (NFD + NVIDIA device plugin + HAMi)
+    /// Enable GPU infrastructure (NFD + NVIDIA device plugin)
     pub gpu: bool,
     /// Monitoring infrastructure configuration (VictoriaMetrics + KEDA for autoscaling).
     pub monitoring: MonitoringConfig,
@@ -149,10 +150,13 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
         }
     }
 
-    // GPU stack (NFD + NVIDIA device plugin + HAMi)
+    // GPU stack (NFD + NVIDIA device plugin)
     if config.gpu {
         manifests.extend(gpu::generate_gpu_stack().iter().cloned());
     }
+
+    // Volcano gang scheduling (always installed — required for LatticeJob)
+    manifests.extend(volcano::generate_volcano().iter().cloned());
 
     // Tetragon runtime enforcement (eBPF kprobes on LSM hooks)
     manifests.extend(tetragon::generate_tetragon().iter().cloned());
@@ -315,13 +319,18 @@ pub(crate) fn namespace_yaml_ambient(name: &str) -> String {
 /// Filters out empty documents and comment-only blocks.
 /// Normalizes output to always have `---` prefix for kubectl apply compatibility.
 ///
+/// Helm hooks: `pre-install` and `pre-upgrade` hooks are kept because they
+/// contain setup resources (e.g. cert-generation Jobs) that work fine when
+/// applied as regular resources — the retry loop handles ordering. Test and
+/// delete hooks are filtered since they don't make sense outside `helm install`.
+///
 /// Note: JSON policies from our typed generators are added directly to manifest
 /// lists and never go through this function.
 pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
     yaml.split("\n---")
         .map(|doc| doc.trim())
         .filter(|doc| {
-            let keep = !doc.is_empty() && doc.contains("kind:") && !doc.contains("helm.sh/hook");
+            let keep = !doc.is_empty() && doc.contains("kind:") && !is_filtered_helm_hook(doc);
             if !keep && !doc.is_empty() {
                 tracing::debug!(
                     doc_preview = &doc[..doc.len().min(100)],
@@ -338,6 +347,23 @@ pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Returns true if a YAML document is a Helm hook that should be filtered out.
+///
+/// We keep pre-install/pre-upgrade hooks (setup resources like cert-generation Jobs)
+/// and filter test/delete hooks that only make sense during `helm install/delete`.
+fn is_filtered_helm_hook(doc: &str) -> bool {
+    if !doc.contains("helm.sh/hook") {
+        return false;
+    }
+    // Keep pre-install and pre-upgrade hooks — they set up prerequisites
+    // and work fine as regular resources applied alongside everything else
+    if doc.contains("pre-install") || doc.contains("pre-upgrade") {
+        return false;
+    }
+    // Filter test hooks, delete hooks, and any other hook types
+    true
 }
 
 #[cfg(test)]
@@ -363,5 +389,27 @@ mod tests {
         let crds = generate_gateway_api_crds();
         assert!(!crds.is_empty());
         assert!(crds.iter().any(|c| c.contains("CustomResourceDefinition")));
+    }
+
+    #[test]
+    fn helm_hooks_pre_install_kept() {
+        let yaml = "kind: Job\nmetadata:\n  annotations:\n    helm.sh/hook: pre-install\n---\nkind: Deployment\n";
+        let docs = split_yaml_documents(yaml);
+        assert_eq!(docs.len(), 2, "pre-install hooks should be kept");
+    }
+
+    #[test]
+    fn helm_hooks_test_filtered() {
+        let yaml =
+            "kind: Pod\nmetadata:\n  annotations:\n    helm.sh/hook: test\n---\nkind: Deployment\n";
+        let docs = split_yaml_documents(yaml);
+        assert_eq!(docs.len(), 1, "test hooks should be filtered");
+    }
+
+    #[test]
+    fn helm_hooks_pre_delete_filtered() {
+        let yaml = "kind: Job\nmetadata:\n  annotations:\n    helm.sh/hook: pre-delete\n---\nkind: Deployment\n";
+        let docs = split_yaml_documents(yaml);
+        assert_eq!(docs.len(), 1, "pre-delete hooks should be filtered");
     }
 }

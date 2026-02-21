@@ -27,7 +27,7 @@ use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     BackupStore, CedarPolicy, CloudProvider, LatticeCluster, LatticeClusterBackup,
-    LatticeExternalService, LatticeMeshMember, LatticeRestore, LatticeService,
+    LatticeExternalService, LatticeJob, LatticeMeshMember, LatticeRestore, LatticeService,
     LatticeServicePolicy, MonitoringConfig, OIDCProvider, ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, LATTICE_SYSTEM_NAMESPACE};
@@ -77,6 +77,8 @@ pub fn build_cluster_controllers(
 }
 
 /// Build service controller futures (LatticeService, LatticeExternalService, LatticeServicePolicy)
+///
+/// Returns the controller futures and the shared ServiceGraph (for use by job controllers).
 pub async fn build_service_controllers(
     client: Client,
     cluster_name: String,
@@ -84,7 +86,10 @@ pub async fn build_service_controllers(
     cedar: Arc<PolicyEngine>,
     crds: Arc<DiscoveredCrds>,
     monitoring: MonitoringConfig,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+) -> (
+    Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    Arc<lattice_common::graph::ServiceGraph>,
+) {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
     let vm_service_scrape_ar = crds.vm_service_scrape.clone();
     let cedar_for_mm = cedar.clone();
@@ -258,12 +263,62 @@ pub async fn build_service_controllers(
     tracing::info!("- LatticeServicePolicy controller");
     tracing::info!("- LatticeMeshMember controller");
 
-    vec![
-        Box::pin(svc_ctrl),
-        Box::pin(ext_ctrl),
-        Box::pin(policy_ctrl),
-        Box::pin(mm_ctrl),
-    ]
+    let graph = service_ctx.graph.clone();
+
+    (
+        vec![
+            Box::pin(svc_ctrl),
+            Box::pin(ext_ctrl),
+            Box::pin(policy_ctrl),
+            Box::pin(mm_ctrl),
+        ],
+        graph,
+    )
+}
+
+/// Build job controller futures (LatticeJob)
+pub async fn build_job_controllers(
+    client: Client,
+    cluster_name: String,
+    provider_type: ProviderType,
+    cedar: Arc<PolicyEngine>,
+    graph: Arc<lattice_common::graph::ServiceGraph>,
+    shared_crds: &DiscoveredCrds,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
+    let crds = Arc::new(
+        lattice_job::controller::JobDiscoveredCrds::from_shared(
+            &client,
+            shared_crds.external_secret.clone(),
+            shared_crds.mesh_member.clone(),
+            shared_crds.tracing_policy_namespaced.clone(),
+        )
+        .await,
+    );
+
+    let ctx = Arc::new(lattice_job::controller::JobContext::new(
+        client.clone(),
+        graph,
+        cluster_name,
+        provider_type,
+        cedar,
+        crds,
+    ));
+
+    let jobs: Api<LatticeJob> = Api::all(client);
+
+    let job_ctrl = Controller::new(jobs, watcher_config())
+        .shutdown_on_signal()
+        .run(
+            lattice_job::controller::reconcile,
+            lattice_job::controller::error_policy,
+            ctx,
+        )
+        .for_each(log_reconcile_result("Job"));
+
+    tracing::info!("- LatticeJob controller");
+
+    vec![Box::pin(job_ctrl)]
 }
 
 /// Build provider controller futures (CloudProvider, SecretProvider, CedarPolicy, OIDCProvider)
@@ -469,6 +524,16 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
         let ns = item.metadata.namespace.as_deref().unwrap_or_default();
         let name = item.metadata.name.as_deref().unwrap_or_default();
         graph.put_mesh_member(ns, name, &item.spec);
+    })
+    .await;
+
+    warmup_list::<LatticeJob>(client, "LatticeJobs", |item| {
+        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
+        let job_name = item.metadata.name.as_deref().unwrap_or_default();
+        for (task_name, task_spec) in &item.spec.tasks {
+            let task_full_name = format!("{}-{}", job_name, task_name);
+            graph.put_workload(ns, &task_full_name, &task_spec.workload);
+        }
     })
     .await;
 }

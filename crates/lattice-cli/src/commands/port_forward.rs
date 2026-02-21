@@ -418,7 +418,7 @@ fn start_port_forward(
         let _ = child.kill();
         let _ = child.wait();
 
-        if attempt % 10 == 0 {
+        if attempt.is_multiple_of(10) {
             info!(
                 "[PortForward] Not ready after {} attempts, {:.0}s remaining",
                 attempt,

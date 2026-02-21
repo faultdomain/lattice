@@ -56,7 +56,7 @@ pub enum ResourceType {
     Volume,
     /// Secret from SecretProvider (ESO ExternalSecret)
     Secret,
-    /// GPU resource (fractional via HAMi or full allocation)
+    /// GPU resource (fractional via Volcano vGPU or full allocation)
     Gpu,
     /// Custom resource type (escape hatch for extensibility)
     /// Validated at parse time: lowercase alphanumeric with hyphens, starts with letter
@@ -385,11 +385,11 @@ pub struct GpuParams {
     /// Number of GPUs requested (must be > 0)
     pub count: u32,
 
-    /// GPU memory limit (e.g., "20Gi", "512Mi"). Enables HAMi fractional sharing.
+    /// GPU memory limit (e.g., "20Gi", "512Mi"). Enables Volcano vGPU fractional sharing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
 
-    /// GPU compute percentage (1-100). Enables HAMi fractional sharing.
+    /// GPU compute percentage (1-100). Enables Volcano vGPU fractional sharing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<u32>,
 
@@ -419,14 +419,14 @@ impl GpuParams {
         Ok(())
     }
 
-    /// Returns true if HAMi fractional sharing is needed (memory or compute set)
-    pub fn needs_hami(&self) -> bool {
+    /// Returns true if Volcano vGPU fractional sharing is needed (memory or compute set)
+    pub fn is_fractional(&self) -> bool {
         self.memory.is_some() || self.compute.is_some()
     }
 
-    /// Returns true if this is a full GPU allocation (no fractional fields)
-    pub fn is_full_gpu(&self) -> bool {
-        !self.needs_hami()
+    /// Returns true if this is a dedicated GPU allocation (no fractional fields)
+    pub fn is_dedicated(&self) -> bool {
+        !self.is_fractional()
     }
 
     /// Parse the memory field into MiB, if present.
@@ -965,8 +965,8 @@ mod tests {
             tolerations: None,
         };
         assert!(params.validate().is_ok());
-        assert!(params.is_full_gpu());
-        assert!(!params.needs_hami());
+        assert!(params.is_dedicated());
+        assert!(!params.is_fractional());
     }
 
     #[test]
@@ -997,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gpu_params_hami_detection() {
+    fn test_gpu_params_fractional_detection() {
         let full = GpuParams {
             count: 1,
             memory: None,
@@ -1005,8 +1005,8 @@ mod tests {
             model: None,
             tolerations: None,
         };
-        assert!(!full.needs_hami());
-        assert!(full.is_full_gpu());
+        assert!(!full.is_fractional());
+        assert!(full.is_dedicated());
 
         let fractional = GpuParams {
             count: 1,
@@ -1015,8 +1015,8 @@ mod tests {
             model: None,
             tolerations: None,
         };
-        assert!(fractional.needs_hami());
-        assert!(!fractional.is_full_gpu());
+        assert!(fractional.is_fractional());
+        assert!(!fractional.is_dedicated());
     }
 
     #[test]

@@ -1,0 +1,14 @@
+[package]
+name = "lattice-volcano"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Volcano VCJob compiler for Lattice batch workloads"
+
+[dependencies]
+lattice-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

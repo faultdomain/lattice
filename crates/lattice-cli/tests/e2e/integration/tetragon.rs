@@ -21,8 +21,8 @@ use tracing::{info, warn};
 
 use lattice_common::crd::{
     ContainerSpec, ExecProbe, LatticeService, LatticeServiceSpec, PortSpec, Probe,
-    ResourceQuantity, ResourceRequirements, RuntimeSpec, SecurityContext, ServicePortsSpec,
-    SidecarSpec, VolumeMount, WorkloadSpec,
+    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec,
+    SecurityContext, ServicePortsSpec, SidecarSpec, VolumeMount, WorkloadSpec,
 };
 
 use super::super::context::InfraContext;
@@ -30,7 +30,7 @@ use super::super::helpers::{
     apply_cedar_policy_crd, delete_cedar_policies_by_label, delete_namespace,
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_pod_running, TestHarness,
-    BUSYBOX_IMAGE, NGINX_IMAGE,
+    BUSYBOX_IMAGE, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
@@ -46,6 +46,11 @@ const NS_IMPLICIT_CEDAR_DENY: &str = "tetragon-t10";
 const NS_MISSING_ENTRYPOINT: &str = "tetragon-t11";
 
 const TEST_LABEL: &str = "tetragon";
+
+/// Default timeout for deploy_and_wait_for_phase. Higher than single-service
+/// tests because all 11 Tetragon tests run in parallel and compete for
+/// operator reconciliation time.
+const DEPLOY_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Default timeout for waiting on Tetragon policy enforcement.
 const ENFORCEMENT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -121,6 +126,21 @@ fn wrap_service(
     containers: BTreeMap<String, ContainerSpec>,
     sidecars: BTreeMap<String, SidecarSpec>,
 ) -> LatticeService {
+    let mut reg_params = BTreeMap::new();
+    reg_params.insert("provider".to_string(), serde_json::json!(REGCREDS_PROVIDER));
+    reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+
+    let mut resources = BTreeMap::new();
+    resources.insert(
+        "ghcr-creds".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some(REGCREDS_REMOTE_KEY.to_string()),
+            params: Some(reg_params),
+            ..Default::default()
+        },
+    );
+
     LatticeService {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
@@ -130,13 +150,14 @@ fn wrap_service(
         spec: LatticeServiceSpec {
             workload: WorkloadSpec {
                 containers,
+                resources,
                 service: Some(ServicePortsSpec {
                     ports: default_ports(),
                 }),
-                ..Default::default()
             },
             runtime: RuntimeSpec {
                 sidecars,
+                image_pull_secrets: vec!["ghcr-creds".to_string()],
                 ..Default::default()
             },
             ..Default::default()
@@ -488,7 +509,7 @@ async fn test_default_security(kubeconfig: &str) -> Result<(), String> {
         build_service(svc, NS_DEFAULT, None, None, None),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
 
@@ -518,7 +539,7 @@ async fn test_probe_shell_exemption(kubeconfig: &str) -> Result<(), String> {
         build_service(svc, NS_PROBE_SHELL, None, Some(probe), None),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
 
@@ -552,7 +573,7 @@ async fn test_cmd_shell_exemption(kubeconfig: &str) -> Result<(), String> {
         build_service(svc, NS_CMD_SHELL, None, None, Some(cmd)),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
 
@@ -581,7 +602,7 @@ async fn test_sidecar_shell_exemption(kubeconfig: &str) -> Result<(), String> {
         build_service_with_sidecar_shell(svc, NS_SIDECAR_SHELL),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
 
@@ -619,7 +640,7 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
         build_service(svc_block, NS_ENFORCEMENT, None, None, None),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
     wait_for_policies(
@@ -662,7 +683,7 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
         build_service(svc_exempt, NS_ENFORCEMENT, None, Some(probe), None),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
     wait_for_policies(
@@ -718,7 +739,7 @@ async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
         ),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
 
@@ -787,7 +808,7 @@ async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String
         svc_obj,
         "Failed",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await
     {
@@ -842,7 +863,7 @@ async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> 
         build_service_with_allowed_binaries(svc, NS_WILDCARD_BINARIES, vec!["*".to_string()]),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
 
@@ -890,7 +911,7 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
         build_service_no_command(svc, NS_IMPLICIT_WILDCARD),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
 
@@ -943,7 +964,7 @@ async fn test_implicit_wildcard_cedar_deny(kubeconfig: &str) -> Result<(), Strin
         build_service_no_command(svc, NS_IMPLICIT_CEDAR_DENY),
         "Failed",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await
     {
@@ -1005,7 +1026,7 @@ async fn test_missing_entrypoint_killed(kubeconfig: &str) -> Result<(), String> 
         ),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEPLOY_TIMEOUT,
     )
     .await?;
 

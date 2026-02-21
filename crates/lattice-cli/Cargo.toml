@@ -70,6 +70,7 @@ futures.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls"] }
+tempfile.workspace = true
 tokio-util.workspace = true
 urlencoding = "2.1.3"
 

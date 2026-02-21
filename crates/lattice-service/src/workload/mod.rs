@@ -147,6 +147,9 @@ pub struct PodSpec {
     /// Image pull secrets for authenticating to private registries
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_pull_secrets: Vec<LocalObjectReference>,
+    /// Scheduler name (e.g., "volcano" for GPU workloads using Volcano vGPU)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_name: Option<String>,
 }
 
 // =============================================================================
@@ -475,6 +478,7 @@ impl WorkloadCompiler {
                         runtime_class_name: pod_template.runtime_class_name,
                         scheduling_gates: pod_template.scheduling_gates,
                         image_pull_secrets: pod_template.image_pull_secrets,
+                        scheduler_name: pod_template.scheduler_name,
                     },
                 },
                 strategy,
@@ -1108,6 +1112,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_resources_serialize_as_volcano_vgpu() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
+
+        let output = compile_service(&service).await;
+        let deployment = output.deployment.expect("should have deployment");
+        let json = serde_json::to_string(&deployment).unwrap();
+
+        assert!(json.contains("volcano.sh/vgpu-number"));
+        // nvidia.com/gpu still appears as toleration key (node taint), not as a resource name
+        assert!(!json.contains("nvidia.com/gpumem"));
+        assert!(!json.contains("nvidia.com/gpucores"));
+    }
+
+    #[tokio::test]
     async fn gpu_toleration_added_by_default() {
         let mut service = make_service("gpu-app", "default");
         service.spec.workload.resources.insert(
@@ -1139,6 +1169,40 @@ mod tests {
 
         assert!(deployment.spec.template.spec.tolerations.is_empty());
         assert!(deployment.spec.template.spec.node_selector.is_none());
+    }
+
+    #[tokio::test]
+    async fn gpu_workload_gets_volcano_scheduler() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
+
+        let output = compile_service(&service).await;
+        let deployment = output.deployment.expect("should have deployment");
+
+        assert_eq!(
+            deployment.spec.template.spec.scheduler_name,
+            Some("volcano".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn non_gpu_workload_has_no_scheduler_name() {
+        let service = make_service("my-app", "default");
+        let output = compile_service(&service).await;
+        let deployment = output.deployment.expect("should have deployment");
+
+        assert!(deployment.spec.template.spec.scheduler_name.is_none());
     }
 
     // =========================================================================

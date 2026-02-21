@@ -135,6 +135,7 @@ async fn run_upgrade_test() -> Result<(), String> {
         true,
         registry_credentials,
         None,
+        std::path::PathBuf::from("."),
         Some(super::helpers::run_id().to_string()),
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;

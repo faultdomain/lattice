@@ -340,15 +340,28 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     let monitoring = controller_runner::resolve_monitoring_from_env();
     let crds = Arc::new(DiscoveredCrds::discover(client).await);
 
-    let mut controllers = controller_runner::build_service_controllers(
+    let (mut controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
-        cluster_name,
+        cluster_name.clone(),
         provider_type,
         cedar.clone(),
-        crds,
+        crds.clone(),
         monitoring,
     )
     .await;
+
+    controllers.extend(
+        controller_runner::build_job_controllers(
+            client.clone(),
+            cluster_name,
+            provider_type,
+            cedar.clone(),
+            graph,
+            &crds,
+        )
+        .await,
+    );
+
     controllers.extend(controller_runner::build_provider_controllers(
         client.clone(),
         cedar,
@@ -425,14 +438,25 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     let monitoring = controller_runner::resolve_monitoring_from_cluster(client).await;
     let cluster_name = self_cluster_name.unwrap_or_else(|| "default".to_string());
     let crds = Arc::new(DiscoveredCrds::discover(client).await);
+    let (service_controllers, graph) = controller_runner::build_service_controllers(
+        client.clone(),
+        cluster_name.clone(),
+        provider_type,
+        cedar.clone(),
+        crds.clone(),
+        monitoring,
+    )
+    .await;
+    controllers.extend(service_controllers);
+
     controllers.extend(
-        controller_runner::build_service_controllers(
+        controller_runner::build_job_controllers(
             client.clone(),
             cluster_name,
             provider_type,
             cedar.clone(),
-            crds,
-            monitoring,
+            graph,
+            &crds,
         )
         .await,
     );

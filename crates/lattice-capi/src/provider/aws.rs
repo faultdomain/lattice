@@ -187,6 +187,7 @@ impl Provider for AwsProvider {
             labels,
             bootstrap: spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::Aws,
+            registry_mirrors: bootstrap.registry_mirrors.clone(),
         };
 
         // No kube-vip for AWS - we use NLB
@@ -196,6 +197,7 @@ impl Provider for AwsProvider {
             post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip: None,
             ssh_authorized_keys: cfg.ssh_authorized_keys.clone().unwrap_or_default(),
+            registry_mirrors: bootstrap.registry_mirrors.clone(),
         };
 
         let infra = self.infra_ref();
@@ -374,6 +376,7 @@ mod tests {
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                registry_mirrors: None,
             },
             status: None,
         }

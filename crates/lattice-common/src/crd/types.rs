@@ -637,6 +637,36 @@ fn default_lattice_namespace() -> String {
 }
 
 // =============================================================================
+// Registry Mirror Configuration
+// =============================================================================
+
+/// Registry mirror configuration for redirecting container image pulls.
+///
+/// The `upstream` field supports three forms:
+/// - **Explicit host** (e.g., `"docker.io"`) — mirrors only that registry.
+/// - **`@infra`** — expands to all build-time detected infrastructure registries
+///   (docker.io, ghcr.io, quay.io, etc.) not already covered by an explicit entry.
+/// - **`*`** — lowest-priority catch-all for ANY registry not covered by explicit
+///   entries or `@infra`. Essential for air-gapped environments where all pulls
+///   must route through a mirror.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryMirror {
+    /// Upstream registry host to redirect (e.g., "docker.io", "quay.io").
+    /// Use `@infra` to match all build-time infrastructure registries.
+    /// Use `*` as a lowest-priority catch-all for any registry (air-gapped).
+    pub upstream: String,
+    /// Mirror endpoint host (e.g., "harbor.corp.com", "mirror.internal:5000").
+    pub mirror: String,
+    /// Optional reference to a Secret containing registry credentials.
+    /// The secret must contain a `.dockerconfigjson` key.
+    /// On the installer, the secret is read from the local cluster.
+    /// On child clusters, it's expected in lattice-system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_ref: Option<SecretRef>,
+}
+
+// =============================================================================
 // Endpoints Configuration
 // =============================================================================
 

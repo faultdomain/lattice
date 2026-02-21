@@ -7,7 +7,7 @@ spec:
   workload:
     containers:
       main:
-        image: docker.io/plexinc/pms-docker:latest
+        image: ghcr.io/evan-hines-js/pms-docker:latest
         security:
           runAsUser: 0
           apparmorProfile: Unconfined

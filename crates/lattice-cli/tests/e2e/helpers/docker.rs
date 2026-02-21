@@ -169,6 +169,7 @@ fn is_already_exists(error: &str) -> bool {
 fn is_transient_kubectl_error(error: &str) -> bool {
     error.contains("Unable to connect to the server")
         || error.contains("connection refused")
+        || error.contains("was refused")
         || error.contains("connection reset")
         || error.contains("i/o timeout")
         || error.contains("TLS handshake timeout")
@@ -186,6 +187,10 @@ fn is_transient_kubectl_error(error: &str) -> bool {
         || error.contains("timed out")
         || error.contains("the server could not find the requested resource")
         || error.contains("couldn't get current server API group list")
+        // Exec credential plugin failures (lattice token) are transient — the
+        // underlying issue is usually a momentary connection problem to the API server.
+        || error.contains("getting credentials")
+        || error.contains("logged in to the server")
 }
 
 // =============================================================================

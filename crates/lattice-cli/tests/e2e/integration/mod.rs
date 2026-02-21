@@ -25,6 +25,7 @@ pub mod capi;
 pub mod cedar;
 pub mod cedar_secrets;
 pub mod cedar_security;
+pub mod job;
 pub mod kubeconfig;
 pub mod mesh;
 pub mod multi_hop;

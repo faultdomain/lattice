@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ClusterPhase, Condition, EndpointsSpec, NetworkingSpec, NodeSpec, ProviderSpec,
+    ClusterPhase, Condition, EndpointsSpec, NetworkingSpec, NodeSpec, ProviderSpec, RegistryMirror,
 };
 
 /// Monitoring infrastructure configuration.
@@ -99,7 +99,7 @@ pub struct LatticeClusterSpec {
     #[serde(default = "super::default_true")]
     pub services: bool,
 
-    /// Enable GPU infrastructure (NFD + NVIDIA device plugin + HAMi).
+    /// Enable GPU infrastructure (NFD + NVIDIA device plugin).
     /// GPUs are discovered automatically by NFD from instance types.
     #[serde(default)]
     pub gpu: bool,
@@ -111,6 +111,13 @@ pub struct LatticeClusterSpec {
     /// Backup infrastructure configuration (Velero).
     #[serde(default)]
     pub backups: BackupsConfig,
+
+    /// Registry mirrors for redirecting container image pulls through private mirrors.
+    /// Each entry maps an upstream registry to a mirror endpoint with optional credentials.
+    /// Use `upstream: "@infra"` to cover all build-time infrastructure registries.
+    /// Use `upstream: "*"` as a catch-all for any registry (air-gapped environments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_mirrors: Option<Vec<RegistryMirror>>,
 }
 
 impl LatticeClusterSpec {
@@ -406,6 +413,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            registry_mirrors: None,
         };
 
         assert!(spec.is_parent(), "Should be recognized as a parent");
@@ -427,6 +435,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            registry_mirrors: None,
         };
 
         assert!(!spec.is_parent(), "Leaf cluster cannot have children");
@@ -453,6 +462,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            registry_mirrors: None,
         };
 
         assert!(
@@ -476,6 +486,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            registry_mirrors: None,
         };
 
         assert!(
@@ -512,6 +523,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            registry_mirrors: None,
         };
 
         assert!(
@@ -535,6 +547,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            registry_mirrors: None,
         };
 
         assert!(
@@ -715,6 +728,7 @@ nodes:
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            registry_mirrors: None,
         };
 
         let json =
@@ -749,6 +763,7 @@ nodes:
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                registry_mirrors: None,
             },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };

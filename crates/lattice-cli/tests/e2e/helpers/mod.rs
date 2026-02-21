@@ -102,7 +102,7 @@ pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
 /// When `true`, rewrite all non-lattice test images to the GHCR mirror
 /// (`ghcr.io/evan-hines-js/{name}:{tag}`). Flip this single bool to switch.
-const USE_GHCR_MIRROR: bool = false;
+const USE_GHCR_MIRROR: bool = true;
 
 /// GHCR org where mirrored images live (only used when `USE_GHCR_MIRROR` is true).
 const GHCR_MIRROR_PREFIX: &str = "ghcr.io/evan-hines-js";

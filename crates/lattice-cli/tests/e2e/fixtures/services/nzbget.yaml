@@ -7,7 +7,7 @@ spec:
   workload:
     containers:
       main:
-        image: docker.io/linuxserver/nzbget:latest
+        image: ghcr.io/evan-hines-js/nzbget:latest
         security:
           runAsUser: 0
           apparmorProfile: Unconfined
@@ -64,7 +64,7 @@ spec:
   # VPN sidecar for killswitch
   sidecars:
     vpn:
-      image: docker.io/linuxserver/wireguard:latest
+      image: ghcr.io/evan-hines-js/wireguard:latest
       variables:
         PUID: "1000"
         PGID: "1000"

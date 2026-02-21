@@ -4,7 +4,7 @@
 //! Sets compile-time environment variables for chart versions.
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -166,6 +166,38 @@ fn ensure_charts_downloaded(charts_dir: &Path, versions: &Versions) {
     }
 }
 
+/// Extract the registry host from a container image reference.
+///
+/// Images without a dot, colon, or "localhost" in the first path component are
+/// implicitly from docker.io (e.g., "nginx" → "docker.io").
+fn extract_registry_host(image_ref: &str) -> String {
+    let parts: Vec<&str> = image_ref.splitn(2, '/').collect();
+    if parts.len() == 1 {
+        return "docker.io".to_string();
+    }
+    let first = parts[0];
+    if first.contains('.') || first.contains(':') || first == "localhost" {
+        first.to_string()
+    } else {
+        "docker.io".to_string()
+    }
+}
+
+/// Scan rendered Helm YAML for `image:` lines and collect unique registry hosts.
+fn extract_registries_from_yaml(yaml: &str) -> BTreeSet<String> {
+    let mut registries = BTreeSet::new();
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("image:") {
+            let image_ref = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !image_ref.is_empty() {
+                registries.insert(extract_registry_host(image_ref));
+            }
+        }
+    }
+    registries
+}
+
 fn main() {
     let manifest_dir =
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
@@ -211,10 +243,6 @@ fn main() {
     println!(
         "cargo:rustc-env=GPU_OPERATOR_VERSION={}",
         versions.charts["gpu-operator"].version
-    );
-    println!(
-        "cargo:rustc-env=HAMI_VERSION={}",
-        versions.charts["hami"].version
     );
     println!(
         "cargo:rustc-env=TETRAGON_VERSION={}",
@@ -426,15 +454,6 @@ fn main() {
     );
     std::fs::write(out_dir.join("gpu-operator.yaml"), yaml).expect("write gpu-operator.yaml");
 
-    // 9. HAMi
-    let yaml = run_helm_template(
-        "hami",
-        &chart(&format!("hami-{}.tgz", versions.charts["hami"].version)),
-        "hami-system",
-        &["--set", "scheduler.enabled=true"],
-    );
-    std::fs::write(out_dir.join("hami.yaml"), yaml).expect("write hami.yaml");
-
     // 10a. VictoriaMetrics K8s Stack — HA mode (VMCluster with 2 replicas each)
     let yaml = run_helm_template(
         "vm",
@@ -612,11 +631,118 @@ fn main() {
     );
     std::fs::write(out_dir.join("metrics-server.yaml"), yaml).expect("write metrics-server.yaml");
 
-    // 13. Gateway API CRDs (just copy, not helm)
+    // 14. Volcano (gang scheduling + vGPU device sharing)
+    // Write a temporary values file with deviceshare scheduler config and webhook exclusions.
+    // Admission webhook pre-install hooks (cert-generation Job) are now kept by
+    // split_yaml_documents, so the admission webhook works out of the box.
+    // We exclude lattice-system from the webhook so the operator can start before Volcano is ready.
+    let volcano_values = out_dir.join("volcano-values.yaml");
+    std::fs::write(
+        &volcano_values,
+        r#"custom:
+  scheduler_config_override: |
+    actions: "enqueue, allocate, backfill"
+    tiers:
+    - plugins:
+      - name: priority
+      - name: gang
+      - name: conformance
+    - plugins:
+      - name: drf
+      - name: deviceshare
+        arguments:
+          deviceshare.VGPUEnable: true
+      - name: predicates
+      - name: proportion
+      - name: nodeorder
+      - name: binpack
+  webhooks_namespace_selector_expressions:
+  - key: kubernetes.io/metadata.name
+    operator: NotIn
+    values:
+    - lattice-system
+"#,
+    )
+    .expect("write volcano-values.yaml");
+
+    let yaml = run_helm_template(
+        "volcano",
+        &chart(&format!(
+            "volcano-{}.tgz",
+            versions.charts["volcano"].version
+        )),
+        "volcano-system",
+        &[
+            "--set",
+            "custom.enabled=true",
+            "--set",
+            "basic.controller_enabled=true",
+            "--set",
+            "basic.scheduler_enabled=true",
+            "--set",
+            "basic.admission_enabled=true",
+            "--values",
+            &volcano_values.to_string_lossy(),
+        ],
+    );
+    std::fs::write(out_dir.join("volcano.yaml"), yaml).expect("write volcano.yaml");
+
+    // 14b. Volcano vGPU device plugin (DaemonSet for GPU nodes)
+    // Downloaded automatically by ensure_charts_downloaded() from versions.toml.
+    let vgpu_ver = &versions.resources["volcano-vgpu-device-plugin"].version;
+    let vgpu_src = charts_dir.join(format!("volcano-vgpu-device-plugin-v{}.yml", vgpu_ver));
+    let vgpu_content = std::fs::read_to_string(&vgpu_src)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", vgpu_src.display(), e));
+    // Patch: add nodeSelector so the DaemonSet only runs on GPU nodes (NFD label).
+    // Without this, the plugin crashes on non-GPU nodes with NVML ERROR_LIBRARY_NOT_FOUND.
+    let vgpu_content = vgpu_content.replace(
+        "      priorityClassName: \"system-node-critical\"",
+        "      nodeSelector:\n        nvidia.com/gpu.present: \"true\"\n      priorityClassName: \"system-node-critical\"",
+    );
+    std::fs::write(
+        out_dir.join("volcano-vgpu-device-plugin.yaml"),
+        vgpu_content,
+    )
+    .expect("write volcano-vgpu-device-plugin.yaml");
+
+    // Set Volcano version env var
+    println!(
+        "cargo:rustc-env=VOLCANO_VERSION={}",
+        versions.charts["volcano"].version
+    );
+
+    // 15. Gateway API CRDs (just copy, not helm)
     let gw_ver = &versions.resources["gateway-api"].version;
     let gw_src = charts_dir.join(format!("gateway-api-crds-v{}.yaml", gw_ver));
     let gw_content = std::fs::read_to_string(&gw_src)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", gw_src.display(), e));
     std::fs::write(out_dir.join("gateway-api-crds.yaml"), gw_content)
         .expect("write gateway-api-crds.yaml");
+
+    // --- Extract upstream registries from all rendered YAML ---
+    let yaml_files = [
+        "cilium.yaml",
+        "istio-base.yaml",
+        "istio-cni.yaml",
+        "istiod.yaml",
+        "ztunnel.yaml",
+        "external-secrets.yaml",
+        "velero.yaml",
+        "gpu-operator.yaml",
+        "hami.yaml",
+        "victoria-metrics-ha.yaml",
+        "victoria-metrics-single.yaml",
+        "keda.yaml",
+        "tetragon.yaml",
+        "cert-manager.yaml",
+        "metrics-server.yaml",
+    ];
+    let mut all_registries = BTreeSet::new();
+    for file in &yaml_files {
+        if let Ok(content) = std::fs::read_to_string(out_dir.join(file)) {
+            all_registries.extend(extract_registries_from_yaml(&content));
+        }
+    }
+    let registries_csv = all_registries.into_iter().collect::<Vec<_>>().join(",");
+    println!("cargo:rustc-env=UPSTREAM_REGISTRIES={}", registries_csv);
 }

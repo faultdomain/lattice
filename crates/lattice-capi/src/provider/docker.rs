@@ -298,6 +298,7 @@ impl Provider for DockerProvider {
             labels: create_cluster_labels(name),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::Docker,
+            registry_mirrors: bootstrap.registry_mirrors.clone(),
         };
 
         let infra_api_version =
@@ -315,6 +316,7 @@ impl Provider for DockerProvider {
             post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip: None,
             ssh_authorized_keys: vec![],
+            registry_mirrors: bootstrap.registry_mirrors.clone(),
         };
 
         // Use shared functions for provider-agnostic resources
@@ -445,6 +447,7 @@ mod tests {
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                registry_mirrors: None,
             },
             status: None,
         }

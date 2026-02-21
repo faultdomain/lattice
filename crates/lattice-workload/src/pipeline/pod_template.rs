@@ -40,6 +40,8 @@ pub struct CompiledPodTemplate {
     pub runtime_class_name: Option<String>,
     pub scheduling_gates: Vec<crate::k8s::SchedulingGate>,
     pub image_pull_secrets: Vec<LocalObjectReference>,
+    /// Scheduler name — set to "volcano" for GPU workloads (Volcano vGPU scheduling)
+    pub scheduler_name: Option<String>,
 }
 
 /// Shared pod template compiler.
@@ -142,6 +144,7 @@ impl PodTemplateCompiler {
             runtime_class_name: gpu_ref.map(|_| "nvidia".to_string()),
             scheduling_gates: volumes.scheduling_gates.clone(),
             image_pull_secrets,
+            scheduler_name: gpu_ref.map(|_| "volcano".to_string()),
         })
     }
 

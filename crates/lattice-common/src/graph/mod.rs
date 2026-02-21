@@ -17,7 +17,7 @@ use tracing::warn;
 use crate::crd::{
     EgressRule, IngressPolicySpec, LatticeExternalServiceSpec, LatticeMeshMemberSpec,
     LatticeServicePolicy, LatticeServiceSpec, MeshMemberTarget, ParsedEndpoint, PeerAuth,
-    Resolution, ServiceBackupSpec, ServiceSelector, VolumeParams,
+    Resolution, ServiceBackupSpec, ServiceSelector, VolumeParams, WorkloadSpec,
 };
 
 /// Fully qualified service reference: (namespace, name)
@@ -89,10 +89,14 @@ pub struct ServiceNode {
 impl ServiceNode {
     /// Create a new local service node from a LatticeService spec
     pub fn from_service_spec(namespace: &str, name: &str, spec: &LatticeServiceSpec) -> Self {
-        let caller_refs = spec.workload.allowed_callers(namespace);
+        Self::from_workload_spec(namespace, name, &spec.workload)
+    }
+
+    /// Create a node from a raw WorkloadSpec (shared by LatticeService and LatticeJob tasks)
+    pub fn from_workload_spec(namespace: &str, name: &str, workload: &WorkloadSpec) -> Self {
+        let caller_refs = workload.allowed_callers(namespace);
         let allows_all = caller_refs.iter().any(|r| r.name == "*");
 
-        // When allows_all is true, the explicit caller list is irrelevant
         let allowed_callers: HashSet<QualifiedName> = if allows_all {
             HashSet::new()
         } else {
@@ -102,8 +106,7 @@ impl ServiceNode {
                 .collect()
         };
 
-        let dependencies: Vec<QualifiedName> = spec
-            .workload
+        let dependencies: Vec<QualifiedName> = workload
             .dependencies(namespace)
             .into_iter()
             .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
@@ -117,9 +120,8 @@ impl ServiceNode {
             allowed_callers,
             allows_all,
             depends_all: false,
-            image: spec.workload.primary_image().map(String::from),
-            ports: spec
-                .workload
+            image: workload.primary_image().map(String::from),
+            ports: workload
                 .service
                 .as_ref()
                 .map(|svc| {
@@ -467,6 +469,12 @@ impl ServiceGraph {
         let node = ServiceNode::from_service_spec(namespace, name, spec);
         self.put_node(node);
         self.update_volume_owners(namespace, name, spec);
+    }
+
+    /// Insert or update a workload in the graph (used by LatticeJob tasks)
+    pub fn put_workload(&self, namespace: &str, name: &str, workload: &WorkloadSpec) {
+        let node = ServiceNode::from_workload_spec(namespace, name, workload);
+        self.put_node(node);
     }
 
     /// Insert or update a mesh member in the graph

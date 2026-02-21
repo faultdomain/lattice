@@ -11,9 +11,9 @@ use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use tracing::{info, warn};
 
-use super::super::providers::InfraProvider;
 use super::docker::{docker_containers_deleted, run_cmd, run_kubectl};
 use super::{run_id, wait_for_condition, OPERATOR_LABEL};
+use crate::providers::InfraProvider;
 
 use lattice_cli::commands::port_forward::PortForward as ResilientPortForward;
 
@@ -124,8 +124,11 @@ pub async fn http_get_with_retry(
         async move {
             let resp = http_get_with_token(&url, &token, timeout_secs).await;
 
-            // Don't retry 4xx errors - these are intentional responses
-            if resp.status_code >= 400 && resp.status_code < 500 {
+            // Don't retry most 4xx errors — they're intentional responses
+            // (e.g. 403 for denied access). Exception: 404 may be transient
+            // when the proxy just restarted and hasn't re-registered cluster
+            // routes yet (chaos monkey kills the operator pod mid-test).
+            if resp.status_code >= 400 && resp.status_code < 500 && resp.status_code != 404 {
                 return Ok(resp);
             }
 
@@ -692,26 +695,32 @@ pub async fn delete_cluster_and_wait(
 ) -> Result<(), String> {
     info!("Deleting cluster {}...", cluster_name);
 
-    // Initiate deletion on the cluster itself with --wait=false
-    // We can't wait for completion because:
-    // 1. The finalizer (lattice.dev/unpivot) blocks deletion
-    // 2. The unpivot flow sends CAPI manifests to parent
-    // 3. Parent imports and deletes via CAPI, which kills the infrastructure
-    // 4. The cluster's API server dies before the finalizer is removed
-    // So we just initiate deletion and wait for parent confirmation.
+    // Initiate deletion on the cluster itself with --wait=false.
+    // We can't wait for completion on the child because:
+    // - The finalizer (lattice.dev/unpivot) blocks deletion
+    // - The unpivot flow sends CAPI manifests to parent
+    // - Parent imports and deletes via CAPI, which kills the infrastructure
+    // - The cluster's API server dies before the finalizer is removed
     //
-    // We retry until the phase changes from Ready because transient proxy/network
-    // issues can cause the delete to silently fail (kubectl returns success but the
-    // request never reaches the API server).
+    // So we send the delete to the child, then verify on the PARENT that the
+    // phase has changed. The parent is always reachable and its LatticeCluster
+    // reflects the child's state. Checking the child would stall forever once
+    // CAPI tears down its infrastructure (run_kubectl retries timeouts).
+    //
+    // We retry the delete because transient proxy/network issues can cause it
+    // to silently fail (kubectl returns success but the request never reaches
+    // the API server).
     wait_for_condition(
         &format!("{} deletion initiated", cluster_name),
         Duration::from_secs(120),
         Duration::from_secs(5),
         || {
             let cluster_kubeconfig = cluster_kubeconfig.to_string();
+            let parent_kubeconfig = parent_kubeconfig.to_string();
             let cluster_name = cluster_name.to_string();
             async move {
-                // Issue the delete (idempotent — safe to retry)
+                // Issue the delete on the child (idempotent — safe to retry).
+                // Ignore errors: the child may already be dying.
                 let _ = run_kubectl(&[
                     "--kubeconfig",
                     &cluster_kubeconfig,
@@ -722,10 +731,11 @@ pub async fn delete_cluster_and_wait(
                 ])
                 .await;
 
-                // Check that the phase is no longer Ready
+                // Check the PARENT for phase change — the parent is always
+                // reachable and won't stall on a dying child API server.
                 match run_kubectl(&[
                     "--kubeconfig",
-                    &cluster_kubeconfig,
+                    &parent_kubeconfig,
                     "get",
                     "latticecluster",
                     &cluster_name,
@@ -735,7 +745,7 @@ pub async fn delete_cluster_and_wait(
                 .await
                 {
                     Ok(phase) if phase.trim() == "Ready" => {
-                        info!("LatticeCluster still Ready, retrying delete...");
+                        info!("LatticeCluster still Ready on parent, retrying delete...");
                         Ok(false)
                     }
                     // Not Ready, not found, or error — deletion is underway

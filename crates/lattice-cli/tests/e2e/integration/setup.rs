@@ -338,6 +338,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         true, // keep_bootstrap_on_failure
         registry_credentials,
         None,
+        std::path::PathBuf::from("."),
         Some(super::super::helpers::run_id().to_string()),
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;
@@ -600,6 +601,7 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         true,
         registry_credentials,
         None,
+        std::path::PathBuf::from("."),
         Some(super::super::helpers::run_id().to_string()),
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;

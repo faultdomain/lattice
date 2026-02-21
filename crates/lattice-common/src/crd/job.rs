@@ -136,6 +136,10 @@ pub struct LatticeJobSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
 
+    /// Priority class name for Volcano fair-share scheduling
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_class_name: Option<String>,
+
     /// Job tasks — each maps to a Volcano VCJob task with its own pod template
     #[serde(default)]
     pub tasks: BTreeMap<String, JobTaskSpec>,
@@ -148,6 +152,7 @@ impl Default for LatticeJobSpec {
             min_available: None,
             max_retry: None,
             queue: None,
+            priority_class_name: None,
             tasks: BTreeMap::new(),
         }
     }
@@ -164,6 +169,10 @@ pub struct LatticeJobStatus {
     /// Human-readable message about current state
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+
+    /// Generation of the spec that was last reconciled
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
 }
 
 // =============================================================================

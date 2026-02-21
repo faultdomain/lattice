@@ -242,6 +242,7 @@ impl Provider for ProxmoxProvider {
             labels: create_cluster_labels(name),
             bootstrap: spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::Proxmox,
+            registry_mirrors: bootstrap.registry_mirrors.clone(),
         };
 
         // Build certSANs - also auto-add controlPlaneEndpoint for Proxmox
@@ -268,6 +269,7 @@ impl Provider for ProxmoxProvider {
             post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip,
             ssh_authorized_keys: cfg.ssh_authorized_keys.clone().unwrap_or_default(),
+            registry_mirrors: bootstrap.registry_mirrors.clone(),
         };
 
         let infra = self.infra_ref();
@@ -442,6 +444,7 @@ mod tests {
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                registry_mirrors: None,
             },
             status: None,
         }

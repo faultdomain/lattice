@@ -266,24 +266,24 @@ pub struct ResourceQuantity {
     pub cpu: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
-    /// GPU count (serializes as `nvidia.com/gpu`)
+    /// GPU count (serializes as `volcano.sh/vgpu-number` for Volcano vGPU scheduling)
     #[serde(
         default,
-        rename = "nvidia.com/gpu",
+        rename = "volcano.sh/vgpu-number",
         skip_serializing_if = "Option::is_none"
     )]
     pub gpu: Option<String>,
-    /// GPU memory in MiB for HAMi (serializes as `nvidia.com/gpumem`)
+    /// GPU memory in MiB for Volcano vGPU fractional sharing (serializes as `volcano.sh/vgpu-memory`)
     #[serde(
         default,
-        rename = "nvidia.com/gpumem",
+        rename = "volcano.sh/vgpu-memory",
         skip_serializing_if = "Option::is_none"
     )]
     pub gpu_memory: Option<String>,
-    /// GPU compute percentage for HAMi (serializes as `nvidia.com/gpucores`)
+    /// GPU compute percentage for Volcano vGPU fractional sharing (serializes as `volcano.sh/vgpu-cores`)
     #[serde(
         default,
-        rename = "nvidia.com/gpucores",
+        rename = "volcano.sh/vgpu-cores",
         skip_serializing_if = "Option::is_none"
     )]
     pub gpu_cores: Option<String>,

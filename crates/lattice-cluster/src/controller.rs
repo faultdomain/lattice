@@ -1572,6 +1572,7 @@ mod tests {
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                registry_mirrors: None,
             },
             status: None,
         }
@@ -2151,6 +2152,7 @@ mod tests {
                     gpu: false,
                     monitoring: MonitoringConfig::default(),
                     backups: BackupsConfig::default(),
+                    registry_mirrors: None,
                 },
                 status: None,
             }

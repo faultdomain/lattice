@@ -32,7 +32,8 @@ use tracing::info;
 
 use super::context::init_e2e_test;
 use super::helpers::{
-    run_id, teardown_mgmt_cluster, TestHarness, MGMT_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+    run_id, teardown_mgmt_cluster, TestHarness, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME,
+    WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::{self, setup};
 use super::providers::InfraProvider;
@@ -206,6 +207,41 @@ async fn run_full_e2e() -> Result<(), String> {
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::autoscaling::run_autoscaling_tests(&ctx2).await
+            }),
+        ));
+    }
+
+    // Job: Volcano gang scheduling
+    {
+        let ctx2 = ctx.clone();
+        let sem = pool.clone();
+        handles.push((
+            "Job",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::job::run_job_tests(&ctx2).await
+            }),
+        ));
+    }
+
+    // Workload2 deletion (if exists) — pause chaos first to avoid log spam
+    if ctx.has_workload2() {
+        setup_result.pause_chaos_on_cluster(WORKLOAD2_CLUSTER_NAME);
+        let child_kc = ctx.require_workload2()?.to_string();
+        let parent_kc = ctx.require_workload()?.to_string();
+        let provider = ctx.provider;
+        let sem = pool.clone();
+        handles.push((
+            "Workload2 deletion",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::pivot::delete_and_verify_unpivot(
+                    &child_kc,
+                    &parent_kc,
+                    WORKLOAD2_CLUSTER_NAME,
+                    provider,
+                )
+                .await
             }),
         ));
     }

@@ -2276,6 +2276,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "lattice-common",
+ "lattice-infra",
  "minijinja",
  "mockall",
  "rand 0.8.5",
@@ -2370,6 +2371,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
@@ -2455,6 +2457,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dashmap",
+ "futures",
  "k8s-openapi",
  "kube",
  "minijinja",
@@ -2504,6 +2507,29 @@ dependencies = [
  "tracing",
  "x509-parser 0.16.0",
  "zeroize",
+]
+
+[[package]]
+name = "lattice-job"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "chrono",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "lattice-cedar",
+ "lattice-common",
+ "lattice-secret-provider",
+ "lattice-tetragon",
+ "lattice-volcano",
+ "lattice-workload",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-test",
+ "tracing",
 ]
 
 [[package]]
@@ -2576,6 +2602,7 @@ dependencies = [
  "lattice-cluster",
  "lattice-common",
  "lattice-infra",
+ "lattice-job",
  "lattice-mesh-member",
  "lattice-proto",
  "lattice-secret-provider",
@@ -2685,6 +2712,15 @@ name = "lattice-tetragon"
 version = "0.1.0"
 dependencies = [
  "lattice-common",
+ "serde_json",
+]
+
+[[package]]
+name = "lattice-volcano"
+version = "0.1.0"
+dependencies = [
+ "lattice-common",
+ "serde",
  "serde_json",
 ]
 

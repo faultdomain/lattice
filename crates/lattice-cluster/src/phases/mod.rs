@@ -262,15 +262,63 @@ pub async fn generate_capi_manifests(
         ctx.parent_servers.as_ref().filter(|s| s.is_running())
     };
 
-    let bootstrap = if let Some(parent_servers) = running_parent_servers {
+    let mut bootstrap = if let Some(parent_servers) = running_parent_servers {
         build_bootstrap_info(cluster, ctx, parent_servers, cluster_name).await?
     } else {
         // No parent_servers - self-provisioning (management cluster bootstrap)
         BootstrapInfo::default()
     };
 
+    // Resolve registry mirror credentials and compute the resolved mirror list
+    if let Some(ref mirrors) = cluster.spec.registry_mirrors {
+        if !mirrors.is_empty() {
+            let resolved_credentials =
+                resolve_registry_credentials(mirrors, ctx.kube.as_ref()).await?;
+            bootstrap.registry_mirrors =
+                lattice_capi::provider::registry::resolve_mirrors(mirrors, &resolved_credentials);
+        }
+    }
+
     let provider = create_provider(cluster.spec.provider.provider_type(), &capi_ns)?;
     provider.generate_capi_manifests(cluster, &bootstrap).await
+}
+
+/// Read registry mirror credential secrets and return name→content map.
+async fn resolve_registry_credentials(
+    mirrors: &[lattice_common::crd::RegistryMirror],
+    kube: &dyn crate::controller::KubeClient,
+) -> Result<std::collections::HashMap<String, String>, Error> {
+    let mut creds = std::collections::HashMap::new();
+    for mirror in mirrors {
+        if let Some(ref secret_ref) = mirror.credentials_ref {
+            if creds.contains_key(&secret_ref.name) {
+                continue;
+            }
+            let secret = kube
+                .get_secret(&secret_ref.name, &secret_ref.namespace)
+                .await
+                .map_err(|e| {
+                    Error::internal(format!(
+                        "failed to read registry credential secret {}/{}: {}",
+                        secret_ref.namespace, secret_ref.name, e
+                    ))
+                })?;
+            if let Some(secret) = secret {
+                if let Some(data) = secret.data {
+                    if let Some(dockerconfig) = data.get(".dockerconfigjson") {
+                        let content = String::from_utf8(dockerconfig.0.clone()).map_err(|e| {
+                            Error::internal(format!(
+                                "invalid UTF-8 in registry credential secret {}: {}",
+                                secret_ref.name, e
+                            ))
+                        })?;
+                        creds.insert(secret_ref.name.clone(), content);
+                    }
+                }
+            }
+        }
+    }
+    Ok(creds)
 }
 
 /// Build bootstrap info for cluster registration.

@@ -20,6 +20,7 @@ mod aws;
 mod docker;
 mod openstack;
 mod proxmox;
+pub mod registry;
 
 pub use aws::AwsProvider;
 pub use docker::DockerProvider;
@@ -130,6 +131,8 @@ pub struct BootstrapInfo {
     pub bootstrap_token: Option<zeroize::Zeroizing<String>>,
     /// CA certificate PEM for verifying the cell's TLS certificate
     pub ca_cert_pem: Option<String>,
+    /// Pre-resolved registry mirrors with credentials content
+    pub registry_mirrors: Vec<registry::ResolvedMirror>,
 }
 
 impl BootstrapInfo {
@@ -139,6 +142,7 @@ impl BootstrapInfo {
             bootstrap_endpoint: Some(bootstrap_endpoint),
             bootstrap_token: Some(zeroize::Zeroizing::new(token)),
             ca_cert_pem: Some(ca_cert_pem),
+            registry_mirrors: Vec::new(),
         }
     }
 
@@ -271,6 +275,8 @@ pub struct ClusterConfig<'a> {
     pub bootstrap: lattice_common::crd::BootstrapProvider,
     /// Infrastructure provider type (Docker, Proxmox, etc.)
     pub provider_type: ProviderType,
+    /// Resolved registry mirror configs (upstream → mirror host, optional credentials content)
+    pub registry_mirrors: Vec<registry::ResolvedMirror>,
 }
 
 /// Infrastructure provider reference configuration
@@ -299,6 +305,8 @@ pub struct ControlPlaneConfig {
     pub vip: Option<VipConfig>,
     /// SSH authorized keys for node access
     pub ssh_authorized_keys: Vec<String>,
+    /// Resolved registry mirror configs (upstream → mirror host, optional credentials content)
+    pub registry_mirrors: Vec<registry::ResolvedMirror>,
 }
 
 /// Virtual IP configuration for kube-vip
@@ -767,7 +775,7 @@ fn generate_kubeadm_config_template_for_pool(
         node_registration["name"] = serde_json::json!(name_template);
     }
 
-    let spec = serde_json::json!({
+    let mut spec = serde_json::json!({
         "template": {
             "spec": {
                 "joinConfiguration": {
@@ -776,6 +784,14 @@ fn generate_kubeadm_config_template_for_pool(
             }
         }
     });
+
+    // Add mirror config for worker nodes
+    if !config.registry_mirrors.is_empty() {
+        let mirror_files = registry::generate_containerd_mirror_files(&config.registry_mirrors);
+        let mirror_commands = registry::generate_containerd_mirror_commands();
+        spec["template"]["spec"]["files"] = serde_json::json!(mirror_files);
+        spec["template"]["spec"]["preKubeadmCommands"] = serde_json::json!(mirror_commands);
+    }
 
     CAPIManifest::new(
         CAPI_BOOTSTRAP_API_VERSION,
@@ -826,7 +842,7 @@ fn generate_rke2_config_template_for_pool(
         kubelet_extra_args.push(format!("register-with-taints={}", taints_str.join(",")));
     }
 
-    let spec = serde_json::json!({
+    let mut spec = serde_json::json!({
         "template": {
             "spec": {
                 "agentConfig": {
@@ -837,6 +853,12 @@ fn generate_rke2_config_template_for_pool(
             }
         }
     });
+
+    // Add mirror config for worker nodes
+    if !config.registry_mirrors.is_empty() {
+        let file = registry::generate_rke2_registries_file(&config.registry_mirrors);
+        spec["template"]["spec"]["files"] = serde_json::json!([file]);
+    }
 
     CAPIManifest::new(
         RKE2_BOOTSTRAP_API_VERSION,
@@ -955,25 +977,42 @@ fn generate_kubeadm_control_plane(
             serde_json::json!(cp_config.post_kubeadm_commands);
     }
 
+    // Build files and preKubeadmCommands accumulators
+    let mut files: Vec<serde_json::Value> = Vec::new();
+    let mut pre_kubeadm_commands: Vec<String> = Vec::new();
+
+    // Mirror config (must come before VIP — restarts containerd)
+    if !cp_config.registry_mirrors.is_empty() {
+        files.extend(registry::generate_containerd_mirror_files(
+            &cp_config.registry_mirrors,
+        ));
+        pre_kubeadm_commands.extend(registry::generate_containerd_mirror_commands());
+    }
+
     // Add kube-vip static pod if VIP is configured
     if let Some(ref vip) = cp_config.vip {
         let kube_vip_content = generate_kube_vip_manifest(vip, &config.bootstrap)?;
-        kubeadm_config_spec["files"] = serde_json::json!([
-            {
-                "content": kube_vip_content,
-                "owner": "root:root",
-                "path": "/etc/kubernetes/manifests/kube-vip.yaml",
-                "permissions": "0644"
-            }
-        ]);
+        files.push(serde_json::json!({
+            "content": kube_vip_content,
+            "owner": "root:root",
+            "path": "/etc/kubernetes/manifests/kube-vip.yaml",
+            "permissions": "0644"
+        }));
 
         // Set node-ip before kubeadm starts to prevent VIP registration issue
         // See: https://github.com/kube-vip/kube-vip/issues/741
         let interface = &vip.interface;
-        kubeadm_config_spec["preKubeadmCommands"] = serde_json::json!([format!(
+        pre_kubeadm_commands.push(format!(
             r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{print $4}}' | cut -d/ -f1 | head -1) && echo "KUBELET_EXTRA_ARGS=\"--node-ip=$NODE_IP\"" > /etc/default/kubelet"#,
             iface = interface
-        )]);
+        ));
+    }
+
+    if !files.is_empty() {
+        kubeadm_config_spec["files"] = serde_json::json!(files);
+    }
+    if !pre_kubeadm_commands.is_empty() {
+        kubeadm_config_spec["preKubeadmCommands"] = serde_json::json!(pre_kubeadm_commands);
     }
 
     // Add SSH authorized keys if configured
@@ -1023,8 +1062,15 @@ fn generate_rke2_control_plane(
 ) -> Result<CAPIManifest> {
     let cp_name = control_plane_name(config.name);
 
-    // Build files array for static pods and SSH keys
+    // Build files array for static pods, SSH keys, and mirror config
     let mut files: Vec<serde_json::Value> = Vec::new();
+
+    // Mirror config
+    if !cp_config.registry_mirrors.is_empty() {
+        files.push(registry::generate_rke2_registries_file(
+            &cp_config.registry_mirrors,
+        ));
+    }
 
     // Add kube-vip static pod if VIP is configured
     if let Some(ref vip) = cp_config.vip {
@@ -1429,6 +1475,7 @@ mod tests {
                 labels: std::collections::BTreeMap::new(),
                 bootstrap,
                 provider_type: ProviderType::Docker,
+                registry_mirrors: vec![],
             }
         }
 
@@ -1451,6 +1498,7 @@ mod tests {
                 post_kubeadm_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1470,6 +1518,7 @@ mod tests {
                 post_kubeadm_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1638,6 +1687,7 @@ mod tests {
                 post_kubeadm_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1669,6 +1719,7 @@ mod tests {
                 post_kubeadm_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1693,6 +1744,7 @@ mod tests {
                 post_kubeadm_commands: vec![],
                 vip: Some(VipConfig::new("10.0.0.100".to_string(), None, None)),
                 ssh_authorized_keys: vec![],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1762,6 +1814,7 @@ mod tests {
                 post_kubeadm_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1789,6 +1842,7 @@ mod tests {
                 post_kubeadm_commands: vec![],
                 vip: Some(VipConfig::new("10.0.0.100".to_string(), None, None)),
                 ssh_authorized_keys: vec![],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1864,6 +1918,7 @@ mod tests {
                 post_kubeadm_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1893,6 +1948,7 @@ mod tests {
                     "ssh-ed25519 AAAAC3... user@host".to_string(),
                     "ssh-rsa AAAAB3... other@host".to_string(),
                 ],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1931,6 +1987,7 @@ mod tests {
                 post_kubeadm_commands: vec![],
                 vip: Some(VipConfig::new("10.0.0.100".to_string(), None, None)),
                 ssh_authorized_keys: vec!["ssh-ed25519 AAAAC3... user@host".to_string()],
+                registry_mirrors: vec![],
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)

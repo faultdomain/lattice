@@ -67,8 +67,8 @@ pub use types::{
     AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec,
     DockerConfig, EndpointsSpec, InstanceType, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec,
     NetworkPool, NetworkingSpec, NodeResourceSpec, NodeSpec, NodeTaint, OpenStackConfig,
-    ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig, RootVolume, SecretRef, ServiceRef,
-    ServiceSpec, TaintEffect, WorkerPoolSpec,
+    ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig, RegistryMirror, RootVolume,
+    SecretRef, ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec,
 };
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,

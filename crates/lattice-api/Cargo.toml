@@ -56,7 +56,6 @@ uuid = { workspace = true }
 
 # Security
 zeroize = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
