@@ -180,19 +180,13 @@ impl KubeClientImpl {
 #[async_trait]
 impl KubeClient for KubeClientImpl {
     async fn patch_status(&self, name: &str, status: &LatticeClusterStatus) -> Result<(), Error> {
-        let api: Api<LatticeCluster> = Api::all(self.client.clone());
-
-        let status_patch = serde_json::json!({
-            "status": status
-        });
-
-        api.patch_status(
+        lattice_common::kube_utils::patch_cluster_resource_status::<LatticeCluster>(
+            &self.client,
             name,
-            &PatchParams::apply("lattice-controller"),
-            &Patch::Merge(&status_patch),
+            status,
+            "lattice-cluster-controller",
         )
         .await?;
-
         Ok(())
     }
 
@@ -371,7 +365,7 @@ impl KubeClient for KubeClientImpl {
 
         api.patch(
             cluster_name,
-            &PatchParams::apply("lattice-controller"),
+            &PatchParams::apply("lattice-cluster-controller"),
             &Patch::Merge(&patch),
         )
         .await?;
@@ -409,7 +403,7 @@ impl KubeClient for KubeClientImpl {
 
         api.patch(
             cluster_name,
-            &PatchParams::apply("lattice-controller"),
+            &PatchParams::apply("lattice-cluster-controller"),
             &Patch::Merge(&patch),
         )
         .await?;
@@ -1171,7 +1165,7 @@ impl PivotOperations for PivotOperationsImpl {
         if let Err(e) = api
             .patch_status(
                 cluster_name,
-                &PatchParams::apply("lattice-operator"),
+                &PatchParams::apply("lattice-cluster-controller"),
                 &Patch::Merge(&patch),
             )
             .await

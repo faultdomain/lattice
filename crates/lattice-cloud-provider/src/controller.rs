@@ -19,7 +19,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
@@ -144,7 +143,7 @@ async fn reconcile_credentials(client: &Client, cp: &CloudProvider) -> Result<()
                     )
                 };
 
-                apply_external_secret(client, &es, "lattice-cloud-provider").await?;
+                apply_external_secret(client, &es, "lattice-cloud-provider-controller").await?;
 
                 debug!(
                     cloud_provider = %cp.name_any(),
@@ -197,15 +196,12 @@ async fn update_status(
         cluster_count: 0,
     };
 
-    let patch = serde_json::json!({
-        "status": status
-    });
-
-    let api: Api<CloudProvider> = Api::namespaced(client.clone(), &namespace);
-    api.patch_status(
+    lattice_common::kube_utils::patch_resource_status::<CloudProvider>(
+        client,
         &name,
-        &PatchParams::apply("lattice-cloud-provider"),
-        &Patch::Merge(&patch),
+        &namespace,
+        &status,
+        "lattice-cloud-provider-controller",
     )
     .await
     .map_err(|e| ReconcileError::Kube(format!("failed to update status: {}", e)))?;

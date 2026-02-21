@@ -786,6 +786,29 @@ where
     Ok(())
 }
 
+/// Patch the status sub-resource of a cluster-scoped Kubernetes resource.
+///
+/// Same as [`patch_resource_status`] but for cluster-scoped (non-namespaced) resources.
+pub async fn patch_cluster_resource_status<T>(
+    client: &Client,
+    name: &str,
+    status: &impl serde::Serialize,
+    field_manager: &str,
+) -> std::result::Result<(), kube::Error>
+where
+    T: kube::Resource<Scope = k8s_openapi::ClusterResourceScope>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug,
+    <T as kube::Resource>::DynamicType: Default,
+{
+    let api: Api<T> = Api::all(client.clone());
+    let patch = serde_json::json!({ "status": status });
+    api.patch_status(name, &PatchParams::apply(field_manager), &Patch::Merge(&patch))
+        .await?;
+    Ok(())
+}
+
 /// Parsed manifest metadata for applying to Kubernetes
 #[derive(Debug, Clone)]
 pub(crate) struct ManifestMetadata {

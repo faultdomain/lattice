@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, ListParams, Patch, PatchParams};
+use kube::api::{Api, ListParams};
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
@@ -100,19 +100,18 @@ pub async fn reconcile(
         }
     }
 
-    let status_patch = serde_json::json!({ "status": status });
-    let policies: Api<LatticeServicePolicy> = Api::namespaced(client.clone(), &namespace);
-    policies
-        .patch_status(
-            &name,
-            &PatchParams::apply("lattice-controller"),
-            &Patch::Merge(&status_patch),
-        )
-        .await
-        .map_err(|e| {
-            warn!(policy = %name, error = %e, "Failed to update policy status");
-            ReconcileError::Kube(format!("status update failed: {}", e))
-        })?;
+    lattice_common::kube_utils::patch_resource_status::<LatticeServicePolicy>(
+        client,
+        &name,
+        &namespace,
+        &status,
+        "lattice-service-policy-controller",
+    )
+    .await
+    .map_err(|e| {
+        warn!(policy = %name, error = %e, "Failed to update policy status");
+        ReconcileError::Kube(format!("status update failed: {}", e))
+    })?;
 
     // Requeue periodically
     Ok(Action::requeue(Duration::from_secs(120)))

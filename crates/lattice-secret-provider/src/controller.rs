@@ -104,7 +104,7 @@ pub async fn ensure_webhook_credentials(
         }
     });
 
-    let params = PatchParams::apply("lattice-secrets-provider").force();
+    let params = PatchParams::apply("lattice-secret-provider-controller").force();
     api.patch(
         LOCAL_WEBHOOK_AUTH_SECRET,
         &params,
@@ -149,7 +149,7 @@ pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), 
         ReconcileError::Internal(format!("failed to build local ClusterSecretStore: {e}"))
     })?;
 
-    let params = PatchParams::apply("lattice-secrets-provider").force();
+    let params = PatchParams::apply("lattice-secret-provider-controller").force();
     css_api
         .patch(LOCAL_WEBHOOK_STORE_NAME, &params, &Patch::Apply(&css_obj))
         .await
@@ -320,7 +320,7 @@ async fn ensure_cluster_secret_store(
         ReconcileError::Internal(format!("failed to build ClusterSecretStore: {e}"))
     })?;
 
-    let params = PatchParams::apply("lattice-secrets-provider").force();
+    let params = PatchParams::apply("lattice-secret-provider-controller").force();
     css_api
         .patch(&name, &params, &Patch::Apply(&css_obj))
         .await
@@ -445,7 +445,7 @@ async fn force_refresh_failed_external_secrets(
         if let Err(e) = ns_api
             .patch(
                 es_name,
-                &PatchParams::apply("lattice-secrets-provider").force(),
+                &PatchParams::apply("lattice-secret-provider-controller").force(),
                 &Patch::Merge(&patch),
             )
             .await
@@ -536,7 +536,7 @@ async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), Reconcile
         }
     });
 
-    let params = PatchParams::apply("lattice-secrets-provider").force();
+    let params = PatchParams::apply("lattice-secret-provider-controller").force();
     ns_api
         .patch(LOCAL_SECRETS_NAMESPACE, &params, &Patch::Apply(&ns))
         .await
@@ -577,7 +577,7 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
 
     let svc_api: Api<k8s_openapi::api::core::v1::Service> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let params = PatchParams::apply("lattice-secrets-provider").force();
+    let params = PatchParams::apply("lattice-secret-provider-controller").force();
     svc_api
         .patch(LOCAL_SECRETS_SERVICE, &params, &Patch::Apply(&svc))
         .await
@@ -631,7 +631,7 @@ async fn update_status(
     let api: Api<SecretProvider> = Api::namespaced(client.clone(), &namespace);
     api.patch_status(
         &name,
-        &PatchParams::apply("lattice-secrets-provider"),
+        &PatchParams::apply("lattice-secret-provider-controller"),
         &Patch::Merge(&patch),
     )
     .await
