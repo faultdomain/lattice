@@ -248,10 +248,10 @@ mod tests {
             ContainerSpec {
                 image: "test:latest".to_string(),
                 readiness_probe: Some(Probe {
-                    http_get: None,
                     exec: Some(ExecProbe {
                         command: vec!["nc".to_string(), "-z".to_string(), "127.0.0.1".to_string()],
                     }),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -278,10 +278,10 @@ mod tests {
                 image: "test:latest".to_string(),
                 command: Some(vec!["/usr/bin/myapp".to_string()]),
                 liveness_probe: Some(Probe {
-                    http_get: None,
                     exec: Some(ExecProbe {
                         command: vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
                     }),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -384,10 +384,10 @@ mod tests {
                     ..Default::default()
                 }),
                 liveness_probe: Some(Probe {
-                    http_get: None,
                     exec: Some(ExecProbe {
                         command: vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
                     }),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -421,7 +421,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "test:latest".to_string(),
-                command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+                command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
                 security: Some(SecurityContext {
                     allowed_binaries: vec!["/usr/bin/curl".to_string()],
                     ..Default::default()
@@ -437,7 +437,7 @@ mod tests {
 
         let values = allowed_values(&compile(&w, &r));
         assert!(
-            values.contains(&"sleep".to_string()),
+            values.contains(&"/bin/sleep".to_string()),
             "command[0] auto-whitelisted"
         );
         assert!(

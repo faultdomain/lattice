@@ -1316,7 +1316,7 @@ mod tests {
             "init-setup".to_string(),
             SidecarSpec {
                 image: "busybox:latest".to_string(),
-                command: Some(vec!["sh".to_string(), "-c".to_string()]),
+                command: Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
                 args: Some(vec!["echo hello".to_string()]),
                 init: Some(true),
                 ..Default::default()

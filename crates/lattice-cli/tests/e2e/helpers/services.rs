@@ -130,7 +130,7 @@ pub fn create_service_with_secrets(
         "main".to_string(),
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
-            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
             resources: Some(ResourceRequirements {
                 requests: Some(ResourceQuantity {
                     cpu: Some("50m".to_string()),
@@ -191,7 +191,7 @@ pub fn create_service_with_security_overrides(
         "main".to_string(),
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
-            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
             security: Some(security),
             ..Default::default()
         },
@@ -622,7 +622,7 @@ pub fn create_service_with_all_secret_routes(
         "main".to_string(),
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
-            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
             variables,
             files,
             resources: Some(ResourceRequirements {

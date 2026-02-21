@@ -203,7 +203,7 @@ fn build_service_with_sidecar_shell(name: &str, namespace: &str) -> LatticeServi
         "main".to_string(),
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
-            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
             security: Some(default_security()),
             resources: Some(default_resources()),
             ..Default::default()
@@ -238,7 +238,7 @@ fn build_service_with_allowed_binaries(
         "main".to_string(),
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
-            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
             security: Some(SecurityContext {
                 allowed_binaries,
                 ..default_security()
@@ -525,7 +525,7 @@ async fn test_probe_shell_exemption(kubeconfig: &str) -> Result<(), String> {
         exec: Some(ExecProbe {
             command: vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
         }),
-        http_get: None,
+        ..Default::default()
     };
     deploy_and_wait_for_phase(
         kubeconfig,
@@ -669,7 +669,7 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
         exec: Some(ExecProbe {
             command: vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
         }),
-        http_get: None,
+        ..Default::default()
     };
     deploy_and_wait_for_phase(
         kubeconfig,

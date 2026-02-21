@@ -198,6 +198,13 @@ fn collect_container_overrides(
             container: cname.clone(),
         });
     }
+    if s.run_as_group == Some(0) {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "runAsRootGroup".into(),
+            category: "container".into(),
+            container: cname.clone(),
+        });
+    }
     if s.read_only_root_filesystem == Some(false) {
         overrides.push(SecurityOverrideRequest {
             override_id: "readWriteRootFilesystem".into(),
@@ -219,9 +226,23 @@ fn collect_container_overrides(
             container: cname.clone(),
         });
     }
+    if s.seccomp_profile.as_deref() == Some("Localhost") {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "localhost:seccomp".into(),
+            category: "profile".into(),
+            container: cname.clone(),
+        });
+    }
     if s.apparmor_profile.as_deref() == Some("Unconfined") {
         overrides.push(SecurityOverrideRequest {
             override_id: "unconfined:apparmor".into(),
+            category: "profile".into(),
+            container: cname.clone(),
+        });
+    }
+    if s.apparmor_profile.as_deref() == Some("Localhost") {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "localhost:apparmor".into(),
             category: "profile".into(),
             container: cname.clone(),
         });
@@ -357,5 +378,139 @@ mod tests {
 
         let overrides = collect_security_overrides(&workload, &runtime);
         assert!(overrides.iter().all(|o| o.category != "binary"));
+    }
+
+    #[test]
+    fn run_as_root_group_generates_override() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                command: Some(vec!["/app".to_string()]),
+                security: Some(SecurityContext {
+                    run_as_group: Some(0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec::default();
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        assert!(overrides
+            .iter()
+            .any(|o| o.override_id == "runAsRootGroup" && o.container.as_deref() == Some("main")));
+    }
+
+    #[test]
+    fn non_zero_run_as_group_no_override() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                command: Some(vec!["/app".to_string()]),
+                security: Some(SecurityContext {
+                    run_as_group: Some(1000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec::default();
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        assert!(!overrides.iter().any(|o| o.override_id == "runAsRootGroup"));
+    }
+
+    #[test]
+    fn localhost_seccomp_generates_override() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                command: Some(vec!["/app".to_string()]),
+                security: Some(SecurityContext {
+                    seccomp_profile: Some("Localhost".to_string()),
+                    seccomp_localhost_profile: Some("profiles/custom.json".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec::default();
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        assert!(overrides
+            .iter()
+            .any(|o| o.override_id == "localhost:seccomp" && o.category == "profile"));
+    }
+
+    #[test]
+    fn localhost_apparmor_generates_override() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                command: Some(vec!["/app".to_string()]),
+                security: Some(SecurityContext {
+                    apparmor_profile: Some("Localhost".to_string()),
+                    apparmor_localhost_profile: Some("custom-profile".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec::default();
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        assert!(overrides
+            .iter()
+            .any(|o| o.override_id == "localhost:apparmor" && o.category == "profile"));
+    }
+
+    #[test]
+    fn runtime_default_profiles_no_override() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                command: Some(vec!["/app".to_string()]),
+                security: Some(SecurityContext {
+                    seccomp_profile: Some("RuntimeDefault".to_string()),
+                    apparmor_profile: Some("RuntimeDefault".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec::default();
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        assert!(!overrides.iter().any(|o| o.category == "profile"));
     }
 }

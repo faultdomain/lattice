@@ -70,11 +70,12 @@ pub struct RuntimeSpec {
 }
 
 impl RuntimeSpec {
-    /// Validate the runtime specification (sidecar names)
+    /// Validate the runtime specification (sidecar names and specs)
     pub fn validate(&self) -> Result<(), crate::Error> {
-        for name in self.sidecars.keys() {
+        for (name, sidecar) in &self.sidecars {
             super::super::validate_dns_label(name, "sidecar name")
                 .map_err(crate::Error::validation)?;
+            sidecar.validate(name)?;
         }
         Ok(())
     }
@@ -252,7 +253,7 @@ mod tests {
     fn simple_container() -> ContainerSpec {
         ContainerSpec {
             image: "nginx:latest".to_string(),
-            command: Some(vec!["nginx".to_string()]),
+            command: Some(vec!["/usr/sbin/nginx".to_string()]),
             resources: Some(ResourceRequirements {
                 limits: Some(ResourceQuantity {
                     memory: Some("256Mi".to_string()),

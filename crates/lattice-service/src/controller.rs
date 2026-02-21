@@ -1421,7 +1421,7 @@ mod tests {
     fn simple_container() -> ContainerSpec {
         ContainerSpec {
             image: "nginx:latest".to_string(),
-            command: Some(vec!["nginx".to_string()]),
+            command: Some(vec!["/usr/sbin/nginx".to_string()]),
             resources: Some(lattice_common::crd::ResourceRequirements {
                 limits: Some(lattice_common::crd::ResourceQuantity {
                     memory: Some("256Mi".to_string()),

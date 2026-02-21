@@ -58,8 +58,7 @@ pub struct ExecProbe {
 /// Probe configuration (liveness or readiness)
 ///
 /// Score-compliant probe specification. Supports HTTP GET and exec probe types.
-/// Timing parameters use platform defaults (initialDelaySeconds: 0, periodSeconds: 10).
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Probe {
     /// HTTP GET probe - performs an HTTP GET request
@@ -69,6 +68,26 @@ pub struct Probe {
     /// Exec probe - executes a command inside the container
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecProbe>,
+
+    /// Seconds after container start before probes begin (default: 0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_delay_seconds: Option<i32>,
+
+    /// Seconds between probe attempts (default: 10)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_seconds: Option<i32>,
+
+    /// Seconds before the probe times out (default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<i32>,
+
+    /// Consecutive failures before marking unhealthy (default: 3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_threshold: Option<i32>,
+
+    /// Consecutive successes before marking healthy (default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_threshold: Option<i32>,
 }
 
 // =============================================================================
@@ -243,6 +262,10 @@ pub struct SidecarSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
 
+    /// Working directory inside the container
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+
     /// Environment variables (values support `${...}` placeholders)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, TemplateString>,
@@ -280,6 +303,30 @@ pub struct SidecarSpec {
     pub security: Option<SecurityContext>,
 }
 
+impl SidecarSpec {
+    /// Validate sidecar specification
+    pub fn validate(&self, sidecar_name: &str) -> Result<(), crate::Error> {
+        validate_image(&self.image, sidecar_name)?;
+        validate_command_path(&self.command, sidecar_name)?;
+
+        // Init sidecars must specify a command. Without it, `has_unknown_binary_entrypoint()`
+        // returns true and disables Tetragon binary enforcement for the entire pod.
+        // Init containers are explicit setup tasks — they always know their entrypoint.
+        if self.init == Some(true) && self.command.is_none() {
+            return Err(crate::Error::validation(format!(
+                "sidecar '{}': init containers must specify a command",
+                sidecar_name
+            )));
+        }
+
+        for (path, file_mount) in &self.files {
+            file_mount.validate(sidecar_name, path)?;
+        }
+
+        Ok(())
+    }
+}
+
 // =============================================================================
 // Container Spec
 // =============================================================================
@@ -298,6 +345,10 @@ pub struct ContainerSpec {
     /// Override container arguments
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
+
+    /// Working directory inside the container
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
 
     /// Environment variables (values support `${...}` placeholders)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -344,6 +395,9 @@ impl ContainerSpec {
     pub fn validate(&self, container_name: &str) -> Result<(), crate::Error> {
         // Validate image format
         validate_image(&self.image, container_name)?;
+
+        // Validate command[0] is an absolute path (Tetragon needs it for the allowlist)
+        validate_command_path(&self.command, container_name)?;
 
         // Resource limits are required for every container
         let resources = self.resources.as_ref().ok_or_else(|| {
@@ -435,6 +489,28 @@ pub(crate) fn validate_image(image: &str, container_name: &str) -> Result<(), cr
         )));
     }
 
+    Ok(())
+}
+
+/// Validate that command[0] is an absolute path.
+///
+/// Tetragon's `security_bprm_check` hook receives the kernel-resolved absolute path,
+/// so relative paths in the allowlist would never match. Reject early with a clear error
+/// instead of silently generating a broken allowlist.
+pub(crate) fn validate_command_path(
+    command: &Option<Vec<String>>,
+    container_name: &str,
+) -> Result<(), crate::Error> {
+    if let Some(cmd) = command {
+        if let Some(binary) = cmd.first() {
+            if !binary.starts_with('/') {
+                return Err(crate::Error::validation(format!(
+                    "container '{}': command[0] '{}' must be an absolute path (start with '/')",
+                    container_name, binary
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -647,5 +723,73 @@ mod tests {
             reverse_expand: false,
         };
         assert!(file_with_content.validate("main", "/etc/config").is_ok());
+    }
+
+    #[test]
+    fn test_command_absolute_path_passes() {
+        assert!(validate_command_path(&Some(vec!["/usr/bin/app".to_string()]), "main").is_ok());
+        assert!(validate_command_path(&Some(vec!["/bin/sh".to_string(), "-c".to_string()]), "main").is_ok());
+        assert!(validate_command_path(&None, "main").is_ok());
+    }
+
+    #[test]
+    fn test_command_relative_path_fails() {
+        let result = validate_command_path(&Some(vec!["app".to_string()]), "main");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an absolute path"));
+    }
+
+    #[test]
+    fn test_command_empty_string_fails() {
+        let result = validate_command_path(&Some(vec!["".to_string()]), "main");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an absolute path"));
+    }
+
+    #[test]
+    fn test_init_sidecar_requires_command() {
+        let sidecar = SidecarSpec {
+            image: "busybox:latest".to_string(),
+            init: Some(true),
+            command: None,
+            ..Default::default()
+        };
+        let result = sidecar.validate("setup");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("init containers must specify a command"));
+    }
+
+    #[test]
+    fn test_init_sidecar_with_command_passes() {
+        let sidecar = SidecarSpec {
+            image: "busybox:latest".to_string(),
+            init: Some(true),
+            command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), "setup".to_string()]),
+            ..Default::default()
+        };
+        assert!(sidecar.validate("setup").is_ok());
+    }
+
+    #[test]
+    fn test_regular_sidecar_without_command_passes() {
+        let sidecar = SidecarSpec {
+            image: "fluentbit:latest".to_string(),
+            init: Some(false),
+            command: None,
+            ..Default::default()
+        };
+        assert!(sidecar.validate("logger").is_ok());
+    }
+
+    #[test]
+    fn test_sidecar_relative_command_fails() {
+        let sidecar = SidecarSpec {
+            image: "busybox:latest".to_string(),
+            command: Some(vec!["sh".to_string()]),
+            ..Default::default()
+        };
+        let result = sidecar.validate("setup");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an absolute path"));
     }
 }

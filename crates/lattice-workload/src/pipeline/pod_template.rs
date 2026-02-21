@@ -276,6 +276,7 @@ impl PodTemplateCompiler {
                     image,
                     command,
                     args,
+                    working_dir: container_spec.working_dir.clone(),
                     env,
                     env_from,
                     ports,
@@ -371,6 +372,11 @@ impl PodTemplateCompiler {
             exec: p.exec.as_ref().map(|e| crate::k8s::ExecAction {
                 command: e.command.clone(),
             }),
+            initial_delay_seconds: p.initial_delay_seconds,
+            period_seconds: p.period_seconds,
+            timeout_seconds: p.timeout_seconds,
+            failure_threshold: p.failure_threshold,
+            success_threshold: p.success_threshold,
         }
     }
 
@@ -525,6 +531,7 @@ impl PodTemplateCompiler {
                 image: sidecar_spec.image.clone(),
                 command: sidecar_spec.command.clone(),
                 args: sidecar_spec.args.clone(),
+                working_dir: sidecar_spec.working_dir.clone(),
                 env,
                 env_from: vec![],
                 ports: vec![],
@@ -624,7 +631,7 @@ mod tests {
                     value: "test".to_string(),
                 }]),
             }),
-            exec: None,
+            ..Default::default()
         };
 
         let result = PodTemplateCompiler::compile_probe(&probe);
@@ -643,10 +650,10 @@ mod tests {
     #[test]
     fn compile_exec_probe() {
         let probe = Probe {
-            http_get: None,
             exec: Some(ExecProbe {
                 command: vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
             }),
+            ..Default::default()
         };
 
         let result = PodTemplateCompiler::compile_probe(&probe);
@@ -654,6 +661,51 @@ mod tests {
         assert!(result.http_get.is_none());
         let exec = result.exec.expect("should have exec");
         assert_eq!(exec.command, vec!["/bin/sh", "-c", "true"]);
+    }
+
+    #[test]
+    fn compile_probe_with_timing_fields() {
+        let probe = Probe {
+            http_get: Some(HttpGetProbe {
+                path: "/healthz".to_string(),
+                port: 8080,
+                scheme: None,
+                host: None,
+                http_headers: None,
+            }),
+            initial_delay_seconds: Some(30),
+            period_seconds: Some(15),
+            timeout_seconds: Some(5),
+            failure_threshold: Some(6),
+            success_threshold: Some(2),
+            ..Default::default()
+        };
+
+        let result = PodTemplateCompiler::compile_probe(&probe);
+
+        assert_eq!(result.initial_delay_seconds, Some(30));
+        assert_eq!(result.period_seconds, Some(15));
+        assert_eq!(result.timeout_seconds, Some(5));
+        assert_eq!(result.failure_threshold, Some(6));
+        assert_eq!(result.success_threshold, Some(2));
+    }
+
+    #[test]
+    fn compile_probe_timing_defaults_to_none() {
+        let probe = Probe {
+            exec: Some(ExecProbe {
+                command: vec!["/bin/true".to_string()],
+            }),
+            ..Default::default()
+        };
+
+        let result = PodTemplateCompiler::compile_probe(&probe);
+
+        assert!(result.initial_delay_seconds.is_none());
+        assert!(result.period_seconds.is_none());
+        assert!(result.timeout_seconds.is_none());
+        assert!(result.failure_threshold.is_none());
+        assert!(result.success_threshold.is_none());
     }
 
     // =========================================================================
@@ -1058,7 +1110,7 @@ mod tests {
                         host: None,
                         http_headers: None,
                     }),
-                    exec: None,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -1091,7 +1143,7 @@ mod tests {
                     exec: Some(ExecProbe {
                         command: vec!["true".to_string()],
                     }),
-                    http_get: None,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },

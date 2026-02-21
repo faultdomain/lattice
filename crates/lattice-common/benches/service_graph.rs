@@ -23,7 +23,7 @@ use lattice_common::graph::ServiceGraph;
 fn simple_container() -> ContainerSpec {
     ContainerSpec {
         image: "nginx:latest".to_string(),
-        command: Some(vec!["nginx".to_string()]),
+        command: Some(vec!["/usr/sbin/nginx".to_string()]),
         ..Default::default()
     }
 }

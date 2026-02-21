@@ -115,8 +115,12 @@ impl RandomMesh {
         self.services.len()
     }
 
-    pub fn has_external_services(&self) -> bool {
-        !self.external_services.is_empty()
+    /// Returns true if any service actually has external outbound dependencies,
+    /// which triggers waypoint proxy creation (1 extra pod).
+    pub fn has_external_deps(&self) -> bool {
+        self.services
+            .values()
+            .any(|s| !s.external_outbound.is_empty())
     }
 
     pub fn generate(config: &RandomMeshConfig) -> Self {
@@ -754,7 +758,8 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     deploy_random_mesh(&mesh, kubeconfig_path).await?;
     wait_for_services_ready(kubeconfig_path, RANDOM_MESH_NAMESPACE, mesh.service_count()).await?;
 
-    let expected_pods = mesh.service_count() + if mesh.has_external_services() { 1 } else { 0 };
+    let expected_pods =
+        mesh.service_count() + if mesh.has_external_deps() { 1 } else { 0 };
     wait_for_pods_running(
         kubeconfig_path,
         RANDOM_MESH_NAMESPACE,

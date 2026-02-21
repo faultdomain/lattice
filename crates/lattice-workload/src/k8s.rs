@@ -130,6 +130,9 @@ pub struct Container {
     /// Args
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
+    /// Working directory
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
     /// Environment variables
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
@@ -322,6 +325,21 @@ pub struct ProbeSpec {
     /// Exec probe
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecAction>,
+    /// Seconds after container start before probes begin
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_delay_seconds: Option<i32>,
+    /// Seconds between probe attempts
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_seconds: Option<i32>,
+    /// Seconds before the probe times out
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<i32>,
+    /// Consecutive failures before marking unhealthy
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_threshold: Option<i32>,
+    /// Consecutive successes before marking healthy
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_threshold: Option<i32>,
 }
 
 /// HTTP GET action for probe
