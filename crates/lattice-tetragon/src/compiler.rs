@@ -17,11 +17,16 @@ use lattice_common::policy::tetragon::{
 ///
 /// Takes workload + runtime specs (not a specific CRD type) so it can be
 /// called from LatticeService, LatticeJob, or LatticeModel controllers.
+///
+/// `extra_binaries` receives additional binaries to whitelist beyond what is
+/// declared in container commands, probes, and allowedBinaries (e.g., backup
+/// hook commands that run inside the pod via Velero).
 pub fn compile_tracing_policies(
     name: &str,
     namespace: &str,
     workload: &WorkloadSpec,
     runtime: &RuntimeSpec,
+    extra_binaries: &[&str],
 ) -> Vec<TracingPolicyNamespaced> {
     let mut policies = Vec::new();
 
@@ -32,7 +37,10 @@ pub fn compile_tracing_policies(
     // its image ENTRYPOINT, so the whole pod gets implicit wildcard (Tetragon
     // policies are pod-scoped). Cedar must authorize this separately.
     let allowed_binaries = extract_allowed_binaries(workload, runtime);
-    let entrypoints = extract_entrypoint_binaries(workload, runtime);
+    let mut entrypoints = extract_entrypoint_binaries(workload, runtime);
+    for binary in extra_binaries {
+        entrypoints.insert((*binary).to_string());
+    }
     let needs_wildcard =
         allowed_binaries.contains("*") || any_container_unknown_entrypoint(workload, runtime);
     if !needs_wildcard {
@@ -210,7 +218,7 @@ mod tests {
     }
 
     fn compile(workload: &WorkloadSpec, runtime: &RuntimeSpec) -> Vec<TracingPolicyNamespaced> {
-        compile_tracing_policies("my-app", "default", workload, runtime)
+        compile_tracing_policies("my-app", "default", workload, runtime, &[])
     }
 
     fn names(policies: &[TracingPolicyNamespaced]) -> Vec<&str> {
@@ -479,5 +487,44 @@ mod tests {
             .find(|p| p.metadata.name == "allow-binaries-my-app")
             .unwrap();
         assert_eq!(allow.spec.kprobes[0].call, "security_bprm_check");
+    }
+
+    #[test]
+    fn extra_binaries_included_in_whitelist() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                command: Some(vec!["/usr/bin/myapp".to_string()]),
+                ..Default::default()
+            },
+        );
+        let w = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let r = RuntimeSpec::default();
+
+        let policies = compile_tracing_policies(
+            "my-app",
+            "default",
+            &w,
+            &r,
+            &["/bin/sh", "/usr/bin/pg_isready"],
+        );
+        let values = allowed_values(&policies);
+        assert!(
+            values.contains(&"/bin/sh".to_string()),
+            "backup hook binary should be whitelisted"
+        );
+        assert!(
+            values.contains(&"/usr/bin/pg_isready".to_string()),
+            "backup hook binary should be whitelisted"
+        );
+        assert!(
+            values.contains(&"/usr/bin/myapp".to_string()),
+            "container entrypoint should still be whitelisted"
+        );
     }
 }

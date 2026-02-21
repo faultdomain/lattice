@@ -287,11 +287,18 @@ impl<'a> ServiceCompiler<'a> {
             }
         }
 
+        // Collect backup hook binaries for Tetragon whitelist inclusion.
+        // Uses the effective backup (merged from policies + inline) so policy-injected
+        // hooks are also whitelisted. Velero executes these inside the pod.
+        let hook_binaries = backup_spec
+            .map(|b| b.hook_binaries())
+            .unwrap_or_default();
         let tracing_policies = lattice_tetragon::compile_tracing_policies(
             name,
             namespace,
             &service.spec.workload,
             &service.spec.runtime,
+            &hook_binaries,
         );
 
         let mut compiled = CompiledService {

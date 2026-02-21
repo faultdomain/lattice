@@ -139,6 +139,11 @@ impl LatticeServiceSpec {
             autoscaling.validate()?;
         }
 
+        // Validate backup hooks
+        if let Some(ref backup) = self.backup {
+            backup.validate()?;
+        }
+
         Ok(())
     }
 }

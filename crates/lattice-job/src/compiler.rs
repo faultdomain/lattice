@@ -104,6 +104,7 @@ pub async fn compile_job(
             namespace,
             &task_spec.workload,
             &task_spec.runtime,
+            &[],
         );
         tracing_policies.extend(policies);
     }

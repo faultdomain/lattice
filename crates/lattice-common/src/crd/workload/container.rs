@@ -502,13 +502,24 @@ pub(crate) fn validate_command_path(
     container_name: &str,
 ) -> Result<(), crate::Error> {
     if let Some(cmd) = command {
-        if let Some(binary) = cmd.first() {
-            if !binary.starts_with('/') {
-                return Err(crate::Error::validation(format!(
-                    "container '{}': command[0] '{}' must be an absolute path (start with '/')",
-                    container_name, binary
-                )));
-            }
+        validate_absolute_command(cmd, container_name)?;
+    }
+    Ok(())
+}
+
+/// Validate that a non-optional command's first element is an absolute path.
+///
+/// Shared by container command validation and backup hook command validation.
+pub fn validate_absolute_command(
+    command: &[String],
+    context_name: &str,
+) -> Result<(), crate::Error> {
+    if let Some(binary) = command.first() {
+        if !binary.starts_with('/') {
+            return Err(crate::Error::validation(format!(
+                "'{}': command[0] '{}' must be an absolute path (start with '/')",
+                context_name, binary
+            )));
         }
     }
     Ok(())
