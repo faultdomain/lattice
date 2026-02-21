@@ -174,7 +174,7 @@ impl CAPIClientImpl {
         let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
         api.patch(
             &manifest.metadata.name,
-            &PatchParams::apply("lattice-controller").force(),
+            &PatchParams::apply("lattice-capi-client").force(),
             &Patch::Apply(&obj),
         )
         .await?;

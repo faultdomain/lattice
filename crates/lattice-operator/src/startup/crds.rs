@@ -94,7 +94,7 @@ fn service_crds() -> Vec<CrdDef> {
 /// Install a set of CRDs using server-side apply
 async fn install_crds(client: &Client, crds_to_install: Vec<CrdDef>) -> anyhow::Result<()> {
     let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
-    let params = PatchParams::apply("lattice-controller").force();
+    let params = PatchParams::apply("lattice-operator").force();
 
     for def in crds_to_install {
         tracing::info!("Installing {} CRD...", def.name);

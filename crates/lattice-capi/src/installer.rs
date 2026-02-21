@@ -439,7 +439,7 @@ pub async fn copy_credentials_to_provider_namespace(
     target_api
         .patch(
             target_name,
-            &PatchParams::apply("lattice-controller").force(),
+            &PatchParams::apply("lattice-capi-installer").force(),
             &Patch::Apply(&target),
         )
         .await
