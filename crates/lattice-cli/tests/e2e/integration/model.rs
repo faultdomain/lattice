@@ -18,7 +18,7 @@ use tracing::info;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     apply_apparmor_override_policy, apply_yaml_with_retry, delete_namespace, load_fixture_config,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
+    run_kubectl, setup_regcreds_infrastructure, wait_for_condition, wait_for_job_complete,
 };
 
 const MODEL_NAMESPACE: &str = "serving";
@@ -520,8 +520,8 @@ async fn test_model_download_pvc(kubeconfig: &str) -> Result<(), String> {
     let storage = pvc["spec"]["resources"]["requests"]["storage"]
         .as_str()
         .unwrap_or_default();
-    if storage != "50Gi" {
-        return Err(format!("PVC storage should be '50Gi', got: '{storage}'"));
+    if storage != "1Gi" {
+        return Err(format!("PVC storage should be '1Gi', got: '{storage}'"));
     }
 
     // Verify access mode
@@ -545,7 +545,7 @@ async fn test_model_download_pvc(kubeconfig: &str) -> Result<(), String> {
         ));
     }
 
-    info!("[Model] Model download PVC verified: 50Gi, ReadWriteOnce, correct owner ref");
+    info!("[Model] Model download PVC verified: 1Gi, ReadWriteOnce, correct owner ref");
     Ok(())
 }
 
@@ -591,9 +591,9 @@ async fn test_model_download_job(kubeconfig: &str) -> Result<(), String> {
     let cmd = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
         .as_str()
         .unwrap_or_default();
-    if !cmd.contains("huggingface-cli download Qwen/Qwen3-8B") {
+    if !cmd.contains("huggingface-cli download hf-internal-testing/tiny-random-LlamaForCausalLM") {
         return Err(format!(
-            "Download job command should reference 'Qwen/Qwen3-8B', got: '{cmd}'"
+            "Download job command should reference 'hf-internal-testing/tiny-random-LlamaForCausalLM', got: '{cmd}'"
         ));
     }
 
@@ -617,7 +617,7 @@ async fn test_model_download_job(kubeconfig: &str) -> Result<(), String> {
         ));
     }
 
-    info!("[Model] Model download Job verified: python:3.11-slim, huggingface-cli, correct owner ref");
+    info!("[Model] Model download Job verified: python:3.11-slim, huggingface-cli download, correct owner ref");
     Ok(())
 }
 
@@ -814,6 +814,68 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Verify download Job completes and scheduling gates are removed
+async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Waiting for download Job to complete...");
+
+    let job_name = format!("{}-download", MODEL_NAME);
+    wait_for_job_complete(kubeconfig, MODEL_NAMESPACE, &job_name, Duration::from_secs(300)).await?;
+
+    info!("[Model] Download Job completed, verifying scheduling gates are removed...");
+
+    // After Job completes, the controller should remove scheduling gates from pods
+    let label_selector = format!("modelserving.volcano.sh/name={}", MODEL_NAME);
+    let kc = kubeconfig.to_string();
+    let ls = label_selector.clone();
+
+    wait_for_condition(
+        "scheduling gates to be removed from model pods",
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let ls = ls.clone();
+            async move {
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "pods",
+                    "-n",
+                    MODEL_NAMESPACE,
+                    "-l",
+                    &ls,
+                    "-o",
+                    "jsonpath={.items[*].spec.schedulingGates}",
+                ])
+                .await;
+
+                match output {
+                    Ok(gates) => {
+                        let gates = gates.trim();
+                        // Empty or no gates means they've been removed
+                        let removed = gates.is_empty()
+                            || !gates.contains("lattice.dev/model-download");
+                        info!(
+                            "[Model] Scheduling gates: {}",
+                            if gates.is_empty() { "(none)" } else { gates }
+                        );
+                        Ok(removed)
+                    }
+                    Err(e) => {
+                        info!("[Model] Could not check scheduling gates: {}", e);
+                        Ok(false)
+                    }
+                }
+            }
+        },
+    )
+    .await?;
+
+    info!("[Model] Download lifecycle verified: Job completed + scheduling gates removed");
+    Ok(())
+}
+
 /// Run all model integration tests
 pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
     let kubeconfig = ctx.require_workload()?;
@@ -839,7 +901,10 @@ pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
     test_model_routing_created(kubeconfig).await?;
     test_model_mesh_members(kubeconfig).await?;
 
-    // Wait for full lifecycle (Kthena processing)
+    // Wait for download lifecycle: Job completes + scheduling gates removed
+    test_download_lifecycle(kubeconfig).await?;
+
+    // Wait for full lifecycle (Kthena processing — now reachable after gates removed)
     test_model_serving_phase(kubeconfig).await?;
 
     // Cleanup

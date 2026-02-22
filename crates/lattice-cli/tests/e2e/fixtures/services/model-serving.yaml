@@ -8,8 +8,8 @@ spec:
   recoveryPolicy: ServingGroupRecreate
   restartGracePeriodSeconds: 30
   modelSource:
-    uri: "hf://Qwen/Qwen3-8B"
-    cacheSize: "50Gi"
+    uri: "hf://hf-internal-testing/tiny-random-LlamaForCausalLM"
+    cacheSize: "1Gi"
   roles:
     prefill:
       replicas: 1
