@@ -763,7 +763,7 @@ mod tests {
             .unwrap();
 
         let download = compiled.download.as_ref().expect("download should be Some");
-        assert_eq!(download.pvc_name, "test-model-model-cache");
+        assert_eq!(download.pvc_name, "vol-test-model-model-cache");
         assert_eq!(download.mount_path, "/models");
 
         // Verify scheduling gate + volume injected into pod templates

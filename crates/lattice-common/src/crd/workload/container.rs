@@ -381,6 +381,12 @@ pub struct ContainerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_probe: Option<Probe>,
 
+    /// Secret resources to mount as environment variables via `envFrom`.
+    /// Each entry is the name of a `type: secret` resource declared in `resources`.
+    /// All keys from the synced Kubernetes Secret are injected as env vars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_from: Vec<String>,
+
     /// Security context for the container
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<SecurityContext>,
@@ -822,5 +828,34 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("must be an absolute path"));
+    }
+
+    #[test]
+    fn test_env_from_defaults_empty() {
+        let container = ContainerSpec {
+            image: "nginx:latest".to_string(),
+            ..Default::default()
+        };
+        assert!(container.env_from.is_empty());
+    }
+
+    #[test]
+    fn test_env_from_deserializes() {
+        let json = serde_json::json!({
+            "image": "nginx:latest",
+            "envFrom": ["db-creds", "api-keys"]
+        });
+        let container: ContainerSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(container.env_from, vec!["db-creds", "api-keys"]);
+    }
+
+    #[test]
+    fn test_env_from_omitted_when_empty() {
+        let container = ContainerSpec {
+            image: "nginx:latest".to_string(),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&container).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("envFrom"));
     }
 }

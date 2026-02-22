@@ -1,17 +1,31 @@
-//! Model download compilation — PVC, Job, and pod template injection
+//! Model download compilation — LatticeJob, PVC, and pod template injection
 //!
 //! Pure compilation functions that take a `ModelSourceSpec` and produce:
-//! - A PVC for caching downloaded model artifacts
-//! - A K8s batch/v1 Job that downloads the model into the PVC
+//! - A LatticeJob CRD that downloads the model through the Lattice compilation pipeline
+//! - A PVC for caching downloaded model artifacts (owned by LatticeModel for GC)
+//! - A ServiceAccount for SPIFFE identity
 //! - Volume + volumeMount injection for role pod templates
 //! - Scheduling gate injection so pods stay `SchedulingGated` until download completes
+//!
+//! The LatticeJob goes through the normal compilation pipeline (WorkloadCompiler → mesh
+//! member → VCJob). Entity-based egress (`entity:world:443`) is declared as an
+//! `external-service` resource, which WorkloadCompiler compiles into a LatticeMeshMember
+//! with HTTPS egress. The token secret (when configured) uses the `lattice-local` ESO
+//! provider and `env_from` to inject credentials.
 //!
 //! Uses existing public container images per URI scheme:
 //! - `hf://` → `python:3.11-slim` (installs `huggingface-hub`, runs `huggingface-cli download`)
 //! - `s3://` → `amazon/aws-cli` (runs `aws s3 sync`)
 //! - `gs://` → `google/cloud-sdk:slim` (runs `gsutil -m rsync -r`)
 
-use lattice_common::crd::ModelSourceSpec;
+use std::collections::BTreeMap;
+
+use lattice_common::crd::{
+    ContainerSpec, DependencyDirection, JobTaskSpec, LatticeJob, LatticeJobSpec, ModelSourceSpec,
+    ResourceSpec, ResourceType, RestartPolicy, RuntimeSpec, WorkloadSpec,
+};
+use lattice_common::crd::workload::container::VolumeMount;
+use lattice_common::template::TemplateString;
 
 use crate::error::ModelError;
 
@@ -20,8 +34,7 @@ use crate::error::ModelError;
 pub const SCHEDULING_GATE_MODEL_DOWNLOAD: &str = "lattice.dev/model-download";
 
 /// Maximum Job retry count before the controller treats a download as failed.
-/// Used by both `compile_job()` (sets `backoffLimit`) and the controller
-/// (`check_download_job_status` checks `status.failed >= DOWNLOAD_BACKOFF_LIMIT`).
+/// Used by both the LatticeJob `max_retry` and the controller status check.
 pub const DOWNLOAD_BACKOFF_LIMIT: u32 = 3;
 
 const DEFAULT_MOUNT_PATH: &str = "/models";
@@ -30,11 +43,15 @@ const VOLUME_NAME: &str = "model-cache";
 /// Compiled download resources for a LatticeModel
 #[derive(Debug)]
 pub struct CompiledDownload {
-    /// PVC for model artifact cache (as JSON for ApplyBatch)
+    /// LatticeJob CRD for the download workload (compiled through the Lattice pipeline)
+    pub job: LatticeJob,
+    /// PVC for model artifact cache (as JSON for ApplyBatch, owned by LatticeModel)
     pub pvc: serde_json::Value,
-    /// K8s batch/v1 Job that downloads the model (as JSON for ApplyBatch)
-    pub job: serde_json::Value,
-    /// PVC name (for volume references in pod templates)
+    /// ServiceAccount for download pod SPIFFE identity
+    pub service_account: serde_json::Value,
+    /// Job name (for controller status checks and logging)
+    pub job_name: String,
+    /// PVC name (for volume references in serving pod templates)
     pub pvc_name: String,
     /// Mount path for model artifacts in serving containers
     pub mount_path: String,
@@ -97,8 +114,10 @@ fn parse_uri(uri: &str) -> Result<ParsedUri, ModelError> {
 
 /// Compile model download resources from a ModelSourceSpec.
 ///
-/// Produces a PVC + Job as JSON values ready for ApplyBatch. This is a pure
-/// compilation function — no K8s API calls.
+/// Produces a LatticeJob, PVC, and ServiceAccount ready for apply. The
+/// LatticeJob goes through the normal compilation pipeline, which generates
+/// a LatticeMeshMember for entity-based egress. This is a pure compilation
+/// function — no K8s API calls.
 pub fn compile_download(
     model_name: &str,
     namespace: &str,
@@ -111,8 +130,16 @@ pub fn compile_download(
         .as_deref()
         .unwrap_or(DEFAULT_MOUNT_PATH)
         .to_string();
-    let pvc_name = format!("{}-model-cache", model_name);
     let job_name = format!("{}-download", model_name);
+    // Volume id for cross-workload PVC sharing. VolumeCompiler generates
+    // PVC name as vol-{id}, so serving pods reference the same PVC.
+    let volume_id = format!("{}-model-cache", model_name);
+    let pvc_name = format!("vol-{}", volume_id);
+
+    let access_mode = source
+        .access_mode
+        .as_deref()
+        .unwrap_or("ReadWriteOnce");
 
     let owner_ref = serde_json::json!([{
         "apiVersion": "lattice.dev/v1alpha1",
@@ -123,11 +150,6 @@ pub fn compile_download(
         "blockOwnerDeletion": true
     }]);
 
-    let access_mode = source
-        .access_mode
-        .as_deref()
-        .unwrap_or("ReadWriteOnce");
-
     let pvc = compile_pvc(
         &pvc_name,
         namespace,
@@ -137,19 +159,22 @@ pub fn compile_download(
         &owner_ref,
     );
 
-    let job = compile_job(
+    let job = compile_lattice_job(
         &job_name,
         namespace,
-        &pvc_name,
+        &volume_id,
         &mount_path,
         &parsed,
         source,
-        &owner_ref,
     );
 
+    let service_account = compile_service_account(&job_name, namespace);
+
     Ok(CompiledDownload {
-        pvc,
         job,
+        pvc,
+        service_account,
+        job_name,
         pvc_name,
         mount_path,
     })
@@ -192,62 +217,127 @@ fn compile_pvc(
     pvc
 }
 
-fn compile_job(
+fn compile_lattice_job(
     name: &str,
     namespace: &str,
-    pvc_name: &str,
+    volume_id: &str,
     mount_path: &str,
     parsed: &ParsedUri,
     source: &ModelSourceSpec,
-    owner_ref: &serde_json::Value,
-) -> serde_json::Value {
+) -> LatticeJob {
     let (image, command) = download_command(parsed, mount_path, source.downloader_image.as_deref());
 
-    // Mount entire secret as env vars via envFrom — the secret's keys must match
-    // what the download tool expects (e.g. HF_TOKEN, AWS_ACCESS_KEY_ID, etc.)
-    let mut env_from: Vec<serde_json::Value> = Vec::new();
+    let mut resources = BTreeMap::new();
+
+    // Volume reference — the PVC is created separately by the model controller
+    // with LatticeModel ownerReferences. This is a reference (no size) so
+    // VolumeCompiler generates the volume mount without creating a duplicate PVC.
+    resources.insert(
+        VOLUME_NAME.to_string(),
+        ResourceSpec {
+            type_: ResourceType::Volume,
+            id: Some(volume_id.to_string()),
+            ..Default::default()
+        },
+    );
+
+    // Entity-based HTTPS egress — WorkloadCompiler parses entity: prefix and
+    // generates a LatticeMeshMember with EgressTarget::Entity.
+    resources.insert(
+        "internet".to_string(),
+        ResourceSpec {
+            type_: ResourceType::ExternalService,
+            id: Some("entity:world:443".to_string()),
+            direction: DependencyDirection::Outbound,
+            ..Default::default()
+        },
+    );
+
+    // Token secret via lattice-local ESO provider (if configured)
+    let mut env_from = Vec::new();
     if let Some(ref token_secret) = source.token_secret {
-        env_from.push(serde_json::json!({
-            "secretRef": { "name": token_secret.name }
-        }));
+        let mut secret_params: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        secret_params.insert("provider".to_string(), serde_json::json!("lattice-local"));
+
+        resources.insert(
+            "token".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                id: Some(token_secret.name.clone()),
+                params: Some(secret_params),
+                ..Default::default()
+            },
+        );
+        env_from.push("token".to_string());
     }
 
+    // Container with volume mount and download command
+    let mut volumes = BTreeMap::new();
+    volumes.insert(
+        mount_path.to_string(),
+        VolumeMount {
+            source: Some(TemplateString::from(format!(
+                "${{resources.{}}}",
+                VOLUME_NAME
+            ))),
+            ..Default::default()
+        },
+    );
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "download".to_string(),
+        ContainerSpec {
+            image: image.clone(),
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                command.clone(),
+            ]),
+            volumes,
+            env_from,
+            ..Default::default()
+        },
+    );
+
+    let workload = WorkloadSpec {
+        containers,
+        resources,
+        ..Default::default()
+    };
+
+    let mut tasks = BTreeMap::new();
+    tasks.insert(
+        "download".to_string(),
+        JobTaskSpec {
+            replicas: 1,
+            workload,
+            runtime: RuntimeSpec::default(),
+            restart_policy: Some(RestartPolicy::OnFailure),
+        },
+    );
+
+    let spec = LatticeJobSpec {
+        max_retry: Some(DOWNLOAD_BACKOFF_LIMIT),
+        tasks,
+        ..Default::default()
+    };
+
+    let mut job = LatticeJob::new(name, spec);
+    job.metadata.namespace = Some(namespace.to_string());
+    job
+}
+
+/// Compile a ServiceAccount for download pod SPIFFE identity.
+fn compile_service_account(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "batch/v1",
-        "kind": "Job",
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
         "metadata": {
             "name": name,
-            "namespace": namespace,
-            "ownerReferences": owner_ref,
-            "labels": {
-                "app.kubernetes.io/managed-by": "lattice",
-                "app.kubernetes.io/component": "model-download"
-            }
+            "namespace": namespace
         },
-        "spec": {
-            "backoffLimit": DOWNLOAD_BACKOFF_LIMIT,
-            "template": {
-                "spec": {
-                    "restartPolicy": "OnFailure",
-                    "containers": [{
-                        "name": "download",
-                        "image": image,
-                        "command": ["/bin/sh", "-c", command],
-                        "envFrom": env_from,
-                        "volumeMounts": [{
-                            "name": VOLUME_NAME,
-                            "mountPath": mount_path
-                        }]
-                    }],
-                    "volumes": [{
-                        "name": VOLUME_NAME,
-                        "persistentVolumeClaim": {
-                            "claimName": pvc_name
-                        }
-                    }]
-                }
-            }
-        }
+        "automountServiceAccountToken": false
     })
 }
 
@@ -424,39 +514,68 @@ mod tests {
         let source = hf_source();
         let download = compile_download("llm-serving", "serving", "uid-123", &source).unwrap();
 
-        assert_eq!(download.pvc_name, "llm-serving-model-cache");
+        assert_eq!(download.pvc_name, "vol-llm-serving-model-cache");
         assert_eq!(download.mount_path, "/models");
+        assert_eq!(download.job_name, "llm-serving-download");
 
-        // PVC checks
-        assert_eq!(download.pvc["metadata"]["name"], "llm-serving-model-cache");
+        // LatticeJob structure
+        let job = &download.job;
+        assert_eq!(job.metadata.name.as_deref(), Some("llm-serving-download"));
+        assert_eq!(job.metadata.namespace.as_deref(), Some("serving"));
+        assert_eq!(job.spec.max_retry, Some(DOWNLOAD_BACKOFF_LIMIT));
+        assert_eq!(job.spec.tasks.len(), 1);
+
+        let task = &job.spec.tasks["download"];
+        assert_eq!(task.replicas, 1);
+        assert_eq!(task.restart_policy, Some(RestartPolicy::OnFailure));
+
+        // Container
+        let container = &task.workload.containers["download"];
+        assert_eq!(container.image, "python:3.11-slim");
+        let cmd = container.command.as_ref().unwrap();
+        assert_eq!(cmd[0], "/bin/sh");
+        assert_eq!(cmd[1], "-c");
+        assert!(cmd[2].contains("huggingface-cli download Qwen/Qwen3-8B"));
+        assert!(cmd[2].contains("--local-dir /models/Qwen3-8B"));
+
+        // Volume reference (no size — PVC is created separately)
+        let vol_resource = &task.workload.resources[VOLUME_NAME];
+        assert_eq!(vol_resource.type_, ResourceType::Volume);
+        assert_eq!(
+            vol_resource.id.as_deref(),
+            Some("llm-serving-model-cache")
+        );
+        assert!(vol_resource.params.is_none(), "volume should be a reference (no params/size)");
+
+        // Entity egress resource
+        let egress_resource = &task.workload.resources["internet"];
+        assert_eq!(egress_resource.type_, ResourceType::ExternalService);
+        assert_eq!(egress_resource.id.as_deref(), Some("entity:world:443"));
+        assert!(egress_resource.direction.is_outbound());
+
+        // Volume mount on container
+        let vol_mount = &container.volumes["/models"];
+        assert_eq!(
+            vol_mount.source.as_ref().unwrap().as_str(),
+            "${resources.model-cache}"
+        );
+
+        // No token secret → no secret resource, no env_from
+        assert!(container.env_from.is_empty());
+        assert!(!task.workload.resources.contains_key("token"));
+
+        // PVC checks (separate from LatticeJob)
+        assert_eq!(download.pvc["metadata"]["name"], "vol-llm-serving-model-cache");
         assert_eq!(download.pvc["metadata"]["namespace"], "serving");
         assert_eq!(
             download.pvc["spec"]["resources"]["requests"]["storage"],
             "50Gi"
         );
         assert_eq!(download.pvc["spec"]["accessModes"][0], "ReadWriteOnce");
-        assert!(download.pvc["spec"]["storageClassName"].is_null());
-
-        // PVC owner reference
         let pvc_owner = &download.pvc["metadata"]["ownerReferences"][0];
         assert_eq!(pvc_owner["kind"], "LatticeModel");
         assert_eq!(pvc_owner["name"], "llm-serving");
         assert_eq!(pvc_owner["uid"], "uid-123");
-
-        // Job checks
-        assert_eq!(download.job["metadata"]["name"], "llm-serving-download");
-        assert_eq!(download.job["metadata"]["namespace"], "serving");
-        assert_eq!(download.job["spec"]["backoffLimit"], 3);
-
-        let container = &download.job["spec"]["template"]["spec"]["containers"][0];
-        assert_eq!(container["image"], "python:3.11-slim");
-        let cmd = container["command"][2].as_str().unwrap();
-        assert!(cmd.contains("huggingface-cli download Qwen/Qwen3-8B"));
-        assert!(cmd.contains("--local-dir /models/Qwen3-8B"));
-
-        // Job owner reference
-        let job_owner = &download.job["metadata"]["ownerReferences"][0];
-        assert_eq!(job_owner["kind"], "LatticeModel");
     }
 
     #[test]
@@ -472,10 +591,9 @@ mod tests {
         };
 
         let download = compile_download("my-model", "default", "uid-456", &source).unwrap();
-
-        let container = &download.job["spec"]["template"]["spec"]["containers"][0];
-        assert_eq!(container["image"], "amazon/aws-cli:latest");
-        let cmd = container["command"][2].as_str().unwrap();
+        let container = &download.job.spec.tasks["download"].workload.containers["download"];
+        assert_eq!(container.image, "amazon/aws-cli:latest");
+        let cmd = &container.command.as_ref().unwrap()[2];
         assert!(cmd.contains("aws s3 sync s3://my-bucket/models/llama /models/llama"));
     }
 
@@ -492,10 +610,9 @@ mod tests {
         };
 
         let download = compile_download("my-model", "default", "uid-789", &source).unwrap();
-
-        let container = &download.job["spec"]["template"]["spec"]["containers"][0];
-        assert_eq!(container["image"], "google/cloud-sdk:slim");
-        let cmd = container["command"][2].as_str().unwrap();
+        let container = &download.job.spec.tasks["download"].workload.containers["download"];
+        assert_eq!(container.image, "google/cloud-sdk:slim");
+        let cmd = &container.command.as_ref().unwrap()[2];
         assert!(cmd.contains("gsutil -m rsync -r gs://my-bucket/models/gemma /models/gemma"));
     }
 
@@ -509,9 +626,10 @@ mod tests {
         let download = compile_download("test", "ns", "uid", &source).unwrap();
         assert_eq!(download.mount_path, "/data/weights");
 
-        let cmd = download.job["spec"]["template"]["spec"]["containers"][0]["command"][2]
-            .as_str()
-            .unwrap();
+        let cmd = &download.job.spec.tasks["download"].workload.containers["download"]
+            .command
+            .as_ref()
+            .unwrap()[2];
         assert!(cmd.contains("/data/weights/Qwen3-8B"));
     }
 
@@ -523,10 +641,8 @@ mod tests {
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        let image = download.job["spec"]["template"]["spec"]["containers"][0]["image"]
-            .as_str()
-            .unwrap();
-        assert_eq!(image, "my-org/downloader:v2");
+        let container = &download.job.spec.tasks["download"].workload.containers["download"];
+        assert_eq!(container.image, "my-org/downloader:v2");
     }
 
     #[test]
@@ -541,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn token_secret_uses_env_from() {
+    fn token_secret_creates_resource_and_env_from() {
         let source = ModelSourceSpec {
             token_secret: Some(SecretKeySelector {
                 name: "hf-credentials".to_string(),
@@ -550,22 +666,22 @@ mod tests {
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        let container = &download.job["spec"]["template"]["spec"]["containers"][0];
+        let task = &download.job.spec.tasks["download"];
 
-        // envFrom mounts the entire secret
-        let env_from = container["envFrom"].as_array().unwrap();
-        assert_eq!(env_from.len(), 1);
-        assert_eq!(env_from[0]["secretRef"]["name"], "hf-credentials");
+        // Secret resource declared with lattice-local provider
+        let secret_resource = &task.workload.resources["token"];
+        assert_eq!(secret_resource.type_, ResourceType::Secret);
+        assert_eq!(secret_resource.id.as_deref(), Some("hf-credentials"));
+        let params = secret_resource.params.as_ref().unwrap();
+        assert_eq!(params["provider"], serde_json::json!("lattice-local"));
 
-        // No individual env vars
-        assert!(
-            container["envFrom"][0].get("secretKeyRef").is_none(),
-            "should use envFrom, not per-key secretKeyRef"
-        );
+        // Container env_from references the secret resource
+        let container = &task.workload.containers["download"];
+        assert_eq!(container.env_from, vec!["token"]);
     }
 
     #[test]
-    fn s3_token_uses_env_from() {
+    fn s3_token_creates_secret_resource() {
         let source = ModelSourceSpec {
             uri: "s3://bucket/model".to_string(),
             cache_size: "50Gi".to_string(),
@@ -579,20 +695,61 @@ mod tests {
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        let env_from = download.job["spec"]["template"]["spec"]["containers"][0]["envFrom"]
-            .as_array()
-            .unwrap();
-        assert_eq!(env_from[0]["secretRef"]["name"], "aws-creds");
+        let secret_resource = &download.job.spec.tasks["download"].workload.resources["token"];
+        assert_eq!(secret_resource.id.as_deref(), Some("aws-creds"));
     }
 
     #[test]
-    fn no_token_secret_empty_env_from() {
+    fn no_token_secret_no_env_from() {
         let source = hf_source();
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        let env_from = download.job["spec"]["template"]["spec"]["containers"][0]["envFrom"]
-            .as_array()
-            .unwrap();
-        assert!(env_from.is_empty());
+        let container = &download.job.spec.tasks["download"].workload.containers["download"];
+        assert!(container.env_from.is_empty());
+        assert!(!download.job.spec.tasks["download"]
+            .workload
+            .resources
+            .contains_key("token"));
+    }
+
+    #[test]
+    fn service_account_compiled() {
+        let source = hf_source();
+        let download = compile_download("test", "ns", "uid", &source).unwrap();
+
+        assert_eq!(download.service_account["metadata"]["name"], "test-download");
+        assert_eq!(download.service_account["metadata"]["namespace"], "ns");
+        assert_eq!(download.service_account["automountServiceAccountToken"], false);
+    }
+
+    #[test]
+    fn lattice_job_has_max_retry() {
+        let source = hf_source();
+        let download = compile_download("test", "ns", "uid", &source).unwrap();
+        assert_eq!(download.job.spec.max_retry, Some(DOWNLOAD_BACKOFF_LIMIT));
+    }
+
+    #[test]
+    fn pvc_name_matches_volume_compiler_convention() {
+        let source = hf_source();
+        let download = compile_download("my-model", "ns", "uid", &source).unwrap();
+
+        // VolumeCompiler uses vol-{id} naming for shared volumes
+        let vol_resource = &download.job.spec.tasks["download"].workload.resources[VOLUME_NAME];
+        let volume_id = vol_resource.id.as_deref().unwrap();
+        let expected_pvc_name = format!("vol-{}", volume_id);
+        assert_eq!(download.pvc_name, expected_pvc_name);
+        assert_eq!(download.pvc["metadata"]["name"], expected_pvc_name);
+    }
+
+    #[test]
+    fn custom_access_mode_propagated() {
+        let source = ModelSourceSpec {
+            access_mode: Some("ReadWriteMany".to_string()),
+            ..hf_source()
+        };
+
+        let download = compile_download("test", "ns", "uid", &source).unwrap();
+        assert_eq!(download.pvc["spec"]["accessModes"][0], "ReadWriteMany");
     }
 
     #[test]

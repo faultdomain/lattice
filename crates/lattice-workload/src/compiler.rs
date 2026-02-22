@@ -21,6 +21,7 @@ use crate::authorization::VolumeAuthorizationMode;
 use crate::compiled::{CompiledConfig, CompiledWorkload};
 use crate::error::CompilationError;
 use crate::helpers::{compute_config_hash, ContainerCompilationData};
+use crate::k8s::{EnvFromSource, SecretEnvSource};
 use crate::pipeline::eso_templated::compile_eso_templated_env_vars;
 use crate::pipeline::volumes::VolumeCompiler;
 use crate::pipeline::{env, files, pod_template::PodTemplateCompiler, secrets::SecretsCompiler};
@@ -249,6 +250,26 @@ impl<'a> WorkloadCompiler<'a> {
                 container_env_from.extend(eso_env_from);
             }
 
+            // 8b. Resolve env_from secret resource references
+            if let Some(container_spec) = self.workload.containers.get(container_name) {
+                for resource_name in &container_spec.env_from {
+                    let secret_ref =
+                        compiled_secrets.secret_refs.get(resource_name.as_str()).ok_or_else(|| {
+                            CompilationError::secret(format!(
+                                "container '{}' env_from references '{}' which is not a \
+                                 type: secret resource",
+                                container_name, resource_name
+                            ))
+                        })?;
+                    container_env_from.push(EnvFromSource {
+                        config_map_ref: None,
+                        secret_ref: Some(SecretEnvSource {
+                            name: secret_ref.secret_name.clone(),
+                        }),
+                    });
+                }
+            }
+
             per_container_env_from.insert(container_name.clone(), container_env_from);
 
             // 9. Compile files
@@ -385,6 +406,10 @@ impl<'a> WorkloadCompiler<'a> {
                 if graph.get_service(self.namespace, id).is_some() {
                     return None;
                 }
+                // Try entity reference first (entity:name or entity:name:port)
+                if let Some(rule) = parse_entity_egress(id) {
+                    return Some(rule);
+                }
                 let ep = ParsedEndpoint::parse(id)?;
                 Some(EgressRule {
                     target: EgressTarget::Fqdn(ep.host),
@@ -395,7 +420,12 @@ impl<'a> WorkloadCompiler<'a> {
 
         let has_mesh_participation =
             !ports.is_empty() || !dependencies.is_empty() || !inline_egress.is_empty();
-        let mesh_member = if service_node.is_some() && has_mesh_participation {
+        // Generate mesh member for workloads in the service graph, OR for
+        // egress-only workloads (e.g., download jobs) that have inline egress
+        // but no graph node.
+        let mesh_member = if has_mesh_participation
+            && (service_node.is_some() || !inline_egress.is_empty())
+        {
             Some(LatticeMeshMember::new(
                 self.name,
                 LatticeMeshMemberSpec {
@@ -425,4 +455,30 @@ impl<'a> WorkloadCompiler<'a> {
             mesh_member,
         })
     }
+}
+
+/// Parse an entity egress reference from an external-service resource id.
+///
+/// Format: `entity:<name>` or `entity:<name>:<port>`
+/// Examples:
+/// - `entity:world` → Entity("world"), port 443
+/// - `entity:world:443` → Entity("world"), port 443
+/// - `entity:kube-apiserver:6443` → Entity("kube-apiserver"), port 6443
+fn parse_entity_egress(id: &str) -> Option<EgressRule> {
+    let rest = id.strip_prefix("entity:")?;
+    let (name, port) = if let Some((n, p)) = rest.rsplit_once(':') {
+        match p.parse::<u16>() {
+            Ok(port) => (n.to_string(), port),
+            Err(_) => (rest.to_string(), 443),
+        }
+    } else {
+        (rest.to_string(), 443)
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some(EgressRule {
+        target: EgressTarget::Entity(name),
+        ports: vec![port],
+    })
 }

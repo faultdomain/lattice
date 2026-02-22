@@ -93,7 +93,7 @@ fn build_cpu_burner_service() -> lattice_common::crd::LatticeService {
         max: 3,
         metrics: vec![AutoscalingMetric {
             metric: "cpu".to_string(),
-            target: 20,
+            target: 20.0,
         }],
     });
 
@@ -191,7 +191,7 @@ fn build_metrics_server_service() -> lattice_common::crd::LatticeService {
         max: 3,
         metrics: vec![AutoscalingMetric {
             metric: CUSTOM_METRIC_NAME.to_string(),
-            target: 10,
+            target: 10.0,
         }],
     });
 

@@ -1042,58 +1042,6 @@ pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), Strin
 // Job Helpers
 // =============================================================================
 
-/// Wait for a Kubernetes Job to complete successfully.
-///
-/// Polls `kubectl get job -o jsonpath={.status.succeeded}` until it returns `1`
-/// or the timeout expires.
-pub async fn wait_for_job_complete(
-    kubeconfig: &str,
-    namespace: &str,
-    job_name: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let kc = kubeconfig.to_string();
-    let ns = namespace.to_string();
-    let jn = job_name.to_string();
-
-    wait_for_condition(
-        &format!("Job {}/{} to complete", namespace, job_name),
-        timeout,
-        Duration::from_secs(10),
-        || {
-            let kc = kc.clone();
-            let ns = ns.clone();
-            let jn = jn.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "job",
-                    &jn,
-                    "-n",
-                    &ns,
-                    "-o",
-                    "jsonpath={.status.succeeded}",
-                ])
-                .await;
-
-                match output {
-                    Ok(succeeded) => {
-                        let succeeded = succeeded.trim();
-                        info!("Job {}/{} succeeded: {}", ns, jn, succeeded);
-                        Ok(succeeded == "1")
-                    }
-                    Err(e) => {
-                        info!("Job {}/{} not ready: {}", ns, jn, e);
-                        Ok(false)
-                    }
-                }
-            }
-        },
-    )
-    .await
-}
 
 // =============================================================================
 // Cert-Manager Test Infrastructure

@@ -26,14 +26,15 @@ use tracing::{error, info, warn};
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    LatticeModel, LatticeModelStatus, ModelCondition, ModelServingPhase, ProviderType,
+    JobPhase, LatticeJob, LatticeModel, LatticeModelStatus, ModelCondition, ModelServingPhase,
+    ProviderType,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry};
 
 use crate::compiler::{compile_model, CompiledModel};
-use crate::download::{CompiledDownload, DOWNLOAD_BACKOFF_LIMIT, SCHEDULING_GATE_MODEL_DOWNLOAD};
+use crate::download::{CompiledDownload, SCHEDULING_GATE_MODEL_DOWNLOAD};
 use crate::error::ModelError;
 
 /// Shared context for the LatticeModel controller
@@ -334,7 +335,7 @@ async fn apply_layers(
     ms_api: &ApiResource,
     params: &PatchParams,
 ) -> Result<(), ModelError> {
-    // Layer 0: Model download (PVC + Job) — only when modelSource is configured
+    // Layer 0: Model download (PVC + Job + MeshMember + SA) — only when modelSource is configured
     if let Some(ref download) = compiled.download {
         apply_download_resources(client, namespace, download, params).await?;
     }
@@ -574,7 +575,11 @@ async fn check_model_serving_status(
     (state, conditions)
 }
 
-/// Apply model download resources (PVC + Job) as Layer 0
+/// Apply model download resources (PVC + ServiceAccount + LatticeJob) as Layer 0.
+///
+/// The PVC is owned by the LatticeModel (for GC cascading). The LatticeJob
+/// references the PVC as a volume. The LatticeJob controller handles mesh
+/// member generation (entity egress) through the normal compilation pipeline.
 async fn apply_download_resources(
     client: &Client,
     namespace: &str,
@@ -582,26 +587,40 @@ async fn apply_download_resources(
     params: &PatchParams,
 ) -> Result<(), ModelError> {
     let pvc_ar = ApiResource::erase::<k8s_openapi::api::core::v1::PersistentVolumeClaim>(&());
-    let job_ar = ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&());
+    let sa_ar = ApiResource::erase::<k8s_openapi::api::core::v1::ServiceAccount>(&());
 
-    let mut layer0 = ApplyBatch::new(client.clone(), namespace, params);
-    layer0.push(
+    // Layer 0a: PVC + ServiceAccount (must exist before LatticeJob references them)
+    let mut layer0a = ApplyBatch::new(client.clone(), namespace, params);
+
+    layer0a.push(
+        "ServiceAccount",
+        &download.job_name,
+        &download.service_account,
+        &sa_ar,
+    )?;
+
+    layer0a.push(
         "PersistentVolumeClaim",
         &download.pvc_name,
         &download.pvc,
         &pvc_ar,
     )?;
 
-    let job_name = download.job["metadata"]["name"]
-        .as_str()
-        .unwrap_or("unknown");
-    layer0.push("Job", job_name, &download.job, &job_ar)?;
+    layer0a.run("layer-0a-download-infra").await?;
 
-    layer0.run("layer-0-model-download").await?;
+    // Layer 0b: LatticeJob (after PVC exists so the volume reference resolves)
+    let lj_api: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
+    lj_api
+        .patch(
+            &download.job_name,
+            params,
+            &Patch::Apply(&download.job),
+        )
+        .await?;
 
     info!(
         pvc = %download.pvc_name,
-        job = %job_name,
+        job = %download.job_name,
         mount_path = %download.mount_path,
         "applied model download resources (Layer 0)"
     );
@@ -615,31 +634,29 @@ enum DownloadState {
     Running,
 }
 
-/// Check the status of a model download Job
+/// Check the status of a model download LatticeJob
 async fn check_download_job_status(
     client: &Client,
     name: &str,
     namespace: &str,
 ) -> Option<DownloadState> {
-    let jobs: Api<k8s_openapi::api::batch::v1::Job> = Api::namespaced(client.clone(), namespace);
+    let jobs: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
 
     match jobs.get(name).await {
         Ok(job) => {
-            let status = job.status.as_ref()?;
-            if status.succeeded.unwrap_or(0) >= 1 {
-                Some(DownloadState::Succeeded)
-            } else if status.failed.unwrap_or(0) >= DOWNLOAD_BACKOFF_LIMIT as i32 {
-                Some(DownloadState::Failed)
-            } else {
-                Some(DownloadState::Running)
+            let phase = job.status.as_ref().map(|s| &s.phase)?;
+            match phase {
+                JobPhase::Succeeded => Some(DownloadState::Succeeded),
+                JobPhase::Failed => Some(DownloadState::Failed),
+                JobPhase::Pending | JobPhase::Running => Some(DownloadState::Running),
             }
         }
         Err(kube::Error::Api(ae)) if ae.code == 404 => {
-            warn!(job = %name, "download Job not found");
+            warn!(job = %name, "download LatticeJob not found");
             None
         }
         Err(e) => {
-            warn!(job = %name, error = %e, "failed to check download Job status");
+            warn!(job = %name, error = %e, "failed to check download LatticeJob status");
             None
         }
     }

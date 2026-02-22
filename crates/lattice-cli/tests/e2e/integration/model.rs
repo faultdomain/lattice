@@ -18,8 +18,7 @@ use tracing::info;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     apply_yaml_with_retry, delete_namespace, ensure_namespace, load_fixture_config, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, wait_for_job_complete,
-    wait_for_resource_phase,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
 };
 
 const MODEL_NAMESPACE: &str = "serving";
@@ -689,12 +688,13 @@ async fn test_model_autoscaling_created(kubeconfig: &str) -> Result<(), String> 
 async fn test_model_download_pvc(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Verifying model download PVC...");
 
+    let pvc_name = format!("vol-{}-model-cache", MODEL_NAME);
     let output = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
         "get",
         "pvc",
-        &format!("{}-model-cache", MODEL_NAME),
+        &pvc_name,
         "-n",
         MODEL_NAMESPACE,
         "-o",
@@ -738,16 +738,17 @@ async fn test_model_download_pvc(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify model download Job was created
+/// Verify model download LatticeJob was created
 async fn test_model_download_job(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Verifying model download Job...");
+    info!("[Model] Verifying model download LatticeJob...");
 
+    let job_name = format!("{}-download", MODEL_NAME);
     let output = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
         "get",
-        "job",
-        &format!("{}-download", MODEL_NAME),
+        "latticejob",
+        &job_name,
         "-n",
         MODEL_NAMESPACE,
         "-o",
@@ -756,57 +757,127 @@ async fn test_model_download_job(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     let job: serde_json::Value = serde_json::from_str(&output)
-        .map_err(|e| format!("Failed to parse Job JSON: {e}"))?;
+        .map_err(|e| format!("Failed to parse LatticeJob JSON: {e}"))?;
 
-    // Verify backoff limit
-    if job["spec"]["backoffLimit"].as_u64() != Some(3) {
+    // Verify maxRetry
+    if job["spec"]["maxRetry"].as_u64() != Some(3) {
         return Err(format!(
-            "Job backoffLimit should be 3, got: {}",
-            job["spec"]["backoffLimit"]
+            "LatticeJob maxRetry should be 3, got: {}",
+            job["spec"]["maxRetry"]
         ));
     }
 
+    // Verify single "download" task
+    let tasks = &job["spec"]["tasks"];
+    if tasks["download"].is_null() {
+        return Err("LatticeJob should have a 'download' task".to_string());
+    }
+
+    let task = &tasks["download"];
+
     // Verify container image (HuggingFace uses python:3.11-slim)
-    let image = job["spec"]["template"]["spec"]["containers"][0]["image"]
+    let image = task["workload"]["containers"]["download"]["image"]
         .as_str()
         .unwrap_or_default();
     if image != "python:3.11-slim" {
         return Err(format!(
-            "Download job image should be 'python:3.11-slim', got: '{image}'"
+            "Download container image should be 'python:3.11-slim', got: '{image}'"
         ));
     }
 
     // Verify command references the model
-    let cmd = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
+    let cmd = task["workload"]["containers"]["download"]["command"][2]
         .as_str()
         .unwrap_or_default();
     if !cmd.contains("huggingface-cli download hf-internal-testing/tiny-random-LlamaForCausalLM") {
         return Err(format!(
-            "Download job command should reference 'hf-internal-testing/tiny-random-LlamaForCausalLM', got: '{cmd}'"
+            "Download command should reference 'hf-internal-testing/tiny-random-LlamaForCausalLM', got: '{cmd}'"
         ));
     }
 
-    // Verify PVC volume mount
-    let volume_name = job["spec"]["template"]["spec"]["volumes"][0]["name"]
-        .as_str()
-        .unwrap_or_default();
-    if volume_name != "model-cache" {
+    // Verify volume resource (reference to PVC)
+    let vol_resource = &task["workload"]["resources"]["model-cache"];
+    if vol_resource["type"].as_str() != Some("volume") {
         return Err(format!(
-            "Job should mount 'model-cache' volume, got: '{volume_name}'"
+            "model-cache resource type should be 'volume', got: {}",
+            vol_resource["type"]
         ));
     }
 
-    // Verify owner reference
-    let owner_kind = job["metadata"]["ownerReferences"][0]["kind"]
-        .as_str()
-        .unwrap_or_default();
-    if owner_kind != "LatticeModel" {
+    // Verify entity egress resource
+    let egress_resource = &task["workload"]["resources"]["internet"];
+    if egress_resource["type"].as_str() != Some("external-service") {
         return Err(format!(
-            "Job ownerReference kind should be 'LatticeModel', got: '{owner_kind}'"
+            "internet resource type should be 'external-service', got: {}",
+            egress_resource["type"]
+        ));
+    }
+    if egress_resource["id"].as_str() != Some("entity:world:443") {
+        return Err(format!(
+            "internet resource id should be 'entity:world:443', got: {}",
+            egress_resource["id"]
         ));
     }
 
-    info!("[Model] Model download Job verified: python:3.11-slim, huggingface-cli download, correct owner ref");
+    info!("[Model] LatticeJob verified: python:3.11-slim, huggingface-cli download, volume + egress resources");
+    Ok(())
+}
+
+/// Verify download mesh member has entity egress
+async fn test_model_download_mesh_member(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Verifying download mesh member (entity egress)...");
+
+    // LatticeJob task "download" with job name "llm-serving-download" produces
+    // mesh member named "llm-serving-download-download"
+    let mm_name = format!("{}-download-download", MODEL_NAME);
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "latticemeshmembers",
+        &mm_name,
+        "-n",
+        MODEL_NAMESPACE,
+        "-o",
+        "json",
+    ])
+    .await?;
+
+    let mm: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse download MeshMember JSON: {e}"))?;
+
+    // Should have egress rules
+    let egress = mm["spec"]["egress"]
+        .as_array()
+        .ok_or("Download mesh member should have egress rules")?;
+    if egress.is_empty() {
+        return Err("Download mesh member egress should not be empty".to_string());
+    }
+
+    // Verify entity egress target
+    let has_world_egress = egress.iter().any(|rule| {
+        rule["target"]["entity"].as_str() == Some("world")
+    });
+    if !has_world_egress {
+        return Err(format!(
+            "Download mesh member should have Entity(\"world\") egress, got: {:?}",
+            egress
+        ));
+    }
+
+    // Should be egress-only (no ports)
+    let ports = mm["spec"]["ports"]
+        .as_array()
+        .map(|p| p.len())
+        .unwrap_or(0);
+    if ports != 0 {
+        return Err(format!(
+            "Download mesh member should have no ports (egress-only), got: {}",
+            ports
+        ));
+    }
+
+    info!("[Model] Download mesh member verified: entity egress to 'world', egress-only");
     Ok(())
 }
 
@@ -948,7 +1019,19 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
         return Err("No LatticeMeshMember resources found".to_string());
     }
 
-    for item in items {
+    // Filter out download mesh member (egress-only, no ports/callers) —
+    // it's verified separately in test_model_download_mesh_member.
+    let download_mm_name = format!("{}-download-download", MODEL_NAME);
+    let role_items: Vec<_> = items
+        .iter()
+        .filter(|item| item["metadata"]["name"].as_str() != Some(&download_mm_name))
+        .collect();
+
+    if role_items.is_empty() {
+        return Err("No role LatticeMeshMember resources found (only download)".to_string());
+    }
+
+    for item in &role_items {
         let mm_name = item["metadata"]["name"]
             .as_str()
             .unwrap_or("unknown");
@@ -1048,14 +1131,22 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify download Job completes and scheduling gates are removed
+/// Verify download LatticeJob completes and scheduling gates are removed
 async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Waiting for download Job to complete...");
+    info!("[Model] Waiting for download LatticeJob to complete...");
 
     let job_name = format!("{}-download", MODEL_NAME);
-    wait_for_job_complete(kubeconfig, MODEL_NAMESPACE, &job_name, Duration::from_secs(300)).await?;
+    wait_for_resource_phase(
+        kubeconfig,
+        "latticejob",
+        MODEL_NAMESPACE,
+        &job_name,
+        "Succeeded",
+        Duration::from_secs(300),
+    )
+    .await?;
 
-    info!("[Model] Download Job completed, verifying scheduling gates are removed...");
+    info!("[Model] Download LatticeJob completed, verifying scheduling gates are removed...");
 
     // After Job completes, the controller should remove scheduling gates from pods
     let label_selector = format!("modelserving.volcano.sh/name={}", MODEL_NAME);
@@ -1106,7 +1197,7 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    info!("[Model] Download lifecycle verified: Job completed + scheduling gates removed");
+    info!("[Model] Download lifecycle verified: LatticeJob completed + scheduling gates removed");
     Ok(())
 }
 
@@ -1124,6 +1215,7 @@ pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
     // Verify download resources were created (modelSource configured)
     test_model_download_pvc(kubeconfig).await?;
     test_model_download_job(kubeconfig).await?;
+    test_model_download_mesh_member(kubeconfig).await?;
     test_model_serving_has_download_injection(kubeconfig).await?;
 
     // Verify resources were created
@@ -1133,7 +1225,7 @@ pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
     test_model_autoscaling_created(kubeconfig).await?;
     test_model_mesh_members(kubeconfig).await?;
 
-    // Wait for download lifecycle: Job completes + scheduling gates removed
+    // Wait for download lifecycle: LatticeJob completes + scheduling gates removed
     test_download_lifecycle(kubeconfig).await?;
 
     // Wait for full lifecycle (Kthena processing — now reachable after gates removed)
