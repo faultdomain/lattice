@@ -7,9 +7,11 @@ use std::collections::BTreeMap;
 
 use lattice_common::crd::LatticeModel;
 
+use lattice_common::kube_utils::OwnerReference;
+
 use crate::types::{
     GangPolicy, ModelServing, ModelServingMetadata, ModelServingRole, ModelServingSpec,
-    OwnerReference, ServingGroupTemplate,
+    ServingGroupTemplate,
 };
 
 /// Pre-compiled pod templates for a single role (entry + optional worker)

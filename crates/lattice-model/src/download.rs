@@ -52,7 +52,7 @@ pub struct CompiledDownload {
     /// ServiceAccount for download pod SPIFFE identity
     pub service_account: serde_json::Value,
     /// Mount path for model artifacts in serving containers
-    pub mount_path: String,
+    mount_path: String,
 }
 
 impl CompiledDownload {
@@ -64,6 +64,11 @@ impl CompiledDownload {
     /// PVC name derived from the PersistentVolumeClaim metadata
     pub fn pvc_name(&self) -> &str {
         &self.pvc.metadata.name
+    }
+
+    /// Mount path for model artifacts in serving containers
+    pub fn mount_path(&self) -> &str {
+        &self.mount_path
     }
 }
 
@@ -158,14 +163,14 @@ pub fn compile_download(
         .as_deref()
         .unwrap_or("ReadWriteOnce");
 
-    let owner_references = vec![OwnerReference {
+    let owner_ref = OwnerReference {
         api_version: "lattice.dev/v1alpha1".to_string(),
         kind: "LatticeModel".to_string(),
         name: model_name.to_string(),
         uid: uid.to_string(),
         controller: Some(true),
         block_owner_deletion: Some(true),
-    }];
+    };
 
     let pvc = compile_pvc(
         &pvc_name,
@@ -173,21 +178,20 @@ pub fn compile_download(
         &source.cache_size,
         source.storage_class.as_deref(),
         access_mode,
-        owner_references,
+        vec![owner_ref.clone()],
     );
 
     let job = compile_lattice_job(
         &job_name,
         namespace,
-        model_name,
-        uid,
+        &owner_ref,
         &volume_id,
         &mount_path,
         &parsed,
         source,
     );
 
-    let service_account = compile_service_account(&job_name, namespace, model_name, uid);
+    let service_account = compile_service_account(&job_name, namespace, &owner_ref);
 
     Ok(CompiledDownload {
         job,
@@ -230,8 +234,7 @@ fn compile_pvc(
 fn compile_lattice_job(
     name: &str,
     namespace: &str,
-    model_name: &str,
-    model_uid: &str,
+    owner_ref: &OwnerReference,
     volume_id: &str,
     mount_path: &str,
     parsed: &ParsedUri,
@@ -338,14 +341,7 @@ fn compile_lattice_job(
 
     let mut job = LatticeJob::new(name, spec);
     job.metadata.namespace = Some(namespace.to_string());
-    job.metadata.owner_references = Some(vec![k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-        api_version: "lattice.dev/v1alpha1".to_string(),
-        kind: "LatticeModel".to_string(),
-        name: model_name.to_string(),
-        uid: model_uid.to_string(),
-        controller: Some(true),
-        block_owner_deletion: Some(true),
-    }]);
+    job.metadata.owner_references = Some(vec![owner_ref.into()]);
     job
 }
 
@@ -353,18 +349,11 @@ fn compile_lattice_job(
 fn compile_service_account(
     name: &str,
     namespace: &str,
-    model_name: &str,
-    model_uid: &str,
+    owner_ref: &OwnerReference,
 ) -> serde_json::Value {
     let mut sa = lattice_common::kube_utils::compile_service_account(name, namespace);
-    sa["metadata"]["ownerReferences"] = serde_json::json!([{
-        "apiVersion": "lattice.dev/v1alpha1",
-        "kind": "LatticeModel",
-        "name": model_name,
-        "uid": model_uid,
-        "controller": true,
-        "blockOwnerDeletion": true
-    }]);
+    sa["metadata"]["ownerReferences"] =
+        serde_json::to_value([owner_ref]).expect("OwnerReference serializes to JSON");
     sa
 }
 
@@ -540,7 +529,7 @@ mod tests {
         let download = compile_download("llm-serving", "serving", "uid-123", &source).unwrap();
 
         assert_eq!(download.pvc_name(), "vol-llm-serving-model-cache");
-        assert_eq!(download.mount_path, "/models");
+        assert_eq!(download.mount_path(), "/models");
         assert_eq!(download.job_name(), "llm-serving-download");
 
         // LatticeJob structure
@@ -656,7 +645,7 @@ mod tests {
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        assert_eq!(download.mount_path, "/data/weights");
+        assert_eq!(download.mount_path(), "/data/weights");
 
         let cmd = &download.job.spec.tasks["download"].workload.containers["download"]
             .command

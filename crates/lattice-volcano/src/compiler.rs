@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 
 use lattice_common::crd::{LatticeJob, LatticeJobSpec, RestartPolicy};
 
-use crate::types::{OwnerReference, VCJob, VCJobMetadata, VCJobSpec, VCJobTask, VCJobTaskPolicy};
+use lattice_common::kube_utils::OwnerReference;
+
+use crate::types::{VCJob, VCJobMetadata, VCJobSpec, VCJobTask, VCJobTaskPolicy};
 
 /// Compile a LatticeJob into a Volcano VCJob.
 ///

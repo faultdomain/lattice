@@ -17,6 +17,7 @@ use lattice_common::crd::{
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
 use lattice_common::{KTHENA_AUTOSCALER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_NAME};
+use lattice_volcano::routing_compiler::{PD_ROLE_DECODE, PD_ROLE_PREFILL};
 use lattice_volcano::{CompiledAutoscaling, CompiledRouting, ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
@@ -215,12 +216,12 @@ pub async fn compile_model(
             download::inject_model_volume(
                 &mut templates.entry_template,
                 dl.pvc_name(),
-                &dl.mount_path,
+                dl.mount_path(),
             );
             download::inject_scheduling_gate(&mut templates.entry_template);
 
             if let Some(ref mut worker) = templates.worker_template {
-                download::inject_model_volume(worker, dl.pvc_name(), &dl.mount_path);
+                download::inject_model_volume(worker, dl.pvc_name(), dl.mount_path());
                 download::inject_scheduling_gate(worker);
             }
         }
@@ -276,8 +277,9 @@ pub async fn compile_model(
 ///   identity will be used in AuthorizationPolicy since it won't be in the
 ///   service graph — same pattern as vmagent, KEDA, etc.)
 /// - Adds the inference port if not already present
-/// - Enables `allow_peer_traffic` when PD disaggregation is active (prefill
-///   and decode roles need to exchange KV cache data)
+/// - Enables `allow_peer_traffic` only on "prefill" and "decode" roles when PD
+///   disaggregation is active. Other roles (e.g. "embedding") are not part of
+///   the PD pair and do not need lateral traffic.
 ///
 /// If a role has no existing mesh member (the workload spec had no service
 /// ports), a new one is created.
@@ -296,83 +298,30 @@ fn ensure_routing_mesh_members(
         && lattice_volcano::routing_compiler::has_pd_roles(roles);
 
     for role_name in roles.keys() {
+        // Only PD roles need peer traffic for KV cache transfer
+        let needs_peer_traffic =
+            has_pd && (role_name == PD_ROLE_PREFILL || role_name == PD_ROLE_DECODE);
+
         let entry_name = format!("{}-{}", model_name, role_name);
-
-        if let Some(mm) = mesh_members
-            .iter_mut()
-            .find(|mm| mm.metadata.name.as_deref() == Some(entry_name.as_str()))
-        {
-            // Add router as allowed caller if not present
-            if !mm.spec.allowed_callers.contains(&router_caller) {
-                mm.spec.allowed_callers.push(router_caller.clone());
-                mm.spec
-                    .allowed_callers
-                    .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
-            }
-
-            // Add inference port if not present
-            if !mm.spec.ports.iter().any(|p| p.port == inference_port) {
-                mm.spec.ports.push(MeshMemberPort {
-                    port: inference_port,
-                    name: "inference".to_string(),
-                    peer_auth: PeerAuth::Strict,
-                });
-            }
-
-            // Enable peer traffic for PD disaggregation
-            if has_pd {
-                mm.spec.allow_peer_traffic = true;
-            }
-        } else {
-            // No existing mesh member — create one for routing
-            let mm = LatticeMeshMember::new(
-                &entry_name,
-                LatticeMeshMemberSpec {
-                    target: MeshMemberTarget::Selector(
-                        [(LABEL_NAME.to_string(), entry_name.clone())]
-                            .into_iter()
-                            .collect(),
-                    ),
-                    ports: vec![MeshMemberPort {
-                        port: inference_port,
-                        name: "inference".to_string(),
-                        peer_auth: PeerAuth::Strict,
-                    }],
-                    allowed_callers: vec![router_caller.clone()],
-                    dependencies: vec![],
-                    egress: vec![],
-                    allow_peer_traffic: has_pd,
-                    depends_all: false,
-                    ingress: None,
-                    service_account: None,
-                },
-            );
-            mesh_members.push(mm);
-        }
+        ensure_infra_caller_on_mesh_member(
+            mesh_members,
+            &entry_name,
+            &router_caller,
+            inference_port,
+            "inference",
+            needs_peer_traffic,
+        );
 
         // Also handle worker mesh members if they exist
         let worker_name = format!("{}-{}-worker", model_name, role_name);
-        if let Some(wmm) = mesh_members
-            .iter_mut()
-            .find(|mm| mm.metadata.name.as_deref() == Some(worker_name.as_str()))
-        {
-            if !wmm.spec.allowed_callers.contains(&router_caller) {
-                wmm.spec.allowed_callers.push(router_caller.clone());
-                wmm.spec
-                    .allowed_callers
-                    .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
-            }
-            if !wmm.spec.ports.iter().any(|p| p.port == inference_port) {
-                wmm.spec.ports.push(MeshMemberPort {
-                    port: inference_port,
-                    name: "inference".to_string(),
-                    peer_auth: PeerAuth::Strict,
-                });
-            }
-            if has_pd {
-                wmm.spec.allow_peer_traffic = true;
-            }
-        }
+        augment_existing_mesh_member(
+            mesh_members,
+            &worker_name,
+            &router_caller,
+            inference_port,
+            "inference",
+            needs_peer_traffic,
+        );
     }
 }
 
@@ -408,82 +357,144 @@ fn ensure_autoscaling_mesh_members(
 
         let entry_name = format!("{}-{}", model_name, role_name);
 
-        if let Some(mm) = mesh_members
-            .iter_mut()
-            .find(|mm| mm.metadata.name.as_deref() == Some(entry_name.as_str()))
-        {
-            // Add autoscaler as allowed caller if not present
-            if !mm.spec.allowed_callers.contains(&autoscaler_caller) {
-                mm.spec.allowed_callers.push(autoscaler_caller.clone());
-                mm.spec
-                    .allowed_callers
-                    .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
-            }
-
-            // Add metrics port if configured and not already present
-            if let Some(port) = metrics_port {
-                if !mm.spec.ports.iter().any(|p| p.port == port) {
-                    mm.spec.ports.push(MeshMemberPort {
-                        port,
-                        name: "metrics".to_string(),
-                        peer_auth: PeerAuth::Strict,
-                    });
-                }
-            }
-        } else {
-            // No existing mesh member — create one for autoscaler metrics scraping
-            let mut ports = Vec::new();
-            if let Some(port) = metrics_port {
-                ports.push(MeshMemberPort {
-                    port,
-                    name: "metrics".to_string(),
-                    peer_auth: PeerAuth::Strict,
-                });
-            }
-
-            let mm = LatticeMeshMember::new(
+        if let Some(port) = metrics_port {
+            ensure_infra_caller_on_mesh_member(
+                mesh_members,
                 &entry_name,
-                LatticeMeshMemberSpec {
-                    target: MeshMemberTarget::Selector(
-                        [(LABEL_NAME.to_string(), entry_name.clone())]
-                            .into_iter()
-                            .collect(),
-                    ),
-                    ports,
-                    allowed_callers: vec![autoscaler_caller.clone()],
-                    dependencies: vec![],
-                    egress: vec![],
-                    allow_peer_traffic: false,
-                    depends_all: false,
-                    ingress: None,
-                    service_account: None,
-                },
+                &autoscaler_caller,
+                port,
+                "metrics",
+                false,
             );
-            mesh_members.push(mm);
+        } else {
+            // No metrics port — only add the caller to an existing mesh member
+            ensure_infra_caller_on_mesh_member(
+                mesh_members,
+                &entry_name,
+                &autoscaler_caller,
+                0, // sentinel — no port to add
+                "",
+                false,
+            );
         }
 
         // Also handle worker mesh members if they exist
         let worker_name = format!("{}-{}-worker", model_name, role_name);
-        if let Some(wmm) = mesh_members
-            .iter_mut()
-            .find(|mm| mm.metadata.name.as_deref() == Some(worker_name.as_str()))
-        {
-            if !wmm.spec.allowed_callers.contains(&autoscaler_caller) {
-                wmm.spec.allowed_callers.push(autoscaler_caller.clone());
-                wmm.spec
-                    .allowed_callers
-                    .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
-            }
-            if let Some(port) = metrics_port {
-                if !wmm.spec.ports.iter().any(|p| p.port == port) {
-                    wmm.spec.ports.push(MeshMemberPort {
-                        port,
-                        name: "metrics".to_string(),
-                        peer_auth: PeerAuth::Strict,
-                    });
-                }
-            }
+        if let Some(port) = metrics_port {
+            augment_existing_mesh_member(
+                mesh_members,
+                &worker_name,
+                &autoscaler_caller,
+                port,
+                "metrics",
+                false,
+            );
+        } else {
+            augment_existing_mesh_member(
+                mesh_members,
+                &worker_name,
+                &autoscaler_caller,
+                0,
+                "",
+                false,
+            );
         }
+    }
+}
+
+/// Add an infrastructure caller (and optionally a port) to a mesh member, creating it if absent.
+fn ensure_infra_caller_on_mesh_member(
+    mesh_members: &mut Vec<LatticeMeshMember>,
+    name: &str,
+    caller: &CallerRef,
+    port: u16,
+    port_name: &str,
+    allow_peer_traffic: bool,
+) {
+    if let Some(mm) = mesh_members
+        .iter_mut()
+        .find(|mm| mm.metadata.name.as_deref() == Some(name))
+    {
+        add_caller_and_port(mm, caller, port, port_name, allow_peer_traffic);
+    } else {
+        // No existing mesh member — create one
+        let mut ports = Vec::new();
+        if port > 0 {
+            ports.push(MeshMemberPort {
+                port,
+                name: port_name.to_string(),
+                peer_auth: PeerAuth::Strict,
+            });
+        }
+
+        let mm = LatticeMeshMember::new(
+            name,
+            LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(
+                    [(LABEL_NAME.to_string(), name.to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ports,
+                allowed_callers: vec![caller.clone()],
+                dependencies: vec![],
+                egress: vec![],
+                allow_peer_traffic,
+                depends_all: false,
+                ingress: None,
+                service_account: None,
+            },
+        );
+        mesh_members.push(mm);
+    }
+}
+
+/// Augment an existing mesh member with a caller and port. Does nothing if the member doesn't exist.
+///
+/// Workers may not have a mesh member if they have no service ports. This is expected —
+/// workers typically don't receive direct inference traffic and are only reached by their
+/// entry pod via intra-group communication.
+fn augment_existing_mesh_member(
+    mesh_members: &mut [LatticeMeshMember],
+    name: &str,
+    caller: &CallerRef,
+    port: u16,
+    port_name: &str,
+    allow_peer_traffic: bool,
+) {
+    if let Some(mm) = mesh_members
+        .iter_mut()
+        .find(|mm| mm.metadata.name.as_deref() == Some(name))
+    {
+        add_caller_and_port(mm, caller, port, port_name, allow_peer_traffic);
+    }
+}
+
+/// Shared logic: add a caller + port to a mesh member, deduplicating both.
+fn add_caller_and_port(
+    mm: &mut LatticeMeshMember,
+    caller: &CallerRef,
+    port: u16,
+    port_name: &str,
+    allow_peer_traffic: bool,
+) {
+    if !mm.spec.allowed_callers.contains(caller) {
+        mm.spec.allowed_callers.push(caller.clone());
+        mm.spec
+            .allowed_callers
+            .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+    }
+
+    if port > 0 && !mm.spec.ports.iter().any(|p| p.port == port) {
+        mm.spec.ports.push(MeshMemberPort {
+            port,
+            name: port_name.to_string(),
+            peer_auth: PeerAuth::Strict,
+        });
+    }
+
+    if allow_peer_traffic {
+        mm.spec.allow_peer_traffic = true;
     }
 }
 
@@ -743,6 +754,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pd_peer_traffic_scoped_to_pd_roles_only() {
+        let mut roles = BTreeMap::new();
+        roles.insert("prefill".to_string(), make_role("prefill:latest", 1));
+        roles.insert("decode".to_string(), make_role("decode:latest", 4));
+        roles.insert("embedding".to_string(), make_role("embed:latest", 1));
+
+        let mut routing = basic_routing();
+        routing.kv_connector = Some(KvConnector {
+            type_: "nixl".to_string(),
+        });
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(routing),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        // PD roles should have peer traffic
+        for role_name in &["prefill", "decode"] {
+            let mm_name = format!("test-model-{}", role_name);
+            let mm = compiled
+                .mesh_members
+                .iter()
+                .find(|mm| mm.metadata.name.as_deref() == Some(&mm_name))
+                .unwrap_or_else(|| panic!("mesh member for {} should exist", role_name));
+            assert!(
+                mm.spec.allow_peer_traffic,
+                "{} should have allow_peer_traffic=true",
+                role_name
+            );
+        }
+
+        // Non-PD role should NOT have peer traffic
+        let embed_mm = compiled
+            .mesh_members
+            .iter()
+            .find(|mm| mm.metadata.name.as_deref() == Some("test-model-embedding"))
+            .expect("mesh member for embedding should exist");
+        assert!(
+            !embed_mm.spec.allow_peer_traffic,
+            "embedding role should NOT have allow_peer_traffic"
+        );
+    }
+
+    #[tokio::test]
     async fn no_routing_means_no_routing_output() {
         let mut roles = BTreeMap::new();
         roles.insert("decode".to_string(), make_role("decoder:latest", 2));
@@ -790,7 +856,7 @@ mod tests {
 
         let download = compiled.download.as_ref().expect("download should be Some");
         assert_eq!(download.pvc_name(), "vol-test-model-model-cache");
-        assert_eq!(download.mount_path, "/models");
+        assert_eq!(download.mount_path(), "/models");
 
         // Verify scheduling gate + volume injected into pod templates
         let role = &compiled.model_serving.spec.template.roles[0];

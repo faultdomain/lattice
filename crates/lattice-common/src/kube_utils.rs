@@ -70,6 +70,21 @@ pub struct OwnerReference {
     pub block_owner_deletion: Option<bool>,
 }
 
+impl From<&OwnerReference>
+    for k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference
+{
+    fn from(oref: &OwnerReference) -> Self {
+        Self {
+            api_version: oref.api_version.clone(),
+            kind: oref.kind.clone(),
+            name: oref.name.clone(),
+            uid: oref.uid.clone(),
+            controller: oref.controller,
+            block_owner_deletion: oref.block_owner_deletion,
+        }
+    }
+}
+
 /// Standard Kubernetes ObjectMeta for compiled resources.
 ///
 /// Used by all resource types (workloads, policies, ingress, certificates)

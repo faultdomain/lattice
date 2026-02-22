@@ -17,6 +17,8 @@ pub struct VCJob {
     pub spec: VCJobSpec,
 }
 
+use lattice_common::kube_utils::OwnerReference;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VCJobMetadata {
@@ -26,19 +28,6 @@ pub struct VCJobMetadata {
     pub labels: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owner_references: Vec<OwnerReference>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct OwnerReference {
-    pub api_version: String,
-    pub kind: String,
-    pub name: String,
-    pub uid: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub controller: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub block_owner_deletion: Option<bool>,
 }
 
 /// VCJob spec

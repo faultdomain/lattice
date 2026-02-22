@@ -619,7 +619,7 @@ async fn apply_download_resources(
     info!(
         pvc = %download.pvc_name(),
         job = %download.job_name(),
-        mount_path = %download.mount_path,
+        mount_path = %download.mount_path(),
         "applied model download resources (Layer 0)"
     );
 

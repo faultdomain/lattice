@@ -10,11 +10,13 @@ use std::collections::BTreeMap;
 
 use lattice_common::crd::{LatticeModel, ModelRoutingSpec};
 
+use lattice_common::kube_utils::OwnerReference;
+
 use crate::types::{
     KthenaHeaderMatch, KthenaKvConnector, KthenaModelMatch, KthenaModelRoute,
     KthenaModelRouteSpec, KthenaModelServer, KthenaModelServerSpec, KthenaNetworkingMetadata,
     KthenaParentRef, KthenaRateLimit, KthenaRetryPolicy, KthenaRouteRule, KthenaTargetModel,
-    KthenaTrafficPolicy, OwnerReference, PdGroup, WorkloadPort, WorkloadSelector,
+    KthenaTrafficPolicy, PdGroup, WorkloadPort, WorkloadSelector,
 };
 
 const NETWORKING_API_VERSION: &str = "networking.serving.volcano.sh/v1alpha1";
@@ -190,40 +192,35 @@ fn compile_model_route(
     }
 }
 
+/// The exact role names required for PD disaggregation.
+///
+/// Kthena PdGroup labels use these as literal values (`modelserving.volcano.sh/role=prefill`),
+/// so role names must match exactly. Substring matching (e.g. "fast-prefill") would silently
+/// break PD routing because pods would have `role=fast-prefill` but Kthena looks for `role=prefill`.
+pub const PD_ROLE_PREFILL: &str = "prefill";
+pub const PD_ROLE_DECODE: &str = "decode";
+
 /// Auto-detect PD disaggregation from roles.
 ///
-/// If the model has roles containing "prefill" AND "decode" (or matching those
-/// names exactly), and a `kv_connector` is configured, populate the PdGroup.
+/// Requires roles named exactly "prefill" and "decode" with a `kv_connector` configured.
+/// Roles must use these exact names because Kthena PdGroup labels reference them literally.
 fn detect_pd_group(model: &LatticeModel, routing: &ModelRoutingSpec) -> Option<PdGroup> {
     routing.kv_connector.as_ref()?;
 
-    let has_prefill = model
-        .spec
-        .roles
-        .keys()
-        .any(|k| k.contains("prefill"));
-    let has_decode = model
-        .spec
-        .roles
-        .keys()
-        .any(|k| k.contains("decode"));
-
-    if has_prefill && has_decode {
-        Some(PdGroup {
-            group_key: GROUP_KEY.to_string(),
-            prefill_labels: BTreeMap::from([(ROLE_LABEL.to_string(), "prefill".to_string())]),
-            decode_labels: BTreeMap::from([(ROLE_LABEL.to_string(), "decode".to_string())]),
-        })
-    } else {
-        None
+    if !has_pd_roles(&model.spec.roles) {
+        return None;
     }
+
+    Some(PdGroup {
+        group_key: GROUP_KEY.to_string(),
+        prefill_labels: BTreeMap::from([(ROLE_LABEL.to_string(), PD_ROLE_PREFILL.to_string())]),
+        decode_labels: BTreeMap::from([(ROLE_LABEL.to_string(), PD_ROLE_DECODE.to_string())]),
+    })
 }
 
-/// Check whether a model has PD disaggregation roles (prefill + decode)
+/// Check whether a model has PD disaggregation roles (exactly "prefill" + "decode").
 pub fn has_pd_roles(roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>) -> bool {
-    let has_prefill = roles.keys().any(|k| k.contains("prefill"));
-    let has_decode = roles.keys().any(|k| k.contains("decode"));
-    has_prefill && has_decode
+    roles.contains_key(PD_ROLE_PREFILL) && roles.contains_key(PD_ROLE_DECODE)
 }
 
 pub(crate) fn owner_reference(name: &str, uid: &str) -> OwnerReference {
@@ -666,6 +663,40 @@ mod tests {
 
         let partial = BTreeMap::from([("prefill".to_string(), make_role(1))]);
         assert!(!has_pd_roles(&partial));
+    }
+
+    #[test]
+    fn has_pd_roles_requires_exact_names() {
+        // Substring matches should NOT trigger PD detection
+        let substring_match = BTreeMap::from([
+            ("fast-prefill".to_string(), make_role(1)),
+            ("decode".to_string(), make_role(4)),
+        ]);
+        assert!(!has_pd_roles(&substring_match));
+
+        let substring_both = BTreeMap::from([
+            ("prefill-v2".to_string(), make_role(1)),
+            ("predecode".to_string(), make_role(4)),
+        ]);
+        assert!(!has_pd_roles(&substring_both));
+    }
+
+    #[test]
+    fn pd_not_detected_for_non_exact_role_names() {
+        let model = test_model(BTreeMap::from([
+            ("fast-prefill".to_string(), make_role(1)),
+            ("decode".to_string(), make_role(4)),
+        ]));
+        let mut routing = basic_routing();
+        routing.kv_connector = Some(KvConnector {
+            type_: "nixl".to_string(),
+        });
+
+        let compiled = compile_model_routing(&model, &routing);
+        assert!(
+            compiled.model_server.spec.workload_selector.pd_group.is_none(),
+            "PD should not be detected for non-exact role names"
+        );
     }
 
     #[test]

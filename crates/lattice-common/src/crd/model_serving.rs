@@ -366,7 +366,7 @@ pub struct ModelParentRef {
 
 /// Declarative model artifact source for automatic downloading.
 ///
-/// Generates a PVC + K8s batch/v1 Job to download model artifacts, and injects
+/// Generates a PVC + LatticeJob to download model artifacts, and injects
 /// a scheduling gate on all role pod templates so they remain `SchedulingGated`
 /// until the download Job completes and the operator removes the gate.
 ///
