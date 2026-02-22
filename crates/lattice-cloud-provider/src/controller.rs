@@ -27,7 +27,10 @@ use lattice_common::crd::{
     CloudProvider, CloudProviderPhase, CloudProviderStatus, CloudProviderType,
 };
 use lattice_common::template::extract_secret_refs;
-use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
+    REQUEUE_SUCCESS_SECS,
+};
 
 const FIELD_MANAGER: &str = "lattice-cloud-provider-controller";
 use lattice_secret_provider::eso::{
@@ -53,7 +56,7 @@ pub async fn reconcile(
             update_status(client, &cp, CloudProviderPhase::Ready, None).await?;
 
             // Requeue periodically to re-validate
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
         }
         Err(e) => {
             warn!(
@@ -64,8 +67,7 @@ pub async fn reconcile(
 
             update_status(client, &cp, CloudProviderPhase::Failed, Some(e.to_string())).await?;
 
-            // Retry with backoff
-            Ok(Action::requeue(Duration::from_secs(60)))
+            Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
         }
     }
 }

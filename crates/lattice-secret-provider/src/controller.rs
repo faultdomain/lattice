@@ -19,7 +19,8 @@ use lattice_common::kube_utils::HasApiResource;
 use lattice_common::{
     ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE,
     LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT,
-    LOCAL_WEBHOOK_AUTH_SECRET, LOCAL_WEBHOOK_STORE_NAME,
+    LOCAL_WEBHOOK_AUTH_SECRET, LOCAL_WEBHOOK_STORE_NAME, REQUEUE_CRD_NOT_FOUND_SECS,
+    REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
 };
 
 use crate::eso::{
@@ -33,12 +34,6 @@ const FIELD_MANAGER: &str = "lattice-secret-provider-controller";
 /// Service name for the local secrets webhook
 const LOCAL_SECRETS_SERVICE: &str = "lattice-local-secrets";
 
-/// Requeue interval for successful reconciliation (handles drift detection)
-const REQUEUE_SUCCESS_SECS: u64 = 300;
-/// Requeue interval when CRD is not found (waiting for ESO installation)
-const REQUEUE_CRD_NOT_FOUND_SECS: u64 = 30;
-/// Requeue interval on other errors (with backoff)
-const REQUEUE_ERROR_SECS: u64 = 60;
 /// Requeue interval when waiting for ClusterSecretStore to become Ready
 const REQUEUE_WAITING_SECS: u64 = 10;
 
@@ -616,7 +611,7 @@ async fn update_status(
     let name = sp.name_any();
     let namespace = sp
         .namespace()
-        .unwrap_or(LATTICE_SYSTEM_NAMESPACE.to_string());
+        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
 
     // Build the patch manually instead of serializing SecretProviderStatus,
     // because Merge patches need explicit `null` to clear fields — serde's

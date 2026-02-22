@@ -14,12 +14,7 @@ use lattice_cedar::PolicyEngine;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{CedarPolicy, CedarPolicyPhase, CedarPolicyStatus};
-use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE};
-
-/// Requeue interval for successful reconciliation
-const REQUEUE_SUCCESS_SECS: u64 = 300;
-/// Requeue interval on error
-const REQUEUE_ERROR_SECS: u64 = 60;
+use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
 /// Controller context for CedarPolicy validation + policy engine reload
 pub struct CedarValidationContext {

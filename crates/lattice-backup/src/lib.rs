@@ -17,11 +17,7 @@ pub mod restore_controller;
 pub mod service_backup_controller;
 pub mod velero;
 
-/// Requeue interval on successful reconciliation (5 minutes)
-const REQUEUE_SUCCESS_SECS: u64 = 300;
-/// Requeue interval when a required CRD (e.g. Velero) is not found (30 seconds)
-const REQUEUE_CRD_NOT_FOUND_SECS: u64 = 30;
-/// Requeue interval on error (1 minute)
-const REQUEUE_ERROR_SECS: u64 = 60;
+use lattice_common::{REQUEUE_CRD_NOT_FOUND_SECS, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
+
 /// Requeue interval while an operation is in progress (15 seconds)
 const REQUEUE_IN_PROGRESS_SECS: u64 = 15;

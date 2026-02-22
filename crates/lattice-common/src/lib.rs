@@ -38,6 +38,13 @@ pub use protocol::{CsrRequest, CsrResponse, DistributableResources};
 /// Result type alias using our custom Error type
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Standard requeue interval after successful reconciliation (drift detection)
+pub const REQUEUE_SUCCESS_SECS: u64 = 300;
+/// Standard requeue interval when a required CRD is not yet installed
+pub const REQUEUE_CRD_NOT_FOUND_SECS: u64 = 30;
+/// Standard requeue interval after a recoverable error
+pub const REQUEUE_ERROR_SECS: u64 = 60;
+
 /// Default port for the bootstrap HTTPS server
 pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8443;
 

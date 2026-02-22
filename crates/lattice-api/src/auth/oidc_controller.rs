@@ -12,12 +12,7 @@ use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{OIDCProvider, OIDCProviderPhase, OIDCProviderStatus};
-use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
-
-/// Requeue interval for successful reconciliation
-const REQUEUE_SUCCESS_SECS: u64 = 300;
-/// Requeue interval on error
-const REQUEUE_ERROR_SECS: u64 = 60;
+use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
 /// OIDC discovery document (subset of fields we need)
 #[derive(Debug, serde::Deserialize)]
