@@ -653,7 +653,9 @@ pub struct RegistryMirror {
     /// Use `@infra` to match all build-time infrastructure registries.
     /// Use `*` as a lowest-priority catch-all for any registry (air-gapped).
     pub upstream: String,
-    /// Mirror endpoint host (e.g., "harbor.corp.com", "mirror.internal:5000").
+    /// Mirror endpoint URL or host. Prefix with `http://` for plain-HTTP mirrors
+    /// (e.g., a local pull-through cache). Defaults to HTTPS when no scheme is given.
+    /// Examples: `"harbor.corp.com"`, `"http://localhost:5555"`.
     pub mirror: String,
     /// Optional reference to a Secret containing registry credentials.
     /// The secret must contain a `.dockerconfigjson` key.

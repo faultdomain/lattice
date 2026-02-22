@@ -27,6 +27,21 @@ services:
     networks:
       - kind
 
+  registry-mirror:
+    image: registry:2
+    container_name: lattice-registry-mirror
+    ports:
+      - "5555:5000"
+    environment:
+      REGISTRY_PROXY_REMOTEURL: "https://registry-1.docker.io"
+    volumes:
+      - registry-mirror-data:/var/lib/registry
+    networks:
+      - kind
+
+volumes:
+  registry-mirror-data:
+
 networks:
   kind:
     external: true

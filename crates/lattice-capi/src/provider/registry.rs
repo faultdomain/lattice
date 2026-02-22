@@ -16,6 +16,19 @@ pub struct ResolvedMirror {
     pub mirror: String,
     /// Resolved dockerconfigjson content (read from the secret at reconcile time)
     pub credentials: Option<String>,
+    /// Use plain HTTP instead of HTTPS (derived from `http://` prefix on mirror URL)
+    pub plain_http: bool,
+}
+
+/// Parse the mirror field: strip `http://` or `https://` prefix, return (host, plain_http).
+fn parse_mirror_scheme(mirror: &str) -> (&str, bool) {
+    if let Some(host) = mirror.strip_prefix("http://") {
+        (host, true)
+    } else if let Some(host) = mirror.strip_prefix("https://") {
+        (host, false)
+    } else {
+        (mirror, false)
+    }
 }
 
 /// Resolve registry mirrors from the CRD spec, expanding `@infra` and `*`.
@@ -47,10 +60,12 @@ pub fn resolve_mirrors(
             .as_ref()
             .and_then(|r| resolved_credentials.get(&r.name))
             .cloned();
+        let (host, plain_http) = parse_mirror_scheme(&mirror.mirror);
         result.push(ResolvedMirror {
             upstream: mirror.upstream.clone(),
-            mirror: mirror.mirror.clone(),
+            mirror: host.to_string(),
             credentials: creds,
+            plain_http,
         });
     }
 
@@ -61,13 +76,15 @@ pub fn resolve_mirrors(
             .as_ref()
             .and_then(|r| resolved_credentials.get(&r.name))
             .cloned();
+        let (infra_host, infra_plain_http) = parse_mirror_scheme(&infra.mirror);
         for reg in lattice_infra::upstream_registries() {
             if !covered_upstreams.contains(reg) {
                 covered_upstreams.insert(reg.to_string());
                 result.push(ResolvedMirror {
                     upstream: reg.to_string(),
-                    mirror: infra.mirror.clone(),
+                    mirror: infra_host.to_string(),
                     credentials: infra_creds.clone(),
+                    plain_http: infra_plain_http,
                 });
             }
         }
@@ -80,6 +97,7 @@ pub fn resolve_mirrors(
             .as_ref()
             .and_then(|r| resolved_credentials.get(&r.name))
             .cloned();
+        let (wildcard_host, wildcard_plain_http) = parse_mirror_scheme(&wildcard.mirror);
 
         // Fill remaining infra registries with explicit entries
         for reg in lattice_infra::upstream_registries() {
@@ -87,8 +105,9 @@ pub fn resolve_mirrors(
                 covered_upstreams.insert(reg.to_string());
                 result.push(ResolvedMirror {
                     upstream: reg.to_string(),
-                    mirror: wildcard.mirror.clone(),
+                    mirror: wildcard_host.to_string(),
                     credentials: wildcard_creds.clone(),
+                    plain_http: wildcard_plain_http,
                 });
             }
         }
@@ -98,8 +117,9 @@ pub fn resolve_mirrors(
         // RKE2 uses "*" as the mirror key — generators handle the mapping.
         result.push(ResolvedMirror {
             upstream: "_default".to_string(),
-            mirror: wildcard.mirror.clone(),
+            mirror: wildcard_host.to_string(),
             credentials: wildcard_creds,
+            plain_http: wildcard_plain_http,
         });
     }
 
@@ -114,10 +134,14 @@ pub fn generate_containerd_mirror_files(mirrors: &[ResolvedMirror]) -> Vec<serde
     let mut creds_written: HashSet<String> = HashSet::new();
 
     for m in mirrors {
-        let content = format!(
-            "[host.\"https://{}\"]\n  capabilities = [\"pull\", \"resolve\"]\n",
-            m.mirror
+        let scheme = if m.plain_http { "http" } else { "https" };
+        let mut content = format!(
+            "[host.\"{}://{}\"]\n  capabilities = [\"pull\", \"resolve\"]\n",
+            scheme, m.mirror
         );
+        if m.plain_http {
+            content.push_str("  skip_verify = true\n");
+        }
         files.push(serde_json::json!({
             "content": content,
             "owner": "root:root",
@@ -159,10 +183,11 @@ pub fn generate_rke2_registries_file(mirrors: &[ResolvedMirror]) -> serde_json::
         } else {
             &m.upstream
         };
+        let scheme = if m.plain_http { "http" } else { "https" };
         yaml.push_str(&format!("  \"{}\":\n", key));
         yaml.push_str(&format!(
-            "    endpoint:\n      - \"https://{}\"\n",
-            m.mirror
+            "    endpoint:\n      - \"{}://{}\"\n",
+            scheme, m.mirror
         ));
     }
 
@@ -199,6 +224,16 @@ mod tests {
             upstream: upstream.to_string(),
             mirror: mirror_host.to_string(),
             credentials: None,
+            plain_http: false,
+        }
+    }
+
+    fn mirror_plain_http(upstream: &str, mirror_host: &str) -> ResolvedMirror {
+        ResolvedMirror {
+            upstream: upstream.to_string(),
+            mirror: mirror_host.to_string(),
+            credentials: None,
+            plain_http: true,
         }
     }
 
@@ -207,6 +242,7 @@ mod tests {
             upstream: upstream.to_string(),
             mirror: mirror_host.to_string(),
             credentials: Some(creds.to_string()),
+            plain_http: false,
         }
     }
 
@@ -227,9 +263,10 @@ mod tests {
                 format!("/etc/containerd/certs.d/{}/hosts.toml", m.upstream)
             );
             let content = files[i]["content"].as_str().unwrap();
-            assert!(content.contains("mirror.example.com"));
+            assert!(content.contains("https://mirror.example.com"));
             assert!(content.contains("pull"));
             assert!(content.contains("resolve"));
+            assert!(!content.contains("skip_verify"));
         }
     }
 
@@ -485,5 +522,63 @@ mod tests {
     fn resolve_mirrors_empty_returns_empty() {
         let resolved = resolve_mirrors(&[], &std::collections::HashMap::new());
         assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn parse_mirror_scheme_strips_http() {
+        assert_eq!(parse_mirror_scheme("http://localhost:5555"), ("localhost:5555", true));
+        assert_eq!(parse_mirror_scheme("https://harbor.corp.com"), ("harbor.corp.com", false));
+        assert_eq!(parse_mirror_scheme("harbor.corp.com"), ("harbor.corp.com", false));
+    }
+
+    #[test]
+    fn containerd_plain_http_generates_http_scheme_and_skip_verify() {
+        let mirrors = vec![mirror_plain_http("docker.io", "localhost:5555")];
+        let files = generate_containerd_mirror_files(&mirrors);
+
+        assert_eq!(files.len(), 1);
+        let content = files[0]["content"].as_str().unwrap();
+        assert!(content.contains("http://localhost:5555"), "should use http scheme");
+        assert!(!content.contains("https://"), "should not contain https");
+        assert!(content.contains("skip_verify = true"), "should skip TLS verify");
+    }
+
+    #[test]
+    fn rke2_plain_http_generates_http_scheme() {
+        let mirrors = vec![mirror_plain_http("docker.io", "localhost:5555")];
+        let file = generate_rke2_registries_file(&mirrors);
+
+        let content = file["content"].as_str().unwrap();
+        assert!(content.contains("http://localhost:5555"), "should use http scheme");
+        assert!(!content.contains("https://"), "should not contain https");
+    }
+
+    #[test]
+    fn resolve_mirrors_propagates_plain_http_from_mirror_url() {
+        let spec_mirrors = vec![RegistryMirror {
+            upstream: "docker.io".to_string(),
+            mirror: "http://localhost:5555".to_string(),
+            credentials_ref: None,
+        }];
+        let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].mirror, "localhost:5555");
+        assert!(resolved[0].plain_http);
+    }
+
+    #[test]
+    fn resolve_mirrors_infra_propagates_plain_http() {
+        let spec_mirrors = vec![RegistryMirror {
+            upstream: "@infra".to_string(),
+            mirror: "http://localhost:5555".to_string(),
+            credentials_ref: None,
+        }];
+        let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
+
+        for m in &resolved {
+            assert_eq!(m.mirror, "localhost:5555");
+            assert!(m.plain_http, "all @infra expansions should inherit plain_http");
+        }
     }
 }
