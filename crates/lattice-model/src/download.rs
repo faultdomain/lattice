@@ -190,24 +190,13 @@ fn compile_job(
     owner_ref: &serde_json::Value,
 ) -> serde_json::Value {
     let (image, command) = download_command(parsed, mount_path, source.downloader_image.as_deref());
-    let mut env_vars: Vec<serde_json::Value> = Vec::new();
 
-    // Map token secret to the scheme-appropriate env var
+    // Mount entire secret as env vars via envFrom — the secret's keys must match
+    // what the download tool expects (e.g. HF_TOKEN, AWS_ACCESS_KEY_ID, etc.)
+    let mut env_from: Vec<serde_json::Value> = Vec::new();
     if let Some(ref token_secret) = source.token_secret {
-        let key = token_secret.key.as_deref().unwrap_or("token");
-        let env_name = match parsed.scheme {
-            UriScheme::HuggingFace => "HF_TOKEN",
-            UriScheme::S3 => "AWS_SECRET_ACCESS_KEY",
-            UriScheme::Gcs => "GOOGLE_APPLICATION_CREDENTIALS",
-        };
-        env_vars.push(serde_json::json!({
-            "name": env_name,
-            "valueFrom": {
-                "secretKeyRef": {
-                    "name": token_secret.name,
-                    "key": key
-                }
-            }
+        env_from.push(serde_json::json!({
+            "secretRef": { "name": token_secret.name }
         }));
     }
 
@@ -232,7 +221,7 @@ fn compile_job(
                         "name": "download",
                         "image": image,
                         "command": ["sh", "-c", command],
-                        "env": env_vars,
+                        "envFrom": env_from,
                         "volumeMounts": [{
                             "name": VOLUME_NAME,
                             "mountPath": mount_path
@@ -537,39 +526,31 @@ mod tests {
     }
 
     #[test]
-    fn token_secret_mapped_to_hf_token_env() {
+    fn token_secret_uses_env_from() {
         let source = ModelSourceSpec {
             token_secret: Some(SecretKeySelector {
                 name: "hf-credentials".to_string(),
-                key: Some("api-token".to_string()),
             }),
             ..hf_source()
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        let env = &download.job["spec"]["template"]["spec"]["containers"][0]["env"][0];
-        assert_eq!(env["name"], "HF_TOKEN");
-        assert_eq!(env["valueFrom"]["secretKeyRef"]["name"], "hf-credentials");
-        assert_eq!(env["valueFrom"]["secretKeyRef"]["key"], "api-token");
+        let container = &download.job["spec"]["template"]["spec"]["containers"][0];
+
+        // envFrom mounts the entire secret
+        let env_from = container["envFrom"].as_array().unwrap();
+        assert_eq!(env_from.len(), 1);
+        assert_eq!(env_from[0]["secretRef"]["name"], "hf-credentials");
+
+        // No individual env vars
+        assert!(
+            container["envFrom"][0].get("secretKeyRef").is_none(),
+            "should use envFrom, not per-key secretKeyRef"
+        );
     }
 
     #[test]
-    fn token_secret_default_key() {
-        let source = ModelSourceSpec {
-            token_secret: Some(SecretKeySelector {
-                name: "my-secret".to_string(),
-                key: None,
-            }),
-            ..hf_source()
-        };
-
-        let download = compile_download("test", "ns", "uid", &source).unwrap();
-        let env = &download.job["spec"]["template"]["spec"]["containers"][0]["env"][0];
-        assert_eq!(env["valueFrom"]["secretKeyRef"]["key"], "token");
-    }
-
-    #[test]
-    fn s3_token_maps_to_aws_env() {
+    fn s3_token_uses_env_from() {
         let source = ModelSourceSpec {
             uri: "s3://bucket/model".to_string(),
             cache_size: "50Gi".to_string(),
@@ -577,14 +558,25 @@ mod tests {
             mount_path: None,
             token_secret: Some(SecretKeySelector {
                 name: "aws-creds".to_string(),
-                key: Some("secret-key".to_string()),
             }),
             downloader_image: None,
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        let env = &download.job["spec"]["template"]["spec"]["containers"][0]["env"][0];
-        assert_eq!(env["name"], "AWS_SECRET_ACCESS_KEY");
+        let env_from = download.job["spec"]["template"]["spec"]["containers"][0]["envFrom"]
+            .as_array()
+            .unwrap();
+        assert_eq!(env_from[0]["secretRef"]["name"], "aws-creds");
+    }
+
+    #[test]
+    fn no_token_secret_empty_env_from() {
+        let source = hf_source();
+        let download = compile_download("test", "ns", "uid", &source).unwrap();
+        let env_from = download.job["spec"]["template"]["spec"]["containers"][0]["envFrom"]
+            .as_array()
+            .unwrap();
+        assert!(env_from.is_empty());
     }
 
     #[test]

@@ -24,7 +24,9 @@ use kube::{Client, ResourceExt};
 use tracing::{error, info, warn};
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{LatticeModel, LatticeModelStatus, ModelServingPhase, ProviderType};
+use lattice_common::crd::{
+    LatticeModel, LatticeModelStatus, ModelCondition, ModelServingPhase, ProviderType,
+};
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry};
@@ -111,6 +113,7 @@ pub async fn reconcile(
                 ModelServingPhase::Loading,
                 None,
                 Some(generation),
+                None,
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(15)))
@@ -134,6 +137,7 @@ pub async fn reconcile(
                             ModelServingPhase::Failed,
                             Some("Model download failed"),
                             Some(generation),
+                            None,
                         )
                         .await?;
                         return Ok(Action::await_change());
@@ -149,16 +153,11 @@ pub async fn reconcile(
                 }
             }
 
-            let ms_api = match ctx.registry.resolve(CrdKind::ModelServing).await {
-                Some(ar) => ar,
-                None => {
-                    warn!(model = %name, "cannot check ModelServing status: CRD not discovered");
-                    return Ok(Action::requeue(Duration::from_secs(15)));
-                }
-            };
+            let (state, conditions) =
+                check_model_serving_status(&ctx.client, &name, namespace, &ctx.registry).await;
 
-            match check_model_serving_status(&ctx.client, &name, namespace, &ms_api).await {
-                Some(ModelServingState::Available) => {
+            match state {
+                ModelServingState::Available => {
                     info!(model = %name, "model serving is available");
                     update_status(
                         &ctx.client,
@@ -167,11 +166,12 @@ pub async fn reconcile(
                         ModelServingPhase::Serving,
                         Some("Model is serving inference requests"),
                         Some(generation),
+                        conditions,
                     )
                     .await?;
                     Ok(Action::requeue(Duration::from_secs(60)))
                 }
-                Some(ModelServingState::Failed) => {
+                ModelServingState::Failed => {
                     error!(model = %name, "model serving failed");
                     cleanup_graph(&model, &ctx.graph, namespace);
                     update_status(
@@ -181,15 +181,71 @@ pub async fn reconcile(
                         ModelServingPhase::Failed,
                         Some("ModelServing failed"),
                         Some(generation),
+                        conditions,
                     )
                     .await?;
                     Ok(Action::await_change())
                 }
-                _ => Ok(Action::requeue(Duration::from_secs(15))),
+                ModelServingState::Progressing => Ok(Action::requeue(Duration::from_secs(15))),
             }
         }
         ModelServingPhase::Serving => {
-            // Monitor health, detect spec changes for rolling update
+            let observed = model.status.as_ref().and_then(|s| s.observed_generation);
+            if observed != Some(generation) {
+                // Spec changed — re-compile and re-apply
+                info!(model = %name, observed = ?observed, current = generation, "spec changed, re-applying");
+                let compiled = compile_model(
+                    &model,
+                    &ctx.graph,
+                    &ctx.cluster_name,
+                    ctx.provider_type,
+                    &ctx.cedar,
+                )
+                .await?;
+                register_graph(&model, &ctx.graph, namespace);
+                apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await?;
+                let conditions = read_model_serving_conditions(
+                    &ctx.client,
+                    &name,
+                    namespace,
+                    &ctx.registry,
+                )
+                .await;
+                update_status(
+                    &ctx.client,
+                    &name,
+                    namespace,
+                    ModelServingPhase::Serving,
+                    Some("Model updated and serving"),
+                    Some(generation),
+                    conditions,
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(15)));
+            }
+
+            // No spec change — monitor health via ModelServing conditions
+            let message = "Model is serving inference requests";
+            if is_status_unchanged(&model, ModelServingPhase::Serving, Some(message), Some(generation)) {
+                return Ok(Action::requeue(Duration::from_secs(60)));
+            }
+            let conditions = read_model_serving_conditions(
+                &ctx.client,
+                &name,
+                namespace,
+                &ctx.registry,
+            )
+            .await;
+            update_status(
+                &ctx.client,
+                &name,
+                namespace,
+                ModelServingPhase::Serving,
+                Some(message),
+                Some(generation),
+                conditions,
+            )
+            .await?;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         ModelServingPhase::Failed => Ok(Action::await_change()),
@@ -392,49 +448,86 @@ enum ModelServingState {
     Progressing,
 }
 
-async fn check_model_serving_status(
+/// Read conditions from a ModelServing resource and convert to ModelCondition structs.
+async fn read_model_serving_conditions(
     client: &Client,
     name: &str,
     namespace: &str,
-    ms_api: &ApiResource,
-) -> Option<ModelServingState> {
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ms_api);
+    registry: &CrdRegistry,
+) -> Option<Vec<ModelCondition>> {
+    let ms_api = registry.resolve(CrdKind::ModelServing).await?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ms_api);
 
     match api.get(name).await {
         Ok(obj) => {
-            let conditions = obj
+            let raw_conditions = obj
                 .data
                 .get("status")
                 .and_then(|s| s.get("conditions"))
-                .and_then(|c| c.as_array());
+                .and_then(|c| c.as_array())?;
 
-            if let Some(conditions) = conditions {
-                for cond in conditions {
-                    let type_ = cond.get("type").and_then(|t| t.as_str());
-                    let status = cond.get("status").and_then(|s| s.as_str());
-                    match (type_, status) {
-                        (Some("Available"), Some("True")) => {
-                            return Some(ModelServingState::Available);
-                        }
-                        (Some("Failed"), Some("True")) => {
-                            return Some(ModelServingState::Failed);
-                        }
-                        _ => {}
-                    }
-                }
+            let conditions: Vec<ModelCondition> = raw_conditions
+                .iter()
+                .filter_map(|c| {
+                    Some(ModelCondition {
+                        type_: c.get("type")?.as_str()?.to_string(),
+                        status: c.get("status")?.as_str()?.to_string(),
+                        reason: c
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        message: c
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        last_transition_time: c
+                            .get("lastTransitionTime")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    })
+                })
+                .collect();
+
+            if conditions.is_empty() {
+                None
+            } else {
+                Some(conditions)
             }
-
-            Some(ModelServingState::Progressing)
         }
         Err(kube::Error::Api(ae)) if ae.code == 404 => {
             warn!(model = %name, "ModelServing not found");
             None
         }
         Err(e) => {
-            warn!(model = %name, error = %e, "failed to check ModelServing status");
+            warn!(model = %name, error = %e, "failed to read ModelServing conditions");
             None
         }
     }
+}
+
+/// Derive the high-level ModelServing state from its conditions.
+fn derive_model_serving_state(conditions: Option<&[ModelCondition]>) -> ModelServingState {
+    if let Some(conditions) = conditions {
+        for cond in conditions {
+            match (cond.type_.as_str(), cond.status.as_str()) {
+                ("Available", "True") => return ModelServingState::Available,
+                ("Failed", "True") => return ModelServingState::Failed,
+                _ => {}
+            }
+        }
+    }
+    ModelServingState::Progressing
+}
+
+async fn check_model_serving_status(
+    client: &Client,
+    name: &str,
+    namespace: &str,
+    registry: &CrdRegistry,
+) -> (ModelServingState, Option<Vec<ModelCondition>>) {
+    let conditions = read_model_serving_conditions(client, name, namespace, registry).await;
+    let state = derive_model_serving_state(conditions.as_deref());
+    (state, conditions)
 }
 
 /// Apply model download resources (PVC + Job) as Layer 0
@@ -585,6 +678,28 @@ async fn remove_scheduling_gates(
     Ok(())
 }
 
+/// Check if the model status already matches — avoids update loop.
+///
+/// Skip redundant patches because each merge patch generates a watch event
+/// that triggers another reconcile. Critical for the Serving phase which
+/// requeues every 60s.
+fn is_status_unchanged(
+    model: &LatticeModel,
+    phase: ModelServingPhase,
+    message: Option<&str>,
+    observed_generation: Option<i64>,
+) -> bool {
+    model
+        .status
+        .as_ref()
+        .map(|s| {
+            s.phase == phase
+                && s.message.as_deref() == message
+                && s.observed_generation == observed_generation
+        })
+        .unwrap_or(false)
+}
+
 async fn update_status(
     client: &Client,
     name: &str,
@@ -592,13 +707,14 @@ async fn update_status(
     phase: ModelServingPhase,
     message: Option<&str>,
     observed_generation: Option<i64>,
+    conditions: Option<Vec<ModelCondition>>,
 ) -> Result<(), ModelError> {
     let api: Api<LatticeModel> = Api::namespaced(client.clone(), namespace);
     let status = LatticeModelStatus {
         phase,
         message: message.map(|m| m.to_string()),
         observed_generation,
-        conditions: None,
+        conditions,
     };
     let status_patch = serde_json::json!({ "status": status });
     api.patch_status(

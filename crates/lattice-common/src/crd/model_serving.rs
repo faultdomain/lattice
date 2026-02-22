@@ -307,16 +307,17 @@ pub struct ModelSourceSpec {
     pub downloader_image: Option<String>,
 }
 
-/// Reference to a key within a K8s Secret
+/// Reference to a K8s Secret whose keys are mounted as env vars via `envFrom`.
+///
+/// The secret's keys must match what the download tool expects:
+/// - HuggingFace: `HF_TOKEN`
+/// - S3: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optionally `AWS_DEFAULT_REGION`
+/// - GCS: keys matching `gsutil` expectations
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretKeySelector {
     /// Secret name
     pub name: String,
-
-    /// Key within the secret (default: "token")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
 }
 
 // =============================================================================
@@ -521,7 +522,6 @@ mod tests {
             mount_path: None,
             token_secret: Some(SecretKeySelector {
                 name: "hf-creds".to_string(),
-                key: Some("token".to_string()),
             }),
             downloader_image: None,
         };
