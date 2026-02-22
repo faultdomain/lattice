@@ -197,9 +197,10 @@ pub enum MeshMemberScope {
 impl LatticeMeshMemberSpec {
     /// Validate the spec
     pub fn validate(&self) -> Result<(), String> {
-        // A mesh member must either expose ports (server) or have dependencies (client)
-        if self.ports.is_empty() && self.dependencies.is_empty() {
-            return Err("at least one port or dependency is required".to_string());
+        // A mesh member must serve traffic (ports), call other services (dependencies),
+        // or have non-mesh egress rules
+        if self.ports.is_empty() && self.dependencies.is_empty() && self.egress.is_empty() {
+            return Err("at least one port, dependency, or egress rule is required".to_string());
         }
 
         for port in &self.ports {
@@ -305,6 +306,27 @@ mod tests {
         spec.ports.clear();
         spec.dependencies.push(ServiceRef::local("some-service"));
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_egress_only_valid() {
+        let mut spec = valid_spec();
+        spec.ports.clear();
+        spec.dependencies.clear();
+        spec.egress.push(EgressRule {
+            target: EgressTarget::Entity("world".to_string()),
+            ports: vec![443],
+        });
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_empty_everything_fails() {
+        let mut spec = valid_spec();
+        spec.ports.clear();
+        spec.dependencies.clear();
+        spec.egress.clear();
+        assert!(spec.validate().is_err());
     }
 
     #[test]

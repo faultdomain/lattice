@@ -2,8 +2,7 @@
 //!
 //! This module handles:
 //! - PVC generation for owned volumes (volumes with size)
-//! - Pod affinity for RWO volume co-location (references follow owner's node)
-//! - Volume mounts in container specs
+//! - Volume mounts in container specs (PVC-backed and emptyDir)
 
 use std::collections::BTreeMap;
 
@@ -151,9 +150,6 @@ fn sanitize_volume_name(mount_path: &str) -> String {
 // Volume Compiler
 // =============================================================================
 
-/// Label prefix for volume ownership
-pub const VOLUME_OWNER_LABEL_PREFIX: &str = "lattice.dev/volume-owner-";
-
 /// Compiler for generating volume-related Kubernetes resources
 pub struct VolumeCompiler;
 
@@ -200,42 +196,6 @@ impl VolumeCompiler {
                     .unwrap_or_default();
                 let pvc = Self::compile_pvc(&pvc_name, namespace, &params);
                 output.pvcs.push(pvc);
-
-                // Add owner label for RWO volumes so references can find us
-                if let Some(id) = &resource_spec.id {
-                    let access_mode = params.access_mode.unwrap_or_default();
-                    if access_mode == VolumeAccessMode::ReadWriteOnce {
-                        let label_key = format!("{}{}", VOLUME_OWNER_LABEL_PREFIX, id);
-                        output.pod_labels.insert(label_key, "true".to_string());
-                    }
-                }
-            }
-
-            // Generate pod affinity for RWO volume references
-            if resource_spec.is_volume_reference() {
-                if let Some(id) = &resource_spec.id {
-                    let label_key = format!("{}{}", VOLUME_OWNER_LABEL_PREFIX, id);
-
-                    let affinity_term = PodAffinityTerm {
-                        label_selector: LabelSelector {
-                            match_labels: {
-                                let mut labels = BTreeMap::new();
-                                labels.insert(label_key, "true".to_string());
-                                labels
-                            },
-                        },
-                        topology_key: "kubernetes.io/hostname".to_string(),
-                        namespaces: Some(vec![namespace.to_string()]),
-                    };
-
-                    let affinity = output.affinity.get_or_insert_with(Affinity::default);
-                    let pod_affinity = affinity
-                        .pod_affinity
-                        .get_or_insert_with(PodAffinity::default);
-                    pod_affinity
-                        .required_during_scheduling_ignored_during_execution
-                        .push(affinity_term);
-                }
             }
 
             // Generate pod volume
@@ -579,7 +539,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn owner_gets_volume_label_for_rwo() {
+    fn no_pod_labels_or_affinity_for_rwo_owner() {
         let spec = make_spec_with_volumes(
             vec![(
                 "downloads",
@@ -593,40 +553,13 @@ mod tests {
 
         let output = VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new()).unwrap();
 
-        // Should have owner label for RWO volume
-        assert_eq!(
-            output
-                .pod_labels
-                .get("lattice.dev/volume-owner-media-downloads"),
-            Some(&"true".to_string())
-        );
-    }
-
-    #[test]
-    fn owner_no_label_for_rwx() {
-        let spec = make_spec_with_volumes(
-            vec![(
-                "media",
-                Some("media-library"),
-                "1Ti",
-                Some(VolumeAccessMode::ReadWriteMany),
-            )],
-            vec![],
-            vec![("/media", "media")],
-        );
-
-        let output = VolumeCompiler::compile("jellyfin", "media", &spec, &BTreeMap::new()).unwrap();
-
-        // No owner label for RWX - no affinity needed
+        // No pod labels — K8s VolumeBinding plugin handles same-PVC scheduling natively
         assert!(output.pod_labels.is_empty());
+        assert!(output.affinity.is_none());
     }
 
-    // =========================================================================
-    // Story: Pod Affinity for Volume References
-    // =========================================================================
-
     #[test]
-    fn reference_gets_affinity_to_owner() {
+    fn no_affinity_for_volume_reference() {
         let spec = make_spec_with_volumes(
             vec![],
             vec![("downloads", "media-downloads")],
@@ -635,37 +568,20 @@ mod tests {
 
         let output = VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new()).unwrap();
 
-        // Should have affinity to owner
-        let affinity = output.affinity.expect("should have affinity");
-        let pod_affinity = affinity.pod_affinity.expect("should have pod affinity");
-        let terms = &pod_affinity.required_during_scheduling_ignored_during_execution;
+        // No pod affinity — K8s VolumeBinding plugin handles same-PVC scheduling natively
+        assert!(output.affinity.is_none());
+        assert!(output.pod_labels.is_empty());
 
-        assert_eq!(terms.len(), 1);
-        assert_eq!(terms[0].topology_key, "kubernetes.io/hostname");
+        // But should still have the PVC-backed pod volume
+        assert_eq!(output.volumes.len(), 1);
         assert_eq!(
-            terms[0]
-                .label_selector
-                .match_labels
-                .get("lattice.dev/volume-owner-media-downloads"),
-            Some(&"true".to_string())
+            output.volumes[0]
+                .persistent_volume_claim
+                .as_ref()
+                .expect("PVC volume source should be set")
+                .claim_name,
+            "vol-media-downloads"
         );
-    }
-
-    #[test]
-    fn multiple_references_get_multiple_affinities() {
-        let spec = make_spec_with_volumes(
-            vec![],
-            vec![("downloads", "media-downloads"), ("media", "media-library")],
-            vec![("/downloads", "downloads"), ("/media", "media")],
-        );
-
-        let output = VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new()).unwrap();
-
-        let affinity = output.affinity.expect("should have affinity");
-        let pod_affinity = affinity.pod_affinity.expect("should have pod affinity");
-        let terms = &pod_affinity.required_during_scheduling_ignored_during_execution;
-
-        assert_eq!(terms.len(), 2);
     }
 
     // =========================================================================
