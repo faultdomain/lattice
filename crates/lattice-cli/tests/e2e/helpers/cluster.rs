@@ -512,6 +512,33 @@ pub fn load_cluster_config(
     Ok((content, cluster))
 }
 
+/// Inject the docker-compose registry pull-through cache as a docker.io mirror.
+/// Containerd falls back to the upstream if the mirror is unreachable, so this is
+/// always safe to add for Docker provider clusters.
+pub fn inject_docker_registry_mirror(cluster: &mut LatticeCluster) {
+    use lattice_common::crd::RegistryMirror;
+
+    let mirror = RegistryMirror {
+        upstream: "docker.io".to_string(),
+        mirror: format!(
+            "http://{}:{}",
+            super::DOCKER_KIND_GATEWAY,
+            super::DOCKER_REGISTRY_MIRROR_PORT
+        ),
+        credentials_ref: None,
+    };
+    match cluster.spec.registry_mirrors {
+        Some(ref mut mirrors) => {
+            if !mirrors.iter().any(|m| m.upstream == "docker.io") {
+                mirrors.push(mirror);
+            }
+        }
+        None => {
+            cluster.spec.registry_mirrors = Some(vec![mirror]);
+        }
+    }
+}
+
 /// Load any deserializable K8s resource from a YAML fixture file in the services directory.
 pub fn load_fixture_config<T: serde::de::DeserializeOwned>(filename: &str) -> Result<T, String> {
     let path = service_fixtures_dir().join(filename);

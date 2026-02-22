@@ -41,9 +41,9 @@ use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, create_with_retry, ensure_docker_network,
-    extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, patch_with_retry, run_cmd, run_id, run_kubectl,
-    watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    extract_docker_cluster_kubeconfig, get_docker_kubeconfig, inject_docker_registry_mirror,
+    kubeconfig_path, load_cluster_config, load_registry_credentials, patch_with_retry, run_cmd,
+    run_id, run_kubectl, watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
 use super::integration::setup;
 use super::mesh_tests::{start_mesh_test, wait_for_mesh_test_cycles};
@@ -108,7 +108,7 @@ async fn run_upgrade_test() -> Result<(), String> {
     let (from_version, to_version) = get_upgrade_versions();
 
     // Load configurations
-    let (mgmt_config_content, _) =
+    let (_, mut mgmt_cluster) =
         load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
 
     let (_, mut workload_cluster) =
@@ -124,6 +124,13 @@ async fn run_upgrade_test() -> Result<(), String> {
     ensure_docker_network()
         .await
         .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
+
+    // Inject Docker registry pull-through cache mirror
+    inject_docker_registry_mirror(&mut mgmt_cluster);
+    inject_docker_registry_mirror(&mut workload_cluster);
+
+    let mgmt_config_content = serde_json::to_string(&mgmt_cluster)
+        .map_err(|e| format!("Failed to serialize mgmt cluster: {}", e))?;
 
     // Install management cluster
     info!("[Phase 1] Installing management cluster...");
