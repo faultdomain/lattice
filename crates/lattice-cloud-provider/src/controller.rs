@@ -40,12 +40,19 @@ use lattice_secret_provider::eso::{
 /// Reconcile a CloudProvider
 ///
 /// Reconciles credentials (ESO or manual) and updates status.
+/// Skips work when the spec hasn't changed (generation matches) and already Ready.
 pub async fn reconcile(
     cp: Arc<CloudProvider>,
     ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
     let name = cp.name_any();
     let client = &ctx.client;
+    let generation = cp.metadata.generation.unwrap_or(0);
+
+    // Skip work if spec unchanged and already Ready
+    if is_status_unchanged(&cp, CloudProviderPhase::Ready, None, Some(generation)) {
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
 
     info!(cloud_provider = %name, provider_type = ?cp.spec.provider_type, "Reconciling CloudProvider");
 
@@ -53,7 +60,7 @@ pub async fn reconcile(
         Ok(()) => {
             info!(cloud_provider = %name, "Credentials reconciled successfully");
 
-            update_status(client, &cp, CloudProviderPhase::Ready, None).await?;
+            update_status(client, &cp, CloudProviderPhase::Ready, None, Some(generation)).await?;
 
             // Requeue periodically to re-validate
             Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
@@ -65,7 +72,7 @@ pub async fn reconcile(
                 "Credential reconciliation failed"
             );
 
-            update_status(client, &cp, CloudProviderPhase::Failed, Some(e.to_string())).await?;
+            update_status(client, &cp, CloudProviderPhase::Failed, Some(e.to_string()), Some(generation)).await?;
 
             Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
         }
@@ -173,19 +180,36 @@ async fn reconcile_credentials(client: &Client, cp: &CloudProvider) -> Result<()
     }
 }
 
+/// Check if the CloudProvider status already matches the desired state.
+///
+/// Prevents redundant status patches that would trigger self-reconcile storms.
+fn is_status_unchanged(
+    cp: &CloudProvider,
+    phase: CloudProviderPhase,
+    message: Option<&str>,
+    observed_generation: Option<i64>,
+) -> bool {
+    cp.status
+        .as_ref()
+        .map(|s| {
+            s.phase == phase
+                && s.message.as_deref() == message
+                && s.observed_generation == observed_generation
+        })
+        .unwrap_or(false)
+}
+
 /// Update CloudProvider status
 async fn update_status(
     client: &Client,
     cp: &CloudProvider,
     phase: CloudProviderPhase,
     message: Option<String>,
+    observed_generation: Option<i64>,
 ) -> Result<(), ReconcileError> {
-    // Check if status already matches - avoid update loop
-    if let Some(ref current_status) = cp.status {
-        if current_status.phase == phase && current_status.message == message {
-            debug!(cloud_provider = %cp.name_any(), "Status unchanged, skipping update");
-            return Ok(());
-        }
+    if is_status_unchanged(cp, phase, message.as_deref(), observed_generation) {
+        debug!(cloud_provider = %cp.name_any(), "Status unchanged, skipping update");
+        return Ok(());
     }
 
     let name = cp.name_any();
@@ -198,6 +222,7 @@ async fn update_status(
         message,
         last_validated: Some(chrono::Utc::now().to_rfc3339()),
         cluster_count: 0,
+        observed_generation,
     };
 
     lattice_common::kube_utils::patch_resource_status::<CloudProvider>(
@@ -492,15 +517,13 @@ mod tests {
             message: None,
             last_validated: Some("2024-01-01T00:00:00Z".to_string()),
             cluster_count: 0,
+            observed_generation: Some(1),
         });
 
-        let expected_phase = CloudProviderPhase::Ready;
-        let expected_message: Option<String> = None;
-
-        if let Some(ref current_status) = cp.status {
-            assert_eq!(current_status.phase, expected_phase);
-            assert_eq!(current_status.message, expected_message);
-        }
+        assert!(is_status_unchanged(&cp, CloudProviderPhase::Ready, None, Some(1)));
+        assert!(!is_status_unchanged(&cp, CloudProviderPhase::Failed, None, Some(1)));
+        assert!(!is_status_unchanged(&cp, CloudProviderPhase::Ready, None, Some(2)));
+        assert!(!is_status_unchanged(&cp, CloudProviderPhase::Ready, Some("msg"), Some(1)));
     }
 
     #[tokio::test]
@@ -510,12 +533,14 @@ mod tests {
             message: Some("Test error message".to_string()),
             last_validated: Some(chrono::Utc::now().to_rfc3339()),
             cluster_count: 5,
+            observed_generation: Some(2),
         };
 
         assert_eq!(status.phase, CloudProviderPhase::Failed);
         assert!(status.message.is_some());
         assert!(status.last_validated.is_some());
         assert_eq!(status.cluster_count, 5);
+        assert_eq!(status.observed_generation, Some(2));
     }
 
     // =========================================================================

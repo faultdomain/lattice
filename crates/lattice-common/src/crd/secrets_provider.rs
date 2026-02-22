@@ -90,6 +90,10 @@ pub struct SecretProviderStatus {
     /// Detected provider type (first key of spec.provider, e.g. "vault", "aws")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_type: Option<String>,
+
+    /// Generation of the spec that was last reconciled
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
 }
 
 /// SecretProvider phase

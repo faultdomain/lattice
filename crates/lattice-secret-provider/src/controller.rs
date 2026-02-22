@@ -163,23 +163,30 @@ pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), 
 ///
 /// Ensures the corresponding ESO ClusterSecretStore exists with the
 /// provider configuration passed through verbatim.
+/// Skips work when the spec hasn't changed (generation matches) and already Ready.
 pub async fn reconcile(
     sp: Arc<SecretProvider>,
     ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
     let name = sp.name_any();
     let client = &ctx.client;
+    let generation = sp.metadata.generation.unwrap_or(0);
 
-    info!(secrets_provider = %name, "Reconciling SecretProvider");
-
-    // Validate spec before attempting to create the ClusterSecretStore
+    // Validate spec on every run (cheap, catches edge cases)
     if let Err(msg) = sp.spec.validate() {
         warn!(secrets_provider = %name, error = %msg, "Invalid SecretProvider spec");
-        update_status(client, &sp, SecretProviderPhase::Failed, Some(msg), None).await?;
+        update_status(client, &sp, SecretProviderPhase::Failed, Some(msg), None, Some(generation)).await?;
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
     }
 
     let provider_type = sp.spec.provider_type_name().map(|s| s.to_string());
+
+    // Skip full reconcile if spec unchanged and already Ready
+    if is_status_unchanged(&sp, SecretProviderPhase::Ready, None, Some(generation)) {
+        return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
+    }
+
+    info!(secrets_provider = %name, "Reconciling SecretProvider");
 
     // Try to create/update the ClusterSecretStore
     match ensure_cluster_secret_store(client, &sp).await {
@@ -202,7 +209,7 @@ pub async fn reconcile(
                     }
 
                     info!(secrets_provider = %name, "ClusterSecretStore is Ready");
-                    update_status(client, &sp, SecretProviderPhase::Ready, None, provider_type)
+                    update_status(client, &sp, SecretProviderPhase::Ready, None, provider_type, Some(generation))
                         .await?;
                     Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
                 }
@@ -220,6 +227,7 @@ pub async fn reconcile(
                         SecretProviderPhase::Pending,
                         Some(format!("ClusterSecretStore not ready: {msg}")),
                         provider_type,
+                        Some(generation),
                     )
                     .await?;
                     Ok(Action::requeue(Duration::from_secs(REQUEUE_WAITING_SECS)))
@@ -233,6 +241,7 @@ pub async fn reconcile(
                         SecretProviderPhase::Pending,
                         Some("Waiting for ESO to validate ClusterSecretStore".to_string()),
                         provider_type,
+                        Some(generation),
                     )
                     .await?;
                     Ok(Action::requeue(Duration::from_secs(REQUEUE_WAITING_SECS)))
@@ -256,6 +265,7 @@ pub async fn reconcile(
                 SecretProviderPhase::Pending,
                 Some("Waiting for ESO to be installed".to_string()),
                 provider_type,
+                Some(generation),
             )
             .await?;
 
@@ -276,6 +286,7 @@ pub async fn reconcile(
                 SecretProviderPhase::Failed,
                 Some(e.to_string()),
                 provider_type,
+                Some(generation),
             )
             .await?;
 
@@ -589,6 +600,25 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
     Ok(())
 }
 
+/// Check if the SecretProvider status already matches the desired state.
+///
+/// Prevents redundant status patches that would trigger self-reconcile storms.
+fn is_status_unchanged(
+    sp: &SecretProvider,
+    phase: SecretProviderPhase,
+    message: Option<&str>,
+    observed_generation: Option<i64>,
+) -> bool {
+    sp.status
+        .as_ref()
+        .map(|s| {
+            s.phase == phase
+                && s.message.as_deref() == message
+                && s.observed_generation == observed_generation
+        })
+        .unwrap_or(false)
+}
+
 /// Update SecretProvider status
 async fn update_status(
     client: &Client,
@@ -596,16 +626,11 @@ async fn update_status(
     phase: SecretProviderPhase,
     message: Option<String>,
     provider_type: Option<String>,
+    observed_generation: Option<i64>,
 ) -> Result<(), ReconcileError> {
-    // Check if status already matches - avoid update loop
-    if let Some(ref current_status) = sp.status {
-        if current_status.phase == phase
-            && current_status.message == message
-            && current_status.provider_type == provider_type
-        {
-            debug!(secrets_provider = %sp.name_any(), "Status unchanged, skipping update");
-            return Ok(());
-        }
+    if is_status_unchanged(sp, phase, message.as_deref(), observed_generation) {
+        debug!(secrets_provider = %sp.name_any(), "Status unchanged, skipping update");
+        return Ok(());
     }
 
     let name = sp.name_any();
@@ -623,6 +648,7 @@ async fn update_status(
             "message": message,
             "lastValidated": chrono::Utc::now().to_rfc3339(),
             "providerType": provider_type,
+            "observedGeneration": observed_generation,
         }
     });
 

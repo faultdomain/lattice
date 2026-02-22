@@ -172,6 +172,10 @@ pub struct CloudProviderStatus {
     /// Number of clusters using this provider
     #[serde(default)]
     pub cluster_count: u32,
+
+    /// Generation of the spec that was last reconciled
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
 }
 
 /// CloudProvider phase
