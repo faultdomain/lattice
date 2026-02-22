@@ -34,13 +34,30 @@ services:
       - "5555:5000"
     environment:
       REGISTRY_PROXY_REMOTEURL: "https://registry-1.docker.io"
+      REGISTRY_PROXY_USERNAME: "${DOCKERHUB_USER:-}"
+      REGISTRY_PROXY_PASSWORD: "${DOCKERHUB_TOKEN:-}"
     volumes:
       - registry-mirror-data:/var/lib/registry
     networks:
       - kind
 
+  ghcr-mirror:
+    image: registry:2
+    container_name: lattice-ghcr-mirror
+    ports:
+      - "5556:5000"
+    environment:
+      REGISTRY_PROXY_REMOTEURL: "https://ghcr.io"
+      REGISTRY_PROXY_USERNAME: "${GHCR_USER:-}"
+      REGISTRY_PROXY_PASSWORD: "${GHCR_TOKEN:-}"
+    volumes:
+      - ghcr-mirror-data:/var/lib/registry
+    networks:
+      - kind
+
 volumes:
   registry-mirror-data:
+  ghcr-mirror-data:
 
 networks:
   kind:

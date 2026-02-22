@@ -512,29 +512,35 @@ pub fn load_cluster_config(
     Ok((content, cluster))
 }
 
-/// Inject the docker-compose registry pull-through cache as a docker.io mirror.
-/// Containerd falls back to the upstream if the mirror is unreachable, so this is
+/// Inject docker-compose registry pull-through caches for docker.io and ghcr.io.
+/// Containerd falls back to the upstream if a mirror is unreachable, so this is
 /// always safe to add for Docker provider clusters.
 pub fn inject_docker_registry_mirror(cluster: &mut LatticeCluster) {
     use lattice_common::crd::RegistryMirror;
 
-    let mirror = RegistryMirror {
-        upstream: "docker.io".to_string(),
-        mirror: format!(
-            "http://{}:{}",
-            super::DOCKER_KIND_GATEWAY,
-            super::DOCKER_REGISTRY_MIRROR_PORT
+    let mirrors_to_add = [
+        (
+            "docker.io",
+            super::DOCKER_REGISTRY_MIRROR_PORT,
         ),
-        credentials_ref: None,
-    };
-    match cluster.spec.registry_mirrors {
-        Some(ref mut mirrors) => {
-            if !mirrors.iter().any(|m| m.upstream == "docker.io") {
-                mirrors.push(mirror);
-            }
-        }
-        None => {
-            cluster.spec.registry_mirrors = Some(vec![mirror]);
+        (
+            "ghcr.io",
+            super::GHCR_REGISTRY_MIRROR_PORT,
+        ),
+    ];
+
+    let existing = cluster
+        .spec
+        .registry_mirrors
+        .get_or_insert_with(Vec::new);
+
+    for (upstream, port) in mirrors_to_add {
+        if !existing.iter().any(|m| m.upstream == upstream) {
+            existing.push(RegistryMirror {
+                upstream: upstream.to_string(),
+                mirror: format!("http://{}:{}", super::DOCKER_KIND_GATEWAY, port),
+                credentials_ref: None,
+            });
         }
     }
 }

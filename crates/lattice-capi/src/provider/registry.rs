@@ -166,9 +166,16 @@ pub fn generate_containerd_mirror_files(mirrors: &[ResolvedMirror]) -> Vec<serde
 }
 
 /// Generate preKubeadmCommands to enable containerd mirror config_path + restart.
+///
+/// Strips any existing registry section/config_path, then appends fresh.
+/// Works on both standard nodes (have `config_path = ""`) and Kind/CAPD (have neither).
 pub fn generate_containerd_mirror_commands() -> Vec<String> {
     vec![
-        r#"sed -i 's|config_path = ""|config_path = "/etc/containerd/certs.d"|' /etc/containerd/config.toml && systemctl restart containerd"#.to_string()
+        concat!(
+            r#"sed -i '/\[plugins.*registry\]/d; /config_path/d' /etc/containerd/config.toml && "#,
+            r#"printf '\n[plugins."io.containerd.grpc.v1.cri".registry]\n  config_path = "/etc/containerd/certs.d"\n' >> /etc/containerd/config.toml && "#,
+            r#"systemctl restart containerd"#,
+        ).to_string()
     ]
 }
 
