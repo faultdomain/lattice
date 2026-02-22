@@ -164,7 +164,29 @@ pub async fn reconcile(
     let crds = ResolvedCrds::resolve(&ctx.registry).await;
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    apply_policies(&ctx.client, &crds, namespace, &params, &policies).await?;
+    // Apply waypoint BEFORE policies — ServiceEntries reference the waypoint
+    // via `istio.io/use-waypoint` and will fail to bind if it doesn't exist yet
+    if let Some(ref waypoint_resources) = waypoint {
+        apply_waypoint(&ctx.client, &crds, namespace, &params, waypoint_resources).await?;
+    }
+
+    // If ServiceEntries need a waypoint, verify it exists before applying them.
+    // On first reconcile the waypoint was just created and won't be programmed
+    // yet — skip ServiceEntries and let the next requeue pick them up.
+    let waypoint_ready = if !policies.service_entries.is_empty() {
+        is_waypoint_programmed(&ctx.client, &crds, namespace).await
+    } else {
+        true
+    };
+
+    if waypoint_ready {
+        apply_policies(&ctx.client, &crds, namespace, &params, &policies).await?;
+    } else {
+        info!("waypoint not yet present, deferring ServiceEntry creation");
+        // Apply everything except ServiceEntries
+        let deferred = policies.without_service_entries();
+        apply_policies(&ctx.client, &crds, namespace, &params, &deferred).await?;
+    }
 
     if let Some(ref ingress_resources) = ingress {
         // Use a per-member field manager for the Gateway so each member owns
@@ -184,15 +206,18 @@ pub async fn reconcile(
         .await?;
     }
 
-    if let Some(ref waypoint_resources) = waypoint {
-        apply_waypoint(&ctx.client, &crds, namespace, &params, waypoint_resources).await?;
-    }
-
     let total = policies.total_count()
         + ingress.as_ref().map_or(0, |i| i.total_count())
         + waypoint.as_ref().map_or(0, |w| w.total_count());
 
     info!(resources = total, "applied mesh member resources");
+
+    // If ServiceEntries were deferred, don't update the graph hash so the next
+    // reconcile will re-run and apply them once the waypoint is programmed.
+    if !waypoint_ready {
+        info!("requeuing in 10s for deferred ServiceEntries");
+        return Ok(Action::requeue(Duration::from_secs(10)));
+    }
 
     // Update status and graph hash annotation in a single patch
     let scope = match member.spec.target {
@@ -261,6 +286,46 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
 
     debug!(namespace = %namespace, "ensured namespace ambient mode");
     Ok(())
+}
+
+// =============================================================================
+// Waypoint readiness check
+// =============================================================================
+
+/// Check if the namespace waypoint Gateway is programmed.
+///
+/// ServiceEntries with `istio.io/use-waypoint` will fail to bind if applied
+/// before the waypoint is fully programmed. Returns `true` only when the
+/// Gateway has `Programmed: True` in its status conditions.
+async fn is_waypoint_programmed(
+    client: &Client,
+    crds: &ResolvedCrds,
+    namespace: &str,
+) -> bool {
+    let Some(ref ar) = crds.gateway else {
+        return false;
+    };
+
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
+    let waypoint = mesh::waypoint_name(namespace);
+
+    let gw = match api.get(&waypoint).await {
+        Ok(gw) => gw,
+        Err(_) => return false,
+    };
+
+    // Check status.conditions for Programmed: True
+    gw.data
+        .get("status")
+        .and_then(|s| s.get("conditions"))
+        .and_then(|c| c.as_array())
+        .map(|conditions| {
+            conditions.iter().any(|c| {
+                c.get("type").and_then(|t| t.as_str()) == Some("Programmed")
+                    && c.get("status").and_then(|s| s.as_str()) == Some("True")
+            })
+        })
+        .unwrap_or(false)
 }
 
 // =============================================================================

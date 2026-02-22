@@ -51,6 +51,16 @@ impl GeneratedPolicies {
             + self.service_entries.len()
             + self.peer_authentications.len()
     }
+
+    /// Clone with ServiceEntries removed (used when waypoint is not yet ready)
+    pub fn without_service_entries(&self) -> Self {
+        Self {
+            authorization_policies: self.authorization_policies.clone(),
+            cilium_policies: self.cilium_policies.clone(),
+            service_entries: Vec::new(),
+            peer_authentications: self.peer_authentications.clone(),
+        }
+    }
 }
 
 // =============================================================================
