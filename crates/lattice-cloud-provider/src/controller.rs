@@ -204,7 +204,7 @@ async fn update_status(
         "lattice-cloud-provider-controller",
     )
     .await
-    .map_err(|e| ReconcileError::Kube(format!("failed to update status: {}", e)))?;
+    .map_err(|e| ReconcileError::kube("failed to update status", e))?;
 
     Ok(())
 }

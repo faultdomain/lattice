@@ -558,10 +558,13 @@ pub async fn apply_external_secret(
         )
         .await
         .map_err(|e| {
-            lattice_common::ReconcileError::Kube(format!(
-                "failed to apply ExternalSecret '{}': {e}",
-                external_secret.metadata.name
-            ))
+            lattice_common::ReconcileError::kube(
+                format!(
+                    "failed to apply ExternalSecret '{}'",
+                    external_secret.metadata.name
+                ),
+                e,
+            )
         })?;
 
     Ok(())

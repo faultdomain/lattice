@@ -39,7 +39,7 @@ pub async fn reconcile(
     let service_list = services
         .list(&ListParams::default())
         .await
-        .map_err(|e| ReconcileError::Kube(format!("failed to list services: {}", e)))?;
+        .map_err(|e| ReconcileError::kube("failed to list services", e))?;
 
     // Fetch namespace labels for selector matching (cache to avoid refetching)
     let mut ns_label_cache: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -110,7 +110,7 @@ pub async fn reconcile(
     .await
     .map_err(|e| {
         warn!(policy = %name, error = %e, "Failed to update policy status");
-        ReconcileError::Kube(format!("status update failed: {}", e))
+        ReconcileError::kube("status update failed", e)
     })?;
 
     // Requeue periodically

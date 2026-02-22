@@ -124,7 +124,7 @@ async fn update_status(
         "lattice-restore-controller",
     )
     .await
-    .map_err(|e| ReconcileError::Kube(format!("status update failed: {}", e)))?;
+    .map_err(|e| ReconcileError::kube("status update failed", e))?;
 
     Ok(())
 }

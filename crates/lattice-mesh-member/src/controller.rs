@@ -252,7 +252,7 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
     )]);
     lattice_common::kube_utils::ensure_namespace_with_labels(client, namespace, &labels, FIELD_MANAGER)
         .await
-        .map_err(|e| ReconcileError::Kube(format!("ensure namespace ambient: {e}")))?;
+        .map_err(|e| ReconcileError::kube("ensure namespace ambient", e))?;
 
     debug!(namespace = %namespace, "ensured namespace ambient mode");
     Ok(())
@@ -322,7 +322,7 @@ async fn apply_resource(
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
     api.patch(name, params, &Patch::Apply(&json))
         .await
-        .map_err(|e| ReconcileError::Kube(format!("apply {kind} {name}: {e}")))?;
+        .map_err(|e| ReconcileError::kube(format!("apply {kind} {name}"), e))?;
 
     debug!(name = %name, kind = %kind, "applied resource");
     Ok(())
@@ -401,9 +401,9 @@ async fn apply_policies(
         async move {
             api.patch(&name, &params, &Patch::Apply(&json))
                 .await
-                .map_err(|e| ReconcileError::Kube(format!("apply {kind} {name}: {e}")))?;
+                .map_err(|e| ReconcileError::kube(format!("apply {kind} {name}"), e))?;
             debug!(name = %name, kind = kind, "applied resource");
-            Ok(())
+            Ok::<(), ReconcileError>(())
         }
     }))
     .await?;
@@ -646,7 +646,7 @@ async fn patch_status_with_hash(
         &Patch::Merge(&patch),
     )
     .await
-    .map_err(|e| ReconcileError::Kube(format!("patch status: {e}")))?;
+    .map_err(|e| ReconcileError::kube("patch status", e))?;
 
     Ok(())
 }

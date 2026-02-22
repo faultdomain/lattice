@@ -71,7 +71,7 @@ pub async fn reconcile(
         &Patch::Merge(&patch),
     )
     .await
-    .map_err(|e| ReconcileError::Kube(format!("failed to update OIDCProvider status: {e}")))?;
+    .map_err(|e| ReconcileError::kube("failed to update OIDCProvider status", e))?;
 
     let requeue = if new_status.phase == OIDCProviderPhase::Ready {
         REQUEUE_SUCCESS_SECS

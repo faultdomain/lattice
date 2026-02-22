@@ -111,7 +111,7 @@ pub async fn ensure_webhook_credentials(
         &Patch::Apply(&secret_json),
     )
     .await
-    .map_err(|e| ReconcileError::Kube(format!("failed to create webhook auth secret: {e}")))?;
+    .map_err(|e| ReconcileError::kube("failed to create webhook auth secret", e))?;
 
     info!("Generated new webhook auth credentials");
     Ok(WebhookCredentials {
@@ -153,9 +153,7 @@ pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), 
     css_api
         .patch(LOCAL_WEBHOOK_STORE_NAME, &params, &Patch::Apply(&css_obj))
         .await
-        .map_err(|e| {
-            ReconcileError::Kube(format!("failed to apply local ClusterSecretStore: {e}"))
-        })?;
+        .map_err(|e| ReconcileError::kube("failed to apply local ClusterSecretStore", e))?;
 
     info!(
         "Local webhook ClusterSecretStore '{}' ensured",
@@ -324,7 +322,7 @@ async fn ensure_cluster_secret_store(
     css_api
         .patch(&name, &params, &Patch::Apply(&css_obj))
         .await
-        .map_err(|e| ReconcileError::Kube(format!("failed to apply ClusterSecretStore: {e}")))?;
+        .map_err(|e| ReconcileError::kube("failed to apply ClusterSecretStore", e))?;
 
     debug!(secrets_provider = %name, "Applied ClusterSecretStore");
     Ok(())
@@ -341,9 +339,10 @@ async fn check_cluster_secret_store_ready(
     let api_resource = ClusterSecretStore::api_resource();
     let css_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
 
-    let css = css_api.get(name).await.map_err(|e| {
-        ReconcileError::Kube(format!("failed to get ClusterSecretStore '{name}': {e}"))
-    })?;
+    let css = css_api
+        .get(name)
+        .await
+        .map_err(|e| ReconcileError::kube(format!("failed to get ClusterSecretStore '{name}'"), e))?;
 
     let conditions = css
         .data
@@ -384,7 +383,7 @@ async fn force_refresh_failed_external_secrets(
     let es_list = es_api
         .list(&ListParams::default())
         .await
-        .map_err(|e| ReconcileError::Kube(format!("failed to list ExternalSecrets: {e}")))?;
+        .map_err(|e| ReconcileError::kube("failed to list ExternalSecrets", e))?;
 
     let timestamp = chrono::Utc::now().timestamp().to_string();
     let mut refreshed = 0u32;
@@ -541,9 +540,10 @@ async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), Reconcile
         .patch(LOCAL_SECRETS_NAMESPACE, &params, &Patch::Apply(&ns))
         .await
         .map_err(|e| {
-            ReconcileError::Kube(format!(
-                "failed to ensure namespace {LOCAL_SECRETS_NAMESPACE}: {e}"
-            ))
+            ReconcileError::kube(
+                format!("failed to ensure namespace {LOCAL_SECRETS_NAMESPACE}"),
+                e,
+            )
         })?;
 
     debug!("Ensured namespace {}", LOCAL_SECRETS_NAMESPACE);
@@ -582,9 +582,10 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
         .patch(LOCAL_SECRETS_SERVICE, &params, &Patch::Apply(&svc))
         .await
         .map_err(|e| {
-            ReconcileError::Kube(format!(
-                "failed to ensure webhook service {LOCAL_SECRETS_SERVICE}: {e}"
-            ))
+            ReconcileError::kube(
+                format!("failed to ensure webhook service {LOCAL_SECRETS_SERVICE}"),
+                e,
+            )
         })?;
 
     debug!("Ensured webhook service {}", LOCAL_SECRETS_SERVICE);
@@ -635,7 +636,7 @@ async fn update_status(
         &Patch::Merge(&patch),
     )
     .await
-    .map_err(|e| ReconcileError::Kube(format!("failed to update status: {e}")))?;
+    .map_err(|e| ReconcileError::kube("failed to update status", e))?;
 
     Ok(())
 }

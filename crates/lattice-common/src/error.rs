@@ -35,12 +35,26 @@ pub enum ReconcileError {
 }
 
 impl ReconcileError {
+    /// Create a Kube error with context describing what operation failed.
+    ///
+    /// Replaces the verbose `.map_err(|e| ReconcileError::Kube(format!("...: {e}")))` pattern.
+    /// Usage: `.map_err(|e| ReconcileError::kube("apply Deployment", e))?`
+    pub fn kube(context: impl std::fmt::Display, error: impl std::fmt::Display) -> Self {
+        Self::Kube(format!("{context}: {error}"))
+    }
+
     /// Check if this error indicates a CRD is not installed (404/not found)
     pub fn is_crd_not_found(&self) -> bool {
         let msg = self.to_string();
         msg.contains("404")
             || msg.contains("not found")
             || msg.contains("the server could not find the requested resource")
+    }
+}
+
+impl From<kube::Error> for ReconcileError {
+    fn from(e: kube::Error) -> Self {
+        Self::Kube(e.to_string())
     }
 }
 
@@ -678,5 +692,23 @@ mod tests {
             }
             _ => panic!("Expected Pivot variant"),
         }
+    }
+
+    #[test]
+    fn reconcile_error_kube_helper_formats_context() {
+        let err = ReconcileError::kube("failed to apply Deployment", "connection refused");
+        assert!(err.to_string().contains("failed to apply Deployment: connection refused"));
+    }
+
+    #[test]
+    fn reconcile_error_from_kube_error() {
+        let kube_err = kube::Error::Api(kube::error::ErrorResponse {
+            status: "Failure".to_string(),
+            message: "not found".to_string(),
+            reason: "NotFound".to_string(),
+            code: 404,
+        });
+        let err: ReconcileError = kube_err.into();
+        assert!(err.is_crd_not_found());
     }
 }

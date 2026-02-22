@@ -25,7 +25,7 @@ where
 {
     let ar = T::api_resource();
     let value = serde_json::to_value(resource)
-        .map_err(|e| ReconcileError::Kube(format!("failed to serialize Velero resource: {}", e)))?;
+        .map_err(|e| ReconcileError::kube("failed to serialize Velero resource", e))?;
 
     let name = value
         .pointer("/metadata/name")
@@ -41,9 +41,7 @@ where
 
     api.patch(name, &params, &Patch::Apply(&value))
         .await
-        .map_err(|e| {
-            ReconcileError::Kube(format!("failed to apply {}/{}: {}", ar.kind, name, e))
-        })?;
+        .map_err(|e| ReconcileError::kube(format!("failed to apply {}/{}", ar.kind, name), e))?;
 
     Ok(())
 }
