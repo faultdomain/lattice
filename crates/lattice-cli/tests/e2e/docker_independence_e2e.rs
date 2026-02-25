@@ -126,8 +126,7 @@ async fn run_independence_test(
         .await
         .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
 
-    let (_, mgmt_cluster) =
-        load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml")?;
+    let (_, mgmt_cluster) = load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml")?;
     let (_, workload_cluster) =
         load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml")?;
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();

@@ -223,7 +223,19 @@ pub async fn build_service_controllers(
             };
             let name = member.metadata.name.as_deref().unwrap_or_default();
             let ns = namespace.to_string();
-            affected_neighbors(&graph, namespace, name)
+            let mut affected: Vec<String> = affected_neighbors(&graph, namespace, name);
+
+            // Drain edge diffs to catch neighbors that affected_neighbors misses
+            // (e.g., when A removes its outbound dep on B, B is no longer a neighbor)
+            if let Some(diffs) = graph.drain_edge_diffs(namespace, name) {
+                for (diff_ns, diff_name) in diffs {
+                    if diff_ns == ns && !affected.contains(&diff_name) {
+                        affected.push(diff_name);
+                    }
+                }
+            }
+
+            affected
                 .into_iter()
                 .filter_map(|dep| {
                     let node = graph.get_service(&ns, &dep)?;

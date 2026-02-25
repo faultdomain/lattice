@@ -257,8 +257,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // Load cluster configurations
     info!("[Setup] Loading cluster configurations...");
 
-    let (_, mgmt_cluster) =
-        load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
+    let (_, mgmt_cluster) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
     let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
     let mgmt_bootstrap = mgmt_cluster.spec.provider.kubernetes.bootstrap.clone();
 
@@ -504,8 +503,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         info!("[Setup/Phase 5] Skipping workload2 cluster (disabled)");
 
         // Just verify workload workers without parallel workload2 provisioning
-        scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 1)
-            .await?;
+        scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 1).await?;
 
         ctx
     };
@@ -581,8 +579,7 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         build_and_push_downloader_image(DEFAULT_DOWNLOADER_IMAGE).await?;
     }
 
-    let (_, mgmt_cluster) =
-        load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
+    let (_, mgmt_cluster) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
     let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
 
     if mgmt_provider == InfraProvider::Docker {
@@ -680,12 +677,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 
     // Verify cluster is operational
     capi::verify_capi_resources(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME).await?;
-    scaling::verify_cluster_workers(
-        &workload_proxy_kc,
-        WORKLOAD_CLUSTER_NAME,
-        1,
-    )
-    .await?;
+    scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 1).await?;
 
     // Add to chaos targets
     if let Some(ref targets) = result.chaos_targets {

@@ -11,7 +11,11 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use super::helpers::{run_kubectl, wait_for_condition};
+use kube::api::{Api, Patch, PatchParams};
+
+use lattice_common::crd::LatticeService;
+
+use super::helpers::{client_from_kubeconfig, patch_with_retry, run_kubectl, wait_for_condition};
 
 // =============================================================================
 // Constants
@@ -536,6 +540,146 @@ where
         start.elapsed().as_secs_f64(),
         last_err
     ))
+}
+
+// =============================================================================
+// Edge Removal Test Helpers
+// =============================================================================
+
+/// An edge that was removed and whose denial we need to verify.
+pub struct RemovedEdge {
+    /// Traffic generator service name (used as pod label selector)
+    pub source: String,
+    /// Pattern that appears when the connection is allowed
+    pub allowed_pattern: String,
+    /// Pattern that appears when the connection is blocked
+    pub blocked_pattern: String,
+}
+
+/// Remove an inbound resource from a LatticeService via JSON merge patch.
+///
+/// This breaks a bilateral agreement by removing the target's inbound allow
+/// for the given source, causing the connection to be denied.
+pub async fn remove_inbound_edge(
+    kubeconfig_path: &str,
+    namespace: &str,
+    target_service: &str,
+    inbound_key: &str,
+) -> Result<(), String> {
+    let client = client_from_kubeconfig(kubeconfig_path).await?;
+    let api: Api<LatticeService> = Api::namespaced(client, namespace);
+
+    let mut resources_map = serde_json::Map::new();
+    resources_map.insert(inbound_key.to_string(), serde_json::Value::Null);
+
+    let patch = serde_json::json!({
+        "spec": {
+            "workload": {
+                "resources": serde_json::Value::Object(resources_map)
+            }
+        }
+    });
+
+    patch_with_retry(
+        &api,
+        target_service,
+        &PatchParams::default(),
+        &Patch::Merge(patch),
+    )
+    .await?;
+
+    info!(
+        "[Edge Removal] Removed inbound '{}' from '{}'",
+        inbound_key, target_service
+    );
+    Ok(())
+}
+
+/// Wait for removed edges to become denied in traffic generator logs.
+///
+/// Polls traffic generator logs every 8s for up to 5 minutes. An edge is
+/// considered denied when `parse_traffic_result` returns `Some(false)`.
+pub async fn wait_for_edges_denied(
+    kubeconfig_path: &str,
+    namespace: &str,
+    edges: &[RemovedEdge],
+    label: &str,
+) -> Result<(), String> {
+    info!(
+        "[{}] Waiting for {} removed edges to become denied (up to 5 min)...",
+        label,
+        edges.len()
+    );
+
+    let timeout = Duration::from_secs(300);
+    let start = Instant::now();
+
+    loop {
+        let mut all_denied = true;
+        let mut pending = Vec::new();
+
+        for edge in edges {
+            let logs = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig_path,
+                "logs",
+                "-n",
+                namespace,
+                "-l",
+                &format!("{}={}", lattice_common::LABEL_NAME, edge.source),
+                "--tail",
+                "200",
+            ])
+            .await
+            .unwrap_or_default();
+
+            match parse_traffic_result(&logs, &edge.allowed_pattern, &edge.blocked_pattern) {
+                Some(false) => {
+                    // Most recent result is BLOCKED — edge is denied
+                }
+                result => {
+                    all_denied = false;
+                    let status = match result {
+                        Some(true) => "still ALLOWED",
+                        None => "no result yet",
+                        _ => unreachable!(),
+                    };
+                    pending.push(format!(
+                        "{} -> {}: {}",
+                        edge.source, edge.blocked_pattern, status
+                    ));
+                }
+            }
+        }
+
+        if all_denied {
+            info!(
+                "[{}] All {} removed edges are now denied!",
+                label,
+                edges.len()
+            );
+            return Ok(());
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "[{}] Timed out after {:.0}s waiting for edges to become denied. Still pending: {}",
+                label,
+                start.elapsed().as_secs_f64(),
+                pending.join("; ")
+            ));
+        }
+
+        info!(
+            "[{}] {}/{} edges denied (elapsed: {:.0}s), waiting...",
+            label,
+            edges.len() - pending.len(),
+            edges.len(),
+            start.elapsed().as_secs_f64()
+        );
+
+        sleep(Duration::from_secs(8)).await;
+    }
 }
 
 /// Check that no traffic was incorrectly allowed (security violation check).

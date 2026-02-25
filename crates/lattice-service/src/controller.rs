@@ -203,12 +203,8 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             Service as K8sService, ServiceAccount as K8sSA,
         };
 
-        lattice_common::kube_utils::ensure_namespace_ssa(
-            &self.client,
-            namespace,
-            "lattice-service-controller",
-        )
-        .await?;
+        lattice_common::kube_utils::ensure_namespace_ssa(&self.client, namespace, FIELD_MANAGER)
+            .await?;
 
         let params = PatchParams::apply(FIELD_MANAGER).force();
 
@@ -232,19 +228,19 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         if let Some(sa) = &compiled.workloads.service_account {
             layer1.push("ServiceAccount", &sa.metadata.name, sa, &ar_sa)?;
         }
-        for pvc in &compiled.workloads.pvcs {
-            layer1.push("PVC", &pvc.metadata.name, pvc, &ar_pvc)?;
+        for pvc in &compiled.workloads.config.pvcs {
+            layer1.push("PersistentVolumeClaim", &pvc.metadata.name, pvc, &ar_pvc)?;
         }
-        for cm in &compiled.workloads.env_config_maps {
+        for cm in &compiled.workloads.config.env_config_maps {
             layer1.push("ConfigMap", &cm.metadata.name, cm, &ar_cm)?;
         }
-        for secret in &compiled.workloads.env_secrets {
+        for secret in &compiled.workloads.config.env_secrets {
             layer1.push("Secret", &secret.metadata.name, secret, &ar_secret)?;
         }
-        for cm in &compiled.workloads.files_config_maps {
+        for cm in &compiled.workloads.config.files_config_maps {
             layer1.push("ConfigMap", &cm.metadata.name, cm, &ar_cm)?;
         }
-        for secret in &compiled.workloads.files_secrets {
+        for secret in &compiled.workloads.config.files_secrets {
             layer1.push("Secret", &secret.metadata.name, secret, &ar_secret)?;
         }
         if let Some(svc) = &compiled.workloads.service {
@@ -259,49 +255,30 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         layer1.push_crd(
             "ExternalSecret",
             es_ar.as_ref(),
-            &compiled.workloads.external_secrets,
+            &compiled.workloads.config.external_secrets,
             |es| &es.metadata.name,
         )?;
 
         // LatticeMeshMember CR — the MeshMember controller generates all mesh policies
-        if let Some(ref mesh_member) = compiled.mesh_member {
-            let ar = self
-                .registry
-                .resolve(CrdKind::MeshMember)
-                .await
-                .ok_or_else(|| {
-                    Error::internal_with_context(
-                        "apply_compiled_service",
-                        "LatticeMeshMember CRD not installed but mesh member needs applying",
-                    )
-                })?;
-            layer1.push(
-                "LatticeMeshMember",
-                mesh_member.metadata.name.as_deref().unwrap_or("unknown"),
-                mesh_member,
-                &ar,
-            )?;
-        }
+        let mm_ar = self.registry.resolve(CrdKind::MeshMember).await;
+        layer1.push_optional_crd(
+            "LatticeMeshMember",
+            mm_ar.as_ref(),
+            compiled.mesh_member.as_ref(),
+            |mm| mm.metadata.name.as_deref().unwrap_or("unknown"),
+        )?;
 
         // Tetragon TracingPolicyNamespaced (runtime enforcement)
-        if !compiled.tracing_policies.is_empty() {
-            let ar = self
-                .registry
-                .resolve(CrdKind::TracingPolicyNamespaced)
-                .await
-                .ok_or_else(|| {
-                    Error::internal_with_context(
-                        "apply_compiled_service",
-                        format!(
-                        "TracingPolicyNamespaced CRD not installed but {} policies need applying",
-                        compiled.tracing_policies.len()
-                    ),
-                    )
-                })?;
-            for tp in &compiled.tracing_policies {
-                layer1.push("TracingPolicyNamespaced", &tp.metadata.name, tp, &ar)?;
-            }
-        }
+        let tp_ar = self
+            .registry
+            .resolve(CrdKind::TracingPolicyNamespaced)
+            .await;
+        layer1.push_crd(
+            "TracingPolicyNamespaced",
+            tp_ar.as_ref(),
+            &compiled.tracing_policies,
+            |tp| &tp.metadata.name,
+        )?;
 
         // Extension resources — infrastructure layer
         for ext in &compiled.extensions {

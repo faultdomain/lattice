@@ -427,7 +427,16 @@ async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String>
 
     // Verify the workload cluster doesn't already have parent_config
     if original_yaml.contains("parentConfig") {
-        info!("[Webhook] Workload cluster already has parentConfig, skipping promotion test");
+        info!("[Webhook] Cluster already has parentConfig, skipping promotion test");
+        // Apply the current YAML to establish the last-applied-configuration
+        // annotation. Without it, `kubectl apply` does a two-way merge that
+        // cannot detect field removal, so the strip test would silently no-op.
+        apply_should_succeed(
+            kubeconfig,
+            &original_yaml,
+            "establish last-applied annotation",
+        )
+        .await?;
     } else {
         // Promotion: add parent_config to the leaf cluster → should be allowed
         let promoted_yaml = inject_parent_config(&original_yaml);
@@ -453,8 +462,7 @@ async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String>
 
     // Removal: try to strip parent_config → should be rejected
     let stripped_yaml = strip_parent_config(&current_yaml);
-    let err =
-        apply_should_be_rejected(kubeconfig, &stripped_yaml, "remove parent_config").await?;
+    let err = apply_should_be_rejected(kubeconfig, &stripped_yaml, "remove parent_config").await?;
     if !err.contains("cannot be removed") {
         return Err(format!(
             "Expected rejection to mention 'cannot be removed', got: {err}"

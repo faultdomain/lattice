@@ -457,6 +457,10 @@ pub struct ServiceGraph {
     /// Used by the service controller to detect external state changes
     /// that require recompilation even when the service spec is unchanged.
     policy_epoch: AtomicU64,
+
+    /// Outbound edge targets added or removed by the most recent `put_node()`.
+    /// Keyed by the service that changed. Consumed by `drain_edge_diffs()`.
+    edge_diffs: DashMap<QualifiedName, HashSet<QualifiedName>>,
 }
 
 impl Default for ServiceGraph {
@@ -478,6 +482,7 @@ impl ServiceGraph {
             depends_all_nodes: DashSet::new(),
             volume_owners: DashMap::new(),
             policy_epoch: AtomicU64::new(0),
+            edge_diffs: DashMap::new(),
         }
     }
 
@@ -503,6 +508,13 @@ impl ServiceGraph {
     /// Internal: Insert a node and update all edge indices
     fn put_node(&self, node: ServiceNode) {
         let key = (node.namespace.clone(), node.name.clone());
+
+        // Snapshot old outbound targets before removing edges
+        let old_targets: HashSet<QualifiedName> = self
+            .edges_out
+            .get(&key)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
 
         // Remove old edges if service existed
         self.remove_edges(&node.namespace, &node.name);
@@ -547,6 +559,16 @@ impl ServiceGraph {
                         .insert(dep_key, ServiceNode::unknown(dep_ns, dep_name));
                 }
             }
+        }
+
+        // Compute edge diff (symmetric difference of old vs new outbound targets)
+        let new_targets: HashSet<QualifiedName> = dependencies.iter().cloned().collect();
+        let diff: HashSet<QualifiedName> = old_targets
+            .symmetric_difference(&new_targets)
+            .cloned()
+            .collect();
+        if !diff.is_empty() {
+            self.edge_diffs.entry(key.clone()).or_default().extend(diff);
         }
 
         // Update namespace index
@@ -856,6 +878,16 @@ impl ServiceGraph {
         self.policy_epoch.load(Ordering::Relaxed)
     }
 
+    /// Drain edge diffs recorded by `put_node()` for a given service.
+    ///
+    /// Returns the set of outbound edge targets that were added or removed
+    /// since the last drain. Returns `None` if no diffs were recorded.
+    /// Consuming the diffs removes them so a second call returns `None`.
+    pub fn drain_edge_diffs(&self, namespace: &str, name: &str) -> Option<HashSet<QualifiedName>> {
+        let key = (namespace.to_string(), name.to_string());
+        self.edge_diffs.remove(&key).map(|(_, diff)| diff)
+    }
+
     /// Cache namespace labels
     pub fn put_namespace_labels(&self, namespace: &str, labels: BTreeMap<String, String>) {
         self.ns_labels.insert(namespace.to_string(), labels);
@@ -966,64 +998,50 @@ mod tests {
 
     fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> LatticeServiceSpec {
         use crate::crd::{
-            ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
-            ServicePortsSpec, WorkloadSpec,
+            ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ServicePortsSpec,
+            WorkloadSpec,
         };
-
-        let mut containers = BTreeMap::new();
-        containers.insert(
-            "main".to_string(),
-            ContainerSpec {
-                image: "test:latest".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let mut resources = BTreeMap::new();
-        for dep in deps {
-            resources.insert(
-                dep.to_string(),
-                ResourceSpec {
-                    type_: ResourceType::Service,
-                    direction: DependencyDirection::Outbound,
-                    id: None,
-                    class: None,
-                    metadata: None,
-                    params: None,
-                    namespace: None,
-                },
-            );
-        }
-        for caller in callers {
-            resources.insert(
-                caller.to_string(),
-                ResourceSpec {
-                    type_: ResourceType::Service,
-                    direction: DependencyDirection::Inbound,
-                    id: None,
-                    class: None,
-                    metadata: None,
-                    params: None,
-                    namespace: None,
-                },
-            );
-        }
-
-        let mut ports = BTreeMap::new();
-        ports.insert(
-            "http".to_string(),
-            PortSpec {
-                port: 8080,
-                target_port: None,
-                protocol: None,
-            },
-        );
 
         LatticeServiceSpec {
             workload: WorkloadSpec {
-                containers,
-                resources,
-                service: Some(ServicePortsSpec { ports }),
+                containers: BTreeMap::from([(
+                    "main".to_string(),
+                    ContainerSpec {
+                        image: "test:latest".to_string(),
+                        ..Default::default()
+                    },
+                )]),
+                resources: deps
+                    .into_iter()
+                    .map(|d| {
+                        (
+                            d.to_string(),
+                            ResourceSpec {
+                                direction: DependencyDirection::Outbound,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .chain(callers.into_iter().map(|c| {
+                        (
+                            c.to_string(),
+                            ResourceSpec {
+                                direction: DependencyDirection::Inbound,
+                                ..Default::default()
+                            },
+                        )
+                    }))
+                    .collect(),
+                service: Some(ServicePortsSpec {
+                    ports: BTreeMap::from([(
+                        "http".to_string(),
+                        PortSpec {
+                            port: 8080,
+                            target_port: None,
+                            protocol: None,
+                        },
+                    )]),
+                }),
             },
             ..Default::default()
         }
@@ -1842,5 +1860,86 @@ mod tests {
 
         // api should no longer see inbound from scraper
         assert!(graph.get_active_inbound_edges("prod", "api").is_empty());
+    }
+
+    // =========================================================================
+    // Edge Diff Tracking Tests
+    // =========================================================================
+
+    #[test]
+    fn edge_diffs_tracks_removed_dependency() {
+        let graph = ServiceGraph::new();
+
+        // A depends on [B, C]
+        let spec_bc = make_service_spec(vec!["B", "C"], vec![]);
+        graph.put_service("ns", "A", &spec_bc);
+
+        // Drain initial diffs (first put always has diffs from empty)
+        graph.drain_edge_diffs("ns", "A");
+
+        // A now depends on [C] only (B removed)
+        let spec_c = make_service_spec(vec!["C"], vec![]);
+        graph.put_service("ns", "A", &spec_c);
+
+        let diffs = graph
+            .drain_edge_diffs("ns", "A")
+            .expect("should have diffs");
+        assert!(diffs.contains(&("ns".to_string(), "B".to_string())));
+        assert!(!diffs.contains(&("ns".to_string(), "C".to_string())));
+    }
+
+    #[test]
+    fn edge_diffs_tracks_added_dependency() {
+        let graph = ServiceGraph::new();
+
+        // A depends on [B]
+        let spec_b = make_service_spec(vec!["B"], vec![]);
+        graph.put_service("ns", "A", &spec_b);
+        graph.drain_edge_diffs("ns", "A");
+
+        // A now depends on [B, C] (C added)
+        let spec_bc = make_service_spec(vec!["B", "C"], vec![]);
+        graph.put_service("ns", "A", &spec_bc);
+
+        let diffs = graph
+            .drain_edge_diffs("ns", "A")
+            .expect("should have diffs");
+        assert!(diffs.contains(&("ns".to_string(), "C".to_string())));
+        assert!(!diffs.contains(&("ns".to_string(), "B".to_string())));
+    }
+
+    #[test]
+    fn edge_diffs_empty_when_unchanged() {
+        let graph = ServiceGraph::new();
+
+        // A depends on [B]
+        let spec = make_service_spec(vec!["B"], vec![]);
+        graph.put_service("ns", "A", &spec);
+        graph.drain_edge_diffs("ns", "A");
+
+        // Same deps again
+        graph.put_service("ns", "A", &spec);
+
+        assert!(
+            graph.drain_edge_diffs("ns", "A").is_none(),
+            "no diffs when dependencies unchanged"
+        );
+    }
+
+    #[test]
+    fn edge_diffs_consumed_on_drain() {
+        let graph = ServiceGraph::new();
+
+        let spec_b = make_service_spec(vec!["B"], vec![]);
+        graph.put_service("ns", "A", &spec_b);
+
+        // First drain consumes diffs
+        assert!(graph.drain_edge_diffs("ns", "A").is_some());
+
+        // Second drain returns None
+        assert!(
+            graph.drain_edge_diffs("ns", "A").is_none(),
+            "diffs should be consumed after first drain"
+        );
     }
 }

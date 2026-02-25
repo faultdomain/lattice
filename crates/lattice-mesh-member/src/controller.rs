@@ -8,13 +8,15 @@
 //! - Gateway + Routes (ingress, if configured)
 //! - Waypoint Gateway + AuthorizationPolicy (if external deps exist)
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, instrument, warn};
 
 use lattice_cedar::{MeshWildcardRequest, PolicyEngine, WildcardDirection};
@@ -49,6 +51,111 @@ pub struct MeshMemberContext {
 
 const FIELD_MANAGER: &str = "lattice-mesh-member-controller";
 const GRAPH_HASH_ANNOTATION: &str = "lattice.dev/graph-hash";
+const APPLIED_RESOURCES_ANNOTATION: &str = "lattice.dev/applied-resources";
+
+/// Reference to an applied resource, tracked for orphan cleanup.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ResourceRef {
+    pub kind: String,
+    pub name: String,
+}
+
+// =============================================================================
+// Orphan tracking helpers
+// =============================================================================
+
+/// Extract resource refs from compiled policies (AuthorizationPolicy + PeerAuthentication).
+///
+/// Cilium policies are excluded (always 1 per service, never orphaned).
+/// ServiceEntries are excluded (shared per-namespace-per-FQDN, can't safely delete
+/// without checking other MeshMembers; orphaned SEs have no security impact since
+/// the `allow-fqdn-*` AuthorizationPolicy IS tracked).
+pub fn collect_resource_refs(policies: &crate::policy::GeneratedPolicies) -> HashSet<ResourceRef> {
+    let mut refs = HashSet::new();
+    for ap in &policies.authorization_policies {
+        refs.insert(ResourceRef {
+            kind: "AuthorizationPolicy".to_string(),
+            name: ap.metadata.name.clone(),
+        });
+    }
+    for pa in &policies.peer_authentications {
+        refs.insert(ResourceRef {
+            kind: "PeerAuthentication".to_string(),
+            name: pa.metadata.name.clone(),
+        });
+    }
+    refs
+}
+
+/// Read previously applied resource refs from the MeshMember annotation.
+/// Returns an empty set if the annotation is missing or invalid (graceful upgrade).
+pub fn read_applied_resources(member: &LatticeMeshMember) -> HashSet<ResourceRef> {
+    member
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(APPLIED_RESOURCES_ANNOTATION))
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default()
+}
+
+/// Delete a single resource via the dynamic API, ignoring 404 (already gone).
+async fn delete_if_discovered(
+    client: &Client,
+    namespace: &str,
+    crd: Option<&ApiResource>,
+    name: &str,
+    kind: &str,
+) -> Result<(), ReconcileError> {
+    let Some(ar) = crd else {
+        debug!(name = %name, kind = %kind, "CRD not discovered, skipping orphan delete");
+        return Ok(());
+    };
+
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
+    match api.delete(name, &DeleteParams::default()).await {
+        Ok(_) => {
+            info!(name = %name, kind = %kind, "deleted orphaned resource");
+            Ok(())
+        }
+        Err(kube::Error::Api(ref resp)) if resp.code == 404 => {
+            debug!(name = %name, kind = %kind, "orphaned resource already gone");
+            Ok(())
+        }
+        Err(e) => Err(ReconcileError::kube(
+            format!("delete orphaned {kind} {name}"),
+            e,
+        )),
+    }
+}
+
+/// Delete resources that were previously applied but are no longer in the compiled set.
+async fn delete_orphaned_resources(
+    client: &Client,
+    crds: &ResolvedCrds,
+    namespace: &str,
+    old_refs: &HashSet<ResourceRef>,
+    new_refs: &HashSet<ResourceRef>,
+) -> Result<(), ReconcileError> {
+    let orphans: Vec<&ResourceRef> = old_refs.difference(new_refs).collect();
+    if orphans.is_empty() {
+        return Ok(());
+    }
+
+    info!(count = orphans.len(), "deleting orphaned mesh resources");
+    for orphan in orphans {
+        let crd = match orphan.kind.as_str() {
+            "AuthorizationPolicy" => crds.authorization_policy.as_ref(),
+            "PeerAuthentication" => crds.peer_authentication.as_ref(),
+            _ => {
+                warn!(kind = %orphan.kind, name = %orphan.name, "unknown orphan kind, skipping");
+                continue;
+            }
+        };
+        delete_if_discovered(client, namespace, crd, &orphan.name, &orphan.kind).await?;
+    }
+    Ok(())
+}
 
 // =============================================================================
 // Reconciliation
@@ -75,6 +182,7 @@ pub async fn reconcile(
             &member,
             status_failed(&msg, member.metadata.generation),
             "",
+            None,
         )
         .await?;
         return Ok(Action::await_change());
@@ -91,6 +199,7 @@ pub async fn reconcile(
             &member,
             status_failed(&denied, member.metadata.generation),
             "",
+            None,
         )
         .await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
@@ -116,17 +225,18 @@ pub async fn reconcile(
     };
 
     match do_reconcile(&member, &name, namespace, &ctx).await {
-        Ok(true) => {
+        Ok((true, new_refs)) => {
             patch_status_with_hash(
                 &ctx.client,
                 &member,
                 status_ready(scope, member.metadata.generation),
                 &graph_hash,
+                Some(&new_refs),
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
-        Ok(false) => {
+        Ok((false, new_refs)) => {
             // ServiceEntries deferred (waypoint not programmed yet) —
             // report Progressing so LatticeService doesn't mark itself Ready.
             patch_status_with_hash(
@@ -134,6 +244,7 @@ pub async fn reconcile(
                 &member,
                 status_progressing(scope, member.metadata.generation),
                 "",
+                Some(&new_refs),
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(10)))
@@ -146,6 +257,7 @@ pub async fn reconcile(
                 &member,
                 status_failed(&msg, member.metadata.generation),
                 "",
+                None,
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(30)))
@@ -197,15 +309,17 @@ async fn check_cedar_wildcards(
     None
 }
 
-/// Inner reconciliation logic. Returns `Ok(true)` when fully reconciled (including
-/// ServiceEntries), `Ok(false)` when partially reconciled (ServiceEntries deferred
-/// because waypoint isn't programmed yet), or `Err` on failure.
+/// Inner reconciliation logic. Returns `Ok((waypoint_ready, new_refs))` where
+/// `waypoint_ready` is true when fully reconciled (including ServiceEntries),
+/// false when partially reconciled (ServiceEntries deferred because waypoint isn't
+/// programmed yet). `new_refs` contains the resource refs that were applied (for
+/// orphan tracking). Returns `Err` on failure.
 async fn do_reconcile(
     member: &LatticeMeshMember,
     name: &str,
     namespace: &str,
     ctx: &MeshMemberContext,
-) -> Result<bool, ReconcileError> {
+) -> Result<(bool, HashSet<ResourceRef>), ReconcileError> {
     ensure_namespace_ambient(&ctx.client, namespace).await?;
 
     let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name).compile(name, namespace);
@@ -247,6 +361,11 @@ async fn do_reconcile(
         apply_policies(&ctx.client, &crds, namespace, &params, &deferred).await?;
     }
 
+    // Orphan cleanup: delete resources that were previously applied but are no longer emitted
+    let new_refs = collect_resource_refs(&policies);
+    let old_refs = read_applied_resources(member);
+    delete_orphaned_resources(&ctx.client, &crds, namespace, &old_refs, &new_refs).await?;
+
     if let Some(ref ingress_resources) = ingress {
         let gateway_field_manager = format!("{}/{}", FIELD_MANAGER, name);
         let gateway_params = PatchParams::apply(&gateway_field_manager).force();
@@ -266,7 +385,7 @@ async fn do_reconcile(
         + waypoint.as_ref().map_or(0, |w| w.total_count());
     info!(resources = total, "applied mesh member resources");
 
-    Ok(waypoint_ready)
+    Ok((waypoint_ready, new_refs))
 }
 
 /// Handle mesh member deletion
@@ -725,7 +844,8 @@ fn status_failed(message: &str, generation: Option<i64>) -> LatticeMeshMemberSta
     }
 }
 
-/// Patch graph hash annotation and status, skipping no-op updates.
+/// Patch graph hash annotation, applied-resources annotation, and status,
+/// skipping no-op updates.
 ///
 /// Compares the desired state against the member's current state and only
 /// issues API calls when something actually changed. This prevents
@@ -742,6 +862,7 @@ async fn patch_status_with_hash(
     member: &LatticeMeshMember,
     new_status: LatticeMeshMemberStatus,
     graph_hash: &str,
+    applied_resources: Option<&HashSet<ResourceRef>>,
 ) -> Result<(), ReconcileError> {
     let name = member.name_any();
     let namespace = member.metadata.namespace.as_deref().unwrap_or_default();
@@ -761,7 +882,10 @@ async fn patch_status_with_hash(
         new_status.observed_generation,
     );
 
-    if current_hash == graph_hash && status_unchanged {
+    // Check if applied-resources annotation needs updating
+    let needs_resource_annotation_update = applied_resources.is_some();
+
+    if current_hash == graph_hash && status_unchanged && !needs_resource_annotation_update {
         debug!("status and graph hash unchanged, skipping patch");
         return Ok(());
     }
@@ -769,10 +893,25 @@ async fn patch_status_with_hash(
     let api: Api<LatticeMeshMember> = Api::namespaced(client.clone(), namespace);
     let params = PatchParams::apply(FIELD_MANAGER);
 
-    // 1. Graph hash annotation (skip if unchanged)
-    if current_hash != graph_hash {
+    // 1. Annotations (graph hash + applied resources)
+    let hash_changed = current_hash != graph_hash;
+    if hash_changed || needs_resource_annotation_update {
+        let mut annotations = serde_json::Map::new();
+        if hash_changed {
+            annotations.insert(
+                GRAPH_HASH_ANNOTATION.to_string(),
+                serde_json::Value::String(graph_hash.to_string()),
+            );
+        }
+        if let Some(refs) = applied_resources {
+            let json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_string());
+            annotations.insert(
+                APPLIED_RESOURCES_ANNOTATION.to_string(),
+                serde_json::Value::String(json),
+            );
+        }
         let annotation_patch = serde_json::json!({
-            "metadata": { "annotations": { GRAPH_HASH_ANNOTATION: graph_hash } },
+            "metadata": { "annotations": annotations },
         });
         api.patch(&name, &params, &Patch::Merge(&annotation_patch))
             .await
@@ -788,4 +927,165 @@ async fn patch_status_with_hash(
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_common::crd::{
+        ContainerSpec, DependencyDirection, LatticeServiceSpec, MeshMemberPort, MeshMemberTarget,
+        PortSpec, ResourceSpec, ServicePortsSpec, WorkloadSpec,
+    };
+    use lattice_common::graph::ServiceGraph;
+    use std::collections::BTreeMap;
+
+    fn make_test_member(name: &str) -> LatticeMeshMember {
+        LatticeMeshMember::new(
+            name,
+            lattice_common::crd::LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(BTreeMap::new()),
+                ports: vec![MeshMemberPort {
+                    port: 8080,
+                    name: "http".to_string(),
+                    peer_auth: lattice_common::crd::PeerAuth::Strict,
+                }],
+                allowed_callers: vec![],
+                dependencies: vec![],
+                egress: vec![],
+                allow_peer_traffic: false,
+                depends_all: false,
+                ingress: None,
+                service_account: None,
+            },
+        )
+    }
+
+    fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> LatticeServiceSpec {
+        LatticeServiceSpec {
+            workload: WorkloadSpec {
+                containers: BTreeMap::from([(
+                    "main".to_string(),
+                    ContainerSpec {
+                        image: "test:latest".to_string(),
+                        ..Default::default()
+                    },
+                )]),
+                resources: deps
+                    .into_iter()
+                    .map(|d| {
+                        (
+                            d.to_string(),
+                            ResourceSpec {
+                                direction: DependencyDirection::Outbound,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .chain(callers.into_iter().map(|c| {
+                        (
+                            c.to_string(),
+                            ResourceSpec {
+                                direction: DependencyDirection::Inbound,
+                                ..Default::default()
+                            },
+                        )
+                    }))
+                    .collect(),
+                service: Some(ServicePortsSpec {
+                    ports: BTreeMap::from([(
+                        "http".to_string(),
+                        PortSpec {
+                            port: 8080,
+                            target_port: None,
+                            protocol: None,
+                        },
+                    )]),
+                }),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn collect_resource_refs_extracts_auth_and_peer_auth() {
+        let graph = ServiceGraph::new();
+        let ns = "test-ns";
+
+        graph.put_service(ns, "api", &make_service_spec(vec![], vec!["gateway"]));
+        graph.put_service(ns, "gateway", &make_service_spec(vec!["api"], vec![]));
+
+        let policies =
+            crate::policy::PolicyCompiler::new(&graph, "test-cluster").compile("api", ns);
+
+        let refs = collect_resource_refs(&policies);
+
+        assert!(!refs.is_empty());
+        assert!(refs
+            .iter()
+            .all(|r| r.kind == "AuthorizationPolicy" || r.kind == "PeerAuthentication"));
+        assert!(!refs.iter().any(|r| r.kind == "CiliumNetworkPolicy"));
+    }
+
+    #[test]
+    fn collect_resource_refs_empty_for_empty_policies() {
+        let refs = collect_resource_refs(&crate::policy::GeneratedPolicies::default());
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn read_applied_resources_returns_empty_on_missing_annotation() {
+        let member = make_test_member("test");
+        assert!(read_applied_resources(&member).is_empty());
+    }
+
+    #[test]
+    fn read_applied_resources_returns_empty_on_invalid_json() {
+        let mut member = make_test_member("test");
+        member.metadata.annotations = Some(BTreeMap::from([(
+            APPLIED_RESOURCES_ANNOTATION.to_string(),
+            "not-valid-json".to_string(),
+        )]));
+        assert!(read_applied_resources(&member).is_empty());
+    }
+
+    #[test]
+    fn read_applied_resources_deserializes_valid_json() {
+        let refs: HashSet<ResourceRef> = [
+            ResourceRef {
+                kind: "AuthorizationPolicy".into(),
+                name: "allow-to-api".into(),
+            },
+            ResourceRef {
+                kind: "PeerAuthentication".into(),
+                name: "pa-api".into(),
+            },
+        ]
+        .into_iter()
+        .collect();
+
+        let json = serde_json::to_string(&refs).unwrap();
+        let mut member = make_test_member("test");
+        member.metadata.annotations = Some(BTreeMap::from([(
+            APPLIED_RESOURCES_ANNOTATION.to_string(),
+            json,
+        )]));
+
+        let result = read_applied_resources(&member);
+        assert_eq!(result, refs);
+    }
+
+    #[test]
+    fn resource_ref_roundtrip_serialization() {
+        let original = ResourceRef {
+            kind: "AuthorizationPolicy".to_string(),
+            name: "allow-to-api".to_string(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: ResourceRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
 }

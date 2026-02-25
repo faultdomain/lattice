@@ -26,8 +26,8 @@ use super::mesh_fixtures::{
     nginx_container, outbound_dep,
 };
 use super::mesh_helpers::{
-    generate_test_script, parse_traffic_result, retry_verification, wait_for_pods_running,
-    wait_for_services_ready, TestTarget,
+    generate_test_script, parse_traffic_result, remove_inbound_edge, retry_verification,
+    wait_for_edges_denied, wait_for_pods_running, wait_for_services_ready, RemovedEdge, TestTarget,
 };
 
 // =============================================================================
@@ -731,13 +731,81 @@ async fn verify_random_mesh_traffic(
 }
 
 // =============================================================================
+// Edge Removal Test
+// =============================================================================
+
+/// Remove randomly-chosen bilateral edges from the random mesh and verify they become denied.
+async fn run_random_edge_removal(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<(), String> {
+    use rand::seq::SliceRandom;
+
+    info!("[Random Mesh] Starting edge removal test...");
+
+    // Find allowed bilateral edges that we can break:
+    // - must be allowed and not external
+    // - source must be a traffic generator (so we can observe the result)
+    // - target must NOT use wildcard inbound (can't break a single edge)
+    // - target must have an explicit inbound allow for the source
+    let breakable: Vec<_> = mesh
+        .expected_connections
+        .iter()
+        .filter(|(src, tgt, allowed, is_external)| {
+            *allowed
+                && !*is_external
+                && mesh.services[src].is_traffic_generator
+                && !mesh.services[tgt].allows_all_inbound
+                && mesh.services[tgt].inbound.contains(src)
+        })
+        .collect();
+
+    if breakable.is_empty() {
+        info!("[Random Mesh] No breakable bilateral edges found, skipping edge removal test");
+        return Ok(());
+    }
+
+    let edges_to_break: Vec<_> = {
+        let mut rng = rand::thread_rng();
+        let num_to_break = 3.min(breakable.len());
+        breakable
+            .choose_multiple(&mut rng, num_to_break)
+            .cloned()
+            .collect()
+    };
+
+    for (source, target, _, _) in &edges_to_break {
+        info!(
+            "[Random Mesh] Breaking edge: {} -> {} (removing inbound '{}')",
+            source, target, source
+        );
+        remove_inbound_edge(kubeconfig_path, RANDOM_MESH_NAMESPACE, target, source).await?;
+    }
+
+    let removed: Vec<RemovedEdge> = edges_to_break
+        .iter()
+        .map(|(source, target, _, _)| RemovedEdge {
+            source: source.to_string(),
+            allowed_pattern: format!("{}->{}:ALLOWED", source, target),
+            blocked_pattern: format!("{}->{}:BLOCKED", source, target),
+        })
+        .collect();
+
+    wait_for_edges_denied(
+        kubeconfig_path,
+        RANDOM_MESH_NAMESPACE,
+        &removed,
+        "Random Mesh Edge Removal",
+    )
+    .await
+}
+
+// =============================================================================
 // Public API
 // =============================================================================
 
 /// Run the randomized 10-20 service mesh test end-to-end.
 ///
 /// Deploys a random mesh topology, waits for pods, then retries verification
-/// every 15s for up to 5 minutes to handle slow policy propagation.
+/// every 15s for up to 5 minutes to handle slow policy propagation. Then
+/// removes random bilateral edges and verifies they become denied.
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     info!("[Random Mesh] Starting randomized large-scale mesh test (10-20 services)...");
 
@@ -760,16 +828,19 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     .await?;
 
     let kc = kubeconfig_path.to_string();
-    let result = retry_verification("Random Mesh", || verify_random_mesh_traffic(&mesh, &kc)).await;
+    retry_verification("Random Mesh", || verify_random_mesh_traffic(&mesh, &kc)).await?;
 
-    if result.is_ok() {
+    info!("[Random Mesh] Traffic patterns verified, starting edge removal test...");
+    let edge_result = run_random_edge_removal(&mesh, kubeconfig_path).await;
+
+    if edge_result.is_ok() {
         delete_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE).await;
     } else {
         info!(
-            "[Random Mesh] Leaving namespace {} for debugging (test failed)",
+            "[Random Mesh] Leaving namespace {} for debugging (edge removal test failed)",
             RANDOM_MESH_NAMESPACE
         );
     }
 
-    result
+    edge_result
 }

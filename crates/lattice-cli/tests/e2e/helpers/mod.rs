@@ -223,10 +223,6 @@ fn cluster_name_from_env(env_var: &str, default: &str) -> String {
     std::env::var(env_var).unwrap_or_else(|_| default.to_string())
 }
 
-pub fn get_mgmt_cluster_name() -> String {
-    cluster_name_from_env("LATTICE_MGMT_CLUSTER_NAME", MGMT_CLUSTER_NAME)
-}
-
 pub fn get_workload_cluster_name() -> String {
     cluster_name_from_env("LATTICE_WORKLOAD_CLUSTER_NAME", WORKLOAD_CLUSTER_NAME)
 }

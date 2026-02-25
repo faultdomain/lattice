@@ -45,7 +45,7 @@ const FIELD_MANAGER: &str = "lattice-model-controller";
 const REQUEUE_LOADING: Duration = Duration::from_secs(15);
 /// Requeue interval during steady-state serving (health monitoring)
 const REQUEUE_SERVING: Duration = Duration::from_secs(60);
-/// Requeue interval for fast retry after Failed → Pending transition
+/// Requeue interval for fast retry after spec change in Failed state
 const REQUEUE_RETRY: Duration = Duration::from_secs(5);
 /// Requeue interval after a reconciliation error
 const REQUEUE_ERROR: Duration = Duration::from_secs(30);
@@ -117,6 +117,17 @@ pub async fn reconcile(
                 Ok(c) => c,
                 Err(e) => {
                     cleanup_graph(&model, &ctx.graph, namespace);
+                    let msg = format!("Failed to compile: {}", e);
+                    let _ = update_status(
+                        &ctx.client,
+                        &model,
+                        namespace,
+                        ModelServingPhase::Failed,
+                        Some(&msg),
+                        Some(generation),
+                        None,
+                    )
+                    .await;
                     return Err(e);
                 }
             };
@@ -125,17 +136,16 @@ pub async fn reconcile(
 
             if let Err(e) = apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await {
                 cleanup_graph(&model, &ctx.graph, namespace);
-                let msg = format!("Failed to apply resources: {}", e);
-                // Don't set observed_generation — this tells the Failed handler
-                // that the current generation hasn't been fully processed, so it
-                // will transition back to Pending and retry. This is correct
-                // because apply errors are typically transient (webhook not ready,
-                // API server hiccup, etc.).
+                let msg = format!("Apply failed (will retry): {}", e);
+                // Stay in Pending — apply errors are transient (webhook not ready,
+                // API server hiccup). error_policy requeues after REQUEUE_ERROR.
+                // Changing phase would trigger a watch event → immediate reconcile
+                // → tight Pending↔Failed flapping loop.
                 let _ = update_status(
                     &ctx.client,
-                    &name,
+                    &model,
                     namespace,
-                    ModelServingPhase::Failed,
+                    ModelServingPhase::Pending,
                     Some(&msg),
                     None,
                     None,
@@ -145,7 +155,7 @@ pub async fn reconcile(
             }
             update_status(
                 &ctx.client,
-                &name,
+                &model,
                 namespace,
                 ModelServingPhase::Loading,
                 Some("Resources applied, waiting for model serving readiness"),
@@ -164,24 +174,26 @@ pub async fn reconcile(
                         info!(model = %name, "model download job completed");
                         remove_scheduling_gates(&ctx.client, &name, namespace).await?;
                     }
-                    Some(DownloadState::Failed) => {
-                        // Don't set observed_generation — the download job may
-                        // retry transient failures (e.g. Volcano webhook not ready).
-                        // Leaving it None lets the Failed handler transition back
-                        // to Pending and re-check the job status.
-                        warn!(model = %name, "model download job failed, will retry");
-                        cleanup_graph(&model, &ctx.graph, namespace);
-                        update_status(
-                            &ctx.client,
-                            &name,
-                            namespace,
-                            ModelServingPhase::Failed,
-                            Some("Model download failed"),
-                            None,
-                            None,
-                        )
-                        .await?;
-                        return Ok(Action::requeue(REQUEUE_RETRY));
+                    Some(DownloadState::Failed { permanent }) => {
+                        if permanent {
+                            // VCJob ran and failed — permanent download failure
+                            error!(model = %name, "model download job permanently failed");
+                            cleanup_graph(&model, &ctx.graph, namespace);
+                            update_status(
+                                &ctx.client,
+                                &model,
+                                namespace,
+                                ModelServingPhase::Failed,
+                                Some("Model download failed"),
+                                Some(generation),
+                                None,
+                            )
+                            .await?;
+                            return Ok(Action::await_change());
+                        }
+                        // LatticeJob is retrying (transient failure) — keep polling
+                        info!(model = %name, "model download job retrying, waiting");
+                        return Ok(Action::requeue(REQUEUE_LOADING));
                     }
                     Some(DownloadState::Running) => {
                         info!(model = %name, "model download in progress");
@@ -202,7 +214,7 @@ pub async fn reconcile(
                     info!(model = %name, "model serving is available");
                     update_status(
                         &ctx.client,
-                        &name,
+                        &model,
                         namespace,
                         ModelServingPhase::Serving,
                         Some("Model is serving inference requests"),
@@ -217,7 +229,7 @@ pub async fn reconcile(
                     cleanup_graph(&model, &ctx.graph, namespace);
                     update_status(
                         &ctx.client,
-                        &name,
+                        &model,
                         namespace,
                         ModelServingPhase::Failed,
                         Some("ModelServing failed"),
@@ -250,7 +262,7 @@ pub async fn reconcile(
                         .await;
                 update_status(
                     &ctx.client,
-                    &name,
+                    &model,
                     namespace,
                     ModelServingPhase::Serving,
                     Some("Model updated and serving"),
@@ -275,7 +287,7 @@ pub async fn reconcile(
                 read_model_serving_conditions(&ctx.client, &name, namespace, &ctx.registry).await;
             update_status(
                 &ctx.client,
-                &name,
+                &model,
                 namespace,
                 ModelServingPhase::Serving,
                 Some(message),
@@ -286,16 +298,18 @@ pub async fn reconcile(
             Ok(Action::requeue(REQUEUE_SERVING))
         }
         ModelServingPhase::Failed => {
-            // Check if the spec has changed since we entered Failed — if so, retry
+            // Failed is only reached for permanent errors (compile failure,
+            // ModelServing failure, permanent download failure). All set
+            // observed_generation. Retry only if the user changed the spec.
             let observed = model.status.as_ref().and_then(|s| s.observed_generation);
             if observed != Some(generation) {
                 info!(model = %name, observed = ?observed, current = generation, "spec changed while Failed, retrying");
                 update_status(
                     &ctx.client,
-                    &name,
+                    &model,
                     namespace,
                     ModelServingPhase::Pending,
-                    Some("Retrying after failure"),
+                    Some("Retrying after spec change"),
                     None,
                     None,
                 )
@@ -648,7 +662,13 @@ async fn apply_download_resources(
 
 enum DownloadState {
     Succeeded,
-    Failed,
+    /// Download job failed. `permanent` is true when the underlying VCJob
+    /// actually ran and failed (observed_generation set), false when the
+    /// failure was transient (webhook not ready, etc.) and the LatticeJob
+    /// controller will retry automatically.
+    Failed {
+        permanent: bool,
+    },
     Running,
 }
 
@@ -662,10 +682,15 @@ async fn check_download_job_status(
 
     match jobs.get(name).await {
         Ok(job) => {
-            let phase = job.status.as_ref().map(|s| &s.phase)?;
-            match phase {
+            let status = job.status.as_ref()?;
+            match &status.phase {
                 JobPhase::Succeeded => Some(DownloadState::Succeeded),
-                JobPhase::Failed => Some(DownloadState::Failed),
+                JobPhase::Failed => {
+                    // Permanent if observed_generation is set (VCJob ran and failed).
+                    // Transient if None (apply error, webhook not ready — LatticeJob retries).
+                    let permanent = status.observed_generation.is_some();
+                    Some(DownloadState::Failed { permanent })
+                }
                 JobPhase::Pending | JobPhase::Running | _ => Some(DownloadState::Running),
             }
         }
@@ -754,13 +779,27 @@ async fn remove_scheduling_gates(
 
 async fn update_status(
     client: &Client,
-    name: &str,
+    model: &LatticeModel,
     namespace: &str,
     phase: ModelServingPhase,
     message: Option<&str>,
     observed_generation: Option<i64>,
     conditions: Option<Vec<ModelCondition>>,
 ) -> Result<(), ModelError> {
+    // Skip redundant writes when not updating conditions.
+    // Condition updates (from ModelServing health checks) always write through.
+    if conditions.is_none()
+        && status_check::is_status_unchanged(
+            model.status.as_ref(),
+            &phase,
+            message,
+            observed_generation,
+        )
+    {
+        return Ok(());
+    }
+
+    let name = model.name_any();
     let status = LatticeModelStatus {
         phase,
         message: message.map(|m| m.to_string()),
@@ -769,7 +808,7 @@ async fn update_status(
     };
     lattice_common::kube_utils::patch_resource_status::<LatticeModel>(
         client,
-        name,
+        &name,
         namespace,
         &status,
         FIELD_MANAGER,

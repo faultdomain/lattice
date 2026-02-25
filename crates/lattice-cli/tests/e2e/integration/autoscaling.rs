@@ -220,7 +220,6 @@ pub async fn run_autoscaling_tests(kubeconfig: &str) -> Result<(), String> {
 /// 2. Verifies the ScaledObject is created with correct spec
 /// 3. Waits for KEDA to scale pods beyond the initial replica count
 async fn run_cpu_autoscaling_test(kubeconfig: &str) -> Result<(), String> {
-
     info!("[Integration/Autoscaling/CPU] Starting CPU autoscaling test...");
 
     ensure_fresh_namespace(kubeconfig, AUTOSCALING_NAMESPACE).await?;
@@ -270,7 +269,6 @@ async fn run_cpu_autoscaling_test(kubeconfig: &str) -> Result<(), String> {
 /// 2. Verifies the ScaledObject is created with a prometheus trigger
 /// 3. Waits for VictoriaMetrics to scrape the metric and KEDA to scale up
 async fn run_prometheus_autoscaling_test(kubeconfig: &str) -> Result<(), String> {
-
     info!("[Integration/Autoscaling/Prom] Starting Prometheus autoscaling test...");
 
     ensure_fresh_namespace(kubeconfig, PROM_NAMESPACE).await?;

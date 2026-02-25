@@ -409,10 +409,12 @@ pub async fn run_cedar_hierarchy_tests(
 #[tokio::test]
 #[ignore]
 async fn test_cedar_sa_auth_standalone() {
-    let session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests")
-            .await
-            .unwrap();
+    let Ok(session) =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests").await
+    else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
+        return;
+    };
     let child_cluster_name = get_child_cluster_name();
 
     let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
@@ -431,10 +433,12 @@ async fn test_cedar_sa_auth_standalone() {
 #[tokio::test]
 #[ignore]
 async fn test_cedar_group_policy_standalone() {
-    let session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests")
-            .await
-            .unwrap();
+    let Ok(session) =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests").await
+    else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
+        return;
+    };
     let child_cluster_name = get_child_cluster_name();
 
     let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
@@ -453,10 +457,12 @@ async fn test_cedar_group_policy_standalone() {
 #[tokio::test]
 #[ignore]
 async fn test_cedar_all_standalone() {
-    let session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests")
-            .await
-            .unwrap();
+    let Ok(session) =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests").await
+    else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
+        return;
+    };
     let child_cluster_name = get_child_cluster_name();
 
     run_cedar_hierarchy_tests(&session.ctx, &child_cluster_name)

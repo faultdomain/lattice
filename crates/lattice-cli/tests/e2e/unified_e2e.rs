@@ -115,9 +115,9 @@ async fn run_full_e2e() -> Result<(), String> {
     // =========================================================================
     info!("[Phase 7] Running mesh/secrets/cedar/autoscaling tests (pool=3)...");
 
-    // Limit concurrent proxy load — at most 3 tasks run simultaneously
-    // (some tasks may spawn internal concurrency, e.g. secrets runs up to 3 sub-tests)
-    let pool = Arc::new(Semaphore::new(3));
+    // Each task uses its own namespace, so concurrency is safe.
+    // Limit to 6 to avoid overwhelming the API server.
+    let pool = Arc::new(Semaphore::new(6));
     let mut handles: Vec<(&str, tokio::task::JoinHandle<Result<(), String>>)> = Vec::new();
 
     // Mesh: fixed test

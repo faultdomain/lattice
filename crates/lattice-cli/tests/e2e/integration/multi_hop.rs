@@ -335,11 +335,14 @@ fn truncate(s: &str, max_len: usize) -> String {
 #[tokio::test]
 #[ignore]
 async fn test_multi_hop_standalone() {
-    let session = TestSession::from_env(
+    let Ok(session) = TestSession::from_env(
         "Set LATTICE_MGMT_KUBECONFIG, LATTICE_WORKLOAD_KUBECONFIG, and LATTICE_WORKLOAD2_KUBECONFIG",
     )
     .await
-    .unwrap();
+    else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG + LATTICE_WORKLOAD_KUBECONFIG + LATTICE_WORKLOAD2_KUBECONFIG (multi-cluster test)");
+        return;
+    };
 
     if !session.ctx.has_workload2() {
         panic!("This test requires LATTICE_WORKLOAD2_KUBECONFIG to be set");

@@ -43,11 +43,8 @@ async fn run() -> Result<(), String> {
     // Verify CAPI resources on both management and workload clusters
     integration::capi::verify_capi_resources(&result.ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME)
         .await?;
-    integration::capi::verify_capi_resources(
-        result.ctx.require_workload()?,
-        WORKLOAD_CLUSTER_NAME,
-    )
-    .await?;
+    integration::capi::verify_capi_resources(result.ctx.require_workload()?, WORKLOAD_CLUSTER_NAME)
+        .await?;
 
     teardown_mgmt_cluster(&result.ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME).await
 }

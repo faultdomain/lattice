@@ -321,9 +321,10 @@ fn truncate_response(response: &str) -> String {
 #[tokio::test]
 #[ignore]
 async fn test_proxy_access_standalone() {
-    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG")
-        .await
-        .unwrap();
+    let Ok(session) = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG").await else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
+        return;
+    };
     let workload_name = get_workload_cluster_name();
 
     // Apply E2E policy
@@ -353,10 +354,12 @@ async fn test_proxy_access_standalone() {
 #[tokio::test]
 #[ignore]
 async fn test_proxy_hierarchy_standalone() {
-    let session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
-            .await
-            .unwrap();
+    let Ok(session) =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG").await
+    else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
+        return;
+    };
     let workload_name = get_workload_cluster_name();
     let workload2_name = if session.ctx.has_workload2() {
         Some(get_workload2_cluster_name())

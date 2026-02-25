@@ -111,12 +111,12 @@ impl CompiledService {
         .count();
 
         workload_count
-            + self.workloads.env_config_maps.len()
-            + self.workloads.env_secrets.len()
-            + self.workloads.files_config_maps.len()
-            + self.workloads.files_secrets.len()
-            + self.workloads.pvcs.len()
-            + self.workloads.external_secrets.len()
+            + self.workloads.config.env_config_maps.len()
+            + self.workloads.config.env_secrets.len()
+            + self.workloads.config.files_config_maps.len()
+            + self.workloads.config.files_secrets.len()
+            + self.workloads.config.pvcs.len()
+            + self.workloads.config.external_secrets.len()
             + self.mesh_member.as_ref().map_or(0, |_| 1)
             + self.tracing_policies.len()
             + self.extensions.len()
@@ -249,13 +249,7 @@ impl<'a> ServiceCompiler<'a> {
         )?;
 
         // Populate config resources from the shared pipeline output
-        workloads.env_config_maps = compiled.config.env_config_maps;
-        workloads.env_secrets = compiled.config.env_secrets;
-        workloads.files_config_maps = compiled.config.files_config_maps;
-        workloads.files_secrets = compiled.config.files_secrets;
-        workloads.pvcs = compiled.config.pvcs;
-        workloads.external_secrets = compiled.config.external_secrets;
-        workloads.secret_refs = compiled.config.secret_refs;
+        workloads.config = compiled.config;
 
         // Add config hash as pod annotation to trigger rollouts on config changes
         if let Some(ref mut deployment) = workloads.deployment {

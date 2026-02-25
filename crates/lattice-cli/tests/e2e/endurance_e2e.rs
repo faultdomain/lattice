@@ -106,8 +106,7 @@ async fn test_endurance_loop() {
 
 async fn run_endurance_test() -> Result<(), String> {
     // Load configurations
-    let (_, mgmt_cluster) =
-        load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
+    let (_, mgmt_cluster) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
 
     // Load workload cluster configs (we'll create multiple instances with unique names)
     let (_, workload_template) =

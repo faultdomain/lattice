@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 
 use lattice_common::kube_utils::{HasApiResource, ObjectMeta};
 use lattice_workload::k8s::{
-    ConfigMap, Container, LabelSelector, LocalObjectReference, PodSecurityContext, SchedulingGate,
-    Secret, TopologySpreadConstraint, Volume,
+    Container, LabelSelector, LocalObjectReference, PodSecurityContext, SchedulingGate,
+    TopologySpreadConstraint, Volume,
 };
 use lattice_workload::{CompilationError, CompiledPodTemplate};
 use serde::{Deserialize, Serialize};
@@ -329,20 +329,8 @@ pub struct GeneratedWorkloads {
     pub pdb: Option<PodDisruptionBudget>,
     /// KEDA ScaledObject for autoscaling
     pub scaled_object: Option<ScaledObject>,
-    /// ConfigMaps for non-sensitive env vars (one per container)
-    pub env_config_maps: Vec<ConfigMap>,
-    /// Secrets for sensitive env vars (one per container)
-    pub env_secrets: Vec<Secret>,
-    /// ConfigMaps for file mounts — text content (one per container)
-    pub files_config_maps: Vec<ConfigMap>,
-    /// Secrets for file mounts — binary content (one per container)
-    pub files_secrets: Vec<Secret>,
-    /// PersistentVolumeClaims for owned volumes
-    pub pvcs: Vec<lattice_workload::PersistentVolumeClaim>,
-    /// ExternalSecrets for syncing secrets from SecretProvider (Vault)
-    pub external_secrets: Vec<lattice_secret_provider::eso::ExternalSecret>,
-    /// Secret references for template resolution (resource_name -> SecretRef)
-    pub secret_refs: BTreeMap<String, lattice_workload::SecretRef>,
+    /// Configuration resources (ConfigMaps, Secrets, PVCs, ExternalSecrets)
+    pub config: lattice_workload::CompiledConfig,
 }
 
 impl GeneratedWorkloads {
@@ -353,12 +341,12 @@ impl GeneratedWorkloads {
             && self.service_account.is_none()
             && self.pdb.is_none()
             && self.scaled_object.is_none()
-            && self.env_config_maps.is_empty()
-            && self.env_secrets.is_empty()
-            && self.files_config_maps.is_empty()
-            && self.files_secrets.is_empty()
-            && self.pvcs.is_empty()
-            && self.external_secrets.is_empty()
+            && self.config.env_config_maps.is_empty()
+            && self.config.env_secrets.is_empty()
+            && self.config.files_config_maps.is_empty()
+            && self.config.files_secrets.is_empty()
+            && self.config.pvcs.is_empty()
+            && self.config.external_secrets.is_empty()
     }
 }
 
@@ -745,13 +733,7 @@ mod tests {
             &monitoring,
         )?;
 
-        workloads.env_config_maps = compiled.config.env_config_maps;
-        workloads.env_secrets = compiled.config.env_secrets;
-        workloads.files_config_maps = compiled.config.files_config_maps;
-        workloads.files_secrets = compiled.config.files_secrets;
-        workloads.pvcs = compiled.config.pvcs;
-        workloads.external_secrets = compiled.config.external_secrets;
-        workloads.secret_refs = compiled.config.secret_refs;
+        workloads.config = compiled.config;
 
         Ok(workloads)
     }

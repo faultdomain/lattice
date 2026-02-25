@@ -143,8 +143,7 @@ async fn test_list_nodes_standalone() {
     use super::super::context::{init_e2e_test, standalone_kubeconfig};
 
     init_e2e_test();
-    let kubeconfig =
-        standalone_kubeconfig().expect("Set LATTICE_KUBECONFIG to list nodes");
+    let kubeconfig = standalone_kubeconfig().expect("Set LATTICE_KUBECONFIG to list nodes");
     let nodes = list_nodes(&kubeconfig).await.unwrap();
     println!("Nodes:\n{}", nodes);
 }

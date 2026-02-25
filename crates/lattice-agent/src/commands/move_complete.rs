@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use lattice_proto::{agent_message::Payload, AgentMessage, AgentState, MoveComplete, MoveCompleteAck};
+use lattice_proto::{
+    agent_message::Payload, AgentMessage, AgentState, MoveComplete, MoveCompleteAck,
+};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 

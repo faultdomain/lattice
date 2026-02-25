@@ -178,7 +178,12 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
         let provider_type = cluster.spec.provider.provider_type();
         if let Err(e) = ctx
             .kube
-            .ensure_cell_service(pc.bootstrap_port, pc.grpc_port, pc.proxy_port, &provider_type)
+            .ensure_cell_service(
+                pc.bootstrap_port,
+                pc.grpc_port,
+                pc.proxy_port,
+                &provider_type,
+            )
             .await
         {
             warn!(error = %e, "failed to ensure cell LB service, will retry");

@@ -171,7 +171,10 @@ pub async fn apply_cedar_policies_batch(
         return Ok(());
     }
 
-    info!("Batch-applying {} Cedar policies (max_concurrent={})...", count, max_concurrent);
+    info!(
+        "Batch-applying {} Cedar policies (max_concurrent={})...",
+        count, max_concurrent
+    );
 
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
     let kubeconfig = kubeconfig.to_string();
@@ -181,7 +184,10 @@ pub async fn apply_cedar_policies_batch(
         let sem = semaphore.clone();
         let kc = kubeconfig.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.map_err(|e| format!("semaphore error: {}", e))?;
+            let _permit = sem
+                .acquire()
+                .await
+                .map_err(|e| format!("semaphore error: {}", e))?;
             apply_cedar_policy_crd(
                 &kc,
                 &policy.name,
@@ -194,7 +200,9 @@ pub async fn apply_cedar_policies_batch(
     }
 
     for handle in handles {
-        handle.await.map_err(|e| format!("task join error: {}", e))??;
+        handle
+            .await
+            .map_err(|e| format!("task join error: {}", e))??;
     }
 
     info!("Batch-applied {} Cedar policies", count);
@@ -250,7 +258,7 @@ pub async fn apply_run_as_root_override_policy(
 ) -> Result<(), String> {
     apply_cedar_policy_crd(
         kubeconfig,
-        &format!("permit-run-as-root-{}", service_name),
+        &format!("root-{namespace}-{service_name}"),
         "e2e",
         50,
         &format!(

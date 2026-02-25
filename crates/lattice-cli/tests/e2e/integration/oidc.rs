@@ -340,9 +340,12 @@ pub async fn run_oidc_hierarchy_tests(
 #[tokio::test]
 #[ignore]
 async fn test_oidc_standalone() {
-    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone OIDC tests")
-        .await
-        .unwrap();
+    let Ok(session) =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone OIDC tests").await
+    else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
+        return;
+    };
     let child_cluster_name = get_child_cluster_name();
 
     if !oidc_tests_enabled() {

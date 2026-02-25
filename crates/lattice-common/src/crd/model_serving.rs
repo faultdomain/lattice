@@ -715,6 +715,8 @@ mod tests {
             downloader_image: None,
             access_mode: None,
             security: None,
+            resources: BTreeMap::new(),
+            image_pull_secrets: vec![],
         };
 
         let json = serde_json::to_value(&source).unwrap();

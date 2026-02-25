@@ -100,7 +100,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             let compiled = match compiled {
                 Ok(c) => c,
                 Err(e) => {
-                    // Compilation failed — don't leave partial graph entries
+                    // Compilation failed (bad spec) — permanent failure
                     cleanup_graph(&job, &ctx.graph, namespace);
                     let msg = format!("Failed to compile job: {}", e);
                     let _ = update_status(
@@ -109,7 +109,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                         namespace,
                         JobPhase::Failed,
                         Some(&msg),
-                        None,
+                        Some(generation),
                     )
                     .await;
                     return Err(e);
@@ -129,12 +129,16 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             .await
             {
                 cleanup_graph(&job, &ctx.graph, namespace);
-                let msg = format!("Failed to apply resources: {}", e);
+                let msg = format!("Apply failed (will retry): {}", e);
+                // Stay in Pending — apply errors are transient (webhook not ready,
+                // API server hiccup). error_policy requeues after REQUEUE_ERROR.
+                // Changing phase would trigger a watch event → immediate reconcile
+                // → tight Pending↔Failed loop or stuck-at-Failed.
                 let _ = update_status(
                     &ctx.client,
                     &job,
                     namespace,
-                    JobPhase::Failed,
+                    JobPhase::Pending,
                     Some(&msg),
                     None,
                 )
@@ -206,27 +210,24 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
         }
         JobPhase::Succeeded => Ok(Action::await_change()),
         JobPhase::Failed => {
-            // Distinguish transient vs permanent failure:
-            // - observed_generation is None → failed during Pending (compile/apply) → retry
-            // - observed_generation is Some → failed during Running (VCJob execution) → permanent
+            // Failed is only reached for permanent errors (compile failure or
+            // VCJob execution failure). Both set observed_generation.
+            // Retry only if the user changed the spec.
             let observed = job.status.as_ref().and_then(|s| s.observed_generation);
-            if observed.is_some() {
-                // VCJob ran and failed — don't retry
-                Ok(Action::await_change())
-            } else {
-                // Never made it to Running — transient error (e.g. webhook not ready)
-                info!(job = %name, "retrying failed job (never reached Running)");
+            if observed != Some(generation) {
+                info!(job = %name, observed = ?observed, current = generation, "spec changed while Failed, retrying");
                 update_status(
                     &ctx.client,
                     &job,
                     namespace,
                     JobPhase::Pending,
-                    Some("Retrying after transient failure"),
+                    Some("Retrying after spec change"),
                     None,
                 )
                 .await?;
-                Ok(Action::requeue(REQUEUE_ERROR))
+                return Ok(Action::requeue(REQUEUE_ERROR));
             }
+            Ok(Action::await_change())
         }
         _ => Ok(Action::await_change()),
     }
@@ -272,8 +273,7 @@ async fn apply_compiled_job(
 ) -> Result<(), JobError> {
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    lattice_common::kube_utils::ensure_namespace_ssa(client, namespace, "lattice-job-controller")
-        .await?;
+    lattice_common::kube_utils::ensure_namespace_ssa(client, namespace, FIELD_MANAGER).await?;
 
     apply_layers(client, namespace, compiled, registry, volcano_api, &params).await
 }

@@ -220,7 +220,7 @@ pub async fn run_secrets_tests(kubeconfig: &str) -> Result<(), String> {
     delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=local-secrets").await;
 
     // Run the comprehensive 5-route tests (manages its own Cedar policies)
-    run_secrets_route_tests(kubeconfig).await?;
+    run_secrets_route_tests(kubeconfig, ROUTES_TEST_NAMESPACE).await?;
 
     info!("[Secrets] All secrets tests passed!");
     Ok(())
@@ -282,12 +282,12 @@ async fn run_basic_secret_test(kubeconfig: &str) -> Result<(), String> {
 ///
 /// Verifies that `${secret.db-creds.password}` compiles to a K8s `secretKeyRef`
 /// and the pod receives the secret value as an environment variable.
-async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String> {
+async fn run_route1_pure_secret_env_test(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     info!("[Route1] Testing pure secret env var (secretKeyRef)...");
 
     let service = with_run_as_root(create_service_with_secrets(
         "route1-pure-env",
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         vec![(
             "db-creds",
             "local-db-creds",
@@ -307,7 +307,7 @@ async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String>
 
     deploy_and_wait_for_phase(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         service,
         "Ready",
         None,
@@ -318,21 +318,14 @@ async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String>
     let selector = service_pod_selector("route1-pure-env");
     verify_pod_env_var(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         &selector,
         "DB_PASSWORD",
         "s3cret-p@ss",
     )
     .await?;
 
-    verify_pod_env_var(
-        kubeconfig,
-        ROUTES_TEST_NAMESPACE,
-        &selector,
-        "DB_USERNAME",
-        "admin",
-    )
-    .await?;
+    verify_pod_env_var(kubeconfig, namespace, &selector, "DB_USERNAME", "admin").await?;
 
     info!("[Route1] Pure secret env var test passed!");
     Ok(())
@@ -342,12 +335,15 @@ async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String>
 ///
 /// Verifies that `postgres://${secret.db-creds.username}:${secret.db-creds.password}@...`
 /// compiles to an ESO-templated ExternalSecret and the pod gets the resolved composite string.
-async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), String> {
+async fn run_route2_mixed_content_env_test(
+    kubeconfig: &str,
+    namespace: &str,
+) -> Result<(), String> {
     info!("[Route2] Testing mixed-content env var (ESO template)...");
 
     let service = with_run_as_root(create_service_with_secrets(
         "route2-mixed-env",
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         vec![(
             "db-creds",
             "local-db-creds",
@@ -366,7 +362,7 @@ async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), Strin
 
     deploy_and_wait_for_phase(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         service,
         "Ready",
         None,
@@ -376,7 +372,7 @@ async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), Strin
 
     verify_pod_env_var(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         &service_pod_selector("route2-mixed-env"),
         "DATABASE_URL",
         "postgres://admin:s3cret-p@ss@db.svc:5432/mydb",
@@ -391,18 +387,21 @@ async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), Strin
 ///
 /// Verifies that a file with `${secret.*}` placeholders compiles to an
 /// ESO-backed volume mount, and the pod can read the resolved file content.
-async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), String> {
+async fn run_route3_file_mount_secret_test(
+    kubeconfig: &str,
+    namespace: &str,
+) -> Result<(), String> {
     info!("[Route3] Testing file mount with secrets...");
 
     let service = with_run_as_root(create_service_with_all_secret_routes(
         "route3-file-mount",
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         LOCAL_WEBHOOK_STORE_NAME,
     ));
 
     deploy_and_wait_for_phase(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         service,
         "Ready",
         None,
@@ -413,7 +412,7 @@ async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), Strin
     let selector = service_pod_selector("route3-file-mount");
     verify_pod_file_content(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         &selector,
         "/etc/app/config.yaml",
         "password: s3cret-p@ss",
@@ -422,7 +421,7 @@ async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), Strin
 
     verify_pod_file_content(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         &selector,
         "/etc/app/config.yaml",
         "api_key: ak-test-12345",
@@ -437,18 +436,21 @@ async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), Strin
 ///
 /// Verifies that a secret resource referenced in `imagePullSecrets` gets synced
 /// by ESO and appears in the pod's `spec.imagePullSecrets`.
-async fn run_route4_image_pull_secrets_test(kubeconfig: &str) -> Result<(), String> {
+async fn run_route4_image_pull_secrets_test(
+    kubeconfig: &str,
+    namespace: &str,
+) -> Result<(), String> {
     info!("[Route4] Testing imagePullSecrets...");
 
     let service = with_run_as_root(create_service_with_all_secret_routes(
         "route4-pull-secrets",
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         LOCAL_WEBHOOK_STORE_NAME,
     ));
 
     deploy_and_wait_for_phase(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         service,
         "Ready",
         None,
@@ -458,7 +460,7 @@ async fn run_route4_image_pull_secrets_test(kubeconfig: &str) -> Result<(), Stri
 
     verify_pod_image_pull_secrets(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         &service_pod_selector("route4-pull-secrets"),
         "route4-pull-secrets-ghcr-creds",
     )
@@ -472,12 +474,12 @@ async fn run_route4_image_pull_secrets_test(kubeconfig: &str) -> Result<(), Stri
 ///
 /// Verifies that a secret resource with no explicit `keys` compiles to a
 /// `dataFrom.extract` ExternalSecret, and the synced K8s Secret has all seeded keys.
-async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
+async fn run_route5_data_from_test(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     info!("[Route5] Testing dataFrom (all keys)...");
 
     let service = with_run_as_root(create_service_with_secrets(
         "route5-data-from",
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         vec![(
             "all-db-config",
             "local-database-config",
@@ -488,7 +490,7 @@ async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
 
     deploy_and_wait_for_phase(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         service,
         "Ready",
         None,
@@ -498,7 +500,7 @@ async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
 
     verify_external_secret(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         "route5-data-from-all-db-config",
         LOCAL_WEBHOOK_STORE_NAME,
         "local-database-config",
@@ -508,7 +510,7 @@ async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
 
     verify_synced_secret_keys(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         "route5-data-from-all-db-config",
         &["host", "port", "name", "ssl"],
     )
@@ -519,18 +521,18 @@ async fn run_route5_data_from_test(kubeconfig: &str) -> Result<(), String> {
 }
 
 /// Combined test: deploy the full fixture and verify all routes in one pod
-async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
+async fn run_all_routes_combined_test(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     info!("[Combined] Testing all 5 secret routes in a single service...");
 
     let service = with_run_as_root(create_service_with_all_secret_routes(
         "secret-routes-combined",
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         LOCAL_WEBHOOK_STORE_NAME,
     ));
 
     deploy_and_wait_for_phase(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         service,
         "Ready",
         None,
@@ -541,27 +543,13 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     let label = service_pod_selector("secret-routes-combined");
 
     // Route 1: Pure secret env vars
-    verify_pod_env_var(
-        kubeconfig,
-        ROUTES_TEST_NAMESPACE,
-        &label,
-        "DB_PASSWORD",
-        "s3cret-p@ss",
-    )
-    .await?;
-    verify_pod_env_var(
-        kubeconfig,
-        ROUTES_TEST_NAMESPACE,
-        &label,
-        "DB_USERNAME",
-        "admin",
-    )
-    .await?;
+    verify_pod_env_var(kubeconfig, namespace, &label, "DB_PASSWORD", "s3cret-p@ss").await?;
+    verify_pod_env_var(kubeconfig, namespace, &label, "DB_USERNAME", "admin").await?;
 
     // Route 2: Mixed-content env var
     verify_pod_env_var(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         &label,
         "DATABASE_URL",
         "postgres://admin:s3cret-p@ss@db.svc:5432/mydb",
@@ -571,7 +559,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     // Non-secret env var (sanity check)
     verify_pod_env_var(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         &label,
         "APP_NAME",
         "secret-routes-test",
@@ -581,7 +569,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     // Route 3: File mount
     verify_pod_file_content(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         &label,
         "/etc/app/config.yaml",
         "password: s3cret-p@ss",
@@ -591,7 +579,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     // Route 4: imagePullSecrets
     verify_pod_image_pull_secrets(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         &label,
         "secret-routes-combined-ghcr-creds",
     )
@@ -600,7 +588,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     // Route 5: dataFrom (verify synced secret has all keys)
     verify_synced_secret_keys(
         kubeconfig,
-        ROUTES_TEST_NAMESPACE,
+        namespace,
         "secret-routes-combined-all-db-config",
         &["host", "port", "name", "ssl"],
     )
@@ -619,9 +607,8 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
 /// Sets up the local provider and secrets, runs per-route + combined tests.
 /// Each route test verifies a different secret delivery mechanism (env var,
 /// mixed-content env, file mount, imagePullSecrets, dataFrom).
-pub async fn run_secrets_route_tests(kubeconfig: &str) -> Result<(), String> {
-
-    info!("[Routes] Running secrets route tests (5 routes + combined)...");
+pub async fn run_secrets_route_tests(kubeconfig: &str, namespace: &str) -> Result<(), String> {
+    info!("[Routes] Running secrets route tests (5 routes + combined) in namespace {namespace}...");
 
     // Set up local provider + regcreds (idempotent if already called)
     setup_regcreds_infrastructure(kubeconfig).await?;
@@ -629,12 +616,14 @@ pub async fn run_secrets_route_tests(kubeconfig: &str) -> Result<(), String> {
     // Seed all test secrets (db-creds, api-key, database-config, regcreds)
     seed_all_local_test_secrets(kubeconfig).await?;
 
-    // Fine-grained: permit route test namespace to access exactly these secrets
+    // Fine-grained: permit route test namespace to access exactly these secrets.
+    // Label is namespace-scoped so concurrent test runs don't delete each other's policies.
+    let label = format!("secret-routes-{namespace}");
     apply_cedar_secret_policy_for_service(
         kubeconfig,
-        "permit-route-secrets",
-        "secret-routes",
-        ROUTES_TEST_NAMESPACE,
+        &format!("permit-route-secrets-{namespace}"),
+        &label,
+        namespace,
         &["local-db-creds", "local-api-key", "local-database-config"],
     )
     .await?;
@@ -648,28 +637,25 @@ pub async fn run_secrets_route_tests(kubeconfig: &str) -> Result<(), String> {
         "route5-data-from",
         "secret-routes-combined",
     ] {
-        apply_run_as_root_override_policy(kubeconfig, ROUTES_TEST_NAMESPACE, svc).await?;
+        apply_run_as_root_override_policy(kubeconfig, namespace, svc).await?;
     }
 
     async {
-        ensure_fresh_namespace(kubeconfig, ROUTES_TEST_NAMESPACE).await?;
+        ensure_fresh_namespace(kubeconfig, namespace).await?;
 
-        // Run per-route tests
-        run_route1_pure_secret_env_test(kubeconfig).await?;
-        run_route2_mixed_content_env_test(kubeconfig).await?;
-        run_route3_file_mount_secret_test(kubeconfig).await?;
-        run_route4_image_pull_secrets_test(kubeconfig).await?;
-        run_route5_data_from_test(kubeconfig).await?;
-
-        // Run combined test
-        run_all_routes_combined_test(kubeconfig).await?;
+        run_route1_pure_secret_env_test(kubeconfig, namespace).await?;
+        run_route2_mixed_content_env_test(kubeconfig, namespace).await?;
+        run_route3_file_mount_secret_test(kubeconfig, namespace).await?;
+        run_route4_image_pull_secrets_test(kubeconfig, namespace).await?;
+        run_route5_data_from_test(kubeconfig, namespace).await?;
+        run_all_routes_combined_test(kubeconfig, namespace).await?;
 
         Ok::<(), String>(())
     }
     .await?;
 
-    delete_namespace(kubeconfig, ROUTES_TEST_NAMESPACE).await;
-    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=secret-routes").await;
+    delete_namespace(kubeconfig, namespace).await;
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={label}")).await;
 
     info!("[Routes] All secrets route tests passed!");
     Ok(())
@@ -713,7 +699,8 @@ async fn test_secrets_standalone() {
     run_secrets_tests(&resolved.kubeconfig).await.unwrap();
 }
 
-/// Standalone test — run only the 5-route secrets tests
+/// Standalone test — run only the 5-route secrets tests (uses a separate namespace
+/// so it can run concurrently with `test_secrets_standalone`)
 #[tokio::test]
 #[ignore]
 async fn test_secrets_routes_standalone() {
@@ -721,5 +708,7 @@ async fn test_secrets_routes_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
-    run_secrets_route_tests(&resolved.kubeconfig).await.unwrap();
+    run_secrets_route_tests(&resolved.kubeconfig, "local-secrets-routes-sa")
+        .await
+        .unwrap();
 }

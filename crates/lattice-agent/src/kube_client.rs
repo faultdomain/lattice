@@ -48,4 +48,3 @@ pub async fn create_client_logged(
         }
     }
 }
-

@@ -1200,15 +1200,57 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
         .await?;
     }
 
-    // Create fresh namespace with retry for transient connection failures
+    // Create fresh namespace, retrying until it is Active (handles Terminating races)
     info!("[Namespace] Creating fresh namespace {}...", namespace);
-    run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig_path,
-        "create",
-        "namespace",
-        namespace,
-    ])
+    wait_for_condition(
+        &format!("namespace {} creation", namespace),
+        Duration::from_secs(300),
+        Duration::from_secs(5),
+        || async move {
+            // Attempt to create (may get AlreadyExists if still Terminating)
+            let _ = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig_path,
+                "create",
+                "namespace",
+                namespace,
+            ])
+            .await;
+
+            // Verify the namespace is Active before proceeding
+            match run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "namespace",
+                namespace,
+                "-o",
+                "jsonpath={.status.phase}",
+            ])
+            .await
+            {
+                Ok(phase) if phase.trim() == "Active" => {
+                    info!("[Namespace] Namespace {} is Active", namespace);
+                    Ok(true)
+                }
+                Ok(phase) => {
+                    info!(
+                        "[Namespace] Namespace {} in phase {}, waiting...",
+                        namespace,
+                        phase.trim()
+                    );
+                    Ok(false)
+                }
+                Err(e) => {
+                    info!(
+                        "[Namespace] Namespace {} not found yet ({}), retrying...",
+                        namespace, e
+                    );
+                    Ok(false)
+                }
+            }
+        },
+    )
     .await?;
 
     Ok(())

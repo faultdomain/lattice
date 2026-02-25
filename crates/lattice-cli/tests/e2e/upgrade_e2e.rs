@@ -108,8 +108,7 @@ async fn run_upgrade_test() -> Result<(), String> {
     let (from_version, to_version) = get_upgrade_versions();
 
     // Load configurations
-    let (_, mgmt_cluster) =
-        load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
+    let (_, mgmt_cluster) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
 
     let (_, mut workload_cluster) =
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;

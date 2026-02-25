@@ -222,10 +222,7 @@ mod tests {
             cluster_with_parent_config(),
         );
         let response = validator.validate(&request);
-        assert!(
-            !response.allowed,
-            "removing parent_config should be denied"
-        );
+        assert!(!response.allowed, "removing parent_config should be denied");
         let message = &response.result.message;
         assert!(
             message.contains("cannot be removed"),
