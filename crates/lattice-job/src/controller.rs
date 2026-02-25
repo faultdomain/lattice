@@ -204,7 +204,30 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 _ => Ok(Action::requeue(REQUEUE_RUNNING)),
             }
         }
-        JobPhase::Succeeded | JobPhase::Failed => Ok(Action::await_change()),
+        JobPhase::Succeeded => Ok(Action::await_change()),
+        JobPhase::Failed => {
+            // Distinguish transient vs permanent failure:
+            // - observed_generation is None → failed during Pending (compile/apply) → retry
+            // - observed_generation is Some → failed during Running (VCJob execution) → permanent
+            let observed = job.status.as_ref().and_then(|s| s.observed_generation);
+            if observed.is_some() {
+                // VCJob ran and failed — don't retry
+                Ok(Action::await_change())
+            } else {
+                // Never made it to Running — transient error (e.g. webhook not ready)
+                info!(job = %name, "retrying failed job (never reached Running)");
+                update_status(
+                    &ctx.client,
+                    &job,
+                    namespace,
+                    JobPhase::Pending,
+                    Some("Retrying after transient failure"),
+                    None,
+                )
+                .await?;
+                Ok(Action::requeue(REQUEUE_ERROR))
+            }
+        }
         _ => Ok(Action::await_change()),
     }
 }

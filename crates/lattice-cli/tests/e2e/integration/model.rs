@@ -16,8 +16,8 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml_with_retry, delete_namespace, ensure_namespace, load_fixture_config, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
+    apply_yaml_with_retry, delete_namespace, ensure_fresh_namespace, load_fixture_config,
+    run_kubectl, setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
     DEFAULT_DOWNLOADER_IMAGE,
 };
 
@@ -42,7 +42,7 @@ fn load_model_fixture() -> Result<lattice_common::crd::LatticeModel, String> {
 async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Deploying LatticeModel from fixture...");
 
-    ensure_namespace(kubeconfig, MODEL_NAMESPACE).await?;
+    ensure_fresh_namespace(kubeconfig, MODEL_NAMESPACE).await?;
 
     let model = load_model_fixture()?;
     let yaml = serde_json::to_string(&model)

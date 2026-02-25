@@ -6,7 +6,6 @@ license.workspace = true
 description = "CLI for managing Lattice cluster hierarchies"
 
 [features]
-default = ["fips"]
 fips = [
     "lattice-operator/fips",
     "lattice-common/fips",
@@ -27,7 +26,7 @@ lattice-cell.workspace = true
 lattice-cluster.workspace = true
 lattice-infra.workspace = true
 lattice-move.workspace = true
-lattice-operator = { path = "../lattice-operator", default-features = false }
+lattice-operator = { path = "../lattice-operator" }
 
 # CLI
 clap.workspace = true

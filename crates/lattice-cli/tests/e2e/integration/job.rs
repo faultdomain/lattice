@@ -16,8 +16,8 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml_with_retry, delete_namespace, ensure_namespace, load_fixture_config, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_resource_phase,
+    apply_yaml_with_retry, delete_namespace, ensure_fresh_namespace, load_fixture_config,
+    run_kubectl, setup_regcreds_infrastructure, wait_for_resource_phase,
 };
 
 const JOB_NAMESPACE: &str = "batch";
@@ -33,7 +33,7 @@ async fn test_job_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[Job] Deploying LatticeJob from fixture...");
 
     // Ensure namespace exists before applying the job
-    ensure_namespace(kubeconfig, JOB_NAMESPACE).await?;
+    ensure_fresh_namespace(kubeconfig, JOB_NAMESPACE).await?;
 
     let job = load_job_fixture()?;
     let yaml =

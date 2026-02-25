@@ -1,11 +1,10 @@
 //! FIPS 140-3 compliance constants and initialization.
 //!
-//! All production Lattice builds enforce FIPS mode via aws-lc-rs. The `fips`
-//! feature (enabled by default on binary crates) activates the FIPS-validated
-//! cryptographic module. When disabled, a non-FIPS aws-lc-rs backend is used
-//! and loud warnings are emitted — this is only acceptable for local
-//! development on platforms where FIPS dynamic libraries are unsupported
-//! (e.g. macOS).
+//! Production Lattice builds enforce FIPS mode via `cargo build --features fips`.
+//! The `fips` feature activates the FIPS-validated aws-lc-rs cryptographic module.
+//! When disabled (the default), a non-FIPS aws-lc-rs backend is used — this is
+//! the normal mode for local development on platforms where FIPS dynamic
+//! libraries are unsupported (e.g. macOS).
 
 /// FIPS-approved TLS 1.2 cipher suites for Kubernetes API servers.
 ///
@@ -55,7 +54,7 @@ pub fn install_crypto_provider() {
         eprintln!("!!  suitable for regulated or production environments.     !!");
         eprintln!("!!  All production builds MUST enable the `fips` feature.  !!");
         eprintln!("!!                                                         !!");
-        eprintln!("!!  To enable: cargo build                                 !!");
+        eprintln!("!!  To enable: cargo build --features fips                 !!");
         eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         eprintln!();
     }

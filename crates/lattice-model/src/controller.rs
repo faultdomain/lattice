@@ -165,7 +165,11 @@ pub async fn reconcile(
                         remove_scheduling_gates(&ctx.client, &name, namespace).await?;
                     }
                     Some(DownloadState::Failed) => {
-                        error!(model = %name, "model download job failed");
+                        // Don't set observed_generation — the download job may
+                        // retry transient failures (e.g. Volcano webhook not ready).
+                        // Leaving it None lets the Failed handler transition back
+                        // to Pending and re-check the job status.
+                        warn!(model = %name, "model download job failed, will retry");
                         cleanup_graph(&model, &ctx.graph, namespace);
                         update_status(
                             &ctx.client,
@@ -173,11 +177,11 @@ pub async fn reconcile(
                             namespace,
                             ModelServingPhase::Failed,
                             Some("Model download failed"),
-                            Some(generation),
+                            None,
                             None,
                         )
                         .await?;
-                        return Ok(Action::await_change());
+                        return Ok(Action::requeue(REQUEUE_RETRY));
                     }
                     Some(DownloadState::Running) => {
                         info!(model = %name, "model download in progress");

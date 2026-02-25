@@ -27,7 +27,8 @@ spec:
         replicas: 1
   services: true
   monitoring:
-    enabled: false
+    enabled: true
+    ha: false
   backups:
     enabled: false
   registryMirrors:

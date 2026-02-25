@@ -200,6 +200,12 @@ spec:
         containers:
           main:
             image: vllm:latest
+            resources:
+              limits:
+                cpu: "100m"
+                memory: "64Mi"
+            security:
+              apparmorProfile: Unconfined
 "#
     );
     apply_should_succeed(kubeconfig, &yaml, "valid LatticeModel").await

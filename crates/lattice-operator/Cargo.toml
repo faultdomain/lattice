@@ -6,7 +6,6 @@ license.workspace = true
 description = "Lattice Kubernetes operator for multi-cluster lifecycle management"
 
 [features]
-default = ["fips"]
 fips = [
     "lattice-common/fips",
     "lattice-infra/fips",

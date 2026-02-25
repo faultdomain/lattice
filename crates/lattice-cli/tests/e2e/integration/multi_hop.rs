@@ -39,7 +39,7 @@ use tokio::time::sleep;
 use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
-use super::super::helpers::{run_kubectl, BUSYBOX_IMAGE};
+use super::super::helpers::{delete_namespace, ensure_fresh_namespace, run_kubectl, BUSYBOX_IMAGE};
 
 // ============================================================================
 // Constants
@@ -88,14 +88,14 @@ pub async fn run_multi_hop_proxy_tests(ctx: &InfraContext) -> Result<(), String>
         "[Integration/MultiHop] Running multi-hop proxy tests through: mgmt -> workload -> workload2"
     );
 
-    // Setup namespace
-    ensure_namespace(kubeconfig).await?;
+    // Setup namespace (delete + recreate for clean slate on re-runs)
+    ensure_fresh_namespace(kubeconfig, MULTI_HOP_NAMESPACE).await?;
 
     // Run tests in sequence (each depends on previous)
     let result = run_test_sequence(kubeconfig).await;
 
     // Cleanup regardless of test result
-    cleanup_namespace(kubeconfig).await;
+    delete_namespace(kubeconfig, MULTI_HOP_NAMESPACE).await;
 
     result
 }
@@ -110,74 +110,6 @@ async fn run_test_sequence(kubeconfig: &str) -> Result<(), String> {
 
     info!("[Integration/MultiHop] All multi-hop proxy tests passed!");
     Ok(())
-}
-
-// ============================================================================
-// Namespace Helpers
-// ============================================================================
-
-/// Ensure the test namespace exists.
-async fn ensure_namespace(kubeconfig: &str) -> Result<(), String> {
-    info!(
-        "[Integration/MultiHop] Ensuring namespace {} exists...",
-        MULTI_HOP_NAMESPACE
-    );
-
-    // Check if namespace exists (with retry for proxy failures)
-    let exists = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "namespace",
-        MULTI_HOP_NAMESPACE,
-        "-o",
-        "name",
-    ])
-    .await
-    .is_ok();
-
-    if exists {
-        info!(
-            "[Integration/MultiHop] Namespace {} already exists",
-            MULTI_HOP_NAMESPACE
-        );
-        return Ok(());
-    }
-
-    // Create namespace
-    run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "create",
-        "namespace",
-        MULTI_HOP_NAMESPACE,
-    ])
-    .await
-    .map_err(|e| format!("Failed to create namespace {}: {}", MULTI_HOP_NAMESPACE, e))?;
-
-    info!(
-        "[Integration/MultiHop] Created namespace {}",
-        MULTI_HOP_NAMESPACE
-    );
-    Ok(())
-}
-
-/// Delete the test namespace (best effort, doesn't fail the test).
-async fn cleanup_namespace(kubeconfig: &str) {
-    info!(
-        "[Integration/MultiHop] Cleaning up namespace {}...",
-        MULTI_HOP_NAMESPACE
-    );
-
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "namespace",
-        MULTI_HOP_NAMESPACE,
-        "--wait=false",
-    ])
-    .await;
 }
 
 // ============================================================================

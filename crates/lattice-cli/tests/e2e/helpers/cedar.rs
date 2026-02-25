@@ -147,7 +147,6 @@ spec:
         "Applied CedarPolicy '{}' (priority={}, label={})",
         name, priority, test_label
     );
-    tokio::time::sleep(Duration::from_secs(3)).await;
     Ok(())
 }
 
@@ -159,61 +158,9 @@ pub struct CedarPolicySpec {
     pub cedar_text: String,
 }
 
-/// Apply a CedarPolicy CRD without the post-apply sleep.
-///
-/// Used internally by `apply_cedar_policies_batch` — the batch function
-/// sleeps once after all policies are applied instead of per-policy.
-pub async fn apply_cedar_policy_crd_nosleep(
-    kubeconfig: &str,
-    name: &str,
-    test_label: &str,
-    priority: u32,
-    cedar_text: &str,
-) -> Result<(), String> {
-    let indented: String = cedar_text
-        .lines()
-        .map(|line| {
-            if line.trim().is_empty() {
-                String::new()
-            } else {
-                format!("    {}", line)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: CedarPolicy
-metadata:
-  name: {name}
-  namespace: {system_ns}
-  labels:
-    lattice.dev/test: {test_label}
-spec:
-  enabled: true
-  priority: {priority}
-  policies: |
-{indented}"#,
-        name = name,
-        system_ns = LATTICE_SYSTEM_NAMESPACE,
-        test_label = test_label,
-        priority = priority,
-        indented = indented,
-    );
-
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
-    info!(
-        "Applied CedarPolicy '{}' (priority={}, label={})",
-        name, priority, test_label
-    );
-    Ok(())
-}
-
-/// Apply multiple Cedar policies concurrently, then sleep once for propagation.
+/// Apply multiple Cedar policies concurrently.
 ///
 /// Uses bounded concurrency via a semaphore to avoid overloading the API server.
-/// Saves `(N-1) * 3` seconds compared to sequential `apply_cedar_policy_crd()` calls.
 pub async fn apply_cedar_policies_batch(
     kubeconfig: &str,
     policies: Vec<CedarPolicySpec>,
@@ -235,7 +182,7 @@ pub async fn apply_cedar_policies_batch(
         let kc = kubeconfig.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.map_err(|e| format!("semaphore error: {}", e))?;
-            apply_cedar_policy_crd_nosleep(
+            apply_cedar_policy_crd(
                 &kc,
                 &policy.name,
                 &policy.test_label,
@@ -250,8 +197,7 @@ pub async fn apply_cedar_policies_batch(
         handle.await.map_err(|e| format!("task join error: {}", e))??;
     }
 
-    info!("Batch-applied {} Cedar policies, waiting 3s for propagation...", count);
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    info!("Batch-applied {} Cedar policies", count);
     Ok(())
 }
 

@@ -84,7 +84,7 @@ COPY scripts/runtime ./scripts
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --release -p lattice-operator && \
+    cargo build --release -p lattice-operator --features fips && \
     cp /app/target/release/lattice-operator /usr/local/bin/lattice-operator
 
 # -----------------------------------------------------------------------------

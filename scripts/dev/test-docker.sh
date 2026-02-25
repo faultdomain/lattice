@@ -87,4 +87,4 @@ echo "Workload cluster config: $LATTICE_WORKLOAD_CLUSTER_CONFIG"
 echo "Workload2 cluster config: $LATTICE_WORKLOAD2_CLUSTER_CONFIG"
 echo
 
-RUST_LOG=info cargo test -p lattice-cli --no-default-features --features provider-e2e --test e2e "$TEST_MODULE" -- --nocapture
+RUST_LOG=info cargo test -p lattice-cli --features provider-e2e --test e2e "$TEST_MODULE" -- --nocapture
