@@ -304,7 +304,3 @@ fn kubeconfig_local_path(cluster_name: &str) -> String {
 /// This must be pinned because Cilium LB-IPAM uses IPs from this range (172.18.255.x)
 pub const DOCKER_KIND_SUBNET: &str = "172.18.0.0/16";
 pub const DOCKER_KIND_GATEWAY: &str = "172.18.0.1";
-/// Host port for the docker-compose DockerHub pull-through cache
-pub const DOCKER_REGISTRY_MIRROR_PORT: u16 = 5555;
-/// Host port for the docker-compose GHCR pull-through cache
-pub const GHCR_REGISTRY_MIRROR_PORT: u16 = 5556;

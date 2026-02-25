@@ -815,6 +815,8 @@ mod tests {
                 downloader_image: None,
                 access_mode: None,
                 security: None,
+                resources: BTreeMap::new(),
+                image_pull_secrets: Vec::new(),
             }),
             ..Default::default()
         };

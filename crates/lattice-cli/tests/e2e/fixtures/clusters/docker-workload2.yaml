@@ -30,3 +30,8 @@ spec:
     workerPools:
       default:
         replicas: 1
+  registryMirrors:
+    - upstream: docker.io
+      mirror: "http://172.18.0.1:5555"
+    - upstream: ghcr.io
+      mirror: "http://172.18.0.1:5556"

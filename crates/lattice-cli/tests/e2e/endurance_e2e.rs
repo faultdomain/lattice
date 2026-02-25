@@ -38,9 +38,9 @@ use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, create_with_retry,
     delete_cluster_and_wait, ensure_docker_network, extract_docker_cluster_kubeconfig,
-    force_delete_docker_cluster, get_docker_kubeconfig, inject_docker_registry_mirror,
-    kubeconfig_path, load_cluster_config, load_registry_credentials, run_id, watch_cluster_phases,
-    DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    force_delete_docker_cluster, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
+    load_registry_credentials, run_id, watch_cluster_phases, DEFAULT_LATTICE_IMAGE,
+    MGMT_CLUSTER_NAME,
 };
 use super::integration::setup;
 use super::providers::InfraProvider;
@@ -106,21 +106,17 @@ async fn test_endurance_loop() {
 
 async fn run_endurance_test() -> Result<(), String> {
     // Load configurations
-    let (_, mut mgmt_cluster) =
+    let (_, mgmt_cluster) =
         load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
 
     // Load workload cluster configs (we'll create multiple instances with unique names)
-    let (_, mut workload_template) =
+    let (_, workload_template) =
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
     let workload_bootstrap = workload_template.spec.provider.kubernetes.bootstrap.clone();
 
     ensure_docker_network()
         .await
         .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
-
-    // Inject Docker registry pull-through cache mirror
-    inject_docker_registry_mirror(&mut mgmt_cluster);
-    inject_docker_registry_mirror(&mut workload_template);
 
     let mgmt_config_content = serde_json::to_string(&mgmt_cluster)
         .map_err(|e| format!("Failed to serialize mgmt cluster: {}", e))?;

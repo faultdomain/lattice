@@ -465,6 +465,16 @@ pub struct ModelSourceSpec {
     /// Security context for the download container (AppArmor, allowed binaries, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<super::workload::container::SecurityContext>,
+
+    /// Secret resources needed by the download job (e.g. registry credentials).
+    /// Keys become resource names in the compiled LatticeJob workload.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, super::ResourceSpec>,
+
+    /// Image pull secret resource names (must reference entries in `resources`).
+    /// Added to the download job's RuntimeSpec so the pod can pull private images.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_pull_secrets: Vec<String>,
 }
 
 /// Reference to a K8s Secret whose keys are mounted as env vars via `envFrom`.

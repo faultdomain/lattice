@@ -13,6 +13,15 @@ spec:
     security:
       apparmorProfile: Unconfined
       allowedBinaries: ["*"]
+    resources:
+      ghcr-creds:
+        type: secret
+        id: local-regcreds
+        params:
+          provider: lattice-local
+          refreshInterval: 1h
+    imagePullSecrets:
+      - ghcr-creds
   roles:
     prefill:
       replicas: 1
@@ -33,6 +42,16 @@ spec:
             security:
               runAsUser: 65534
               apparmorProfile: Unconfined
+        resources:
+          ghcr-creds:
+            type: secret
+            id: local-regcreds
+            params:
+              provider: lattice-local
+              refreshInterval: 1h
+      entryRuntime:
+        imagePullSecrets:
+          - ghcr-creds
     decode:
       replicas: 2
       entryWorkload:

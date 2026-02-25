@@ -48,9 +48,9 @@ use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::super::context::InfraContext;
 use super::super::helpers::{
     build_and_push_downloader_image, build_and_push_lattice_image, client_from_kubeconfig,
-    create_with_retry, ensure_docker_network, get_docker_kubeconfig, inject_docker_registry_mirror,
-    kubeconfig_path, load_cluster_config, load_registry_credentials, run_cmd,
-    wait_for_operator_ready, watch_cluster_phases, ProxySession,
+    create_with_retry, ensure_docker_network, get_docker_kubeconfig, kubeconfig_path,
+    load_cluster_config, load_registry_credentials, run_cmd, wait_for_operator_ready,
+    watch_cluster_phases, ProxySession,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, cedar, scaling};
@@ -257,7 +257,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // Load cluster configurations
     info!("[Setup] Loading cluster configurations...");
 
-    let (_, mut mgmt_cluster) =
+    let (_, mgmt_cluster) =
         load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
     let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
     let mgmt_bootstrap = mgmt_cluster.spec.provider.kubernetes.bootstrap.clone();
@@ -291,16 +291,6 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         if let Some(ref mut c) = workload2_cluster {
             c.spec.monitoring.enabled = false;
             c.spec.services = false;
-        }
-    }
-
-    // Inject docker-compose registry pull-through cache for Docker provider
-    if mgmt_provider == InfraProvider::Docker {
-        info!("[Setup] Injecting DockerHub pull-through cache mirror for Docker provider");
-        inject_docker_registry_mirror(&mut mgmt_cluster);
-        inject_docker_registry_mirror(&mut workload_cluster);
-        if let Some(ref mut c) = workload2_cluster {
-            inject_docker_registry_mirror(c);
         }
     }
 
@@ -591,7 +581,7 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         build_and_push_downloader_image(DEFAULT_DOWNLOADER_IMAGE).await?;
     }
 
-    let (_, mut mgmt_cluster) =
+    let (_, mgmt_cluster) =
         load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
     let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
 
@@ -599,8 +589,6 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         ensure_docker_network()
             .await
             .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
-        info!("[Setup] Injecting DockerHub pull-through cache mirror for Docker provider");
-        inject_docker_registry_mirror(&mut mgmt_cluster);
     }
 
     let mgmt_config_content = serde_json::to_string(&mgmt_cluster)
@@ -666,12 +654,8 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     // Start with mgmt setup
     let mut result = setup_mgmt_only(config).await?;
 
-    let (_, mut workload_cluster) =
+    let (_, workload_cluster) =
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
-
-    if result.ctx.provider == InfraProvider::Docker {
-        inject_docker_registry_mirror(&mut workload_cluster);
-    }
 
     info!("[Setup] Creating workload cluster...");
 

@@ -55,24 +55,6 @@ pub async fn run_mesh_tests(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Run only the fixed 10-service mesh test
-pub async fn run_fixed_mesh_test(kubeconfig: &str) -> Result<(), String> {
-    info!(
-        "[Integration/Mesh] Running fixed mesh test on {}",
-        kubeconfig
-    );
-    run_mesh_test(kubeconfig).await
-}
-
-/// Run only the randomized mesh test
-pub async fn run_randomized_mesh_test(kubeconfig: &str) -> Result<(), String> {
-    info!(
-        "[Integration/Mesh] Running random mesh test on {}",
-        kubeconfig
-    );
-    run_random_mesh_test(kubeconfig).await
-}
-
 /// Check if mesh tests should be enabled based on environment
 pub fn mesh_tests_enabled() -> bool {
     std::env::var("LATTICE_ENABLE_MESH_TEST")
@@ -96,26 +78,4 @@ async fn test_mesh_standalone() {
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
     run_mesh_tests(&resolved.kubeconfig).await.unwrap();
-}
-
-/// Standalone test - run only the fixed 10-service mesh test
-#[tokio::test]
-#[ignore]
-async fn test_fixed_mesh_standalone() {
-    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
-
-    init_e2e_test();
-    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
-    run_fixed_mesh_test(&resolved.kubeconfig).await.unwrap();
-}
-
-/// Standalone test - run only the randomized mesh test
-#[tokio::test]
-#[ignore]
-async fn test_random_mesh_standalone() {
-    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
-
-    init_e2e_test();
-    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
-    run_randomized_mesh_test(&resolved.kubeconfig).await.unwrap();
 }

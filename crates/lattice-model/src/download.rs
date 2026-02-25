@@ -304,9 +304,19 @@ fn compile_lattice_job(
         },
     );
 
+    // Merge any user-provided resources (e.g. ghcr-creds for imagePullSecrets)
+    for (key, spec) in &source.resources {
+        resources.entry(key.clone()).or_insert_with(|| spec.clone());
+    }
+
     let workload = WorkloadSpec {
         containers,
         resources,
+        ..Default::default()
+    };
+
+    let runtime = RuntimeSpec {
+        image_pull_secrets: source.image_pull_secrets.clone(),
         ..Default::default()
     };
 
@@ -316,7 +326,7 @@ fn compile_lattice_job(
         JobTaskSpec {
             replicas: 1,
             workload,
-            runtime: RuntimeSpec::default(),
+            runtime,
             restart_policy: Some(RestartPolicy::OnFailure),
         },
     );
@@ -437,6 +447,8 @@ mod tests {
             downloader_image: None,
             access_mode: None,
             security: None,
+            resources: BTreeMap::new(),
+            image_pull_secrets: Vec::new(),
         }
     }
 
@@ -570,6 +582,8 @@ mod tests {
             downloader_image: None,
             access_mode: None,
             security: None,
+            resources: BTreeMap::new(),
+            image_pull_secrets: Vec::new(),
         };
 
         let download = compile_download("my-model", "default", "uid-456", &source).unwrap();
@@ -590,6 +604,8 @@ mod tests {
             downloader_image: None,
             access_mode: None,
             security: None,
+            resources: BTreeMap::new(),
+            image_pull_secrets: Vec::new(),
         };
 
         let download = compile_download("my-model", "default", "uid-789", &source).unwrap();
@@ -682,6 +698,8 @@ mod tests {
             downloader_image: None,
             access_mode: None,
             security: None,
+            resources: BTreeMap::new(),
+            image_pull_secrets: Vec::new(),
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
@@ -778,6 +796,39 @@ mod tests {
         let download = compile_download("test", "ns", "uid", &source).unwrap();
         let container = &download.job.spec.tasks["download"].workload.containers["download"];
         assert!(container.security.is_none());
+    }
+
+    #[test]
+    fn image_pull_secrets_propagated_to_runtime() {
+        let mut resources = BTreeMap::new();
+        let mut params = BTreeMap::new();
+        params.insert("provider".to_string(), serde_json::json!("lattice-local"));
+        resources.insert(
+            "ghcr-creds".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                id: Some("local-regcreds".to_string()),
+                params: Some(params),
+                ..Default::default()
+            },
+        );
+
+        let source = ModelSourceSpec {
+            resources,
+            image_pull_secrets: vec!["ghcr-creds".to_string()],
+            ..hf_source()
+        };
+
+        let download = compile_download("test", "ns", "uid", &source).unwrap();
+        let task = &download.job.spec.tasks["download"];
+
+        // imagePullSecrets set on runtime
+        assert_eq!(task.runtime.image_pull_secrets, vec!["ghcr-creds"]);
+
+        // ghcr-creds resource merged into workload resources
+        let creds = &task.workload.resources["ghcr-creds"];
+        assert_eq!(creds.type_, ResourceType::Secret);
+        assert_eq!(creds.id.as_deref(), Some("local-regcreds"));
     }
 
     #[test]

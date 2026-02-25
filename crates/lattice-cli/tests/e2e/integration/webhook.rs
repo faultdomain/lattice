@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use super::super::helpers::{run_kubectl, wait_for_condition};
+use super::super::helpers::{apply_apparmor_override_policy, run_kubectl, wait_for_condition};
 
 const WEBHOOK_TEST_NS: &str = "webhook-test";
 
@@ -145,6 +145,8 @@ spec:
           limits:
             cpu: "100m"
             memory: "64Mi"
+        security:
+          apparmorProfile: Unconfined
 "#
     );
     apply_should_succeed(kubeconfig, &yaml, "valid LatticeService").await
@@ -534,6 +536,9 @@ pub async fn run_webhook_tests(kubeconfig: &str) -> Result<(), String> {
 
     wait_for_webhook_ready(kubeconfig).await?;
     ensure_test_namespace(kubeconfig).await?;
+
+    // KIND clusters don't have AppArmor — permit the Unconfined override
+    apply_apparmor_override_policy(kubeconfig).await?;
 
     // Valid resources should be accepted
     test_valid_service_accepted(kubeconfig).await?;
