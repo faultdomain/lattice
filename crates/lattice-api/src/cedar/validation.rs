@@ -36,7 +36,8 @@ pub async fn reconcile(
 
     info!(cedar_policy = %name, "Reconciling CedarPolicy");
 
-    let new_status = validate_policy(&policy);
+    let generation = policy.metadata.generation;
+    let new_status = validate_policy(&policy, generation);
 
     // Check if status already matches — avoid update loop
     if let Some(ref current_status) = policy.status {
@@ -44,6 +45,7 @@ pub async fn reconcile(
             && current_status.permit_count == new_status.permit_count
             && current_status.forbid_count == new_status.forbid_count
             && current_status.validation_errors == new_status.validation_errors
+            && current_status.observed_generation == generation
         {
             debug!(cedar_policy = %name, "Status unchanged, skipping update");
             return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
@@ -97,7 +99,7 @@ pub async fn reconcile(
 }
 
 /// Validate a CedarPolicy and produce the new status
-fn validate_policy(policy: &CedarPolicy) -> CedarPolicyStatus {
+fn validate_policy(policy: &CedarPolicy, generation: Option<i64>) -> CedarPolicyStatus {
     let now = chrono::Utc::now().to_rfc3339();
 
     // Disabled policies are always valid (no evaluation)
@@ -109,6 +111,7 @@ fn validate_policy(policy: &CedarPolicy) -> CedarPolicyStatus {
             forbid_count: 0,
             last_validated: Some(now),
             validation_errors: vec![],
+            observed_generation: generation,
         };
     }
 
@@ -134,6 +137,7 @@ fn validate_policy(policy: &CedarPolicy) -> CedarPolicyStatus {
                 forbid_count,
                 last_validated: Some(now),
                 validation_errors: vec![],
+                observed_generation: generation,
             }
         }
         Err(parse_errors) => {
@@ -152,6 +156,7 @@ fn validate_policy(policy: &CedarPolicy) -> CedarPolicyStatus {
                 forbid_count: 0,
                 last_validated: Some(now),
                 validation_errors: errors,
+                observed_generation: generation,
             }
         }
     }
@@ -180,7 +185,7 @@ mod tests {
     #[test]
     fn valid_permit_policy() {
         let cp = make_policy("test", "permit(principal, action, resource);", true);
-        let status = validate_policy(&cp);
+        let status = validate_policy(&cp, None);
 
         assert_eq!(status.phase, CedarPolicyPhase::Valid);
         assert_eq!(status.permit_count, 1);
@@ -196,7 +201,7 @@ mod tests {
             r#"forbid(principal, action, resource == Lattice::Cluster::"prod");"#,
             true,
         );
-        let status = validate_policy(&cp);
+        let status = validate_policy(&cp, None);
 
         assert_eq!(status.phase, CedarPolicyPhase::Valid);
         assert_eq!(status.permit_count, 0);
@@ -215,7 +220,7 @@ mod tests {
             "#,
             true,
         );
-        let status = validate_policy(&cp);
+        let status = validate_policy(&cp, None);
 
         assert_eq!(status.phase, CedarPolicyPhase::Valid);
         assert_eq!(status.permit_count, 2);
@@ -225,7 +230,7 @@ mod tests {
     #[test]
     fn invalid_syntax() {
         let cp = make_policy("test", "this is not valid cedar syntax;", true);
-        let status = validate_policy(&cp);
+        let status = validate_policy(&cp, None);
 
         assert_eq!(status.phase, CedarPolicyPhase::Invalid);
         assert_eq!(status.permit_count, 0);
@@ -237,7 +242,7 @@ mod tests {
     #[test]
     fn disabled_policy_always_valid() {
         let cp = make_policy("test", "this is not valid cedar syntax;", false);
-        let status = validate_policy(&cp);
+        let status = validate_policy(&cp, None);
 
         assert_eq!(status.phase, CedarPolicyPhase::Valid);
         assert_eq!(status.permit_count, 0);
@@ -249,7 +254,7 @@ mod tests {
     #[test]
     fn empty_policy_text() {
         let cp = make_policy("test", "", true);
-        let status = validate_policy(&cp);
+        let status = validate_policy(&cp, None);
 
         // Empty string parses as valid with 0 policies
         assert_eq!(status.phase, CedarPolicyPhase::Valid);

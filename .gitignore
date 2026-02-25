@@ -5,3 +5,4 @@ tarpaulin-report.html
 .regcred.json
 /test-charts
 /test-providers
+/endurance-logs

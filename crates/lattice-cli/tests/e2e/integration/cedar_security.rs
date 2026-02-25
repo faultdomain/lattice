@@ -308,6 +308,7 @@ async fn test_policy_lifecycle(kubeconfig: &str) -> Result<(), String> {
         NS_LIFECYCLE,
         "svc-lifecycle",
         "Ready",
+        None,
         Duration::from_secs(90),
     )
     .await?;

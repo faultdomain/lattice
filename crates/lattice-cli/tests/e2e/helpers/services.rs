@@ -13,7 +13,9 @@ use super::cedar::{apply_cedar_policies_batch, CedarPolicySpec};
 use super::cluster::load_registry_credentials;
 use super::docker::run_kubectl;
 use super::kubernetes::{client_from_kubeconfig, create_with_retry};
-use super::{wait_for_condition, BUSYBOX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY};
+use super::{
+    wait_for_condition, BUSYBOX_IMAGE, DEFAULT_TIMEOUT, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+};
 
 // =============================================================================
 // LatticeService Test Helpers
@@ -239,84 +241,73 @@ pub fn create_service_with_security_overrides(
 
 /// Wait for a LatticeService to reach the expected phase.
 ///
-/// Thin wrapper around `wait_for_resource_phase` for LatticeService resources.
+/// When `expected_message` is `Some`, also requires the status condition message
+/// to contain the substring. Phase and message are read atomically in a single
+/// kubectl call to avoid races with phase transitions.
 pub async fn wait_for_service_phase(
     kubeconfig: &str,
     namespace: &str,
     name: &str,
     phase: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    super::wait_for_resource_phase(
-        kubeconfig,
-        "latticeservice",
-        namespace,
-        name,
-        phase,
-        timeout,
-    )
-    .await
-}
-
-/// Wait for a LatticeService to reach the given phase AND have a condition
-/// message containing `message_substring`. Phase and message are read atomically
-/// in a single kubectl call to avoid races with phase transitions.
-pub async fn wait_for_service_phase_with_message(
-    kubeconfig: &str,
-    namespace: &str,
-    name: &str,
-    phase: &str,
-    message_substring: &str,
+    expected_message: Option<&str>,
     timeout: Duration,
 ) -> Result<(), String> {
     let kc = kubeconfig.to_string();
     let ns = namespace.to_string();
     let svc_name = name.to_string();
     let expected_phase = phase.to_string();
-    let expected_msg = message_substring.to_string();
+    let expected_msg = expected_message.map(String::from);
 
-    wait_for_condition(
-        &format!(
+    let desc = match &expected_msg {
+        Some(msg) => format!(
             "LatticeService {}/{} to reach {} with '{}'",
-            namespace, name, phase, message_substring
+            namespace, name, phase, msg
         ),
-        timeout,
-        Duration::from_secs(5),
-        || {
-            let kc = kc.clone();
-            let ns = ns.clone();
-            let svc_name = svc_name.clone();
-            let expected_phase = expected_phase.clone();
-            let expected_msg = expected_msg.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "latticeservice",
-                    &svc_name,
-                    "-n",
-                    &ns,
-                    "-o",
-                    "jsonpath={.status.phase} {.status.conditions[0].message}",
-                ])
-                .await;
+        None => format!("LatticeService {}/{} to reach {}", namespace, name, phase),
+    };
 
-                match output {
-                    Ok(raw) => {
-                        let raw = raw.trim();
-                        let current_phase = raw.split_whitespace().next().unwrap_or("");
-                        info!(
-                            "LatticeService {}/{} phase: {}",
-                            ns, svc_name, current_phase
-                        );
-                        Ok(current_phase == expected_phase && raw.contains(&expected_msg))
-                    }
-                    Err(_) => Ok(false),
+    wait_for_condition(&desc, timeout, Duration::from_secs(5), || {
+        let kc = kc.clone();
+        let ns = ns.clone();
+        let svc_name = svc_name.clone();
+        let expected_phase = expected_phase.clone();
+        let expected_msg = expected_msg.clone();
+        async move {
+            let jsonpath = match &expected_msg {
+                Some(_) => "jsonpath={.status.phase} {.status.conditions[0].message}",
+                None => "jsonpath={.status.phase}",
+            };
+            let output = run_kubectl(&[
+                "--kubeconfig",
+                &kc,
+                "get",
+                "latticeservice",
+                &svc_name,
+                "-n",
+                &ns,
+                "-o",
+                jsonpath,
+            ])
+            .await;
+
+            match output {
+                Ok(raw) => {
+                    let raw = raw.trim();
+                    let current_phase = raw.split_whitespace().next().unwrap_or("");
+                    info!(
+                        "LatticeService {}/{} phase: {}",
+                        ns, svc_name, current_phase
+                    );
+                    let phase_ok = current_phase == expected_phase;
+                    let msg_ok = expected_msg
+                        .as_deref()
+                        .map_or(true, |msg| raw.contains(msg));
+                    Ok(phase_ok && msg_ok)
                 }
+                Err(_) => Ok(false),
             }
-        },
-    )
+        }
+    })
     .await
 }
 
@@ -345,20 +336,15 @@ pub async fn deploy_and_wait_for_phase(
 
     create_with_retry(&api, &service, &name).await?;
 
-    match expected_message {
-        Some(substring) => {
-            wait_for_service_phase_with_message(
-                kubeconfig,
-                namespace,
-                &name,
-                expected_phase,
-                substring,
-                timeout,
-            )
-            .await
-        }
-        None => wait_for_service_phase(kubeconfig, namespace, &name, expected_phase, timeout).await,
-    }
+    wait_for_service_phase(
+        kubeconfig,
+        namespace,
+        &name,
+        expected_phase,
+        expected_message,
+        timeout,
+    )
+    .await
 }
 
 // =============================================================================
@@ -711,7 +697,7 @@ pub async fn verify_pod_env_var(
 
     wait_for_condition(
         &format!("env var {} = '{}'", var_name, expected_value),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || {
             let kc = kc.clone();
@@ -775,7 +761,7 @@ pub async fn verify_pod_file_content(
 
     wait_for_condition(
         &format!("file {} contains '{}'", file_path, expected_substr),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || {
             let kc = kc.clone();
@@ -869,7 +855,7 @@ pub async fn wait_for_pod_running(
             "pod (label={}) in {} to be Running",
             label_selector, namespace
         ),
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || async move {
             let output = run_kubectl(&[
@@ -945,7 +931,7 @@ pub async fn verify_synced_secret_keys(
 
     wait_for_condition(
         &format!("secret {} in {} to be synced", secret_name, namespace),
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || async move {
             let output = run_kubectl(&[

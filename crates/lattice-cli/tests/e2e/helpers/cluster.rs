@@ -12,7 +12,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use tracing::{info, warn};
 
 use super::docker::{docker_containers_deleted, run_cmd, run_kubectl};
-use super::{run_id, wait_for_condition, OPERATOR_LABEL};
+use super::{run_id, wait_for_condition, DEFAULT_TIMEOUT, OPERATOR_LABEL};
 use crate::providers::InfraProvider;
 
 use lattice_cli::commands::port_forward::PortForward as ResilientPortForward;
@@ -445,7 +445,7 @@ pub async fn wait_for_operator_ready(
 
     wait_for_condition(
         &format!("operator on {} to be ready", cluster_name),
-        Duration::from_secs(timeout_secs.unwrap_or(300)),
+        timeout_secs.map_or(DEFAULT_TIMEOUT, Duration::from_secs),
         Duration::from_secs(5),
         || async move {
             if let Ok(output) = run_kubectl(&[
@@ -613,7 +613,7 @@ pub async fn proxy_service_exists(kubeconfig: &str) -> bool {
 async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> {
     wait_for_condition(
         "LoadBalancer IP to be assigned",
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || async move {
             let result = run_kubectl(
@@ -807,7 +807,7 @@ pub async fn delete_cluster_and_wait(
         info!("Waiting for Docker containers to be cleaned up...");
         wait_for_condition(
             &format!("{} Docker container cleanup", cluster_name),
-            Duration::from_secs(300),
+            DEFAULT_TIMEOUT,
             Duration::from_secs(5),
             || async move {
                 let deleted = docker_containers_deleted(cluster_name).await;
@@ -985,7 +985,7 @@ impl ProxySession {
 
         wait_for_condition(
             &format!("cluster '{}' to appear in subtree", cluster_name),
-            Duration::from_secs(300),
+            DEFAULT_TIMEOUT,
             Duration::from_secs(5),
             || {
                 let client = &client;
@@ -1157,7 +1157,7 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 
         wait_for_condition(
             &format!("namespace {} deletion", namespace),
-            Duration::from_secs(300),
+            DEFAULT_TIMEOUT,
             Duration::from_secs(5),
             || async move {
                 let deleted = match run_kubectl(&[
@@ -1204,7 +1204,7 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
     info!("[Namespace] Creating fresh namespace {}...", namespace);
     wait_for_condition(
         &format!("namespace {} creation", namespace),
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || async move {
             // Attempt to create (may get AlreadyExists if still Terminating)

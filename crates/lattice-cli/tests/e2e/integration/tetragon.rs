@@ -29,7 +29,7 @@ use super::super::helpers::{
     apply_cedar_policy_crd, delete_cedar_policies_by_label, delete_namespace,
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_pod_running, TestHarness,
-    BUSYBOX_IMAGE, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    BUSYBOX_IMAGE, DEFAULT_TIMEOUT, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
@@ -52,7 +52,7 @@ const TEST_LABEL: &str = "tetragon";
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Default timeout for waiting on Tetragon policy enforcement.
-const ENFORCEMENT_TIMEOUT: Duration = Duration::from_secs(300);
+const ENFORCEMENT_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 
 // =============================================================================
 // Cedar helpers

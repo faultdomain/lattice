@@ -15,7 +15,9 @@ use kube::api::{Api, Patch, PatchParams};
 
 use lattice_common::crd::LatticeService;
 
-use super::helpers::{client_from_kubeconfig, patch_with_retry, run_kubectl, wait_for_condition};
+use super::helpers::{
+    client_from_kubeconfig, patch_with_retry, run_kubectl, wait_for_condition, DEFAULT_TIMEOUT,
+};
 
 // =============================================================================
 // Constants
@@ -431,7 +433,7 @@ pub async fn wait_for_services_ready(
             "{} LatticeServices in {} to be Ready",
             expected_count, namespace
         ),
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(2),
         || async move {
             let output = run_kubectl(&[
@@ -506,7 +508,7 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
-    let timeout = Duration::from_secs(300);
+    let timeout = DEFAULT_TIMEOUT;
     let start = Instant::now();
     let mut attempt = 0u32;
     let mut last_err;
@@ -611,7 +613,7 @@ pub async fn wait_for_edges_denied(
         edges.len()
     );
 
-    let timeout = Duration::from_secs(300);
+    let timeout = DEFAULT_TIMEOUT;
     let start = Instant::now();
 
     loop {

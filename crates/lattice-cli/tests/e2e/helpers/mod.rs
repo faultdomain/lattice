@@ -164,8 +164,25 @@ pub async fn wait_for_resource_phase(
 }
 
 // =============================================================================
+// Shared Utilities
+// =============================================================================
+
+/// Truncate a string for error messages.
+pub fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        format!("{}...(truncated)", &s[..max_len])
+    } else {
+        s.to_string()
+    }
+}
+
+// =============================================================================
 // Shared Constants
 // =============================================================================
+
+/// Standard timeout for waiting on conditions (pod readiness, phase transitions,
+/// policy propagation, etc.). Generous to avoid flakes on CPU-starved machines.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Default Lattice container image for E2E tests
 pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";

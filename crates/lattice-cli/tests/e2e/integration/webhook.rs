@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use tracing::info;
 
-use super::super::helpers::{apply_apparmor_override_policy, run_kubectl, wait_for_condition};
+use super::super::helpers::{
+    apply_apparmor_override_policy, ensure_namespace, run_kubectl, wait_for_condition,
+};
 
 const WEBHOOK_TEST_NS: &str = "webhook-test";
 
@@ -113,18 +115,6 @@ async fn wait_for_webhook_ready(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     info!("[Webhook] Admission webhook is ready");
-    Ok(())
-}
-
-/// Ensure the test namespace exists
-async fn ensure_test_namespace(kubeconfig: &str) -> Result<(), String> {
-    let ns_yaml = format!("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {WEBHOOK_TEST_NS}");
-    let tmpfile = "/tmp/webhook-test-ns.yaml";
-    tokio::fs::write(tmpfile, &ns_yaml)
-        .await
-        .map_err(|e| format!("Failed to write namespace yaml: {e}"))?;
-
-    run_kubectl(&["--kubeconfig", kubeconfig, "apply", "-f", tmpfile]).await?;
     Ok(())
 }
 
@@ -549,7 +539,7 @@ pub async fn run_webhook_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Webhook] Running admission webhook integration tests on {kubeconfig}");
 
     wait_for_webhook_ready(kubeconfig).await?;
-    ensure_test_namespace(kubeconfig).await?;
+    ensure_namespace(kubeconfig, WEBHOOK_TEST_NS).await?;
 
     // KIND clusters don't have AppArmor — permit the Unconfined override
     apply_apparmor_override_policy(kubeconfig).await?;

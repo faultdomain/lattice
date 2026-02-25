@@ -31,6 +31,7 @@ use lattice_common::crd::{
 use super::super::helpers::{
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace, run_kubectl,
     service_pod_selector, setup_regcreds_infrastructure, wait_for_condition, BUSYBOX_IMAGE,
+    DEFAULT_TIMEOUT,
 };
 use super::super::mesh_fixtures::build_lattice_service;
 
@@ -45,9 +46,9 @@ const METRICS_SERVER_NAME: &str = "metrics-server";
 const CUSTOM_METRIC_NAME: &str = "test_scale_metric";
 
 const SCALEDOBJECT_TIMEOUT: Duration = Duration::from_secs(120);
-const SCALEUP_TIMEOUT: Duration = Duration::from_secs(300);
+const SCALEUP_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 const PROM_SCALEUP_TIMEOUT: Duration = Duration::from_secs(420);
-const DEPLOY_TIMEOUT: Duration = Duration::from_secs(300);
+const DEPLOY_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 // =============================================================================

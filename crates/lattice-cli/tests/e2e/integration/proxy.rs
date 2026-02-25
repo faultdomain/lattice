@@ -28,7 +28,7 @@ use tracing::info;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     get_or_create_proxy, get_sa_token, get_workload2_cluster_name, get_workload_cluster_name,
-    http_get_with_retry, run_kubectl,
+    http_get_with_retry, run_kubectl, truncate, DEFAULT_TIMEOUT,
 };
 use super::cedar::{apply_e2e_default_policy, delete_cedar_policy, E2E_DEFAULT_POLICY_NAME};
 
@@ -64,7 +64,7 @@ pub async fn wait_for_agent_ready(
 
     wait_for_condition(
         &format!("cluster {} to reach Ready/Pivoted", child_cluster_name),
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || async move {
             let phase_trimmed = match run_kubectl(&[
@@ -215,14 +215,14 @@ async fn verify_proxy_namespace_access(
         if response.is_forbidden() {
             return Err(format!(
                 "Proxy access denied (403 Forbidden) to {} {} - Cedar policy may be missing. Response: {}",
-                cluster_type, cluster_name, truncate_response(&response.body)
+                cluster_type, cluster_name, truncate(&response.body, 500)
             ));
         }
 
         if response.is_unauthorized() {
             return Err(format!(
                 "Proxy authentication failed (401 Unauthorized) to {} {} - token validation failed. Response: {}",
-                cluster_type, cluster_name, truncate_response(&response.body)
+                cluster_type, cluster_name, truncate(&response.body, 500)
             ));
         }
 
@@ -237,7 +237,7 @@ async fn verify_proxy_namespace_access(
                 cluster_type,
                 cluster_name,
                 response.status_code,
-                truncate_response(&response.body)
+                truncate(&response.body, 500)
             );
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
@@ -248,7 +248,7 @@ async fn verify_proxy_namespace_access(
             cluster_type,
             cluster_name,
             response.status_code,
-            truncate_response(&response.body)
+            truncate(&response.body, 500)
         ));
     }
 }
@@ -300,15 +300,6 @@ pub async fn run_proxy_tests(
 
     info!("[Integration/Proxy] Proxy tests complete");
     Ok(())
-}
-
-/// Truncate long responses for error messages
-fn truncate_response(response: &str) -> String {
-    if response.len() > 500 {
-        format!("{}...(truncated)", &response[..500])
-    } else {
-        response.to_string()
-    }
 }
 
 // ============================================================================

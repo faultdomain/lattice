@@ -15,7 +15,7 @@ use lattice_common::crd::LatticeService;
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, ensure_fresh_namespace,
     ensure_test_cluster_issuer, load_service_config, run_kubectl, setup_regcreds_infrastructure,
-    wait_for_condition, wait_for_service_phase_with_message, CedarPolicySpec,
+    wait_for_condition, wait_for_service_phase, CedarPolicySpec, DEFAULT_TIMEOUT,
 };
 use super::mesh_helpers::retry_verification;
 
@@ -143,7 +143,7 @@ async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
 
         wait_for_condition(
             &format!("deployment {} to be available", name),
-            Duration::from_secs(300),
+            DEFAULT_TIMEOUT,
             Duration::from_secs(5),
             || async move {
                 let output = run_kubectl(&[
@@ -577,12 +577,12 @@ async fn verify_unauthorized_volume_access_denied(kubeconfig_path: &str) -> Resu
     // plex was deployed alongside the other services in deploy_media_services().
     // It references media-storage but is NOT in jellyfin's allowedConsumers —
     // the compiler should reject it with a volume access denied error.
-    wait_for_service_phase_with_message(
+    wait_for_service_phase(
         kubeconfig_path,
         NAMESPACE,
         "plex",
         "Failed",
-        "volume access denied",
+        Some("volume access denied"),
         Duration::from_secs(120),
     )
     .await?;

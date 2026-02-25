@@ -36,7 +36,7 @@ use tracing::info;
 use super::super::helpers::{
     apply_cedar_policy_crd, create_service_with_secrets, delete_cedar_policies_by_label,
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace,
-    setup_regcreds_infrastructure, wait_for_service_phase, TestHarness,
+    setup_regcreds_infrastructure, wait_for_service_phase, TestHarness, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -200,7 +200,7 @@ async fn test_permit_specific_path(kubeconfig: &str) -> Result<(), String> {
         ),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -277,7 +277,7 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
         ),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -323,6 +323,7 @@ async fn test_policy_lifecycle(kubeconfig: &str) -> Result<(), String> {
         NS_LIFECYCLE,
         "svc-lifecycle",
         "Ready",
+        None,
         Duration::from_secs(180),
     )
     .await?;
@@ -371,7 +372,7 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
         ),
         "Ready",
         None,
-        Duration::from_secs(90),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 

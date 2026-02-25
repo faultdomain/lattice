@@ -39,7 +39,9 @@ use tokio::time::sleep;
 use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
-use super::super::helpers::{delete_namespace, ensure_fresh_namespace, run_kubectl, BUSYBOX_IMAGE};
+use super::super::helpers::{
+    delete_namespace, ensure_fresh_namespace, run_kubectl, truncate, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
+};
 
 // ============================================================================
 // Constants
@@ -135,7 +137,7 @@ async fn test_create_pod(kubeconfig: &str) -> Result<(), String> {
 
     // Create the pod
     // The pod echoes a marker then sleeps to stay running for log/exec tests
-    let pod_command = format!("echo '{}'; sleep 300", LOG_MARKER);
+    let pod_command = format!("echo '{}'; sleep 600", LOG_MARKER);
 
     run_kubectl(&[
         "--kubeconfig",
@@ -162,7 +164,7 @@ async fn test_create_pod(kubeconfig: &str) -> Result<(), String> {
 async fn test_wait_pod_ready(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/MultiHop] Test 2: Waiting for pod to be ready (polling through 2-hop proxy)...");
 
-    let timeout = Duration::from_secs(300);
+    let timeout = DEFAULT_TIMEOUT;
     let start = std::time::Instant::now();
 
     loop {
@@ -310,19 +312,6 @@ async fn test_delete_pod(kubeconfig: &str) -> Result<(), String> {
 
     info!("[Integration/MultiHop] SUCCESS: Pod deleted through 2-hop proxy");
     Ok(())
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/// Truncate a string for error messages.
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...(truncated)", &s[..max_len])
-    } else {
-        s.to_string()
-    }
 }
 
 // ============================================================================

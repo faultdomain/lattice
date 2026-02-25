@@ -18,7 +18,7 @@ use tracing::info;
 use super::super::helpers::{
     apply_yaml_with_retry, delete_namespace, ensure_fresh_namespace, load_fixture_config,
     run_kubectl, setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
-    DEFAULT_DOWNLOADER_IMAGE,
+    DEFAULT_DOWNLOADER_IMAGE, DEFAULT_TIMEOUT,
 };
 
 const MODEL_NAMESPACE: &str = "serving";
@@ -27,7 +27,7 @@ const MODEL_NAME: &str = "llm-serving";
 /// Timeout for waiting on phase transitions (e.g., Pending → Loading)
 const PHASE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Timeout for longer operations (Serving phase, download Job completion)
-const LONG_TIMEOUT: Duration = Duration::from_secs(300);
+const LONG_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 /// Interval between polls when waiting for a condition
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Expected HuggingFace model ID used in model-serving fixture

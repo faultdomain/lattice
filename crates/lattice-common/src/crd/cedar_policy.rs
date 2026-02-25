@@ -107,6 +107,11 @@ pub struct CedarPolicyStatus {
     /// Validation errors (if any)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation_errors: Vec<String>,
+
+    /// Last observed metadata.generation — ensures status is always patched when
+    /// spec changes, even if the validation result is identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
 }
 
 /// CedarPolicy phase
