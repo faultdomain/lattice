@@ -10,17 +10,16 @@
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
+use futures::future::try_join_all;
 use kube::api::Api;
 use rand::prelude::*;
-use tokio::time::sleep;
 use tracing::info;
 
 use lattice_common::crd::{LatticeService, ParsedEndpoint};
 
 use super::helpers::{
-    apply_cedar_external_endpoint_policy, apply_mesh_wildcard_inbound_policy,
-    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
-    run_kubectl, setup_regcreds_infrastructure,
+    apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
+    ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, CedarPolicySpec,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,
@@ -530,52 +529,87 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
 
-    // Apply Cedar policies for wildcard inbound services
+    // Batch-apply all Cedar policies (wildcard inbound + external endpoints)
+    let mut cedar_policies = Vec::new();
+
     for svc in mesh.services.values() {
         if svc.allows_all_inbound {
-            apply_mesh_wildcard_inbound_policy(kubeconfig_path, RANDOM_MESH_NAMESPACE, &svc.name)
-                .await?;
+            cedar_policies.push(CedarPolicySpec {
+                name: format!("permit-wildcard-inbound-{}", svc.name),
+                test_label: "mesh-test".to_string(),
+                priority: 50,
+                cedar_text: format!(
+                    r#"permit(
+  principal == Lattice::Service::"{namespace}/{service_name}",
+  action == Lattice::Action::"AllowWildcard",
+  resource == Lattice::Mesh::"inbound"
+);"#,
+                    namespace = RANDOM_MESH_NAMESPACE,
+                    service_name = svc.name,
+                ),
+            });
+        }
+
+        if !svc.external_outbound.is_empty() {
+            let endpoint_ids: Vec<String> = svc
+                .external_outbound
+                .iter()
+                .filter_map(|ext_name| {
+                    let url = &mesh.external_services[ext_name].url;
+                    ParsedEndpoint::parse(url).map(|ep| format!("{}:{}", ep.host, ep.port))
+                })
+                .collect();
+            let resource_conditions: Vec<String> = endpoint_ids
+                .iter()
+                .map(|id| format!("resource == Lattice::ExternalEndpoint::\"{}\"", id))
+                .collect();
+            let resource_expr = resource_conditions.join(" ||\n  ");
+
+            cedar_policies.push(CedarPolicySpec {
+                name: format!("permit-ext-{}-{}", RANDOM_MESH_NAMESPACE, svc.name),
+                test_label: "random-mesh".to_string(),
+                priority: 100,
+                cedar_text: format!(
+                    r#"permit(
+  principal == Lattice::Service::"{namespace}/{service_name}",
+  action == Lattice::Action::"AccessExternalEndpoint",
+  resource
+) when {{
+  {resource_expr}
+}};"#,
+                    namespace = RANDOM_MESH_NAMESPACE,
+                    service_name = svc.name,
+                ),
+            });
         }
     }
 
-    // Apply per-service Cedar policies for external endpoint access
-    for svc in mesh.services.values() {
-        if svc.external_outbound.is_empty() {
-            continue;
-        }
-        let endpoint_ids: Vec<String> = svc
-            .external_outbound
-            .iter()
-            .filter_map(|ext_name| {
-                let url = &mesh.external_services[ext_name].url;
-                ParsedEndpoint::parse(url).map(|ep| format!("{}:{}", ep.host, ep.port))
-            })
-            .collect();
-        let endpoint_refs: Vec<&str> = endpoint_ids.iter().map(|s| s.as_str()).collect();
-        apply_cedar_external_endpoint_policy(
-            kubeconfig_path,
-            "random-mesh",
-            RANDOM_MESH_NAMESPACE,
-            &svc.name,
-            &endpoint_refs,
-        )
-        .await?;
+    if !cedar_policies.is_empty() {
+        apply_cedar_policies_batch(kubeconfig_path, cedar_policies, 5).await?;
     }
 
     let api: Api<LatticeService> = Api::namespaced(client, RANDOM_MESH_NAMESPACE);
 
-    for (layer_idx, layer) in mesh.layers.iter().enumerate().rev() {
-        info!(
-            "[Random Mesh] [Layer {}] Deploying {} services...",
-            layer_idx,
-            layer.len()
-        );
-        for name in layer {
+    // Deploy all services concurrently
+    let all_services: Vec<(String, LatticeService)> = mesh
+        .layers
+        .iter()
+        .flat_map(|layer| layer.iter())
+        .map(|name| {
             let svc = mesh.create_lattice_service(name, RANDOM_MESH_NAMESPACE);
-            create_with_retry(&api, &svc, name).await?;
-        }
-        sleep(Duration::from_secs(2)).await;
-    }
+            (name.clone(), svc)
+        })
+        .collect();
+
+    info!(
+        "[Random Mesh] Deploying all {} services concurrently...",
+        all_services.len()
+    );
+    try_join_all(all_services.into_iter().map(|(name, svc)| {
+        let api = api.clone();
+        async move { create_with_retry(&api, &svc, &name).await }
+    }))
+    .await?;
 
     info!(
         "[Random Mesh] All {} services deployed!",
@@ -721,7 +755,7 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
         expected_pods,
         "Random Mesh",
         Duration::from_secs(1200),
-        Duration::from_secs(15),
+        Duration::from_secs(5),
     )
     .await?;
 

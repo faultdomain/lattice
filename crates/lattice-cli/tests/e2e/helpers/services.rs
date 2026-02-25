@@ -9,10 +9,7 @@ use lattice_common::crd::LatticeService;
 use lattice_common::LOCAL_SECRETS_NAMESPACE;
 use tracing::info;
 
-use super::cedar::{
-    apply_apparmor_override_policy, apply_binary_wildcard_override_policy, apply_cedar_policy_crd,
-    apply_test_binaries_override_policy,
-};
+use super::cedar::{apply_cedar_policies_batch, CedarPolicySpec};
 use super::cluster::load_registry_credentials;
 use super::docker::run_kubectl;
 use super::kubernetes::{client_from_kubeconfig, create_with_retry};
@@ -178,7 +175,8 @@ pub fn create_service_with_security_overrides(
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        ContainerSpec, LatticeServiceSpec, PortSpec, RuntimeSpec, ServicePortsSpec, WorkloadSpec,
+        ContainerSpec, LatticeServiceSpec, PortSpec, ResourceQuantity, ResourceRequirements,
+        RuntimeSpec, ServicePortsSpec, WorkloadSpec,
     };
 
     // Docker KIND clusters don't have AppArmor — ensure Unconfined
@@ -192,6 +190,16 @@ pub fn create_service_with_security_overrides(
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
             command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
             security: Some(security),
             ..Default::default()
         },
@@ -1016,30 +1024,63 @@ pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), Strin
     // Seed the GHCR credentials as a source secret for the webhook
     seed_local_regcreds(kubeconfig, REGCREDS_REMOTE_KEY).await?;
 
-    // Broad Cedar policy: permit all services to access regcreds
-    apply_cedar_policy_crd(
+    // Batch-apply all Cedar policies needed for regcreds infrastructure
+    apply_cedar_policies_batch(
         kubeconfig,
-        "permit-regcreds",
-        "regcreds",
-        50,
-        r#"permit(
+        vec![
+            CedarPolicySpec {
+                name: "permit-regcreds".to_string(),
+                test_label: "regcreds".to_string(),
+                priority: 50,
+                cedar_text: r#"permit(
   principal,
   action == Lattice::Action::"AccessSecret",
   resource
 ) when {
   resource.path == "local-regcreds"
-};"#,
+};"#
+                .to_string(),
+            },
+            CedarPolicySpec {
+                name: "permit-apparmor-unconfined".to_string(),
+                test_label: "e2e".to_string(),
+                priority: 50,
+                cedar_text: r#"permit(
+  principal,
+  action == Lattice::Action::"OverrideSecurity",
+  resource == Lattice::SecurityOverride::"unconfined:apparmor"
+);"#
+                .to_string(),
+            },
+            CedarPolicySpec {
+                name: "permit-binary-wildcard".to_string(),
+                test_label: "e2e".to_string(),
+                priority: 50,
+                cedar_text: r#"permit(
+  principal,
+  action == Lattice::Action::"OverrideSecurity",
+  resource == Lattice::SecurityOverride::"allowedBinary:*"
+);"#
+                .to_string(),
+            },
+            CedarPolicySpec {
+                name: "permit-test-binaries".to_string(),
+                test_label: "e2e".to_string(),
+                priority: 50,
+                cedar_text: r#"permit(
+  principal,
+  action == Lattice::Action::"OverrideSecurity",
+  resource
+) when {
+  resource == Lattice::SecurityOverride::"allowedBinary:/bin/printenv" ||
+  resource == Lattice::SecurityOverride::"allowedBinary:/bin/cat"
+};"#
+                .to_string(),
+            },
+        ],
+        5,
     )
     .await?;
-
-    // KIND clusters don't have AppArmor
-    apply_apparmor_override_policy(kubeconfig).await?;
-
-    // Permit binary wildcard for containers without explicit command or with allowedBinaries: ["*"]
-    apply_binary_wildcard_override_policy(kubeconfig).await?;
-
-    // Permit test utility binaries (printenv, cat) for verification via kubectl exec
-    apply_test_binaries_override_policy(kubeconfig).await?;
 
     info!("[Regcreds] Infrastructure ready (provider + source secret + Cedar policies)");
     Ok(())

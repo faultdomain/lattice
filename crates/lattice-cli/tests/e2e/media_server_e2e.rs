@@ -13,10 +13,9 @@ use kube::api::Api;
 use lattice_common::crd::LatticeService;
 
 use super::helpers::{
-    apply_cedar_external_endpoint_policy, apply_cedar_policy_crd,
-    apply_run_as_root_override_policy, client_from_kubeconfig, create_with_retry,
-    ensure_fresh_namespace, ensure_test_cluster_issuer, load_service_config, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, wait_for_service_phase_with_message,
+    apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, ensure_fresh_namespace,
+    ensure_test_cluster_issuer, load_service_config, run_kubectl, setup_regcreds_infrastructure,
+    wait_for_condition, wait_for_service_phase_with_message, CedarPolicySpec,
 };
 use super::mesh_helpers::retry_verification;
 
@@ -38,33 +37,49 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     // Ensure cert-manager has a self-signed issuer matching the fixture references
     ensure_test_cluster_issuer(kubeconfig_path, "letsencrypt-prod").await?;
 
-    // Cedar: permit security overrides for media services (including plex)
+    // Batch-apply all Cedar policies for media services
+    let mut cedar_policies: Vec<CedarPolicySpec> = Vec::new();
+
+    // Run-as-root overrides for jellyfin, nzbget, sonarr, plex
     for svc in ["jellyfin", "nzbget", "sonarr", "plex"] {
-        apply_run_as_root_override_policy(kubeconfig_path, NAMESPACE, svc).await?;
+        cedar_policies.push(CedarPolicySpec {
+            name: format!("permit-run-as-root-{}", svc),
+            test_label: "e2e".to_string(),
+            priority: 50,
+            cedar_text: format!(
+                r#"permit(
+  principal == Lattice::Service::"{namespace}/{service_name}",
+  action == Lattice::Action::"OverrideSecurity",
+  resource == Lattice::SecurityOverride::"runAsRoot"
+);"#,
+                namespace = NAMESPACE,
+                service_name = svc,
+            ),
+        });
     }
-    // sonarr main container needs SETUID + SETGID for s6-overlay
-    apply_cedar_policy_crd(
-        kubeconfig_path,
-        "permit-sonarr-caps",
-        "e2e",
-        50,
-        r#"permit(
+
+    // sonarr: SETUID + SETGID for s6-overlay
+    cedar_policies.push(CedarPolicySpec {
+        name: "permit-sonarr-caps".to_string(),
+        test_label: "e2e".to_string(),
+        priority: 50,
+        cedar_text: r#"permit(
   principal == Lattice::Service::"media/sonarr",
   action == Lattice::Action::"OverrideSecurity",
   resource
 ) when {
   resource == Lattice::SecurityOverride::"capability:SETUID" ||
   resource == Lattice::SecurityOverride::"capability:SETGID"
-};"#,
-    )
-    .await?;
-    // nzbget: main needs SETUID + SETGID (s6-overlay), vpn sidecar needs NET_ADMIN + SYS_MODULE
-    apply_cedar_policy_crd(
-        kubeconfig_path,
-        "permit-nzbget-caps",
-        "e2e",
-        50,
-        r#"permit(
+};"#
+        .to_string(),
+    });
+
+    // nzbget: SETUID + SETGID (s6-overlay) + NET_ADMIN + SYS_MODULE (vpn sidecar)
+    cedar_policies.push(CedarPolicySpec {
+        name: "permit-nzbget-caps".to_string(),
+        test_label: "e2e".to_string(),
+        priority: 50,
+        cedar_text: r#"permit(
   principal == Lattice::Service::"media/nzbget",
   action == Lattice::Action::"OverrideSecurity",
   resource
@@ -73,19 +88,26 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
   resource == Lattice::SecurityOverride::"capability:SYS_MODULE" ||
   resource == Lattice::SecurityOverride::"capability:SETUID" ||
   resource == Lattice::SecurityOverride::"capability:SETGID"
-};"#,
-    )
-    .await?;
+};"#
+        .to_string(),
+    });
 
-    // Cedar: permit jellyfin to access repo.jellyfin.org (inline external-service endpoint)
-    apply_cedar_external_endpoint_policy(
-        kubeconfig_path,
-        "e2e",
-        NAMESPACE,
-        "jellyfin",
-        &["repo.jellyfin.org:443"],
-    )
-    .await?;
+    // jellyfin: external endpoint access to repo.jellyfin.org
+    cedar_policies.push(CedarPolicySpec {
+        name: format!("permit-ext-{}-jellyfin", NAMESPACE),
+        test_label: "e2e".to_string(),
+        priority: 100,
+        cedar_text: r#"permit(
+  principal == Lattice::Service::"media/jellyfin",
+  action == Lattice::Action::"AccessExternalEndpoint",
+  resource
+) when {
+  resource == Lattice::ExternalEndpoint::"repo.jellyfin.org:443"
+};"#
+        .to_string(),
+    });
+
+    apply_cedar_policies_batch(kubeconfig_path, cedar_policies, 5).await?;
 
     // Label for Istio ambient mesh
     run_kubectl(&[

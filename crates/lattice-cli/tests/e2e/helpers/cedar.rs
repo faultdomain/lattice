@@ -1,10 +1,12 @@
 //! Cedar policy helpers, YAML application, and Tetragon listing.
 #![cfg(feature = "provider-e2e")]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use super::docker::run_kubectl;
@@ -149,6 +151,110 @@ spec:
     Ok(())
 }
 
+/// Specification for a Cedar policy to be batch-applied.
+pub struct CedarPolicySpec {
+    pub name: String,
+    pub test_label: String,
+    pub priority: u32,
+    pub cedar_text: String,
+}
+
+/// Apply a CedarPolicy CRD without the post-apply sleep.
+///
+/// Used internally by `apply_cedar_policies_batch` — the batch function
+/// sleeps once after all policies are applied instead of per-policy.
+pub async fn apply_cedar_policy_crd_nosleep(
+    kubeconfig: &str,
+    name: &str,
+    test_label: &str,
+    priority: u32,
+    cedar_text: &str,
+) -> Result<(), String> {
+    let indented: String = cedar_text
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("    {}", line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let yaml = format!(
+        r#"apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: {name}
+  namespace: {system_ns}
+  labels:
+    lattice.dev/test: {test_label}
+spec:
+  enabled: true
+  priority: {priority}
+  policies: |
+{indented}"#,
+        name = name,
+        system_ns = LATTICE_SYSTEM_NAMESPACE,
+        test_label = test_label,
+        priority = priority,
+        indented = indented,
+    );
+
+    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    info!(
+        "Applied CedarPolicy '{}' (priority={}, label={})",
+        name, priority, test_label
+    );
+    Ok(())
+}
+
+/// Apply multiple Cedar policies concurrently, then sleep once for propagation.
+///
+/// Uses bounded concurrency via a semaphore to avoid overloading the API server.
+/// Saves `(N-1) * 3` seconds compared to sequential `apply_cedar_policy_crd()` calls.
+pub async fn apply_cedar_policies_batch(
+    kubeconfig: &str,
+    policies: Vec<CedarPolicySpec>,
+    max_concurrent: usize,
+) -> Result<(), String> {
+    let count = policies.len();
+    if count == 0 {
+        return Ok(());
+    }
+
+    info!("Batch-applying {} Cedar policies (max_concurrent={})...", count, max_concurrent);
+
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
+    let kubeconfig = kubeconfig.to_string();
+
+    let mut handles = Vec::with_capacity(count);
+    for policy in policies {
+        let sem = semaphore.clone();
+        let kc = kubeconfig.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.map_err(|e| format!("semaphore error: {}", e))?;
+            apply_cedar_policy_crd_nosleep(
+                &kc,
+                &policy.name,
+                &policy.test_label,
+                policy.priority,
+                &policy.cedar_text,
+            )
+            .await
+        }));
+    }
+
+    for handle in handles {
+        handle.await.map_err(|e| format!("task join error: {}", e))??;
+    }
+
+    info!("Batch-applied {} Cedar policies, waiting 3s for propagation...", count);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    Ok(())
+}
+
 /// Apply a Cedar policy permitting wildcard inbound for a specific service.
 pub async fn apply_mesh_wildcard_inbound_policy(
     kubeconfig: &str,
@@ -191,51 +297,6 @@ pub async fn apply_apparmor_override_policy(kubeconfig: &str) -> Result<(), Stri
     .await
 }
 
-/// Apply a Cedar policy permitting binary wildcard for all services.
-///
-/// When containers don't declare an explicit `command`, the compiler infers an
-/// implicit `allowedBinaries: ["*"]` wildcard. Fixtures that explicitly set
-/// `allowedBinaries: ["*"]` also generate this override. This blanket permit
-/// authorizes all such cases across all namespaces.
-pub async fn apply_binary_wildcard_override_policy(kubeconfig: &str) -> Result<(), String> {
-    apply_cedar_policy_crd(
-        kubeconfig,
-        "permit-binary-wildcard",
-        "e2e",
-        50,
-        r#"permit(
-  principal,
-  action == Lattice::Action::"OverrideSecurity",
-  resource == Lattice::SecurityOverride::"allowedBinary:*"
-);"#,
-    )
-    .await
-}
-
-/// Apply a Cedar policy permitting test utility binaries (printenv, cat).
-///
-/// Services that declare `allowedBinaries: ["/bin/printenv", "/bin/cat"]` need Cedar
-/// authorization for each binary. This blanket permit covers all services
-/// so that `kubectl exec -- printenv` and `kubectl exec -- cat` work for
-/// test verification.
-pub async fn apply_test_binaries_override_policy(kubeconfig: &str) -> Result<(), String> {
-    apply_cedar_policy_crd(
-        kubeconfig,
-        "permit-test-binaries",
-        "e2e",
-        50,
-        r#"permit(
-  principal,
-  action == Lattice::Action::"OverrideSecurity",
-  resource
-) when {
-  resource == Lattice::SecurityOverride::"allowedBinary:/bin/printenv" ||
-  resource == Lattice::SecurityOverride::"allowedBinary:/bin/cat"
-};"#,
-    )
-    .await
-}
-
 pub async fn apply_run_as_root_override_policy(
     kubeconfig: &str,
     namespace: &str,
@@ -255,38 +316,6 @@ pub async fn apply_run_as_root_override_policy(
         ),
     )
     .await
-}
-
-/// Apply a Cedar policy permitting a specific service to access specific external endpoints.
-///
-/// Each service gets its own policy listing exactly which endpoints it can reach.
-///
-/// `endpoint_ids` are `"host:port"` strings matching `Lattice::ExternalEndpoint` UIDs.
-pub async fn apply_cedar_external_endpoint_policy(
-    kubeconfig: &str,
-    label: &str,
-    namespace: &str,
-    service_name: &str,
-    endpoint_ids: &[&str],
-) -> Result<(), String> {
-    let resource_conditions: Vec<String> = endpoint_ids
-        .iter()
-        .map(|id| format!("resource == Lattice::ExternalEndpoint::\"{}\"", id))
-        .collect();
-    let resource_expr = resource_conditions.join(" ||\n  ");
-
-    let cedar = format!(
-        r#"permit(
-  principal == Lattice::Service::"{namespace}/{service_name}",
-  action == Lattice::Action::"AccessExternalEndpoint",
-  resource
-) when {{
-  {resource_expr}
-}};"#,
-    );
-
-    let policy_name = format!("permit-ext-{}-{}", namespace, service_name);
-    apply_cedar_policy_crd(kubeconfig, &policy_name, label, 100, &cedar).await
 }
 
 /// Delete all CedarPolicy CRDs matching a label selector.

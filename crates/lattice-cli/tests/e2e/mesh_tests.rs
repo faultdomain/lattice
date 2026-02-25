@@ -8,8 +8,8 @@
 
 use std::time::Duration;
 
+use futures::future::try_join_all;
 use kube::api::Api;
-use tokio::time::sleep;
 use tracing::info;
 
 use lattice_common::crd::LatticeService;
@@ -86,39 +86,30 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
     apply_mesh_wildcard_inbound_policy(kubeconfig_path, TEST_SERVICES_NAMESPACE, "public-api")
         .await?;
 
-    info!("[Fixed Mesh] [Layer 3] Deploying backend services...");
-    for (name, svc) in [
+    let all_services: Vec<(&str, LatticeService)> = vec![
         ("db-users", create_db_users()),
         ("db-orders", create_db_orders()),
         ("cache", create_cache()),
         ("public-api", create_public_api()),
-    ] {
-        info!("[Fixed Mesh] Deploying {}...", name);
-        create_with_retry(&api, &svc, name).await?;
-    }
-
-    info!("[Fixed Mesh] [Layer 2] Deploying API services...");
-    for (name, svc) in [
         ("api-gateway", create_api_gateway()),
         ("api-users", create_api_users()),
         ("api-orders", create_api_orders()),
-    ] {
-        info!("[Fixed Mesh] Deploying {}...", name);
-        create_with_retry(&api, &svc, name).await?;
-    }
-
-    info!("[Fixed Mesh] [Layer 1] Deploying frontend services...");
-    for (name, svc) in [
         ("frontend-web", create_frontend_web()),
         ("frontend-mobile", create_frontend_mobile()),
         ("frontend-admin", create_frontend_admin()),
-    ] {
-        info!("[Fixed Mesh] Deploying {}...", name);
-        create_with_retry(&api, &svc, name).await?;
-    }
+    ];
+
+    info!("[Fixed Mesh] Deploying all {} services concurrently...", all_services.len());
+    try_join_all(all_services.into_iter().map(|(name, svc)| {
+        let api = api.clone();
+        async move {
+            info!("[Fixed Mesh] Deploying {}...", name);
+            create_with_retry(&api, &svc, name).await
+        }
+    }))
+    .await?;
 
     info!("[Fixed Mesh] All {} services deployed!", TOTAL_SERVICES);
-    sleep(Duration::from_secs(5)).await;
     Ok(())
 }
 
@@ -272,7 +263,7 @@ pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, St
         TOTAL_SERVICES,
         "Fixed Mesh",
         Duration::from_secs(300),
-        Duration::from_secs(10),
+        Duration::from_secs(5),
     )
     .await?;
 

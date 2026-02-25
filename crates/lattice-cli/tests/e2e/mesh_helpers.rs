@@ -428,7 +428,7 @@ pub async fn wait_for_services_ready(
             expected_count, namespace
         ),
         Duration::from_secs(300),
-        Duration::from_secs(5),
+        Duration::from_secs(2),
         || async move {
             let output = run_kubectl(&[
                 "--kubeconfig",
@@ -523,8 +523,8 @@ where
                 if start.elapsed() >= timeout {
                     break;
                 }
-                info!("[{}] Verification failed, retrying in 15s...", label);
-                sleep(Duration::from_secs(15)).await;
+                info!("[{}] Verification failed, retrying in 8s...", label);
+                sleep(Duration::from_secs(8)).await;
             }
         }
     }
