@@ -182,7 +182,12 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 
 /// Standard timeout for waiting on conditions (pod readiness, phase transitions,
 /// policy propagation, etc.). Generous to avoid flakes on CPU-starved machines.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Cycle markers emitted by traffic generators to indicate test progress.
+/// Used by both mesh and gateway traffic generators.
+pub const CYCLE_START_MARKER: &str = "===CYCLE_START===";
+pub const CYCLE_END_MARKER: &str = "===CYCLE_END===";
 
 /// Default Lattice container image for E2E tests
 pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";

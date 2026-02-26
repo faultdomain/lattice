@@ -34,6 +34,7 @@ pub mod cedar_security;
 pub mod gateway;
 pub mod job;
 pub mod kubeconfig;
+pub mod media;
 pub mod mesh;
 pub mod model;
 pub mod multi_hop;

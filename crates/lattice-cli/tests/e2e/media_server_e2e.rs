@@ -74,7 +74,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
         .to_string(),
     });
 
-    // nzbget: SETUID + SETGID (s6-overlay) + NET_ADMIN + SYS_MODULE (vpn sidecar)
+    // nzbget: s6-overlay init caps + VPN sidecar caps (NET_ADMIN, SYS_MODULE)
     cedar_policies.push(CedarPolicySpec {
         name: "permit-nzbget-caps".to_string(),
         test_label: "e2e".to_string(),
@@ -84,6 +84,10 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
   action == Lattice::Action::"OverrideSecurity",
   resource
 ) when {
+  resource == Lattice::SecurityOverride::"capability:CHOWN" ||
+  resource == Lattice::SecurityOverride::"capability:DAC_OVERRIDE" ||
+  resource == Lattice::SecurityOverride::"capability:FOWNER" ||
+  resource == Lattice::SecurityOverride::"capability:KILL" ||
   resource == Lattice::SecurityOverride::"capability:NET_ADMIN" ||
   resource == Lattice::SecurityOverride::"capability:SYS_MODULE" ||
   resource == Lattice::SecurityOverride::"capability:SETUID" ||

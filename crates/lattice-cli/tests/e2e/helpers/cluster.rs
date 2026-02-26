@@ -240,7 +240,7 @@ pub async fn watch_worker_scaling(
 
     wait_for_condition(
         &format!("{} workers on {}", expected_workers, cluster_name),
-        Duration::from_secs(600),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(15),
         || {
             let last_count = &last_count;
@@ -777,7 +777,7 @@ pub async fn delete_cluster_and_wait(
     info!("Waiting for LatticeCluster to be deleted from parent...");
     wait_for_condition(
         &format!("{} CR deletion from parent", cluster_name),
-        Duration::from_secs(600),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(10),
         || async move {
             let deleted = match run_kubectl(&[

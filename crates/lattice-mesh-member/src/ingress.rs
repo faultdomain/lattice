@@ -5,14 +5,34 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{IngressSpec, IngressTls, MeshMemberPort, PathMatchType, RouteKind};
+use lattice_common::crd::{
+    derived_name, IngressSpec, IngressTls, MeshMemberPort, PathMatchType, RouteKind,
+};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
 use lattice_common::network::gateway_api::*;
+use lattice_common::policy::cilium::{
+    CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, EndpointSelector,
+};
 use lattice_common::policy::istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     OperationSpec, WorkloadSelector,
 };
+
+use crate::policy::cilium::{
+    build_tcp_port_rules, dns_egress_rule, hbone_egress_rule, hbone_ingress_rule,
+};
+
+/// K8s label for the gateway name on gateway proxy pods (raw, without Cilium `k8s:` prefix).
+const GATEWAY_NAME_LABEL: &str = "gateway.networking.k8s.io/gateway-name";
+
+/// Deduplicated, sorted listener ports from a set of gateway listeners.
+fn unique_listener_ports(listeners: &[GatewayListener]) -> Vec<u16> {
+    let mut ports: Vec<u16> = listeners.iter().map(|l| l.port).collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
 
 // =============================================================================
 // Generated Resources
@@ -22,6 +42,8 @@ use lattice_common::policy::istio::{
 #[derive(Clone, Debug, Default)]
 pub struct GeneratedIngress {
     pub gateway: Option<Gateway>,
+    pub gateway_policy: Option<CiliumNetworkPolicy>,
+    pub gateway_auth_policy: Option<AuthorizationPolicy>,
     pub http_routes: Vec<HttpRoute>,
     pub grpc_routes: Vec<GrpcRoute>,
     pub tcp_routes: Vec<TcpRoute>,
@@ -31,6 +53,8 @@ pub struct GeneratedIngress {
 impl GeneratedIngress {
     pub fn is_empty(&self) -> bool {
         self.gateway.is_none()
+            && self.gateway_policy.is_none()
+            && self.gateway_auth_policy.is_none()
             && self.http_routes.is_empty()
             && self.grpc_routes.is_empty()
             && self.tcp_routes.is_empty()
@@ -38,8 +62,9 @@ impl GeneratedIngress {
     }
 
     pub fn total_count(&self) -> usize {
-        let gateway_count = if self.gateway.is_some() { 1 } else { 0 };
-        gateway_count
+        usize::from(self.gateway.is_some())
+            + usize::from(self.gateway_policy.is_some())
+            + usize::from(self.gateway_auth_policy.is_some())
             + self.http_routes.len()
             + self.grpc_routes.len()
             + self.tcp_routes.len()
@@ -60,13 +85,7 @@ impl GeneratedWaypoint {
     }
 
     pub fn total_count(&self) -> usize {
-        let gateway_count = if self.gateway.is_some() { 1 } else { 0 };
-        let policy_count = if self.allow_to_waypoint_policy.is_some() {
-            1
-        } else {
-            0
-        };
-        gateway_count + policy_count
+        usize::from(self.gateway.is_some()) + usize::from(self.allow_to_waypoint_policy.is_some())
     }
 }
 
@@ -221,6 +240,18 @@ impl IngressCompiler {
         }
 
         if !all_listeners.is_empty() {
+            output.gateway_policy = Some(Self::compile_gateway_policy(
+                service_name,
+                namespace,
+                &gateway_name,
+                &all_listeners,
+            ));
+            output.gateway_auth_policy = Some(Self::compile_gateway_auth_policy(
+                service_name,
+                namespace,
+                &gateway_name,
+                &all_listeners,
+            ));
             output.gateway = Some(Gateway::new(
                 ObjectMeta::new(&gateway_name, namespace),
                 GatewaySpec {
@@ -231,6 +262,89 @@ impl IngressCompiler {
         }
 
         Ok(output)
+    }
+
+    /// Compile a per-service CiliumNetworkPolicy for the gateway proxy pod.
+    ///
+    /// Each service with ingress creates its own CNP. Cilium unions multiple CNPs
+    /// targeting the same endpoint, so per-service policies compose correctly.
+    /// This avoids SSA conflicts — CRD lists are atomic, so a shared CNP would
+    /// lose ports when the last service to reconcile overwrites the list.
+    fn compile_gateway_policy(
+        service_name: &str,
+        namespace: &str,
+        gateway_name: &str,
+        listeners: &[GatewayListener],
+    ) -> CiliumNetworkPolicy {
+        let endpoint_labels = BTreeMap::from([(
+            mesh::CILIUM_GATEWAY_NAME_LABEL.to_string(),
+            gateway_name.to_string(),
+        )]);
+
+        // HBONE ingress (mesh pods reaching gateway via ztunnel)
+        let mut ingress_rules = vec![hbone_ingress_rule()];
+
+        // Direct TCP ingress on each unique listener port from any source.
+        let listener_ports = unique_listener_ports(listeners);
+        if !listener_ports.is_empty() {
+            ingress_rules.push(CiliumIngressRule {
+                to_ports: build_tcp_port_rules(&listener_ports),
+                ..Default::default()
+            });
+        }
+
+        // HBONE egress (gateway forwarding to backends via ztunnel) + DNS to kube-dns.
+        let egress_rules = vec![dns_egress_rule(None), hbone_egress_rule()];
+
+        CiliumNetworkPolicy::new(
+            ObjectMeta::new(
+                derived_name("cnp-gw-", &[namespace, gateway_name, service_name]),
+                namespace,
+            ),
+            CiliumNetworkPolicySpec {
+                endpoint_selector: EndpointSelector::from_labels(endpoint_labels),
+                ingress: ingress_rules,
+                egress: egress_rules,
+            },
+        )
+    }
+
+    /// Compile a per-service Istio ALLOW AuthorizationPolicy for the gateway proxy.
+    ///
+    /// Each service with ingress creates its own ALLOW policy. Istio unions
+    /// multiple ALLOW policies — a request is permitted if ANY policy matches.
+    /// This avoids SSA conflicts on the shared atomic `spec.rules` list.
+    fn compile_gateway_auth_policy(
+        service_name: &str,
+        namespace: &str,
+        gateway_name: &str,
+        listeners: &[GatewayListener],
+    ) -> AuthorizationPolicy {
+        let listener_ports = unique_listener_ports(listeners);
+
+        let match_labels =
+            BTreeMap::from([(GATEWAY_NAME_LABEL.to_string(), gateway_name.to_string())]);
+
+        AuthorizationPolicy::new(
+            ObjectMeta::new(
+                derived_name("allow-gw-", &[namespace, gateway_name, service_name]),
+                namespace,
+            ),
+            AuthorizationPolicySpec {
+                target_refs: vec![],
+                selector: Some(WorkloadSelector { match_labels }),
+                action: "ALLOW".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![],
+                    to: vec![AuthorizationOperation {
+                        operation: OperationSpec {
+                            ports: listener_ports.iter().map(|p| p.to_string()).collect(),
+                            hosts: vec![],
+                        },
+                    }],
+                }],
+            },
+        )
     }
 
     fn build_host_listeners(
@@ -555,6 +669,7 @@ mod tests {
     fn single_port() -> Vec<MeshMemberPort> {
         vec![MeshMemberPort {
             port: 8080,
+            service_port: None,
             name: "http".to_string(),
             peer_auth: PeerAuth::Strict,
         }]
@@ -924,7 +1039,8 @@ mod tests {
         let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
 
         assert!(!output.is_empty());
-        assert_eq!(output.total_count(), 3);
+        // gateway + gateway_policy + gateway_auth_policy + http_route + certificate = 5
+        assert_eq!(output.total_count(), 5);
     }
 
     #[test]
@@ -1005,5 +1121,113 @@ mod tests {
 
         assert_eq!(output.total_count(), 2);
         assert!(!output.is_empty());
+    }
+
+    // =========================================================================
+    // Gateway CiliumNetworkPolicy tests
+    // =========================================================================
+
+    #[test]
+    fn gateway_generates_cnp_with_correct_selector() {
+        let ingress = make_ingress_spec(vec!["api.example.com"], false);
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+
+        let cnp = output.gateway_policy.expect("should have gateway CNP");
+        assert_eq!(cnp.metadata.namespace, "prod");
+        assert_eq!(
+            cnp.spec
+                .endpoint_selector
+                .match_labels
+                .get("k8s:gateway.networking.k8s.io/gateway-name"),
+            Some(&"prod-ingress".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_cnp_has_listener_port_ingress() {
+        let ingress = make_ingress_spec(vec!["api.example.com"], true);
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+
+        let cnp = output.gateway_policy.expect("should have gateway CNP");
+
+        // Should have direct TCP ingress rule for listener ports (80, 443)
+        let tcp_rule = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| {
+                r.from_entities.is_empty()
+                    && r.from_endpoints.is_empty()
+                    && r.to_ports.iter().any(|pr| {
+                        pr.ports.iter().any(|p| p.port == "80")
+                            && pr.ports.iter().any(|p| p.port == "443")
+                    })
+            })
+            .expect("should have direct TCP ingress for listener ports");
+        assert_eq!(tcp_rule.to_ports[0].ports.len(), 2);
+    }
+
+    #[test]
+    fn gateway_cnp_has_hbone_ingress_and_egress() {
+        let ingress = make_ingress_spec(vec!["api.example.com"], false);
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+
+        let cnp = output.gateway_policy.expect("should have gateway CNP");
+        let hbone_port = mesh::HBONE_PORT.to_string();
+
+        // HBONE ingress
+        let hbone_in = cnp.spec.ingress.iter().find(|r| {
+            r.from_entities.contains(&"cluster".to_string())
+                && r.to_ports
+                    .iter()
+                    .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))
+        });
+        assert!(hbone_in.is_some(), "should have HBONE ingress rule");
+
+        // HBONE egress
+        let hbone_out = cnp.spec.egress.iter().find(|r| {
+            r.to_entities.contains(&"cluster".to_string())
+                && r.to_ports
+                    .iter()
+                    .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))
+        });
+        assert!(hbone_out.is_some(), "should have HBONE egress rule");
+
+        // DNS egress
+        let dns_out = cnp.spec.egress.iter().find(|r| {
+            r.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == "53"))
+        });
+        assert!(dns_out.is_some(), "should have DNS egress rule");
+    }
+
+    #[test]
+    fn no_gateway_cnp_when_no_listeners() {
+        let ingress = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::new(),
+        };
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+
+        assert!(output.gateway.is_none());
+        assert!(output.gateway_policy.is_none());
+    }
+
+    #[test]
+    fn per_service_cnp_and_auth_have_distinct_names() {
+        let ingress_a = make_ingress_spec(vec!["a.example.com"], false);
+        let ingress_b = make_ingress_spec(vec!["b.example.com"], true);
+
+        let out_a = IngressCompiler::compile("svc-a", "prod", &ingress_a, &single_port()).unwrap();
+        let out_b = IngressCompiler::compile("svc-b", "prod", &ingress_b, &single_port()).unwrap();
+
+        let cnp_a = out_a.gateway_policy.unwrap();
+        let cnp_b = out_b.gateway_policy.unwrap();
+        assert_ne!(cnp_a.metadata.name, cnp_b.metadata.name);
+
+        let auth_a = out_a.gateway_auth_policy.unwrap();
+        let auth_b = out_b.gateway_auth_policy.unwrap();
+        assert_ne!(auth_a.metadata.name, auth_b.metadata.name);
     }
 }

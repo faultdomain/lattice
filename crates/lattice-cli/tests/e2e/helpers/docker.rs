@@ -157,6 +157,37 @@ pub async fn run_kubectl(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Resolve the ModelServing resource name for a LatticeModel.
+///
+/// The ModelServing name includes a role-key hash suffix (e.g. `llm-serving-ac65f6b6`).
+/// Lists by `app.kubernetes.io/name` label and returns the first match.
+pub async fn resolve_model_serving_name(
+    kubeconfig: &str,
+    namespace: &str,
+    model_name: &str,
+) -> Result<String, String> {
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "modelservings.workload.serving.volcano.sh",
+        "-n",
+        namespace,
+        "-l",
+        &format!("app.kubernetes.io/name={model_name}"),
+        "-o",
+        "jsonpath={.items[0].metadata.name}",
+    ])
+    .await?;
+    let name = output.trim().to_string();
+    if name.is_empty() {
+        return Err(format!(
+            "No ModelServing found with label app.kubernetes.io/name={model_name} in {namespace}"
+        ));
+    }
+    Ok(name)
+}
+
 fn is_already_exists(error: &str) -> bool {
     error.contains("AlreadyExists") || error.contains("already exists")
 }

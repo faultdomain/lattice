@@ -17,8 +17,8 @@ use tracing::info;
 
 use super::super::helpers::{
     apply_yaml_with_retry, delete_namespace, ensure_fresh_namespace, load_fixture_config,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
-    DEFAULT_DOWNLOADER_IMAGE, DEFAULT_TIMEOUT,
+    resolve_model_serving_name, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
+    wait_for_resource_phase, TestHarness, DEFAULT_DOWNLOADER_IMAGE, DEFAULT_TIMEOUT,
 };
 
 const MODEL_NAMESPACE: &str = "serving";
@@ -68,12 +68,14 @@ async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
 async fn test_model_serving_created(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Verifying ModelServing creation...");
 
+    let serving_name = resolve_model_serving_name(kubeconfig, MODEL_NAMESPACE, MODEL_NAME).await?;
+
     let output = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
         "get",
         "modelservings.workload.serving.volcano.sh",
-        MODEL_NAME,
+        &serving_name,
         "-n",
         MODEL_NAMESPACE,
         "-o",
@@ -291,15 +293,16 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
     let ms: serde_json::Value = serde_json::from_str(&ms_output)
         .map_err(|e| format!("Failed to parse ModelServer JSON: {e}"))?;
 
-    // Verify workloadSelector matches the model name
+    // Verify workloadSelector matches the ModelServing resource name (model name + role suffix)
+    let serving_name = resolve_model_serving_name(kubeconfig, MODEL_NAMESPACE, MODEL_NAME).await?;
     let match_labels = &ms["spec"]["workloadSelector"]["matchLabels"];
     let selector_value = match_labels["modelserving.volcano.sh/name"]
         .as_str()
         .unwrap_or_default();
-    if selector_value != MODEL_NAME {
+    if selector_value != serving_name {
         return Err(format!(
-            "ModelServer workloadSelector should match model name '{}', got: '{}'",
-            MODEL_NAME, selector_value
+            "ModelServer workloadSelector should match serving name '{}', got: '{}'",
+            serving_name, selector_value
         ));
     }
 
@@ -889,12 +892,14 @@ async fn test_model_download_mesh_member(kubeconfig: &str) -> Result<(), String>
 async fn test_model_serving_has_download_injection(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Verifying scheduling gates and model volume on ModelServing...");
 
+    let serving_name = resolve_model_serving_name(kubeconfig, MODEL_NAMESPACE, MODEL_NAME).await?;
+
     let output = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
         "get",
         "modelservings.workload.serving.volcano.sh",
-        MODEL_NAME,
+        &serving_name,
         "-n",
         MODEL_NAMESPACE,
         "-o",
@@ -1134,8 +1139,10 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
 
     info!("[Model] Download LatticeJob completed, verifying scheduling gates are removed...");
 
-    // After Job completes, the controller should remove scheduling gates from pods
-    let label_selector = format!("modelserving.volcano.sh/name={}", MODEL_NAME);
+    // After Job completes, the controller should remove scheduling gates from pods.
+    // Kthena labels pods with the ModelServing resource name (model name + role suffix).
+    let serving_name = resolve_model_serving_name(kubeconfig, MODEL_NAMESPACE, MODEL_NAME).await?;
+    let label_selector = format!("modelserving.volcano.sh/name={}", serving_name);
     let kc = kubeconfig.to_string();
     let ls = label_selector.clone();
 
@@ -1194,26 +1201,41 @@ pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
     // GHCR registry credentials + Cedar policies (includes AppArmor override)
     setup_regcreds_infrastructure(kubeconfig).await?;
 
-    // Deploy the model
+    // Deploy the model (must complete before verification)
     test_model_deployment(kubeconfig).await?;
 
-    // Verify download resources were created (modelSource configured)
-    test_model_download_pvc(kubeconfig).await?;
-    test_model_download_job(kubeconfig).await?;
-    test_model_download_mesh_member(kubeconfig).await?;
-    test_model_serving_has_download_injection(kubeconfig).await?;
+    // All resource verifications + download lifecycle run concurrently
+    // (they are independent reads against already-created K8s resources)
+    let harness = TestHarness::new("Model Tests");
+    tokio::join!(
+        harness.run("Download PVC", || test_model_download_pvc(kubeconfig)),
+        harness.run("Download Job", || test_model_download_job(kubeconfig)),
+        harness.run("Download MeshMember", || {
+            test_model_download_mesh_member(kubeconfig)
+        }),
+        harness.run("Download injection", || {
+            test_model_serving_has_download_injection(kubeconfig)
+        }),
+        harness.run("ModelServing created", || {
+            test_model_serving_created(kubeconfig)
+        }),
+        harness.run("Tracing policies", || {
+            test_tracing_policies_created(kubeconfig)
+        }),
+        harness.run("Routing created", || {
+            test_model_routing_created(kubeconfig)
+        }),
+        harness.run("Autoscaling created", || {
+            test_model_autoscaling_created(kubeconfig)
+        }),
+        harness.run("Mesh members", || test_model_mesh_members(kubeconfig)),
+        harness.run("Download lifecycle", || {
+            test_download_lifecycle(kubeconfig)
+        }),
+    );
+    harness.finish()?;
 
-    // Verify resources were created
-    test_model_serving_created(kubeconfig).await?;
-    test_tracing_policies_created(kubeconfig).await?;
-    test_model_routing_created(kubeconfig).await?;
-    test_model_autoscaling_created(kubeconfig).await?;
-    test_model_mesh_members(kubeconfig).await?;
-
-    // Wait for download lifecycle: LatticeJob completes + scheduling gates removed
-    test_download_lifecycle(kubeconfig).await?;
-
-    // Wait for full lifecycle (Kthena processing — now reachable after gates removed)
+    // Serving phase depends on download lifecycle (scheduling gates removed)
     test_model_serving_phase(kubeconfig).await?;
 
     // Cleanup

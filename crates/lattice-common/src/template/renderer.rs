@@ -630,6 +630,24 @@ impl TemplateRenderer {
         Ok(rendered)
     }
 
+    /// Render a batch of file mounts (for sidecar files).
+    ///
+    /// Sidecars use `SidecarSpec` (not `ContainerSpec`), so they aren't included
+    /// in `render_all_containers`. This method renders sidecar `files:` directives
+    /// through the same template engine used for main containers.
+    pub fn render_files(
+        &self,
+        files: &BTreeMap<String, FileMount>,
+        ctx: &TemplateContext,
+    ) -> Result<BTreeMap<String, RenderedFile>, TemplateError> {
+        let mut rendered = BTreeMap::new();
+        for (path, file) in files {
+            let r = self.render_file(file, ctx)?;
+            rendered.insert(path.clone(), r);
+        }
+        Ok(rendered)
+    }
+
     /// Render a single template string
     pub fn render_string(
         &self,

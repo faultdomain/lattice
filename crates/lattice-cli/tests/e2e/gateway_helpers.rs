@@ -10,14 +10,9 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use super::gateway_fixtures::ExpectedStatus;
-use super::helpers::{run_kubectl, wait_for_condition};
-
-// =============================================================================
-// Constants
-// =============================================================================
-
-const CYCLE_START_MARKER: &str = "===CYCLE_START===";
-const CYCLE_END_MARKER: &str = "===CYCLE_END===";
+use super::helpers::{
+    run_kubectl, wait_for_condition, CYCLE_END_MARKER, CYCLE_START_MARKER, DEFAULT_TIMEOUT,
+};
 
 // =============================================================================
 // Gateway Test Target
@@ -176,10 +171,12 @@ echo "Testing {num_targets} gateway endpoints..."
     ));
 
     for (i, target) in targets.iter().enumerate() {
+        // HTTPS: use --resolve so curl sends the domain as TLS SNI (required for
+        // Gateway listener matching). HTTP: -H Host is sufficient.
         let (curl_cmd, status_var) = if target.use_https {
             (
                 format!(
-                    r#"HTTP_CODE_{i}=$(curl -sk -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5 -H "Host: {host}" https://{ip}:{port}{path} 2>/dev/null; true)"#,
+                    r#"HTTP_CODE_{i}=$(curl -sk -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5 --resolve {host}:{port}:{ip} https://{host}:{port}{path} 2>/dev/null; true)"#,
                     i = i,
                     host = target.host,
                     ip = gateway_ip,
@@ -517,7 +514,7 @@ pub async fn wait_for_gateway_cycles(
 
     wait_for_condition(
         &format!("{} gateway test cycles", min_cycles),
-        Duration::from_secs(600),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(10),
         || async move {
             let logs = match run_kubectl(&[

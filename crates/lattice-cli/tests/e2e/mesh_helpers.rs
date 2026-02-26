@@ -16,15 +16,9 @@ use kube::api::{Api, Patch, PatchParams};
 use lattice_common::crd::LatticeService;
 
 use super::helpers::{
-    client_from_kubeconfig, patch_with_retry, run_kubectl, wait_for_condition, DEFAULT_TIMEOUT,
+    client_from_kubeconfig, patch_with_retry, run_kubectl, wait_for_condition, CYCLE_END_MARKER,
+    CYCLE_START_MARKER, DEFAULT_TIMEOUT,
 };
-
-// =============================================================================
-// Constants
-// =============================================================================
-
-const CYCLE_START_MARKER: &str = "===CYCLE_START===";
-const CYCLE_END_MARKER: &str = "===CYCLE_END===";
 
 // =============================================================================
 // Test Target
@@ -262,7 +256,7 @@ pub async fn wait_for_cycles(
 
     wait_for_condition(
         &format!("{} test cycles in {}", min_cycles, label),
-        Duration::from_secs(600),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(10),
         || async move {
             let label_escaped = lattice_common::LABEL_NAME.replace('.', r"\.");

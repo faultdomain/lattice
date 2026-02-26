@@ -25,11 +25,18 @@ pub struct RoleTemplates {
 /// Takes the LatticeModel and pre-compiled entry/worker pod templates for each role.
 /// The caller (lattice-model compiler) is responsible for compiling workload specs
 /// into pod templates via `WorkloadCompiler` and serializing them.
+///
+/// `role_suffix` is appended to the resource name so that a role-set change
+/// (e.g. prefill+decode → decode only) produces a different ModelServing name,
+/// avoiding PodGroup name collisions with still-Terminating old resources.
+/// When the role set is unchanged the suffix is stable and SSA updates work normally.
 pub fn compile_model_serving(
     model: &LatticeModel,
     role_templates: &BTreeMap<String, RoleTemplates>,
+    role_suffix: &str,
 ) -> ModelServing {
-    let name = model.metadata.name.as_deref().unwrap_or_default();
+    let model_name = model.metadata.name.as_deref().unwrap_or_default();
+    let serving_name = format!("{}-{}", model_name, role_suffix);
     let namespace = model.metadata.namespace.as_deref().unwrap_or("default");
     let uid = model.metadata.uid.as_deref().unwrap_or_default();
 
@@ -40,19 +47,19 @@ pub fn compile_model_serving(
         api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
         kind: "ModelServing".to_string(),
         metadata: VolcanoMetadata {
-            name: name.to_string(),
+            name: serving_name,
             namespace: namespace.to_string(),
             labels: BTreeMap::from([
                 (
                     "app.kubernetes.io/managed-by".to_string(),
                     "lattice".to_string(),
                 ),
-                ("app.kubernetes.io/name".to_string(), name.to_string()),
+                ("app.kubernetes.io/name".to_string(), model_name.to_string()),
             ]),
             owner_references: vec![OwnerReference {
                 api_version: "lattice.dev/v1alpha1".to_string(),
                 kind: "LatticeModel".to_string(),
-                name: name.to_string(),
+                name: model_name.to_string(),
                 uid: uid.to_string(),
                 controller: Some(true),
                 block_owner_deletion: Some(true),
@@ -171,11 +178,11 @@ mod tests {
             make_entry_only_templates("decoder:latest"),
         )]);
 
-        let ms = compile_model_serving(&model, &templates);
+        let ms = compile_model_serving(&model, &templates, "abc123");
 
         assert_eq!(ms.api_version, "workload.serving.volcano.sh/v1alpha1");
         assert_eq!(ms.kind, "ModelServing");
-        assert_eq!(ms.metadata.name, "test-model");
+        assert_eq!(ms.metadata.name, "test-model-abc123");
         assert_eq!(ms.spec.scheduler_name, "volcano");
         assert_eq!(ms.spec.template.roles.len(), 1);
         assert_eq!(ms.spec.template.roles[0].name, "decode");
@@ -208,7 +215,7 @@ mod tests {
             },
         )]);
 
-        let ms = compile_model_serving(&model, &templates);
+        let ms = compile_model_serving(&model, &templates, "test");
 
         assert_eq!(ms.spec.template.roles.len(), 1);
         let role = &ms.spec.template.roles[0];
@@ -236,7 +243,7 @@ mod tests {
             ),
         ]);
 
-        let ms = compile_model_serving(&model, &templates);
+        let ms = compile_model_serving(&model, &templates, "test");
 
         assert_eq!(ms.spec.template.roles.len(), 2);
         // BTreeMap iteration is sorted, so "decode" comes before "prefill"
@@ -249,7 +256,7 @@ mod tests {
     #[test]
     fn owner_reference_set() {
         let model = test_model(BTreeMap::new());
-        let ms = compile_model_serving(&model, &BTreeMap::new());
+        let ms = compile_model_serving(&model, &BTreeMap::new(), "test");
 
         assert_eq!(ms.metadata.owner_references.len(), 1);
         let oref = &ms.metadata.owner_references[0];
@@ -277,7 +284,7 @@ mod tests {
             ),
         ]);
 
-        let ms = compile_model_serving(&model, &templates);
+        let ms = compile_model_serving(&model, &templates, "test");
 
         let gang = ms.spec.template.gang_policy.as_ref().unwrap();
         // minRoleReplicas is always 1 (start serving with partial capacity)
@@ -295,7 +302,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid".to_string());
 
-        let ms = compile_model_serving(&model, &BTreeMap::new());
+        let ms = compile_model_serving(&model, &BTreeMap::new(), "test");
         assert_eq!(
             ms.spec.recovery_policy,
             Some(RecoveryPolicy::ServingGroupRecreate)
@@ -312,7 +319,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid".to_string());
 
-        let ms = compile_model_serving(&model, &BTreeMap::new());
+        let ms = compile_model_serving(&model, &BTreeMap::new(), "test");
         assert_eq!(ms.spec.template.restart_grace_period_seconds, Some(30));
     }
 }

@@ -9,7 +9,7 @@
 //! - [`istio_ambient`]: L7 policies (AuthorizationPolicy, ServiceEntry, PeerAuthentication)
 //! - [`cilium`]: L4 policies (CiliumNetworkPolicy)
 
-mod cilium;
+pub(crate) mod cilium;
 mod istio_ambient;
 
 use lattice_common::crd::EgressTarget;
@@ -200,7 +200,7 @@ mod tests {
     use lattice_common::policy::cilium::{CiliumEgressRule, FqdnSelector};
     use std::collections::BTreeMap;
 
-    fn make_service_spec(
+    pub(crate) fn make_service_spec(
         deps: Vec<&str>,
         callers: Vec<&str>,
     ) -> lattice_common::crd::LatticeServiceSpec {
@@ -570,6 +570,7 @@ mod tests {
                 .into_iter()
                 .map(|(name, port, peer_auth)| MeshMemberPort {
                     port,
+                    service_port: None,
                     name: name.to_string(),
                     peer_auth,
                 })
@@ -886,6 +887,7 @@ mod tests {
             )])),
             ports: vec![MeshMemberPort {
                 port: 8080,
+                service_port: None,
                 name: "http".to_string(),
                 peer_auth: lattice_common::crd::PeerAuth::Strict,
             }],
@@ -955,6 +957,7 @@ mod tests {
             )])),
             ports: vec![MeshMemberPort {
                 port: 8080,
+                service_port: None,
                 name: "http".to_string(),
                 peer_auth: lattice_common::crd::PeerAuth::Strict,
             }],
@@ -999,6 +1002,7 @@ mod tests {
             )])),
             ports: vec![MeshMemberPort {
                 port: 8080,
+                service_port: None,
                 name: "http".to_string(),
                 peer_auth: lattice_common::crd::PeerAuth::Strict,
             }],

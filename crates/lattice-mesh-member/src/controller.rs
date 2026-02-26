@@ -57,7 +57,7 @@ const GRAPH_HASH_ANNOTATION: &str = "lattice.dev/graph-hash";
 
 /// Extract resource refs from compiled policies (AuthorizationPolicy + PeerAuthentication).
 ///
-/// Cilium policies are excluded (always 1 per service, never orphaned).
+/// Bilateral-agreement Cilium policies are excluded (always 1 per service, never orphaned).
 /// ServiceEntries are excluded (shared per-namespace-per-FQDN, can't safely delete
 /// without checking other MeshMembers; orphaned SEs have no security impact since
 /// the `allow-fqdn-*` AuthorizationPolicy IS tracked).
@@ -76,6 +76,42 @@ pub fn collect_resource_refs(
             kind: "PeerAuthentication".to_string(),
             name: pa.metadata.name.clone(),
         });
+    }
+    refs
+}
+
+/// Extract resource refs from compiled ingress resources.
+///
+/// Tracks per-service CNP, auth policy, routes, and certificates for orphan cleanup.
+/// The shared Gateway is NOT tracked — its listeners are managed via SSA field managers.
+pub fn collect_ingress_refs(
+    ingress: &crate::ingress::GeneratedIngress,
+) -> HashSet<AppliedResourceRef> {
+    let mut refs = HashSet::new();
+    let mut track = |kind: &str, name: &str| {
+        refs.insert(AppliedResourceRef {
+            kind: kind.to_string(),
+            name: name.to_string(),
+        });
+    };
+
+    if let Some(ref cnp) = ingress.gateway_policy {
+        track("CiliumNetworkPolicy", &cnp.metadata.name);
+    }
+    if let Some(ref ap) = ingress.gateway_auth_policy {
+        track("AuthorizationPolicy", &ap.metadata.name);
+    }
+    for route in &ingress.http_routes {
+        track("HTTPRoute", &route.metadata.name);
+    }
+    for route in &ingress.grpc_routes {
+        track("GRPCRoute", &route.metadata.name);
+    }
+    for route in &ingress.tcp_routes {
+        track("TCPRoute", &route.metadata.name);
+    }
+    for cert in &ingress.certificates {
+        track("Certificate", &cert.metadata.name);
     }
     refs
 }
@@ -128,6 +164,11 @@ async fn delete_orphaned_resources(
         let crd = match orphan.kind.as_str() {
             "AuthorizationPolicy" => crds.authorization_policy.as_ref(),
             "PeerAuthentication" => crds.peer_authentication.as_ref(),
+            "CiliumNetworkPolicy" => crds.cilium_network_policy.as_ref(),
+            "HTTPRoute" => crds.http_route.as_ref(),
+            "GRPCRoute" => crds.grpc_route.as_ref(),
+            "TCPRoute" => crds.tcp_route.as_ref(),
+            "Certificate" => crds.certificate.as_ref(),
             _ => {
                 warn!(kind = %orphan.kind, name = %orphan.name, "unknown orphan kind, skipping");
                 continue;
@@ -335,23 +376,37 @@ async fn do_reconcile(
         apply_policies(&ctx.client, &crds, namespace, &params, &deferred).await?;
     }
 
-    // Orphan cleanup: delete resources that were previously applied but are no longer emitted
-    let new_refs = collect_resource_refs(&policies);
-    let old_refs = read_applied_resources(member);
-    delete_orphaned_resources(&ctx.client, &crds, namespace, &old_refs, &new_refs).await?;
+    // Apply ingress resources with per-member field manager
+    let ingress_field_manager = format!("{}/{}", FIELD_MANAGER, name);
+    let ingress_params = PatchParams::apply(&ingress_field_manager).force();
 
     if let Some(ref ingress_resources) = ingress {
-        let gateway_field_manager = format!("{}/{}", FIELD_MANAGER, name);
-        let gateway_params = PatchParams::apply(&gateway_field_manager).force();
         apply_ingress(
             &ctx.client,
             &crds,
             namespace,
-            &params,
-            &gateway_params,
+            &ingress_params,
             ingress_resources,
         )
         .await?;
+    }
+
+    // Orphan cleanup: merge policy refs + ingress refs, delete stale resources
+    let mut new_refs = collect_resource_refs(&policies);
+    if let Some(ref ingress_resources) = ingress {
+        new_refs.extend(collect_ingress_refs(ingress_resources));
+    }
+    let old_refs = read_applied_resources(member);
+    delete_orphaned_resources(&ctx.client, &crds, namespace, &old_refs, &new_refs).await?;
+
+    // When ingress was removed, release this member's Gateway listeners via SSA.
+    // Applying empty listeners tells the API server this field manager no longer
+    // owns any listener entries, so SSA removes them while preserving other members'.
+    let had_ingress_before = old_refs
+        .iter()
+        .any(|r| r.kind == "HTTPRoute" || r.kind == "GRPCRoute" || r.kind == "TCPRoute");
+    if ingress.is_none() && had_ingress_before {
+        release_gateway_listeners(&ctx.client, &crds, namespace, &ingress_params).await?;
     }
 
     let total = policies.total_count()
@@ -627,23 +682,26 @@ fn serialize_crd_batch<T: serde::Serialize>(
     Ok(())
 }
 
-/// Apply compiled ingress resources
+/// Apply compiled ingress resources in parallel via server-side apply.
 ///
-/// Uses `gateway_params` (per-member field manager) for the shared Gateway
-/// and `params` (shared field manager) for routes and certificates.
+/// The Gateway is applied first (creates the parent reference for routes), then
+/// all remaining resources (CNP, auth policy, routes, certs) are applied concurrently
+/// using `serialize_crd_batch` + `try_join_all` — the same pattern as `apply_policies`.
 async fn apply_ingress(
     client: &Client,
     crds: &ResolvedCrds,
     namespace: &str,
     params: &PatchParams,
-    gateway_params: &PatchParams,
     ingress: &crate::ingress::GeneratedIngress,
 ) -> Result<(), ReconcileError> {
+    use futures::future::try_join_all;
+
+    // Gateway must be applied first (routes reference it as a parentRef)
     if let Some(ref gw) = ingress.gateway {
         apply_if_discovered(
             client,
             namespace,
-            gateway_params,
+            params,
             gw,
             crds.gateway.as_ref(),
             &gw.metadata.name,
@@ -652,58 +710,119 @@ async fn apply_ingress(
         .await?;
     }
 
-    for route in &ingress.http_routes {
-        apply_if_discovered(
-            client,
-            namespace,
-            params,
-            route,
-            crds.http_route.as_ref(),
-            &route.metadata.name,
-            "HTTPRoute",
-        )
-        .await?;
+    // Apply remaining resources concurrently
+    let mut items: Vec<(String, &'static str, serde_json::Value, ApiResource)> = Vec::new();
+
+    serialize_crd_batch(
+        &mut items,
+        &ingress
+            .gateway_policy
+            .as_ref()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        crds.cilium_network_policy.as_ref(),
+        "CiliumNetworkPolicy",
+        |cnp| &cnp.metadata.name,
+    )?;
+    serialize_crd_batch(
+        &mut items,
+        &ingress
+            .gateway_auth_policy
+            .as_ref()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        crds.authorization_policy.as_ref(),
+        "AuthorizationPolicy",
+        |ap| &ap.metadata.name,
+    )?;
+    serialize_crd_batch(
+        &mut items,
+        &ingress.http_routes,
+        crds.http_route.as_ref(),
+        "HTTPRoute",
+        |r| &r.metadata.name,
+    )?;
+    serialize_crd_batch(
+        &mut items,
+        &ingress.grpc_routes,
+        crds.grpc_route.as_ref(),
+        "GRPCRoute",
+        |r| &r.metadata.name,
+    )?;
+    serialize_crd_batch(
+        &mut items,
+        &ingress.tcp_routes,
+        crds.tcp_route.as_ref(),
+        "TCPRoute",
+        |r| &r.metadata.name,
+    )?;
+    serialize_crd_batch(
+        &mut items,
+        &ingress.certificates,
+        crds.certificate.as_ref(),
+        "Certificate",
+        |c| &c.metadata.name,
+    )?;
+
+    if items.is_empty() {
+        return Ok(());
     }
 
-    for route in &ingress.grpc_routes {
-        apply_if_discovered(
-            client,
-            namespace,
-            params,
-            route,
-            crds.grpc_route.as_ref(),
-            &route.metadata.name,
-            "GRPCRoute",
-        )
-        .await?;
+    try_join_all(items.into_iter().map(|(name, kind, json, ar)| {
+        let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+        let params = params.clone();
+        async move {
+            api.patch(&name, &params, &Patch::Apply(&json))
+                .await
+                .map_err(|e| ReconcileError::kube(format!("apply {kind} {name}"), e))?;
+            debug!(name = %name, kind = kind, "applied resource");
+            Ok::<(), ReconcileError>(())
+        }
+    }))
+    .await?;
+
+    Ok(())
+}
+
+/// Release this field manager's Gateway listeners via SSA.
+///
+/// When a service removes its ingress, its per-member field manager stops applying
+/// listeners to the shared Gateway. SSA won't auto-remove the old listeners — they
+/// persist until the field manager explicitly releases them. Applying an empty
+/// `spec.listeners: []` tells the API server this field manager no longer owns any
+/// listeners, so SSA removes them while preserving other members' listeners.
+async fn release_gateway_listeners(
+    client: &Client,
+    crds: &ResolvedCrds,
+    namespace: &str,
+    params: &PatchParams,
+) -> Result<(), ReconcileError> {
+    let Some(ref ar) = crds.gateway else {
+        return Ok(());
+    };
+    let gateway_name = mesh::ingress_gateway_name(namespace);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
+
+    // Only release if the Gateway exists (avoid creating an empty one)
+    if api.get(&gateway_name).await.is_err() {
+        return Ok(());
     }
 
-    for route in &ingress.tcp_routes {
-        apply_if_discovered(
-            client,
-            namespace,
-            params,
-            route,
-            crds.tcp_route.as_ref(),
-            &route.metadata.name,
-            "TCPRoute",
-        )
-        .await?;
-    }
+    let empty_listeners = serde_json::json!({
+        "apiVersion": ar.api_version.clone(),
+        "kind": ar.kind.clone(),
+        "metadata": { "name": gateway_name, "namespace": namespace },
+        "spec": {
+            "gatewayClassName": mesh::INGRESS_GATEWAY_CLASS,
+            "listeners": []
+        }
+    });
 
-    for cert in &ingress.certificates {
-        apply_if_discovered(
-            client,
-            namespace,
-            params,
-            cert,
-            crds.certificate.as_ref(),
-            &cert.metadata.name,
-            "Certificate",
-        )
-        .await?;
-    }
+    api.patch(&gateway_name, params, &Patch::Apply(empty_listeners))
+        .await
+        .map_err(|e| ReconcileError::kube("release gateway listeners", e))?;
 
+    info!("released gateway listeners for removed ingress");
     Ok(())
 }
 
@@ -901,12 +1020,11 @@ async fn patch_status_with_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
-        ContainerSpec, DependencyDirection, LatticeServiceSpec, MeshMemberPort, MeshMemberTarget,
-        PortSpec, ResourceSpec, ServicePortsSpec, WorkloadSpec,
-    };
+    use lattice_common::crd::{MeshMemberPort, MeshMemberTarget};
     use lattice_common::graph::ServiceGraph;
     use std::collections::BTreeMap;
+
+    use crate::policy::tests::make_service_spec;
 
     fn make_test_member(name: &str) -> LatticeMeshMember {
         LatticeMeshMember::new(
@@ -915,6 +1033,7 @@ mod tests {
                 target: MeshMemberTarget::Selector(BTreeMap::new()),
                 ports: vec![MeshMemberPort {
                     port: 8080,
+                    service_port: None,
                     name: "http".to_string(),
                     peer_auth: lattice_common::crd::PeerAuth::Strict,
                 }],
@@ -927,52 +1046,6 @@ mod tests {
                 service_account: None,
             },
         )
-    }
-
-    fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> LatticeServiceSpec {
-        LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers: BTreeMap::from([(
-                    "main".to_string(),
-                    ContainerSpec {
-                        image: "test:latest".to_string(),
-                        ..Default::default()
-                    },
-                )]),
-                resources: deps
-                    .into_iter()
-                    .map(|d| {
-                        (
-                            d.to_string(),
-                            ResourceSpec {
-                                direction: DependencyDirection::Outbound,
-                                ..Default::default()
-                            },
-                        )
-                    })
-                    .chain(callers.into_iter().map(|c| {
-                        (
-                            c.to_string(),
-                            ResourceSpec {
-                                direction: DependencyDirection::Inbound,
-                                ..Default::default()
-                            },
-                        )
-                    }))
-                    .collect(),
-                service: Some(ServicePortsSpec {
-                    ports: BTreeMap::from([(
-                        "http".to_string(),
-                        PortSpec {
-                            port: 8080,
-                            target_port: None,
-                            protocol: None,
-                        },
-                    )]),
-                }),
-            },
-            ..Default::default()
-        }
     }
 
     #[test]

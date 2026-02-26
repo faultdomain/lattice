@@ -42,18 +42,31 @@ fn emptydir(medium: Option<&str>, size_limit: Option<&str>) -> VolumeMount {
     }
 }
 
-/// Nginx container with emptyDir volumes for writable paths.
+/// Nginx container that returns 200 for all request paths.
 ///
-/// Nginx needs `/var/cache/nginx`, `/var/run`, and `/tmp` writable.
-/// With read-only rootfs (our secure default), these must be emptyDir mounts.
+/// Writes a catch-all config so arbitrary paths (`/api`, `/health`, etc.) return
+/// 200 instead of 404. The emptyDir mounts provide writable paths under read-only
+/// rootfs (our secure default): `/etc/nginx/conf.d` for the config write,
+/// `/var/cache/nginx` and `/var/run` for nginx runtime, `/tmp` for scratch.
 pub fn nginx_container() -> ContainerSpec {
     let mut volumes = BTreeMap::new();
+    volumes.insert("/etc/nginx/conf.d".to_string(), emptydir(None, None));
     volumes.insert("/var/cache/nginx".to_string(), emptydir(None, None));
     volumes.insert("/var/run".to_string(), emptydir(None, None));
     volumes.insert("/tmp".to_string(), emptydir(None, None));
 
     ContainerSpec {
         image: NGINX_IMAGE.to_string(),
+        command: Some(vec!["/bin/sh".to_string()]),
+        args: Some(vec![
+            "-c".to_string(),
+            concat!(
+                "printf 'server { listen 8080; location / { return 200 \"ok\\n\"; ",
+                "add_header Content-Type text/plain; } }' ",
+                "> /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
+            )
+            .to_string(),
+        ]),
         volumes,
         resources: Some(ResourceRequirements {
             requests: Some(ResourceQuantity {
@@ -67,7 +80,6 @@ pub fn nginx_container() -> ContainerSpec {
         }),
         security: Some(SecurityContext {
             apparmor_profile: Some("Unconfined".to_string()),
-            // No command — image ENTRYPOINT unknown, so allow all binaries.
             allowed_binaries: vec!["*".to_string()],
             ..Default::default()
         }),
@@ -152,6 +164,22 @@ pub fn inbound_allow_all() -> (String, ResourceSpec) {
             type_: ResourceType::Service,
             direction: DependencyDirection::Inbound,
             id: Some("*".to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+/// Entity egress resource: allows Cilium egress to a named entity (e.g. "cluster") on a port.
+///
+/// Produces `EgressTarget::Entity` in the compiled MeshMember, which becomes a
+/// `toEntities` rule in the CiliumNetworkPolicy.
+pub fn entity_egress(entity: &str, port: u16) -> (String, ResourceSpec) {
+    (
+        format!("entity-{entity}-{port}"),
+        ResourceSpec {
+            type_: ResourceType::ExternalService,
+            direction: DependencyDirection::Outbound,
+            id: Some(format!("entity:{entity}:{port}")),
             ..Default::default()
         },
     )

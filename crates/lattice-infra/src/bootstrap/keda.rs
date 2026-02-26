@@ -56,6 +56,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 )])),
                 ports: vec![MeshMemberPort {
                     port: 6443,
+                    service_port: None,
                     name: "metrics-api".to_string(),
                     peer_auth: PeerAuth::Webhook,
                 }],
@@ -79,6 +80,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 )])),
                 ports: vec![MeshMemberPort {
                     port: 9443,
+                    service_port: None,
                     name: "webhook".to_string(),
                     peer_auth: PeerAuth::Webhook,
                 }],
@@ -102,6 +104,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 )])),
                 ports: vec![MeshMemberPort {
                     port: 9666,
+                    service_port: None,
                     name: "grpc".to_string(),
                     peer_auth: PeerAuth::Strict,
                 }],

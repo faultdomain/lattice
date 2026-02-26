@@ -157,6 +157,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 target: MeshMemberTarget::Selector(vm_instance_labels("vminsert")),
                 ports: vec![MeshMemberPort {
                     port: VMINSERT_PORT,
+                    service_port: None,
                     name: "write".to_string(),
                     peer_auth: PeerAuth::Strict,
                 }],
@@ -177,6 +178,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 target: MeshMemberTarget::Selector(vm_instance_labels("vmselect")),
                 ports: vec![MeshMemberPort {
                     port: VMSELECT_PORT,
+                    service_port: None,
                     name: "read".to_string(),
                     peer_auth: PeerAuth::Strict,
                 }],
@@ -198,6 +200,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 target: MeshMemberTarget::Selector(vm_instance_labels("vmsingle")),
                 ports: vec![MeshMemberPort {
                     port: VMSINGLE_PORT,
+                    service_port: None,
                     name: "http".to_string(),
                     peer_auth: PeerAuth::Strict,
                 }],
@@ -225,6 +228,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             target: MeshMemberTarget::Selector(vm_instance_labels("vmagent")),
             ports: vec![MeshMemberPort {
                 port: 8429,
+                service_port: None,
                 name: "http".to_string(),
                 peer_auth: PeerAuth::Strict,
             }],
@@ -250,11 +254,13 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             ports: vec![
                 MeshMemberPort {
                     port: 9443,
+                    service_port: None,
                     name: "webhook".to_string(),
                     peer_auth: PeerAuth::Webhook,
                 },
                 MeshMemberPort {
                     port: 8080,
+                    service_port: None,
                     name: "metrics".to_string(),
                     peer_auth: PeerAuth::Strict,
                 },
@@ -280,6 +286,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             )])),
             ports: vec![MeshMemberPort {
                 port: 8080,
+                service_port: None,
                 name: "metrics".to_string(),
                 peer_auth: PeerAuth::Strict,
             }],

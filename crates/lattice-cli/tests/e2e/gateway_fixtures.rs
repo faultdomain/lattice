@@ -14,7 +14,8 @@ use lattice_common::crd::{
 
 use super::gateway_helpers::{generate_gateway_test_script, GatewayTestTarget};
 use super::mesh_fixtures::{
-    build_lattice_service, curl_container, inbound_allow_all, nginx_container,
+    build_lattice_service, curl_container, entity_egress, inbound_allow_all, nginx_container,
+    outbound_dep,
 };
 
 // =============================================================================
@@ -244,7 +245,19 @@ pub fn create_gateway_traffic_gen(
         targets,
     );
 
-    let resources = BTreeMap::new();
+    // The traffic-gen needs two types of Cilium egress:
+    //
+    // 1. HBONE egress (port 15008): ztunnel wraps mesh-to-mesh traffic in HBONE.
+    //    Any outbound dependency triggers the HBONE egress rule in the CNP.
+    //
+    // 2. Direct TCP egress (ports 80, 443): the gateway proxy has
+    //    `istio.io/dataplane-mode: none`, so ztunnel does passthrough (plain TCP).
+    //    Cilium sees port 80/443, not 15008, so entity egress rules are needed.
+    let resources = BTreeMap::from([
+        outbound_dep("backend-a"),
+        entity_egress("cluster", 80),
+        entity_egress("cluster", 443),
+    ]);
 
     build_lattice_service(
         "gateway-traffic-gen",
@@ -256,7 +269,7 @@ pub fn create_gateway_traffic_gen(
 }
 
 // =============================================================================
-// Types (re-exported for gateway_helpers)
+// Types (used by gateway_helpers)
 // =============================================================================
 
 /// Expected HTTP status category for a gateway traffic target.

@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, LatticeModel, MeshMemberPort,
-    MeshMemberTarget, PeerAuth, ProviderType,
+    derived_name, CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, LatticeModel,
+    MeshMemberPort, MeshMemberTarget, PeerAuth, ProviderType,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
@@ -23,6 +23,18 @@ use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
 use crate::download::{self, CompiledDownload};
 use crate::error::ModelError;
+
+/// Compute a stable suffix from the role key set for the ModelServing name.
+///
+/// Uses `derived_name` (FIPS SHA-256) with an empty prefix, returning an 8-char
+/// hex hash. The suffix changes only when roles are added or removed, giving the
+/// new ModelServing (and its PodGroup/pods) a different name that doesn't collide
+/// with still-Terminating resources from the old role set.
+pub(crate) fn role_key_suffix<'a>(role_names: impl Iterator<Item = &'a String>) -> String {
+    let mut names: Vec<&str> = role_names.map(|s| s.as_str()).collect();
+    names.sort();
+    derived_name("", &names)
+}
 
 /// Complete compiled output for a LatticeModel
 #[derive(Debug)]
@@ -57,6 +69,7 @@ pub async fn compile_model(
     cluster_name: &str,
     provider_type: ProviderType,
     cedar: &PolicyEngine,
+    role_suffix: &str,
 ) -> Result<CompiledModel, ModelError> {
     let name = model.metadata.name.as_deref().unwrap_or_default();
     let namespace = model
@@ -228,15 +241,16 @@ pub async fn compile_model(
         }
     }
 
-    // Build ModelServing from aggregated role templates
-    let model_serving = lattice_volcano::compile_model_serving(model, &role_templates);
+    // Build ModelServing from aggregated role templates.
+    // The role suffix ensures the resource name changes when the role set changes,
+    // avoiding PodGroup name collisions with still-Terminating old resources.
+    let model_serving = lattice_volcano::compile_model_serving(model, &role_templates, role_suffix);
+    let serving_name = &model_serving.metadata.name;
 
     // Compile routing (ModelServer + ModelRoutes) if configured
-    let routing = model
-        .spec
-        .routing
-        .as_ref()
-        .map(|routing_spec| lattice_volcano::compile_model_routing(model, routing_spec));
+    let routing = model.spec.routing.as_ref().map(|routing_spec| {
+        lattice_volcano::compile_model_routing(model, routing_spec, serving_name)
+    });
 
     // When routing is configured, ensure mesh policies allow the Kthena router
     // to reach model pods, and enable peer traffic for PD disaggregation.
@@ -395,6 +409,7 @@ fn ensure_infra_caller_on_mesh_member(
         let ports = match port {
             Some((p, name)) => vec![MeshMemberPort {
                 port: p,
+                service_port: None,
                 name: name.to_string(),
                 peer_auth: PeerAuth::Strict,
             }],
@@ -461,6 +476,7 @@ fn add_caller_and_port(
         if !mm.spec.ports.iter().any(|existing| existing.port == p) {
             mm.spec.ports.push(MeshMemberPort {
                 port: p,
+                service_port: None,
                 name: name.to_string(),
                 peer_auth: PeerAuth::Strict,
             });
@@ -559,9 +575,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(compiled.model_serving.spec.template.roles.len(), 1);
         assert_eq!(compiled.model_serving.spec.template.roles[0].name, "decode");
@@ -580,9 +603,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(compiled.model_serving.spec.template.roles.len(), 2);
         assert!(compiled.routing.is_none());
@@ -594,8 +624,15 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
 
-        let result =
-            compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar).await;
+        let result = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await;
         assert!(matches!(result, Err(ModelError::NoRoles)));
     }
 
@@ -613,8 +650,15 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
 
-        let result =
-            compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar).await;
+        let result = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await;
         assert!(matches!(result, Err(ModelError::MissingNamespace)));
     }
 
@@ -635,9 +679,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         let routing = compiled.routing.as_ref().expect("routing should be Some");
         assert_eq!(routing.model_server.metadata.name, "test-model");
@@ -662,9 +713,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         // Mesh member created for the decode role with router as allowed caller
         let mm = compiled
@@ -708,9 +766,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         // Both roles should have allow_peer_traffic=true for KV cache transfer
         for role_name in &["prefill", "decode"] {
@@ -752,9 +817,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         // PD roles should have peer traffic
         for role_name in &["prefill", "decode"] {
@@ -792,9 +864,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         assert!(compiled.routing.is_none());
     }
@@ -827,9 +906,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         let download = compiled.download.as_ref().expect("download should be Some");
         assert_eq!(download.pvc_name(), "vol-test-model-model-cache");
@@ -865,9 +951,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         assert!(compiled.download.is_none());
 
@@ -919,9 +1012,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         // Autoscaling resources should be compiled
         assert!(compiled.autoscaling.is_some());
@@ -1028,9 +1128,16 @@ mod tests {
         let cedar = permit_all_cedar();
 
         // This should succeed — the compiler propagates ghcr-creds to the worker workload
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .expect("worker should compile with entry runtime's imagePullSecrets");
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .expect("worker should compile with entry runtime's imagePullSecrets");
 
         assert_eq!(compiled.model_serving.spec.template.roles.len(), 1);
     }
@@ -1052,9 +1159,16 @@ mod tests {
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
 
         assert!(compiled.autoscaling.is_none());
 
@@ -1071,5 +1185,27 @@ mod tests {
             !has_autoscaler,
             "Kthena autoscaler should NOT be present when no autoscaling configured"
         );
+    }
+
+    #[test]
+    fn role_key_suffix_deterministic() {
+        let roles = vec!["decode".to_string(), "prefill".to_string()];
+        let a = role_key_suffix(roles.iter());
+        let b = role_key_suffix(roles.iter());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn role_key_suffix_order_independent() {
+        let fwd = vec!["decode".to_string(), "prefill".to_string()];
+        let rev = vec!["prefill".to_string(), "decode".to_string()];
+        assert_eq!(role_key_suffix(fwd.iter()), role_key_suffix(rev.iter()));
+    }
+
+    #[test]
+    fn role_key_suffix_different_roles_differ() {
+        let a = vec!["decode".to_string()];
+        let b = vec!["decode".to_string(), "prefill".to_string()];
+        assert_ne!(role_key_suffix(a.iter()), role_key_suffix(b.iter()));
     }
 }

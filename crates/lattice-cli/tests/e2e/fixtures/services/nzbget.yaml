@@ -11,7 +11,7 @@ spec:
         security:
           runAsUser: 0
           apparmorProfile: Unconfined
-          capabilities: [SETUID, SETGID]
+          capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETUID, SETGID]
           allowedBinaries: ["*"]
         variables:
           PUID: "1000"
@@ -83,12 +83,13 @@ spec:
                      iptables -t mangle -A INPUT -p tcp --dport 15008 -j MARK --set-mark 0x2; \
                      iptables -t mangle -A OUTPUT -p tcp --sport 15008 -j MARK --set-mark 0x2
       volumes:
+        /config: {}
         /tmp: {}
         /run: {}
       security:
         runAsUser: 0
-        capabilities: [NET_ADMIN, SYS_MODULE]
         apparmorProfile: Unconfined
+        capabilities: [NET_ADMIN, SYS_MODULE]
         allowedBinaries: ["*"]
   imagePullSecrets:
     - ghcr-creds

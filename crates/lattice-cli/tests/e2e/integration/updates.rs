@@ -32,9 +32,9 @@ use tracing::info;
 use super::super::helpers::{
     apply_cedar_policy_crd, apply_yaml_with_retry, create_service_with_secrets,
     delete_cedar_policies_by_label, delete_namespace, deploy_and_wait_for_phase,
-    ensure_fresh_namespace, load_fixture_config, run_kubectl, setup_regcreds_infrastructure,
-    wait_for_condition, wait_for_resource_phase, wait_for_service_phase, TestHarness,
-    BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
+    ensure_fresh_namespace, load_fixture_config, resolve_model_serving_name, run_kubectl,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
+    wait_for_service_phase, TestHarness, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -49,6 +49,9 @@ const NS_MODEL_LOADING_GAP: &str = "update-t5";
 const NS_PDB_ORPHAN: &str = "update-t6";
 const NS_MODEL_ROLE_ORPHAN: &str = "update-t7";
 const NS_JOB_FAILED_STABLE: &str = "update-t8";
+/// Separate namespace for `test_job_updates_standalone` so it doesn't collide
+/// with `test_updates_standalone` when both run concurrently.
+const NS_JOB_FAILED_STANDALONE: &str = "update-t8-sa";
 
 /// Dummy secret provider name (Cedar denies access → immediate compile failure)
 const DENIED_PROVIDER: &str = "nonexistent-provider";
@@ -119,7 +122,7 @@ async fn test_ready_spec_update(kubeconfig: &str) -> Result<(), String> {
         "svc-update-test",
         "Ready",
         None,
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -197,7 +200,7 @@ async fn test_failed_spec_recovery(kubeconfig: &str) -> Result<(), String> {
         "svc-recover",
         "Ready",
         None,
-        Duration::from_secs(180),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -384,7 +387,7 @@ async fn test_model_loading_detects_spec_change(
         namespace,
         "llm-serving",
         "Loading",
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -645,12 +648,13 @@ async fn get_model_serving_role_replicas(
     model_name: &str,
     role_name: &str,
 ) -> Result<u64, String> {
+    let serving_name = resolve_model_serving_name(kubeconfig, namespace, model_name).await?;
     let output = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
         "get",
         "modelservings.workload.serving.volcano.sh",
-        model_name,
+        &serving_name,
         "-n",
         namespace,
         "-o",
@@ -728,7 +732,7 @@ async fn test_service_pdb_orphan_cleanup(kubeconfig: &str) -> Result<(), String>
         "svc-pdb-test",
         "Ready",
         None,
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -882,7 +886,7 @@ async fn wait_for_resource_exists(
 
     wait_for_condition(
         &desc,
-        Duration::from_secs(120),
+        Duration::from_secs(300),
         Duration::from_secs(3),
         || {
             let kc = kc.clone();
@@ -966,16 +970,15 @@ fn build_service_with_replicas(
 
 /// Deploy a job that fails permanently. Verify that observed_generation is set
 /// on the Failed status so the controller doesn't tight-loop retrying.
-async fn test_job_failed_sets_observed_generation(kubeconfig: &str) -> Result<(), String> {
+async fn test_job_failed_sets_observed_generation(
+    kubeconfig: &str,
+    namespace: &str,
+) -> Result<(), String> {
     info!("[Updates] Test 8: LatticeJob Failed sets observed_generation");
-    ensure_fresh_namespace(kubeconfig, NS_JOB_FAILED_STABLE).await?;
+    ensure_fresh_namespace(kubeconfig, namespace).await?;
 
     // Deploy a job that fails permanently
-    let job = build_simple_job(
-        "job-stable-fail",
-        NS_JOB_FAILED_STABLE,
-        &["/bin/sh", "-c", "exit 1"],
-    );
+    let job = build_simple_job("job-stable-fail", namespace, &["/bin/sh", "-c", "exit 1"]);
     let yaml = serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job: {e}"))?;
     apply_yaml_with_retry(kubeconfig, &yaml).await?;
 
@@ -983,10 +986,10 @@ async fn test_job_failed_sets_observed_generation(kubeconfig: &str) -> Result<()
     wait_for_resource_phase(
         kubeconfig,
         "latticejob",
-        NS_JOB_FAILED_STABLE,
+        namespace,
         "job-stable-fail",
         "Failed",
-        Duration::from_secs(120),
+        Duration::from_secs(300),
     )
     .await?;
 
@@ -994,13 +997,9 @@ async fn test_job_failed_sets_observed_generation(kubeconfig: &str) -> Result<()
     tokio::time::sleep(Duration::from_secs(10)).await;
 
     // Verify observed_generation is set (not empty/missing)
-    let observed = get_resource_observed_generation(
-        kubeconfig,
-        "latticejob",
-        NS_JOB_FAILED_STABLE,
-        "job-stable-fail",
-    )
-    .await?;
+    let observed =
+        get_resource_observed_generation(kubeconfig, "latticejob", namespace, "job-stable-fail")
+            .await?;
     if observed.is_empty() {
         return Err(
             "observed_generation is empty on Failed job — controller will tight-loop \
@@ -1010,13 +1009,8 @@ async fn test_job_failed_sets_observed_generation(kubeconfig: &str) -> Result<()
         );
     }
 
-    let gen = get_resource_generation(
-        kubeconfig,
-        "latticejob",
-        NS_JOB_FAILED_STABLE,
-        "job-stable-fail",
-    )
-    .await?;
+    let gen =
+        get_resource_generation(kubeconfig, "latticejob", namespace, "job-stable-fail").await?;
     if observed != gen {
         return Err(format!(
             "observed_generation ({observed}) != metadata.generation ({gen}) — \
@@ -1026,7 +1020,7 @@ async fn test_job_failed_sets_observed_generation(kubeconfig: &str) -> Result<()
 
     info!("[Updates] observed_generation = {observed} (matches generation = {gen})");
 
-    delete_namespace(kubeconfig, NS_JOB_FAILED_STABLE).await;
+    delete_namespace(kubeconfig, namespace).await;
     info!("[Updates] Test 8 passed: Failed job has observed_generation set");
     Ok(())
 }
@@ -1123,37 +1117,31 @@ pub async fn run_service_update_tests(kubeconfig: &str) -> Result<(), String> {
 pub async fn run_model_update_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Updates] Running LatticeModel update tests on {kubeconfig}");
 
-    // Model tests run sequentially: test 5 needs Loading phase which is brief,
-    // and we can't have two models with the same name in different namespaces
-    // competing for CRD discovery.
+    // Each test uses its own namespace so they can run concurrently
     let harness = TestHarness::new("Model Updates");
-    harness
-        .run("Model Serving spec update", || {
+    tokio::join!(
+        harness.run("Model Serving spec update", || {
             test_model_serving_spec_update(kubeconfig, NS_MODEL_SPEC_UPDATE)
-        })
-        .await;
-    harness
-        .run("Model Loading detects spec change", || {
+        }),
+        harness.run("Model Loading detects spec change", || {
             test_model_loading_detects_spec_change(kubeconfig, NS_MODEL_LOADING_GAP)
-        })
-        .await;
-    harness
-        .run("Model role removal orphan cleanup", || {
+        }),
+        harness.run("Model role removal orphan cleanup", || {
             test_model_role_removal_orphan_cleanup(kubeconfig, NS_MODEL_ROLE_ORPHAN)
-        })
-        .await;
+        }),
+    );
 
     harness.finish()
 }
 
 /// Run LatticeJob CRD update integration tests.
-pub async fn run_job_update_tests(kubeconfig: &str) -> Result<(), String> {
+pub async fn run_job_update_tests(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     info!("[Updates] Running LatticeJob update tests on {kubeconfig}");
 
     let harness = TestHarness::new("Job Updates");
     harness
         .run("Job Failed observed_generation", || {
-            test_job_failed_sets_observed_generation(kubeconfig)
+            test_job_failed_sets_observed_generation(kubeconfig, namespace)
         })
         .await;
 
@@ -1166,9 +1154,15 @@ pub async fn run_update_tests(kubeconfig: &str) -> Result<(), String> {
 
     setup_regcreds_infrastructure(kubeconfig).await?;
 
-    run_service_update_tests(kubeconfig).await?;
-    run_model_update_tests(kubeconfig).await?;
-    run_job_update_tests(kubeconfig).await?;
+    // All suites use independent namespaces, run concurrently
+    let (svc_result, model_result, job_result) = tokio::join!(
+        run_service_update_tests(kubeconfig),
+        run_model_update_tests(kubeconfig),
+        run_job_update_tests(kubeconfig, NS_JOB_FAILED_STABLE),
+    );
+    svc_result?;
+    model_result?;
+    job_result?;
 
     info!("[Updates] All CRD update integration tests passed!");
     Ok(())
@@ -1198,5 +1192,7 @@ async fn test_job_updates_standalone() {
     setup_regcreds_infrastructure(&resolved.kubeconfig)
         .await
         .unwrap();
-    run_job_update_tests(&resolved.kubeconfig).await.unwrap();
+    run_job_update_tests(&resolved.kubeconfig, NS_JOB_FAILED_STANDALONE)
+        .await
+        .unwrap();
 }

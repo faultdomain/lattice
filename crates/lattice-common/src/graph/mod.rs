@@ -108,7 +108,13 @@ impl ServiceNode {
         let allows_all = caller_refs.iter().any(|r| r.name == "*");
 
         let allowed_callers: HashSet<QualifiedName> = if allows_all {
-            HashSet::new()
+            // Keep non-wildcard CallerRefs — these are infrastructure identities
+            // (e.g. gateway proxy SA) that need explicit L7 authorization.
+            caller_refs
+                .into_iter()
+                .filter(|r| r.name != "*")
+                .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
+                .collect()
         } else {
             caller_refs
                 .into_iter()
@@ -169,7 +175,13 @@ impl ServiceNode {
         let allows_all = spec.allowed_callers.iter().any(|c| c.name == "*");
 
         let allowed_callers: HashSet<QualifiedName> = if allows_all {
-            HashSet::new()
+            // Keep non-wildcard CallerRefs — these are infrastructure identities
+            // (e.g. gateway proxy SA) that need explicit L7 authorization.
+            spec.allowed_callers
+                .iter()
+                .filter(|c| c.name != "*")
+                .map(|c| (c.resolve_namespace(namespace).to_string(), c.name.clone()))
+                .collect()
         } else {
             spec.allowed_callers
                 .iter()
@@ -190,8 +202,8 @@ impl ServiceNode {
                 (
                     p.name.clone(),
                     PortMapping {
-                        service_port: p.port,
-                        target_port: p.port, // No K8s Service indirection
+                        service_port: p.service_port.unwrap_or(p.port),
+                        target_port: p.port,
                         peer_auth: p.peer_auth,
                     },
                 )
@@ -1477,6 +1489,7 @@ mod tests {
                 .into_iter()
                 .map(|(name, port)| MeshMemberPort {
                     port,
+                    service_port: None,
                     name: name.to_string(),
                     peer_auth: PeerAuth::Strict,
                 })
@@ -1620,6 +1633,7 @@ mod tests {
             target: MeshMemberTarget::Namespace("kube-system".to_string()),
             ports: vec![crate::crd::MeshMemberPort {
                 port: 443,
+                service_port: None,
                 name: "https".to_string(),
                 peer_auth: crate::crd::PeerAuth::Permissive,
             }],
@@ -1984,6 +1998,7 @@ mod tests {
             target: MeshMemberTarget::Selector(BTreeMap::new()),
             ports: vec![crate::crd::MeshMemberPort {
                 port: 8080,
+                service_port: None,
                 name: "http".to_string(),
                 peer_auth: PeerAuth::Strict,
             }],
@@ -2043,6 +2058,7 @@ mod tests {
             target: MeshMemberTarget::Selector(BTreeMap::new()),
             ports: vec![crate::crd::MeshMemberPort {
                 port: 8080,
+                service_port: None,
                 name: "http".to_string(),
                 peer_auth: PeerAuth::Strict,
             }],

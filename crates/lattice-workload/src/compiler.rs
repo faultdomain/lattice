@@ -13,6 +13,7 @@ use lattice_common::crd::{
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
+use lattice_common::mesh;
 use lattice_common::template::{RenderConfig, TemplateRenderer};
 use lattice_common::LABEL_NAME;
 
@@ -128,6 +129,40 @@ impl<'a> WorkloadCompiler<'a> {
     pub fn with_owner_references(mut self, refs: Vec<OwnerReference>) -> Self {
         self.owner_references = refs;
         self
+    }
+
+    /// Compile files for a container/sidecar and collect outputs into the accumulator vecs.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_compiled_files(
+        service_name: &str,
+        container_name: &str,
+        namespace: &str,
+        rendered_files: &BTreeMap<String, lattice_common::template::RenderedFile>,
+        secret_refs: &BTreeMap<String, crate::pipeline::secrets::SecretRef>,
+        files_config_maps: &mut Vec<crate::k8s::ConfigMap>,
+        files_secrets: &mut Vec<crate::k8s::Secret>,
+        file_external_secrets: &mut Vec<lattice_secret_provider::eso::ExternalSecret>,
+        per_container_file_volumes: &mut BTreeMap<String, Vec<crate::k8s::Volume>>,
+        per_container_file_mounts: &mut BTreeMap<String, Vec<crate::k8s::VolumeMount>>,
+    ) -> Result<(), CompilationError> {
+        let compiled = files::compile(
+            service_name,
+            container_name,
+            namespace,
+            rendered_files,
+            secret_refs,
+        )?;
+
+        if let Some(cm) = compiled.config_map {
+            files_config_maps.push(cm);
+        }
+        if let Some(secret) = compiled.secret {
+            files_secrets.push(secret);
+        }
+        file_external_secrets.extend(compiled.file_external_secrets);
+        per_container_file_volumes.insert(container_name.to_string(), compiled.volumes);
+        per_container_file_mounts.insert(container_name.to_string(), compiled.volume_mounts);
+        Ok(())
     }
 
     /// Compile the workload spec into Kubernetes primitives.
@@ -282,23 +317,44 @@ impl<'a> WorkloadCompiler<'a> {
             per_container_env_from.insert(container_name.clone(), container_env_from);
 
             // Compile files
-            let compiled_files = files::compile(
+            Self::collect_compiled_files(
                 self.name,
                 container_name,
                 self.namespace,
                 &rendered.files,
                 &compiled_secrets.secret_refs,
+                &mut files_config_maps,
+                &mut files_secrets,
+                &mut file_external_secrets,
+                &mut per_container_file_volumes,
+                &mut per_container_file_mounts,
             )?;
+        }
 
-            if let Some(cm) = compiled_files.config_map {
-                files_config_maps.push(cm);
+        // Compile sidecar files (sidecars use SidecarSpec, not ContainerSpec,
+        // so they aren't included in render_all_containers)
+        for (sidecar_name, sidecar_spec) in &self.runtime.sidecars {
+            if sidecar_spec.files.is_empty() {
+                continue;
             }
-            if let Some(secret) = compiled_files.secret {
-                files_secrets.push(secret);
-            }
-            file_external_secrets.extend(compiled_files.file_external_secrets);
-            per_container_file_volumes.insert(container_name.clone(), compiled_files.volumes);
-            per_container_file_mounts.insert(container_name.clone(), compiled_files.volume_mounts);
+
+            let rendered_files = self
+                .renderer
+                .render_files(&sidecar_spec.files, &template_ctx)
+                .map_err(CompilationError::from)?;
+
+            Self::collect_compiled_files(
+                self.name,
+                sidecar_name,
+                self.namespace,
+                &rendered_files,
+                &compiled_secrets.secret_refs,
+                &mut files_config_maps,
+                &mut files_secrets,
+                &mut file_external_secrets,
+                &mut per_container_file_volumes,
+                &mut per_container_file_mounts,
+            )?;
         }
 
         // Compile pod template
@@ -368,6 +424,19 @@ impl<'a> WorkloadCompiler<'a> {
             }];
         }
 
+        // When the service has ingress routes, the namespace's shared gateway proxy
+        // needs to reach the backend. Add its SA as an infrastructure caller so the
+        // AuthorizationPolicy includes its SPIFFE principal.
+        // This must be AFTER the wildcard override — the `*` wildcard means "accept
+        // all graph services via bilateral agreement" but doesn't cover infrastructure
+        // identities like the gateway proxy SA.
+        if self.ingress.as_ref().is_some_and(|i| !i.routes.is_empty()) {
+            allowed_callers.push(CallerRef {
+                name: mesh::ingress_gateway_sa_name(self.namespace),
+                namespace: None,
+            });
+        }
+
         let mut dependencies: Vec<lattice_common::crd::ServiceRef> = service_node
             .as_ref()
             .map(|n| {
@@ -396,6 +465,11 @@ impl<'a> WorkloadCompiler<'a> {
                     .iter()
                     .map(|(port_name, ps)| MeshMemberPort {
                         port: ps.target_port.unwrap_or(ps.port),
+                        service_port: if ps.target_port.is_some() {
+                            Some(ps.port)
+                        } else {
+                            None
+                        },
                         name: port_name.clone(),
                         peer_auth: PeerAuth::Strict,
                     })

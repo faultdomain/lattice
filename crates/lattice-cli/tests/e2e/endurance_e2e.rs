@@ -47,7 +47,7 @@ use super::helpers::{
     delete_cluster_and_wait, ensure_docker_network, extract_docker_cluster_kubeconfig,
     force_delete_docker_cluster, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
     load_registry_credentials, run_id, watch_cluster_phases, DEFAULT_LATTICE_IMAGE,
-    MGMT_CLUSTER_NAME,
+    DEFAULT_TIMEOUT, MGMT_CLUSTER_NAME,
 };
 use super::integration::setup;
 use super::providers::InfraProvider;
@@ -152,7 +152,12 @@ async fn run_endurance_test() -> Result<(), String> {
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig_path).await?;
 
     // Verify management cluster
-    watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, Some(600)).await?;
+    watch_cluster_phases(
+        &mgmt_client,
+        MGMT_CLUSTER_NAME,
+        Some(DEFAULT_TIMEOUT.as_secs()),
+    )
+    .await?;
     info!("[SETUP] Management cluster ready!");
 
     // Start coordinated chaos monkey on mgmt cluster
@@ -330,14 +335,17 @@ async fn create_clusters_parallel(
 }
 
 async fn wait_all_running(client: &Client, cluster_names: &[String]) -> Result<(), String> {
-    let futures: Vec<_> = cluster_names
-        .iter()
-        .map(|name| {
-            let client = client.clone();
-            let name = name.clone();
-            async move { watch_cluster_phases(&client, &name, Some(600)).await }
-        })
-        .collect();
+    let futures: Vec<_> =
+        cluster_names
+            .iter()
+            .map(|name| {
+                let client = client.clone();
+                let name = name.clone();
+                async move {
+                    watch_cluster_phases(&client, &name, Some(DEFAULT_TIMEOUT.as_secs())).await
+                }
+            })
+            .collect();
 
     try_join_all(futures).await?;
     Ok(())

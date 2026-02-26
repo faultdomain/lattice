@@ -32,8 +32,16 @@ pub struct CompiledRouting {
 }
 
 /// Compile a ModelRoutingSpec into Kthena networking resources.
-pub fn compile_model_routing(model: &LatticeModel, routing: &ModelRoutingSpec) -> CompiledRouting {
-    let model_server = compile_model_server(model, routing);
+///
+/// `serving_name` is the ModelServing resource name (model name + role suffix).
+/// The ModelServer's workload_selector uses `modelserving.volcano.sh/name` to
+/// match pods, which Kthena labels with the ModelServing name.
+pub fn compile_model_routing(
+    model: &LatticeModel,
+    routing: &ModelRoutingSpec,
+    serving_name: &str,
+) -> CompiledRouting {
+    let model_server = compile_model_server(model, routing, serving_name);
 
     let model_routes: Vec<KthenaModelRoute> = routing
         .routes
@@ -47,7 +55,11 @@ pub fn compile_model_routing(model: &LatticeModel, routing: &ModelRoutingSpec) -
     }
 }
 
-fn compile_model_server(model: &LatticeModel, routing: &ModelRoutingSpec) -> KthenaModelServer {
+fn compile_model_server(
+    model: &LatticeModel,
+    routing: &ModelRoutingSpec,
+    serving_name: &str,
+) -> KthenaModelServer {
     let name = model.metadata.name.as_deref().unwrap_or_default();
     let namespace = model.metadata.namespace.as_deref().unwrap_or("default");
     let uid = model.metadata.uid.as_deref().unwrap_or_default();
@@ -73,7 +85,10 @@ fn compile_model_server(model: &LatticeModel, routing: &ModelRoutingSpec) -> Kth
             model: Some(routing.model.clone()),
             inference_engine: routing.inference_engine.to_string(),
             workload_selector: WorkloadSelector {
-                match_labels: BTreeMap::from([(MODEL_SERVING_LABEL.to_string(), name.to_string())]),
+                match_labels: BTreeMap::from([(
+                    MODEL_SERVING_LABEL.to_string(),
+                    serving_name.to_string(),
+                )]),
                 pd_group,
             },
             workload_port: WorkloadPort {
@@ -298,7 +313,7 @@ mod tests {
         let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
         let routing = basic_routing();
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
 
         assert_eq!(compiled.model_server.metadata.name, "test-model");
         assert_eq!(compiled.model_server.spec.inference_engine, "vLLM");
@@ -338,7 +353,7 @@ mod tests {
             type_: KvConnectorType::Nixl,
         });
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
 
         let pd = compiled
             .model_server
@@ -370,7 +385,7 @@ mod tests {
         ]));
         let routing = basic_routing();
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
         assert!(compiled
             .model_server
             .spec
@@ -387,7 +402,7 @@ mod tests {
             type_: KvConnectorType::Nixl,
         });
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
         assert!(compiled
             .model_server
             .spec
@@ -431,7 +446,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
         let route = &compiled.model_routes[0];
         assert_eq!(route.spec.rules[0].target_models.len(), 2);
         assert_eq!(
@@ -482,7 +497,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
 
         assert_eq!(compiled.model_server.spec.inference_engine, "SGLang");
         assert_eq!(compiled.model_server.spec.workload_port.port, 9000);
@@ -525,7 +540,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
         let route = &compiled.model_routes[0];
         assert_eq!(route.spec.model_name, Some("custom-model".to_string()));
         assert_eq!(
@@ -569,7 +584,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
 
         assert_eq!(
             compiled
@@ -596,7 +611,7 @@ mod tests {
         let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
         let routing = basic_routing();
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
 
         let ms_oref = &compiled.model_server.metadata.owner_references[0];
         assert_eq!(ms_oref.kind, "LatticeModel");
@@ -642,7 +657,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
         let refs = compiled.model_routes[0].spec.parent_refs.as_ref().unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "inference-gw");
@@ -692,7 +707,7 @@ mod tests {
             type_: KvConnectorType::Nixl,
         });
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
         assert!(
             compiled
                 .model_server
@@ -705,14 +720,14 @@ mod tests {
     }
 
     #[test]
-    fn workload_selector_matches_model_name() {
+    fn workload_selector_matches_serving_name() {
         let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
         let routing = basic_routing();
 
-        let compiled = compile_model_routing(&model, &routing);
+        let compiled = compile_model_routing(&model, &routing, "test-model-test");
         assert_eq!(
             compiled.model_server.spec.workload_selector.match_labels[MODEL_SERVING_LABEL],
-            "test-model"
+            "test-model-test"
         );
     }
 }

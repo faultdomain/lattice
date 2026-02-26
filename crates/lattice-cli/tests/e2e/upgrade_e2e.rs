@@ -43,7 +43,7 @@ use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, create_with_retry, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
     load_registry_credentials, patch_with_retry, run_cmd, run_id, run_kubectl,
-    watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    watch_cluster_phases, DEFAULT_LATTICE_IMAGE, DEFAULT_TIMEOUT, MGMT_CLUSTER_NAME,
 };
 use super::integration::setup;
 use super::mesh_tests::{start_mesh_test, wait_for_mesh_test_cycles};
@@ -160,7 +160,12 @@ async fn run_upgrade_test() -> Result<(), String> {
     create_with_retry(&api, &workload_cluster, UPGRADE_WORKLOAD_CLUSTER_NAME).await?;
 
     // Wait for cluster to be ready
-    watch_cluster_phases(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME, Some(600)).await?;
+    watch_cluster_phases(
+        &mgmt_client,
+        UPGRADE_WORKLOAD_CLUSTER_NAME,
+        Some(DEFAULT_TIMEOUT.as_secs()),
+    )
+    .await?;
     info!("Workload cluster ready at v{}!", from_version);
 
     // Extract kubeconfig
@@ -270,7 +275,7 @@ async fn wait_for_cluster_deleted(kubeconfig: &str, name: &str) -> Result<(), St
     // Use a generous timeout - cluster deletion can take a while with CAPI cleanup
     wait_for_condition(
         &format!("cluster {} to be deleted", name),
-        Duration::from_secs(600),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || async move {
             match run_kubectl(&[

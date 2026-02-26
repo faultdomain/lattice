@@ -35,7 +35,7 @@ use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry};
 
-use crate::compiler::{compile_model, CompiledModel};
+use crate::compiler::{compile_model, role_key_suffix, CompiledModel};
 use crate::download::{CompiledDownload, SCHEDULING_GATE_MODEL_DOWNLOAD};
 use crate::error::ModelError;
 
@@ -102,11 +102,26 @@ pub async fn reconcile(
     register_graph(&model, &ctx.graph, namespace);
 
     let generation = model.metadata.generation.unwrap_or(0);
+    let suffix = role_key_suffix(model.spec.roles.keys());
+    let serving_name = format!("{}-{}", name, suffix);
     let phase = model
         .status
         .as_ref()
         .map(|s| s.phase.clone())
         .unwrap_or(ModelServingPhase::Pending);
+
+    // Kthena may create new pods (scale-up, worker addition) after the initial
+    // gate removal in Loading. Run gate removal on every reconcile past Pending
+    // when the download job has completed, so late-arriving pods get ungated.
+    if model.spec.model_source.is_some() && phase != ModelServingPhase::Pending {
+        let job_name = format!("{}-download", name);
+        if matches!(
+            check_download_job_status(&ctx.client, &job_name, namespace).await,
+            Some(DownloadState::Succeeded)
+        ) {
+            remove_scheduling_gates(&ctx.client, &serving_name, namespace).await?;
+        }
+    }
 
     match phase {
         ModelServingPhase::Pending => {
@@ -116,6 +131,7 @@ pub async fn reconcile(
                 &ctx.cluster_name,
                 ctx.provider_type,
                 &ctx.cedar,
+                &suffix,
             )
             .await;
 
@@ -191,13 +207,14 @@ pub async fn reconcile(
                 return Ok(Action::requeue(REQUEUE_RETRY));
             }
 
-            // When modelSource is configured, check download Job before ModelServing
+            // When modelSource is configured, check download Job before ModelServing.
+            // Gate removal already happened above (pre-phase); here we only gate on
+            // the download status to block ModelServing readiness checks.
             if model.spec.model_source.is_some() {
                 let job_name = format!("{}-download", name);
                 match check_download_job_status(&ctx.client, &job_name, namespace).await {
                     Some(DownloadState::Succeeded) => {
                         info!(model = %name, "model download job completed");
-                        remove_scheduling_gates(&ctx.client, &name, namespace).await?;
                     }
                     Some(DownloadState::Failed { permanent }) => {
                         if permanent {
@@ -232,7 +249,8 @@ pub async fn reconcile(
             }
 
             let (state, conditions) =
-                check_model_serving_status(&ctx.client, &name, namespace, &ctx.registry).await;
+                check_model_serving_status(&ctx.client, &serving_name, namespace, &ctx.registry)
+                    .await;
 
             match state {
                 ModelServingState::Available => {
@@ -284,6 +302,7 @@ pub async fn reconcile(
                     &ctx.cluster_name,
                     ctx.provider_type,
                     &ctx.cedar,
+                    &suffix,
                 )
                 .await
                 {
@@ -322,9 +341,19 @@ pub async fn reconcile(
                 // When roles are added or removed, the gang policy's
                 // minRoleReplicas key set changes. Volcano marks that field
                 // immutable, so an SSA update would 422. Delete the old
-                // ModelServing first — the re-apply will create a fresh one.
+                // ModelServing and requeue — the old PodGroup and pods need
+                // time to be garbage-collected. Applying immediately would
+                // SSA-patch the Terminating resource or create a PodGroup
+                // name collision, leaving decode pods stuck in Pending.
+                //
+                // On the next reconcile, register_graph (above) has already
+                // updated the graph so old_role_keys == new_role_keys, the
+                // delete is skipped, and apply_compiled_model creates a
+                // clean new ModelServing.
                 if old_role_keys != new_role_keys {
-                    delete_model_serving(&ctx.client, &ctx.registry, &name, namespace).await;
+                    delete_model_serving(&ctx.client, &ctx.registry, &name, namespace).await?;
+                    info!(model = %name, "deleted ModelServing for role change, requeuing for clean recreate");
+                    return Ok(Action::requeue(REQUEUE_LOADING));
                 }
 
                 if let Err(e) = apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await
@@ -372,7 +401,8 @@ pub async fn reconcile(
                 return Ok(Action::requeue(REQUEUE_SERVING));
             }
             let conditions =
-                read_model_serving_conditions(&ctx.client, &name, namespace, &ctx.registry).await;
+                read_model_serving_conditions(&ctx.client, &serving_name, namespace, &ctx.registry)
+                    .await;
             update_status(
                 &ctx.client,
                 &model,
@@ -502,26 +532,39 @@ async fn cleanup_removed_roles(
     }
 }
 
-/// Delete the ModelServing resource so it can be recreated with a new gang policy.
+/// Delete all ModelServing resources owned by a LatticeModel.
+///
+/// Uses label-based listing (`app.kubernetes.io/name`) to find ModelServings
+/// regardless of their role-suffix. This handles the case where the role set
+/// changes and the new ModelServing has a different name suffix.
 ///
 /// Volcano marks `gangPolicy.minRoleReplicas` as immutable. When the role set
 /// changes (roles added or removed), an SSA update would get a 422. Deleting
-/// first lets the re-apply create a fresh resource with the correct keys.
+/// first lets the re-apply create a fresh resource with the new suffix.
 async fn delete_model_serving(
     client: &Client,
     registry: &CrdRegistry,
     model_name: &str,
     namespace: &str,
-) {
+) -> Result<(), ModelError> {
     let Some(ms_ar) = registry.resolve(CrdKind::ModelServing).await else {
-        return;
+        return Ok(());
     };
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ms_ar);
-    match api.delete(model_name, &DeleteParams::default()).await {
-        Ok(_) => info!(model = %model_name, "deleted ModelServing for role structure change"),
-        Err(kube::Error::Api(ref resp)) if resp.code == 404 => {}
-        Err(e) => warn!(model = %model_name, error = %e, "failed to delete ModelServing"),
+    let lp =
+        kube::api::ListParams::default().labels(&format!("app.kubernetes.io/name={model_name}"));
+    let list = api.list(&lp).await?;
+    for ms in list.items {
+        let ms_name = ms.name_any();
+        match api.delete(&ms_name, &DeleteParams::default()).await {
+            Ok(_) => {
+                info!(model = %model_name, serving = %ms_name, "deleted ModelServing")
+            }
+            Err(kube::Error::Api(ref resp)) if resp.code == 404 => {}
+            Err(e) => return Err(e.into()),
+        }
     }
+    Ok(())
 }
 
 /// Error policy for LatticeModel reconciliation
@@ -892,15 +935,19 @@ async fn check_download_job_status(
 /// Lists pods by the `modelserving.volcano.sh/name` label and patches each
 /// one that has the `lattice.dev/model-download` gate to remove it, allowing
 /// the kube-scheduler to schedule them.
+///
+/// `serving_name` must be the ModelServing resource name (model name + role suffix),
+/// since Kthena labels pods with `modelserving.volcano.sh/name={ModelServing.metadata.name}`.
 async fn remove_scheduling_gates(
     client: &Client,
-    model_name: &str,
+    serving_name: &str,
     namespace: &str,
 ) -> Result<(), ModelError> {
     use kube::api::ListParams;
 
     let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(client.clone(), namespace);
-    let lp = ListParams::default().labels(&format!("modelserving.volcano.sh/name={}", model_name));
+    let lp =
+        ListParams::default().labels(&format!("modelserving.volcano.sh/name={}", serving_name));
 
     let pod_list = pods.list(&lp).await?;
     let mut removed = 0u32;
@@ -953,7 +1000,7 @@ async fn remove_scheduling_gates(
     }
 
     if removed > 0 {
-        info!(model = %model_name, count = removed, "removed scheduling gates from pods");
+        info!(serving = %serving_name, count = removed, "removed scheduling gates from pods");
     }
 
     Ok(())

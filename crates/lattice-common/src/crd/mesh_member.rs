@@ -84,8 +84,14 @@ pub enum MeshMemberTarget {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshMemberPort {
-    /// Port number
+    /// Port number (container/target port)
     pub port: u16,
+    /// Kubernetes Service port. When the Service uses a port mapping
+    /// (`port: 80, targetPort: 8080`), this holds the Service-facing port
+    /// so Gateway API backendRefs can reference it correctly.
+    /// Defaults to `port` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_port: Option<u16>,
     /// Port name (must be a valid DNS label)
     pub name: String,
     /// mTLS enforcement mode for this port
@@ -346,6 +352,7 @@ mod tests {
             )])),
             ports: vec![MeshMemberPort {
                 port: 9090,
+                service_port: None,
                 name: "metrics".to_string(),
                 peer_auth: PeerAuth::Strict,
             }],

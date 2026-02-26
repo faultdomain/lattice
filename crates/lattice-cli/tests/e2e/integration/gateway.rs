@@ -189,14 +189,14 @@ async fn verify_gateway_resources(kubeconfig: &str) -> Result<(), String> {
     verify_gateway_listeners(kubeconfig, GATEWAY_TEST_NAMESPACE, &listener_refs).await?;
 
     // Verify HTTPRoutes
-    // backend-a: catch-all route
+    // backend-a: catch-all route (port 80 = K8s Service port, not container targetPort 8080)
     verify_httproute(
         kubeconfig,
         GATEWAY_TEST_NAMESPACE,
         "backend-a-public-route",
         "backend-a.gateway-test.local",
         "backend-a",
-        "8080",
+        "80",
     )
     .await?;
 
@@ -207,7 +207,7 @@ async fn verify_gateway_resources(kubeconfig: &str) -> Result<(), String> {
         "backend-b-public-route",
         "backend-b.gateway-test.local",
         "backend-b",
-        "8080",
+        "80",
     )
     .await?;
 
@@ -218,7 +218,7 @@ async fn verify_gateway_resources(kubeconfig: &str) -> Result<(), String> {
         "backend-tls-public-route",
         "secure.gateway-test.local",
         "backend-tls",
-        "8080",
+        "80",
     )
     .await?;
 

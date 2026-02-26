@@ -338,19 +338,20 @@ impl RouteSpec {
 // =============================================================================
 
 impl RouteSpec {
-    /// Resolve the target port number from mesh member ports.
+    /// Resolve the Service port number from mesh member ports.
     ///
-    /// If `port` is set, looks it up by name. Otherwise infers when there's exactly one port.
-    /// Returns an error if the port can't be resolved.
+    /// Returns `service_port` when available (port mapping case), otherwise `port`.
+    /// Gateway API backendRefs reference the Kubernetes Service port, not the
+    /// container target port.
     pub fn resolve_port(&self, ports: &[MeshMemberPort]) -> Result<u16, String> {
         if let Some(ref port_name) = self.port {
             ports
                 .iter()
                 .find(|p| p.name == *port_name)
-                .map(|p| p.port)
+                .map(|p| p.service_port.unwrap_or(p.port))
                 .ok_or_else(|| format!("port '{}' not found in member ports", port_name))
         } else if ports.len() == 1 {
-            Ok(ports[0].port)
+            Ok(ports[0].service_port.unwrap_or(ports[0].port))
         } else {
             Err(format!(
                 "cannot infer port: member has {} ports, specify route.port explicitly",
@@ -372,6 +373,7 @@ mod tests {
     fn single_port() -> Vec<MeshMemberPort> {
         vec![MeshMemberPort {
             port: 8080,
+            service_port: None,
             name: "http".to_string(),
             peer_auth: PeerAuth::Strict,
         }]
@@ -381,11 +383,13 @@ mod tests {
         vec![
             MeshMemberPort {
                 port: 8080,
+                service_port: None,
                 name: "http".to_string(),
                 peer_auth: PeerAuth::Strict,
             },
             MeshMemberPort {
                 port: 9090,
+                service_port: None,
                 name: "grpc".to_string(),
                 peer_auth: PeerAuth::Strict,
             },
@@ -619,6 +623,18 @@ mod tests {
         let mut route = http_route(vec!["a.example.com"]);
         route.port = Some("grpc".to_string());
         assert_eq!(route.resolve_port(&multi_port()).unwrap(), 9090);
+    }
+
+    #[test]
+    fn resolve_port_returns_service_port_when_set() {
+        let route = http_route(vec!["a.example.com"]);
+        let ports = vec![MeshMemberPort {
+            port: 8080,
+            service_port: Some(80),
+            name: "http".to_string(),
+            peer_auth: PeerAuth::Strict,
+        }];
+        assert_eq!(route.resolve_port(&ports).unwrap(), 80);
     }
 
     #[test]

@@ -75,7 +75,8 @@ impl PodTemplateCompiler {
         let mut containers = Self::compile_containers(workload, gpu_ref, volumes, container_data)?;
 
         // Compile sidecars (init + regular)
-        let (init_containers, sidecar_containers) = Self::compile_sidecars(runtime, volumes);
+        let (init_containers, sidecar_containers) =
+            Self::compile_sidecars(runtime, volumes, container_data);
 
         // Merge sidecar containers with main containers
         containers.extend(sidecar_containers);
@@ -477,6 +478,7 @@ impl PodTemplateCompiler {
     fn compile_sidecars(
         runtime: &RuntimeSpec,
         volumes: &GeneratedVolumes,
+        container_data: &ContainerCompilationData<'_>,
     ) -> (Vec<Container>, Vec<Container>) {
         let mut init_containers = Vec::new();
         let mut sidecar_containers = Vec::new();
@@ -510,11 +512,17 @@ impl PodTemplateCompiler {
                 )
             };
 
-            let volume_mounts = volumes
+            let mut volume_mounts = volumes
                 .volume_mounts
                 .get(sidecar_name)
                 .cloned()
                 .unwrap_or_default();
+
+            // Append file volume mounts from files::compile (ConfigMap/Secret mounts
+            // for the sidecar's `files:` directive)
+            if let Some(file_mounts) = container_data.per_container_file_mounts.get(sidecar_name) {
+                volume_mounts.extend(file_mounts.iter().cloned());
+            }
 
             let security_context = Self::compile_security_context(sidecar_spec.security.as_ref());
 

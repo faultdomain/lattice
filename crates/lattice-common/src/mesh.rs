@@ -83,6 +83,13 @@ pub fn ingress_gateway_name(namespace: &str) -> String {
     format!("{}-ingress", namespace)
 }
 
+/// Get the service account name for the namespace's ingress gateway proxy.
+///
+/// Istio creates a service account `{gateway_name}-istio` for the proxy pod.
+pub fn ingress_gateway_sa_name(namespace: &str) -> String {
+    format!("{}-istio", ingress_gateway_name(namespace))
+}
+
 // =============================================================================
 // Trust Domain Helpers
 // =============================================================================
@@ -125,8 +132,11 @@ pub mod trust_domain {
     /// (`{namespace}-ingress`), so only cluster_name and namespace are needed.
     /// Istio creates a service account `{gateway_name}-istio` for the proxy.
     pub fn gateway_principal(cluster_name: &str, namespace: &str) -> String {
-        let gw_name = super::ingress_gateway_name(namespace);
-        principal(cluster_name, namespace, &format!("{}-istio", gw_name))
+        principal(
+            cluster_name,
+            namespace,
+            &super::ingress_gateway_sa_name(namespace),
+        )
     }
 }
 
@@ -175,5 +185,11 @@ mod tests {
     fn ingress_gateway_name_format() {
         assert_eq!(ingress_gateway_name("prod"), "prod-ingress");
         assert_eq!(ingress_gateway_name("my-ns"), "my-ns-ingress");
+    }
+
+    #[test]
+    fn ingress_gateway_sa_name_format() {
+        assert_eq!(ingress_gateway_sa_name("prod"), "prod-ingress-istio");
+        assert_eq!(ingress_gateway_sa_name("my-ns"), "my-ns-ingress-istio");
     }
 }
