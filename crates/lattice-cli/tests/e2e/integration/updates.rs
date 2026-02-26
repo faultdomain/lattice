@@ -249,26 +249,26 @@ const NS_MODEL_SPEC_UPDATE: &str = "update-t4";
 
 /// Deploy a model to Serving, update its spec (replicas), verify the controller
 /// recompiles and observed_generation advances.
-async fn test_model_serving_spec_update(kubeconfig: &str) -> Result<(), String> {
+async fn test_model_serving_spec_update(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     info!("[Updates] Test 4: Model Serving → spec change → Serving");
-    ensure_fresh_namespace(kubeconfig, NS_MODEL_SPEC_UPDATE).await?;
+    ensure_fresh_namespace(kubeconfig, namespace).await?;
 
     // Deploy from fixture with overridden namespace
-    let yaml = load_model_fixture_for_namespace(NS_MODEL_SPEC_UPDATE)?;
+    let yaml = load_model_fixture_for_namespace(namespace)?;
     apply_yaml_with_retry(kubeconfig, &yaml).await?;
 
     // Wait for Serving
     wait_for_resource_phase(
         kubeconfig,
         "latticemodel",
-        NS_MODEL_SPEC_UPDATE,
+        namespace,
         "llm-serving",
         "Serving",
         DEFAULT_TIMEOUT,
     )
     .await?;
 
-    let gen_before = get_model_observed_generation(kubeconfig, NS_MODEL_SPEC_UPDATE, "llm-serving").await?;
+    let gen_before = get_model_observed_generation(kubeconfig, namespace, "llm-serving").await?;
     info!("[Updates] Model before update: observed_generation = {gen_before}");
 
     // Patch decode replicas from 2 → 3
@@ -281,13 +281,13 @@ async fn test_model_serving_spec_update(kubeconfig: &str) -> Result<(), String> 
             }
         }
     });
-    patch_resource(kubeconfig, "latticemodel", NS_MODEL_SPEC_UPDATE, "llm-serving", &patch_json).await?;
+    patch_resource(kubeconfig, "latticemodel", namespace, "llm-serving", &patch_json).await?;
 
     // Wait for generation to advance
     let gen_before_i64: i64 = gen_before.parse().unwrap_or(0);
     wait_for_model_generation_advance(
         kubeconfig,
-        NS_MODEL_SPEC_UPDATE,
+        namespace,
         "llm-serving",
         gen_before_i64,
     )
@@ -297,7 +297,7 @@ async fn test_model_serving_spec_update(kubeconfig: &str) -> Result<(), String> 
     wait_for_resource_phase(
         kubeconfig,
         "latticemodel",
-        NS_MODEL_SPEC_UPDATE,
+        namespace,
         "llm-serving",
         "Serving",
         Duration::from_secs(180),
@@ -307,7 +307,7 @@ async fn test_model_serving_spec_update(kubeconfig: &str) -> Result<(), String> 
     // Verify ModelServing reflects new replicas
     let decode_replicas = get_model_serving_role_replicas(
         kubeconfig,
-        NS_MODEL_SPEC_UPDATE,
+        namespace,
         "llm-serving",
         "decode",
     )
@@ -318,7 +318,7 @@ async fn test_model_serving_spec_update(kubeconfig: &str) -> Result<(), String> 
         ));
     }
 
-    let gen_after = get_model_observed_generation(kubeconfig, NS_MODEL_SPEC_UPDATE, "llm-serving").await?;
+    let gen_after = get_model_observed_generation(kubeconfig, namespace, "llm-serving").await?;
     info!("[Updates] Model after update: observed_generation = {gen_after}");
 
     if gen_after == gen_before {
@@ -327,7 +327,7 @@ async fn test_model_serving_spec_update(kubeconfig: &str) -> Result<(), String> 
         ));
     }
 
-    delete_namespace(kubeconfig, NS_MODEL_SPEC_UPDATE).await;
+    delete_namespace(kubeconfig, namespace).await;
     info!("[Updates] Test 4 passed: Model Serving → spec change → Serving");
     Ok(())
 }
@@ -347,19 +347,19 @@ const NS_MODEL_LOADING_GAP: &str = "update-t5";
 /// Loading, the old compiled resources keep running. On Loading→Serving
 /// transition, the NEW generation is stamped — making Serving think it's
 /// up-to-date when it's actually running stale config.
-async fn test_model_loading_detects_spec_change(kubeconfig: &str) -> Result<(), String> {
+async fn test_model_loading_detects_spec_change(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     info!("[Updates] Test 5: Model Loading → spec change → detect and recompile");
-    ensure_fresh_namespace(kubeconfig, NS_MODEL_LOADING_GAP).await?;
+    ensure_fresh_namespace(kubeconfig, namespace).await?;
 
     // Deploy from fixture (decode.replicas=2 in fixture)
-    let yaml = load_model_fixture_for_namespace(NS_MODEL_LOADING_GAP)?;
+    let yaml = load_model_fixture_for_namespace(namespace)?;
     apply_yaml_with_retry(kubeconfig, &yaml).await?;
 
     // Wait for Loading (compilation done, resources applied, waiting for readiness)
     wait_for_resource_phase(
         kubeconfig,
         "latticemodel",
-        NS_MODEL_LOADING_GAP,
+        namespace,
         "llm-serving",
         "Loading",
         Duration::from_secs(120),
@@ -368,7 +368,7 @@ async fn test_model_loading_detects_spec_change(kubeconfig: &str) -> Result<(), 
 
     let gen_at_loading = get_model_observed_generation(
         kubeconfig,
-        NS_MODEL_LOADING_GAP,
+        namespace,
         "llm-serving",
     )
     .await?;
@@ -385,14 +385,14 @@ async fn test_model_loading_detects_spec_change(kubeconfig: &str) -> Result<(), 
             }
         }
     });
-    patch_resource(kubeconfig, "latticemodel", NS_MODEL_LOADING_GAP, "llm-serving", &patch_json).await?;
+    patch_resource(kubeconfig, "latticemodel", namespace, "llm-serving", &patch_json).await?;
     info!("[Updates] Patched decode replicas to 3 while Loading");
 
     // Wait for the model to reach Serving (whether or not it recompiled)
     wait_for_resource_phase(
         kubeconfig,
         "latticemodel",
-        NS_MODEL_LOADING_GAP,
+        namespace,
         "llm-serving",
         "Serving",
         DEFAULT_TIMEOUT,
@@ -403,7 +403,7 @@ async fn test_model_loading_detects_spec_change(kubeconfig: &str) -> Result<(), 
     // or 2 (old spec, stale config)?
     let decode_replicas = get_model_serving_role_replicas(
         kubeconfig,
-        NS_MODEL_LOADING_GAP,
+        namespace,
         "llm-serving",
         "decode",
     )
@@ -420,15 +420,15 @@ async fn test_model_loading_detects_spec_change(kubeconfig: &str) -> Result<(), 
     }
 
     // Also verify observed_generation matches the final generation
-    let observed = get_model_observed_generation(kubeconfig, NS_MODEL_LOADING_GAP, "llm-serving").await?;
-    let gen = get_model_generation(kubeconfig, NS_MODEL_LOADING_GAP, "llm-serving").await?;
+    let observed = get_model_observed_generation(kubeconfig, namespace, "llm-serving").await?;
+    let gen = get_model_generation(kubeconfig, namespace, "llm-serving").await?;
     if observed != gen {
         return Err(format!(
             "Model observed_generation ({observed}) != generation ({gen}) after Serving"
         ));
     }
 
-    delete_namespace(kubeconfig, NS_MODEL_LOADING_GAP).await;
+    delete_namespace(kubeconfig, namespace).await;
     info!("[Updates] Test 5 passed: Model Loading detected spec change and recompiled");
     Ok(())
 }
@@ -712,6 +712,17 @@ pub async fn run_service_update_tests(kubeconfig: &str) -> Result<(), String> {
 
 /// Run LatticeModel CRD update integration tests.
 pub async fn run_model_update_tests(kubeconfig: &str) -> Result<(), String> {
+    run_model_update_tests_in(kubeconfig, NS_MODEL_SPEC_UPDATE, NS_MODEL_LOADING_GAP).await
+}
+
+/// Run LatticeModel CRD update integration tests with explicit namespaces.
+/// Callers must provide distinct namespaces to avoid collisions when running
+/// concurrently with other tests that use the default namespaces.
+pub async fn run_model_update_tests_in(
+    kubeconfig: &str,
+    ns_spec_update: &str,
+    ns_loading_gap: &str,
+) -> Result<(), String> {
     info!("[Updates] Running LatticeModel update tests on {kubeconfig}");
 
     // Model tests run sequentially: test 5 needs Loading phase which is brief,
@@ -720,12 +731,12 @@ pub async fn run_model_update_tests(kubeconfig: &str) -> Result<(), String> {
     let harness = TestHarness::new("Model Updates");
     harness
         .run("Model Serving spec update", || {
-            test_model_serving_spec_update(kubeconfig)
+            test_model_serving_spec_update(kubeconfig, ns_spec_update)
         })
         .await;
     harness
         .run("Model Loading detects spec change", || {
-            test_model_loading_detects_spec_change(kubeconfig)
+            test_model_loading_detects_spec_change(kubeconfig, ns_loading_gap)
         })
         .await;
 
@@ -769,5 +780,9 @@ async fn test_model_updates_standalone() {
     setup_regcreds_infrastructure(&resolved.kubeconfig)
         .await
         .unwrap();
-    run_model_update_tests(&resolved.kubeconfig).await.unwrap();
+    // Use distinct namespaces to avoid collisions with test_updates_standalone
+    // which runs concurrently and uses update-t4/update-t5.
+    run_model_update_tests_in(&resolved.kubeconfig, "model-update-t4", "model-update-t5")
+        .await
+        .unwrap();
 }
