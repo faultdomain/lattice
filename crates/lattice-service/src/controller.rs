@@ -653,75 +653,48 @@ pub async fn reconcile(
     // This is idempotent - put_service handles updates correctly
     ctx.graph.put_service(namespace, &name, &service.spec);
 
-    // State machine: transition based on current phase
-    match current_phase {
-        ServicePhase::Pending => {
-            update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
-            Ok(Action::requeue(REQUEUE_PENDING))
-        }
-        ServicePhase::Compiling => {
-            let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
-            if !missing_deps.is_empty() {
-                debug!(?missing_deps, "waiting for dependencies");
-                return Ok(Action::requeue(REQUEUE_WAITING));
-            }
-
-            let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
-            let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
-            debug!(
-                active_inbound = active_in.len(),
-                active_outbound = active_out.len(),
-                "edge status"
-            );
-
-            try_compile(&service, &name, namespace, &ctx).await
-        }
-        ServicePhase::Ready => {
-            // Compute inputs hash from graph state + policy epochs
-            let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
-            let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
-            let inputs_hash = lattice_common::graph::compute_edge_hash_with_epochs(
-                &active_in,
-                &active_out,
-                ctx.graph.policy_epoch(),
-                ctx.cedar.reload_epoch(),
-            );
-
-            // Skip if spec and external inputs are unchanged
-            if is_reconcile_current(&service, &inputs_hash) {
-                debug!("generation and inputs unchanged, skipping reconcile");
-                return Ok(Action::requeue(REQUEUE_READY));
-            }
-
-            let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
-            if !missing_deps.is_empty() {
-                warn!(?missing_deps, "dependencies no longer available");
-                update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
-                return Ok(Action::requeue(REQUEUE_WAITING));
-            }
-
-            try_compile_and_record(&service, &name, namespace, &ctx, &inputs_hash).await
-        }
-        ServicePhase::Failed | _ => {
-            // Same guard as Ready: skip retry when spec + inputs are unchanged
-            // to avoid tight loops on persistent compilation errors.
-            let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
-            let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
-            let inputs_hash = lattice_common::graph::compute_edge_hash_with_epochs(
-                &active_in,
-                &active_out,
-                ctx.graph.policy_epoch(),
-                ctx.cedar.reload_epoch(),
-            );
-
-            if is_reconcile_current(&service, &inputs_hash) {
-                debug!("generation and inputs unchanged, skipping failed retry");
-                return Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED));
-            }
-
-            try_compile_and_record(&service, &name, namespace, &ctx, &inputs_hash).await
-        }
+    // Pending → transition to Compiling and requeue immediately
+    if current_phase == ServicePhase::Pending {
+        update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
+        return Ok(Action::requeue(REQUEUE_PENDING));
     }
+
+    // All other phases share the same compile path with an inputs-hash guard.
+    let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
+    let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
+    let inputs_hash = lattice_common::graph::compute_edge_hash(
+        &active_in,
+        &active_out,
+        ctx.graph.policy_epoch(),
+        ctx.cedar.reload_epoch(),
+    );
+
+    // Skip reconcile when spec and external inputs are unchanged.
+    // For Ready services this avoids unnecessary recompilation.
+    // For Failed services this prevents tight retry loops on persistent errors.
+    // Compiling services always compile (no stored hash yet).
+    if is_reconcile_current(&service, &inputs_hash) {
+        let requeue = if current_phase == ServicePhase::Ready {
+            REQUEUE_READY
+        } else {
+            REQUEUE_FAILED_UNCHANGED
+        };
+        debug!("generation and inputs unchanged, skipping reconcile");
+        return Ok(Action::requeue(requeue));
+    }
+
+    let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
+    if !missing_deps.is_empty() {
+        if current_phase == ServicePhase::Ready {
+            warn!(?missing_deps, "dependencies no longer available");
+        } else {
+            debug!(?missing_deps, "waiting for dependencies");
+        }
+        update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
+        return Ok(Action::requeue(REQUEUE_WAITING));
+    }
+
+    compile_and_apply(&service, &name, namespace, &ctx, &inputs_hash).await
 }
 
 /// Error policy for the LatticeService controller (kube-rs callback).
@@ -824,110 +797,19 @@ async fn resolve_policy_defaults(
     (effective_backup, ingress_defaults)
 }
 
-/// Try compiling and applying a service. On success, transition to Ready only
-/// after all child resources (including the LatticeMeshMember) are reconciled.
-/// On failure, compile_and_apply already sets status to Failed; requeue to retry.
+/// Compile a service, apply resources, update status, and record the inputs hash.
 ///
-/// This is the shared compilation path for Compiling, Ready, and Failed phases.
-/// Using `match` instead of `?` prevents CompilationError → Error::Validation
-/// → error_policy → Action::await_change() from permanently parking the service.
-async fn try_compile(
-    service: &LatticeService,
-    name: &str,
-    namespace: &str,
-    ctx: &ServiceContext,
-) -> Result<Action, Error> {
-    match compile_and_apply(service, name, namespace, ctx).await {
-        Ok(has_mesh_member) => {
-            // Don't mark Ready until the MeshMember controller has fully reconciled
-            // (including ServiceEntries). This prevents a race where the LatticeService
-            // reports Ready but external connectivity isn't yet configured.
-            if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
-                debug!("mesh member not yet ready, staying in Compiling");
-                update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await?;
-                return Ok(Action::requeue(REQUEUE_PENDING));
-            }
-            update_service_status(
-                service,
-                ctx,
-                ServiceStatusUpdate::ready(service.metadata.generation),
-            )
-            .await?;
-            Ok(Action::requeue(REQUEUE_READY))
-        }
-        Err(_) => {
-            // compile_and_apply already set status to Failed
-            Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED))
-        }
-    }
-}
-
-/// Like try_compile, but also records the inputs hash annotation on both
-/// success and failure. This enables the reconcile guard to suppress tight
-/// retry loops when nothing has changed (same spec + same graph state =
-/// same compilation outcome).
-async fn try_compile_and_record(
+/// The inputs hash is stored as an annotation so the reconcile guard can
+/// suppress retries when nothing has changed (same spec + same graph state =
+/// same compilation outcome). The hash is stored on both success and failure
+/// so the guard works in all phases.
+async fn compile_and_apply(
     service: &LatticeService,
     name: &str,
     namespace: &str,
     ctx: &ServiceContext,
     inputs_hash: &str,
 ) -> Result<Action, Error> {
-    match compile_and_apply(service, name, namespace, ctx).await {
-        Ok(has_mesh_member) => {
-            // Don't mark Ready until the MeshMember controller has fully reconciled
-            if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
-                debug!("mesh member not yet ready, staying in Compiling");
-                update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await?;
-                return Ok(Action::requeue(REQUEUE_PENDING));
-            }
-            update_service_status(
-                service,
-                ctx,
-                ServiceStatusUpdate::ready(service.metadata.generation),
-            )
-            .await?;
-            // Store the inputs hash so the guard can detect no-op reconciles.
-            // This is a separate patch (one extra event), but the guard catches
-            // the re-triggered reconcile immediately.
-            if let Err(e) = ctx
-                .kube
-                .patch_service_annotation(name, namespace, INPUTS_HASH_ANNOTATION, inputs_hash)
-                .await
-            {
-                warn!(error = %e, "failed to patch inputs hash annotation");
-            }
-            Ok(Action::requeue(REQUEUE_READY))
-        }
-        Err(_) => {
-            // compile_and_apply already set status to Failed.
-            // Store the inputs hash so the Failed-phase guard can suppress
-            // retries until the spec or graph state actually changes.
-            if let Err(e) = ctx
-                .kube
-                .patch_service_annotation(name, namespace, INPUTS_HASH_ANNOTATION, inputs_hash)
-                .await
-            {
-                warn!(error = %e, "failed to patch inputs hash annotation");
-            }
-            Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED))
-        }
-    }
-}
-
-/// Compile a service and apply the resulting resources to the cluster.
-///
-/// On compile failure, publishes a warning event and sets the service to Failed.
-/// On apply failure, sets the service to Failed and returns the error.
-///
-/// Returns `true` if a LatticeMeshMember CR was emitted (the MeshMember controller
-/// must reconcile it before the LatticeService should be considered Ready).
-async fn compile_and_apply(
-    service: &LatticeService,
-    name: &str,
-    namespace: &str,
-    ctx: &ServiceContext,
-) -> Result<bool, Error> {
     // Resolve policy defaults (backup + ingress) in one pass
     let (effective_backup, ingress_defaults) =
         resolve_policy_defaults(service, namespace, ctx).await;
@@ -1012,7 +894,8 @@ async fn compile_and_apply(
                 ServiceStatusUpdate::failed_with_generation(&msg, service.metadata.generation),
             )
             .await?;
-            return Err(Error::validation(e.to_string()));
+            record_inputs_hash(ctx, name, namespace, inputs_hash).await;
+            return Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED));
         }
     };
 
@@ -1044,10 +927,36 @@ async fn compile_and_apply(
             ServiceStatusUpdate::failed_with_generation(&msg, service.metadata.generation),
         )
         .await?;
-        return Err(e);
+        record_inputs_hash(ctx, name, namespace, inputs_hash).await;
+        return Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED));
     }
 
-    Ok(has_mesh_member)
+    // Don't mark Ready until the MeshMember controller has fully reconciled
+    if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
+        debug!("mesh member not yet ready, staying in Compiling");
+        update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await?;
+        return Ok(Action::requeue(REQUEUE_PENDING));
+    }
+
+    update_service_status(
+        service,
+        ctx,
+        ServiceStatusUpdate::ready(service.metadata.generation),
+    )
+    .await?;
+    record_inputs_hash(ctx, name, namespace, inputs_hash).await;
+    Ok(Action::requeue(REQUEUE_READY))
+}
+
+/// Best-effort store of the inputs hash annotation.
+async fn record_inputs_hash(ctx: &ServiceContext, name: &str, namespace: &str, hash: &str) {
+    if let Err(e) = ctx
+        .kube
+        .patch_service_annotation(name, namespace, INPUTS_HASH_ANNOTATION, hash)
+        .await
+    {
+        warn!(error = %e, "failed to patch inputs hash annotation");
+    }
 }
 
 // =============================================================================
@@ -1731,9 +1640,8 @@ mod tests {
             m.insert(INPUTS_HASH_ANNOTATION.to_string(), h.to_string());
             m
         });
-        svc.status = Some(
-            LatticeServiceStatus::with_phase(phase).observed_generation(observed_generation),
-        );
+        svc.status =
+            Some(LatticeServiceStatus::with_phase(phase).observed_generation(observed_generation));
         svc
     }
 

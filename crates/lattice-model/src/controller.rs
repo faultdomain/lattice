@@ -294,8 +294,7 @@ pub async fn reconcile(
                     }
                 };
                 register_graph(&model, &ctx.graph, namespace);
-                if let Err(e) =
-                    apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await
+                if let Err(e) = apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await
                 {
                     // Apply errors are transient — stay in Serving, let
                     // error_policy retry. Keep the old observed_generation so

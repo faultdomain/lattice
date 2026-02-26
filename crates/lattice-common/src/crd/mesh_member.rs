@@ -205,6 +205,20 @@ pub struct LatticeMeshMemberStatus {
     /// Status conditions
     #[serde(default)]
     pub conditions: Vec<super::types::Condition>,
+    /// Resources applied by the controller, tracked for orphan cleanup.
+    /// When a dependency is removed, resources in the old set but not the new set are deleted.
+    #[serde(default)]
+    pub applied_resources: Vec<AppliedResourceRef>,
+}
+
+/// Reference to an applied mesh resource, tracked for orphan cleanup.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedResourceRef {
+    /// Kubernetes resource kind (e.g. "AuthorizationPolicy", "PeerAuthentication")
+    pub kind: String,
+    /// Resource name
+    pub name: String,
 }
 
 /// Phase of a mesh member

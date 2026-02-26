@@ -16,13 +16,12 @@ use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
-use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, instrument, warn};
 
 use lattice_cedar::{MeshWildcardRequest, PolicyEngine, WildcardDirection};
 use lattice_common::crd::{
-    Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberStatus, MeshMemberPhase,
-    MeshMemberScope, MeshMemberTarget,
+    AppliedResourceRef, Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberStatus,
+    MeshMemberPhase, MeshMemberScope, MeshMemberTarget,
 };
 use lattice_common::graph::{compute_edge_hash, ServiceGraph};
 use lattice_common::mesh;
@@ -51,14 +50,6 @@ pub struct MeshMemberContext {
 
 const FIELD_MANAGER: &str = "lattice-mesh-member-controller";
 const GRAPH_HASH_ANNOTATION: &str = "lattice.dev/graph-hash";
-const APPLIED_RESOURCES_ANNOTATION: &str = "lattice.dev/applied-resources";
-
-/// Reference to an applied resource, tracked for orphan cleanup.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct ResourceRef {
-    pub kind: String,
-    pub name: String,
-}
 
 // =============================================================================
 // Orphan tracking helpers
@@ -70,16 +61,18 @@ pub struct ResourceRef {
 /// ServiceEntries are excluded (shared per-namespace-per-FQDN, can't safely delete
 /// without checking other MeshMembers; orphaned SEs have no security impact since
 /// the `allow-fqdn-*` AuthorizationPolicy IS tracked).
-pub fn collect_resource_refs(policies: &crate::policy::GeneratedPolicies) -> HashSet<ResourceRef> {
+pub fn collect_resource_refs(
+    policies: &crate::policy::GeneratedPolicies,
+) -> HashSet<AppliedResourceRef> {
     let mut refs = HashSet::new();
     for ap in &policies.authorization_policies {
-        refs.insert(ResourceRef {
+        refs.insert(AppliedResourceRef {
             kind: "AuthorizationPolicy".to_string(),
             name: ap.metadata.name.clone(),
         });
     }
     for pa in &policies.peer_authentications {
-        refs.insert(ResourceRef {
+        refs.insert(AppliedResourceRef {
             kind: "PeerAuthentication".to_string(),
             name: pa.metadata.name.clone(),
         });
@@ -87,15 +80,13 @@ pub fn collect_resource_refs(policies: &crate::policy::GeneratedPolicies) -> Has
     refs
 }
 
-/// Read previously applied resource refs from the MeshMember annotation.
-/// Returns an empty set if the annotation is missing or invalid (graceful upgrade).
-pub fn read_applied_resources(member: &LatticeMeshMember) -> HashSet<ResourceRef> {
+/// Read previously applied resource refs from the MeshMember status.
+/// Returns an empty set if the status is missing (graceful upgrade).
+pub fn read_applied_resources(member: &LatticeMeshMember) -> HashSet<AppliedResourceRef> {
     member
-        .metadata
-        .annotations
+        .status
         .as_ref()
-        .and_then(|a| a.get(APPLIED_RESOURCES_ANNOTATION))
-        .and_then(|json| serde_json::from_str(json).ok())
+        .map(|s| s.applied_resources.iter().cloned().collect())
         .unwrap_or_default()
 }
 
@@ -134,10 +125,10 @@ async fn delete_orphaned_resources(
     client: &Client,
     crds: &ResolvedCrds,
     namespace: &str,
-    old_refs: &HashSet<ResourceRef>,
-    new_refs: &HashSet<ResourceRef>,
+    old_refs: &HashSet<AppliedResourceRef>,
+    new_refs: &HashSet<AppliedResourceRef>,
 ) -> Result<(), ReconcileError> {
-    let orphans: Vec<&ResourceRef> = old_refs.difference(new_refs).collect();
+    let orphans: Vec<&AppliedResourceRef> = old_refs.difference(new_refs).collect();
     if orphans.is_empty() {
         return Ok(());
     }
@@ -182,7 +173,6 @@ pub async fn reconcile(
             &member,
             status_failed(&msg, member.metadata.generation),
             "",
-            None,
         )
         .await?;
         return Ok(Action::await_change());
@@ -199,7 +189,6 @@ pub async fn reconcile(
             &member,
             status_failed(&denied, member.metadata.generation),
             "",
-            None,
         )
         .await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
@@ -208,7 +197,13 @@ pub async fn reconcile(
     // Compute edge hash AFTER graph update to capture current bilateral agreements
     let inbound_edges = ctx.graph.get_active_inbound_edges(namespace, &name);
     let outbound_edges = ctx.graph.get_active_outbound_edges(namespace, &name);
-    let graph_hash = compute_edge_hash(&inbound_edges, &outbound_edges);
+    let cedar_epoch = ctx.cedar.as_ref().map_or(0, |c| c.reload_epoch());
+    let graph_hash = compute_edge_hash(
+        &inbound_edges,
+        &outbound_edges,
+        ctx.graph.policy_epoch(),
+        cedar_epoch,
+    );
 
     // Skip reconciliation if spec AND graph state haven't changed
     if is_status_current(&member, &graph_hash) {
@@ -226,27 +221,17 @@ pub async fn reconcile(
 
     match do_reconcile(&member, &name, namespace, &ctx).await {
         Ok((true, new_refs)) => {
-            patch_status_with_hash(
-                &ctx.client,
-                &member,
-                status_ready(scope, member.metadata.generation),
-                &graph_hash,
-                Some(&new_refs),
-            )
-            .await?;
+            let mut status = status_ready(scope, member.metadata.generation);
+            status.applied_resources = new_refs.into_iter().collect::<Vec<_>>();
+            patch_status_with_hash(&ctx.client, &member, status, &graph_hash).await?;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         Ok((false, new_refs)) => {
             // ServiceEntries deferred (waypoint not programmed yet) —
             // report Progressing so LatticeService doesn't mark itself Ready.
-            patch_status_with_hash(
-                &ctx.client,
-                &member,
-                status_progressing(scope, member.metadata.generation),
-                "",
-                Some(&new_refs),
-            )
-            .await?;
+            let mut status = status_progressing(scope, member.metadata.generation);
+            status.applied_resources = new_refs.into_iter().collect::<Vec<_>>();
+            patch_status_with_hash(&ctx.client, &member, status, "").await?;
             Ok(Action::requeue(Duration::from_secs(10)))
         }
         Err(e) => {
@@ -257,7 +242,6 @@ pub async fn reconcile(
                 &member,
                 status_failed(&msg, member.metadata.generation),
                 "",
-                None,
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(30)))
@@ -319,7 +303,7 @@ async fn do_reconcile(
     name: &str,
     namespace: &str,
     ctx: &MeshMemberContext,
-) -> Result<(bool, HashSet<ResourceRef>), ReconcileError> {
+) -> Result<(bool, HashSet<AppliedResourceRef>), ReconcileError> {
     ensure_namespace_ambient(&ctx.client, namespace).await?;
 
     let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name).compile(name, namespace);
@@ -811,6 +795,7 @@ fn status_progressing(scope: MeshMemberScope, generation: Option<i64>) -> Lattic
             "WaypointPending",
             "Waiting for waypoint to program ServiceEntries",
         )],
+        ..Default::default()
     }
 }
 
@@ -826,6 +811,7 @@ fn status_ready(scope: MeshMemberScope, generation: Option<i64>) -> LatticeMeshM
             "PoliciesApplied",
             "Policies applied successfully",
         )],
+        ..Default::default()
     }
 }
 
@@ -841,11 +827,11 @@ fn status_failed(message: &str, generation: Option<i64>) -> LatticeMeshMemberSta
             "ReconcileFailed",
             message,
         )],
+        ..Default::default()
     }
 }
 
-/// Patch graph hash annotation, applied-resources annotation, and status,
-/// skipping no-op updates.
+/// Patch graph hash annotation and status, skipping no-op updates.
 ///
 /// Compares the desired state against the member's current state and only
 /// issues API calls when something actually changed. This prevents
@@ -853,8 +839,8 @@ fn status_failed(message: &str, generation: Option<i64>) -> LatticeMeshMemberSta
 ///
 /// The CRD has a status subresource, so annotation and status must be patched
 /// separately. Order matters for crash consistency:
-///   1. Annotation first (optimization — controls `is_status_current` skip gate)
-///   2. Status last (user-visible commit point — phase, scope, message)
+///   - Annotation first (optimization — controls `is_status_current` skip gate)
+///   - Status last (user-visible commit point — phase, scope, message, applied resources)
 ///
 /// If we crash between the two, the next reconcile redoes the work (idempotent).
 async fn patch_status_with_hash(
@@ -862,7 +848,6 @@ async fn patch_status_with_hash(
     member: &LatticeMeshMember,
     new_status: LatticeMeshMemberStatus,
     graph_hash: &str,
-    applied_resources: Option<&HashSet<ResourceRef>>,
 ) -> Result<(), ReconcileError> {
     let name = member.name_any();
     let namespace = member.metadata.namespace.as_deref().unwrap_or_default();
@@ -882,10 +867,15 @@ async fn patch_status_with_hash(
         new_status.observed_generation,
     );
 
-    // Check if applied-resources annotation needs updating
-    let needs_resource_annotation_update = applied_resources.is_some();
+    let applied_resources_changed = member
+        .status
+        .as_ref()
+        .map(|s| s.applied_resources != new_status.applied_resources)
+        .unwrap_or(!new_status.applied_resources.is_empty());
 
-    if current_hash == graph_hash && status_unchanged && !needs_resource_annotation_update {
+    let hash_changed = current_hash != graph_hash;
+
+    if !hash_changed && status_unchanged && !applied_resources_changed {
         debug!("status and graph hash unchanged, skipping patch");
         return Ok(());
     }
@@ -893,33 +883,18 @@ async fn patch_status_with_hash(
     let api: Api<LatticeMeshMember> = Api::namespaced(client.clone(), namespace);
     let params = PatchParams::apply(FIELD_MANAGER);
 
-    // 1. Annotations (graph hash + applied resources)
-    let hash_changed = current_hash != graph_hash;
-    if hash_changed || needs_resource_annotation_update {
-        let mut annotations = serde_json::Map::new();
-        if hash_changed {
-            annotations.insert(
-                GRAPH_HASH_ANNOTATION.to_string(),
-                serde_json::Value::String(graph_hash.to_string()),
-            );
-        }
-        if let Some(refs) = applied_resources {
-            let json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_string());
-            annotations.insert(
-                APPLIED_RESOURCES_ANNOTATION.to_string(),
-                serde_json::Value::String(json),
-            );
-        }
+    // Annotation (graph hash only)
+    if hash_changed {
         let annotation_patch = serde_json::json!({
-            "metadata": { "annotations": annotations },
+            "metadata": { "annotations": { GRAPH_HASH_ANNOTATION: graph_hash } },
         });
         api.patch(&name, &params, &Patch::Merge(&annotation_patch))
             .await
             .map_err(|e| ReconcileError::kube("patch annotation", e))?;
     }
 
-    // 2. Status (skip if unchanged)
-    if !status_unchanged {
+    // Status (phase, scope, message, applied resources)
+    if !status_unchanged || applied_resources_changed {
         let status_patch = serde_json::json!({ "status": new_status });
         api.patch_status(&name, &params, &Patch::Merge(&status_patch))
             .await
@@ -1037,55 +1012,33 @@ mod tests {
     }
 
     #[test]
-    fn read_applied_resources_returns_empty_on_missing_annotation() {
+    fn read_applied_resources_returns_empty_on_missing_status() {
         let member = make_test_member("test");
         assert!(read_applied_resources(&member).is_empty());
     }
 
     #[test]
-    fn read_applied_resources_returns_empty_on_invalid_json() {
-        let mut member = make_test_member("test");
-        member.metadata.annotations = Some(BTreeMap::from([(
-            APPLIED_RESOURCES_ANNOTATION.to_string(),
-            "not-valid-json".to_string(),
-        )]));
-        assert!(read_applied_resources(&member).is_empty());
-    }
-
-    #[test]
-    fn read_applied_resources_deserializes_valid_json() {
-        let refs: HashSet<ResourceRef> = [
-            ResourceRef {
+    fn read_applied_resources_reads_from_status() {
+        let refs = vec![
+            AppliedResourceRef {
                 kind: "AuthorizationPolicy".into(),
                 name: "allow-to-api".into(),
             },
-            ResourceRef {
+            AppliedResourceRef {
                 kind: "PeerAuthentication".into(),
                 name: "pa-api".into(),
             },
-        ]
-        .into_iter()
-        .collect();
+        ];
 
-        let json = serde_json::to_string(&refs).unwrap();
         let mut member = make_test_member("test");
-        member.metadata.annotations = Some(BTreeMap::from([(
-            APPLIED_RESOURCES_ANNOTATION.to_string(),
-            json,
-        )]));
+        member.status = Some(LatticeMeshMemberStatus {
+            applied_resources: refs.clone(),
+            ..Default::default()
+        });
 
         let result = read_applied_resources(&member);
-        assert_eq!(result, refs);
-    }
-
-    #[test]
-    fn resource_ref_roundtrip_serialization() {
-        let original = ResourceRef {
-            kind: "AuthorizationPolicy".to_string(),
-            name: "allow-to-api".to_string(),
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        let deserialized: ResourceRef = serde_json::from_str(&json).unwrap();
-        assert_eq!(original, deserialized);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&refs[0]));
+        assert!(result.contains(&refs[1]));
     }
 }

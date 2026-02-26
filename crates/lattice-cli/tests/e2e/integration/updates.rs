@@ -55,11 +55,19 @@ async fn test_ready_spec_update(kubeconfig: &str) -> Result<(), String> {
 
     // Deploy a simple service (no secrets, no deps) → should reach Ready
     let svc = build_simple_service("svc-update-test", NS_READY_UPDATE);
-    deploy_and_wait_for_phase(kubeconfig, NS_READY_UPDATE, svc, "Ready", None, DEFAULT_TIMEOUT)
-        .await?;
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_READY_UPDATE,
+        svc,
+        "Ready",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
 
     // Record the current observed_generation
-    let gen_before = get_observed_generation(kubeconfig, NS_READY_UPDATE, "svc-update-test").await?;
+    let gen_before =
+        get_observed_generation(kubeconfig, NS_READY_UPDATE, "svc-update-test").await?;
     info!("[Updates] Before update: observed_generation = {gen_before}");
 
     // Update the service spec (change the command) — this bumps metadata.generation
@@ -74,7 +82,14 @@ async fn test_ready_spec_update(kubeconfig: &str) -> Result<(), String> {
             }
         }
     });
-    patch_resource(kubeconfig, "latticeservice", NS_READY_UPDATE, "svc-update-test", &patch_json).await?;
+    patch_resource(
+        kubeconfig,
+        "latticeservice",
+        NS_READY_UPDATE,
+        "svc-update-test",
+        &patch_json,
+    )
+    .await?;
 
     // Wait for the controller to reconcile with the new generation
     let gen_before_i64: i64 = gen_before.parse().unwrap_or(0);
@@ -281,17 +296,18 @@ async fn test_model_serving_spec_update(kubeconfig: &str, namespace: &str) -> Re
             }
         }
     });
-    patch_resource(kubeconfig, "latticemodel", namespace, "llm-serving", &patch_json).await?;
+    patch_resource(
+        kubeconfig,
+        "latticemodel",
+        namespace,
+        "llm-serving",
+        &patch_json,
+    )
+    .await?;
 
     // Wait for generation to advance
     let gen_before_i64: i64 = gen_before.parse().unwrap_or(0);
-    wait_for_model_generation_advance(
-        kubeconfig,
-        namespace,
-        "llm-serving",
-        gen_before_i64,
-    )
-    .await?;
+    wait_for_model_generation_advance(kubeconfig, namespace, "llm-serving", gen_before_i64).await?;
 
     // Verify still Serving
     wait_for_resource_phase(
@@ -305,13 +321,8 @@ async fn test_model_serving_spec_update(kubeconfig: &str, namespace: &str) -> Re
     .await?;
 
     // Verify ModelServing reflects new replicas
-    let decode_replicas = get_model_serving_role_replicas(
-        kubeconfig,
-        namespace,
-        "llm-serving",
-        "decode",
-    )
-    .await?;
+    let decode_replicas =
+        get_model_serving_role_replicas(kubeconfig, namespace, "llm-serving", "decode").await?;
     if decode_replicas != 3 {
         return Err(format!(
             "ModelServing decode replicas should be 3 after update, got: {decode_replicas}"
@@ -347,7 +358,10 @@ const NS_MODEL_LOADING_GAP: &str = "update-t5";
 /// Loading, the old compiled resources keep running. On Loading→Serving
 /// transition, the NEW generation is stamped — making Serving think it's
 /// up-to-date when it's actually running stale config.
-async fn test_model_loading_detects_spec_change(kubeconfig: &str, namespace: &str) -> Result<(), String> {
+async fn test_model_loading_detects_spec_change(
+    kubeconfig: &str,
+    namespace: &str,
+) -> Result<(), String> {
     info!("[Updates] Test 5: Model Loading → spec change → detect and recompile");
     ensure_fresh_namespace(kubeconfig, namespace).await?;
 
@@ -366,12 +380,8 @@ async fn test_model_loading_detects_spec_change(kubeconfig: &str, namespace: &st
     )
     .await?;
 
-    let gen_at_loading = get_model_observed_generation(
-        kubeconfig,
-        namespace,
-        "llm-serving",
-    )
-    .await?;
+    let gen_at_loading =
+        get_model_observed_generation(kubeconfig, namespace, "llm-serving").await?;
     info!("[Updates] Model at Loading: observed_generation = {gen_at_loading}");
 
     // Patch decode replicas from 2 → 3 while still Loading
@@ -385,7 +395,14 @@ async fn test_model_loading_detects_spec_change(kubeconfig: &str, namespace: &st
             }
         }
     });
-    patch_resource(kubeconfig, "latticemodel", namespace, "llm-serving", &patch_json).await?;
+    patch_resource(
+        kubeconfig,
+        "latticemodel",
+        namespace,
+        "llm-serving",
+        &patch_json,
+    )
+    .await?;
     info!("[Updates] Patched decode replicas to 3 while Loading");
 
     // Wait for the model to reach Serving (whether or not it recompiled)
@@ -401,13 +418,8 @@ async fn test_model_loading_detects_spec_change(kubeconfig: &str, namespace: &st
 
     // The critical check: does the ModelServing have 3 decode replicas (new spec)
     // or 2 (old spec, stale config)?
-    let decode_replicas = get_model_serving_role_replicas(
-        kubeconfig,
-        namespace,
-        "llm-serving",
-        "decode",
-    )
-    .await?;
+    let decode_replicas =
+        get_model_serving_role_replicas(kubeconfig, namespace, "llm-serving", "decode").await?;
 
     if decode_replicas != 3 {
         return Err(format!(
@@ -438,12 +450,9 @@ async fn test_model_loading_detects_spec_change(kubeconfig: &str, namespace: &st
 // =============================================================================
 
 /// Build a minimal LatticeService with no secrets or dependencies.
-fn build_simple_service(
-    name: &str,
-    namespace: &str,
-) -> lattice_common::crd::LatticeService {
-    use std::collections::BTreeMap;
+fn build_simple_service(name: &str, namespace: &str) -> lattice_common::crd::LatticeService {
     use lattice_common::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements};
+    use std::collections::BTreeMap;
 
     let mut containers = BTreeMap::new();
     containers.insert(
@@ -469,12 +478,7 @@ fn build_simple_service(
         },
     );
 
-    super::super::helpers::build_busybox_service(
-        name,
-        namespace,
-        containers,
-        BTreeMap::new(),
-    )
+    super::super::helpers::build_busybox_service(name, namespace, containers, BTreeMap::new())
 }
 
 // =============================================================================
@@ -489,8 +493,8 @@ async fn patch_resource(
     name: &str,
     patch: &serde_json::Value,
 ) -> Result<(), String> {
-    let patch_str = serde_json::to_string(patch)
-        .map_err(|e| format!("Failed to serialize patch: {e}"))?;
+    let patch_str =
+        serde_json::to_string(patch).map_err(|e| format!("Failed to serialize patch: {e}"))?;
 
     run_kubectl(&[
         "--kubeconfig",
@@ -594,11 +598,7 @@ async fn get_observed_generation(
 }
 
 /// Get `.metadata.generation` from a LatticeService.
-async fn get_generation(
-    kubeconfig: &str,
-    namespace: &str,
-    name: &str,
-) -> Result<String, String> {
+async fn get_generation(kubeconfig: &str, namespace: &str, name: &str) -> Result<String, String> {
     get_resource_generation(kubeconfig, "latticeservice", namespace, name).await
 }
 
@@ -619,11 +619,9 @@ async fn wait_for_generation_advance(
 
 /// Load the model-serving fixture with an overridden namespace.
 fn load_model_fixture_for_namespace(namespace: &str) -> Result<String, String> {
-    let mut model: lattice_common::crd::LatticeModel =
-        load_fixture_config("model-serving.yaml")?;
+    let mut model: lattice_common::crd::LatticeModel = load_fixture_config("model-serving.yaml")?;
     model.metadata.namespace = Some(namespace.to_string());
-    serde_json::to_string(&model)
-        .map_err(|e| format!("Failed to serialize model fixture: {e}"))
+    serde_json::to_string(&model).map_err(|e| format!("Failed to serialize model fixture: {e}"))
 }
 
 /// Get `.status.observedGeneration` from a LatticeModel.
@@ -704,7 +702,9 @@ pub async fn run_service_update_tests(kubeconfig: &str) -> Result<(), String> {
     tokio::join!(
         harness.run("Ready spec update", || test_ready_spec_update(kubeconfig)),
         harness.run("Failed recovery", || test_failed_spec_recovery(kubeconfig)),
-        harness.run("Failed observed_generation", || test_failed_sets_observed_generation(kubeconfig)),
+        harness.run("Failed observed_generation", || {
+            test_failed_sets_observed_generation(kubeconfig)
+        }),
     );
 
     harness.finish()

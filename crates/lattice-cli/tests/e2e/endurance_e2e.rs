@@ -14,10 +14,17 @@
 //! - Any cluster failing to provision = FAILURE
 //! - Any cluster failing to delete = FAILURE
 //!
+//! # Environment Variables
+//!
+//! - `LATTICE_ENDURANCE_FAIL_FAST=1` — Stop on first batch failure (default: continue and report)
+//!
 //! # Running
 //!
 //! ```bash
 //! cargo test --features provider-e2e --test e2e endurance_e2e -- --nocapture
+//!
+//! # Stop on first failure:
+//! LATTICE_ENDURANCE_FAIL_FAST=1 cargo test --features provider-e2e --test e2e endurance_e2e -- --nocapture
 //! ```
 
 #![cfg(feature = "provider-e2e")]
@@ -156,12 +163,21 @@ async fn run_endurance_test() -> Result<(), String> {
     let chaos_config = ChaosConfig::for_provider(InfraProvider::Docker).with_coordinated(0.5);
     let _chaos = ChaosMonkey::start_with_config(chaos_targets.clone(), chaos_config);
 
+    let fail_fast = std::env::var("LATTICE_ENDURANCE_FAIL_FAST")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     let mut iteration = 0u64;
+    let mut failures = 0u64;
     let test_start = Instant::now();
 
-    info!("Starting batch iterations (1 cluster per batch, runs forever, 10 min timeout per batch)...");
+    if fail_fast {
+        info!("Starting batch iterations (1 cluster per batch, FAIL_FAST mode, 10 min timeout per batch)...");
+    } else {
+        info!("Starting batch iterations (1 cluster per batch, runs forever, 10 min timeout per batch)...");
+    }
 
-    // Loop forever until failure
+    // Loop forever until failure (or first failure in fail_fast mode)
     loop {
         iteration += 1;
         let batch_start = Instant::now();
@@ -264,13 +280,26 @@ async fn run_endurance_test() -> Result<(), String> {
                 );
             }
             Ok(Err(e)) => {
-                return Err(format!("Batch {} failed: {}", iteration, e));
+                failures += 1;
+                let msg = format!("Batch {} failed: {}", iteration, e);
+                if fail_fast {
+                    return Err(msg);
+                }
+                error!(
+                    "[ITERATION {}] {} (total failures: {})",
+                    iteration, msg, failures
+                );
             }
             Err(_) => {
-                return Err(format!(
-                    "Batch {} timed out after {:?}",
-                    iteration, BATCH_TIMEOUT
-                ));
+                failures += 1;
+                let msg = format!("Batch {} timed out after {:?}", iteration, BATCH_TIMEOUT);
+                if fail_fast {
+                    return Err(msg);
+                }
+                error!(
+                    "[ITERATION {}] {} (total failures: {})",
+                    iteration, msg, failures
+                );
             }
         }
     }

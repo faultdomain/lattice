@@ -355,19 +355,13 @@ fn edge_fingerprint(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
     input
 }
 
-/// Compute a stable hash of active edges for change detection.
-///
-/// Sorts edges by namespace/name so the hash is stable regardless of graph
-/// iteration order, then feeds the result through `deterministic_hash`.
-pub fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
-    crate::deterministic_hash(&edge_fingerprint(inbound, outbound))
-}
-
 /// Compute a stable hash of active edges plus policy epochs.
 ///
-/// Extends `compute_edge_hash` with policy and cedar epoch suffixes so that
-/// policy changes trigger re-reconciliation even when the graph topology is unchanged.
-pub fn compute_edge_hash_with_epochs(
+/// Sorts edges by namespace/name so the hash is stable regardless of graph
+/// iteration order, appends policy and cedar epoch suffixes, then feeds the
+/// result through `deterministic_hash`. The epochs ensure that policy changes
+/// trigger re-reconciliation even when graph topology is unchanged.
+pub fn compute_edge_hash(
     inbound: &[ActiveEdge],
     outbound: &[ActiveEdge],
     policy_epoch: u64,
@@ -505,9 +499,43 @@ impl ServiceGraph {
         self.put_node(node);
     }
 
-    /// Internal: Insert a node and update all edge indices
-    fn put_node(&self, node: ServiceNode) {
+    /// Internal: Insert a node and update all edge indices.
+    ///
+    /// When replacing an existing node, MeshMember-owned fields (egress_rules,
+    /// selector, target_namespace, allow_peer_traffic, depends_all, service_account,
+    /// ports) are preserved if the incoming node doesn't set them. This prevents
+    /// the service controller's `put_service` from clobbering data written by
+    /// `put_mesh_member`.
+    fn put_node(&self, mut node: ServiceNode) {
         let key = (node.namespace.clone(), node.name.clone());
+
+        // Preserve MeshMember-owned fields when a non-MeshMember node replaces
+        // an existing MeshMember node. The service controller creates Local nodes
+        // with empty egress_rules/ports; the MeshMember controller sets these.
+        if node.type_ != ServiceType::MeshMember {
+            if let Some(existing) = self.vertices.get(&key) {
+                if existing.type_ == ServiceType::MeshMember {
+                    if node.egress_rules.is_empty() {
+                        node.egress_rules = existing.egress_rules.clone();
+                    }
+                    if node.ports.is_empty() {
+                        node.ports = existing.ports.clone();
+                    }
+                    if node.selector.is_none() {
+                        node.selector = existing.selector.clone();
+                    }
+                    if node.target_namespace.is_none() {
+                        node.target_namespace = existing.target_namespace.clone();
+                    }
+                    if node.service_account.is_none() {
+                        node.service_account = existing.service_account.clone();
+                    }
+                    node.allow_peer_traffic =
+                        node.allow_peer_traffic || existing.allow_peer_traffic;
+                    node.depends_all = node.depends_all || existing.depends_all;
+                }
+            }
+        }
 
         // Snapshot old outbound targets before removing edges
         let old_targets: HashSet<QualifiedName> = self
@@ -1941,5 +1969,101 @@ mod tests {
             graph.drain_edge_diffs("ns", "A").is_none(),
             "diffs should be consumed after first drain"
         );
+    }
+
+    #[test]
+    fn put_service_preserves_mesh_member_egress_rules() {
+        use crate::crd::{
+            EgressRule, EgressTarget, LatticeMeshMemberSpec, MeshMemberTarget, PeerAuth,
+        };
+
+        let graph = ServiceGraph::new();
+
+        // MeshMember controller writes node with egress rules
+        let mm_spec = LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::new()),
+            ports: vec![crate::crd::MeshMemberPort {
+                port: 8080,
+                name: "http".to_string(),
+                peer_auth: PeerAuth::Strict,
+            }],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![EgressRule {
+                target: EgressTarget::Fqdn("example.com".to_string()),
+                ports: vec![443],
+            }],
+            allow_peer_traffic: false,
+            depends_all: false,
+            ingress: None,
+            service_account: Some("custom-sa".to_string()),
+        };
+        graph.put_mesh_member("ns", "frontend", &mm_spec);
+
+        let node = graph.get_service("ns", "frontend").unwrap();
+        assert_eq!(node.egress_rules.len(), 1);
+        assert_eq!(node.service_account, Some("custom-sa".to_string()));
+        assert!(!node.ports.is_empty());
+
+        // Service controller writes node (would previously clobber egress_rules)
+        let svc_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service("ns", "frontend", &svc_spec);
+
+        let node = graph.get_service("ns", "frontend").unwrap();
+        assert_eq!(
+            node.egress_rules.len(),
+            1,
+            "put_service must preserve MeshMember egress_rules"
+        );
+        assert_eq!(
+            node.service_account,
+            Some("custom-sa".to_string()),
+            "put_service must preserve MeshMember service_account"
+        );
+        assert!(
+            !node.ports.is_empty(),
+            "put_service must preserve MeshMember ports"
+        );
+    }
+
+    #[test]
+    fn put_mesh_member_overwrites_service_egress_rules() {
+        use crate::crd::{
+            EgressRule, EgressTarget, LatticeMeshMemberSpec, MeshMemberTarget, PeerAuth,
+        };
+
+        let graph = ServiceGraph::new();
+
+        // Service controller writes node first
+        let svc_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service("ns", "frontend", &svc_spec);
+
+        // MeshMember controller writes node with egress rules
+        let mm_spec = LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::new()),
+            ports: vec![crate::crd::MeshMemberPort {
+                port: 8080,
+                name: "http".to_string(),
+                peer_auth: PeerAuth::Strict,
+            }],
+            allowed_callers: vec![],
+            dependencies: vec![crate::crd::ServiceRef {
+                name: "api".to_string(),
+                namespace: None,
+            }],
+            egress: vec![EgressRule {
+                target: EgressTarget::Fqdn("example.com".to_string()),
+                ports: vec![443],
+            }],
+            allow_peer_traffic: false,
+            depends_all: false,
+            ingress: None,
+            service_account: None,
+        };
+        graph.put_mesh_member("ns", "frontend", &mm_spec);
+
+        let node = graph.get_service("ns", "frontend").unwrap();
+        assert_eq!(node.egress_rules.len(), 1);
+        assert_eq!(node.type_, ServiceType::MeshMember);
     }
 }
