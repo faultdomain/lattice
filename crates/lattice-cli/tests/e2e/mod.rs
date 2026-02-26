@@ -73,11 +73,11 @@
 mod chaos;
 #[cfg(feature = "provider-e2e")]
 mod context;
+mod gateway_fixtures;
+mod gateway_helpers;
 mod helpers;
 #[cfg(feature = "provider-e2e")]
 pub mod integration;
-mod gateway_fixtures;
-mod gateway_helpers;
 mod media_server_e2e;
 mod mesh_fixtures;
 mod mesh_helpers;

@@ -400,7 +400,11 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         if compiled.workloads.scaled_object.is_none() {
             if let Some(ar) = self.registry.resolve(CrdKind::ScaledObject).await {
                 delete_resource_if_exists(
-                    &self.client, namespace, &ar, service_name, "ScaledObject",
+                    &self.client,
+                    namespace,
+                    &ar,
+                    service_name,
+                    "ScaledObject",
                 )
                 .await
                 .map_err(|e| cleanup_err("ScaledObject", e))?;
@@ -412,7 +416,11 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             let ar =
                 lattice_common::kube_utils::build_api_resource("policy/v1", "PodDisruptionBudget");
             delete_resource_if_exists(
-                &self.client, namespace, &ar, service_name, "PodDisruptionBudget",
+                &self.client,
+                namespace,
+                &ar,
+                service_name,
+                "PodDisruptionBudget",
             )
             .await
             .map_err(|e| cleanup_err("PodDisruptionBudget", e))?;
@@ -422,7 +430,11 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         if compiled.mesh_member.is_none() {
             if let Some(ar) = self.registry.resolve(CrdKind::MeshMember).await {
                 delete_resource_if_exists(
-                    &self.client, namespace, &ar, service_name, "LatticeMeshMember",
+                    &self.client,
+                    namespace,
+                    &ar,
+                    service_name,
+                    "LatticeMeshMember",
                 )
                 .await
                 .map_err(|e| cleanup_err("LatticeMeshMember", e))?;
@@ -680,10 +692,7 @@ pub async fn reconcile(
         update_service_status(
             &service,
             &ctx,
-            ServiceStatusUpdate::failed(
-                &e.to_string(),
-                service.metadata.generation,
-            ),
+            ServiceStatusUpdate::failed(&e.to_string(), service.metadata.generation),
         )
         .await?;
         // Don't requeue for validation errors - they require spec changes

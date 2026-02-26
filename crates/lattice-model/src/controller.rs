@@ -488,7 +488,11 @@ async fn cleanup_removed_roles(
         // Delete orphaned LatticeMeshMember
         if let Some(mm_ar) = registry.resolve(CrdKind::MeshMember).await {
             if let Err(e) = lattice_common::kube_utils::delete_resource_if_exists(
-                client, namespace, &mm_ar, role_key, "LatticeMeshMember",
+                client,
+                namespace,
+                &mm_ar,
+                role_key,
+                "LatticeMeshMember",
             )
             .await
             {

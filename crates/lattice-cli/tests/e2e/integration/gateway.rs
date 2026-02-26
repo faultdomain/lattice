@@ -157,7 +157,10 @@ async fn deploy_backend_services(kubeconfig: &str) -> Result<(), String> {
 
     // Wait for all services to reach Ready
     wait_for_services_ready(kubeconfig, GATEWAY_TEST_NAMESPACE, NUM_BACKEND_SERVICES).await?;
-    info!("[Gateway] All {} backend services are Ready", NUM_BACKEND_SERVICES);
+    info!(
+        "[Gateway] All {} backend services are Ready",
+        NUM_BACKEND_SERVICES
+    );
 
     Ok(())
 }
@@ -173,17 +176,12 @@ async fn verify_gateway_resources(kubeconfig: &str) -> Result<(), String> {
     wait_for_gateway_ready(kubeconfig, GATEWAY_TEST_NAMESPACE).await?;
 
     // Verify Gateway listeners
-    // backend-a: public route -> http-0, https-0
-    // backend-b: api route -> http-0, https-0; health route -> http-0, https-0
+    // backend-a: public route -> http-0
+    // backend-b: public route -> http-0 (single route, two rules)
     // backend-tls: public route -> http-0, https-0
     let expected_listeners: Vec<String> = vec![
-        // backend-a public route
         "backend-a-public-http-0".to_string(),
-        // backend-b api route
-        "backend-b-api-http-0".to_string(),
-        // backend-b health route
-        "backend-b-health-http-0".to_string(),
-        // backend-tls public route (HTTP + HTTPS)
+        "backend-b-public-http-0".to_string(),
         "backend-tls-public-http-0".to_string(),
         "backend-tls-public-https-0".to_string(),
     ];
@@ -202,22 +200,11 @@ async fn verify_gateway_resources(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    // backend-b: api route
+    // backend-b: single route with PathPrefix /api + Exact /health rules
     verify_httproute(
         kubeconfig,
         GATEWAY_TEST_NAMESPACE,
-        "backend-b-api-route",
-        "backend-b.gateway-test.local",
-        "backend-b",
-        "8080",
-    )
-    .await?;
-
-    // backend-b: health route
-    verify_httproute(
-        kubeconfig,
-        GATEWAY_TEST_NAMESPACE,
-        "backend-b-health-route",
+        "backend-b-public-route",
         "backend-b.gateway-test.local",
         "backend-b",
         "8080",
@@ -257,10 +244,9 @@ async fn verify_traffic_flow(kubeconfig: &str) -> Result<(), String> {
     info!("[Gateway] Deploying traffic generator and verifying traffic flow...");
 
     let gateway_ip = get_gateway_service_ip(kubeconfig, GATEWAY_TEST_NAMESPACE).await?;
-    let gateway_https_port =
-        get_gateway_https_port(kubeconfig, GATEWAY_TEST_NAMESPACE)
-            .await
-            .unwrap_or(443);
+    let gateway_https_port = get_gateway_https_port(kubeconfig, GATEWAY_TEST_NAMESPACE)
+        .await
+        .unwrap_or(443);
 
     info!(
         "[Gateway] Gateway IP: {}, HTTPS port: {}",
@@ -326,17 +312,11 @@ async fn verify_orphan_cleanup(kubeconfig: &str) -> Result<(), String> {
     info!("[Gateway] Removed ingress from backend-a, waiting for orphan cleanup...");
 
     // Verify the HTTPRoute for backend-a is deleted
-    verify_httproute_deleted(
-        kubeconfig,
-        GATEWAY_TEST_NAMESPACE,
-        "backend-a-public-route",
-    )
-    .await?;
+    verify_httproute_deleted(kubeconfig, GATEWAY_TEST_NAMESPACE, "backend-a-public-route").await?;
 
     // Verify the Gateway still has backend-b and backend-tls listeners
     let remaining_listeners: Vec<String> = vec![
-        "backend-b-api-http-0".to_string(),
-        "backend-b-health-http-0".to_string(),
+        "backend-b-public-http-0".to_string(),
         "backend-tls-public-http-0".to_string(),
         "backend-tls-public-https-0".to_string(),
     ];

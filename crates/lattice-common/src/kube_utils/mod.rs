@@ -62,7 +62,9 @@ pub use status::{patch_cluster_resource_status, patch_resource_status};
 pub use service::{build_cell_service, compile_service_account};
 
 // dynamic.rs
-pub use dynamic::{delete_resource_if_exists, get_dynamic_resource_status_field, get_machine_phases};
+pub use dynamic::{
+    delete_resource_if_exists, get_dynamic_resource_status_field, get_machine_phases,
+};
 
 // hash.rs
 pub use hash::deterministic_hash;

@@ -271,7 +271,6 @@ async fn test_failed_sets_observed_generation(kubeconfig: &str) -> Result<(), St
 // Test 4: LatticeModel Serving → spec change → recompile → Serving
 // =============================================================================
 
-
 /// Deploy a model to Serving, update its spec (replicas), verify the controller
 /// recompiles and observed_generation advances.
 async fn test_model_serving_spec_update(kubeconfig: &str, namespace: &str) -> Result<(), String> {
@@ -702,8 +701,7 @@ async fn test_service_pdb_orphan_cleanup(kubeconfig: &str) -> Result<(), String>
     wait_for_resource_exists(kubeconfig, "pdb", NS_PDB_ORPHAN, "svc-pdb-test", true).await?;
     info!("[Updates] PDB exists with replicas=2 (expected)");
 
-    let gen_before =
-        get_observed_generation(kubeconfig, NS_PDB_ORPHAN, "svc-pdb-test").await?;
+    let gen_before = get_observed_generation(kubeconfig, NS_PDB_ORPHAN, "svc-pdb-test").await?;
 
     // Patch replicas to 1 → PDB should be removed
     let patch_json = serde_json::json!({
@@ -721,13 +719,7 @@ async fn test_service_pdb_orphan_cleanup(kubeconfig: &str) -> Result<(), String>
 
     // Wait for the controller to reconcile with the new generation
     let gen_before_i64: i64 = gen_before.parse().unwrap_or(0);
-    wait_for_generation_advance(
-        kubeconfig,
-        NS_PDB_ORPHAN,
-        "svc-pdb-test",
-        gen_before_i64,
-    )
-    .await?;
+    wait_for_generation_advance(kubeconfig, NS_PDB_ORPHAN, "svc-pdb-test", gen_before_i64).await?;
 
     // Verify still Ready
     wait_for_service_phase(
@@ -899,15 +891,20 @@ async fn wait_for_resource_exists(
             let rname = rname.clone();
             async move {
                 let result = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", &kind, &rname,
-                    "-n", &ns,
-                    "-o", "name",
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    &kind,
+                    &rname,
+                    "-n",
+                    &ns,
+                    "-o",
+                    "name",
                 ])
                 .await;
 
                 match result {
-                    Ok(_) => Ok(should_exist),  // resource exists
+                    Ok(_) => Ok(should_exist), // resource exists
                     Err(e) if e.contains("NotFound") || e.contains("not found") => {
                         Ok(!should_exist) // resource doesn't exist
                     }
@@ -957,12 +954,8 @@ fn build_service_with_replicas(
         },
     );
 
-    let mut svc = super::super::helpers::build_busybox_service(
-        name,
-        namespace,
-        containers,
-        BTreeMap::new(),
-    );
+    let mut svc =
+        super::super::helpers::build_busybox_service(name, namespace, containers, BTreeMap::new());
     svc.spec.replicas = replicas;
     svc
 }
@@ -983,8 +976,7 @@ async fn test_job_failed_sets_observed_generation(kubeconfig: &str) -> Result<()
         NS_JOB_FAILED_STABLE,
         &["/bin/sh", "-c", "exit 1"],
     );
-    let yaml =
-        serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job: {e}"))?;
+    let yaml = serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job: {e}"))?;
     apply_yaml_with_retry(kubeconfig, &yaml).await?;
 
     // Wait for Failed
@@ -1129,24 +1121,6 @@ pub async fn run_service_update_tests(kubeconfig: &str) -> Result<(), String> {
 
 /// Run LatticeModel CRD update integration tests.
 pub async fn run_model_update_tests(kubeconfig: &str) -> Result<(), String> {
-    run_model_update_tests_in(
-        kubeconfig,
-        NS_MODEL_SPEC_UPDATE,
-        NS_MODEL_LOADING_GAP,
-        NS_MODEL_ROLE_ORPHAN,
-    )
-    .await
-}
-
-/// Run LatticeModel CRD update integration tests with explicit namespaces.
-/// Callers must provide distinct namespaces to avoid collisions when running
-/// concurrently with other tests that use the default namespaces.
-pub async fn run_model_update_tests_in(
-    kubeconfig: &str,
-    ns_spec_update: &str,
-    ns_loading_gap: &str,
-    ns_role_orphan: &str,
-) -> Result<(), String> {
     info!("[Updates] Running LatticeModel update tests on {kubeconfig}");
 
     // Model tests run sequentially: test 5 needs Loading phase which is brief,
@@ -1155,17 +1129,17 @@ pub async fn run_model_update_tests_in(
     let harness = TestHarness::new("Model Updates");
     harness
         .run("Model Serving spec update", || {
-            test_model_serving_spec_update(kubeconfig, ns_spec_update)
+            test_model_serving_spec_update(kubeconfig, NS_MODEL_SPEC_UPDATE)
         })
         .await;
     harness
         .run("Model Loading detects spec change", || {
-            test_model_loading_detects_spec_change(kubeconfig, ns_loading_gap)
+            test_model_loading_detects_spec_change(kubeconfig, NS_MODEL_LOADING_GAP)
         })
         .await;
     harness
         .run("Model role removal orphan cleanup", || {
-            test_model_role_removal_orphan_cleanup(kubeconfig, ns_role_orphan)
+            test_model_role_removal_orphan_cleanup(kubeconfig, NS_MODEL_ROLE_ORPHAN)
         })
         .await;
 
@@ -1212,57 +1186,6 @@ async fn test_updates_standalone() {
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
     run_update_tests(&resolved.kubeconfig).await.unwrap();
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_model_updates_standalone() {
-    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
-
-    init_e2e_test();
-    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
-    setup_regcreds_infrastructure(&resolved.kubeconfig)
-        .await
-        .unwrap();
-    // Use distinct namespaces to avoid collisions with test_updates_standalone
-    // which runs concurrently and uses update-t4/update-t5/update-t7.
-    run_model_update_tests_in(
-        &resolved.kubeconfig,
-        "model-update-t4",
-        "model-update-t5",
-        "model-update-t7",
-    )
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_orphan_cleanup_standalone() {
-    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
-
-    init_e2e_test();
-    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
-    setup_regcreds_infrastructure(&resolved.kubeconfig)
-        .await
-        .unwrap();
-
-    // Run sequentially — model tests create 10+ Volcano pods with gang
-    // scheduling (minAvailable=5). Concurrent model deployments across
-    // standalone tests saturate a small kind cluster and deadlock the
-    // gang scheduler.
-    let harness = TestHarness::new("Orphan Cleanup");
-    harness
-        .run("PDB orphan cleanup", || {
-            test_service_pdb_orphan_cleanup(&resolved.kubeconfig)
-        })
-        .await;
-    harness
-        .run("Model role removal orphan cleanup", || {
-            test_model_role_removal_orphan_cleanup(&resolved.kubeconfig, "orphan-model-t1")
-        })
-        .await;
-    harness.finish().unwrap();
 }
 
 #[tokio::test]

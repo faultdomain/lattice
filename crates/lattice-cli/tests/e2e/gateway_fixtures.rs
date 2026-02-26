@@ -13,7 +13,9 @@ use lattice_common::crd::{
 };
 
 use super::gateway_helpers::{generate_gateway_test_script, GatewayTestTarget};
-use super::mesh_fixtures::{build_lattice_service, curl_container, inbound_allow_all, nginx_container};
+use super::mesh_fixtures::{
+    build_lattice_service, curl_container, inbound_allow_all, nginx_container,
+};
 
 // =============================================================================
 // Constants
@@ -60,12 +62,15 @@ pub fn create_backend_a() -> lattice_common::crd::LatticeService {
     svc
 }
 
-/// Backend B: nginx with two HTTPRoutes on `backend-b.gateway-test.local`.
+/// Backend B: nginx with a single HTTPRoute on `backend-b.gateway-test.local`
+/// containing two match rules:
 ///
 /// - PathPrefix `/api` (matches `/api`, `/api/v1/users`, etc.)
 /// - Exact `/health`
 ///
 /// Requests to other paths (e.g. `/other`) should get 404 from the gateway.
+/// Both rules are in one route to avoid duplicate Gateway listeners (Gateway API
+/// requires unique port+protocol+hostname per listener).
 pub fn create_backend_b() -> lattice_common::crd::LatticeService {
     let mut resources = BTreeMap::new();
     let (key, spec) = inbound_allow_all();
@@ -81,48 +86,38 @@ pub fn create_backend_b() -> lattice_common::crd::LatticeService {
 
     let mut routes = BTreeMap::new();
 
-    // Route 1: PathPrefix /api
+    // Single route with two match rules: PathPrefix /api + Exact /health
     routes.insert(
-        "api".to_string(),
+        "public".to_string(),
         RouteSpec {
             kind: RouteKind::HTTPRoute,
             hosts: vec!["backend-b.gateway-test.local".to_string()],
             port: None,
             listen_port: None,
-            rules: Some(vec![RouteRule {
-                matches: vec![RouteMatch {
-                    path: Some(PathMatch {
-                        type_: PathMatchType::PathPrefix,
-                        value: "/api".to_string(),
-                    }),
-                    headers: vec![],
-                    method: None,
-                    grpc_method: None,
-                }],
-            }]),
-            tls: None,
-        },
-    );
-
-    // Route 2: Exact /health
-    routes.insert(
-        "health".to_string(),
-        RouteSpec {
-            kind: RouteKind::HTTPRoute,
-            hosts: vec!["backend-b.gateway-test.local".to_string()],
-            port: None,
-            listen_port: None,
-            rules: Some(vec![RouteRule {
-                matches: vec![RouteMatch {
-                    path: Some(PathMatch {
-                        type_: PathMatchType::Exact,
-                        value: "/health".to_string(),
-                    }),
-                    headers: vec![],
-                    method: None,
-                    grpc_method: None,
-                }],
-            }]),
+            rules: Some(vec![
+                RouteRule {
+                    matches: vec![RouteMatch {
+                        path: Some(PathMatch {
+                            type_: PathMatchType::PathPrefix,
+                            value: "/api".to_string(),
+                        }),
+                        headers: vec![],
+                        method: None,
+                        grpc_method: None,
+                    }],
+                },
+                RouteRule {
+                    matches: vec![RouteMatch {
+                        path: Some(PathMatch {
+                            type_: PathMatchType::Exact,
+                            value: "/health".to_string(),
+                        }),
+                        headers: vec![],
+                        method: None,
+                        grpc_method: None,
+                    }],
+                },
+            ]),
             tls: None,
         },
     );
@@ -179,7 +174,10 @@ pub fn create_backend_tls() -> lattice_common::crd::LatticeService {
 /// Traffic generator that curls the gateway ClusterIP with Host headers.
 ///
 /// Uses cycle-based script pattern for reliable verification.
-pub fn create_gateway_traffic_gen(gateway_ip: &str, gateway_https_port: u16) -> lattice_common::crd::LatticeService {
+pub fn create_gateway_traffic_gen(
+    gateway_ip: &str,
+    gateway_https_port: u16,
+) -> lattice_common::crd::LatticeService {
     let targets = vec![
         // backend-a catch-all
         GatewayTestTarget {
@@ -239,7 +237,12 @@ pub fn create_gateway_traffic_gen(gateway_ip: &str, gateway_https_port: u16) -> 
         },
     ];
 
-    let script = generate_gateway_test_script("gateway-traffic-gen", gateway_ip, gateway_https_port, targets);
+    let script = generate_gateway_test_script(
+        "gateway-traffic-gen",
+        gateway_ip,
+        gateway_https_port,
+        targets,
+    );
 
     let resources = BTreeMap::new();
 

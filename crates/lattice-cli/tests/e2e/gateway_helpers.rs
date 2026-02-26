@@ -46,10 +46,7 @@ pub struct GatewayTestTarget {
 /// The Istio gateway controller creates a Service named `{namespace}-ingress-istio`
 /// for each Gateway resource. We use ClusterIP (not LoadBalancer) since traffic
 /// generators run inside the cluster and this always works in Kind without MetalLB.
-pub async fn get_gateway_service_ip(
-    kubeconfig: &str,
-    namespace: &str,
-) -> Result<String, String> {
+pub async fn get_gateway_service_ip(kubeconfig: &str, namespace: &str) -> Result<String, String> {
     let svc_name = format!("{}-ingress-istio", namespace);
 
     wait_for_condition(
@@ -108,10 +105,7 @@ pub async fn get_gateway_service_ip(
 }
 
 /// Discover the HTTPS port on the gateway Service (the port named `https` or 443).
-pub async fn get_gateway_https_port(
-    kubeconfig: &str,
-    namespace: &str,
-) -> Result<u16, String> {
+pub async fn get_gateway_https_port(kubeconfig: &str, namespace: &str) -> Result<u16, String> {
     let svc_name = format!("{}-ingress-istio", namespace);
 
     let output = run_kubectl(&[
@@ -273,10 +267,7 @@ sleep 5
 // =============================================================================
 
 /// Wait for the Gateway resource and its backing Istio Service to be ready.
-pub async fn wait_for_gateway_ready(
-    kubeconfig: &str,
-    namespace: &str,
-) -> Result<(), String> {
+pub async fn wait_for_gateway_ready(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     let gateway_name = format!("{}-ingress", namespace);
 
     wait_for_condition(
