@@ -103,16 +103,16 @@ async fn test_model_serving_created(kubeconfig: &str) -> Result<(), String> {
         .find(|r| r["name"].as_str() == Some("prefill"))
         .ok_or("prefill role not found")?;
 
-    // Verify decode role: replicas=2, workerReplicas=4, both templates present
+    // Verify decode role: replicas=2, workerReplicas=1, both templates present
     if decode["replicas"].as_u64() != Some(2) {
         return Err(format!(
             "decode role: expected replicas=2, got: {}",
             decode["replicas"]
         ));
     }
-    if decode["workerReplicas"].as_u64() != Some(4) {
+    if decode["workerReplicas"].as_u64() != Some(1) {
         return Err(format!(
-            "decode role: expected workerReplicas=4, got: {}",
+            "decode role: expected workerReplicas=1, got: {}",
             decode["workerReplicas"]
         ));
     }

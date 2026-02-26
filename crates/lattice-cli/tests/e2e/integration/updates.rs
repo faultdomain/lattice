@@ -13,6 +13,9 @@
 //! - Loading → spec change → detect and recompile (not stamp stale generation)
 //! - Role removal → orphan cleanup (removed role's MeshMember deleted)
 //!
+//! LatticeJob:
+//! - Failed sets observed_generation (no tight loop, jobs are immutable)
+//!
 //! # Running Standalone
 //!
 //! ```bash
@@ -45,6 +48,7 @@ const NS_MODEL_SPEC_UPDATE: &str = "update-t4";
 const NS_MODEL_LOADING_GAP: &str = "update-t5";
 const NS_PDB_ORPHAN: &str = "update-t6";
 const NS_MODEL_ROLE_ORPHAN: &str = "update-t7";
+const NS_JOB_FAILED_STABLE: &str = "update-t8";
 
 /// Dummy secret provider name (Cedar denies access → immediate compile failure)
 const DENIED_PROVIDER: &str = "nonexistent-provider";
@@ -946,6 +950,7 @@ fn build_service_with_replicas(
             }),
             security: Some(lattice_common::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
+                run_as_user: Some(65534),
                 ..Default::default()
             }),
             ..Default::default()
@@ -960,6 +965,143 @@ fn build_service_with_replicas(
     );
     svc.spec.replicas = replicas;
     svc
+}
+
+// =============================================================================
+// Test 8: LatticeJob Failed sets observed_generation (no tight loop)
+// =============================================================================
+
+/// Deploy a job that fails permanently. Verify that observed_generation is set
+/// on the Failed status so the controller doesn't tight-loop retrying.
+async fn test_job_failed_sets_observed_generation(kubeconfig: &str) -> Result<(), String> {
+    info!("[Updates] Test 8: LatticeJob Failed sets observed_generation");
+    ensure_fresh_namespace(kubeconfig, NS_JOB_FAILED_STABLE).await?;
+
+    // Deploy a job that fails permanently
+    let job = build_simple_job(
+        "job-stable-fail",
+        NS_JOB_FAILED_STABLE,
+        &["/bin/sh", "-c", "exit 1"],
+    );
+    let yaml =
+        serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job: {e}"))?;
+    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+
+    // Wait for Failed
+    wait_for_resource_phase(
+        kubeconfig,
+        "latticejob",
+        NS_JOB_FAILED_STABLE,
+        "job-stable-fail",
+        "Failed",
+        Duration::from_secs(120),
+    )
+    .await?;
+
+    // Give the controller time to stabilize
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    // Verify observed_generation is set (not empty/missing)
+    let observed = get_resource_observed_generation(
+        kubeconfig,
+        "latticejob",
+        NS_JOB_FAILED_STABLE,
+        "job-stable-fail",
+    )
+    .await?;
+    if observed.is_empty() {
+        return Err(
+            "observed_generation is empty on Failed job — controller will tight-loop \
+             retrying every 30s even when nothing changed. \
+             Failed status must include observed_generation."
+                .to_string(),
+        );
+    }
+
+    let gen = get_resource_generation(
+        kubeconfig,
+        "latticejob",
+        NS_JOB_FAILED_STABLE,
+        "job-stable-fail",
+    )
+    .await?;
+    if observed != gen {
+        return Err(format!(
+            "observed_generation ({observed}) != metadata.generation ({gen}) — \
+             controller hasn't acknowledged the current spec"
+        ));
+    }
+
+    info!("[Updates] observed_generation = {observed} (matches generation = {gen})");
+
+    delete_namespace(kubeconfig, NS_JOB_FAILED_STABLE).await;
+    info!("[Updates] Test 8 passed: Failed job has observed_generation set");
+    Ok(())
+}
+
+// =============================================================================
+// Helpers (Job)
+// =============================================================================
+
+/// Build a minimal LatticeJob with a single "worker" task.
+fn build_simple_job(
+    name: &str,
+    namespace: &str,
+    command: &[&str],
+) -> lattice_common::crd::LatticeJob {
+    use lattice_common::crd::{
+        ContainerSpec, JobTaskSpec, LatticeJobSpec, ResourceQuantity, ResourceRequirements,
+        RestartPolicy,
+    };
+    use std::collections::BTreeMap;
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            command: Some(command.iter().map(|s| s.to_string()).collect()),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
+            security: Some(lattice_common::crd::SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                run_as_user: Some(65534),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    let mut tasks = BTreeMap::new();
+    tasks.insert(
+        "worker".to_string(),
+        JobTaskSpec {
+            replicas: 1,
+            workload: lattice_common::crd::WorkloadSpec {
+                containers,
+                ..Default::default()
+            },
+            runtime: lattice_common::crd::RuntimeSpec::default(),
+            restart_policy: Some(RestartPolicy::Never),
+        },
+    );
+
+    let spec = LatticeJobSpec {
+        max_retry: Some(0),
+        tasks,
+        ..Default::default()
+    };
+    let mut job = lattice_common::crd::LatticeJob::new(name, spec);
+    job.metadata.namespace = Some(namespace.to_string());
+    job
 }
 
 // =============================================================================
@@ -1030,7 +1172,21 @@ pub async fn run_model_update_tests_in(
     harness.finish()
 }
 
-/// Run all CRD update integration tests (Service + Model).
+/// Run LatticeJob CRD update integration tests.
+pub async fn run_job_update_tests(kubeconfig: &str) -> Result<(), String> {
+    info!("[Updates] Running LatticeJob update tests on {kubeconfig}");
+
+    let harness = TestHarness::new("Job Updates");
+    harness
+        .run("Job Failed observed_generation", || {
+            test_job_failed_sets_observed_generation(kubeconfig)
+        })
+        .await;
+
+    harness.finish()
+}
+
+/// Run all CRD update integration tests (Service + Model + Job).
 pub async fn run_update_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Updates] Running CRD update integration tests on {kubeconfig}");
 
@@ -1038,6 +1194,7 @@ pub async fn run_update_tests(kubeconfig: &str) -> Result<(), String> {
 
     run_service_update_tests(kubeconfig).await?;
     run_model_update_tests(kubeconfig).await?;
+    run_job_update_tests(kubeconfig).await?;
 
     info!("[Updates] All CRD update integration tests passed!");
     Ok(())
@@ -1090,14 +1247,33 @@ async fn test_orphan_cleanup_standalone() {
         .await
         .unwrap();
 
+    // Run sequentially — model tests create 10+ Volcano pods with gang
+    // scheduling (minAvailable=5). Concurrent model deployments across
+    // standalone tests saturate a small kind cluster and deadlock the
+    // gang scheduler.
     let harness = TestHarness::new("Orphan Cleanup");
-    tokio::join!(
-        harness.run("PDB orphan cleanup", || {
+    harness
+        .run("PDB orphan cleanup", || {
             test_service_pdb_orphan_cleanup(&resolved.kubeconfig)
-        }),
-        harness.run("Model role removal orphan cleanup", || {
+        })
+        .await;
+    harness
+        .run("Model role removal orphan cleanup", || {
             test_model_role_removal_orphan_cleanup(&resolved.kubeconfig, "orphan-model-t1")
-        }),
-    );
+        })
+        .await;
     harness.finish().unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_job_updates_standalone() {
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
+
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
+    run_job_update_tests(&resolved.kubeconfig).await.unwrap();
 }

@@ -3,6 +3,8 @@
 //! Reconciles LatticeJob resources through a state machine:
 //! Pending → Running → Succeeded/Failed
 //!
+//! Jobs are immutable once created. Failed and Succeeded are terminal states.
+//!
 //! Resources are applied in layers to prevent race conditions:
 //! - Layer 1: ConfigMaps, Secrets, ExternalSecrets, PVCs, MeshMembers, TracingPolicies
 //! - Layer 2: VCJob (only after mesh/security is ready)
@@ -208,25 +210,8 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 _ => Ok(Action::requeue(REQUEUE_RUNNING)),
             }
         }
-        JobPhase::Succeeded => Ok(Action::await_change()),
-        JobPhase::Failed => {
-            // Failed is only reached for permanent errors (compile failure or
-            // VCJob execution failure). Both set observed_generation.
-            // Retry only if the user changed the spec.
-            let observed = job.status.as_ref().and_then(|s| s.observed_generation);
-            if observed != Some(generation) {
-                info!(job = %name, observed = ?observed, current = generation, "spec changed while Failed, retrying");
-                update_status(
-                    &ctx.client,
-                    &job,
-                    namespace,
-                    JobPhase::Pending,
-                    Some("Retrying after spec change"),
-                    None,
-                )
-                .await?;
-                return Ok(Action::requeue(REQUEUE_ERROR));
-            }
+        JobPhase::Succeeded | JobPhase::Failed => {
+            // Terminal states — jobs are immutable, no retry.
             Ok(Action::await_change())
         }
         _ => Ok(Action::await_change()),

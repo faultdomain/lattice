@@ -100,7 +100,7 @@ spec:
           scaleDown:
             stabilizationWindow: "5m"
             period: "1m"
-      workerReplicas: 4
+      workerReplicas: 1
       workerWorkload:
         containers:
           main:

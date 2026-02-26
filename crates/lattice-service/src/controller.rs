@@ -680,7 +680,7 @@ pub async fn reconcile(
         update_service_status(
             &service,
             &ctx,
-            ServiceStatusUpdate::failed_with_generation(
+            ServiceStatusUpdate::failed(
                 &e.to_string(),
                 service.metadata.generation,
             ),
@@ -707,7 +707,10 @@ pub async fn reconcile(
             update_service_status(
                 &service,
                 &ctx,
-                ServiceStatusUpdate::failed("Resource missing namespace"),
+                ServiceStatusUpdate::failed(
+                    "Resource missing namespace",
+                    service.metadata.generation,
+                ),
             )
             .await?;
             return Ok(Action::await_change());
@@ -956,7 +959,7 @@ async fn compile_and_apply(
             update_service_status(
                 service,
                 ctx,
-                ServiceStatusUpdate::failed_with_generation(&msg, service.metadata.generation),
+                ServiceStatusUpdate::failed(&msg, service.metadata.generation),
             )
             .await?;
             record_inputs_hash(ctx, name, namespace, inputs_hash).await;
@@ -989,7 +992,7 @@ async fn compile_and_apply(
         update_service_status(
             service,
             ctx,
-            ServiceStatusUpdate::failed_with_generation(&msg, service.metadata.generation),
+            ServiceStatusUpdate::failed(&msg, service.metadata.generation),
         )
         .await?;
         record_inputs_hash(ctx, name, namespace, inputs_hash).await;
@@ -1099,19 +1102,7 @@ impl<'a> ServiceStatusUpdate<'a> {
         }
     }
 
-    fn failed(message: &'a str) -> Self {
-        Self {
-            phase: ServicePhase::Failed,
-            message,
-            condition_type: "Ready",
-            condition_status: ConditionStatus::False,
-            reason: "ValidationFailed",
-            set_compiled_at: false,
-            observed_generation: None,
-        }
-    }
-
-    fn failed_with_generation(message: &'a str, generation: Option<i64>) -> Self {
+    fn failed(message: &'a str, generation: Option<i64>) -> Self {
         Self {
             phase: ServicePhase::Failed,
             message,
@@ -1290,8 +1281,6 @@ mod tests {
             .returning(|_, _, _, _| Ok(()));
         mock.expect_is_mesh_member_ready()
             .returning(|_, _| Ok(true));
-        mock.expect_cleanup_orphaned_resources()
-            .returning(|_, _, _| Ok(()));
         mock
     }
 
@@ -1363,7 +1352,10 @@ mod tests {
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
         let service = Arc::new(service);
 
-        let mock_kube = mock_kube_with_policies(vec![]);
+        let mut mock_kube = mock_kube_with_policies(vec![]);
+        mock_kube
+            .expect_cleanup_orphaned_resources()
+            .returning(|_, _, _| Ok(()));
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Add both services to graph
@@ -1386,7 +1378,10 @@ mod tests {
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Ready));
         let service = Arc::new(service);
 
-        let mock_kube = mock_kube_with_policies(vec![]);
+        let mut mock_kube = mock_kube_with_policies(vec![]);
+        mock_kube
+            .expect_cleanup_orphaned_resources()
+            .returning(|_, _, _| Ok(()));
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         ctx.graph.put_service("test", "my-service", &service.spec);
@@ -1624,7 +1619,10 @@ mod tests {
         };
 
         let policy = make_policy("db-backup", "test", 100, Some(policy_backup));
-        let mock_kube = mock_kube_with_policies(vec![]);
+        let mut mock_kube = mock_kube_with_policies(vec![]);
+        mock_kube
+            .expect_cleanup_orphaned_resources()
+            .returning(|_, _, _| Ok(()));
 
         let mut service = sample_service("my-db");
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
@@ -1771,7 +1769,7 @@ mod tests {
     /// ServiceStatusUpdate::failed() must set observed_generation so the guard works.
     #[test]
     fn failed_status_update_sets_observed_generation() {
-        let update = ServiceStatusUpdate::failed_with_generation("error", Some(3));
+        let update = ServiceStatusUpdate::failed("error", Some(3));
         assert_eq!(
             update.observed_generation,
             Some(3),
@@ -1817,7 +1815,6 @@ mod tests {
         flag: Arc<std::sync::atomic::AtomicBool>,
     ) -> MockServiceKubeClient {
         let mut mock = mock_kube_with_policies(vec![]);
-        // Override the default cleanup expectation to track calls
         mock.expect_cleanup_orphaned_resources()
             .returning(move |_, _, _| {
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);

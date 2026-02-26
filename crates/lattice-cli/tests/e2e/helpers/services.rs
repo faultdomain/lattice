@@ -143,6 +143,7 @@ pub fn create_service_with_secrets(
             security: Some(lattice_common::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
                 allowed_binaries: vec!["/bin/printenv".to_string(), "/bin/cat".to_string()],
+                run_as_user: Some(65534),
                 ..Default::default()
             }),
             ..Default::default()
@@ -594,6 +595,7 @@ pub fn create_service_with_all_secret_routes(
             security: Some(lattice_common::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
                 allowed_binaries: vec!["/bin/printenv".to_string(), "/bin/cat".to_string()],
+                run_as_user: Some(65534),
                 ..Default::default()
             }),
             ..Default::default()

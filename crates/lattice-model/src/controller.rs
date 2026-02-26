@@ -95,6 +95,12 @@ pub async fn reconcile(
     // Validate the model spec (all roles)
     model.spec.validate()?;
 
+    // Always ensure roles are in the graph (crash recovery).
+    // After a controller restart the in-memory graph is empty, so
+    // current_graph_role_keys() would return nothing and removed roles
+    // would go undetected during spec-change cleanup.
+    register_graph(&model, &ctx.graph, namespace);
+
     let generation = model.metadata.generation.unwrap_or(0);
     let phase = model
         .status
@@ -339,17 +345,17 @@ pub async fn reconcile(
                     .await;
                     return Err(e);
                 }
-                let conditions =
-                    read_model_serving_conditions(&ctx.client, &name, namespace, &ctx.registry)
-                        .await;
+                // Transition to Loading so the next reconcile checks the
+                // download job and removes scheduling gates on new pods.
+                // Staying in Serving would skip gate removal (only in Loading).
                 update_status(
                     &ctx.client,
                     &model,
                     namespace,
-                    ModelServingPhase::Serving,
-                    Some("Model updated and serving"),
+                    ModelServingPhase::Loading,
+                    Some("Spec changed, reloading"),
                     Some(generation),
-                    conditions,
+                    None,
                 )
                 .await?;
                 return Ok(Action::requeue(REQUEUE_LOADING));
