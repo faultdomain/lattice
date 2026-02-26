@@ -31,6 +31,7 @@ pub mod capi;
 pub mod cedar;
 pub mod cedar_secrets;
 pub mod cedar_security;
+pub mod gateway;
 pub mod job;
 pub mod kubeconfig;
 pub mod mesh;

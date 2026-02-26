@@ -250,6 +250,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Gateway API: ingress routing through Istio gateway
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Gateway",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::gateway::run_gateway_tests(&kc).await
+            }),
+        ));
+    }
+
     // Workload2 deletion (if exists) — pause chaos first to avoid log spam
     if ctx.has_workload2() {
         setup_result.pause_chaos_on_cluster(WORKLOAD2_CLUSTER_NAME);

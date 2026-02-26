@@ -76,6 +76,8 @@ mod context;
 mod helpers;
 #[cfg(feature = "provider-e2e")]
 pub mod integration;
+mod gateway_fixtures;
+mod gateway_helpers;
 mod media_server_e2e;
 mod mesh_fixtures;
 mod mesh_helpers;
@@ -97,6 +99,7 @@ mod capi_e2e;
 mod cedar_e2e;
 mod cedar_secrets_e2e;
 mod cedar_security_e2e;
+mod gateway_e2e;
 mod kubeconfig_e2e;
 mod mesh_e2e;
 mod oidc_e2e;
