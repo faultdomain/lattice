@@ -27,9 +27,9 @@ use super::super::gateway_helpers::{
     wait_for_gateway_ready,
 };
 use super::super::helpers::{
-    apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, ensure_fresh_namespace,
-    ensure_test_cluster_issuer, patch_with_retry, run_kubectl, setup_regcreds_infrastructure,
-    CedarPolicySpec,
+    apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
+    ensure_fresh_namespace, ensure_test_cluster_issuer, patch_with_retry, run_kubectl,
+    setup_regcreds_infrastructure, CedarPolicySpec,
 };
 use super::super::mesh_helpers::{retry_verification, wait_for_services_ready};
 
@@ -54,6 +54,16 @@ pub async fn run_gateway_tests(kubeconfig: &str) -> Result<(), String> {
     info!("========================================\n");
 
     setup_gateway_infrastructure(kubeconfig).await?;
+
+    let result = run_gateway_test_sequence(kubeconfig).await;
+
+    // Cleanup regardless of test result
+    delete_namespace(kubeconfig, GATEWAY_TEST_NAMESPACE).await;
+
+    result
+}
+
+async fn run_gateway_test_sequence(kubeconfig: &str) -> Result<(), String> {
     deploy_backend_services(kubeconfig).await?;
     verify_gateway_resources(kubeconfig).await?;
 

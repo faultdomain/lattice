@@ -34,9 +34,7 @@ use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
-use lattice_service::controller::{
-    error_policy as service_error_policy, reconcile as service_reconcile, ServiceContext,
-};
+use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
 use lattice_service::policy_controller as service_policy_ctrl;
 
 /// Watcher timeout (seconds) - must be less than client read_timeout (30s)
@@ -185,7 +183,11 @@ pub async fn build_service_controllers(
                 .collect()
         })
         .shutdown_on_signal()
-        .run(service_reconcile, service_error_policy, service_ctx.clone())
+        .run(
+            service_reconcile,
+            lattice_common::default_error_policy,
+            service_ctx.clone(),
+        )
         .for_each(log_reconcile_result("Service"));
 
     let policy_ctx = Arc::new(ControllerContext::new(client.clone()));
@@ -248,7 +250,7 @@ pub async fn build_service_controllers(
         .shutdown_on_signal()
         .run(
             mesh_member_ctrl::reconcile,
-            mesh_member_ctrl::error_policy,
+            lattice_common::default_error_policy,
             mm_ctx,
         )
         .for_each(log_reconcile_result("MeshMember"));
@@ -291,7 +293,7 @@ pub async fn build_job_controllers(
         .shutdown_on_signal()
         .run(
             lattice_job::controller::reconcile,
-            lattice_job::controller::error_policy,
+            lattice_common::default_error_policy,
             ctx,
         )
         .for_each(log_reconcile_result("Job"));
@@ -327,7 +329,7 @@ pub async fn build_model_controllers(
         .shutdown_on_signal()
         .run(
             lattice_model::controller::reconcile,
-            lattice_model::controller::error_policy,
+            lattice_common::default_error_policy,
             ctx,
         )
         .for_each(log_reconcile_result("Model"));

@@ -458,6 +458,8 @@ fn main() {
             "snapshotsEnabled=true",
             "--set",
             "initContainers=null",
+            "--set",
+            "upgradeCRDs=false",
             "--set-json",
             "configuration.backupStorageLocation=[]",
             "--set-json",

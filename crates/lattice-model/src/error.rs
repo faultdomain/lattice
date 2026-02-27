@@ -1,5 +1,7 @@
 //! Model-specific error types
 
+use lattice_common::Retryable;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
     #[error("compilation failed for role '{role}': {source}")]
@@ -34,4 +36,21 @@ pub enum ModelError {
 
     #[error("model download failed: {0}")]
     DownloadFailed(String),
+}
+
+impl Retryable for ModelError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::RoleCompilation { .. } => false,
+            Self::Kube(_) => true,
+            Self::Serialization(_) => false,
+            Self::Common(e) => e.is_retryable(),
+            Self::RoleValidation { .. } => false,
+            Self::NoRoles => false,
+            Self::MissingNamespace => false,
+            Self::KthenaCrdMissing => true,
+            Self::InvalidModelUri(_) => false,
+            Self::DownloadFailed(_) => true,
+        }
+    }
 }

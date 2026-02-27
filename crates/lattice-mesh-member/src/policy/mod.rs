@@ -189,7 +189,7 @@ impl<'a> PolicyCompiler<'a> {
 // =============================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::PolicyCompiler;
     use lattice_common::crd::{
         ContainerSpec, DependencyDirection, EgressRule, EgressTarget, PortSpec, ResourceSpec,

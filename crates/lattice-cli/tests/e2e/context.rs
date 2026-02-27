@@ -11,9 +11,45 @@
 //! LATTICE_WORKLOAD2_KUBECONFIG=/path/to/workload2-kubeconfig
 //! ```
 
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
+
 #[cfg(feature = "provider-e2e")]
 use super::helpers::ProxySession;
 use super::providers::InfraProvider;
+
+// =============================================================================
+// Test Concurrency Limiter
+// =============================================================================
+
+/// Maximum number of integration tests that can run concurrently.
+/// Prevents resource exhaustion on single-worker-node clusters.
+const MAX_CONCURRENT_TESTS: usize = 10;
+
+static SEMAPHORE_COUNTER: Mutex<usize> = Mutex::new(0);
+static SEMAPHORE_CONDVAR: Condvar = Condvar::new();
+
+/// RAII permit that limits concurrent test execution.
+/// Automatically releases the slot when dropped (even on panic).
+pub struct TestPermit(());
+
+impl Drop for TestPermit {
+    fn drop(&mut self) {
+        let mut count = SEMAPHORE_COUNTER.lock().unwrap();
+        *count -= 1;
+        SEMAPHORE_CONDVAR.notify_one();
+    }
+}
+
+/// Block until a test execution slot is available, then return an RAII permit.
+pub fn acquire_test_permit() -> TestPermit {
+    let mut count = SEMAPHORE_COUNTER.lock().unwrap();
+    while *count >= MAX_CONCURRENT_TESTS {
+        count = SEMAPHORE_CONDVAR.wait(count).unwrap();
+    }
+    *count += 1;
+    TestPermit(())
+}
 
 /// Cluster infrastructure context for tests
 ///
@@ -167,6 +203,8 @@ pub struct StandaloneKubeconfig {
     pub kubeconfig: String,
     /// Proxy session (kept alive for port-forward). None when using direct access.
     _session: Option<TestSession>,
+    /// Concurrency permit — released when this struct is dropped
+    _permit: TestPermit,
 }
 
 #[cfg(feature = "provider-e2e")]
@@ -176,10 +214,13 @@ impl StandaloneKubeconfig {
     /// Prefers `LATTICE_KUBECONFIG` for direct access. Falls back to
     /// `LATTICE_MGMT_KUBECONFIG` + `LATTICE_WORKLOAD_KUBECONFIG` with proxy + Cedar policy.
     pub async fn resolve() -> Result<Self, String> {
+        let permit = acquire_test_permit();
+
         if let Some(kc) = standalone_kubeconfig() {
             return Ok(Self {
                 kubeconfig: kc,
                 _session: None,
+                _permit: permit,
             });
         }
 
@@ -192,6 +233,7 @@ impl StandaloneKubeconfig {
         Ok(Self {
             kubeconfig: kc,
             _session: Some(session),
+            _permit: permit,
         })
     }
 }
@@ -206,6 +248,65 @@ pub fn init_e2e_test() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .try_init();
+}
+
+// =============================================================================
+// Per-Integration E2E Runner
+// =============================================================================
+
+/// Run a per-integration E2E test with standard setup, teardown, timeout, and cleanup.
+///
+/// Handles the boilerplate shared by all per-integration E2E tests:
+/// - `init_e2e_test()` (crypto + tracing)
+/// - `setup_mgmt_and_workload()` with default config
+/// - Timeout wrapping
+/// - `teardown_mgmt_cluster()` on success
+/// - `cleanup_bootstrap_cluster()` on failure or timeout
+///
+/// The `test_fn` closure receives the `InfraContext` (cloned from `SetupResult`)
+/// and runs the actual integration test logic.
+///
+/// # Example
+///
+/// ```ignore
+/// #[tokio::test]
+/// async fn test_mesh_e2e() {
+///     run_per_integration_e2e("Mesh", Duration::from_secs(2400), |ctx| async move {
+///         integration::mesh::run_mesh_tests(ctx.require_workload()?).await
+///     }).await;
+/// }
+/// ```
+#[cfg(feature = "provider-e2e")]
+pub async fn run_per_integration_e2e<F, Fut>(name: &str, timeout: Duration, test_fn: F)
+where
+    F: FnOnce(InfraContext) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    use super::helpers::{run_id, teardown_mgmt_cluster, MGMT_CLUSTER_NAME};
+    use super::integration::setup;
+    use tracing::info;
+
+    init_e2e_test();
+    info!("Starting E2E test: {}", name);
+
+    let run_inner = async {
+        let result = setup::setup_mgmt_and_workload(&setup::SetupConfig::default()).await?;
+        let ctx = result.ctx.clone();
+        test_fn(ctx).await?;
+        teardown_mgmt_cluster(&result.ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME).await
+    };
+
+    match tokio::time::timeout(timeout, run_inner).await {
+        Ok(Ok(())) => info!("TEST PASSED: {}", name),
+        Ok(Err(e)) => {
+            setup::cleanup_bootstrap_cluster(run_id()).await;
+            panic!("{} E2E failed: {}", name, e);
+        }
+        Err(_) => {
+            setup::cleanup_bootstrap_cluster(run_id()).await;
+            panic!("{} E2E timed out after {:?}", name, timeout);
+        }
+    }
 }
 
 // =============================================================================
@@ -230,6 +331,8 @@ pub struct TestSession {
     pub ctx: InfraContext,
     /// Proxy session to mgmt cluster (all child access routes through mgmt's proxy)
     mgmt_proxy: Option<ProxySession>,
+    /// Concurrency permit — released when this struct is dropped
+    _permit: TestPermit,
 }
 
 #[cfg(feature = "provider-e2e")]
@@ -239,6 +342,7 @@ impl TestSession {
     /// Starts a port-forward to mgmt's proxy if workload kubeconfig is set.
     /// All child cluster access routes through mgmt's proxy.
     pub async fn from_env(require_msg: &str) -> Result<Self, String> {
+        let permit = acquire_test_permit();
         init_e2e_test();
         let mut ctx = InfraContext::from_env().ok_or(require_msg)?;
 
@@ -259,7 +363,11 @@ impl TestSession {
             None
         };
 
-        Ok(Self { ctx, mgmt_proxy })
+        Ok(Self {
+            ctx,
+            mgmt_proxy,
+            _permit: permit,
+        })
     }
 
     /// Rebuild operators and restart port-forwards.

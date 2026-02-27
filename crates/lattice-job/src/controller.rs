@@ -23,7 +23,7 @@ use lattice_common::crd::{JobPhase, LatticeJob, LatticeJobStatus, ProviderType};
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::status_check;
-use lattice_common::{CrdKind, CrdRegistry};
+use lattice_common::{CrdKind, CrdRegistry, Retryable};
 
 use crate::compiler::{compile_job, CompiledJob};
 use crate::error::JobError;
@@ -32,9 +32,6 @@ const FIELD_MANAGER: &str = "lattice-job-controller";
 
 /// Requeue interval while waiting for job to complete
 const REQUEUE_RUNNING: Duration = Duration::from_secs(15);
-/// Requeue interval after a reconciliation error
-const REQUEUE_ERROR: Duration = Duration::from_secs(30);
-
 /// Shared context for the LatticeJob controller
 pub struct JobContext {
     pub client: Client,
@@ -102,18 +99,32 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             let compiled = match compiled {
                 Ok(c) => c,
                 Err(e) => {
-                    // Compilation failed (bad spec) — permanent failure
-                    cleanup_graph(&job, &ctx.graph, namespace);
-                    let msg = format!("Failed to compile job: {}", e);
-                    let _ = update_status(
-                        &ctx.client,
-                        &job,
-                        namespace,
-                        JobPhase::Failed,
-                        Some(&msg),
-                        Some(generation),
-                    )
-                    .await;
+                    if e.is_retryable() {
+                        // Transient — stay in Pending so error_policy retries
+                        let msg = format!("Compile failed (will retry): {}", e);
+                        let _ = update_status(
+                            &ctx.client,
+                            &job,
+                            namespace,
+                            JobPhase::Pending,
+                            Some(&msg),
+                            None,
+                        )
+                        .await;
+                    } else {
+                        // Permanent — go to Failed
+                        cleanup_graph(&job, &ctx.graph, namespace);
+                        let msg = format!("Failed to compile job: {}", e);
+                        let _ = update_status(
+                            &ctx.client,
+                            &job,
+                            namespace,
+                            JobPhase::Failed,
+                            Some(&msg),
+                            Some(generation),
+                        )
+                        .await;
+                    }
                     return Err(e);
                 }
             };
@@ -236,16 +247,6 @@ fn cleanup_graph(job: &LatticeJob, graph: &ServiceGraph, namespace: &str) {
     for task_name in job.spec.tasks.keys() {
         graph.delete_service(namespace, &format!("{}-{}", name, task_name));
     }
-}
-
-/// Error policy for LatticeJob reconciliation
-pub fn error_policy(job: Arc<LatticeJob>, error: &JobError, _ctx: Arc<JobContext>) -> Action {
-    error!(
-        ?error,
-        job = %job.name_any(),
-        "job reconciliation failed"
-    );
-    Action::requeue(REQUEUE_ERROR)
 }
 
 /// Apply compiled job resources in layers using ApplyBatch

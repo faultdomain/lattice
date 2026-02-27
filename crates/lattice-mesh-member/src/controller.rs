@@ -16,7 +16,7 @@ use kube::api::{Api, DynamicObject, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use lattice_cedar::{MeshWildcardRequest, PolicyEngine, WildcardDirection};
 use lattice_common::crd::{
@@ -430,20 +430,6 @@ pub fn cleanup(member: &LatticeMeshMember, ctx: &MeshMemberContext) {
 
     info!(mesh_member = %name, namespace = %namespace, "removing mesh member from graph");
     ctx.graph.delete_service(namespace, &name);
-}
-
-/// Error policy — requeue after 30s for all errors
-pub fn error_policy(
-    member: Arc<LatticeMeshMember>,
-    error: &ReconcileError,
-    _ctx: Arc<MeshMemberContext>,
-) -> Action {
-    error!(
-        ?error,
-        mesh_member = %member.name_any(),
-        "mesh member reconciliation failed"
-    );
-    Action::requeue(Duration::from_secs(30))
 }
 
 // =============================================================================

@@ -24,7 +24,7 @@ pub mod template;
 pub mod yaml;
 
 pub use crd_registry::{CrdKind, CrdRegistry};
-pub use error::{default_error_policy, ControllerContext, Error, ReconcileError};
+pub use error::{default_error_policy, ControllerContext, Error, ReconcileError, Retryable};
 pub use events::{EventPublisher, KubeEventPublisher, NoopEventPublisher};
 pub use kube_utils::{
     apply_manifest_with_discovery, apply_manifests_with_discovery, deterministic_hash,

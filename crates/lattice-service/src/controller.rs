@@ -53,10 +53,6 @@ const REQUEUE_PENDING: Duration = Duration::from_secs(5);
 const REQUEUE_WAITING: Duration = Duration::from_secs(10);
 /// Requeue interval when service is Ready (periodic drift check).
 const REQUEUE_READY: Duration = Duration::from_secs(60);
-/// Requeue interval on persistent failure with unchanged inputs.
-const REQUEUE_FAILED_UNCHANGED: Duration = Duration::from_secs(30);
-/// Requeue interval after a retryable error (error_policy).
-const REQUEUE_ERROR: Duration = Duration::from_secs(30);
 
 // =============================================================================
 // Traits for dependency injection and testability
@@ -637,17 +633,16 @@ const INPUTS_HASH_ANNOTATION: &str = "lattice.dev/inputs-hash";
 
 /// Check if reconciliation can be skipped because nothing has changed.
 ///
-/// Returns true when the service is Ready or Failed AND:
+/// Returns true when the service is Ready AND:
 /// - observed_generation matches metadata.generation (spec unchanged)
 /// - stored inputs hash matches the current graph + policy state
 ///
-/// For Failed services this prevents tight retry loops when the same
-/// compilation error would recur (e.g. volume access denied). The service
-/// will still retry when its spec changes, bilateral edges change, or
-/// policy epochs advance.
+/// Failed services are NOT skipped — they always re-enter the compile
+/// path so transient errors (e.g. webhook down) self-heal without
+/// waiting for a spec change. The error_policy controls retry backoff.
 fn is_reconcile_current(service: &LatticeService, current_inputs_hash: &str) -> bool {
     let status = match service.status.as_ref() {
-        Some(s) if s.phase == ServicePhase::Ready || s.phase == ServicePhase::Failed => s,
+        Some(s) if s.phase == ServicePhase::Ready => s,
         _ => return false,
     };
 
@@ -746,18 +741,11 @@ pub async fn reconcile(
         ctx.cedar.reload_epoch(),
     );
 
-    // Skip reconcile when spec and external inputs are unchanged.
-    // For Ready services this avoids unnecessary recompilation.
-    // For Failed services this prevents tight retry loops on persistent errors.
-    // Compiling services always compile (no stored hash yet).
+    // Skip reconcile when spec and external inputs are unchanged (Ready only).
+    // Compiling and Failed services always re-enter the compile path.
     if is_reconcile_current(&service, &inputs_hash) {
-        let requeue = if current_phase == ServicePhase::Ready {
-            REQUEUE_READY
-        } else {
-            REQUEUE_FAILED_UNCHANGED
-        };
         debug!("generation and inputs unchanged, skipping reconcile");
-        return Ok(Action::requeue(requeue));
+        return Ok(Action::requeue(REQUEUE_READY));
     }
 
     let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
@@ -772,29 +760,6 @@ pub async fn reconcile(
     }
 
     compile_and_apply(&service, &name, namespace, &ctx, &inputs_hash).await
-}
-
-/// Error policy for the LatticeService controller (kube-rs callback).
-///
-/// Retryable errors (transient): requeue after 30 seconds.
-/// Non-retryable errors (permanent): await spec change.
-pub fn error_policy<T: ResourceExt>(
-    resource: Arc<T>,
-    error: &Error,
-    _ctx: Arc<ServiceContext>,
-) -> Action {
-    error!(
-        ?error,
-        resource = %resource.name_any(),
-        retryable = error.is_retryable(),
-        "reconciliation failed"
-    );
-
-    if error.is_retryable() {
-        Action::requeue(REQUEUE_ERROR)
-    } else {
-        Action::await_change()
-    }
 }
 
 /// Check which dependencies are missing from the graph
@@ -972,7 +937,7 @@ async fn compile_and_apply(
             )
             .await?;
             record_inputs_hash(ctx, name, namespace, inputs_hash).await;
-            return Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED));
+            return Ok(Action::requeue(Duration::from_secs(30)));
         }
     };
 
@@ -1004,8 +969,10 @@ async fn compile_and_apply(
             ServiceStatusUpdate::failed(&msg, service.metadata.generation),
         )
         .await?;
-        record_inputs_hash(ctx, name, namespace, inputs_hash).await;
-        return Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED));
+        // Don't record the inputs hash for apply failures — these are often
+        // transient (broken webhook, API server blip, network timeout) and
+        // should retry on the next requeue even if inputs are unchanged.
+        return Ok(Action::requeue(Duration::from_secs(30)));
     }
 
     // Clean up resources that were previously applied but are no longer needed.
@@ -1466,28 +1433,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Error Policy Tests
-    // =========================================================================
-
-    /// Story: Error policy distinguishes retryable vs non-retryable errors
-    #[test]
-    fn error_policy_requeues() {
-        let service = Arc::new(sample_service("my-service"));
-        let mock_kube = mock_kube_with_policies(vec![]);
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
-
-        // Validation errors are NOT retryable - should await spec change
-        let validation_error = Error::validation("test error");
-        let action = error_policy(Arc::clone(&service), &validation_error, Arc::clone(&ctx));
-        assert_eq!(action, Action::await_change());
-
-        // Bootstrap errors ARE retryable - should requeue with backoff
-        let retryable_error = Error::bootstrap("connection timeout");
-        let action = error_policy(service, &retryable_error, ctx);
-        assert_eq!(action, Action::requeue(REQUEUE_ERROR));
-    }
-
-    // =========================================================================
     // Missing Dependency Detection Tests
     // =========================================================================
 
@@ -1750,14 +1695,15 @@ mod tests {
         assert!(!is_reconcile_current(&svc, "hash-NEW"));
     }
 
-    /// Failed services with observed_generation and matching hash should be skipped.
-    /// This prevents tight 30s retry loops when the same error recurs.
+    /// Failed services always retry — they are never skipped by the guard.
+    /// Transient errors (webhook down, API blip) self-heal without needing
+    /// a spec change. The error_policy controls retry backoff.
     #[test]
-    fn reconcile_guard_skips_failed_with_matching_inputs() {
+    fn reconcile_guard_retries_failed_even_with_matching_inputs() {
         let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), Some("hash-abc"));
         assert!(
-            is_reconcile_current(&svc, "hash-abc"),
-            "Failed service with matching generation + hash should be skipped"
+            !is_reconcile_current(&svc, "hash-abc"),
+            "Failed service should always retry, even with matching generation + hash"
         );
     }
 
@@ -1773,6 +1719,16 @@ mod tests {
     fn reconcile_guard_retries_failed_on_hash_change() {
         let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), Some("hash-abc"));
         assert!(!is_reconcile_current(&svc, "hash-NEW"));
+    }
+
+    /// Failed services without a stored hash always retry (apply failures don't record hash).
+    #[test]
+    fn reconcile_guard_retries_failed_without_hash() {
+        let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), None);
+        assert!(
+            !is_reconcile_current(&svc, "hash-abc"),
+            "Failed service with no stored hash should always retry (transient apply failure)"
+        );
     }
 
     /// ServiceStatusUpdate::failed() must set observed_generation so the guard works.

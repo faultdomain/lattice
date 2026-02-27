@@ -27,6 +27,7 @@
 //! ```
 
 pub mod autoscaling;
+pub mod backup;
 pub mod capi;
 pub mod cedar;
 pub mod cedar_secrets;

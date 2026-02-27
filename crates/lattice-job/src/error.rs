@@ -1,5 +1,7 @@
 //! Job-specific error types
 
+use lattice_common::Retryable;
+
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
     #[error("compilation failed for task '{task}': {source}")]
@@ -25,4 +27,18 @@ pub enum JobError {
 
     #[error("Volcano Job CRD (batch.volcano.sh/Job) not available")]
     VolcanoCrdMissing,
+}
+
+impl Retryable for JobError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::TaskCompilation { .. } => false,
+            Self::Kube(_) => true,
+            Self::Serialization(_) => false,
+            Self::Common(e) => e.is_retryable(),
+            Self::NoTasks => false,
+            Self::MissingNamespace => false,
+            Self::VolcanoCrdMissing => true,
+        }
+    }
 }

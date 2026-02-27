@@ -10,6 +10,7 @@ spec:
         image: docker.io/linuxserver/nzbget:latest
         security:
           runAsUser: 0
+          readOnlyRootFilesystem: false
           apparmorProfile: Unconfined
           capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETUID, SETGID]
           allowedBinaries: ["*"]
@@ -23,8 +24,6 @@ spec:
           /downloads:
             source: ${resources.media-storage}
             path: downloads
-          /tmp: {}
-          /run: {}
         resources:
           requests:
             cpu: 100m

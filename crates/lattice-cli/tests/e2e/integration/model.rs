@@ -1201,6 +1201,15 @@ pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
     // GHCR registry credentials + Cedar policies (includes AppArmor override)
     setup_regcreds_infrastructure(kubeconfig).await?;
 
+    let result = run_model_test_sequence(kubeconfig).await;
+
+    // Cleanup regardless of test result
+    delete_namespace(kubeconfig, MODEL_NAMESPACE).await;
+
+    result
+}
+
+async fn run_model_test_sequence(kubeconfig: &str) -> Result<(), String> {
     // Deploy the model (must complete before verification)
     test_model_deployment(kubeconfig).await?;
 
@@ -1237,9 +1246,6 @@ pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
 
     // Serving phase depends on download lifecycle (scheduling gates removed)
     test_model_serving_phase(kubeconfig).await?;
-
-    // Cleanup
-    delete_namespace(kubeconfig, MODEL_NAMESPACE).await;
 
     info!("[Model] All LatticeModel integration tests passed!");
     Ok(())

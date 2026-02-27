@@ -8,12 +8,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
-use kube::Client;
+use kube::{Client, ResourceExt};
 use thiserror::Error;
 use tracing::warn;
 
 /// Default context value when no specific context is available
 pub const UNKNOWN_CONTEXT: &str = "unknown";
+
+/// Trait for errors that know whether they're worth retrying.
+pub trait Retryable {
+    /// Returns true if retrying might succeed (transient errors).
+    /// Returns false for permanent errors requiring config/spec changes.
+    fn is_retryable(&self) -> bool;
+}
 
 /// Simple reconciliation error for controllers.
 ///
@@ -58,6 +65,16 @@ impl From<kube::Error> for ReconcileError {
     }
 }
 
+impl Retryable for ReconcileError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Kube(_) => true,
+            Self::Validation(_) => false,
+            Self::Internal(_) => true,
+        }
+    }
+}
+
 /// Standard controller context with a Kubernetes client.
 ///
 /// This is the common context type used by all Lattice controllers.
@@ -76,11 +93,26 @@ impl ControllerContext {
 
 /// Default error policy for controllers.
 ///
-/// Logs the error and requeues for retry after 30 seconds.
-/// Generic over context type so any controller can use it.
-pub fn default_error_policy<T, C>(_obj: Arc<T>, error: &ReconcileError, _ctx: Arc<C>) -> Action {
-    warn!(error = %error, "Reconcile error, will retry");
-    Action::requeue(Duration::from_secs(30))
+/// Retryable errors: log warning and requeue after 30 seconds.
+/// Non-retryable errors: log warning and await spec change.
+/// Generic over error and context type so any controller can use it.
+pub fn default_error_policy<T: ResourceExt, E: Retryable + std::fmt::Display, C>(
+    resource: Arc<T>,
+    error: &E,
+    _ctx: Arc<C>,
+) -> Action {
+    let retryable = error.is_retryable();
+    warn!(
+        error = %error,
+        resource = %resource.name_any(),
+        retryable,
+        "reconcile error"
+    );
+    if retryable {
+        Action::requeue(Duration::from_secs(30))
+    } else {
+        Action::await_change()
+    }
 }
 
 /// Main error type for Lattice operations
@@ -367,7 +399,16 @@ impl Error {
             Error::Internal { .. } => true,
         }
     }
+}
 
+impl Retryable for Error {
+    fn is_retryable(&self) -> bool {
+        // Delegate to the inherent method (inherent takes priority, no recursion)
+        Error::is_retryable(self)
+    }
+}
+
+impl Error {
     /// Get the cluster name if this error is associated with a specific cluster
     pub fn cluster(&self) -> Option<&str> {
         match self {
@@ -712,5 +753,72 @@ mod tests {
         });
         let err: ReconcileError = kube_err.into();
         assert!(err.is_crd_not_found());
+    }
+
+    // ==========================================================================
+    // Retryable trait tests
+    // ==========================================================================
+
+    #[test]
+    fn reconcile_error_retryable_kube() {
+        let err = ReconcileError::Kube("connection refused".into());
+        assert!(Retryable::is_retryable(&err));
+    }
+
+    #[test]
+    fn reconcile_error_not_retryable_validation() {
+        let err = ReconcileError::Validation("bad spec".into());
+        assert!(!Retryable::is_retryable(&err));
+    }
+
+    #[test]
+    fn reconcile_error_retryable_internal() {
+        let err = ReconcileError::Internal("timeout".into());
+        assert!(Retryable::is_retryable(&err));
+    }
+
+    #[test]
+    fn error_retryable_trait_delegates_to_inherent() {
+        let retryable_err = Error::bootstrap("connection timeout");
+        assert!(Retryable::is_retryable(&retryable_err));
+
+        let non_retryable_err = Error::validation("bad config");
+        assert!(!Retryable::is_retryable(&non_retryable_err));
+    }
+
+    #[test]
+    fn default_error_policy_retryable_requeues() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let resource = Arc::new(ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let ctx: Arc<()> = Arc::new(());
+        let err = ReconcileError::Kube("transient".into());
+
+        let action = default_error_policy(resource, &err, ctx);
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn default_error_policy_non_retryable_awaits_change() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let resource = Arc::new(ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let ctx: Arc<()> = Arc::new(());
+        let err = ReconcileError::Validation("bad spec".into());
+
+        let action = default_error_policy(resource, &err, ctx);
+        assert_eq!(action, Action::await_change());
     }
 }

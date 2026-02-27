@@ -615,6 +615,29 @@ mod tests {
     };
     use lattice_common::template::SecretVariableRef;
 
+    fn empty_container_data() -> ContainerCompilationData<'static> {
+        static EMPTY_SECRET_REFS: std::sync::LazyLock<BTreeMap<String, SecretRef>> =
+            std::sync::LazyLock::new(BTreeMap::new);
+        static EMPTY_RENDERED: std::sync::LazyLock<
+            BTreeMap<String, lattice_common::template::RenderedContainer>,
+        > = std::sync::LazyLock::new(BTreeMap::new);
+        static EMPTY_ENV_FROM: std::sync::LazyLock<
+            BTreeMap<String, Vec<crate::k8s::EnvFromSource>>,
+        > = std::sync::LazyLock::new(BTreeMap::new);
+        static EMPTY_VOLUMES: std::sync::LazyLock<BTreeMap<String, Vec<Volume>>> =
+            std::sync::LazyLock::new(BTreeMap::new);
+        static EMPTY_MOUNTS: std::sync::LazyLock<BTreeMap<String, Vec<crate::k8s::VolumeMount>>> =
+            std::sync::LazyLock::new(BTreeMap::new);
+
+        ContainerCompilationData {
+            secret_refs: &EMPTY_SECRET_REFS,
+            rendered_containers: &EMPTY_RENDERED,
+            per_container_env_from: &EMPTY_ENV_FROM,
+            per_container_file_volumes: &EMPTY_VOLUMES,
+            per_container_file_mounts: &EMPTY_MOUNTS,
+        }
+    }
+
     // =========================================================================
     // Story: Compile Probe
     // =========================================================================
@@ -1025,7 +1048,8 @@ mod tests {
         };
         let volumes = GeneratedVolumes::default();
 
-        let (init, regular) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+        let (init, regular) =
+            PodTemplateCompiler::compile_sidecars(&runtime, &volumes, &empty_container_data());
 
         assert_eq!(init.len(), 1);
         assert_eq!(init[0].name, "setup");
@@ -1054,7 +1078,8 @@ mod tests {
         };
         let volumes = GeneratedVolumes::default();
 
-        let (_, regular) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+        let (_, regular) =
+            PodTemplateCompiler::compile_sidecars(&runtime, &volumes, &empty_container_data());
 
         let sec = regular[0]
             .security_context
@@ -1086,7 +1111,8 @@ mod tests {
         };
         let volumes = GeneratedVolumes::default();
 
-        let (_, regular) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+        let (_, regular) =
+            PodTemplateCompiler::compile_sidecars(&runtime, &volumes, &empty_container_data());
 
         let sec = regular[0]
             .security_context
@@ -1123,7 +1149,8 @@ mod tests {
         };
         let volumes = GeneratedVolumes::default();
 
-        let (_, regular) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+        let (_, regular) =
+            PodTemplateCompiler::compile_sidecars(&runtime, &volumes, &empty_container_data());
 
         assert!(regular[0].readiness_probe.is_some());
         let probe = regular[0].readiness_probe.as_ref().unwrap();
@@ -1156,7 +1183,8 @@ mod tests {
         };
         let volumes = GeneratedVolumes::default();
 
-        let (init, _) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+        let (init, _) =
+            PodTemplateCompiler::compile_sidecars(&runtime, &volumes, &empty_container_data());
 
         // Init containers must NOT have probes (K8s rejects them)
         assert!(init[0].liveness_probe.is_none());

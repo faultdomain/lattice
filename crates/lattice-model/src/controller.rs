@@ -33,7 +33,7 @@ use lattice_common::crd::{
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::status_check;
-use lattice_common::{CrdKind, CrdRegistry};
+use lattice_common::{CrdKind, CrdRegistry, Retryable};
 
 use crate::compiler::{compile_model, role_key_suffix, CompiledModel};
 use crate::download::{CompiledDownload, SCHEDULING_GATE_MODEL_DOWNLOAD};
@@ -47,9 +47,6 @@ const REQUEUE_LOADING: Duration = Duration::from_secs(15);
 const REQUEUE_SERVING: Duration = Duration::from_secs(60);
 /// Requeue interval for fast retry after spec change in Failed state
 const REQUEUE_RETRY: Duration = Duration::from_secs(5);
-/// Requeue interval after a reconciliation error
-const REQUEUE_ERROR: Duration = Duration::from_secs(30);
-
 /// Shared context for the LatticeModel controller
 pub struct ModelContext {
     pub client: Client,
@@ -138,18 +135,34 @@ pub async fn reconcile(
             let compiled = match compiled {
                 Ok(c) => c,
                 Err(e) => {
-                    cleanup_graph(&model, &ctx.graph, namespace);
-                    let msg = format!("Failed to compile: {}", e);
-                    let _ = update_status(
-                        &ctx.client,
-                        &model,
-                        namespace,
-                        ModelServingPhase::Failed,
-                        Some(&msg),
-                        Some(generation),
-                        None,
-                    )
-                    .await;
+                    if e.is_retryable() {
+                        // Transient — stay in Pending so error_policy retries
+                        let msg = format!("Compile failed (will retry): {}", e);
+                        let _ = update_status(
+                            &ctx.client,
+                            &model,
+                            namespace,
+                            ModelServingPhase::Pending,
+                            Some(&msg),
+                            None,
+                            None,
+                        )
+                        .await;
+                    } else {
+                        // Permanent — go to Failed
+                        cleanup_graph(&model, &ctx.graph, namespace);
+                        let msg = format!("Failed to compile: {}", e);
+                        let _ = update_status(
+                            &ctx.client,
+                            &model,
+                            namespace,
+                            ModelServingPhase::Failed,
+                            Some(&msg),
+                            Some(generation),
+                            None,
+                        )
+                        .await;
+                    }
                     return Err(e);
                 }
             };
@@ -160,9 +173,7 @@ pub async fn reconcile(
                 cleanup_graph(&model, &ctx.graph, namespace);
                 let msg = format!("Apply failed (will retry): {}", e);
                 // Stay in Pending — apply errors are transient (webhook not ready,
-                // API server hiccup). error_policy requeues after REQUEUE_ERROR.
-                // Changing phase would trigger a watch event → immediate reconcile
-                // → tight Pending↔Failed flapping loop.
+                // API server hiccup). error_policy requeues after 30s.
                 let _ = update_status(
                     &ctx.client,
                     &model,
@@ -308,19 +319,34 @@ pub async fn reconcile(
                 {
                     Ok(c) => c,
                     Err(e) => {
-                        // Compile errors are permanent — go to Failed
-                        cleanup_graph(&model, &ctx.graph, namespace);
-                        let msg = format!("Failed to recompile after spec change: {}", e);
-                        let _ = update_status(
-                            &ctx.client,
-                            &model,
-                            namespace,
-                            ModelServingPhase::Failed,
-                            Some(&msg),
-                            Some(generation),
-                            None,
-                        )
-                        .await;
+                        if e.is_retryable() {
+                            // Transient — stay in Serving, let error_policy retry
+                            let msg = format!("Recompile failed (will retry): {}", e);
+                            let _ = update_status(
+                                &ctx.client,
+                                &model,
+                                namespace,
+                                ModelServingPhase::Serving,
+                                Some(&msg),
+                                observed,
+                                None,
+                            )
+                            .await;
+                        } else {
+                            // Permanent — go to Failed
+                            cleanup_graph(&model, &ctx.graph, namespace);
+                            let msg = format!("Failed to recompile after spec change: {}", e);
+                            let _ = update_status(
+                                &ctx.client,
+                                &model,
+                                namespace,
+                                ModelServingPhase::Failed,
+                                Some(&msg),
+                                Some(generation),
+                                None,
+                            )
+                            .await;
+                        }
                         return Err(e);
                     }
                 };
@@ -416,9 +442,9 @@ pub async fn reconcile(
             Ok(Action::requeue(REQUEUE_SERVING))
         }
         ModelServingPhase::Failed => {
-            // Failed is only reached for permanent errors (compile failure,
-            // ModelServing failure, permanent download failure). All set
-            // observed_generation. Retry only if the user changed the spec.
+            // Periodically retry Failed models. If the spec changed, go back
+            // to Pending for a full recompile. Otherwise just requeue — the
+            // error may have been transient (CRD not installed yet, API blip).
             let observed = model.status.as_ref().and_then(|s| s.observed_generation);
             if observed != Some(generation) {
                 info!(model = %name, observed = ?observed, current = generation, "spec changed while Failed, retrying");
@@ -434,7 +460,7 @@ pub async fn reconcile(
                 .await?;
                 return Ok(Action::requeue(REQUEUE_RETRY));
             }
-            Ok(Action::await_change())
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
         _ => Ok(Action::await_change()),
     }
@@ -565,20 +591,6 @@ async fn delete_model_serving(
         }
     }
     Ok(())
-}
-
-/// Error policy for LatticeModel reconciliation
-pub fn error_policy(
-    model: Arc<LatticeModel>,
-    error: &ModelError,
-    _ctx: Arc<ModelContext>,
-) -> Action {
-    error!(
-        ?error,
-        model = %model.name_any(),
-        "model reconciliation failed"
-    );
-    Action::requeue(REQUEUE_ERROR)
 }
 
 /// Apply compiled model resources in layers using ApplyBatch

@@ -74,7 +74,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
         .to_string(),
     });
 
-    // nzbget: s6-overlay init caps + VPN sidecar caps (NET_ADMIN, SYS_MODULE)
+    // nzbget: s6-overlay init caps + VPN sidecar caps (NET_ADMIN, SYS_MODULE) + writable rootfs
     cedar_policies.push(CedarPolicySpec {
         name: "permit-nzbget-caps".to_string(),
         test_label: "e2e".to_string(),
@@ -91,7 +91,8 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
   resource == Lattice::SecurityOverride::"capability:NET_ADMIN" ||
   resource == Lattice::SecurityOverride::"capability:SYS_MODULE" ||
   resource == Lattice::SecurityOverride::"capability:SETUID" ||
-  resource == Lattice::SecurityOverride::"capability:SETGID"
+  resource == Lattice::SecurityOverride::"capability:SETGID" ||
+  resource == Lattice::SecurityOverride::"readWriteRootFilesystem"
 };"#
         .to_string(),
     });

@@ -300,7 +300,11 @@ pub struct RestoreSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_resources: Vec<String>,
     /// Restore PVs
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "restorePVs"
+    )]
     pub restore_pvs: Option<bool>,
 }
 
