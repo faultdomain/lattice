@@ -4,8 +4,9 @@
 //! runs workload2-specific validations (kubeconfig, proxy, cedar, multi-hop),
 //! then tears down in reverse order.
 //!
-//! This test deliberately excludes mesh, secrets, cedar_secrets, tetragon,
-//! and autoscaling — those only need 2 clusters and live in unified_e2e.
+//! Includes mesh bilateral agreement tests on BOTH workload clusters to verify
+//! mesh policies work correctly across the full hierarchy. Other tests (secrets,
+//! cedar_secrets, tetragon, autoscaling) only need 2 clusters and live in unified_e2e.
 //!
 //! ```bash
 //! cargo test --features provider-e2e --test e2e test_workload2_e2e -- --nocapture
@@ -95,6 +96,24 @@ async fn run() -> Result<(), String> {
     integration::multi_hop::run_multi_hop_proxy_tests(&ctx).await?;
 
     info!("SUCCESS: Multi-hop proxy tests complete!");
+
+    // =========================================================================
+    // Phase 5.5: Mesh bilateral agreement tests on both workload clusters
+    // =========================================================================
+    info!("[Phase 5.5] Running mesh tests on both workload clusters...");
+
+    let workload_kc = ctx.require_workload()?;
+    let workload2_kc = ctx.require_workload2()?;
+
+    // Run mesh tests on both clusters concurrently
+    let (r1, r2) = tokio::join!(
+        integration::mesh::run_mesh_tests(workload_kc),
+        integration::mesh::run_mesh_tests(workload2_kc),
+    );
+    r1.map_err(|e| format!("Mesh tests failed on workload: {}", e))?;
+    r2.map_err(|e| format!("Mesh tests failed on workload2: {}", e))?;
+
+    info!("SUCCESS: Mesh bilateral agreements verified on both workload clusters!");
 
     // =========================================================================
     // Phase 6: Delete workload2 (unpivot to workload)

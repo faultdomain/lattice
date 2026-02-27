@@ -225,10 +225,7 @@ pub async fn run_oidc_auth_test(
     wait_for_oidc_provider_ready(parent_kubeconfig).await?;
     info!("[Integration/OIDC] OIDCProvider is Ready");
 
-    // Allow time for the watcher to reload the OIDC validator
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // 3. Get OIDC tokens from Keycloak
+    // 3. Get OIDC tokens from Keycloak (does not depend on operator OIDC reload)
     let admin_token = get_keycloak_token("admin@lattice.dev", "admin").await?;
     info!("[Integration/OIDC] Got admin token from Keycloak");
 
@@ -258,24 +255,34 @@ pub async fn run_oidc_auth_test(
     ])
     .await;
 
-    // 5. Verify admin OIDC token grants access
+    // 5. Wait for the OIDC validator to reload and the admin token to be accepted.
+    //    Polls until the proxy returns 200 for the admin OIDC token, which confirms
+    //    both the OIDCProvider watcher has reloaded and the Cedar policy is active.
     info!("[Integration/OIDC] Testing admin access (should be allowed)...");
     let url = format!(
         "{}/clusters/{}/api/v1/namespaces",
         proxy_url, child_cluster_name
     );
-    let response = http_get_with_retry(&url, &admin_token, 10).await?;
-    if !response.is_success() {
-        cleanup_oidc_test_resources(parent_kubeconfig).await;
-        return Err(format!(
-            "Expected admin OIDC access to succeed, got HTTP {}",
-            response.status_code
-        ));
-    }
-    info!(
-        "[Integration/OIDC] Admin access allowed as expected (HTTP {})",
-        response.status_code
-    );
+    let admin_url = url.clone();
+    let admin_token_owned = admin_token.clone();
+    wait_for_condition(
+        "OIDC admin token accepted by proxy",
+        Duration::from_secs(30),
+        Duration::from_secs(2),
+        || {
+            let url = admin_url.clone();
+            let token = admin_token_owned.clone();
+            async move {
+                let response = http_get_with_retry(&url, &token, 1).await?;
+                Ok(response.is_success())
+            }
+        },
+    )
+    .await
+    .map_err(|e| {
+        format!("Expected admin OIDC access to succeed, but it never did: {e}")
+    })?;
+    info!("[Integration/OIDC] Admin access allowed as expected");
 
     // 6. Verify viewer OIDC token is denied (not in lattice-admins group)
     info!("[Integration/OIDC] Testing viewer access (should be denied)...");

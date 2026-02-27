@@ -288,6 +288,75 @@ pub async fn delete_cedar_policies_by_label(kubeconfig: &str, label_selector: &s
     .await;
 }
 
+/// Check whether a CedarPolicy with the given name exists in lattice-system.
+pub async fn cedar_policy_exists(kubeconfig: &str, name: &str) -> bool {
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "cedarpolicy",
+        name,
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-o",
+        "name",
+    ])
+    .await
+    .is_ok()
+}
+
+/// Count CedarPolicy CRDs matching a label selector.
+async fn count_cedar_policies_with_label(kubeconfig: &str, label_selector: &str) -> usize {
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "cedarpolicy",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-l",
+        label_selector,
+        "-o",
+        "jsonpath={.items[*].metadata.name}",
+    ])
+    .await;
+
+    match output {
+        Ok(stdout) => stdout
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .count(),
+        Err(_) => 0,
+    }
+}
+
+/// Wait until no CedarPolicies matching the label selector remain.
+///
+/// Used after `delete_cedar_policies_by_label` to ensure the operator has
+/// processed the deletions before proceeding with tests that rely on
+/// default-deny semantics.
+pub async fn wait_for_no_cedar_policies_with_label(
+    kubeconfig: &str,
+    label_selector: &str,
+) -> Result<(), String> {
+    let kc = kubeconfig.to_string();
+    let label = label_selector.to_string();
+    super::wait_for_condition(
+        &format!("no CedarPolicies with label '{}'", label_selector),
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let kc = kc.clone();
+            let label = label.clone();
+            async move {
+                let count = count_cedar_policies_with_label(&kc, &label).await;
+                Ok(count == 0)
+            }
+        },
+    )
+    .await
+}
+
 // =============================================================================
 // Fine-Grained Cedar Policy Helpers
 // =============================================================================

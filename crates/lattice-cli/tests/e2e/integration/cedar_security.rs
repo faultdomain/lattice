@@ -38,7 +38,8 @@ use tracing::info;
 use super::super::helpers::{
     apply_apparmor_override_policy, apply_cedar_policy_crd, create_service_with_security_overrides,
     delete_cedar_policies_by_label, delete_namespace, deploy_and_wait_for_phase,
-    ensure_fresh_namespace, wait_for_service_phase, TestHarness,
+    ensure_fresh_namespace, wait_for_no_cedar_policies_with_label, wait_for_service_phase,
+    TestHarness,
 };
 
 // =============================================================================
@@ -392,9 +393,13 @@ pub async fn run_cedar_security_tests(kubeconfig: &str) -> Result<(), String> {
         kubeconfig
     );
 
-    // Clean up any leftover policies from previous runs
+    // Clean up any leftover policies from previous runs and wait for deletion
     cleanup_cedar_security_policies(kubeconfig).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_no_cedar_policies_with_label(
+        kubeconfig,
+        &format!("lattice.dev/test={}", TEST_LABEL),
+    )
+    .await?;
 
     // Docker KIND clusters don't have AppArmor — permit the Unconfined override.
     // Uses "e2e" label so the cedar-security cleanup (which deletes by "cedar-security"

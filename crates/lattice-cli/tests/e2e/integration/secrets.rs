@@ -61,7 +61,7 @@ const ROUTES_TEST_NAMESPACE: &str = "local-secrets-routes";
 ///
 /// Checks apiVersion, kind, secretStoreRef, target name, data/dataFrom mappings,
 /// and refreshInterval.
-async fn verify_external_secret(
+pub async fn verify_external_secret(
     kubeconfig_path: &str,
     namespace: &str,
     name: &str,

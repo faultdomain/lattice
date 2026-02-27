@@ -28,8 +28,9 @@ use lattice_common::crd::{
 use super::super::helpers::{
     apply_cedar_policy_crd, delete_cedar_policies_by_label, delete_namespace,
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, wait_for_pod_running, TestHarness,
-    BUSYBOX_IMAGE, DEFAULT_TIMEOUT, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_no_cedar_policies_with_label,
+    wait_for_pod_running, TestHarness, BUSYBOX_IMAGE, DEFAULT_TIMEOUT, NGINX_IMAGE,
+    REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
@@ -1061,7 +1062,11 @@ pub async fn run_tetragon_tests(kubeconfig: &str) -> Result<(), String> {
 
     setup_regcreds_infrastructure(kubeconfig).await?;
     cleanup_policies(kubeconfig).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_no_cedar_policies_with_label(
+        kubeconfig,
+        &format!("lattice.dev/test={TEST_LABEL}"),
+    )
+    .await?;
 
     let harness = TestHarness::new("Tetragon");
     tokio::join!(

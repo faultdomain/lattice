@@ -6,6 +6,20 @@
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+/// Errors from exec I/O operations
+#[derive(Debug, thiserror::Error)]
+pub enum ExecIoError {
+    /// Failed to write to process stdin
+    #[error("stdin write failed: {0}")]
+    StdinWrite(String),
+    /// Stdin is not available for this exec session
+    #[error("stdin not available")]
+    StdinNotAvailable,
+    /// The underlying channel was closed
+    #[error("channel closed")]
+    ChannelClosed,
+}
+
 /// Output from an exec session (stdout, stderr, or status)
 pub struct ExecOutput {
     /// K8s channel ID (1=stdout, 2=stderr, 3=error/status)
@@ -24,7 +38,7 @@ pub struct ExecOutput {
 #[async_trait]
 pub trait ExecIo: Send {
     /// Send stdin data to the process
-    async fn send_stdin(&mut self, data: Vec<u8>) -> Result<(), String>;
+    async fn send_stdin(&mut self, data: Vec<u8>) -> Result<(), ExecIoError>;
 
     /// Send terminal resize event
     async fn send_resize(&mut self, width: u16, height: u16);

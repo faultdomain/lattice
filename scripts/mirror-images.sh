@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # Mirror all Docker Hub images used by E2E tests to GHCR.
+# Runs all mirrors concurrently for speed.
 #
 # Prerequisites:
 #   echo $GITHUB_TOKEN | docker login ghcr.io -u evan-hines-js --password-stdin
@@ -35,40 +36,53 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   DRY_RUN=true
 fi
 
-failed=0
+mirror_one() {
+  local src=$1
+  local dst=$2
+
+  echo "[start] ${src} → ${dst}"
+
+  if ! docker pull "$src" &>/dev/null; then
+    echo "[FAIL]  ${src} (pull failed)"
+    return 1
+  fi
+
+  docker tag "$src" "$dst"
+
+  if ! docker push "$dst" &>/dev/null; then
+    echo "[FAIL]  ${src} (push failed)"
+    return 1
+  fi
+
+  echo "[done]  ${dst}"
+}
+
+pids=()
+failures=0
 
 for entry in "${IMAGES[@]}"; do
   src=$(echo "$entry" | awk '{print $1}')
   dst_name=$(echo "$entry" | awk '{print $2}')
   dst="${GHCR_PREFIX}/${dst_name}"
 
-  echo "=== ${src} → ${dst} ==="
-
   if $DRY_RUN; then
-    echo "  [dry-run] would pull, tag, push"
+    echo "[dry-run] ${src} → ${dst}"
     continue
   fi
 
-  if ! docker pull "$src"; then
-    echo "  FAILED to pull $src"
-    failed=$((failed + 1))
-    continue
+  mirror_one "$src" "$dst" &
+  pids+=($!)
+done
+
+for pid in "${pids[@]}"; do
+  if ! wait "$pid"; then
+    failures=$((failures + 1))
   fi
-
-  docker tag "$src" "$dst"
-
-  if ! docker push "$dst"; then
-    echo "  FAILED to push $dst"
-    failed=$((failed + 1))
-    continue
-  fi
-
-  echo "  OK"
 done
 
 echo ""
-if [ $failed -gt 0 ]; then
-  echo "WARNING: $failed image(s) failed to mirror"
+if [ $failures -gt 0 ]; then
+  echo "WARNING: $failures image(s) failed to mirror"
   exit 1
 else
   echo "All images mirrored to ${GHCR_PREFIX}/"

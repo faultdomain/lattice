@@ -58,10 +58,10 @@ impl RemoteExecIo {
 
 #[async_trait]
 impl ExecIo for RemoteExecIo {
-    async fn send_stdin(&mut self, data: Vec<u8>) -> Result<(), String> {
+    async fn send_stdin(&mut self, data: Vec<u8>) -> Result<(), super::io::ExecIoError> {
         self.exec_session.send_stdin(data).await.map_err(|e| {
             warn!(request_id = %self.request_id, error = %e, "Failed to send stdin");
-            e.to_string()
+            super::io::ExecIoError::StdinWrite(e.to_string())
         })
     }
 

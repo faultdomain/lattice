@@ -36,7 +36,8 @@ use tracing::info;
 use super::super::helpers::{
     apply_cedar_policy_crd, create_service_with_secrets, delete_cedar_policies_by_label,
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace,
-    setup_regcreds_infrastructure, wait_for_service_phase, TestHarness, DEFAULT_TIMEOUT,
+    setup_regcreds_infrastructure, wait_for_no_cedar_policies_with_label, wait_for_service_phase,
+    TestHarness, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -398,9 +399,9 @@ pub async fn run_cedar_secret_tests(kubeconfig: &str) -> Result<(), String> {
     // Set up regcreds infrastructure — all services now include ghcr-creds
     setup_regcreds_infrastructure(kubeconfig).await?;
 
-    // Clean up any leftover policies from previous runs
+    // Clean up any leftover policies from previous runs and wait for deletion
     cleanup_cedar_secret_policies(kubeconfig).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_no_cedar_policies_with_label(kubeconfig, "lattice.dev/test=cedar-secret").await?;
 
     // Run all tests concurrently — each uses its own namespace
     let harness = TestHarness::new("Cedar Secrets");

@@ -17,6 +17,7 @@ pub mod docker;
 pub mod kubernetes;
 pub mod services;
 pub mod test_harness;
+pub mod vault;
 
 // Re-export everything from submodules so existing imports stay unchanged
 pub use cedar::*;
@@ -25,6 +26,7 @@ pub use docker::*;
 pub use kubernetes::*;
 pub use services::*;
 pub use test_harness::*;
+pub use vault::*;
 
 // =============================================================================
 // Generic Polling Helper

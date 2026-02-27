@@ -35,8 +35,7 @@ impl AgentClient {
         info!(endpoint = %self.config.cell_grpc_endpoint, "Connecting to cell with mTLS");
 
         // Build mTLS config
-        let domain = extract_domain(&self.config.cell_grpc_endpoint)
-            .map_err(ClientError::InvalidEndpoint)?;
+        let domain = extract_domain(&self.config.cell_grpc_endpoint)?;
         let mtls_config = ClientMtlsConfig::new(
             credentials.cert_pem.clone(),
             credentials.key_pem.clone(),
@@ -97,7 +96,7 @@ impl AgentClient {
         self.message_tx = Some(message_tx.clone());
 
         // Create shutdown channel
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         self.shutdown_tx = Some(shutdown_tx);
 
         // Start the control stream
@@ -107,7 +106,7 @@ impl AgentClient {
             .await
             .map_err(|e| ClientError::StreamFailed(e.to_string()))?;
 
-        let mut inbound = response.into_inner();
+        let inbound = response.into_inner();
 
         *self.state.write().await = ClientState::Connected;
         info!("Connected to cell");
@@ -116,11 +115,40 @@ impl AgentClient {
         // This registers the agent on the server side
         self.send_ready().await?;
 
-        // Install CAPI on this cluster - required for resource move during pivot
-        // Retry up to 3 times with backoff for slow clusters (RKE2 image pulls)
+        // Install CAPI with retries, then send bootstrap complete
+        let (capi_ready, installed_providers) = self.install_capi_with_retries().await?;
+        self.send_bootstrap_complete(capi_ready, installed_providers)
+            .await?;
+
+        // Send full subtree state to parent and start watcher for changes
+        // This enables the parent cell to know about all clusters in our subtree
+        // for routing K8s API requests and authorization decisions
+        if let Some(k8s_client) = self.create_client_logged("subtree watcher").await {
+            let subtree_sender = SubtreeSender::new(self.config.cluster_name.clone(), k8s_client);
+
+            // Send full state on connect
+            subtree_sender.send_full_state(&message_tx).await;
+
+            // Spawn watcher to send deltas on LatticeCluster changes
+            // spawn_watcher consumes the sender and runs until the channel closes
+            self.subtree_watcher_handle = Some(subtree_sender.spawn_watcher(message_tx.clone()));
+        }
+
+        // Spawn background tasks
+        self.spawn_heartbeat_task(message_tx.clone());
+        self.spawn_deletion_watcher_task(message_tx.clone());
+        self.spawn_command_handler_task(inbound, shutdown_rx);
+
+        Ok(())
+    }
+
+    /// Install CAPI on this cluster with up to 3 retry attempts.
+    ///
+    /// Each attempt has a timeout and waits for CRDs to become available.
+    /// Returns `(capi_ready, installed_providers)` on success, or
+    /// `ClientError::CapiInstallFailed` after all attempts are exhausted.
+    async fn install_capi_with_retries(&self) -> Result<(bool, Vec<String>), ClientError> {
         info!("Installing CAPI on local cluster");
-        let mut capi_ready = false;
-        let mut installed_providers = vec![];
 
         let capi_install_timeout = CAPI_INSTALL_TIMEOUT;
         for attempt in 1..=3 {
@@ -129,9 +157,7 @@ impl AgentClient {
                     info!("CAPI installed, waiting for CRDs");
                     if self.wait_for_capi_crds(120).await {
                         info!("CAPI is ready");
-                        capi_ready = true;
-                        installed_providers = vec![provider];
-                        break;
+                        return Ok((true, vec![provider]));
                     } else {
                         warn!(
                             attempt,
@@ -154,49 +180,22 @@ impl AgentClient {
             }
         }
 
-        if !capi_ready {
-            return Err(ClientError::CapiInstallFailed(
-                "failed after 3 attempts - cluster cannot self-manage".to_string(),
-            ));
-        }
+        Err(ClientError::CapiInstallFailed(
+            "failed after 3 attempts - cluster cannot self-manage".to_string(),
+        ))
+    }
 
-        // Send bootstrap complete with CAPI status
-        self.send_bootstrap_complete(capi_ready, installed_providers)
-            .await?;
-
-        // Send full subtree state to parent and start watcher for changes
-        // This enables the parent cell to know about all clusters in our subtree
-        // for routing K8s API requests and authorization decisions
-        if let Some(k8s_client) = self.create_client_logged("subtree watcher").await {
-            let subtree_sender = SubtreeSender::new(self.config.cluster_name.clone(), k8s_client);
-
-            // Send full state on connect
-            subtree_sender.send_full_state(&message_tx).await;
-
-            // Spawn watcher to send deltas on LatticeCluster changes
-            // spawn_watcher consumes the sender and runs until the channel closes
-            self.subtree_watcher_handle = Some(subtree_sender.spawn_watcher(message_tx.clone()));
-        }
-
-        // Clone for spawned tasks
-        let config = self.config.clone();
-        let state = self.state.clone();
-        let agent_state = self.agent_state.clone();
-        let message_tx_clone = message_tx.clone();
-        let watch_registry = self.watch_registry.clone();
-        let exec_registry = self.exec_registry.clone();
-        let forwarder = self.forwarder.clone();
-        let exec_forwarder = self.exec_forwarder.clone();
-        let forwarded_exec_sessions = self.forwarded_exec_sessions.clone();
-        let kube_provider = self.kube_provider.clone();
-
-        // Spawn heartbeat task and store handle
+    /// Spawn the periodic heartbeat task that sends cluster health to the cell.
+    ///
+    /// Sends a `Heartbeat` message at `self.config.heartbeat_interval` containing
+    /// the current agent state, timestamp, uptime, and cluster health.
+    /// Sets `self.heartbeat_handle`.
+    fn spawn_heartbeat_task(&mut self, message_tx: mpsc::Sender<AgentMessage>) {
         let heartbeat_interval = self.config.heartbeat_interval;
-        let heartbeat_state = agent_state.clone();
-        let heartbeat_tx = message_tx.clone();
-        let cluster_name = config.cluster_name.clone();
+        let heartbeat_state = self.agent_state.clone();
+        let cluster_name = self.config.cluster_name.clone();
         let start_time = self.start_time;
-        let heartbeat_kube_provider = kube_provider.clone();
+        let heartbeat_kube_provider = self.kube_provider.clone();
 
         self.heartbeat_handle = Some(tokio::spawn(async move {
             let mut ticker = interval(heartbeat_interval);
@@ -216,20 +215,22 @@ impl AgentClient {
                     })),
                 };
 
-                if heartbeat_tx.send(msg).await.is_err() {
+                if message_tx.send(msg).await.is_err() {
                     debug!("Heartbeat channel closed");
                     break;
                 }
             }
         }));
+    }
 
-        // Spawn deletion watcher task - detects cluster deletion and starts unpivot loop.
-        // Handles both:
-        // - Runtime deletion: cluster deleted while agent is running
-        // - Crash recovery: cluster was being deleted when agent crashed/restarted
-        // Polls every 5 seconds, so crash recovery has at most 5s latency.
-        let deletion_tx = message_tx.clone();
+    /// Spawn the deletion watcher task that detects cluster deletion and starts unpivot.
+    ///
+    /// Handles both runtime deletion (cluster deleted while agent is running) and
+    /// crash recovery (cluster was being deleted when agent crashed/restarted).
+    /// Polls every `DELETION_POLL_INTERVAL`. Sets `self.deletion_watcher_handle`.
+    fn spawn_deletion_watcher_task(&mut self, message_tx: mpsc::Sender<AgentMessage>) {
         let deletion_provider = self.kube_provider.clone();
+
         self.deletion_watcher_handle = Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(DELETION_POLL_INTERVAL).await;
@@ -246,7 +247,7 @@ impl AgentClient {
 
                     // Start the unpivot retry loop (runs until CAPI deletes us)
                     Self::run_unpivot_loop(
-                        deletion_tx,
+                        message_tx,
                         &cluster_name,
                         &namespace,
                         deletion_provider.as_ref(),
@@ -259,21 +260,36 @@ impl AgentClient {
                 }
             }
         }));
+    }
 
-        // Create command context for handler
+    /// Spawn the command handler task that processes inbound commands from the cell.
+    ///
+    /// Reads commands from the inbound gRPC stream and dispatches them via
+    /// `commands::handle_command`. On disconnect, cancels all active watch/exec
+    /// sessions and resets pivot state if interrupted mid-pivot.
+    /// Sets `self.command_handler_handle`.
+    fn spawn_command_handler_task(
+        &mut self,
+        mut inbound: tonic::Streaming<lattice_proto::CellCommand>,
+        mut shutdown_rx: oneshot::Receiver<()>,
+    ) {
+        let state = self.state.clone();
+        let agent_state = self.agent_state.clone();
+        let watch_registry = self.watch_registry.clone();
+        let exec_registry = self.exec_registry.clone();
+
         let command_ctx = CommandContext::new(
-            config.cluster_name.clone(),
-            message_tx_clone.clone(),
+            self.config.cluster_name.clone(),
+            self.message_tx.clone().expect("message_tx set before spawn"),
             agent_state.clone(),
             watch_registry.clone(),
             exec_registry.clone(),
-            forwarder,
-            exec_forwarder,
-            forwarded_exec_sessions,
-            kube_provider,
+            self.forwarder.clone(),
+            self.exec_forwarder.clone(),
+            self.forwarded_exec_sessions.clone(),
+            self.kube_provider.clone(),
         );
 
-        // Spawn command handler task and store handle
         self.command_handler_handle = Some(tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -310,15 +326,13 @@ impl AgentClient {
             *state.write().await = ClientState::Disconnected;
             info!("Disconnected from cell");
         }));
-
-        Ok(())
     }
 }
 
 /// Extract domain name from a URL for TLS verification
-pub(super) fn extract_domain(endpoint: &str) -> Result<String, String> {
+pub(super) fn extract_domain(endpoint: &str) -> Result<String, ClientError> {
     if endpoint.is_empty() {
-        return Err("URL is empty".to_string());
+        return Err(ClientError::InvalidEndpoint("URL is empty".to_string()));
     }
     // Ensure we have a scheme for url::Url to parse correctly
     let with_scheme = if endpoint.contains("://") {
@@ -326,13 +340,13 @@ pub(super) fn extract_domain(endpoint: &str) -> Result<String, String> {
     } else {
         format!("https://{}", endpoint)
     };
-    let parsed =
-        url::Url::parse(&with_scheme).map_err(|e| format!("invalid URL '{}': {}", endpoint, e))?;
+    let parsed = url::Url::parse(&with_scheme)
+        .map_err(|e| ClientError::InvalidEndpoint(format!("invalid URL '{}': {}", endpoint, e)))?;
     parsed
         .host_str()
         .filter(|h| !h.is_empty())
         .map(|h| h.to_string())
-        .ok_or_else(|| format!("URL has no host: {}", endpoint))
+        .ok_or_else(|| ClientError::InvalidEndpoint(format!("URL has no host: {}", endpoint)))
 }
 
 #[cfg(test)]

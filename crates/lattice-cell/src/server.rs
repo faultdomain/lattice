@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::time::Duration;
 
 use futures::Stream;
 use tokio::sync::mpsc;
@@ -37,6 +38,36 @@ use lattice_infra::ServerMtlsConfig;
 
 /// Shared reference to SubtreeRegistry
 pub type SharedSubtreeRegistry = std::sync::Arc<SubtreeRegistry>;
+
+/// Timeout for CAPI object import during unpivot. If the distributed move hangs,
+/// the agent will retry on the next attempt rather than blocking indefinitely.
+const CAPI_IMPORT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Errors that can occur during CAPI object import
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    /// Failed to create or ensure the target namespace exists
+    #[error("failed to ensure namespace: {0}")]
+    NamespaceCreation(#[source] lattice_move::MoveError),
+    /// CAPI import timed out waiting for objects to be applied
+    #[error("CAPI import timed out after {0:?} for cluster {1}")]
+    Timeout(Duration, String),
+    /// One or more objects failed to import
+    #[error("{0} object(s) failed to import")]
+    ObjectImport(usize),
+    /// No proxy config available for kubeconfig patching
+    #[error("no proxy config available")]
+    NoProxyConfig,
+    /// Kubeconfig Secret was not found after import
+    #[error("kubeconfig Secret not found after import")]
+    KubeconfigNotFound,
+    /// Failed to patch kubeconfig for proxy access
+    #[error("failed to patch kubeconfig: {0}")]
+    KubeconfigPatch(String),
+    /// Failed to unpause cluster resources after import
+    #[error("failed to unpause cluster: {0}")]
+    UnpauseResources(#[source] lattice_move::MoveError),
+}
 
 /// Convert SubtreeState clusters to ClusterInfo, filtering out removed clusters
 fn convert_subtree_to_cluster_infos(state: &SubtreeState) -> Vec<ClusterInfo> {
@@ -173,7 +204,7 @@ async fn import_capi_objects(
     objects: &[lattice_move::MoveObjectOutput],
     client: &Client,
     registry: &SharedAgentRegistry,
-) -> Result<(), String> {
+) -> Result<(), ImportError> {
     // Log each object received for debugging
     for obj in objects {
         if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&obj.manifest) {
@@ -206,10 +237,12 @@ async fn import_capi_objects(
     mover
         .ensure_namespace()
         .await
-        .map_err(|e| format!("Failed to ensure namespace: {}", e))?;
+        .map_err(ImportError::NamespaceCreation)?;
 
-    // Apply all objects
-    let (mappings, errors) = mover.apply_batch(objects).await;
+    // Apply all objects (with timeout to prevent indefinite hangs during unpivot)
+    let (mappings, errors) = tokio::time::timeout(CAPI_IMPORT_TIMEOUT, mover.apply_batch(objects))
+        .await
+        .map_err(|_| ImportError::Timeout(CAPI_IMPORT_TIMEOUT, cluster.to_string()))?;
 
     if !errors.is_empty() {
         for e in &errors {
@@ -220,10 +253,7 @@ async fn import_capi_objects(
                 "Failed to import object"
             );
         }
-        return Err(format!(
-            "Import failed, {} errors - agent will retry",
-            errors.len()
-        ));
+        return Err(ImportError::ObjectImport(errors.len()));
     }
 
     info!(
@@ -235,7 +265,7 @@ async fn import_capi_objects(
     // Patch kubeconfig for proxy access
     let proxy_config = registry
         .get_proxy_config()
-        .ok_or("No proxy config available")?;
+        .ok_or(ImportError::NoProxyConfig)?;
 
     match patch_kubeconfig_for_proxy(
         client,
@@ -247,15 +277,15 @@ async fn import_capi_objects(
     .await
     {
         Ok(true) => info!(cluster = %cluster, "Kubeconfig patched for proxy access"),
-        Ok(false) => return Err("Kubeconfig Secret not found after import".to_string()),
-        Err(e) => return Err(format!("Failed to patch kubeconfig: {}", e)),
+        Ok(false) => return Err(ImportError::KubeconfigNotFound),
+        Err(e) => return Err(ImportError::KubeconfigPatch(e.to_string())),
     }
 
     // Unpause cluster
     mover
         .unpause_resources()
         .await
-        .map_err(|e| format!("Failed to unpause cluster: {}", e))?;
+        .map_err(ImportError::UnpauseResources)?;
     info!(cluster = %cluster, "Cluster unpaused successfully");
 
     Ok(())

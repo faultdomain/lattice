@@ -24,7 +24,7 @@ use super::providers::InfraProvider;
 
 /// Maximum number of integration tests that can run concurrently.
 /// Prevents resource exhaustion on single-worker-node clusters.
-const MAX_CONCURRENT_TESTS: usize = 10;
+const MAX_CONCURRENT_TESTS: usize = 5;
 
 static SEMAPHORE_COUNTER: Mutex<usize> = Mutex::new(0);
 static SEMAPHORE_CONDVAR: Condvar = Condvar::new();

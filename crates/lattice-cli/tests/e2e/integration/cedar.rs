@@ -27,9 +27,10 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
-    apply_cedar_policy_crd, apply_yaml_with_retry, delete_cedar_policies_by_label,
-    delete_namespace, get_child_cluster_name, get_or_create_proxy, get_sa_token,
-    http_get_with_retry, proxy_service_exists, run_kubectl, TestHarness,
+    apply_cedar_policy_crd, apply_yaml_with_retry, cedar_policy_exists,
+    delete_cedar_policies_by_label, delete_namespace, get_child_cluster_name,
+    get_or_create_proxy, get_sa_token, http_get_with_retry, proxy_service_exists, run_kubectl,
+    wait_for_condition, TestHarness,
 };
 
 // =============================================================================
@@ -370,7 +371,19 @@ pub async fn run_cedar_hierarchy_tests(
 
     // Remove default E2E policy so deny checks work correctly
     let _ = delete_cedar_policy(&ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_condition(
+        &format!("Cedar policy '{}' deleted", E2E_DEFAULT_POLICY_NAME),
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let kc = ctx.mgmt_kubeconfig.clone();
+            async move {
+                let exists = cedar_policy_exists(&kc, E2E_DEFAULT_POLICY_NAME).await;
+                Ok(!exists)
+            }
+        },
+    )
+    .await?;
 
     let proxy_url = ctx.mgmt_proxy_url.as_deref();
     let kubeconfig = &ctx.mgmt_kubeconfig;
@@ -418,7 +431,20 @@ async fn test_cedar_sa_auth_standalone() {
     let child_cluster_name = get_child_cluster_name();
 
     let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_condition(
+        &format!("Cedar policy '{}' deleted", E2E_DEFAULT_POLICY_NAME),
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let kc = session.ctx.mgmt_kubeconfig.clone();
+            async move {
+                let exists = cedar_policy_exists(&kc, E2E_DEFAULT_POLICY_NAME).await;
+                Ok(!exists)
+            }
+        },
+    )
+    .await
+    .unwrap();
 
     run_cedar_proxy_test(
         &session.ctx.mgmt_kubeconfig,
@@ -442,7 +468,20 @@ async fn test_cedar_group_policy_standalone() {
     let child_cluster_name = get_child_cluster_name();
 
     let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_condition(
+        &format!("Cedar policy '{}' deleted", E2E_DEFAULT_POLICY_NAME),
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let kc = session.ctx.mgmt_kubeconfig.clone();
+            async move {
+                let exists = cedar_policy_exists(&kc, E2E_DEFAULT_POLICY_NAME).await;
+                Ok(!exists)
+            }
+        },
+    )
+    .await
+    .unwrap();
 
     run_cedar_group_test(
         &session.ctx.mgmt_kubeconfig,

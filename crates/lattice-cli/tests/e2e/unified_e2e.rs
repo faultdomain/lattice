@@ -185,6 +185,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Vault secrets tests (Vault KV v2 ESO backend — skips if Vault not available)
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Vault secrets",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::vault_secrets::run_vault_secrets_tests(&kc).await
+            }),
+        ));
+    }
+
     // Tetragon runtime enforcement
     {
         let kc = ctx.require_workload()?.to_string();

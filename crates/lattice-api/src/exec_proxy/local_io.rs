@@ -76,13 +76,16 @@ impl LocalExecIo {
 
 #[async_trait]
 impl ExecIo for LocalExecIo {
-    async fn send_stdin(&mut self, data: Vec<u8>) -> Result<(), String> {
+    async fn send_stdin(&mut self, data: Vec<u8>) -> Result<(), super::io::ExecIoError> {
         if let Some(ref mut writer) = self.stdin_writer {
-            writer.write_all(&data).await.map_err(|e| e.to_string())?;
+            writer
+                .write_all(&data)
+                .await
+                .map_err(|e| super::io::ExecIoError::StdinWrite(e.to_string()))?;
             let _ = writer.flush().await;
             Ok(())
         } else {
-            Err("stdin not available".to_string())
+            Err(super::io::ExecIoError::StdinNotAvailable)
         }
     }
 

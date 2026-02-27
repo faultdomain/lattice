@@ -50,6 +50,10 @@ async fn apply_should_succeed(kubeconfig: &str, yaml: &str, desc: &str) -> Resul
 /// Apply YAML via kubectl and expect it to be rejected by the admission webhook.
 ///
 /// Returns the error message from the rejection for further assertions.
+///
+/// Retries up to 10 times on transient errors (auth failures, connection
+/// issues) before giving up. Only returns once kubectl reaches the API server
+/// and gets a definitive accept/reject from the admission webhook.
 async fn apply_should_be_rejected(
     kubeconfig: &str,
     yaml: &str,
@@ -60,22 +64,39 @@ async fn apply_should_be_rejected(
         .await
         .map_err(|e| format!("Failed to write temp file: {e}"))?;
 
-    // kubectl apply should fail — that's the expected behavior
-    let result = tokio::process::Command::new("kubectl")
-        .args(["--kubeconfig", kubeconfig, "apply", "-f", &tmpfile])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to spawn kubectl: {e}"))?;
+    for attempt in 1..=10 {
+        let result = tokio::process::Command::new("kubectl")
+            .args(["--kubeconfig", kubeconfig, "apply", "-f", &tmpfile])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to spawn kubectl: {e}"))?;
 
-    if result.status.success() {
-        return Err(format!(
-            "[Webhook] {desc}: was accepted but should have been REJECTED"
-        ));
+        if result.status.success() {
+            return Err(format!(
+                "[Webhook] {desc}: was accepted but should have been REJECTED"
+            ));
+        }
+
+        let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+
+        // Admission webhook rejections contain "denied the request" — if we see
+        // that, the request reached the webhook and was properly rejected.
+        if stderr.contains("denied the request") {
+            info!("[Webhook] {desc}: rejected (expected): {stderr}");
+            return Ok(stderr);
+        }
+
+        // Otherwise this is a transient error (auth, connectivity, etc.) — retry
+        info!(
+            "[Webhook] {desc}: transient error (attempt {attempt}/10): {}",
+            stderr.lines().next().unwrap_or(&stderr)
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    let stderr = String::from_utf8_lossy(&result.stderr).to_string();
-    info!("[Webhook] {desc}: rejected (expected): {stderr}");
-    Ok(stderr)
+    Err(format!(
+        "[Webhook] {desc}: kubectl never reached the admission webhook after 10 attempts"
+    ))
 }
 
 /// Wait for the admission webhook to be responsive.

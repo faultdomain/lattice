@@ -9,8 +9,31 @@ services:
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
     cap_add:
       - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8200/v1/sys/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     networks:
       - kind
+
+  vault-init:
+    image: hashicorp/vault:1.15
+    container_name: lattice-vault-init
+    depends_on:
+      vault:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: "http://lattice-vault:8200"
+      VAULT_TOKEN: "root"
+      GHCR_USER: "${GHCR_USER:-}"
+      GHCR_TOKEN: "${GHCR_TOKEN:-}"
+    volumes:
+      - ./deploy/vault:/scripts:ro
+    entrypoint: ["sh", "/scripts/init.sh"]
+    networks:
+      - kind
+    restart: "no"
 
   keycloak:
     image: quay.io/keycloak/keycloak:24.0

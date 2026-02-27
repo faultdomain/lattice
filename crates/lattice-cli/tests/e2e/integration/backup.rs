@@ -525,6 +525,10 @@ spec:
     containers:
       main:
         image: busybox:latest
+        resources:
+          limits:
+            cpu: "100m"
+            memory: "64Mi"
         security:
           allowedBinaries: ["*"]
   backup:

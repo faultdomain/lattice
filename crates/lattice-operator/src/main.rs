@@ -626,32 +626,8 @@ async fn setup_cell_infra(
     let is_cell = is_bootstrap || has_parent_config(client, self_cluster_name).await;
 
     let auth_proxy_handle = if is_cell {
-        // Start cell servers with TLS SANs from LoadBalancer
         let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;
-        servers
-            .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
-            .await?;
-        tracing::info!("Cell servers started");
-
-        // Start auth proxy server
-        let handle = start_auth_proxy(
-            client,
-            servers.clone(),
-            self_cluster_name,
-            &extra_sans,
-            cedar,
-        )
-        .await;
-
-        // Start CA rotation background task
-        start_ca_rotation(servers.clone());
-
-        // Re-register clusters after restart (crash recovery)
-        if let Some(state) = servers.bootstrap_state().await {
-            re_register_existing_clusters(client, &state, self_cluster_name, &servers).await;
-        }
-
-        handle
+        activate_cell_services(client, &servers, self_cluster_name, &extra_sans, cedar).await?
     } else {
         // Leaf cluster — spawn background watcher for promotion
         tracing::info!("Leaf cluster, cell servers deferred until parent_config is set");
@@ -674,6 +650,32 @@ async fn setup_cell_infra(
     };
 
     Ok((servers, agent_token, auth_proxy_handle))
+}
+
+/// Activate cell infrastructure: start servers, auth proxy, CA rotation, and crash recovery.
+///
+/// Shared by both immediate cell activation (in `setup_cell_infra`) and deferred
+/// promotion (in `cell_activation_watcher`).
+async fn activate_cell_services(
+    client: &kube::Client,
+    servers: &Arc<ParentServers<DefaultManifestGenerator>>,
+    cluster_name: &Option<String>,
+    extra_sans: &[String],
+    cedar: Arc<PolicyEngine>,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    servers
+        .ensure_running(DefaultManifestGenerator::new(), extra_sans, client.clone())
+        .await?;
+    tracing::info!("Cell servers started");
+
+    let handle = start_auth_proxy(client, servers.clone(), cluster_name, extra_sans, cedar).await;
+    start_ca_rotation(servers.clone());
+
+    if let Some(state) = servers.bootstrap_state().await {
+        re_register_existing_clusters(client, &state, cluster_name, servers).await;
+    }
+
+    Ok(handle)
 }
 
 /// Background task that watches for `parent_config` to appear on the self-cluster CRD.
@@ -752,28 +754,15 @@ async fn cell_activation_watcher(
         tracing::info!(host = %lb_address, "Cell host discovered");
 
         let extra_sans = vec![lb_address];
+        let cluster_name = Some(self_cluster_name.clone());
 
-        // Start cell servers
-        if let Err(e) = servers
-            .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
-            .await
+        if let Err(e) =
+            activate_cell_services(&client, &servers, &cluster_name, &extra_sans, cedar.clone())
+                .await
         {
-            tracing::error!(error = %e, "Failed to start cell servers during promotion");
+            tracing::error!(error = %e, "Failed to activate cell services during promotion");
             tokio::time::sleep(Duration::from_secs(10)).await;
             continue;
-        }
-        tracing::info!("Cell servers started (promoted to parent)");
-
-        // Start auth proxy
-        let cluster_name = Some(self_cluster_name.clone());
-        start_auth_proxy(&client, servers.clone(), &cluster_name, &extra_sans, cedar).await;
-
-        // Start CA rotation
-        start_ca_rotation(servers.clone());
-
-        // Crash recovery
-        if let Some(state) = servers.bootstrap_state().await {
-            re_register_existing_clusters(&client, &state, &cluster_name, &servers).await;
         }
 
         tracing::info!("Cell infrastructure activated (cluster promoted to parent)");
