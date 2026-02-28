@@ -57,10 +57,11 @@ spec:
         direction: outbound
   replicas: 1
   ingress:
+    gateway_class: istio
     routes:
       public:
         hosts:
           - nzbget.home.arpa
         tls:
           issuerRef:
-            name: letsencrypt-prod
+            name: e2e-selfsigned

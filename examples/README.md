@@ -73,9 +73,14 @@ Add `webapp.local` to `/etc/hosts` pointing to your ingress IP, then visit `http
 
 ## Media Stack
 
-The `media/` directory deploys a homelab media server stack with shared storage and bilateral mesh agreements:
+The `media/` directory deploys a homelab media server stack with shared storage and bilateral mesh agreements. Designed for running on a home server (e.g., Dell PowerEdge) with a Lattice Docker cluster.
 
 ```
+LAN/Internet -> nginx (host) -> media-ingress Gateway (172.18.x.x)
+                                  ├─ jellyfin.home.arpa -> jellyfin:8096
+                                  ├─ sonarr.home.arpa   -> sonarr:8989
+                                  └─ nzbget.home.arpa   -> nzbget:6789
+
 sonarr:8989 -> nzbget:6789 (download requests)
 sonarr:8989 -> jellyfin:8096 (library refresh)
 jellyfin:8096 -> repo.jellyfin.org (external, plugin updates)
@@ -99,21 +104,72 @@ Jellyfin owns a 100Gi `media-storage` volume and grants access to sonarr and nzb
 
 Nzbget routes its download traffic through a wireguard egress gateway via bilateral mesh agreement. The gateway tunnels all traffic it receives through a wireguard VPN. Edit `egress-vpn.yaml` with your wireguard credentials before deploying.
 
+### Prerequisites
+
+- A Lattice management cluster running via Docker (see Cluster Provisioning above)
+- A self-signed ClusterIssuer for TLS certificates:
+
+```bash
+# Check if one already exists
+kubectl get clusterissuer
+
+# If not, create one
+cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: e2e-selfsigned
+spec:
+  selfSigned: {}
+EOF
+```
+
 ### Deploy
 
 ```bash
 kubectl apply -f examples/media/namespace.yaml
-kubectl apply -f examples/media/jellyfin-repo.yaml
 kubectl apply -f examples/media/jellyfin.yaml
 kubectl apply -f examples/media/sonarr.yaml
 kubectl apply -f examples/media/egress-vpn.yaml
 kubectl apply -f examples/media/nzbget.yaml
 ```
 
+### Host Network Setup
+
+The Lattice cluster runs inside Docker on the `172.18.0.0/16` network. Each service's `ingress` section compiles to a shared Gateway API Gateway (`media-ingress`) that gets a LoadBalancer IP on this Docker network. To make the services accessible from your LAN, set up nginx on the host as a reverse proxy.
+
+**Find the gateway's LoadBalancer IP:**
+
+```bash
+kubectl get svc -n media media-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+# Example output: 172.18.255.10
+```
+
+**Install and configure nginx on the host:**
+
+```bash
+sudo apt install -y nginx
+
+# Edit examples/media/nginx.conf — replace the proxy_pass IP with your gateway IP
+sudo cp examples/media/nginx.conf /etc/nginx/sites-available/media
+sudo ln -sf /etc/nginx/sites-available/media /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### DNS Setup
+
+On your LAN clients (or your home router's DNS), point `*.home.arpa` to the PowerEdge's LAN IP. If you don't run local DNS, add entries to `/etc/hosts` on each client:
+
+```
+# Replace 192.168.1.100 with your PowerEdge's LAN IP
+192.168.1.100  jellyfin.home.arpa
+192.168.1.100  sonarr.home.arpa
+192.168.1.100  nzbget.home.arpa
+```
+
 ### Access
 
-Add `*.home.arpa` entries to `/etc/hosts` pointing to your ingress IP:
-
-- `https://jellyfin.home.arpa` - Jellyfin media server
-- `https://sonarr.home.arpa` - Sonarr TV management
-- `https://nzbget.home.arpa` - NZBGet download client
+- `http://jellyfin.home.arpa` — Jellyfin media server (initial setup wizard on first visit)
+- `http://sonarr.home.arpa` — Sonarr TV management
+- `http://nzbget.home.arpa` — NZBGet download client
