@@ -9,10 +9,11 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use super::gateway_fixtures::ExpectedStatus;
+use super::gateway_fixtures::{gateway_traffic_targets, ExpectedStatus};
 use super::helpers::{
     run_kubectl, wait_for_condition, CYCLE_END_MARKER, CYCLE_START_MARKER, DEFAULT_TIMEOUT,
 };
+use super::mesh_helpers::parse_traffic_result;
 
 // =============================================================================
 // Gateway Test Target
@@ -566,7 +567,10 @@ pub async fn wait_for_gateway_cycles(
 
 /// Verify gateway traffic results from traffic generator logs.
 ///
-/// Checks that each target matches its expected status (ALLOWED, 404, or BLOCKED).
+/// Uses the same `parse_traffic_result` pattern as mesh tests: for each target,
+/// find the **most recent** log entry and check whether it matches expectations.
+/// This naturally handles transient errors (e.g. 503 during gateway startup) in
+/// earlier cycles — only the latest result matters.
 pub async fn verify_gateway_traffic(
     kubeconfig: &str,
     namespace: &str,
@@ -586,36 +590,67 @@ pub async fn verify_gateway_traffic(
     .await
     .map_err(|e| format!("Failed to get traffic gen logs: {}", e))?;
 
+    let targets = gateway_traffic_targets();
+    let mut total_pass = 0;
+    let mut total_fail = 0;
     let mut failures: Vec<String> = Vec::new();
 
-    // Check for unexpected results in the logs
-    for line in logs.lines() {
-        let line = line.trim();
-        if line.contains("UNEXPECTED") {
-            failures.push(line.to_string());
+    for target in &targets {
+        let (allowed_pattern, blocked_pattern) = match target.expected_status {
+            ExpectedStatus::Success => (
+                format!("GATEWAY[{}]:ALLOWED", target.label),
+                format!("GATEWAY[{}]:BLOCKED", target.label),
+            ),
+            ExpectedStatus::NotFound => (
+                format!("GATEWAY[{}]:404", target.label),
+                format!("GATEWAY[{}]:UNEXPECTED_STATUS", target.label),
+            ),
+        };
+
+        let expected_str = match target.expected_status {
+            ExpectedStatus::Success => "ALLOWED",
+            ExpectedStatus::NotFound => "404",
+        };
+
+        let actual_str = match parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern) {
+            Some(true) => expected_str,
+            Some(false) => "BLOCKED",
+            None => "UNKNOWN",
+        };
+
+        let result_ok = actual_str == expected_str;
+        let status = if result_ok { "PASS" } else { "FAIL" };
+
+        info!(
+            "[Gateway]   [{}] {}: {} (expected: {})",
+            status, target.label, actual_str, expected_str
+        );
+
+        if result_ok {
+            total_pass += 1;
+        } else {
+            total_fail += 1;
+            failures.push(format!(
+                "{}: got {}, expected {}",
+                target.label, actual_str, expected_str
+            ));
         }
     }
 
+    let total_tests = total_pass + total_fail;
+    info!(
+        "[Gateway] Traffic verified: {}/{} passed",
+        total_pass, total_tests
+    );
+
     if !failures.is_empty() {
         return Err(format!(
-            "Gateway traffic verification failed with {} unexpected results:\n{}",
-            failures.len(),
+            "Gateway traffic verification failed: {} of {} tests failed:\n{}",
+            total_fail,
+            total_tests,
             failures.join("\n")
         ));
     }
-
-    // Verify we actually got results (not just empty logs)
-    let allowed_count = logs.matches(":ALLOWED(").count();
-    let not_found_count = logs.matches(":404(").count();
-
-    if allowed_count == 0 && not_found_count == 0 {
-        return Err("No gateway traffic results found in logs".to_string());
-    }
-
-    info!(
-        "[Gateway] Traffic verified: {} allowed, {} 404s, 0 unexpected",
-        allowed_count, not_found_count
-    );
 
     Ok(())
 }

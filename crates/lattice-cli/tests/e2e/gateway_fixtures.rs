@@ -172,14 +172,9 @@ pub fn create_backend_tls() -> lattice_common::crd::LatticeService {
     svc
 }
 
-/// Traffic generator that curls the gateway ClusterIP with Host headers.
-///
-/// Uses cycle-based script pattern for reliable verification.
-pub fn create_gateway_traffic_gen(
-    gateway_ip: &str,
-    gateway_https_port: u16,
-) -> lattice_common::crd::LatticeService {
-    let targets = vec![
+/// The gateway traffic targets shared by both script generation and verification.
+pub fn gateway_traffic_targets() -> Vec<GatewayTestTarget> {
+    vec![
         // backend-a catch-all
         GatewayTestTarget {
             host: "backend-a.gateway-test.local".to_string(),
@@ -236,13 +231,21 @@ pub fn create_gateway_traffic_gen(
             expected_status: ExpectedStatus::Success,
             label: "backend-tls HTTPS".to_string(),
         },
-    ];
+    ]
+}
 
+/// Traffic generator that curls the gateway ClusterIP with Host headers.
+///
+/// Uses cycle-based script pattern for reliable verification.
+pub fn create_gateway_traffic_gen(
+    gateway_ip: &str,
+    gateway_https_port: u16,
+) -> lattice_common::crd::LatticeService {
     let script = generate_gateway_test_script(
         "gateway-traffic-gen",
         gateway_ip,
         gateway_https_port,
-        targets,
+        gateway_traffic_targets(),
     );
 
     // The traffic-gen needs two types of Cilium egress:
