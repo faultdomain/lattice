@@ -260,7 +260,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // ExternalSecrets (ESO syncs secrets from Vault)
-        let es_ar = self.registry.resolve(CrdKind::ExternalSecret).await;
+        let es_ar = self.registry.resolve(CrdKind::ExternalSecret).await?;
         layer1.push_crd(
             "ExternalSecret",
             es_ar.as_ref(),
@@ -269,7 +269,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         )?;
 
         // LatticeMeshMember CR — the MeshMember controller generates all mesh policies
-        let mm_ar = self.registry.resolve(CrdKind::MeshMember).await;
+        let mm_ar = self.registry.resolve(CrdKind::MeshMember).await?;
         layer1.push_optional_crd(
             "LatticeMeshMember",
             mm_ar.as_ref(),
@@ -281,7 +281,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let tp_ar = self
             .registry
             .resolve(CrdKind::TracingPolicyNamespaced)
-            .await;
+            .await?;
         layer1.push_crd(
             "TracingPolicyNamespaced",
             tp_ar.as_ref(),
@@ -325,7 +325,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         // Must be applied after the Deployment because KEDA's admission webhook
         // validates that the scaleTargetRef target exists.
         let mut layer3 = ApplyBatch::new(self.client.clone(), namespace, &params);
-        let so_ar = self.registry.resolve(CrdKind::ScaledObject).await;
+        let so_ar = self.registry.resolve(CrdKind::ScaledObject).await?;
         layer3.push_optional_crd(
             "ScaledObject",
             so_ar.as_ref(),
@@ -394,7 +394,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         // ScaledObject: if compilation no longer produces one, delete the old one.
         // Without this, KEDA keeps auto-scaling with stale configuration.
         if compiled.workloads.scaled_object.is_none() {
-            if let Some(ar) = self.registry.resolve(CrdKind::ScaledObject).await {
+            if let Some(ar) = self.registry.resolve(CrdKind::ScaledObject).await? {
                 delete_resource_if_exists(
                     &self.client,
                     namespace,
@@ -424,7 +424,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         // LatticeMeshMember: if compilation no longer produces one, delete the old one.
         if compiled.mesh_member.is_none() {
-            if let Some(ar) = self.registry.resolve(CrdKind::MeshMember).await {
+            if let Some(ar) = self.registry.resolve(CrdKind::MeshMember).await? {
                 delete_resource_if_exists(
                     &self.client,
                     namespace,

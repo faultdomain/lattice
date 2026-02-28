@@ -49,3 +49,4 @@ pub mod tetragon;
 pub mod updates;
 pub mod vault_secrets;
 pub mod webhook;
+pub mod workload;

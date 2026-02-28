@@ -7,10 +7,10 @@
 # =============================================================================
 
 [tools.kubernetes]
-version = "1.35.0"
+version = "1.35.1"
 
 [tools.helm]
-version = "4.0.4"
+version = "4.1.1"
 
 # =============================================================================
 # Helm Charts
@@ -18,61 +18,61 @@ version = "4.0.4"
 # =============================================================================
 
 [charts.cilium]
-version = "1.18.5"
+version = "1.19.1"
 repo = "https://helm.cilium.io/"
 chart = "cilium/cilium"
 filename = "cilium-{version}.tgz"
 
 [charts.istio-base]
-version = "1.28.2"
+version = "1.29.0"
 repo = "https://istio-release.storage.googleapis.com/charts"
 chart = "istio/base"
 filename = "base-{version}.tgz"
 
 [charts.istiod]
-version = "1.28.2"
+version = "1.29.0"
 repo = "https://istio-release.storage.googleapis.com/charts"
 chart = "istio/istiod"
 filename = "istiod-{version}.tgz"
 
 [charts.istio-cni]
-version = "1.28.2"
+version = "1.29.0"
 repo = "https://istio-release.storage.googleapis.com/charts"
 chart = "istio/cni"
 filename = "cni-{version}.tgz"
 
 [charts.ztunnel]
-version = "1.28.2"
+version = "1.29.0"
 repo = "https://istio-release.storage.googleapis.com/charts"
 chart = "istio/ztunnel"
 filename = "ztunnel-{version}.tgz"
 
 [charts.cert-manager]
-version = "1.19.2"
+version = "1.19.4"
 repo = "https://charts.jetstack.io"
 chart = "jetstack/cert-manager"
 filename = "cert-manager-v{version}.tgz"
 
 [charts.external-secrets]
-version = "1.2.1"
+version = "1.3.1"
 repo = "https://charts.external-secrets.io"
 chart = "external-secrets/external-secrets"
 filename = "external-secrets-{version}.tgz"
 
 [charts.velero]
-version = "8.5.0"
+version = "11.4.0"
 repo = "https://vmware-tanzu.github.io/helm-charts"
 chart = "vmware-tanzu/velero"
 filename = "velero-{version}.tgz"
 
 [charts.gpu-operator]
-version = "24.9.2"
+version = "25.10.1"
 repo = "https://helm.ngc.nvidia.com/nvidia"
 chart = "nvidia/gpu-operator"
 filename = "gpu-operator-v{version}.tgz"
 
 [charts.tetragon]
-version = "1.3.0"
+version = "1.6.0"
 repo = "https://helm.cilium.io/"
 chart = "cilium/tetragon"
 filename = "tetragon-{version}.tgz"
@@ -84,7 +84,7 @@ chart = "kedacore/keda"
 filename = "keda-{version}.tgz"
 
 [charts.metrics-server]
-version = "3.12.2"
+version = "3.13.0"
 repo = "https://kubernetes-sigs.github.io/metrics-server/"
 chart = "metrics-server/metrics-server"
 filename = "metrics-server-{version}.tgz"
@@ -96,7 +96,7 @@ chart = "vm/victoria-metrics-k8s-stack"
 filename = "victoria-metrics-k8s-stack-{version}.tgz"
 
 [charts.volcano]
-version = "1.11.0"
+version = "1.13.0"
 repo = "https://volcano-sh.github.io/helm-charts"
 chart = "volcano-sh/volcano"
 filename = "volcano-{version}.tgz"
@@ -118,7 +118,7 @@ version = "v1"
 # =============================================================================
 
 [resources.gateway-api]
-version = "1.2.1"
+version = "1.5.0"
 url = "https://github.com/kubernetes-sigs/gateway-api/releases/download/v{version}/standard-install.yaml"
 filename = "gateway-api-crds-v{version}.yaml"
 
@@ -138,38 +138,38 @@ filename = "volcano-vgpu-device-plugin-v{version}.yml"
 
 [providers.cluster-api]
 # Core CAPI provider
-version = "1.12.1"
+version = "1.12.3"
 repo = "kubernetes-sigs/cluster-api"
 components = ["core-components.yaml", "metadata.yaml"]
 
 [providers.bootstrap-kubeadm]
 # Kubeadm bootstrap provider (uses CAPI version)
-version = "1.12.1"
+version = "1.12.3"
 repo = "kubernetes-sigs/cluster-api"
 components = ["bootstrap-components.yaml"]
 # metadata.yaml copied from cluster-api
 
 [providers.control-plane-kubeadm]
 # Kubeadm control plane provider (uses CAPI version)
-version = "1.12.1"
+version = "1.12.3"
 repo = "kubernetes-sigs/cluster-api"
 components = ["control-plane-components.yaml"]
 
 [providers.infrastructure-docker]
 # Docker infrastructure provider (uses CAPI version)
-version = "1.12.1"
+version = "1.12.3"
 repo = "kubernetes-sigs/cluster-api"
 components = ["infrastructure-components-development.yaml"]
 
 [providers.bootstrap-rke2]
 # RKE2 bootstrap provider
-version = "0.21.1"
+version = "0.23.2"
 repo = "rancher/cluster-api-provider-rke2"
 components = ["bootstrap-components.yaml", "metadata.yaml"]
 
 [providers.control-plane-rke2]
 # RKE2 control plane provider
-version = "0.21.1"
+version = "0.23.2"
 repo = "rancher/cluster-api-provider-rke2"
 components = ["control-plane-components.yaml"]
 
@@ -181,13 +181,13 @@ components = ["infrastructure-components.yaml", "metadata.yaml"]
 
 [providers.infrastructure-aws]
 # AWS infrastructure provider (CAPA)
-version = "2.10.0"
+version = "2.10.1"
 repo = "kubernetes-sigs/cluster-api-provider-aws"
 components = ["infrastructure-components.yaml", "metadata.yaml"]
 
 [providers.infrastructure-openstack]
 # OpenStack infrastructure provider (CAPO)
-version = "0.14.0"
+version = "0.14.1"
 repo = "kubernetes-sigs/cluster-api-provider-openstack"
 components = ["infrastructure-components.yaml", "metadata.yaml"]
 

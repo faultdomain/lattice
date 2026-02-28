@@ -27,8 +27,7 @@ pub use crd_registry::{CrdKind, CrdRegistry};
 pub use error::{default_error_policy, ControllerContext, Error, ReconcileError, Retryable};
 pub use events::{EventPublisher, KubeEventPublisher, NoopEventPublisher};
 pub use kube_utils::{
-    apply_manifest_with_discovery, apply_manifests_with_discovery, deterministic_hash,
-    kind_priority, pluralize_kind, ApplyOptions,
+    apply_manifests, deterministic_hash, kind_priority, pluralize_kind, ApplyOptions,
 };
 pub use leader_election::{
     LeaderElectionError, LeaderElector, LeaderGuard, LEADER_LABEL_KEY, LEADER_LABEL_VALUE,

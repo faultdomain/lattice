@@ -58,7 +58,7 @@ impl Default for RandomMeshConfig {
     fn default() -> Self {
         Self {
             min_services: 10,
-            max_services: 50,
+            max_services: 20,
             num_layers: 3,
             outbound_probability: 0.3,
             bilateral_probability: 0.6,

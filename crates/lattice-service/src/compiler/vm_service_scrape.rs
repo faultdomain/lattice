@@ -35,7 +35,7 @@ impl VMServiceScrapePhase {
         Self { registry }
     }
 
-    async fn resolve_api_resource(&self) -> Option<ApiResource> {
+    async fn resolve_api_resource(&self) -> Result<Option<ApiResource>, kube::Error> {
         self.registry.resolve(CrdKind::VMServiceScrape).await
     }
 }
@@ -72,11 +72,15 @@ impl CompilerPhase for VMServiceScrapePhase {
             return Ok(());
         }
 
-        let ar = self.resolve_api_resource().await.ok_or_else(|| {
-            "VMServiceScrape CRD not installed (operator.victoriametrics.com); \
-             the VictoriaMetrics operator may still be installing"
-                .to_string()
-        })?;
+        let ar = self
+            .resolve_api_resource()
+            .await
+            .map_err(|e| format!("VMServiceScrape CRD discovery failed: {e}"))?
+            .ok_or_else(|| {
+                "VMServiceScrape CRD not installed (operator.victoriametrics.com); \
+                 the VictoriaMetrics operator may still be installing"
+                    .to_string()
+            })?;
 
         // Emit VMServiceScrape
         let scrape_name = format!("{}-scrape", ctx.name);

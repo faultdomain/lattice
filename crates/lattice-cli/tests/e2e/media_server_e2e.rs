@@ -35,7 +35,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     setup_regcreds_infrastructure(kubeconfig_path).await?;
 
     // Ensure cert-manager has a self-signed issuer matching the fixture references
-    ensure_test_cluster_issuer(kubeconfig_path, "letsencrypt-prod").await?;
+    ensure_test_cluster_issuer(kubeconfig_path, "e2e-selfsigned").await?;
 
     // Batch-apply all Cedar policies for media services
     let mut cedar_policies: Vec<CedarPolicySpec> = Vec::new();
@@ -336,14 +336,14 @@ async fn verify_gateway_routes(kubeconfig_path: &str) -> Result<(), String> {
                         info!("Certificate {} not ready yet", cert_name);
                         return Ok(false);
                     }
-                    if parts[0] != expected_host || parts[1] != "letsencrypt-prod" {
+                    if parts[0] != expected_host || parts[1] != "e2e-selfsigned" {
                         info!(
-                            "Certificate {} mismatch: dns={} issuer={} (expected {} letsencrypt-prod)",
+                            "Certificate {} mismatch: dns={} issuer={} (expected {} e2e-selfsigned)",
                             cert_name, parts[0], parts[1], expected_host
                         );
                         return Ok(false);
                     }
-                    info!("Certificate {} -> {} (issuer: letsencrypt-prod)", cert_name, expected_host);
+                    info!("Certificate {} -> {} (issuer: e2e-selfsigned)", cert_name, expected_host);
                     Ok(true)
                 }
             },

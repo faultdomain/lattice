@@ -7,13 +7,20 @@ use kube::discovery::ApiResource;
 use kube::Client;
 use tracing::{trace, warn};
 
-use super::api_resource::{build_api_resource, parse_api_version};
+use super::api_resource::build_api_resource;
 use super::waiting::poll_until;
-use crate::retry::{retry_with_backoff, RetryConfig};
 use crate::Error;
 
 /// Retry interval for apply operations
 const APPLY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Options for applying manifests.
+#[derive(Debug, Clone, Default)]
+pub struct ApplyOptions {
+    /// Skip manifests for resource types that aren't installed yet (default: false).
+    /// A 404 from the API server (resource type not found) is treated as a skip.
+    pub skip_missing_crds: bool,
+}
 
 /// Parsed manifest metadata for applying to Kubernetes
 #[derive(Debug, Clone)]
@@ -84,125 +91,171 @@ pub(crate) fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> 
     })
 }
 
-/// Apply a manifest using server-side apply
-pub async fn apply_manifest(client: &Client, manifest: &str) -> Result<(), Error> {
+/// Apply manifests with proper ordering via server-side apply.
+///
+/// Each manifest's declared `apiVersion`/`kind` is used directly to construct
+/// the ApiResource — no API discovery is needed. This avoids the problem where
+/// a broken APIService (e.g. KEDA returning 503) poisons `Discovery::run()`
+/// and blocks unrelated manifests.
+///
+/// Applies in two phases:
+/// - Foundational resources (Namespaces, CRDs) — fail-fast
+/// - Everything else sorted by kind priority — best-effort (continues past failures)
+pub async fn apply_manifests(
+    client: &Client,
+    manifests: &[impl AsRef<str>],
+    options: &ApplyOptions,
+) -> Result<(), Error> {
+    if manifests.is_empty() {
+        return Ok(());
+    }
+
+    // Split into foundational (Namespace, CRD) and rest
+    let (mut foundational, mut rest): (Vec<&str>, Vec<&str>) =
+        manifests.iter().map(|m| m.as_ref()).partition(|m| {
+            let kind = extract_kind(m);
+            kind == "Namespace" || kind == "CustomResourceDefinition"
+        });
+
+    // Sort each group by priority
+    foundational.sort_by_key(|m| kind_priority(extract_kind(m)));
+    rest.sort_by_key(|m| kind_priority(extract_kind(m)));
+
+    // Phase 1: Foundational resources — fail-fast.
+    for manifest in &foundational {
+        apply_one(client, manifest, options).await?;
+    }
+
+    // Phase 2: Remaining resources — best-effort, continue past failures.
+    let mut first_error: Option<Error> = None;
+    let mut failed_count = 0usize;
+
+    for manifest in &rest {
+        if let Err(e) = apply_one(client, manifest, options).await {
+            failed_count += 1;
+            warn!(
+                error = %e,
+                kind = %extract_kind(manifest),
+                "manifest apply failed, continuing with remaining manifests"
+            );
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        }
+    }
+
+    if let Some(e) = first_error {
+        warn!(
+            failed = failed_count,
+            total = rest.len(),
+            "some manifests failed to apply"
+        );
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+/// Apply a multi-document YAML string with retry until timeout.
+pub async fn apply_manifest_with_retry(
+    client: &Client,
+    manifest: &str,
+    timeout: Duration,
+) -> Result<(), Error> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let client_clone = client.clone();
+    let docs: Vec<String> = split_multi_doc(manifest);
+    let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let last_error_clone = last_error.clone();
+
+    let result = poll_until(
+        timeout,
+        APPLY_RETRY_INTERVAL,
+        "Timeout waiting for apply",
+        || {
+            let client = client_clone.clone();
+            let docs = docs.clone();
+            let last_error = last_error_clone.clone();
+            async move {
+                match apply_manifests(&client, &docs, &ApplyOptions::default()).await {
+                    Ok(()) => Ok(true),
+                    Err(e) => {
+                        let error_msg = e.to_string();
+                        warn!("Apply failed (will retry): {}", error_msg);
+                        *last_error.lock().await = Some(error_msg);
+                        Ok(false)
+                    }
+                }
+            }
+        },
+    )
+    .await;
+
+    if result.is_err() {
+        if let Some(err) = last_error.lock().await.take() {
+            return Err(Error::internal_with_context(
+                "apply_manifest_with_retry",
+                format!("Timeout applying manifest. Last error: {}", err),
+            ));
+        }
+    }
+
+    result
+}
+
+/// Apply a single manifest via SSA, respecting `ApplyOptions`.
+async fn apply_one(client: &Client, manifest: &str, options: &ApplyOptions) -> Result<(), Error> {
     let metadata = parse_manifest(manifest)?;
-    let patch_params = PatchParams::apply("lattice").force();
+    let params = PatchParams::apply("lattice").force();
 
     let api: Api<DynamicObject> = match &metadata.namespace {
         Some(ns) => Api::namespaced_with(client.clone(), ns, &metadata.api_resource),
         None => Api::all_with(client.clone(), &metadata.api_resource),
     };
 
-    api.patch(
-        &metadata.name,
-        &patch_params,
-        &Patch::Apply(&metadata.value),
-    )
-    .await
-    .map_err(|e| {
-        Error::internal_with_context(
+    match api
+        .patch(&metadata.name, &params, &Patch::Apply(&metadata.value))
+        .await
+    {
+        Ok(_) => {
+            trace!(
+                kind = %metadata.api_resource.kind,
+                name = %metadata.name,
+                namespace = ?metadata.namespace,
+                "applied manifest"
+            );
+            Ok(())
+        }
+        Err(kube::Error::Api(ref ae)) if ae.code == 404 && options.skip_missing_crds => {
+            trace!(
+                kind = %metadata.api_resource.kind,
+                name = %metadata.name,
+                "skipping manifest - resource type not available"
+            );
+            Ok(())
+        }
+        Err(e) => Err(Error::internal_with_context(
             "apply_manifest",
             format!(
-                "Failed to apply {}/{}: {}",
+                "failed to apply {}/{}: {}",
                 metadata.api_resource.kind, metadata.name, e
             ),
-        )
-    })?;
-
-    Ok(())
+        )),
+    }
 }
 
-/// Options for applying manifests with discovery
-#[derive(Debug, Clone, Default)]
-pub struct ApplyOptions {
-    /// Skip manifests for CRDs that aren't installed yet (default: false)
-    pub skip_missing_crds: bool,
-}
-
-/// Apply a single manifest using API discovery
-///
-/// Uses Kubernetes API discovery to resolve the correct resource type,
-/// supporting CRDs and custom resources. Server-side apply is used for
-/// idempotency.
-///
-/// # Arguments
-/// * `client` - Kubernetes client
-/// * `discovery` - Pre-built API discovery (reuse for efficiency)
-/// * `manifest` - YAML or JSON manifest string
-/// * `options` - Apply options (e.g., skip missing CRDs)
-pub async fn apply_manifest_with_discovery(
-    client: &Client,
-    discovery: &kube::discovery::Discovery,
-    manifest: &str,
-    options: &ApplyOptions,
-) -> Result<(), Error> {
-    let obj: serde_json::Value = crate::yaml::parse_yaml(manifest).map_err(|e| {
-        Error::internal_with_context(
-            "apply_manifest_with_discovery",
-            format!("invalid YAML: {}", e),
-        )
-    })?;
-
-    let kind = obj.get("kind").and_then(|v| v.as_str()).ok_or_else(|| {
-        Error::internal_with_context("apply_manifest_with_discovery", "missing kind")
-    })?;
-    let api_version = obj
-        .get("apiVersion")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            Error::internal_with_context("apply_manifest_with_discovery", "missing apiVersion")
-        })?;
-    let name = obj
-        .pointer("/metadata/name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            Error::internal_with_context("apply_manifest_with_discovery", "missing metadata.name")
-        })?;
-    let namespace = obj.pointer("/metadata/namespace").and_then(|v| v.as_str());
-
-    // Parse apiVersion into group/version
-    let (group, version) = parse_api_version(api_version);
-
-    let gvk = kube::api::GroupVersionKind {
-        group,
-        version,
-        kind: kind.to_string(),
-    };
-
-    let Some((api_resource, _)) = discovery.resolve_gvk(&gvk) else {
-        if options.skip_missing_crds {
-            trace!(kind = %kind, name = %name, "skipping manifest - CRD not available");
-            return Ok(());
-        }
-        return Err(Error::internal_with_context(
-            "apply_manifest_with_discovery",
-            format!("unknown resource type: {}/{}", api_version, kind),
-        ));
-    };
-
-    let params = PatchParams::apply("lattice").force();
-    let api: Api<DynamicObject> = match namespace {
-        Some(ns) => Api::namespaced_with(client.clone(), ns, &api_resource),
-        None => Api::all_with(client.clone(), &api_resource),
-    };
-
-    api.patch(name, &params, &Patch::Apply(&obj))
-        .await
-        .map_err(|e| {
-            Error::internal_with_context(
-                "apply_manifest_with_discovery",
-                format!("failed to apply {}/{}: {}", kind, name, e),
-            )
-        })?;
-
-    trace!(kind = %kind, name = %name, namespace = ?namespace, "applied manifest");
-    Ok(())
+/// Split a multi-document YAML string into individual documents.
+fn split_multi_doc(manifest: &str) -> Vec<String> {
+    manifest
+        .split("\n---")
+        .map(|doc| doc.trim().to_string())
+        .filter(|doc| doc.contains("apiVersion"))
+        .collect()
 }
 
 /// Get priority for a Kubernetes resource kind (lower = apply first)
-///
-/// Used to sort manifests for proper ordering during apply.
 ///
 /// Security policies (PeerAuthentication, AuthorizationPolicy) MUST be applied
 /// before workloads (Deployment, DaemonSet). Otherwise pods start with STRICT
@@ -217,9 +270,6 @@ pub fn kind_priority(kind: &str) -> u8 {
         "ClusterRole" | "Role" => 3,
         "ClusterRoleBinding" | "RoleBinding" => 4,
         "ConfigMap" | "Secret" => 5,
-        // Network/security policies before workloads: PERMISSIVE mTLS, ALLOW policies,
-        // and Cilium policies must be active before pods start, or aggregated API
-        // services (e.g. KEDA metrics) break because kube-apiserver can't reach them.
         "PeerAuthentication"
         | "AuthorizationPolicy"
         | "CiliumNetworkPolicy"
@@ -234,8 +284,6 @@ pub fn kind_priority(kind: &str) -> u8 {
 /// Extract kind from a YAML or JSON manifest (fast, no full parse)
 ///
 /// Handles both YAML (`kind: Foo`) and pretty-printed JSON (`"kind": "Foo"`).
-/// JSON support is needed because Istio/Cilium policies are serialized via
-/// `serde_json::to_string_pretty` and must be ordered correctly during apply.
 pub(crate) fn extract_kind(manifest: &str) -> &str {
     for line in manifest.lines() {
         let trimmed = line.trim();
@@ -264,211 +312,6 @@ pub fn is_deployment_json(manifest: &str) -> bool {
     } else {
         false
     }
-}
-
-/// Run API discovery with retry.
-///
-/// Discovery can transiently fail when aggregated API endpoints (from recently
-/// installed providers like CAPI or cert-manager) haven't registered yet.
-/// Retries are bounded -- callers like the reconciler and operator startup
-/// have their own retry/requeue logic for persistent failures.
-///
-/// Uses 1s initial backoff (not the default 100ms) because discovery is an
-/// expensive operation that enumerates all API groups. With 100ms backoff,
-/// 5 retries complete in ~3s which can overwhelm a stressed API server.
-/// With 1s backoff the same 5 retries spread over ~31s.
-pub(crate) async fn run_discovery(client: &Client) -> Result<kube::discovery::Discovery, Error> {
-    use kube::discovery::Discovery;
-
-    let config = RetryConfig {
-        max_attempts: 5,
-        initial_delay: Duration::from_secs(1),
-        ..RetryConfig::default()
-    };
-    let client = client.clone();
-    retry_with_backoff(&config, "api-discovery", || {
-        let client = client.clone();
-        async move {
-            Discovery::new(client)
-                .run()
-                .await
-                .map_err(|e| Error::internal_with_context("api-discovery", e.to_string()))
-        }
-    })
-    .await
-}
-
-/// Apply multiple manifests with proper ordering and discovery
-///
-/// Applies in two phases:
-/// 1. Namespaces and CRDs (foundational resources)
-/// 2. Re-run discovery only if CRDs were applied (to learn new types)
-/// 3. Everything else (sorted by kind priority)
-///
-/// Discovery is expensive (enumerates all API groups), so we minimize calls:
-/// - Skip discovery entirely when no foundational resources exist (single call)
-/// - Only re-run discovery after CRDs are applied (Namespaces don't register new types)
-///
-/// # Arguments
-/// * `client` - Kubernetes client
-/// * `manifests` - Slice of manifest strings (YAML or JSON)
-/// * `options` - Apply options
-pub async fn apply_manifests_with_discovery(
-    client: &Client,
-    manifests: &[impl AsRef<str>],
-    options: &ApplyOptions,
-) -> Result<(), Error> {
-    if manifests.is_empty() {
-        return Ok(());
-    }
-
-    // Split into foundational (Namespace, CRD) and rest
-    let (mut foundational, mut rest): (Vec<&str>, Vec<&str>) =
-        manifests.iter().map(|m| m.as_ref()).partition(|m| {
-            let kind = extract_kind(m);
-            kind == "Namespace" || kind == "CustomResourceDefinition"
-        });
-
-    // Sort each group by priority
-    foundational.sort_by_key(|m| kind_priority(extract_kind(m)));
-    rest.sort_by_key(|m| kind_priority(extract_kind(m)));
-
-    // Check if any foundational resources are CRDs (not just Namespaces).
-    // Only CRDs register new API types that require re-discovery.
-    let has_crds = foundational
-        .iter()
-        .any(|m| extract_kind(m) == "CustomResourceDefinition");
-
-    // Phase 1: Apply foundational resources (Namespaces, CRDs) -- fail-fast.
-    // These are prerequisites; if they fail, nothing else will work.
-    if !foundational.is_empty() {
-        let discovery = run_discovery(client).await?;
-
-        for manifest in &foundational {
-            apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
-        }
-
-        // Phase 2: Apply remaining resources best-effort, continuing past failures.
-        // Re-run discovery only if CRDs were applied (they register new API types).
-        if !rest.is_empty() {
-            let discovery = if has_crds {
-                run_discovery(client).await?
-            } else {
-                discovery
-            };
-
-            apply_all_best_effort(client, &discovery, &rest, options).await?;
-        }
-    } else if !rest.is_empty() {
-        let discovery = run_discovery(client).await?;
-        apply_all_best_effort(client, &discovery, &rest, options).await?;
-    }
-
-    Ok(())
-}
-
-/// Apply manifests best-effort: try every manifest even if some fail.
-/// Returns the first error after attempting all manifests.
-/// This prevents a single webhook or transient failure from blocking
-/// all subsequent manifests (e.g., LMMs that would unblock the webhook).
-async fn apply_all_best_effort(
-    client: &Client,
-    discovery: &kube::discovery::Discovery,
-    manifests: &[&str],
-    options: &ApplyOptions,
-) -> Result<(), Error> {
-    let mut first_error: Option<Error> = None;
-    let mut failed_count = 0usize;
-
-    for manifest in manifests {
-        if let Err(e) = apply_manifest_with_discovery(client, discovery, manifest, options).await {
-            failed_count += 1;
-            tracing::warn!(
-                error = %e,
-                kind = %extract_kind(manifest),
-                "manifest apply failed, continuing with remaining manifests"
-            );
-            if first_error.is_none() {
-                first_error = Some(e);
-            }
-        }
-    }
-
-    match first_error {
-        Some(e) => {
-            tracing::warn!(
-                failed = failed_count,
-                total = manifests.len(),
-                "some manifests failed to apply"
-            );
-            Err(e)
-        }
-        None => Ok(()),
-    }
-}
-
-/// Apply a multi-document YAML manifest (documents separated by ---)
-pub async fn apply_manifests(client: &Client, manifests: &str) -> Result<(), Error> {
-    for doc in manifests.split("\n---") {
-        let doc = doc.trim();
-        // Skip non-manifest documents (empty, comments-only, etc.)
-        if !doc.contains("apiVersion") {
-            continue;
-        }
-        apply_manifest(client, doc).await?;
-    }
-    Ok(())
-}
-
-/// Apply a manifest with retry (supports multi-document YAML)
-pub async fn apply_manifest_with_retry(
-    client: &Client,
-    manifest: &str,
-    timeout: Duration,
-) -> Result<(), Error> {
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
-
-    let client_clone = client.clone();
-    let manifest_owned = manifest.to_string();
-    let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let last_error_clone = last_error.clone();
-
-    let result = poll_until(
-        timeout,
-        APPLY_RETRY_INTERVAL,
-        "Timeout waiting for apply",
-        || {
-            let client = client_clone.clone();
-            let manifest = manifest_owned.clone();
-            let last_error = last_error_clone.clone();
-            async move {
-                match apply_manifests(&client, &manifest).await {
-                    Ok(()) => Ok(true),
-                    Err(e) => {
-                        let error_msg = e.to_string();
-                        // Log at warn level so errors are visible during install
-                        warn!("Apply failed (will retry): {}", error_msg);
-                        *last_error.lock().await = Some(error_msg);
-                        Ok(false)
-                    }
-                }
-            }
-        },
-    )
-    .await;
-
-    // If we timed out, include the last error in the message
-    if result.is_err() {
-        if let Some(err) = last_error.lock().await.take() {
-            return Err(Error::internal_with_context(
-                "apply_manifest_with_retry",
-                format!("Timeout applying manifest. Last error: {}", err),
-            ));
-        }
-    }
-
-    result
 }
 
 #[cfg(test)]

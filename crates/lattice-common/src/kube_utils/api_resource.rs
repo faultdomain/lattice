@@ -28,7 +28,6 @@
 
 use kube::discovery::ApiResource;
 use kube::Client;
-use tracing::{info, warn};
 
 use crate::Error;
 
@@ -174,36 +173,6 @@ pub fn build_api_resource(api_version: &str, kind: &str) -> ApiResource {
         api_version: api_version.to_string(),
         plural: pluralize_kind(kind),
     }
-}
-
-/// Look up a resource in pre-computed API discovery results.
-///
-/// Returns `None` if the CRD is not installed (not an error). Use this when
-/// you've already run `Discovery::new(client).run().await` and want to look up
-/// multiple resources from the same discovery pass.
-pub(crate) fn find_discovered_resource(
-    discovery: &kube::discovery::Discovery,
-    group: &str,
-    kind: &str,
-) -> Option<ApiResource> {
-    for api_group in discovery.groups() {
-        if api_group.name() != group {
-            continue;
-        }
-        for (ar, _caps) in api_group.resources_by_stability() {
-            if ar.kind == kind {
-                info!(
-                    group = %group,
-                    kind = %kind,
-                    api_version = %ar.api_version,
-                    "discovered CRD version"
-                );
-                return Some(ar);
-            }
-        }
-    }
-    warn!(group = %group, kind = %kind, "CRD not found in API discovery");
-    None
 }
 
 /// Parse apiVersion into (group, version)

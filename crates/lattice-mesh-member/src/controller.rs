@@ -142,7 +142,7 @@ async fn delete_if_discovered(
         }
     };
 
-    let Some(ar) = registry.resolve(crd_kind).await else {
+    let Some(ar) = registry.resolve(crd_kind).await? else {
         debug!(name = %name, kind = %kind, "CRD not discovered, skipping orphan delete");
         return Ok(());
     };
@@ -463,8 +463,13 @@ async fn is_waypoint_programmed(
     registry: &CrdRegistry,
     namespace: &str,
 ) -> bool {
-    let Some(ar) = registry.resolve(CrdKind::Gateway).await else {
-        return false;
+    let ar = match registry.resolve(CrdKind::Gateway).await {
+        Ok(Some(ar)) => ar,
+        Ok(None) => return false,
+        Err(e) => {
+            warn!(error = %e, "CRD discovery failed checking waypoint status");
+            return false;
+        }
     };
 
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
@@ -504,7 +509,7 @@ async fn apply_resource(
     crd_kind: CrdKind,
 ) -> Result<(), ReconcileError> {
     let kind = crd_kind.kind_str();
-    let ar = registry.resolve(crd_kind).await.ok_or_else(|| {
+    let ar = registry.resolve(crd_kind).await?.ok_or_else(|| {
         ReconcileError::Internal(format!(
             "{kind} CRD not installed but resource '{name}' needs applying"
         ))
@@ -547,7 +552,7 @@ async fn serialize_crd_batch<T: serde::Serialize>(
     }
 
     let kind = crd_kind.kind_str();
-    let ar = registry.resolve(crd_kind).await.ok_or_else(|| {
+    let ar = registry.resolve(crd_kind).await?.ok_or_else(|| {
         ReconcileError::Internal(format!(
             "{kind} CRD not installed but {} resources need applying",
             resources.len()
@@ -760,7 +765,7 @@ async fn release_gateway_listeners(
     namespace: &str,
     params: &PatchParams,
 ) -> Result<(), ReconcileError> {
-    let Some(ar) = registry.resolve(CrdKind::Gateway).await else {
+    let Some(ar) = registry.resolve(CrdKind::Gateway).await? else {
         return Ok(());
     };
     let gateway_name = mesh::ingress_gateway_name(namespace);

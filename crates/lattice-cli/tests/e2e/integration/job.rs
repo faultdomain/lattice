@@ -261,7 +261,7 @@ async fn test_vcjob_pod_template(kubeconfig: &str) -> Result<(), String> {
 
 /// Verify the job completes successfully (exercises full lifecycle including graph cleanup)
 async fn test_job_completion(kubeconfig: &str) -> Result<(), String> {
-    info!("[Job] Waiting for job to complete (tasks sleep 30s)...");
+    info!("[Job] Waiting for job to complete (tasks sleep 5s)...");
 
     wait_for_resource_phase(
         kubeconfig,

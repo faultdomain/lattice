@@ -30,7 +30,7 @@ spec:
     enabled: true
     ha: false
   backups:
-    enabled: false
+    enabled: true
   registryMirrors:
     - upstream: docker.io
       mirror: "http://172.18.0.1:5555"

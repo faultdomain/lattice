@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use kube::Client;
 
-use lattice_common::kube_utils::{self, apply_manifests_with_discovery, ApplyOptions};
+use lattice_common::kube_utils::{self, apply_manifests, ApplyOptions};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 
 use super::{namespace_yaml, split_yaml_documents};
@@ -52,7 +52,7 @@ pub async fn ensure_cert_manager(client: &Client) -> anyhow::Result<()> {
         let client = client.clone();
         let manifests = manifests.to_vec();
         async move {
-            apply_manifests_with_discovery(&client, &manifests, &ApplyOptions::default()).await
+            apply_manifests(&client, &manifests, &ApplyOptions::default()).await
         }
     })
     .await?;

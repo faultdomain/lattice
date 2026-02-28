@@ -87,4 +87,4 @@ spec:
           - jellyfin.home.local
         tls:
           issuerRef:
-            name: letsencrypt-prod
+            name: e2e-selfsigned

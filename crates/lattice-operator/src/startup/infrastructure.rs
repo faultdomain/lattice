@@ -11,7 +11,7 @@ use kube::{Api, Client};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{
-    apply_manifests_with_discovery, ApplyOptions, ParentConnectionConfig, LATTICE_SYSTEM_NAMESPACE,
+    apply_manifests, ApplyOptions, ParentConnectionConfig, LATTICE_SYSTEM_NAMESPACE,
 };
 
 use lattice_capi::installer::{
@@ -201,7 +201,7 @@ async fn apply_infra(client: &Client, config: &InfrastructureConfig) -> anyhow::
         let client = client.clone();
         let manifests = manifests.clone();
         async move {
-            apply_manifests_with_discovery(&client, &manifests, &ApplyOptions::default()).await
+            apply_manifests(&client, &manifests, &ApplyOptions::default()).await
         }
     })
     .await

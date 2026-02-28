@@ -32,7 +32,7 @@ pub async fn handle(cmd: &ApplyManifestsCommand, ctx: &CommandContext) {
         match String::from_utf8(manifest.clone()) {
             Ok(yaml) => {
                 let (kind, name) = extract_manifest_info(&yaml);
-                if let Err(e) = lattice_common::kube_utils::apply_manifest(&client, &yaml).await {
+                if let Err(e) = lattice_common::kube_utils::apply_manifests(&client, &[&yaml], &Default::default()).await {
                     error!(
                         error = %e,
                         manifest_index = i,
@@ -87,13 +87,13 @@ fn extract_manifest_info_from_value(value: Option<serde_json::Value>) -> (String
 
 /// Apply a list of manifests (bytes) using server-side apply.
 ///
-/// Thin adapter over `lattice_common::kube_utils::apply_manifest` for protobuf
+/// Thin adapter over `lattice_common::kube_utils::apply_manifests` for protobuf
 /// byte-buffer manifests received from the cell.
 pub async fn apply_manifests(client: &kube::Client, manifests: &[Vec<u8>]) -> Result<(), String> {
     for manifest_bytes in manifests {
         let yaml = String::from_utf8(manifest_bytes.clone())
             .map_err(|e| format!("Invalid UTF-8 in manifest: {}", e))?;
-        lattice_common::kube_utils::apply_manifest(client, &yaml)
+        lattice_common::kube_utils::apply_manifests(client, &[&yaml], &Default::default())
             .await
             .map_err(|e| format!("Failed to apply manifest: {}", e))?;
     }

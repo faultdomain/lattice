@@ -87,13 +87,27 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             } else {
                 CrdKind::VolcanoJob
             };
-            let volcano_api = ctx
-                .registry
-                .resolve(crd_kind)
-                .await
-                .ok_or(JobError::VolcanoCrdMissing {
-                    kind: crd_kind.kind_str(),
-                })?;
+            let volcano_api = match ctx.registry.resolve(crd_kind).await? {
+                Some(ar) => ar,
+                None => {
+                    let msg = format!(
+                        "Volcano CRD {} not found — install Volcano or remove the job",
+                        crd_kind.kind_str()
+                    );
+                    let _ = update_status(
+                        &ctx.client,
+                        &job,
+                        namespace,
+                        JobPhase::Pending,
+                        Some(&msg),
+                        None,
+                    )
+                    .await;
+                    return Err(JobError::VolcanoCrdMissing {
+                        kind: crd_kind.kind_str(),
+                    });
+                }
+            };
 
             let compiled = compile_job(
                 &job,
@@ -191,7 +205,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
 
             if job.spec.is_cron() {
                 // Cron jobs are perpetual — verify VCCronJob exists, never transition to Succeeded
-                let cron_api = match ctx.registry.resolve(CrdKind::VolcanoCronJob).await {
+                let cron_api = match ctx.registry.resolve(CrdKind::VolcanoCronJob).await? {
                     Some(ar) => ar,
                     None => {
                         warn!(job = %name, "cannot check VCCronJob status: Volcano CronJob CRD not discovered");
@@ -239,7 +253,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 }
                 Ok(Action::requeue(REQUEUE_RUNNING))
             } else {
-                let volcano_api = match ctx.registry.resolve(CrdKind::VolcanoJob).await {
+                let volcano_api = match ctx.registry.resolve(CrdKind::VolcanoJob).await? {
                     Some(ar) => ar,
                     None => {
                         warn!(job = %name, "cannot check VCJob status: Volcano CRD not discovered");
@@ -353,7 +367,7 @@ async fn apply_layers(
     for secret in &compiled.config.files_secrets {
         layer1.push("Secret", &secret.metadata.name, secret, &secret_ar)?;
     }
-    let es_ar = registry.resolve(CrdKind::ExternalSecret).await;
+    let es_ar = registry.resolve(CrdKind::ExternalSecret).await?;
     layer1.push_crd(
         "ExternalSecret",
         es_ar.as_ref(),
@@ -363,14 +377,14 @@ async fn apply_layers(
     for pvc in &compiled.config.pvcs {
         layer1.push("PersistentVolumeClaim", &pvc.metadata.name, pvc, &pvc_ar)?;
     }
-    let mm_ar = registry.resolve(CrdKind::MeshMember).await;
+    let mm_ar = registry.resolve(CrdKind::MeshMember).await?;
     layer1.push_crd(
         "LatticeMeshMember",
         mm_ar.as_ref(),
         &compiled.mesh_members,
         |mm| mm.metadata.name.as_deref().unwrap_or("unknown"),
     )?;
-    let tp_ar = registry.resolve(CrdKind::TracingPolicyNamespaced).await;
+    let tp_ar = registry.resolve(CrdKind::TracingPolicyNamespaced).await?;
     layer1.push_crd(
         "TracingPolicyNamespaced",
         tp_ar.as_ref(),

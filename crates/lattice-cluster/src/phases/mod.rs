@@ -232,7 +232,7 @@ pub async fn reconcile_infrastructure(
     let options = lattice_common::ApplyOptions {
         skip_missing_crds: true,
     };
-    lattice_common::apply_manifests_with_discovery(client, &manifests, &options)
+    lattice_common::apply_manifests(client, &manifests, &options)
         .await
         .map_err(|e| Error::internal(format!("failed to apply infrastructure: {}", e)))?;
 

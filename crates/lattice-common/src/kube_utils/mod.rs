@@ -22,7 +22,6 @@ mod waiting;
 pub use metadata::{strip_export_metadata, ObjectMeta, OwnerReference};
 
 // api_resource.rs
-pub(crate) use api_resource::find_discovered_resource;
 pub use api_resource::{
     build_api_resource, build_api_resource_with_discovery, parse_api_version, pluralize_kind,
     HasApiResource,
@@ -48,8 +47,7 @@ pub use namespace::ensure_namespace;
 
 // manifest.rs
 pub use manifest::{
-    apply_manifest, apply_manifest_with_discovery, apply_manifest_with_retry, apply_manifests,
-    apply_manifests_with_discovery, is_deployment_json, kind_priority, ApplyOptions,
+    apply_manifest_with_retry, apply_manifests, is_deployment_json, kind_priority, ApplyOptions,
 };
 
 // batch.rs

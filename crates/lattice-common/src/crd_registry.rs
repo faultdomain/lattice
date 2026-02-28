@@ -9,7 +9,7 @@ use kube::discovery::ApiResource;
 use kube::Client;
 use tracing::{info, warn};
 
-use crate::kube_utils::{build_api_resource, find_discovered_resource};
+use crate::kube_utils::build_api_resource;
 
 /// Known third-party CRD types managed by Lattice controllers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -194,113 +194,115 @@ impl CrdKind {
 /// Uses `DashMap` for per-key granularity: resolving one missing CRD doesn't
 /// block reads for others.
 pub struct CrdRegistry {
-    /// Client for API discovery. None in tests (rediscovery becomes a no-op).
+    /// Client for API discovery. None in tests (discovery becomes a no-op).
     client: Option<Client>,
     entries: DashMap<CrdKind, ApiResource>,
 }
 
 impl CrdRegistry {
-    /// Run API discovery once and populate all known CRDs.
+    /// Create a new registry and run initial API discovery.
     ///
-    /// Replaces the 3 separate `Discovery::new().run()` calls that previously
-    /// happened at startup (one each for Service, MeshMember, and Job controllers).
-    pub async fn discover(client: Client) -> Self {
-        use kube::discovery::Discovery;
-
-        let entries = DashMap::new();
-
-        match Discovery::new(client.clone()).run().await {
-            Ok(discovery) => {
-                for kind in ALL_CRD_KINDS {
-                    if let Some(ar) =
-                        find_discovered_resource(&discovery, kind.group(), kind.kind_str())
-                    {
-                        entries.insert(*kind, ar);
-                    }
-                }
-                info!(
-                    discovered = entries.len(),
-                    total = ALL_CRD_KINDS.len(),
-                    "CRD registry populated via API discovery"
-                );
-            }
-            Err(e) => {
-                warn!(error = %e, "API discovery failed, falling back to hardcoded CRD versions");
-                for kind in ALL_CRD_KINDS {
-                    entries.insert(
-                        *kind,
-                        build_api_resource(kind.hardcoded_api_version(), kind.kind_str()),
-                    );
-                }
-            }
-        }
-
-        Self {
+    /// Discovery is best-effort at startup — if it fails, the cache starts
+    /// empty and `resolve()` will retry lazily on first access.
+    pub async fn new(client: Client) -> Self {
+        let registry = Self {
             client: Some(client),
-            entries,
+            entries: DashMap::new(),
+        };
+
+        if let Err(e) = registry.run_discovery().await {
+            warn!(error = %e, "Initial CRD discovery failed, will retry lazily on first resolve");
         }
+
+        registry
     }
 
-    /// Get a CRD, running lazy re-discovery if it was missing at startup.
+    /// Resolve a CRD's ApiResource, running lazy discovery on cache miss.
     ///
-    /// Returns immediately from cache when the CRD was found during initial
-    /// discovery. On first miss, runs full API discovery and caches all
-    /// newly-found CRDs. Returns `None` only if the CRD is genuinely not
-    /// installed after re-discovery.
-    pub async fn resolve(&self, kind: CrdKind) -> Option<ApiResource> {
+    /// Returns `Ok(Some(ar))` when the CRD is found, `Ok(None)` when discovery
+    /// succeeds but the CRD is not installed, and `Err` when discovery itself
+    /// fails (e.g. a broken APIService poisoning the discovery API).
+    pub async fn resolve(&self, kind: CrdKind) -> Result<Option<ApiResource>, kube::Error> {
         if let Some(ar) = self.entries.get(&kind) {
-            return Some(ar.clone());
+            return Ok(Some(ar.clone()));
+        }
+
+        if self.client.is_none() {
+            return Ok(None);
         }
 
         info!(
             kind = kind.kind_str(),
             group = kind.group(),
-            "CRD missing at startup, attempting lazy discovery"
+            "CRD not cached, running discovery"
         );
 
-        self.rediscover().await;
-        self.entries.get(&kind).map(|r| r.clone())
+        self.run_discovery().await?;
+        Ok(self.entries.get(&kind).map(|r| r.clone()))
     }
 
-    /// Re-run API discovery and populate any newly-installed CRDs.
+    /// Run per-group API discovery and cache any newly-found CRDs.
+    ///
+    /// Discovers each API group independently via `oneshot::group()` so that
+    /// a broken APIService (e.g. KEDA returning 503) only skips that group
+    /// instead of poisoning the entire discovery pass.
     ///
     /// Only inserts entries that are currently missing — existing entries
     /// are not overwritten (the initially-discovered version is stable).
-    async fn rediscover(&self) {
-        use kube::discovery::Discovery;
+    async fn run_discovery(&self) -> Result<(), kube::Error> {
+        use std::collections::BTreeSet;
 
         let client = match &self.client {
             Some(c) => c.clone(),
-            None => return, // No client (tests) — skip rediscovery
+            None => return Ok(()),
         };
 
-        let discovery = match Discovery::new(client).run().await {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(error = %e, "CRD re-discovery failed");
-                return;
-            }
-        };
+        // Collect the unique groups we need to discover (only for missing entries)
+        let groups_needed: BTreeSet<&str> = ALL_CRD_KINDS
+            .iter()
+            .filter(|k| !self.entries.contains_key(k))
+            .map(|k| k.group())
+            .collect();
+
+        if groups_needed.is_empty() {
+            return Ok(());
+        }
 
         let mut newly_found = 0u32;
-        for kind in ALL_CRD_KINDS {
-            if self.entries.contains_key(kind) {
-                continue;
-            }
-            if let Some(ar) = find_discovered_resource(&discovery, kind.group(), kind.kind_str()) {
-                self.entries.insert(*kind, ar);
-                newly_found += 1;
+        let mut failed_groups = Vec::new();
+
+        for group in &groups_needed {
+            match kube::discovery::oneshot::group(&client, group).await {
+                Ok(api_group) => {
+                    for (ar, _caps) in api_group.resources_by_stability() {
+                        if let Some(kind) = CrdKind::from_kind_str(&ar.kind) {
+                            if !self.entries.contains_key(&kind) {
+                                self.entries.insert(kind, ar);
+                                newly_found += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(group = %group, error = %e, "API group discovery failed, skipping");
+                    failed_groups.push(*group);
+                }
             }
         }
 
-        if newly_found > 0 {
-            info!(newly_found, "CRD re-discovery found new CRDs");
-        }
+        info!(
+            newly_found,
+            total = self.entries.len(),
+            failed_groups = ?failed_groups,
+            "CRD discovery completed"
+        );
+
+        Ok(())
     }
 
     /// Create a registry pre-populated with hardcoded API versions and no client.
     ///
-    /// Rediscovery is a no-op since there's no client. Used in unit tests that
+    /// Discovery is a no-op since there's no client. Used in unit tests that
     /// need CRD resolution without a real API server.
     pub fn for_testing() -> Self {
         let entries = DashMap::new();

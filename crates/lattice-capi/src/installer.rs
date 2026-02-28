@@ -786,7 +786,7 @@ impl NativeInstaller {
             "Applying provider manifests"
         );
 
-        kube_utils::apply_manifests_with_discovery(
+        kube_utils::apply_manifests(
             client,
             &all_documents,
             &ApplyOptions::default(),

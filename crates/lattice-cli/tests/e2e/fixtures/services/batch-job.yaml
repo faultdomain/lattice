@@ -12,14 +12,14 @@ spec:
         containers:
           main:
             image: ghcr.io/evan-hines-js/busybox:latest
-            command: ["/bin/sh", "-c", "echo 'master ready'; sleep 30"]
+            command: ["/bin/sh", "-c", "echo 'master ready'; sleep 5"]
             resources:
               requests:
+                cpu: 50m
+                memory: 32Mi
+              limits:
                 cpu: 100m
                 memory: 64Mi
-              limits:
-                cpu: 200m
-                memory: 128Mi
             security:
               runAsUser: 65534
               apparmorProfile: Unconfined
@@ -34,19 +34,19 @@ spec:
         - ghcr-creds
       restartPolicy: Never
     worker:
-      replicas: 2
+      replicas: 1
       workload:
         containers:
           main:
             image: ghcr.io/evan-hines-js/busybox:latest
-            command: ["/bin/sh", "-c", "echo 'worker running'; sleep 30"]
+            command: ["/bin/sh", "-c", "echo 'worker running'; sleep 5"]
             resources:
               requests:
+                cpu: 50m
+                memory: 32Mi
+              limits:
                 cpu: 100m
                 memory: 64Mi
-              limits:
-                cpu: 200m
-                memory: 128Mi
             security:
               runAsUser: 65534
               apparmorProfile: Unconfined

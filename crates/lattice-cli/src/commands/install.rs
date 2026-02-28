@@ -400,7 +400,7 @@ impl Installer {
             .collect();
 
         for manifest in &operator_manifests {
-            kube_utils::apply_manifest(client, manifest)
+            kube_utils::apply_manifests(client, &[manifest], &Default::default())
                 .await
                 .cmd_err()?;
         }
@@ -541,7 +541,7 @@ impl Installer {
             lattice_common::retry::retry_with_backoff(&retry_config, "apply_manifest", || {
                 let c = client.clone();
                 let manifest = m.clone();
-                async move { kube_utils::apply_manifest(&c, &manifest).await }
+                async move { kube_utils::apply_manifests(&c, &[&manifest], &Default::default()).await }
             })
             .await
             .cmd_err()?;

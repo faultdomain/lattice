@@ -547,17 +547,23 @@ async fn cleanup_removed_roles(
         graph.delete_service(namespace, role_key);
 
         // Delete orphaned LatticeMeshMember
-        if let Some(mm_ar) = registry.resolve(CrdKind::MeshMember).await {
-            if let Err(e) = lattice_common::kube_utils::delete_resource_if_exists(
-                client,
-                namespace,
-                &mm_ar,
-                role_key,
-                "LatticeMeshMember",
-            )
-            .await
-            {
-                warn!(name = %role_key, error = %e, "failed to delete orphaned MeshMember");
+        match registry.resolve(CrdKind::MeshMember).await {
+            Ok(Some(mm_ar)) => {
+                if let Err(e) = lattice_common::kube_utils::delete_resource_if_exists(
+                    client,
+                    namespace,
+                    &mm_ar,
+                    role_key,
+                    "LatticeMeshMember",
+                )
+                .await
+                {
+                    warn!(name = %role_key, error = %e, "failed to delete orphaned MeshMember");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(name = %role_key, error = %e, "CRD discovery failed during orphan cleanup");
             }
         }
     }
@@ -578,7 +584,7 @@ async fn delete_model_serving(
     model_name: &str,
     namespace: &str,
 ) -> Result<(), ModelError> {
-    let Some(ms_ar) = registry.resolve(CrdKind::ModelServing).await else {
+    let Some(ms_ar) = registry.resolve(CrdKind::ModelServing).await? else {
         return Ok(());
     };
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ms_ar);
@@ -612,7 +618,7 @@ async fn apply_compiled_model(
     let ms_api = ctx
         .registry
         .resolve(CrdKind::ModelServing)
-        .await
+        .await?
         .ok_or(ModelError::KthenaCrdMissing)?;
 
     apply_layers(client, namespace, compiled, &ctx.registry, &ms_api, &params).await
@@ -665,7 +671,7 @@ async fn apply_layers(
     for secret in &compiled.config.files_secrets {
         layer1.push("Secret", &secret.metadata.name, secret, &secret_ar)?;
     }
-    let es_ar = registry.resolve(CrdKind::ExternalSecret).await;
+    let es_ar = registry.resolve(CrdKind::ExternalSecret).await?;
     layer1.push_crd(
         "ExternalSecret",
         es_ar.as_ref(),
@@ -675,14 +681,14 @@ async fn apply_layers(
     for pvc in &compiled.config.pvcs {
         layer1.push("PersistentVolumeClaim", &pvc.metadata.name, pvc, &pvc_ar)?;
     }
-    let mm_ar = registry.resolve(CrdKind::MeshMember).await;
+    let mm_ar = registry.resolve(CrdKind::MeshMember).await?;
     layer1.push_crd(
         "LatticeMeshMember",
         mm_ar.as_ref(),
         &compiled.mesh_members,
         |mm| mm.metadata.name.as_deref().unwrap_or("unknown"),
     )?;
-    let tp_ar = registry.resolve(CrdKind::TracingPolicyNamespaced).await;
+    let tp_ar = registry.resolve(CrdKind::TracingPolicyNamespaced).await?;
     layer1.push_crd(
         "TracingPolicyNamespaced",
         tp_ar.as_ref(),
@@ -706,7 +712,7 @@ async fn apply_layers(
     if let Some(ref routing) = compiled.routing {
         let mut layer3 = ApplyBatch::new(client.clone(), namespace, params);
 
-        if let Some(ref ms_server_ar) = registry.resolve(CrdKind::KthenaModelServer).await {
+        if let Some(ref ms_server_ar) = registry.resolve(CrdKind::KthenaModelServer).await? {
             layer3.push(
                 "ModelServer",
                 &routing.model_server.metadata.name,
@@ -715,7 +721,7 @@ async fn apply_layers(
             )?;
         }
 
-        if let Some(ref mr_ar) = registry.resolve(CrdKind::KthenaModelRoute).await {
+        if let Some(ref mr_ar) = registry.resolve(CrdKind::KthenaModelRoute).await? {
             for route in &routing.model_routes {
                 layer3.push("ModelRoute", &route.metadata.name, route, mr_ar)?;
             }
@@ -729,7 +735,7 @@ async fn apply_layers(
     // exists when an AutoscalingPolicyBinding is created, so policies must be
     // applied before bindings.
     if let Some(ref autoscaling) = compiled.autoscaling {
-        if let Some(ref ap_ar) = registry.resolve(CrdKind::AutoscalingPolicy).await {
+        if let Some(ref ap_ar) = registry.resolve(CrdKind::AutoscalingPolicy).await? {
             let mut layer4a = ApplyBatch::new(client.clone(), namespace, params);
             for policy in &autoscaling.policies {
                 layer4a.push("AutoscalingPolicy", &policy.metadata.name, policy, ap_ar)?;
@@ -737,7 +743,7 @@ async fn apply_layers(
             layer4a.run("layer-4a-autoscaling-policies").await?;
         }
 
-        if let Some(ref apb_ar) = registry.resolve(CrdKind::AutoscalingPolicyBinding).await {
+        if let Some(ref apb_ar) = registry.resolve(CrdKind::AutoscalingPolicyBinding).await? {
             let mut layer4b = ApplyBatch::new(client.clone(), namespace, params);
             for binding in &autoscaling.bindings {
                 layer4b.push(
@@ -778,7 +784,14 @@ async fn read_model_serving_conditions(
     namespace: &str,
     registry: &CrdRegistry,
 ) -> Option<Vec<ModelCondition>> {
-    let ms_api = registry.resolve(CrdKind::ModelServing).await?;
+    let ms_api = match registry.resolve(CrdKind::ModelServing).await {
+        Ok(Some(ar)) => ar,
+        Ok(None) => return None,
+        Err(e) => {
+            warn!(error = %e, "CRD discovery failed reading ModelServing conditions");
+            return None;
+        }
+    };
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ms_api);
 
     match api.get(name).await {
