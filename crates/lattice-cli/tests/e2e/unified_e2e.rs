@@ -289,6 +289,23 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // OIDC: authentication via Keycloak (skips if Keycloak not available)
+    if integration::oidc::oidc_tests_enabled() {
+        let ctx_clone = ctx.clone();
+        let sem = pool.clone();
+        handles.push((
+            "OIDC",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::oidc::run_oidc_hierarchy_tests(
+                    &ctx_clone,
+                    WORKLOAD_CLUSTER_NAME,
+                )
+                .await
+            }),
+        ));
+    }
+
     // Workload2 deletion (if exists) — pause chaos first to avoid log spam
     if ctx.has_workload2() {
         setup_result.pause_chaos_on_cluster(WORKLOAD2_CLUSTER_NAME);

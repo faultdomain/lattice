@@ -45,6 +45,8 @@ services:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
       KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME_URL: "http://lattice-keycloak:8080"
+      KC_HOSTNAME_STRICT: "false"
     volumes:
       - ./deploy/keycloak:/opt/keycloak/data/import
     networks:

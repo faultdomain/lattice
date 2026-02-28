@@ -11,7 +11,7 @@
 //! docker compose up -d
 //!
 //! # Run standalone
-//! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
+//! LATTICE_KUBECONFIG=/path/to/kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_oidc_standalone -- --ignored --nocapture
 //! ```
 
@@ -23,10 +23,10 @@ use tracing::info;
 
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
-use super::super::context::{InfraContext, TestSession};
+use super::super::context::InfraContext;
 use super::super::helpers::{
-    apply_yaml_with_retry, get_child_cluster_name, get_or_create_proxy, http_get_with_retry,
-    proxy_service_exists, run_kubectl, wait_for_condition,
+    apply_yaml_with_retry, get_or_create_proxy, http_get_with_retry, proxy_service_exists,
+    run_kubectl, wait_for_condition,
 };
 use super::cedar::{apply_cedar_policy_allow_group, apply_e2e_default_policy};
 
@@ -172,6 +172,17 @@ async fn cleanup_oidc_test_resources(kubeconfig: &str) {
         ])
         .await;
     }
+    // Clean up cluster-scoped RBAC resources
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "clusterrolebinding",
+        "-l",
+        "lattice.dev/test=oidc",
+        "--ignore-not-found",
+    ])
+    .await;
     info!("[Integration/OIDC] Cleanup complete");
 }
 
@@ -216,7 +227,25 @@ pub async fn run_oidc_auth_test(
     let viewer_token = get_keycloak_token("viewer@lattice.dev", "viewer").await?;
     info!("[Integration/OIDC] Got viewer token from Keycloak");
 
-    // 4. Create Cedar policy allowing lattice-admins group
+    // 4. Create K8s RBAC bindings so the impersonated OIDC user can list namespaces
+    let rbac_yaml = r#"apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: oidc-test-lattice-admins
+  labels:
+    lattice.dev/test: oidc
+subjects:
+  - kind: Group
+    name: lattice-admins
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io"#;
+    apply_yaml_with_retry(parent_kubeconfig, rbac_yaml).await?;
+    info!("[Integration/OIDC] Created K8s RBAC for lattice-admins group");
+
+    // Create Cedar policy allowing lattice-admins group
     apply_cedar_policy_allow_group(
         parent_kubeconfig,
         "oidc-test-allow-admins",
@@ -239,7 +268,7 @@ pub async fn run_oidc_auth_test(
     ])
     .await;
 
-    // 5. Wait for the OIDC validator to reload and the admin token to be accepted.
+    // Wait for the OIDC validator to reload and the admin token to be accepted.
     //    Polls until the proxy returns 200 for the admin OIDC token, which confirms
     //    both the OIDCProvider watcher has reloaded and the Cedar policy is active.
     info!("[Integration/OIDC] Testing admin access (should be allowed)...");
@@ -266,7 +295,7 @@ pub async fn run_oidc_auth_test(
     .map_err(|e| format!("Expected admin OIDC access to succeed, but it never did: {e}"))?;
     info!("[Integration/OIDC] Admin access allowed as expected");
 
-    // 6. Verify viewer OIDC token is denied (not in lattice-admins group)
+    // Verify viewer OIDC token is denied (not in lattice-admins group)
     info!("[Integration/OIDC] Testing viewer access (should be denied)...");
     let response = http_get_with_retry(&url, &viewer_token, 10).await?;
     if !response.is_forbidden() {
@@ -325,28 +354,44 @@ pub async fn run_oidc_hierarchy_tests(
 
 /// Standalone OIDC authentication test
 ///
-/// Requires `LATTICE_MGMT_KUBECONFIG` and Keycloak running via docker-compose.
+/// Requires `LATTICE_KUBECONFIG` and Keycloak running via docker-compose.
+/// Discovers the cluster name from the LatticeCluster CRD and tests the
+/// full OIDC flow: Keycloak token -> lattice proxy -> Cedar -> K8s API.
 #[tokio::test]
 #[ignore]
 async fn test_oidc_standalone() {
-    let Ok(session) =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone OIDC tests").await
-    else {
-        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
-        return;
-    };
-    let child_cluster_name = get_child_cluster_name();
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
+
+    init_e2e_test();
 
     if !oidc_tests_enabled() {
         eprintln!("Skipping: Keycloak not reachable (start with: docker compose up -d)");
         return;
     }
 
-    run_oidc_auth_test(
-        &session.ctx.mgmt_kubeconfig,
-        &child_cluster_name,
-        session.ctx.mgmt_proxy_url.as_deref(),
-    )
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+
+    // Discover the cluster's own name from the LatticeCluster CRD
+    let cluster_name = run_kubectl(&[
+        "--kubeconfig",
+        &resolved.kubeconfig,
+        "get",
+        "latticecluster",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-o",
+        "jsonpath={.items[0].metadata.name}",
+    ])
     .await
-    .unwrap();
+    .expect("Failed to get LatticeCluster name");
+    let cluster_name = cluster_name.trim();
+    assert!(
+        !cluster_name.is_empty(),
+        "No LatticeCluster found in {LATTICE_SYSTEM_NAMESPACE}"
+    );
+
+    run_oidc_auth_test(&resolved.kubeconfig, cluster_name, None)
+        .await
+        .unwrap();
 }
+
