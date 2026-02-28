@@ -198,6 +198,44 @@ pub struct WorkerPoolStatus {
     pub message: Option<String>,
 }
 
+/// Phase of an infrastructure component upgrade.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub enum InfraComponentPhase {
+    /// Version matches desired — no work needed.
+    #[default]
+    UpToDate,
+    /// Manifests applied, waiting for health gate.
+    Upgrading,
+    /// Health gate failed or component is unhealthy after upgrade.
+    Degraded,
+}
+
+impl std::fmt::Display for InfraComponentPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UpToDate => write!(f, "UpToDate"),
+            Self::Upgrading => write!(f, "Upgrading"),
+            Self::Degraded => write!(f, "Degraded"),
+        }
+    }
+}
+
+/// Status of a single infrastructure component (Istio, Cilium, etc.).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InfraComponentStatus {
+    /// Component name (e.g., "istio", "cilium", "cert-manager").
+    pub name: String,
+    /// Version embedded in the operator binary.
+    pub desired_version: String,
+    /// Version last successfully applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
+    /// Current upgrade phase.
+    #[serde(default)]
+    pub phase: InfraComponentPhase,
+}
+
 /// Status for a LatticeCluster
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -286,6 +324,14 @@ pub struct LatticeClusterStatus {
     /// the version reconciliation loop is skipped entirely (zero CAPI API calls).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+
+    /// Per-component infrastructure upgrade status.
+    ///
+    /// Populated by the operator during phased infrastructure installation.
+    /// Each entry tracks the desired vs current version and upgrade phase
+    /// for a single component (Istio, Cilium, cert-manager, etc.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub infrastructure: Vec<InfraComponentStatus>,
 }
 
 fn is_false(b: &bool) -> bool {

@@ -1,8 +1,8 @@
-//! Infrastructure installation
+//! Phased infrastructure installation
 //!
-//! Split into two phases:
-//! - `ensure_capi_infrastructure`: blocking — installs cert-manager + CAPI (schedules on tainted CP)
-//! - `spawn_general_infrastructure`: background — installs Istio, ESO, monitoring (needs workers)
+//! Infrastructure is installed in two stages:
+//! - `ensure_capi_infrastructure`: blocking — applies cert-manager phase + CAPI
+//! - `spawn_general_infrastructure`: background — applies remaining phases with health gates
 
 use std::time::Duration;
 
@@ -10,9 +10,7 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::{
-    apply_manifests, ApplyOptions, ParentConnectionConfig, LATTICE_SYSTEM_NAMESPACE,
-};
+use lattice_common::{ParentConnectionConfig, LATTICE_SYSTEM_NAMESPACE};
 
 use lattice_capi::installer::{
     copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
@@ -20,18 +18,16 @@ use lattice_capi::installer::{
 use lattice_common::crd::{
     BackupsConfig, CloudProvider, LatticeCluster, MonitoringConfig, ProviderType,
 };
-use lattice_infra::bootstrap::{self, cert_manager, InfrastructureConfig};
+use lattice_infra::bootstrap::{self, InfrastructureConfig};
 
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
 
 /// Install critical infrastructure (cert-manager + CAPI) that must complete
 /// before controllers start.
 ///
-/// This is the blocking part of infrastructure setup. cert-manager and CAPI
-/// have control-plane tolerations so they schedule on tainted CP nodes.
-/// CAPI then provisions workers for the rest of the infrastructure.
-///
-/// When `capi_installer` is provided, installs cert-manager + CAPI providers.
+/// cert-manager is applied as phase 0 of the phased infrastructure system
+/// with its health gate (all deployments in cert-manager namespace ready).
+/// CAPI providers are then installed via the native CAPI installer.
 pub async fn ensure_capi_infrastructure(
     client: &Client,
     capi_installer: Option<&dyn CapiInstaller>,
@@ -46,7 +42,7 @@ pub async fn ensure_capi_infrastructure(
         let cluster = find_lattice_cluster(client, capi_installer.is_some()).await?;
 
         if let (Some(installer), Some(c)) = (capi_installer, &cluster) {
-            cert_manager::ensure_cert_manager(client).await?;
+            apply_cert_manager_phase(client).await?;
             let provider_type = c.spec.provider.provider_type();
             let cloud_providers: Api<CloudProvider> =
                 Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
@@ -76,7 +72,7 @@ pub fn spawn_general_infrastructure(
 /// established quickly; infrastructure manifests can wait.
 const INFRA_STAGGER_DELAY: Duration = Duration::from_secs(5);
 
-/// Internal: resolve config and apply general infrastructure manifests.
+/// Internal: resolve config and apply infrastructure phases.
 async fn ensure_general_infrastructure(client: &Client, cluster_mode: bool) -> anyhow::Result<()> {
     // Stagger to avoid competing with controller watch setup for API server capacity.
     // Controllers are starting concurrently and need to establish ~16 watches.
@@ -86,8 +82,30 @@ async fn ensure_general_infrastructure(client: &Client, cluster_mode: bool) -> a
 
     tracing::info!(is_bootstrap, "Installing general infrastructure...");
 
-    let config = if is_bootstrap {
-        InfrastructureConfig {
+    let config = resolve_infra_config(client, is_bootstrap, cluster_mode).await?;
+    let phases = bootstrap::generate_phases(&config)
+        .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
+
+    tracing::info!(
+        phases = phases.len(),
+        "Applying infrastructure phases (skipping cert-manager — already applied)"
+    );
+
+    // Skip phase 0 (cert-manager) — it was already applied in the blocking path.
+    bootstrap::apply_all_phases(client, &phases, 1).await?;
+
+    tracing::info!("General infrastructure installation complete");
+    Ok(())
+}
+
+/// Resolve infrastructure config from cluster CRD or environment.
+async fn resolve_infra_config(
+    client: &Client,
+    is_bootstrap: bool,
+    cluster_mode: bool,
+) -> anyhow::Result<InfrastructureConfig> {
+    if is_bootstrap {
+        return Ok(InfrastructureConfig {
             cluster_name: "bootstrap".to_string(),
             skip_cilium_policies: true,
             skip_service_mesh: true,
@@ -97,48 +115,63 @@ async fn ensure_general_infrastructure(client: &Client, cluster_mode: bool) -> a
             },
             backups: BackupsConfig { enabled: false },
             ..Default::default()
-        }
-    } else {
-        let cluster = find_lattice_cluster(client, cluster_mode).await?;
+        });
+    }
 
-        match &cluster {
-            Some(c) => {
-                let mut cfg = InfrastructureConfig::from(c);
-                if let Ok(Some(parent)) = ParentConnectionConfig::read(client).await {
-                    cfg.parent_host = Some(parent.endpoint.host);
-                    cfg.parent_grpc_port = parent.endpoint.grpc_port;
-                }
-                tracing::info!(
-                    provider = ?cfg.provider,
-                    bootstrap = ?cfg.bootstrap,
-                    cluster = %cfg.cluster_name,
-                    parent_host = ?cfg.parent_host,
-                    monitoring = ?cfg.monitoring,
-                    backups = ?cfg.backups,
-                    "config from LatticeCluster CRD"
-                );
-                cfg
+    let cluster = find_lattice_cluster(client, cluster_mode).await?;
+
+    match &cluster {
+        Some(c) => {
+            let mut cfg = InfrastructureConfig::from(c);
+            if let Ok(Some(parent)) = ParentConnectionConfig::read(client).await {
+                cfg.parent_host = Some(parent.endpoint.host);
+                cfg.parent_grpc_port = parent.endpoint.grpc_port;
             }
-            None => {
-                let cluster_name =
-                    std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
-                tracing::info!(cluster = %cluster_name, "no LatticeCluster CRD, using env config");
-                InfrastructureConfig {
-                    cluster_name,
-                    monitoring: MonitoringConfig {
-                        enabled: false,
-                        ha: false,
-                    },
-                    backups: BackupsConfig { enabled: false },
-                    ..Default::default()
-                }
-            }
+            tracing::info!(
+                provider = ?cfg.provider,
+                bootstrap = ?cfg.bootstrap,
+                cluster = %cfg.cluster_name,
+                parent_host = ?cfg.parent_host,
+                monitoring = ?cfg.monitoring,
+                backups = ?cfg.backups,
+                "config from LatticeCluster CRD"
+            );
+            Ok(cfg)
         }
-    };
+        None => {
+            let cluster_name =
+                std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
+            tracing::info!(cluster = %cluster_name, "no LatticeCluster CRD, using env config");
+            Ok(InfrastructureConfig {
+                cluster_name,
+                monitoring: MonitoringConfig {
+                    enabled: false,
+                    ha: false,
+                },
+                backups: BackupsConfig { enabled: false },
+                ..Default::default()
+            })
+        }
+    }
+}
 
-    apply_infra(client, &config).await?;
+/// Apply the cert-manager phase (phase 0) with health gate.
+///
+/// This is the only phase that runs in the blocking path because CAPI
+/// depends on cert-manager webhooks being ready.
+async fn apply_cert_manager_phase(client: &Client) -> anyhow::Result<()> {
+    // Generate a minimal config — cert-manager phase doesn't depend on cluster config
+    let config = InfrastructureConfig::default();
+    let phases = bootstrap::generate_phases(&config)
+        .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
 
-    tracing::info!("General infrastructure installation complete");
+    let cert_manager_phase = phases
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no phases generated"))?;
+
+    debug_assert_eq!(cert_manager_phase.name, "cert-manager");
+
+    bootstrap::apply_phase(client, cert_manager_phase).await?;
     Ok(())
 }
 
@@ -186,26 +219,6 @@ async fn find_lattice_cluster(
     .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
-/// Generate and apply infrastructure manifests with infinite retry.
-async fn apply_infra(client: &Client, config: &InfrastructureConfig) -> anyhow::Result<()> {
-    let manifests = bootstrap::generate_core(config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
-    tracing::info!(count = manifests.len(), "applying infrastructure manifests");
-
-    let retry = RetryConfig {
-        initial_delay: Duration::from_secs(2),
-        ..RetryConfig::default()
-    };
-    retry_with_backoff(&retry, "infrastructure", || {
-        let client = client.clone();
-        let manifests = manifests.clone();
-        async move { apply_manifests(&client, &manifests, &ApplyOptions::default()).await }
-    })
-    .await
-    .map_err(Into::into)
-}
-
 /// Install CAPI on the bootstrap cluster.
 ///
 /// Waits for the CloudProvider CRD (created by `lattice install` after the
@@ -244,7 +257,7 @@ async fn ensure_capi_on_bootstrap(
     .await
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    cert_manager::ensure_cert_manager(client).await?;
+    apply_cert_manager_phase(client).await?;
     ensure_capi(client, infrastructure, Some(&cp), installer).await
 }
 

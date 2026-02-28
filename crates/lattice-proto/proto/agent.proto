@@ -94,6 +94,10 @@ message AgentReady {
   AgentState state = 3;
   // API server endpoint (for informational purposes)
   string api_server_endpoint = 4;
+  // Protocol version for capability negotiation.
+  // Both sides use proto3 forward/backward compatibility, so this is advisory.
+  // Version 1 = initial release. New capabilities gate on min(agent, cell) version.
+  uint32 protocol_version = 5;
 }
 
 // Sent when agent has completed initial setup

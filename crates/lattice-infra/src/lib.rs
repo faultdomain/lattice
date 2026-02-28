@@ -21,7 +21,10 @@
 //! - [`bootstrap::IstioConfig`], [`bootstrap::IstioReconciler`]: Istio manifest generation
 //! - [`bootstrap::cilium`]: Cilium manifests and network policy generators
 //! - [`bootstrap::eso`]: External Secrets Operator manifests
-//! - [`bootstrap::generate_core`]: Top-level generator (used by operator startup)
+//! - [`bootstrap::generate_phases`]: Phased generator (used by operator startup)
+//! - [`bootstrap::generate_all_manifests`]: Flat generator (used by cluster controller reconciliation)
+//! - [`bootstrap::apply_phase`]: Apply a single phase with health gates
+//! - [`bootstrap::apply_all_phases`]: Apply all phases sequentially
 //!
 //! ## PKI
 //! - [`pki::CertificateAuthority`]: CA operations for signing CSRs

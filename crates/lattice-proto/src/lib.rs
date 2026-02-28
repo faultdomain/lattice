@@ -80,6 +80,7 @@
 //!     kubernetes_version: "1.29.0".to_string(),
 //!     state: AgentState::Provisioning as i32,
 //!     api_server_endpoint: "https://10.0.0.1:6443".to_string(),
+//!     protocol_version: lattice_proto::PROTOCOL_VERSION,
 //! };
 //!
 //! let msg = AgentMessage {
@@ -102,6 +103,12 @@ pub mod agent {
 pub mod tracing;
 
 pub use agent::v1::*;
+
+/// Current protocol version for agent-cell communication.
+///
+/// Included in `AgentReady.protocol_version` so either side can gate new
+/// behavior on `min(agent_version, cell_version)` when needed.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Check if a query string indicates a streaming request.
 ///

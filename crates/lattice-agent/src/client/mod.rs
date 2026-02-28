@@ -328,6 +328,7 @@ impl AgentClient {
                 kubernetes_version: k8s_version,
                 state: (*self.agent_state.read().await).into(),
                 api_server_endpoint: self.api_server_endpoint(),
+                protocol_version: lattice_proto::PROTOCOL_VERSION,
             })),
         };
 
@@ -736,6 +737,7 @@ mod tests {
                 kubernetes_version: "unknown".to_string(),
                 state: AgentState::Provisioning.into(),
                 api_server_endpoint: String::new(),
+                protocol_version: lattice_proto::PROTOCOL_VERSION,
             })),
         };
 
@@ -745,6 +747,7 @@ mod tests {
                 assert_eq!(ready.agent_version, "1.5.0");
                 assert_eq!(ready.kubernetes_version, "unknown");
                 assert_eq!(ready.state, i32::from(AgentState::Provisioning));
+                assert!(ready.protocol_version > 0);
             }
             _ => panic!("Expected Ready payload"),
         }
@@ -769,6 +772,7 @@ mod tests {
                     kubernetes_version: "v1.28.0".to_string(),
                     state: state.into(),
                     api_server_endpoint: "https://127.0.0.1:6443".to_string(),
+                    protocol_version: lattice_proto::PROTOCOL_VERSION,
                 })),
             };
 

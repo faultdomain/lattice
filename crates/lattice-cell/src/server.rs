@@ -316,6 +316,7 @@ async fn process_agent_message(
                 cluster = %cluster_name,
                 agent_version = %ready.agent_version,
                 k8s_version = %ready.kubernetes_version,
+                protocol_version = ready.protocol_version,
                 state = ?ready.state(),
                 "Agent connected"
             );

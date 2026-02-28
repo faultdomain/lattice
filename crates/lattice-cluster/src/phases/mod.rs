@@ -169,6 +169,7 @@ pub async fn update_status(
         children_health: current_status.children_health,
         last_heartbeat: current_status.last_heartbeat,
         version: current_status.version,
+        infrastructure: current_status.infrastructure,
     };
 
     // Set pivot_complete if requested (persists pivot completion across restarts)
@@ -215,9 +216,8 @@ pub async fn reconcile_infrastructure(
         config.parent_grpc_port = parent.endpoint.grpc_port;
     }
 
-    // Generate infrastructure manifests
-    let manifests = lattice_infra::bootstrap::generate_core(&config)
-        .await
+    // Generate infrastructure manifests (flat list for reconciliation — infra already exists)
+    let manifests = lattice_infra::bootstrap::generate_all_manifests(&config)
         .map_err(|e| Error::internal(format!("failed to generate infrastructure: {}", e)))?;
 
     debug!(
