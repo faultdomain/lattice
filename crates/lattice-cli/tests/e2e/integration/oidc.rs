@@ -155,39 +155,23 @@ async fn wait_for_oidc_provider_ready(kubeconfig: &str) -> Result<(), String> {
     .await
 }
 
-/// Delete OIDCProvider CRD
-async fn delete_oidc_provider(kubeconfig: &str) {
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "oidcprovider",
-        "-n",
-        LATTICE_SYSTEM_NAMESPACE,
-        "-l",
-        "lattice.dev/test=oidc",
-        "--ignore-not-found",
-    ])
-    .await;
-}
-
 /// Clean up all OIDC test resources
 async fn cleanup_oidc_test_resources(kubeconfig: &str) {
     info!("[Integration/OIDC] Cleaning up test resources...");
-    delete_oidc_provider(kubeconfig).await;
-    // Delete test Cedar policies
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "cedarpolicy",
-        "-n",
-        LATTICE_SYSTEM_NAMESPACE,
-        "-l",
-        "lattice.dev/test=oidc",
-        "--ignore-not-found",
-    ])
-    .await;
+    for kind in ["oidcprovider", "cedarpolicy"] {
+        let _ = run_kubectl(&[
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            kind,
+            "-n",
+            LATTICE_SYSTEM_NAMESPACE,
+            "-l",
+            "lattice.dev/test=oidc",
+            "--ignore-not-found",
+        ])
+        .await;
+    }
     info!("[Integration/OIDC] Cleanup complete");
 }
 

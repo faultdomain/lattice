@@ -15,9 +15,6 @@ pub enum ExecIoError {
     /// Stdin is not available for this exec session
     #[error("stdin not available")]
     StdinNotAvailable,
-    /// The underlying channel was closed
-    #[error("channel closed")]
-    ChannelClosed,
 }
 
 /// Output from an exec session (stdout, stderr, or status)

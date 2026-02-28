@@ -157,14 +157,6 @@ fn service_no_overrides(name: &str, namespace: &str) -> LatticeService {
 }
 
 // =============================================================================
-// Cleanup
-// =============================================================================
-
-async fn cleanup_cedar_security_policies(kubeconfig: &str) {
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={}", TEST_LABEL)).await;
-}
-
-// =============================================================================
 // Test Scenarios
 // =============================================================================
 
@@ -394,7 +386,7 @@ pub async fn run_cedar_security_tests(kubeconfig: &str) -> Result<(), String> {
     );
 
     // Clean up any leftover policies from previous runs and wait for deletion
-    cleanup_cedar_security_policies(kubeconfig).await;
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
     wait_for_no_cedar_policies_with_label(kubeconfig, &format!("lattice.dev/test={}", TEST_LABEL))
         .await?;
 
@@ -422,7 +414,7 @@ pub async fn run_cedar_security_tests(kubeconfig: &str) -> Result<(), String> {
     );
 
     // Always clean up policies, even on failure
-    cleanup_cedar_security_policies(kubeconfig).await;
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
 
     harness.finish()?;
 

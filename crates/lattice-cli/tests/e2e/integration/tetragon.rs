@@ -76,10 +76,6 @@ async fn apply_security_override(
     apply_cedar_policy_crd(kubeconfig, name, TEST_LABEL, 100, &cedar).await
 }
 
-async fn cleanup_policies(kubeconfig: &str) {
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
-}
-
 // =============================================================================
 // Service builders
 // =============================================================================
@@ -1061,7 +1057,7 @@ pub async fn run_tetragon_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Running runtime enforcement tests on {kubeconfig}");
 
     setup_regcreds_infrastructure(kubeconfig).await?;
-    cleanup_policies(kubeconfig).await;
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
     wait_for_no_cedar_policies_with_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
         .await?;
 
@@ -1095,7 +1091,7 @@ pub async fn run_tetragon_tests(kubeconfig: &str) -> Result<(), String> {
     );
     harness.finish()?;
 
-    cleanup_policies(kubeconfig).await;
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
     info!("[Tetragon] All runtime enforcement tests passed!");
     Ok(())
 }

@@ -49,8 +49,7 @@ use super::secrets::verify_external_secret;
 /// Namespace for Vault 5-route secrets tests
 const VAULT_TEST_NAMESPACE: &str = "vault-secrets-routes";
 
-/// Cedar test label for cleanup
-const CEDAR_TEST_LABEL: &str = "vault-secrets";
+const TEST_LABEL: &str = "vault-secrets";
 
 // =============================================================================
 // Route Verification (pods already running)
@@ -382,7 +381,7 @@ pub async fn run_vault_secrets_tests(kubeconfig: &str) -> Result<(), String> {
     apply_cedar_secret_policy_for_service(
         kubeconfig,
         "permit-vault-route-secrets",
-        CEDAR_TEST_LABEL,
+        TEST_LABEL,
         VAULT_TEST_NAMESPACE,
         &[
             "vault-db-creds",
@@ -411,7 +410,7 @@ pub async fn run_vault_secrets_tests(kubeconfig: &str) -> Result<(), String> {
     delete_namespace(kubeconfig, VAULT_TEST_NAMESPACE).await;
     delete_cedar_policies_by_label(
         kubeconfig,
-        &format!("lattice.dev/test={}", CEDAR_TEST_LABEL),
+        &format!("lattice.dev/test={TEST_LABEL}"),
     )
     .await;
     cleanup_vault_infrastructure(kubeconfig).await;

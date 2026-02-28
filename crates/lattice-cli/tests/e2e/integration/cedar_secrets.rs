@@ -121,14 +121,7 @@ async fn apply_cedar_secret_provider_policy(
     apply_cedar_policy_crd(kubeconfig, name, "cedar-secret", 100, &cedar).await
 }
 
-// =============================================================================
-// Verification Helpers
-// =============================================================================
-
-/// Clean up all Cedar secret test policies
-async fn cleanup_cedar_secret_policies(kubeconfig: &str) {
-    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=cedar-secret").await;
-}
+const TEST_LABEL: &str = "cedar-secret";
 
 // =============================================================================
 // Service Factory (wraps shared helper with no-keys default)
@@ -400,8 +393,9 @@ pub async fn run_cedar_secret_tests(kubeconfig: &str) -> Result<(), String> {
     setup_regcreds_infrastructure(kubeconfig).await?;
 
     // Clean up any leftover policies from previous runs and wait for deletion
-    cleanup_cedar_secret_policies(kubeconfig).await;
-    wait_for_no_cedar_policies_with_label(kubeconfig, "lattice.dev/test=cedar-secret").await?;
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
+    wait_for_no_cedar_policies_with_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+        .await?;
 
     // Run all tests concurrently — each uses its own namespace
     let harness = TestHarness::new("Cedar Secrets");
@@ -422,15 +416,10 @@ pub async fn run_cedar_secret_tests(kubeconfig: &str) -> Result<(), String> {
         )),
     );
 
-    // Only clean up policies on success — on failure, leave them in place so the
-    // operator can self-heal after crashes/restarts. The pre-test cleanup (above)
-    // handles leftovers from previous failed runs.
-    let result = harness.finish();
-    if result.is_ok() {
-        cleanup_cedar_secret_policies(kubeconfig).await;
-    }
+    // Always clean up policies, even on failure
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
 
-    result?;
+    harness.finish()?;
 
     info!("[CedarSecrets] All Cedar secret authorization tests passed!");
     Ok(())

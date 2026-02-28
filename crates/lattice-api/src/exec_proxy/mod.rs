@@ -6,10 +6,8 @@
 //! Portforward is handled separately by the `portforward` module using
 //! transparent HTTP upgrade proxying.
 
-mod handlers;
+pub mod handlers;
 mod io;
 mod local_io;
 mod remote_io;
 mod websocket;
-
-pub use handlers::{handle_exec_websocket, has_websocket_upgrade_headers};

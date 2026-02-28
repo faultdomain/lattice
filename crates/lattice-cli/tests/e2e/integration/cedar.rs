@@ -37,6 +37,8 @@ use super::super::helpers::{
 // Constants
 // =============================================================================
 
+const TEST_LABEL: &str = "cedar";
+
 /// Namespace for Cedar proxy SA tests
 const CEDAR_PROXY_TEST_NS: &str = "cedar-proxy-test";
 
@@ -151,11 +153,6 @@ pub async fn delete_cedar_policy(kubeconfig: &str, policy_name: &str) -> Result<
     .await?;
     info!("[Integration/Cedar] Deleted CedarPolicy {}", policy_name);
     Ok(())
-}
-
-/// Clean up all Cedar test policies (safety net for failures)
-pub async fn cleanup_cedar_test_policies(kubeconfig: &str) {
-    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=cedar").await;
 }
 
 /// E2E default policy name
@@ -403,7 +400,7 @@ pub async fn run_cedar_hierarchy_tests(
     );
 
     // Safety net: clean up any leftover policies on failure
-    cleanup_cedar_test_policies(kubeconfig).await;
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
 
     // Restore default policy for subsequent tests (mesh, secrets, etc.)
     apply_e2e_default_policy(kubeconfig).await?;
