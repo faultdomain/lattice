@@ -445,6 +445,7 @@ mod tests {
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                network_topology: None,
                 registry_mirrors: None,
             },
             status: None,

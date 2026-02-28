@@ -28,7 +28,8 @@ use tracing::debug;
 
 use lattice_common::crd::{
     BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
-    LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MonitoringConfig, ProviderType,
+    LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MonitoringConfig,
+    NetworkTopologyConfig, ProviderType,
 };
 use lattice_common::{
     DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE, MONITORING_NAMESPACE, VMAGENT_SA_NAME,
@@ -57,6 +58,8 @@ pub struct InfrastructureConfig {
     pub monitoring: MonitoringConfig,
     /// Backup infrastructure configuration (Velero).
     pub backups: BackupsConfig,
+    /// Network topology configuration for topology-aware scheduling.
+    pub network_topology: Option<NetworkTopologyConfig>,
 }
 
 impl Default for InfrastructureConfig {
@@ -72,6 +75,7 @@ impl Default for InfrastructureConfig {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            network_topology: None,
         }
     }
 }
@@ -95,6 +99,7 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             gpu: cluster.spec.gpu,
             monitoring: cluster.spec.monitoring.clone(),
             backups: cluster.spec.backups.clone(),
+            network_topology: cluster.spec.network_topology.clone(),
         }
     }
 }
@@ -158,6 +163,13 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
 
     // Volcano gang scheduling (always installed — required for LatticeJob)
     manifests.extend(volcano::generate_volcano().iter().cloned());
+
+    // Topology discovery ConfigMap (when network topology is configured)
+    if let Some(ref topo) = config.network_topology {
+        if let Some(cm) = volcano::generate_topology_discovery_configmap(topo, config.provider) {
+            manifests.push(cm);
+        }
+    }
 
     // Kthena model serving (always installed — required for LatticeModel)
     manifests.extend(kthena::generate_kthena().iter().cloned());

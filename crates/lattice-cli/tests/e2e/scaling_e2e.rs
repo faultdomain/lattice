@@ -20,7 +20,7 @@ async fn test_scaling_e2e() {
         integration::scaling::verify_cluster_workers(
             ctx.require_workload()?,
             WORKLOAD_CLUSTER_NAME,
-            1,
+            5,
         )
         .await
     })

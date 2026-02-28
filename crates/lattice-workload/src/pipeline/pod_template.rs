@@ -39,7 +39,7 @@ pub struct CompiledPodTemplate {
     pub runtime_class_name: Option<String>,
     pub scheduling_gates: Vec<crate::k8s::SchedulingGate>,
     pub image_pull_secrets: Vec<LocalObjectReference>,
-    /// Scheduler name — set to "volcano" for GPU workloads (Volcano vGPU scheduling)
+    /// Scheduler name — set to "volcano" for GPU or topology-aware workloads
     pub scheduler_name: Option<String>,
 }
 
@@ -66,6 +66,7 @@ impl PodTemplateCompiler {
         volumes: &GeneratedVolumes,
         provider_type: ProviderType,
         container_data: &ContainerCompilationData<'_>,
+        has_topology: bool,
     ) -> Result<CompiledPodTemplate, CompilationError> {
         // Extract GPU params from resources (find the `type: gpu` resource)
         let gpu = Self::extract_gpu(workload);
@@ -138,7 +139,11 @@ impl PodTemplateCompiler {
             runtime_class_name: gpu_ref.map(|_| "nvidia".to_string()),
             scheduling_gates: volumes.scheduling_gates.clone(),
             image_pull_secrets,
-            scheduler_name: gpu_ref.map(|_| "volcano".to_string()),
+            scheduler_name: if gpu_ref.is_some() || has_topology {
+                Some("volcano".to_string())
+            } else {
+                None
+            },
         })
     }
 

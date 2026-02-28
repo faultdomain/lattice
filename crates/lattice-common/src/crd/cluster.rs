@@ -7,6 +7,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::topology::NetworkTopologyConfig;
 use super::types::{
     ClusterPhase, Condition, EndpointsSpec, NodeSpec, ProviderSpec, RegistryMirror,
 };
@@ -107,6 +108,11 @@ pub struct LatticeClusterSpec {
     /// Backup infrastructure configuration (Velero).
     #[serde(default)]
     pub backups: BackupsConfig,
+
+    /// Network topology configuration for topology-aware scheduling.
+    /// Enables Volcano HyperNode discovery for workload co-placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_topology: Option<NetworkTopologyConfig>,
 
     /// Registry mirrors for redirecting container image pulls through private mirrors.
     /// Each entry maps an upstream registry to a mirror endpoint with optional credentials.
@@ -414,6 +420,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            network_topology: None,
             registry_mirrors: None,
         };
 
@@ -436,6 +443,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            network_topology: None,
             registry_mirrors: None,
         };
 
@@ -463,6 +471,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            network_topology: None,
             registry_mirrors: None,
         };
 
@@ -487,6 +496,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            network_topology: None,
             registry_mirrors: None,
         };
 
@@ -524,6 +534,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            network_topology: None,
             registry_mirrors: None,
         };
 
@@ -548,6 +559,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            network_topology: None,
             registry_mirrors: None,
         };
 
@@ -732,6 +744,7 @@ nodes:
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            network_topology: None,
             registry_mirrors: None,
         };
 
@@ -767,6 +780,7 @@ nodes:
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                network_topology: None,
                 registry_mirrors: None,
             },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),

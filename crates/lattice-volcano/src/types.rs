@@ -53,6 +53,9 @@ pub struct VCJobSpec {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<VCJobTaskPolicy>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_topology: Option<serde_json::Value>,
 }
 
 /// A single task within a VCJob
@@ -73,6 +76,65 @@ pub struct VCJobTask {
 pub struct VCJobTaskPolicy {
     pub event: String,
     pub action: String,
+}
+
+// =============================================================================
+// PodGroup
+// =============================================================================
+
+/// Volcano PodGroup resource (`scheduling.volcano.sh/v1beta1`)
+///
+/// Used by LatticeService when topology-aware scheduling is configured.
+/// Associates a group of pods for co-scheduling with network topology constraints.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PodGroup {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: VolcanoMetadata,
+    pub spec: PodGroupSpec,
+}
+
+/// PodGroup spec
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PodGroupSpec {
+    pub min_member: u32,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_topology: Option<serde_json::Value>,
+}
+
+/// Annotation key for associating pods with a PodGroup
+pub const PODGROUP_ANNOTATION: &str = "scheduling.volcano.sh/group-name";
+
+/// Compile a PodGroup for a LatticeService with topology-aware scheduling.
+pub fn compile_service_pod_group(
+    name: &str,
+    namespace: &str,
+    replicas: u32,
+    topology: &lattice_common::crd::WorkloadNetworkTopology,
+) -> PodGroup {
+    PodGroup {
+        api_version: "scheduling.volcano.sh/v1beta1".to_string(),
+        kind: "PodGroup".to_string(),
+        metadata: VolcanoMetadata {
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+            labels: BTreeMap::from([
+                (
+                    "app.kubernetes.io/managed-by".to_string(),
+                    "lattice".to_string(),
+                ),
+                ("app.kubernetes.io/name".to_string(), name.to_string()),
+            ]),
+            owner_references: Vec::new(),
+        },
+        spec: PodGroupSpec {
+            min_member: replicas,
+            network_topology: Some(network_topology_value(topology)),
+        },
+    }
 }
 
 // =============================================================================
@@ -519,6 +581,28 @@ pub struct KthenaMetricEndpoint {
     pub port: Option<u16>,
 }
 
+/// Convert a `WorkloadNetworkTopology` to the Volcano-native JSON representation.
+///
+/// Produces `{"mode": "hard"|"soft", "highestTierAllowed": N}` for use in
+/// `VCJobSpec.network_topology` and `ServingGroupTemplate.network_topology`.
+pub fn network_topology_value(
+    topo: &lattice_common::crd::WorkloadNetworkTopology,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "mode".into(),
+        match topo.mode {
+            lattice_common::crd::TopologyMode::Hard => "hard".into(),
+            lattice_common::crd::TopologyMode::Soft => "soft".into(),
+            _ => "soft".into(),
+        },
+    );
+    if let Some(tier) = topo.max_tier {
+        map.insert("highestTierAllowed".into(), tier.into());
+    }
+    serde_json::Value::Object(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +629,7 @@ mod tests {
                 priority_class_name: None,
                 tasks: vec![],
                 policies: vec![],
+                network_topology: None,
             },
         };
 
@@ -588,6 +673,7 @@ mod tests {
                             policies: vec![],
                         }],
                         policies: vec![],
+                        network_topology: None,
                     },
                 },
             },
@@ -886,5 +972,82 @@ mod tests {
         );
         assert_eq!(value["spec"]["homogeneousTarget"]["minReplicas"], 1);
         assert_eq!(value["spec"]["homogeneousTarget"]["maxReplicas"], 10);
+    }
+
+    #[test]
+    fn network_topology_value_soft() {
+        use lattice_common::crd::{TopologyMode, WorkloadNetworkTopology};
+
+        let topo = WorkloadNetworkTopology {
+            mode: TopologyMode::Soft,
+            max_tier: Some(2),
+        };
+        let value = network_topology_value(&topo);
+        assert_eq!(value["mode"], "soft");
+        assert_eq!(value["highestTierAllowed"], 2);
+    }
+
+    #[test]
+    fn network_topology_value_hard() {
+        use lattice_common::crd::{TopologyMode, WorkloadNetworkTopology};
+
+        let topo = WorkloadNetworkTopology {
+            mode: TopologyMode::Hard,
+            max_tier: Some(1),
+        };
+        let value = network_topology_value(&topo);
+        assert_eq!(value["mode"], "hard");
+        assert_eq!(value["highestTierAllowed"], 1);
+    }
+
+    #[test]
+    fn network_topology_value_no_tier() {
+        use lattice_common::crd::{TopologyMode, WorkloadNetworkTopology};
+
+        let topo = WorkloadNetworkTopology {
+            mode: TopologyMode::Soft,
+            max_tier: None,
+        };
+        let value = network_topology_value(&topo);
+        assert_eq!(value["mode"], "soft");
+        assert!(value.get("highestTierAllowed").is_none());
+    }
+
+    #[test]
+    fn vcjob_with_network_topology_roundtrip() {
+        use lattice_common::crd::{TopologyMode, WorkloadNetworkTopology};
+
+        let topo = WorkloadNetworkTopology {
+            mode: TopologyMode::Hard,
+            max_tier: Some(1),
+        };
+        let vcjob = VCJob {
+            api_version: "batch.volcano.sh/v1alpha1".to_string(),
+            kind: "Job".to_string(),
+            metadata: VolcanoMetadata {
+                name: "topo-job".to_string(),
+                namespace: "default".to_string(),
+                labels: BTreeMap::new(),
+                owner_references: vec![],
+            },
+            spec: VCJobSpec {
+                scheduler_name: "volcano".to_string(),
+                min_available: Some(2),
+                max_retry: None,
+                queue: None,
+                priority_class_name: None,
+                tasks: vec![],
+                policies: vec![],
+                network_topology: Some(network_topology_value(&topo)),
+            },
+        };
+
+        let json = serde_json::to_string(&vcjob).unwrap();
+        let de: VCJob = serde_json::from_str(&json).unwrap();
+        assert_eq!(vcjob, de);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["spec"]["networkTopology"]["mode"], "hard");
+        assert_eq!(value["spec"]["networkTopology"]["highestTierAllowed"], 1);
     }
 }

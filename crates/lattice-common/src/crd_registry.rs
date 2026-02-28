@@ -56,6 +56,8 @@ pub enum CrdKind {
     AutoscalingPolicy,
     /// Kthena AutoscalingPolicyBinding (workload.serving.volcano.sh)
     AutoscalingPolicyBinding,
+    /// Volcano PodGroup (scheduling.volcano.sh)
+    PodGroup,
 }
 
 /// All CrdKind variants for iteration.
@@ -81,6 +83,7 @@ const ALL_CRD_KINDS: &[CrdKind] = &[
     CrdKind::KthenaModelRoute,
     CrdKind::AutoscalingPolicy,
     CrdKind::AutoscalingPolicyBinding,
+    CrdKind::PodGroup,
 ];
 
 impl CrdKind {
@@ -99,6 +102,7 @@ impl CrdKind {
             Self::Certificate => "cert-manager.io",
             Self::MeshMember => "lattice.dev",
             Self::VolcanoJob | Self::VolcanoCronJob => "batch.volcano.sh",
+            Self::PodGroup => "scheduling.volcano.sh",
             Self::ModelServing | Self::AutoscalingPolicy | Self::AutoscalingPolicyBinding => {
                 "workload.serving.volcano.sh"
             }
@@ -130,6 +134,7 @@ impl CrdKind {
             Self::KthenaModelRoute => "ModelRoute",
             Self::AutoscalingPolicy => "AutoscalingPolicy",
             Self::AutoscalingPolicyBinding => "AutoscalingPolicyBinding",
+            Self::PodGroup => "PodGroup",
         }
     }
 
@@ -159,6 +164,7 @@ impl CrdKind {
             "ModelRoute" => Some(Self::KthenaModelRoute),
             "AutoscalingPolicy" => Some(Self::AutoscalingPolicy),
             "AutoscalingPolicyBinding" => Some(Self::AutoscalingPolicyBinding),
+            "PodGroup" => Some(Self::PodGroup),
             _ => None,
         }
     }
@@ -178,6 +184,7 @@ impl CrdKind {
             Self::MeshMember => "lattice.dev/v1alpha1",
             Self::TracingPolicyNamespaced => "cilium.io/v1alpha1",
             Self::VolcanoJob | Self::VolcanoCronJob => "batch.volcano.sh/v1alpha1",
+            Self::PodGroup => "scheduling.volcano.sh/v1beta1",
             Self::ModelServing | Self::AutoscalingPolicy | Self::AutoscalingPolicyBinding => {
                 "workload.serving.volcano.sh/v1alpha1"
             }
@@ -357,7 +364,7 @@ mod tests {
     #[test]
     fn all_crd_kinds_is_exhaustive() {
         // Ensure ALL_CRD_KINDS contains every variant
-        assert_eq!(ALL_CRD_KINDS.len(), 21);
+        assert_eq!(ALL_CRD_KINDS.len(), 22);
     }
 
     #[test]

@@ -19,12 +19,41 @@ spec:
     config:
       docker:
         lbCidr: "172.18.255.0/28"
+  networkTopology:
+    discovery:
+      label:
+        tiers:
+          - nodeLabel: "topology.kubernetes.io/zone"
+          - nodeLabel: "topology.lattice.dev/rack"
   nodes:
     controlPlane:
       replicas: 1
     workerPools:
-      default:
+      zone-a-rack-1:
         replicas: 1
+        labels:
+          topology.kubernetes.io/zone: "zone-a"
+          topology.lattice.dev/rack: "rack-1"
+      zone-a-rack-2:
+        replicas: 1
+        labels:
+          topology.kubernetes.io/zone: "zone-a"
+          topology.lattice.dev/rack: "rack-2"
+      zone-b-rack-3:
+        replicas: 1
+        labels:
+          topology.kubernetes.io/zone: "zone-b"
+          topology.lattice.dev/rack: "rack-3"
+      zone-b-rack-4:
+        replicas: 1
+        labels:
+          topology.kubernetes.io/zone: "zone-b"
+          topology.lattice.dev/rack: "rack-4"
+      zone-c-rack-5:
+        replicas: 1
+        labels:
+          topology.kubernetes.io/zone: "zone-c"
+          topology.lattice.dev/rack: "rack-5"
   services: true
   monitoring:
     enabled: true

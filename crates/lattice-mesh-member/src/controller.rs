@@ -353,7 +353,14 @@ async fn do_reconcile(
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
     if let Some(ref waypoint_resources) = waypoint {
-        apply_waypoint(&ctx.client, registry, namespace, &params, waypoint_resources).await?;
+        apply_waypoint(
+            &ctx.client,
+            registry,
+            namespace,
+            &params,
+            waypoint_resources,
+        )
+        .await?;
     }
 
     let waypoint_ready = if !policies.service_entries.is_empty() {
@@ -436,14 +443,9 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
         mesh::DATAPLANE_MODE_LABEL.to_string(),
         mesh::DATAPLANE_MODE_AMBIENT.to_string(),
     )]);
-    lattice_common::kube_utils::ensure_namespace(
-        client,
-        namespace,
-        Some(&labels),
-        FIELD_MANAGER,
-    )
-    .await
-    .map_err(|e| ReconcileError::kube("ensure namespace ambient", e))?;
+    lattice_common::kube_utils::ensure_namespace(client, namespace, Some(&labels), FIELD_MANAGER)
+        .await
+        .map_err(|e| ReconcileError::kube("ensure namespace ambient", e))?;
 
     debug!(namespace = %namespace, "ensured namespace ambient mode");
     Ok(())
@@ -458,11 +460,7 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
 /// ServiceEntries with `istio.io/use-waypoint` will fail to bind if applied
 /// before the waypoint is fully programmed. Returns `true` only when the
 /// Gateway has `Programmed: True` in its status conditions.
-async fn is_waypoint_programmed(
-    client: &Client,
-    registry: &CrdRegistry,
-    namespace: &str,
-) -> bool {
+async fn is_waypoint_programmed(client: &Client, registry: &CrdRegistry, namespace: &str) -> bool {
     let ar = match registry.resolve(CrdKind::Gateway).await {
         Ok(Some(ar)) => ar,
         Ok(None) => return false,
@@ -541,7 +539,12 @@ async fn apply_resource(
 /// list is empty (no registry call, no warnings). Returns an error if resources need
 /// applying but the CRD is not installed.
 async fn serialize_crd_batch<T: serde::Serialize>(
-    items: &mut Vec<(String, &'static str, serde_json::Value, kube::discovery::ApiResource)>,
+    items: &mut Vec<(
+        String,
+        &'static str,
+        serde_json::Value,
+        kube::discovery::ApiResource,
+    )>,
     resources: &[T],
     registry: &CrdRegistry,
     crd_kind: CrdKind,
@@ -588,8 +591,12 @@ async fn apply_policies(
 ) -> Result<(), ReconcileError> {
     use futures::future::try_join_all;
 
-    let mut items: Vec<(String, &'static str, serde_json::Value, kube::discovery::ApiResource)> =
-        Vec::new();
+    let mut items: Vec<(
+        String,
+        &'static str,
+        serde_json::Value,
+        kube::discovery::ApiResource,
+    )> = Vec::new();
 
     serialize_crd_batch(
         &mut items,
@@ -672,8 +679,12 @@ async fn apply_ingress(
     }
 
     // Apply remaining resources concurrently
-    let mut items: Vec<(String, &'static str, serde_json::Value, kube::discovery::ApiResource)> =
-        Vec::new();
+    let mut items: Vec<(
+        String,
+        &'static str,
+        serde_json::Value,
+        kube::discovery::ApiResource,
+    )> = Vec::new();
 
     serialize_crd_batch(
         &mut items,

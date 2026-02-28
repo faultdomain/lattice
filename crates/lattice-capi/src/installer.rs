@@ -786,18 +786,14 @@ impl NativeInstaller {
             "Applying provider manifests"
         );
 
-        kube_utils::apply_manifests(
-            client,
-            &all_documents,
-            &ApplyOptions::default(),
-        )
-        .await
-        .map_err(|e| {
-            Error::capi_installation(format!(
-                "Failed to apply {} {}: {}",
-                desired.provider_type, desired.name, e
-            ))
-        })?;
+        kube_utils::apply_manifests(client, &all_documents, &ApplyOptions::default())
+            .await
+            .map_err(|e| {
+                Error::capi_installation(format!(
+                    "Failed to apply {} {}: {}",
+                    desired.provider_type, desired.name, e
+                ))
+            })?;
 
         // Patch provider deployments with control-plane toleration so they
         // schedule on tainted CP nodes before workers are available.

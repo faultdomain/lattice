@@ -302,6 +302,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Topology: network topology-aware scheduling
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Topology",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::topology::run_topology_tests(&kc).await
+            }),
+        ));
+    }
+
     // OIDC: authentication via Keycloak (skips if Keycloak not available)
     if integration::oidc::oidc_tests_enabled() {
         let ctx_clone = ctx.clone();

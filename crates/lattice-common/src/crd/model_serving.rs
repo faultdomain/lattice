@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::workload::scaling::AutoscalingMetric;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
+use super::workload::topology::WorkloadNetworkTopology;
 
 // =============================================================================
 // Phase
@@ -546,6 +547,12 @@ pub struct LatticeModelSpec {
     /// Inference routing configuration (compiles to Kthena ModelServer + ModelRoute)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<ModelRoutingSpec>,
+
+    /// Network topology configuration for topology-aware scheduling.
+    /// When set, the ModelServing includes networkTopology for Volcano co-placement.
+    /// When absent but kv_connector is present, topology is auto-injected (soft mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<WorkloadNetworkTopology>,
 }
 
 impl LatticeModelSpec {
@@ -569,6 +576,7 @@ impl Default for LatticeModelSpec {
             model_source: None,
             roles: BTreeMap::new(),
             routing: None,
+            topology: None,
         }
     }
 }
@@ -595,6 +603,11 @@ pub struct LatticeModelStatus {
     /// Conditions reflecting detailed status from ModelServing
     #[serde(default)]
     pub conditions: Option<Vec<ModelCondition>>,
+
+    /// Auto-injected topology configuration (from kv_connector inference).
+    /// Written to status only — never mutates the spec.
+    #[serde(default)]
+    pub auto_topology: Option<WorkloadNetworkTopology>,
 }
 
 /// A condition on a LatticeModel (mirrored from ModelServing status)

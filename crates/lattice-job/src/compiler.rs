@@ -73,7 +73,7 @@ pub async fn compile_job(
         let task_full_name = format!("{}-{}", name, task_name);
 
         // Compile workload → pod template + config resources + mesh member
-        let compiled = WorkloadCompiler::new(
+        let mut compiler = WorkloadCompiler::new(
             &task_full_name,
             namespace,
             &task_spec.workload,
@@ -83,13 +83,19 @@ pub async fn compile_job(
         .with_cedar(cedar)
         .with_cluster_name(cluster_name)
         .with_graph(graph)
-        .with_image_pull_secrets(&task_spec.runtime.image_pull_secrets)
-        .compile()
-        .await
-        .map_err(|e| JobError::TaskCompilation {
-            task: task_name.clone(),
-            source: e,
-        })?;
+        .with_image_pull_secrets(&task_spec.runtime.image_pull_secrets);
+
+        if job.spec.topology.is_some() {
+            compiler = compiler.with_topology();
+        }
+
+        let compiled = compiler
+            .compile()
+            .await
+            .map_err(|e| JobError::TaskCompilation {
+                task: task_name.clone(),
+                source: e,
+            })?;
 
         // Convert CompiledPodTemplate to JSON for VCJob
         let template_json = lattice_workload::pod_template_to_json(compiled.pod_template)

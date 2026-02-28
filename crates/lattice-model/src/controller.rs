@@ -143,30 +143,19 @@ pub async fn reconcile(
                     if e.is_retryable() {
                         // Transient — stay in Pending so error_policy retries
                         let msg = format!("Compile failed (will retry): {}", e);
-                        let _ = update_status(
-                            &ctx.client,
-                            &model,
-                            namespace,
-                            ModelServingPhase::Pending,
-                            Some(&msg),
-                            None,
-                            None,
-                        )
-                        .await;
+                        let _ = StatusUpdate::new(ModelServingPhase::Pending)
+                            .message(&msg)
+                            .apply(&ctx.client, &model, namespace)
+                            .await;
                     } else {
                         // Permanent — go to Failed
                         cleanup_graph(&model, &ctx.graph, namespace);
                         let msg = format!("Failed to compile: {}", e);
-                        let _ = update_status(
-                            &ctx.client,
-                            &model,
-                            namespace,
-                            ModelServingPhase::Failed,
-                            Some(&msg),
-                            Some(generation),
-                            None,
-                        )
-                        .await;
+                        let _ = StatusUpdate::new(ModelServingPhase::Failed)
+                            .message(&msg)
+                            .observed_generation(generation)
+                            .apply(&ctx.client, &model, namespace)
+                            .await;
                     }
                     return Err(e);
                 }
@@ -179,28 +168,18 @@ pub async fn reconcile(
                 let msg = format!("Apply failed (will retry): {}", e);
                 // Stay in Pending — apply errors are transient (webhook not ready,
                 // API server hiccup). error_policy requeues after 30s.
-                let _ = update_status(
-                    &ctx.client,
-                    &model,
-                    namespace,
-                    ModelServingPhase::Pending,
-                    Some(&msg),
-                    None,
-                    None,
-                )
-                .await;
+                let _ = StatusUpdate::new(ModelServingPhase::Pending)
+                    .message(&msg)
+                    .apply(&ctx.client, &model, namespace)
+                    .await;
                 return Err(e);
             }
-            update_status(
-                &ctx.client,
-                &model,
-                namespace,
-                ModelServingPhase::Loading,
-                Some("Resources applied, waiting for model serving readiness"),
-                Some(generation),
-                None,
-            )
-            .await?;
+            StatusUpdate::new(ModelServingPhase::Loading)
+                .message("Resources applied, waiting for model serving readiness")
+                .observed_generation(generation)
+                .auto_topology(compiled.auto_topology)
+                .apply(&ctx.client, &model, namespace)
+                .await?;
             Ok(Action::requeue(REQUEUE_LOADING))
         }
         ModelServingPhase::Loading => {
@@ -210,16 +189,10 @@ pub async fn reconcile(
             // running resources compiled from the old spec.
             if spec_changed_since_compilation(model.status.as_ref(), generation) {
                 info!(model = %name, "spec changed during Loading, recompiling");
-                update_status(
-                    &ctx.client,
-                    &model,
-                    namespace,
-                    ModelServingPhase::Pending,
-                    Some("Spec changed, recompiling"),
-                    None,
-                    None,
-                )
-                .await?;
+                StatusUpdate::new(ModelServingPhase::Pending)
+                    .message("Spec changed, recompiling")
+                    .apply(&ctx.client, &model, namespace)
+                    .await?;
                 return Ok(Action::requeue(REQUEUE_RETRY));
             }
 
@@ -237,16 +210,11 @@ pub async fn reconcile(
                             // VCJob ran and failed — permanent download failure
                             error!(model = %name, "model download job permanently failed");
                             cleanup_graph(&model, &ctx.graph, namespace);
-                            update_status(
-                                &ctx.client,
-                                &model,
-                                namespace,
-                                ModelServingPhase::Failed,
-                                Some("Model download failed"),
-                                Some(generation),
-                                None,
-                            )
-                            .await?;
+                            StatusUpdate::new(ModelServingPhase::Failed)
+                                .message("Model download failed")
+                                .observed_generation(generation)
+                                .apply(&ctx.client, &model, namespace)
+                                .await?;
                             return Ok(Action::await_change());
                         }
                         // LatticeJob is retrying (transient failure) — keep polling
@@ -271,31 +239,25 @@ pub async fn reconcile(
             match state {
                 ModelServingState::Available => {
                     info!(model = %name, "model serving is available");
-                    update_status(
-                        &ctx.client,
-                        &model,
-                        namespace,
-                        ModelServingPhase::Serving,
-                        Some("Model is serving inference requests"),
-                        Some(generation),
-                        conditions,
-                    )
-                    .await?;
+                    let mut s = StatusUpdate::new(ModelServingPhase::Serving)
+                        .message("Model is serving inference requests")
+                        .observed_generation(generation);
+                    if let Some(c) = conditions {
+                        s = s.conditions(c);
+                    }
+                    s.apply(&ctx.client, &model, namespace).await?;
                     Ok(Action::requeue(REQUEUE_SERVING))
                 }
                 ModelServingState::Failed => {
                     error!(model = %name, "model serving failed");
                     cleanup_graph(&model, &ctx.graph, namespace);
-                    update_status(
-                        &ctx.client,
-                        &model,
-                        namespace,
-                        ModelServingPhase::Failed,
-                        Some("ModelServing failed"),
-                        Some(generation),
-                        conditions,
-                    )
-                    .await?;
+                    let mut s = StatusUpdate::new(ModelServingPhase::Failed)
+                        .message("ModelServing failed")
+                        .observed_generation(generation);
+                    if let Some(c) = conditions {
+                        s = s.conditions(c);
+                    }
+                    s.apply(&ctx.client, &model, namespace).await?;
                     Ok(Action::await_change())
                 }
                 ModelServingState::Progressing => Ok(Action::requeue(REQUEUE_LOADING)),
@@ -327,30 +289,20 @@ pub async fn reconcile(
                         if e.is_retryable() {
                             // Transient — stay in Serving, let error_policy retry
                             let msg = format!("Recompile failed (will retry): {}", e);
-                            let _ = update_status(
-                                &ctx.client,
-                                &model,
-                                namespace,
-                                ModelServingPhase::Serving,
-                                Some(&msg),
-                                observed,
-                                None,
-                            )
-                            .await;
+                            let mut s = StatusUpdate::new(ModelServingPhase::Serving).message(&msg);
+                            if let Some(gen) = observed {
+                                s = s.observed_generation(gen);
+                            }
+                            let _ = s.apply(&ctx.client, &model, namespace).await;
                         } else {
                             // Permanent — go to Failed
                             cleanup_graph(&model, &ctx.graph, namespace);
                             let msg = format!("Failed to recompile after spec change: {}", e);
-                            let _ = update_status(
-                                &ctx.client,
-                                &model,
-                                namespace,
-                                ModelServingPhase::Failed,
-                                Some(&msg),
-                                Some(generation),
-                                None,
-                            )
-                            .await;
+                            let _ = StatusUpdate::new(ModelServingPhase::Failed)
+                                .message(&msg)
+                                .observed_generation(generation)
+                                .apply(&ctx.client, &model, namespace)
+                                .await;
                         }
                         return Err(e);
                     }
@@ -393,31 +345,22 @@ pub async fn reconcile(
                     // error_policy retry. Keep the old observed_generation so
                     // the next reconcile re-enters this recompile path.
                     let msg = format!("Apply failed after spec change (will retry): {}", e);
-                    let _ = update_status(
-                        &ctx.client,
-                        &model,
-                        namespace,
-                        ModelServingPhase::Serving,
-                        Some(&msg),
-                        observed,
-                        None,
-                    )
-                    .await;
+                    let mut s = StatusUpdate::new(ModelServingPhase::Serving).message(&msg);
+                    if let Some(gen) = observed {
+                        s = s.observed_generation(gen);
+                    }
+                    let _ = s.apply(&ctx.client, &model, namespace).await;
                     return Err(e);
                 }
                 // Transition to Loading so the next reconcile checks the
                 // download job and removes scheduling gates on new pods.
                 // Staying in Serving would skip gate removal (only in Loading).
-                update_status(
-                    &ctx.client,
-                    &model,
-                    namespace,
-                    ModelServingPhase::Loading,
-                    Some("Spec changed, reloading"),
-                    Some(generation),
-                    None,
-                )
-                .await?;
+                StatusUpdate::new(ModelServingPhase::Loading)
+                    .message("Spec changed, reloading")
+                    .observed_generation(generation)
+                    .auto_topology(compiled.auto_topology)
+                    .apply(&ctx.client, &model, namespace)
+                    .await?;
                 return Ok(Action::requeue(REQUEUE_LOADING));
             }
 
@@ -434,16 +377,13 @@ pub async fn reconcile(
             let conditions =
                 read_model_serving_conditions(&ctx.client, &serving_name, namespace, &ctx.registry)
                     .await;
-            update_status(
-                &ctx.client,
-                &model,
-                namespace,
-                ModelServingPhase::Serving,
-                Some(message),
-                Some(generation),
-                conditions,
-            )
-            .await?;
+            let mut s = StatusUpdate::new(ModelServingPhase::Serving)
+                .message(message)
+                .observed_generation(generation);
+            if let Some(c) = conditions {
+                s = s.conditions(c);
+            }
+            s.apply(&ctx.client, &model, namespace).await?;
             Ok(Action::requeue(REQUEUE_SERVING))
         }
         ModelServingPhase::Failed => {
@@ -453,16 +393,10 @@ pub async fn reconcile(
             let observed = model.status.as_ref().and_then(|s| s.observed_generation);
             if observed != Some(generation) {
                 info!(model = %name, observed = ?observed, current = generation, "spec changed while Failed, retrying");
-                update_status(
-                    &ctx.client,
-                    &model,
-                    namespace,
-                    ModelServingPhase::Pending,
-                    Some("Retrying after spec change"),
-                    None,
-                    None,
-                )
-                .await?;
+                StatusUpdate::new(ModelServingPhase::Pending)
+                    .message("Retrying after spec change")
+                    .apply(&ctx.client, &model, namespace)
+                    .await?;
                 return Ok(Action::requeue(REQUEUE_RETRY));
             }
             Ok(Action::requeue(Duration::from_secs(30)))
@@ -1046,44 +980,88 @@ fn spec_changed_since_compilation(status: Option<&LatticeModelStatus>, generatio
     observed != Some(generation)
 }
 
-async fn update_status(
-    client: &Client,
-    model: &LatticeModel,
-    namespace: &str,
+/// Status update builder — avoids long parameter lists and makes optional fields explicit.
+struct StatusUpdate<'a> {
     phase: ModelServingPhase,
-    message: Option<&str>,
+    message: Option<&'a str>,
     observed_generation: Option<i64>,
     conditions: Option<Vec<ModelCondition>>,
-) -> Result<(), ModelError> {
-    // Skip redundant writes when not updating conditions.
-    // Condition updates (from ModelServing health checks) always write through.
-    if conditions.is_none()
-        && status_check::is_status_unchanged(
-            model.status.as_ref(),
-            &phase,
-            message,
-            observed_generation,
-        )
-    {
-        return Ok(());
+    auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
+}
+
+impl<'a> StatusUpdate<'a> {
+    fn new(phase: ModelServingPhase) -> Self {
+        Self {
+            phase,
+            message: None,
+            observed_generation: None,
+            conditions: None,
+            auto_topology: None,
+        }
     }
 
-    let name = model.name_any();
-    let status = LatticeModelStatus {
-        phase,
-        message: message.map(|m| m.to_string()),
-        observed_generation,
-        conditions,
-    };
-    lattice_common::kube_utils::patch_resource_status::<LatticeModel>(
-        client,
-        &name,
-        namespace,
-        &status,
-        FIELD_MANAGER,
-    )
-    .await?;
-    Ok(())
+    fn message(mut self, msg: &'a str) -> Self {
+        self.message = Some(msg);
+        self
+    }
+
+    fn observed_generation(mut self, gen: i64) -> Self {
+        self.observed_generation = Some(gen);
+        self
+    }
+
+    fn conditions(mut self, conditions: Vec<ModelCondition>) -> Self {
+        self.conditions = Some(conditions);
+        self
+    }
+
+    fn auto_topology(mut self, topo: Option<lattice_common::crd::WorkloadNetworkTopology>) -> Self {
+        self.auto_topology = topo;
+        self
+    }
+
+    async fn apply(
+        self,
+        client: &Client,
+        model: &LatticeModel,
+        namespace: &str,
+    ) -> Result<(), ModelError> {
+        // Skip redundant writes when not updating conditions or auto_topology.
+        // Condition updates (from ModelServing health checks) always write through.
+        if self.conditions.is_none()
+            && self.auto_topology.is_none()
+            && status_check::is_status_unchanged(
+                model.status.as_ref(),
+                &self.phase,
+                self.message,
+                self.observed_generation,
+            )
+        {
+            return Ok(());
+        }
+
+        let name = model.name_any();
+        // Preserve auto_topology from existing status unless explicitly overridden
+        let auto_topology = self
+            .auto_topology
+            .or_else(|| model.status.as_ref().and_then(|s| s.auto_topology.clone()));
+        let status = LatticeModelStatus {
+            phase: self.phase,
+            message: self.message.map(|m| m.to_string()),
+            observed_generation: self.observed_generation,
+            conditions: self.conditions,
+            auto_topology,
+        };
+        lattice_common::kube_utils::patch_resource_status::<LatticeModel>(
+            client,
+            &name,
+            namespace,
+            &status,
+            FIELD_MANAGER,
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1099,6 +1077,7 @@ mod tests {
             message: None,
             observed_generation,
             conditions: None,
+            auto_topology: None,
         }
     }
 

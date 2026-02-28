@@ -17,6 +17,7 @@ mod restore;
 mod secrets_provider;
 mod service;
 mod service_policy;
+mod topology;
 mod types;
 pub mod workload;
 
@@ -71,6 +72,10 @@ pub use service_policy::{
     LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,
     ServiceSelector,
 };
+pub use topology::{
+    LabelDiscoveryConfig, LabelTier, NetworkTopologyConfig, TopologyDiscoverySpec,
+    UfmDiscoveryConfig,
+};
 pub use types::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec, EndpointsSpec,
     InstanceType, KubernetesSpec, NodeResourceSpec, NodeSpec, NodeTaint, ProviderConfig,
@@ -97,6 +102,7 @@ pub use workload::resources::{
 };
 pub use workload::scaling::{AutoscalingMetric, AutoscalingSpec};
 pub use workload::spec::{RuntimeSpec, WorkloadSpec};
+pub use workload::topology::{TopologyMode, WorkloadNetworkTopology};
 
 // =============================================================================
 

@@ -329,6 +329,8 @@ pub struct GeneratedWorkloads {
     pub pdb: Option<PodDisruptionBudget>,
     /// KEDA ScaledObject for autoscaling
     pub scaled_object: Option<ScaledObject>,
+    /// Volcano PodGroup for topology-aware scheduling
+    pub pod_group: Option<lattice_volcano::PodGroup>,
     /// Configuration resources (ConfigMaps, Secrets, PVCs, ExternalSecrets)
     pub config: lattice_workload::CompiledConfig,
 }
@@ -341,6 +343,7 @@ impl GeneratedWorkloads {
             && self.service_account.is_none()
             && self.pdb.is_none()
             && self.scaled_object.is_none()
+            && self.pod_group.is_none()
             && self.config.env_config_maps.is_empty()
             && self.config.env_secrets.is_empty()
             && self.config.files_config_maps.is_empty()
@@ -385,7 +388,24 @@ impl WorkloadCompiler {
         };
 
         // Wrap pod template in a Deployment with service-specific fields
-        output.deployment = Some(Self::build_deployment(name, namespace, spec, pod_template));
+        let mut deployment = Self::build_deployment(name, namespace, spec, pod_template);
+
+        // Generate PodGroup for topology-aware scheduling
+        if let Some(ref topology) = spec.topology {
+            output.pod_group = Some(lattice_volcano::compile_service_pod_group(
+                name,
+                namespace,
+                spec.replicas,
+                topology,
+            ));
+            // Annotate pod template so Volcano associates pods with this PodGroup
+            deployment.spec.template.metadata.annotations.insert(
+                lattice_volcano::PODGROUP_ANNOTATION.to_string(),
+                name.to_string(),
+            );
+        }
+
+        output.deployment = Some(deployment);
 
         // Generate Service if ports are defined
         if workload.service.is_some() {

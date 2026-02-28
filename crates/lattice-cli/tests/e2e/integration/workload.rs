@@ -40,10 +40,7 @@ fn build_workload_features_service() -> lattice_common::crd::LatticeService {
 
     // -- Main container --
     let mut variables = BTreeMap::new();
-    variables.insert(
-        "APP_NAME".to_string(),
-        TemplateString::new("workload-test"),
-    );
+    variables.insert("APP_NAME".to_string(), TemplateString::new("workload-test"));
     variables.insert("LOG_LEVEL".to_string(), TemplateString::new("debug"));
 
     let mut files = BTreeMap::new();
@@ -188,8 +185,12 @@ fn build_workload_features_service() -> lattice_common::crd::LatticeService {
 
     let resources = BTreeMap::new();
 
-    let mut service =
-        super::super::helpers::build_busybox_service(SERVICE_NAME, WORKLOAD_NS, containers, resources);
+    let mut service = super::super::helpers::build_busybox_service(
+        SERVICE_NAME,
+        WORKLOAD_NS,
+        containers,
+        resources,
+    );
 
     service.spec.runtime.sidecars = sidecars;
 
@@ -201,8 +202,15 @@ async fn test_workload_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[Workload] Deploying workload-features service...");
 
     let service = build_workload_features_service();
-    deploy_and_wait_for_phase(kubeconfig, WORKLOAD_NS, service, "Ready", None, DEFAULT_TIMEOUT)
-        .await?;
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        WORKLOAD_NS,
+        service,
+        "Ready",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
 
     info!("[Workload] Service reached Ready phase");
     Ok(())
@@ -213,7 +221,14 @@ async fn test_plain_env_vars(kubeconfig: &str) -> Result<(), String> {
     info!("[Workload] Verifying plain environment variables...");
 
     let selector = service_pod_selector(SERVICE_NAME);
-    verify_pod_env_var(kubeconfig, WORKLOAD_NS, &selector, "APP_NAME", "workload-test").await?;
+    verify_pod_env_var(
+        kubeconfig,
+        WORKLOAD_NS,
+        &selector,
+        "APP_NAME",
+        "workload-test",
+    )
+    .await?;
     verify_pod_env_var(kubeconfig, WORKLOAD_NS, &selector, "LOG_LEVEL", "debug").await?;
 
     info!("[Workload] Plain env vars verified (APP_NAME, LOG_LEVEL)");

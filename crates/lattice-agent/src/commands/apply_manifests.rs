@@ -32,7 +32,13 @@ pub async fn handle(cmd: &ApplyManifestsCommand, ctx: &CommandContext) {
         match String::from_utf8(manifest.clone()) {
             Ok(yaml) => {
                 let (kind, name) = extract_manifest_info(&yaml);
-                if let Err(e) = lattice_common::kube_utils::apply_manifests(&client, &[&yaml], &Default::default()).await {
+                if let Err(e) = lattice_common::kube_utils::apply_manifests(
+                    &client,
+                    &[&yaml],
+                    &Default::default(),
+                )
+                .await
+                {
                     error!(
                         error = %e,
                         manifest_index = i,

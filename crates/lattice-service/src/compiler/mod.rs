@@ -105,6 +105,7 @@ impl CompiledService {
             self.workloads.service_account.is_some(),
             self.workloads.pdb.is_some(),
             self.workloads.scaled_object.is_some(),
+            self.workloads.pod_group.is_some(),
         ]
         .iter()
         .filter(|&&x| x)
@@ -218,7 +219,7 @@ impl<'a> ServiceCompiler<'a> {
             .ok_or(CompilationError::missing_metadata("namespace"))?;
 
         // Use lattice_workload::WorkloadCompiler for the shared pipeline
-        let compiled = lattice_workload::WorkloadCompiler::new(
+        let mut compiler = lattice_workload::WorkloadCompiler::new(
             name,
             namespace,
             &service.spec.workload,
@@ -233,9 +234,13 @@ impl<'a> ServiceCompiler<'a> {
         })
         .with_annotations(&service.metadata.annotations.clone().unwrap_or_default())
         .with_image_pull_secrets(&service.spec.runtime.image_pull_secrets)
-        .with_ingress(service.spec.ingress.clone())
-        .compile()
-        .await?;
+        .with_ingress(service.spec.ingress.clone());
+
+        if service.spec.topology.is_some() {
+            compiler = compiler.with_topology();
+        }
+
+        let compiled = compiler.compile().await?;
 
         let mesh_member = compiled.mesh_member;
 

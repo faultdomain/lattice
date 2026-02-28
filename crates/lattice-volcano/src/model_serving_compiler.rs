@@ -5,14 +5,21 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::LatticeModel;
+use lattice_common::crd::{KvConnectorType, LatticeModel, TopologyMode, WorkloadNetworkTopology};
 
 use lattice_common::kube_utils::OwnerReference;
 
 use crate::types::{
-    GangPolicy, ModelServing, ModelServingRole, ModelServingSpec, ServingGroupTemplate,
+    self, GangPolicy, ModelServing, ModelServingRole, ModelServingSpec, ServingGroupTemplate,
     VolcanoMetadata,
 };
+
+/// Result of model serving compilation, including any auto-injected topology.
+pub struct ModelServingCompilation {
+    pub model_serving: ModelServing,
+    /// Topology that was auto-injected from kv_connector (None if explicit or absent).
+    pub auto_topology: Option<WorkloadNetworkTopology>,
+}
 
 /// Pre-compiled pod templates for a single role (entry + optional worker)
 pub struct RoleTemplates {
@@ -34,7 +41,7 @@ pub fn compile_model_serving(
     model: &LatticeModel,
     role_templates: &BTreeMap<String, RoleTemplates>,
     role_suffix: &str,
-) -> ModelServing {
+) -> ModelServingCompilation {
     let model_name = model.metadata.name.as_deref().unwrap_or_default();
     let serving_name = format!("{}-{}", model_name, role_suffix);
     let namespace = model.metadata.namespace.as_deref().unwrap_or("default");
@@ -43,7 +50,13 @@ pub fn compile_model_serving(
     let roles = compile_roles(&model.spec.roles, role_templates);
     let gang_policy = compute_gang_policy(&model.spec.roles);
 
-    ModelServing {
+    // Resolve topology: explicit spec > auto-inject from kv_connector > None
+    let (resolved_topology, auto_topology) = resolve_topology(model);
+    let network_topology = resolved_topology
+        .as_ref()
+        .map(types::network_topology_value);
+
+    let model_serving = ModelServing {
         api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
         kind: "ModelServing".to_string(),
         metadata: VolcanoMetadata {
@@ -75,12 +88,55 @@ pub fn compile_model_serving(
                     .spec
                     .restart_grace_period_seconds
                     .map(|v| v as i64),
-                network_topology: None,
+                network_topology,
             },
             recovery_policy: model.spec.recovery_policy.clone(),
             rollout_strategy: None,
         },
+    };
+
+    ModelServingCompilation {
+        model_serving,
+        auto_topology,
     }
+}
+
+/// Resolve the effective topology for a model.
+///
+/// Returns `(resolved, auto_injected)`:
+/// - If the spec has an explicit topology, use it (auto_injected = None).
+/// - If no explicit topology but kv_connector is set, auto-inject soft mode
+///   with a tier based on the connector type.
+/// - Otherwise, both are None.
+fn resolve_topology(
+    model: &LatticeModel,
+) -> (
+    Option<WorkloadNetworkTopology>,
+    Option<WorkloadNetworkTopology>,
+) {
+    // Explicit topology from spec takes priority
+    if model.spec.topology.is_some() {
+        return (model.spec.topology.clone(), None);
+    }
+
+    // Auto-inject from kv_connector if routing is configured
+    if let Some(ref routing) = model.spec.routing {
+        if let Some(ref kv) = routing.kv_connector {
+            let max_tier = match kv.type_ {
+                KvConnectorType::Nixl => 2,
+                KvConnectorType::Lmcache => 2,
+                KvConnectorType::Mooncake => 3,
+                _ => 2,
+            };
+            let auto = WorkloadNetworkTopology {
+                mode: TopologyMode::Soft,
+                max_tier: Some(max_tier),
+            };
+            return (Some(auto.clone()), Some(auto));
+        }
+    }
+
+    (None, None)
 }
 
 fn compile_roles(
@@ -120,7 +176,8 @@ fn compute_gang_policy(
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        LatticeModelSpec, ModelRoleSpec, RecoveryPolicy, RuntimeSpec, WorkloadSpec,
+        LatticeModelSpec, ModelRoleSpec, RecoveryPolicy, RuntimeSpec, TopologyMode,
+        WorkloadNetworkTopology, WorkloadSpec,
     };
 
     fn test_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
@@ -178,7 +235,8 @@ mod tests {
             make_entry_only_templates("decoder:latest"),
         )]);
 
-        let ms = compile_model_serving(&model, &templates, "abc123");
+        let result = compile_model_serving(&model, &templates, "abc123");
+        let ms = &result.model_serving;
 
         assert_eq!(ms.api_version, "workload.serving.volcano.sh/v1alpha1");
         assert_eq!(ms.kind, "ModelServing");
@@ -188,6 +246,7 @@ mod tests {
         assert_eq!(ms.spec.template.roles[0].name, "decode");
         assert_eq!(ms.spec.template.roles[0].replicas, 2);
         assert!(ms.spec.template.roles[0].worker_template.is_none());
+        assert!(result.auto_topology.is_none());
     }
 
     #[test]
@@ -215,7 +274,8 @@ mod tests {
             },
         )]);
 
-        let ms = compile_model_serving(&model, &templates, "test");
+        let result = compile_model_serving(&model, &templates, "test");
+        let ms = &result.model_serving;
 
         assert_eq!(ms.spec.template.roles.len(), 1);
         let role = &ms.spec.template.roles[0];
@@ -243,7 +303,8 @@ mod tests {
             ),
         ]);
 
-        let ms = compile_model_serving(&model, &templates, "test");
+        let result = compile_model_serving(&model, &templates, "test");
+        let ms = &result.model_serving;
 
         assert_eq!(ms.spec.template.roles.len(), 2);
         // BTreeMap iteration is sorted, so "decode" comes before "prefill"
@@ -256,7 +317,8 @@ mod tests {
     #[test]
     fn owner_reference_set() {
         let model = test_model(BTreeMap::new());
-        let ms = compile_model_serving(&model, &BTreeMap::new(), "test");
+        let result = compile_model_serving(&model, &BTreeMap::new(), "test");
+        let ms = &result.model_serving;
 
         assert_eq!(ms.metadata.owner_references.len(), 1);
         let oref = &ms.metadata.owner_references[0];
@@ -284,7 +346,8 @@ mod tests {
             ),
         ]);
 
-        let ms = compile_model_serving(&model, &templates, "test");
+        let result = compile_model_serving(&model, &templates, "test");
+        let ms = &result.model_serving;
 
         let gang = ms.spec.template.gang_policy.as_ref().unwrap();
         // minRoleReplicas is always 1 (start serving with partial capacity)
@@ -302,9 +365,9 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid".to_string());
 
-        let ms = compile_model_serving(&model, &BTreeMap::new(), "test");
+        let result = compile_model_serving(&model, &BTreeMap::new(), "test");
         assert_eq!(
-            ms.spec.recovery_policy,
+            result.model_serving.spec.recovery_policy,
             Some(RecoveryPolicy::ServingGroupRecreate)
         );
     }
@@ -319,7 +382,107 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid".to_string());
 
-        let ms = compile_model_serving(&model, &BTreeMap::new(), "test");
-        assert_eq!(ms.spec.template.restart_grace_period_seconds, Some(30));
+        let result = compile_model_serving(&model, &BTreeMap::new(), "test");
+        assert_eq!(
+            result
+                .model_serving
+                .spec
+                .template
+                .restart_grace_period_seconds,
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn explicit_topology_used_no_auto_inject() {
+        let spec = LatticeModelSpec {
+            topology: Some(WorkloadNetworkTopology {
+                mode: TopologyMode::Hard,
+                max_tier: Some(1),
+            }),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid".to_string());
+
+        let result = compile_model_serving(&model, &BTreeMap::new(), "test");
+        let ms = &result.model_serving;
+
+        // Explicit topology should be used
+        let topo = ms.spec.template.network_topology.as_ref().unwrap();
+        assert_eq!(topo["mode"], "hard");
+        assert_eq!(topo["highestTierAllowed"], 1);
+        // No auto-injection
+        assert!(result.auto_topology.is_none());
+    }
+
+    #[test]
+    fn kv_connector_auto_injects_topology() {
+        use lattice_common::crd::{KvConnectorConfig, KvConnectorType, ModelRoutingSpec};
+
+        let spec = LatticeModelSpec {
+            routing: Some(ModelRoutingSpec {
+                kv_connector: Some(KvConnectorConfig {
+                    type_: KvConnectorType::Nixl,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid".to_string());
+
+        let result = compile_model_serving(&model, &BTreeMap::new(), "test");
+        let ms = &result.model_serving;
+
+        // Auto-injected soft topology with tier 2 for nixl
+        let topo = ms.spec.template.network_topology.as_ref().unwrap();
+        assert_eq!(topo["mode"], "soft");
+        assert_eq!(topo["highestTierAllowed"], 2);
+        // Auto-topology is recorded
+        let auto = result.auto_topology.as_ref().unwrap();
+        assert_eq!(auto.mode, TopologyMode::Soft);
+        assert_eq!(auto.max_tier, Some(2));
+    }
+
+    #[test]
+    fn mooncake_connector_auto_injects_tier_3() {
+        use lattice_common::crd::{KvConnectorConfig, KvConnectorType, ModelRoutingSpec};
+
+        let spec = LatticeModelSpec {
+            routing: Some(ModelRoutingSpec {
+                kv_connector: Some(KvConnectorConfig {
+                    type_: KvConnectorType::Mooncake,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid".to_string());
+
+        let result = compile_model_serving(&model, &BTreeMap::new(), "test");
+
+        let auto = result.auto_topology.as_ref().unwrap();
+        assert_eq!(auto.max_tier, Some(3));
+    }
+
+    #[test]
+    fn no_topology_no_auto_inject() {
+        let model = test_model(BTreeMap::new());
+        let result = compile_model_serving(&model, &BTreeMap::new(), "test");
+
+        assert!(result
+            .model_serving
+            .spec
+            .template
+            .network_topology
+            .is_none());
+        assert!(result.auto_topology.is_none());
     }
 }

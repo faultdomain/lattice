@@ -27,6 +27,7 @@ use super::workload::deploy::DeploySpec;
 use super::workload::ingress::IngressSpec;
 use super::workload::scaling::AutoscalingSpec;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
+use super::workload::topology::WorkloadNetworkTopology;
 
 // =============================================================================
 // Service Phase
@@ -104,6 +105,11 @@ pub struct LatticeServiceSpec {
     /// Ingress configuration for external access via Gateway API
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<IngressSpec>,
+
+    /// Network topology configuration for topology-aware scheduling.
+    /// When set, pods are scheduled via Volcano with a PodGroup for co-placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<WorkloadNetworkTopology>,
 }
 
 fn default_replicas() -> u32 {
@@ -120,6 +126,7 @@ impl Default for LatticeServiceSpec {
             backup: None,
             deploy: DeploySpec::default(),
             ingress: None,
+            topology: None,
         }
     }
 }

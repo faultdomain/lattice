@@ -9,8 +9,8 @@ use lattice_common::crd::{LatticeJob, LatticeJobSpec, RestartPolicy};
 use lattice_common::kube_utils::OwnerReference;
 
 use crate::types::{
-    VCCronJob, VCCronJobSpec, VCCronJobTemplate, VCJob, VCJobSpec, VCJobTask, VCJobTaskPolicy,
-    VolcanoMetadata,
+    self, VCCronJob, VCCronJobSpec, VCCronJobTemplate, VCJob, VCJobSpec, VCJobTask,
+    VCJobTaskPolicy, VolcanoMetadata,
 };
 
 /// Compile a LatticeJob into a Volcano VCJob.
@@ -63,6 +63,11 @@ pub fn compile_vcjob(
             priority_class_name: job.spec.priority_class_name.clone(),
             tasks,
             policies: default_policies(job.spec.max_retry),
+            network_topology: job
+                .spec
+                .topology
+                .as_ref()
+                .map(types::network_topology_value),
         },
     }
 }
@@ -89,9 +94,7 @@ pub fn compile_vccronjob(job: &LatticeJob, vcjob: VCJob) -> VCCronJob {
             successful_jobs_history_limit: job.spec.successful_jobs_history_limit,
             failed_jobs_history_limit: job.spec.failed_jobs_history_limit,
             starting_deadline_seconds: job.spec.starting_deadline_seconds,
-            job_template: VCCronJobTemplate {
-                spec: vcjob.spec,
-            },
+            job_template: VCCronJobTemplate { spec: vcjob.spec },
         },
     }
 }

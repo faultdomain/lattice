@@ -2729,6 +2729,7 @@ dependencies = [
  "lattice-infra",
  "lattice-secret-provider",
  "lattice-tetragon",
+ "lattice-volcano",
  "lattice-workload",
  "mockall",
  "parking_lot",

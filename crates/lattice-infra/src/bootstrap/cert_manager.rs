@@ -51,9 +51,7 @@ pub async fn ensure_cert_manager(client: &Client) -> anyhow::Result<()> {
     retry_with_backoff(&retry, "cert-manager", || {
         let client = client.clone();
         let manifests = manifests.to_vec();
-        async move {
-            apply_manifests(&client, &manifests, &ApplyOptions::default()).await
-        }
+        async move { apply_manifests(&client, &manifests, &ApplyOptions::default()).await }
     })
     .await?;
 

@@ -33,9 +33,7 @@ pub use conditions::{
 };
 
 // client.rs
-pub use client::{
-    create_client, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT,
-};
+pub use client::{create_client, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
 
 // waiting.rs
 pub use waiting::{

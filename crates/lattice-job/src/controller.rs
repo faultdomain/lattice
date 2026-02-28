@@ -154,8 +154,14 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             // Register tasks in the graph after successful compilation
             register_graph(&job, &ctx.graph, namespace);
 
-            if let Err(e) =
-                apply_layers(&ctx.client, namespace, &compiled, &ctx.registry, &volcano_api).await
+            if let Err(e) = apply_layers(
+                &ctx.client,
+                namespace,
+                &compiled,
+                &ctx.registry,
+                &volcano_api,
+            )
+            .await
             {
                 cleanup_graph(&job, &ctx.graph, namespace);
                 let msg = format!("Apply failed (will retry): {}", e);

@@ -697,6 +697,7 @@ fn main() {
       - name: proportion
       - name: nodeorder
       - name: binpack
+      - name: network-topology-aware
   webhooks_namespace_selector_expressions:
   - key: kubernetes.io/metadata.name
     operator: NotIn

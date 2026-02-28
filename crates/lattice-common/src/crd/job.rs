@@ -13,6 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
+use super::workload::topology::WorkloadNetworkTopology;
 
 // =============================================================================
 // Phase
@@ -198,6 +199,11 @@ pub struct LatticeJobSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starting_deadline_seconds: Option<i64>,
 
+    /// Network topology configuration for topology-aware scheduling.
+    /// When set, the VCJob includes networkTopology for Volcano co-placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<WorkloadNetworkTopology>,
+
     /// Job tasks — each maps to a Volcano VCJob task with its own pod template
     #[serde(default)]
     pub tasks: BTreeMap<String, JobTaskSpec>,
@@ -217,6 +223,7 @@ impl Default for LatticeJobSpec {
             successful_jobs_history_limit: None,
             failed_jobs_history_limit: None,
             starting_deadline_seconds: None,
+            topology: None,
             tasks: BTreeMap::new(),
         }
     }

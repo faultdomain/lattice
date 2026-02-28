@@ -259,6 +259,16 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             layer1.push("PodDisruptionBudget", &pdb.metadata.name, pdb, &ar_pdb)?;
         }
 
+        // Volcano PodGroup for topology-aware scheduling (must exist before Deployment
+        // so Volcano can associate pods with the group)
+        let pg_ar = self.registry.resolve(CrdKind::PodGroup).await?;
+        layer1.push_optional_crd(
+            "PodGroup",
+            pg_ar.as_ref(),
+            compiled.workloads.pod_group.as_ref(),
+            |pg| &pg.metadata.name,
+        )?;
+
         // ExternalSecrets (ESO syncs secrets from Vault)
         let es_ar = self.registry.resolve(CrdKind::ExternalSecret).await?;
         layer1.push_crd(
@@ -420,6 +430,15 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             )
             .await
             .map_err(|e| cleanup_err("PodDisruptionBudget", e))?;
+        }
+
+        // PodGroup: if compilation no longer produces one (topology removed), delete the old one.
+        if compiled.workloads.pod_group.is_none() {
+            if let Some(ar) = self.registry.resolve(CrdKind::PodGroup).await? {
+                delete_resource_if_exists(&self.client, namespace, &ar, service_name, "PodGroup")
+                    .await
+                    .map_err(|e| cleanup_err("PodGroup", e))?;
+            }
         }
 
         // LatticeMeshMember: if compilation no longer produces one, delete the old one.

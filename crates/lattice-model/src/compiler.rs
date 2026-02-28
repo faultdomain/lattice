@@ -53,6 +53,8 @@ pub struct CompiledModel {
     pub autoscaling: Option<CompiledAutoscaling>,
     /// Model download resources (PVC + Job) when modelSource is configured
     pub download: Option<CompiledDownload>,
+    /// Auto-injected topology from kv_connector (for status reporting, never mutates spec)
+    pub auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
 }
 
 /// Compile a LatticeModel into Kubernetes resources.
@@ -98,7 +100,7 @@ pub async fn compile_model(
         let entry_full_name = format!("{}-{}", name, role_name);
 
         // Compile entry workload (always present)
-        let entry_compiled = WorkloadCompiler::new(
+        let mut entry_compiler = WorkloadCompiler::new(
             &entry_full_name,
             namespace,
             &role_spec.entry_workload,
@@ -108,13 +110,20 @@ pub async fn compile_model(
         .with_cedar(cedar)
         .with_cluster_name(cluster_name)
         .with_graph(graph)
-        .with_image_pull_secrets(&role_spec.entry_runtime.image_pull_secrets)
-        .compile()
-        .await
-        .map_err(|e| ModelError::RoleCompilation {
-            role: role_name.clone(),
-            source: e,
-        })?;
+        .with_image_pull_secrets(&role_spec.entry_runtime.image_pull_secrets);
+
+        if model.spec.topology.is_some() {
+            entry_compiler = entry_compiler.with_topology();
+        }
+
+        let entry_compiled =
+            entry_compiler
+                .compile()
+                .await
+                .map_err(|e| ModelError::RoleCompilation {
+                    role: role_name.clone(),
+                    source: e,
+                })?;
 
         let entry_json = lattice_workload::pod_template_to_json(entry_compiled.pod_template)
             .map_err(ModelError::Serialization)?;
@@ -164,7 +173,7 @@ pub async fn compile_model(
                 worker_workload
             };
 
-            let worker_compiled = WorkloadCompiler::new(
+            let mut worker_compiler = WorkloadCompiler::new(
                 &worker_name,
                 namespace,
                 workload_ref,
@@ -174,13 +183,20 @@ pub async fn compile_model(
             .with_cedar(cedar)
             .with_cluster_name(cluster_name)
             .with_graph(graph)
-            .with_image_pull_secrets(&worker_runtime.image_pull_secrets)
-            .compile()
-            .await
-            .map_err(|e| ModelError::RoleCompilation {
-                role: format!("{}-worker", role_name),
-                source: e,
-            })?;
+            .with_image_pull_secrets(&worker_runtime.image_pull_secrets);
+
+            if model.spec.topology.is_some() {
+                worker_compiler = worker_compiler.with_topology();
+            }
+
+            let worker_compiled =
+                worker_compiler
+                    .compile()
+                    .await
+                    .map_err(|e| ModelError::RoleCompilation {
+                        role: format!("{}-worker", role_name),
+                        source: e,
+                    })?;
 
             let worker_template =
                 lattice_workload::pod_template_to_json(worker_compiled.pod_template)
@@ -244,7 +260,9 @@ pub async fn compile_model(
     // Build ModelServing from aggregated role templates.
     // The role suffix ensures the resource name changes when the role set changes,
     // avoiding PodGroup name collisions with still-Terminating old resources.
-    let model_serving = lattice_volcano::compile_model_serving(model, &role_templates, role_suffix);
+    let compilation = lattice_volcano::compile_model_serving(model, &role_templates, role_suffix);
+    let model_serving = compilation.model_serving;
+    let auto_topology = compilation.auto_topology;
     let serving_name = &model_serving.metadata.name;
 
     // Compile routing (ModelServer + ModelRoutes) if configured
@@ -282,6 +300,7 @@ pub async fn compile_model(
         routing,
         autoscaling,
         download,
+        auto_topology,
     })
 }
 

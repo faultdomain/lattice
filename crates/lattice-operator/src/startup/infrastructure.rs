@@ -200,9 +200,7 @@ async fn apply_infra(client: &Client, config: &InfrastructureConfig) -> anyhow::
     retry_with_backoff(&retry, "infrastructure", || {
         let client = client.clone();
         let manifests = manifests.clone();
-        async move {
-            apply_manifests(&client, &manifests, &ApplyOptions::default()).await
-        }
+        async move { apply_manifests(&client, &manifests, &ApplyOptions::default()).await }
     })
     .await
     .map_err(Into::into)

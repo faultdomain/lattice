@@ -453,7 +453,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
         // Run workload worker verification in parallel with workload2 provisioning
         let (worker_result, phase_result) = tokio::join!(
-            scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 1),
+            scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 5),
             watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None)
         );
         worker_result?;
@@ -503,7 +503,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         info!("[Setup/Phase 5] Skipping workload2 cluster (disabled)");
 
         // Just verify workload workers without parallel workload2 provisioning
-        scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 1).await?;
+        scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 5).await?;
 
         ctx
     };
@@ -677,7 +677,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 
     // Verify cluster is operational
     capi::verify_capi_resources(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME).await?;
-    scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 1).await?;
+    scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 5).await?;
 
     // Add to chaos targets
     if let Some(ref targets) = result.chaos_targets {

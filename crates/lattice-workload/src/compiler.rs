@@ -54,6 +54,7 @@ pub struct WorkloadCompiler<'a> {
     graph: Option<&'a ServiceGraph>,
     ingress: Option<IngressSpec>,
     owner_references: Vec<OwnerReference>,
+    has_topology: bool,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -80,6 +81,7 @@ impl<'a> WorkloadCompiler<'a> {
             graph: None,
             ingress: None,
             owner_references: Vec::new(),
+            has_topology: false,
         }
     }
 
@@ -128,6 +130,16 @@ impl<'a> WorkloadCompiler<'a> {
     /// Set owner references for generated PVCs (GC cascading).
     pub fn with_owner_references(mut self, refs: Vec<OwnerReference>) -> Self {
         self.owner_references = refs;
+        self
+    }
+
+    /// Mark this workload as having topology-aware scheduling.
+    ///
+    /// When set, the pod template uses the Volcano scheduler (`schedulerName: "volcano"`)
+    /// even if no GPU is present. The actual topology configuration (mode, maxTier) is
+    /// handled at the CRD-specific level (VCJob, ModelServing, Service PodGroup).
+    pub fn with_topology(mut self) -> Self {
+        self.has_topology = true;
         self
     }
 
@@ -373,6 +385,7 @@ impl<'a> WorkloadCompiler<'a> {
             &compiled_volumes,
             self.provider_type,
             &container_data,
+            self.has_topology,
         )?;
 
         // Assemble config and compute hash

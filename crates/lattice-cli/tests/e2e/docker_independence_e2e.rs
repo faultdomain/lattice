@@ -201,7 +201,7 @@ async fn run_independence_test(
 
     info!("Workload cluster has its own CAPI resources!");
 
-    watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 1).await?;
+    watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 5).await?;
 
     // =========================================================================
     // Phase 4: Delete Management Cluster
@@ -220,7 +220,7 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 5: Scale Workload Cluster
     // =========================================================================
-    info!("[Phase 5] Scaling workload cluster workers 1 -> 2...");
+    info!("[Phase 5] Scaling workload cluster workers 5 -> 6...");
     info!("If this works, the cluster is truly self-managing");
 
     run_kubectl(&[
@@ -231,7 +231,7 @@ async fn run_independence_test(
         &workload_cluster_name,
         "--type=merge",
         "-p",
-        r#"{"spec":{"nodes":{"workerPools":{"default":{"replicas":2}}}}}"#,
+        r#"{"spec":{"nodes":{"workerPools":{"zone-a-rack-1":{"replicas":2}}}}}"#,
     ])
     .await?;
 
@@ -240,11 +240,11 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 6: Verify Scaling Succeeded
     // =========================================================================
-    info!("[Phase 6] Verifying workload cluster scaled to 2 workers...");
+    info!("[Phase 6] Verifying workload cluster scaled to 6 workers...");
 
-    watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 2).await?;
+    watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 6).await?;
 
-    info!("SUCCESS: Workload cluster scaled from 1 to 2 workers");
+    info!("SUCCESS: Workload cluster scaled from 5 to 6 workers");
     info!("SUCCESS: Cluster is fully operational without parent!");
 
     Ok(())
