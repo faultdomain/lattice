@@ -215,14 +215,6 @@ pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, Stri
                 |e| format!("Failed to serialize CiliumClusterwideNetworkPolicy: {}", e),
             )?,
         );
-        // Operator network policy - allows operator to reach parent cell and accept agent connections
-        manifests.push(
-            serde_json::to_string_pretty(&cilium::generate_operator_network_policy(
-                config.parent_host.as_deref(),
-                config.parent_grpc_port,
-            ))
-            .map_err(|e| format!("Failed to serialize CiliumNetworkPolicy: {}", e))?,
-        );
     }
 
     Ok(manifests)

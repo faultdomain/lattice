@@ -208,10 +208,12 @@ spec:
     apply_yaml_with_retry(kubeconfig, &provider_yaml).await?;
     info!("[Vault] Applied SecretProvider '{}'", VAULT_STORE_NAME);
 
-    // Wait for SecretProvider to reach Ready phase
+    // Wait for SecretProvider to reach Ready phase.
+    // ESO re-validation can take >120s when a stale ClusterSecretStore exists
+    // from a previous run, so allow 180s.
     wait_for_condition(
         &format!("SecretProvider '{}' to become Ready", VAULT_STORE_NAME),
-        Duration::from_secs(120),
+        Duration::from_secs(180),
         Duration::from_secs(3),
         || async move {
             let phase = run_kubectl(&[
@@ -248,6 +250,20 @@ pub async fn cleanup_vault_infrastructure(kubeconfig: &str) {
         LATTICE_SYSTEM_NAMESPACE,
         "-l",
         "lattice.dev/test=vault",
+        "--ignore-not-found",
+    ])
+    .await;
+
+    // Delete the ClusterSecretStore directly so subsequent runs start clean.
+    // The controller normally manages this, but in endurance tests the operator
+    // may not process the SP deletion before the next run begins, leaving a
+    // stale CSS that ESO must re-validate (slow).
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "clustersecretstore",
+        VAULT_STORE_NAME,
         "--ignore-not-found",
     ])
     .await;

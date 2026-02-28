@@ -408,11 +408,7 @@ pub async fn run_vault_secrets_tests(kubeconfig: &str) -> Result<(), String> {
     let result = run_vault_route_tests_inner(kubeconfig, VAULT_TEST_NAMESPACE).await;
 
     delete_namespace(kubeconfig, VAULT_TEST_NAMESPACE).await;
-    delete_cedar_policies_by_label(
-        kubeconfig,
-        &format!("lattice.dev/test={TEST_LABEL}"),
-    )
-    .await;
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
     cleanup_vault_infrastructure(kubeconfig).await;
 
     result?;

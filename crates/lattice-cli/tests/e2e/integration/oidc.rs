@@ -394,4 +394,3 @@ async fn test_oidc_standalone() {
         .await
         .unwrap();
 }
-

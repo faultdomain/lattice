@@ -297,11 +297,7 @@ async fn run_full_e2e() -> Result<(), String> {
             "OIDC",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::oidc::run_oidc_hierarchy_tests(
-                    &ctx_clone,
-                    WORKLOAD_CLUSTER_NAME,
-                )
-                .await
+                integration::oidc::run_oidc_hierarchy_tests(&ctx_clone, WORKLOAD_CLUSTER_NAME).await
             }),
         ));
     }
