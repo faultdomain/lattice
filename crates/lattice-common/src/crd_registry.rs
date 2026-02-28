@@ -129,6 +129,35 @@ impl CrdKind {
         }
     }
 
+    /// Reverse of `kind_str()` — parse a Kubernetes Kind string into a `CrdKind`.
+    ///
+    /// Returns `None` for unrecognized kind strings.
+    pub fn from_kind_str(s: &str) -> Option<Self> {
+        match s {
+            "ExternalSecret" => Some(Self::ExternalSecret),
+            "ScaledObject" => Some(Self::ScaledObject),
+            "VMServiceScrape" => Some(Self::VMServiceScrape),
+            "CiliumNetworkPolicy" => Some(Self::CiliumNetworkPolicy),
+            "AuthorizationPolicy" => Some(Self::AuthorizationPolicy),
+            "ServiceEntry" => Some(Self::ServiceEntry),
+            "PeerAuthentication" => Some(Self::PeerAuthentication),
+            "Gateway" => Some(Self::Gateway),
+            "HTTPRoute" => Some(Self::HttpRoute),
+            "GRPCRoute" => Some(Self::GrpcRoute),
+            "TCPRoute" => Some(Self::TcpRoute),
+            "Certificate" => Some(Self::Certificate),
+            "LatticeMeshMember" => Some(Self::MeshMember),
+            "TracingPolicyNamespaced" => Some(Self::TracingPolicyNamespaced),
+            "Job" => Some(Self::VolcanoJob),
+            "ModelServing" => Some(Self::ModelServing),
+            "ModelServer" => Some(Self::KthenaModelServer),
+            "ModelRoute" => Some(Self::KthenaModelRoute),
+            "AutoscalingPolicy" => Some(Self::AutoscalingPolicy),
+            "AutoscalingPolicyBinding" => Some(Self::AutoscalingPolicyBinding),
+            _ => None,
+        }
+    }
+
     /// Hardcoded API version used when discovery fails entirely.
     fn hardcoded_api_version(&self) -> &'static str {
         match self {
@@ -322,5 +351,20 @@ mod tests {
     fn all_crd_kinds_is_exhaustive() {
         // Ensure ALL_CRD_KINDS contains every variant
         assert_eq!(ALL_CRD_KINDS.len(), 20);
+    }
+
+    #[test]
+    fn from_kind_str_is_inverse_of_kind_str() {
+        for kind in ALL_CRD_KINDS {
+            let s = kind.kind_str();
+            let roundtripped = CrdKind::from_kind_str(s);
+            assert_eq!(
+                roundtripped,
+                Some(*kind),
+                "from_kind_str({:?}) should return {:?}",
+                s,
+                kind
+            );
+        }
     }
 }

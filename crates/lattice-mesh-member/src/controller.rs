@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kube::api::{Api, DynamicObject, Patch, PatchParams};
-use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, instrument, warn};
@@ -127,20 +126,28 @@ pub fn read_applied_resources(member: &LatticeMeshMember) -> HashSet<AppliedReso
 }
 
 /// Delete a single resource via the dynamic API, ignoring 404 (already gone).
-/// Wraps the shared `delete_resource_if_exists` with CRD discovery check.
+/// Resolves the CRD from the registry on demand.
 async fn delete_if_discovered(
     client: &Client,
+    registry: &CrdRegistry,
     namespace: &str,
-    crd: Option<&ApiResource>,
     name: &str,
     kind: &str,
 ) -> Result<(), ReconcileError> {
-    let Some(ar) = crd else {
+    let crd_kind = match CrdKind::from_kind_str(kind) {
+        Some(k) => k,
+        None => {
+            warn!(kind = %kind, name = %name, "unknown orphan kind, skipping");
+            return Ok(());
+        }
+    };
+
+    let Some(ar) = registry.resolve(crd_kind).await else {
         debug!(name = %name, kind = %kind, "CRD not discovered, skipping orphan delete");
         return Ok(());
     };
 
-    lattice_common::kube_utils::delete_resource_if_exists(client, namespace, ar, name, kind)
+    lattice_common::kube_utils::delete_resource_if_exists(client, namespace, &ar, name, kind)
         .await
         .map_err(|e| ReconcileError::kube(format!("delete orphaned {kind} {name}"), e))?;
     Ok(())
@@ -149,7 +156,7 @@ async fn delete_if_discovered(
 /// Delete resources that were previously applied but are no longer in the compiled set.
 async fn delete_orphaned_resources(
     client: &Client,
-    crds: &ResolvedCrds,
+    registry: &CrdRegistry,
     namespace: &str,
     old_refs: &HashSet<AppliedResourceRef>,
     new_refs: &HashSet<AppliedResourceRef>,
@@ -161,20 +168,7 @@ async fn delete_orphaned_resources(
 
     info!(count = orphans.len(), "deleting orphaned mesh resources");
     for orphan in orphans {
-        let crd = match orphan.kind.as_str() {
-            "AuthorizationPolicy" => crds.authorization_policy.as_ref(),
-            "PeerAuthentication" => crds.peer_authentication.as_ref(),
-            "CiliumNetworkPolicy" => crds.cilium_network_policy.as_ref(),
-            "HTTPRoute" => crds.http_route.as_ref(),
-            "GRPCRoute" => crds.grpc_route.as_ref(),
-            "TCPRoute" => crds.tcp_route.as_ref(),
-            "Certificate" => crds.certificate.as_ref(),
-            _ => {
-                warn!(kind = %orphan.kind, name = %orphan.name, "unknown orphan kind, skipping");
-                continue;
-            }
-        };
-        delete_if_discovered(client, namespace, crd, &orphan.name, &orphan.kind).await?;
+        delete_if_discovered(client, registry, namespace, &orphan.name, &orphan.kind).await?;
     }
     Ok(())
 }
@@ -355,25 +349,25 @@ async fn do_reconcile(
         None
     };
 
-    let crds = ResolvedCrds::resolve(&ctx.registry).await;
+    let registry = &ctx.registry;
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
     if let Some(ref waypoint_resources) = waypoint {
-        apply_waypoint(&ctx.client, &crds, namespace, &params, waypoint_resources).await?;
+        apply_waypoint(&ctx.client, registry, namespace, &params, waypoint_resources).await?;
     }
 
     let waypoint_ready = if !policies.service_entries.is_empty() {
-        is_waypoint_programmed(&ctx.client, &crds, namespace).await
+        is_waypoint_programmed(&ctx.client, registry, namespace).await
     } else {
         true
     };
 
     if waypoint_ready {
-        apply_policies(&ctx.client, &crds, namespace, &params, &policies).await?;
+        apply_policies(&ctx.client, registry, namespace, &params, &policies).await?;
     } else {
         info!("waypoint not yet present, deferring ServiceEntry creation");
         let deferred = policies.without_service_entries();
-        apply_policies(&ctx.client, &crds, namespace, &params, &deferred).await?;
+        apply_policies(&ctx.client, registry, namespace, &params, &deferred).await?;
     }
 
     // Apply ingress resources with per-member field manager
@@ -383,7 +377,7 @@ async fn do_reconcile(
     if let Some(ref ingress_resources) = ingress {
         apply_ingress(
             &ctx.client,
-            &crds,
+            registry,
             namespace,
             &ingress_params,
             ingress_resources,
@@ -397,7 +391,7 @@ async fn do_reconcile(
         new_refs.extend(collect_ingress_refs(ingress_resources));
     }
     let old_refs = read_applied_resources(member);
-    delete_orphaned_resources(&ctx.client, &crds, namespace, &old_refs, &new_refs).await?;
+    delete_orphaned_resources(&ctx.client, registry, namespace, &old_refs, &new_refs).await?;
 
     // When ingress was removed, release this member's Gateway listeners via SSA.
     // Applying empty listeners tells the API server this field manager no longer
@@ -406,7 +400,7 @@ async fn do_reconcile(
         .iter()
         .any(|r| r.kind == "HTTPRoute" || r.kind == "GRPCRoute" || r.kind == "TCPRoute");
     if ingress.is_none() && had_ingress_before {
-        release_gateway_listeners(&ctx.client, &crds, namespace, &ingress_params).await?;
+        release_gateway_listeners(&ctx.client, registry, namespace, &ingress_params).await?;
     }
 
     let total = policies.total_count()
@@ -464,12 +458,16 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
 /// ServiceEntries with `istio.io/use-waypoint` will fail to bind if applied
 /// before the waypoint is fully programmed. Returns `true` only when the
 /// Gateway has `Programmed: True` in its status conditions.
-async fn is_waypoint_programmed(client: &Client, crds: &ResolvedCrds, namespace: &str) -> bool {
-    let Some(ref ar) = crds.gateway else {
+async fn is_waypoint_programmed(
+    client: &Client,
+    registry: &CrdRegistry,
+    namespace: &str,
+) -> bool {
+    let Some(ar) = registry.resolve(CrdKind::Gateway).await else {
         return false;
     };
 
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
     let waypoint = mesh::waypoint_name(namespace);
 
     let gw = match api.get(&waypoint).await {
@@ -492,56 +490,21 @@ async fn is_waypoint_programmed(client: &Client, crds: &ResolvedCrds, namespace:
 }
 
 // =============================================================================
-// Resolved CRDs — resolved once per reconcile, shared across apply functions
-// =============================================================================
-
-/// All CRD ApiResources needed by the mesh-member apply functions.
-///
-/// Resolved once in the reconcile loop and passed by reference to avoid
-/// duplicate registry lookups across apply_policies/apply_ingress/apply_waypoint.
-struct ResolvedCrds {
-    authorization_policy: Option<ApiResource>,
-    cilium_network_policy: Option<ApiResource>,
-    service_entry: Option<ApiResource>,
-    peer_authentication: Option<ApiResource>,
-    gateway: Option<ApiResource>,
-    http_route: Option<ApiResource>,
-    grpc_route: Option<ApiResource>,
-    tcp_route: Option<ApiResource>,
-    certificate: Option<ApiResource>,
-}
-
-impl ResolvedCrds {
-    async fn resolve(registry: &CrdRegistry) -> Self {
-        Self {
-            authorization_policy: registry.resolve(CrdKind::AuthorizationPolicy).await,
-            cilium_network_policy: registry.resolve(CrdKind::CiliumNetworkPolicy).await,
-            service_entry: registry.resolve(CrdKind::ServiceEntry).await,
-            peer_authentication: registry.resolve(CrdKind::PeerAuthentication).await,
-            gateway: registry.resolve(CrdKind::Gateway).await,
-            http_route: registry.resolve(CrdKind::HttpRoute).await,
-            grpc_route: registry.resolve(CrdKind::GrpcRoute).await,
-            tcp_route: registry.resolve(CrdKind::TcpRoute).await,
-            certificate: registry.resolve(CrdKind::Certificate).await,
-        }
-    }
-}
-
-// =============================================================================
 // SSA apply helpers
 // =============================================================================
 
-/// Apply a single resource via server-side apply, erroring if the CRD is not discovered.
-async fn apply_if_discovered(
+/// Apply a single resource via server-side apply, resolving the CRD from the registry.
+async fn apply_resource(
     client: &Client,
+    registry: &CrdRegistry,
     namespace: &str,
     params: &PatchParams,
     resource: &impl serde::Serialize,
-    crd: Option<&ApiResource>,
     name: &str,
-    kind: &str,
+    crd_kind: CrdKind,
 ) -> Result<(), ReconcileError> {
-    let ar = crd.ok_or_else(|| {
+    let kind = crd_kind.kind_str();
+    let ar = registry.resolve(crd_kind).await.ok_or_else(|| {
         ReconcileError::Internal(format!(
             "{kind} CRD not installed but resource '{name}' needs applying"
         ))
@@ -558,7 +521,7 @@ async fn apply_if_discovered(
         );
     }
 
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
     api.patch(name, params, &Patch::Apply(&json))
         .await
         .map_err(|e| ReconcileError::kube(format!("apply {kind} {name}"), e))?;
@@ -567,50 +530,94 @@ async fn apply_if_discovered(
     Ok(())
 }
 
+/// Serialize a batch of CRD-backed resources into (name, kind, json, ApiResource) tuples.
+///
+/// Resolves the CRD from the registry on demand. Returns immediately if the resource
+/// list is empty (no registry call, no warnings). Returns an error if resources need
+/// applying but the CRD is not installed.
+async fn serialize_crd_batch<T: serde::Serialize>(
+    items: &mut Vec<(String, &'static str, serde_json::Value, kube::discovery::ApiResource)>,
+    resources: &[T],
+    registry: &CrdRegistry,
+    crd_kind: CrdKind,
+    name_fn: impl Fn(&T) -> &str,
+) -> Result<(), ReconcileError> {
+    if resources.is_empty() {
+        return Ok(());
+    }
+
+    let kind = crd_kind.kind_str();
+    let ar = registry.resolve(crd_kind).await.ok_or_else(|| {
+        ReconcileError::Internal(format!(
+            "{kind} CRD not installed but {} resources need applying",
+            resources.len()
+        ))
+    })?;
+
+    for resource in resources {
+        let mut json = serde_json::to_value(resource)
+            .map_err(|e| ReconcileError::Internal(format!("serialize {kind}: {e}")))?;
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert(
+                "apiVersion".to_string(),
+                serde_json::Value::String(ar.api_version.clone()),
+            );
+        }
+        items.push((name_fn(resource).to_string(), kind, json, ar.clone()));
+    }
+
+    Ok(())
+}
+
 /// Apply all compiled policies in parallel via server-side apply.
 ///
-/// Pre-serializes all resources to JSON, then applies them concurrently
-/// using `try_join_all`. Returns an error if any CRD type has compiled
-/// resources but its CRD is not discovered on the cluster.
+/// Resolves CRDs from the registry on demand — only CRDs with non-empty resource
+/// lists are looked up. Pre-serializes all resources to JSON, then applies them
+/// concurrently using `try_join_all`.
 async fn apply_policies(
     client: &Client,
-    crds: &ResolvedCrds,
+    registry: &CrdRegistry,
     namespace: &str,
     params: &PatchParams,
     policies: &crate::policy::GeneratedPolicies,
 ) -> Result<(), ReconcileError> {
     use futures::future::try_join_all;
 
-    let mut items: Vec<(String, &'static str, serde_json::Value, ApiResource)> = Vec::new();
+    let mut items: Vec<(String, &'static str, serde_json::Value, kube::discovery::ApiResource)> =
+        Vec::new();
 
     serialize_crd_batch(
         &mut items,
         &policies.authorization_policies,
-        crds.authorization_policy.as_ref(),
-        "AuthorizationPolicy",
+        registry,
+        CrdKind::AuthorizationPolicy,
         |ap| &ap.metadata.name,
-    )?;
+    )
+    .await?;
     serialize_crd_batch(
         &mut items,
         &policies.cilium_policies,
-        crds.cilium_network_policy.as_ref(),
-        "CiliumNetworkPolicy",
+        registry,
+        CrdKind::CiliumNetworkPolicy,
         |cnp| &cnp.metadata.name,
-    )?;
+    )
+    .await?;
     serialize_crd_batch(
         &mut items,
         &policies.service_entries,
-        crds.service_entry.as_ref(),
-        "ServiceEntry",
+        registry,
+        CrdKind::ServiceEntry,
         |se| &se.metadata.name,
-    )?;
+    )
+    .await?;
     serialize_crd_batch(
         &mut items,
         &policies.peer_authentications,
-        crds.peer_authentication.as_ref(),
-        "PeerAuthentication",
+        registry,
+        CrdKind::PeerAuthentication,
         |pa| &pa.metadata.name,
-    )?;
+    )
+    .await?;
 
     if items.is_empty() {
         return Ok(());
@@ -632,50 +639,13 @@ async fn apply_policies(
     Ok(())
 }
 
-/// Serialize a batch of CRD-backed resources into (name, kind, json, ApiResource) tuples.
-///
-/// Returns an error if the CRD is not discovered but resources need applying.
-/// Resources are serialized eagerly so the actual API calls can run fully in parallel.
-fn serialize_crd_batch<T: serde::Serialize>(
-    items: &mut Vec<(String, &'static str, serde_json::Value, ApiResource)>,
-    resources: &[T],
-    crd: Option<&ApiResource>,
-    kind: &'static str,
-    name_fn: impl Fn(&T) -> &str,
-) -> Result<(), ReconcileError> {
-    let Some(ar) = crd else {
-        if !resources.is_empty() {
-            return Err(ReconcileError::Internal(format!(
-                "{kind} CRD not installed but {} resources need applying",
-                resources.len()
-            )));
-        }
-        return Ok(());
-    };
-
-    for resource in resources {
-        let mut json = serde_json::to_value(resource)
-            .map_err(|e| ReconcileError::Internal(format!("serialize {kind}: {e}")))?;
-        if let Some(obj) = json.as_object_mut() {
-            obj.insert(
-                "apiVersion".to_string(),
-                serde_json::Value::String(ar.api_version.clone()),
-            );
-        }
-        items.push((name_fn(resource).to_string(), kind, json, ar.clone()));
-    }
-
-    Ok(())
-}
-
 /// Apply compiled ingress resources in parallel via server-side apply.
 ///
 /// The Gateway is applied first (creates the parent reference for routes), then
-/// all remaining resources (CNP, auth policy, routes, certs) are applied concurrently
-/// using `serialize_crd_batch` + `try_join_all` — the same pattern as `apply_policies`.
+/// all remaining resources (CNP, auth policy, routes, certs) are applied concurrently.
 async fn apply_ingress(
     client: &Client,
-    crds: &ResolvedCrds,
+    registry: &CrdRegistry,
     namespace: &str,
     params: &PatchParams,
     ingress: &crate::ingress::GeneratedIngress,
@@ -684,20 +654,21 @@ async fn apply_ingress(
 
     // Gateway must be applied first (routes reference it as a parentRef)
     if let Some(ref gw) = ingress.gateway {
-        apply_if_discovered(
+        apply_resource(
             client,
+            registry,
             namespace,
             params,
             gw,
-            crds.gateway.as_ref(),
             &gw.metadata.name,
-            "Gateway",
+            CrdKind::Gateway,
         )
         .await?;
     }
 
     // Apply remaining resources concurrently
-    let mut items: Vec<(String, &'static str, serde_json::Value, ApiResource)> = Vec::new();
+    let mut items: Vec<(String, &'static str, serde_json::Value, kube::discovery::ApiResource)> =
+        Vec::new();
 
     serialize_crd_batch(
         &mut items,
@@ -706,10 +677,11 @@ async fn apply_ingress(
             .as_ref()
             .into_iter()
             .collect::<Vec<_>>(),
-        crds.cilium_network_policy.as_ref(),
-        "CiliumNetworkPolicy",
+        registry,
+        CrdKind::CiliumNetworkPolicy,
         |cnp| &cnp.metadata.name,
-    )?;
+    )
+    .await?;
     serialize_crd_batch(
         &mut items,
         &ingress
@@ -717,38 +689,43 @@ async fn apply_ingress(
             .as_ref()
             .into_iter()
             .collect::<Vec<_>>(),
-        crds.authorization_policy.as_ref(),
-        "AuthorizationPolicy",
+        registry,
+        CrdKind::AuthorizationPolicy,
         |ap| &ap.metadata.name,
-    )?;
+    )
+    .await?;
     serialize_crd_batch(
         &mut items,
         &ingress.http_routes,
-        crds.http_route.as_ref(),
-        "HTTPRoute",
+        registry,
+        CrdKind::HttpRoute,
         |r| &r.metadata.name,
-    )?;
+    )
+    .await?;
     serialize_crd_batch(
         &mut items,
         &ingress.grpc_routes,
-        crds.grpc_route.as_ref(),
-        "GRPCRoute",
+        registry,
+        CrdKind::GrpcRoute,
         |r| &r.metadata.name,
-    )?;
+    )
+    .await?;
     serialize_crd_batch(
         &mut items,
         &ingress.tcp_routes,
-        crds.tcp_route.as_ref(),
-        "TCPRoute",
+        registry,
+        CrdKind::TcpRoute,
         |r| &r.metadata.name,
-    )?;
+    )
+    .await?;
     serialize_crd_batch(
         &mut items,
         &ingress.certificates,
-        crds.certificate.as_ref(),
-        "Certificate",
+        registry,
+        CrdKind::Certificate,
         |c| &c.metadata.name,
-    )?;
+    )
+    .await?;
 
     if items.is_empty() {
         return Ok(());
@@ -779,15 +756,15 @@ async fn apply_ingress(
 /// listeners, so SSA removes them while preserving other members' listeners.
 async fn release_gateway_listeners(
     client: &Client,
-    crds: &ResolvedCrds,
+    registry: &CrdRegistry,
     namespace: &str,
     params: &PatchParams,
 ) -> Result<(), ReconcileError> {
-    let Some(ref ar) = crds.gateway else {
+    let Some(ar) = registry.resolve(CrdKind::Gateway).await else {
         return Ok(());
     };
     let gateway_name = mesh::ingress_gateway_name(namespace);
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
 
     // Only release if the Gateway exists (avoid creating an empty one)
     if api.get(&gateway_name).await.is_err() {
@@ -815,33 +792,33 @@ async fn release_gateway_listeners(
 /// Apply compiled waypoint resources
 async fn apply_waypoint(
     client: &Client,
-    crds: &ResolvedCrds,
+    registry: &CrdRegistry,
     namespace: &str,
     params: &PatchParams,
     waypoint: &crate::ingress::GeneratedWaypoint,
 ) -> Result<(), ReconcileError> {
     if let Some(ref gw) = waypoint.gateway {
-        apply_if_discovered(
+        apply_resource(
             client,
+            registry,
             namespace,
             params,
             gw,
-            crds.gateway.as_ref(),
             &gw.metadata.name,
-            "Gateway",
+            CrdKind::Gateway,
         )
         .await?;
     }
 
     if let Some(ref policy) = waypoint.allow_to_waypoint_policy {
-        apply_if_discovered(
+        apply_resource(
             client,
+            registry,
             namespace,
             params,
             policy,
-            crds.authorization_policy.as_ref(),
             &policy.metadata.name,
-            "AuthorizationPolicy",
+            CrdKind::AuthorizationPolicy,
         )
         .await?;
     }

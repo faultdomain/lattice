@@ -53,6 +53,9 @@ const NS_ISOLATION_B: &str = "cedar-secret-t4b";
 const NS_LIFECYCLE: &str = "cedar-secret-t5";
 const NS_PROVIDER: &str = "cedar-secret-t6";
 
+/// Label applied to CedarPolicy CRDs created by these tests (used for cleanup)
+const TEST_LABEL: &str = "cedar-secret";
+
 /// Test SecretProvider name (does not need to exist — Cedar checks happen before ESO)
 const TEST_PROVIDER: &str = "test-provider";
 
@@ -80,7 +83,7 @@ async fn apply_cedar_secret_permit_policy(
   resource.path like "{path_pattern}"
 }};"#,
     );
-    apply_cedar_policy_crd(kubeconfig, name, "cedar-secret", 100, &cedar).await
+    apply_cedar_policy_crd(kubeconfig, name, TEST_LABEL, 100, &cedar).await
 }
 
 /// Apply a CedarPolicy CRD that forbids AccessSecret for a path pattern
@@ -98,7 +101,7 @@ async fn apply_cedar_secret_forbid_policy(
   resource.path like "{path_pattern}"
 }};"#,
     );
-    apply_cedar_policy_crd(kubeconfig, name, "cedar-secret", 200, &cedar).await
+    apply_cedar_policy_crd(kubeconfig, name, TEST_LABEL, 200, &cedar).await
 }
 
 /// Apply a CedarPolicy CRD that permits AccessSecret scoped to a specific provider
@@ -118,10 +121,8 @@ async fn apply_cedar_secret_provider_policy(
   resource.provider == "{provider}"
 }};"#,
     );
-    apply_cedar_policy_crd(kubeconfig, name, "cedar-secret", 100, &cedar).await
+    apply_cedar_policy_crd(kubeconfig, name, TEST_LABEL, 100, &cedar).await
 }
-
-const TEST_LABEL: &str = "cedar-secret";
 
 // =============================================================================
 // Service Factory (wraps shared helper with no-keys default)

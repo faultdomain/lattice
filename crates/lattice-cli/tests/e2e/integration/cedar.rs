@@ -116,7 +116,7 @@ async fn apply_cedar_policy_allow_sa(
         sa = full_sa_name,
         cluster = cluster_name,
     );
-    apply_cedar_policy_crd(kubeconfig, policy_name, "cedar", 100, &cedar).await
+    apply_cedar_policy_crd(kubeconfig, policy_name, TEST_LABEL, 100, &cedar).await
 }
 
 /// Apply a CedarPolicy that allows a group of ServiceAccounts
@@ -135,7 +135,7 @@ pub async fn apply_cedar_policy_allow_group(
         group = group_name,
         cluster = cluster_name,
     );
-    apply_cedar_policy_crd(kubeconfig, policy_name, "cedar", 100, &cedar).await
+    apply_cedar_policy_crd(kubeconfig, policy_name, TEST_LABEL, 100, &cedar).await
 }
 
 /// Delete a CedarPolicy
@@ -347,6 +347,27 @@ pub async fn run_cedar_group_test(
     Ok(())
 }
 
+/// Delete the E2E default Cedar policy and wait for it to be gone.
+///
+/// Cedar deny tests require the default permit-all policy to be absent,
+/// otherwise denied SAs would still be allowed through.
+async fn remove_e2e_default_policy(kubeconfig: &str) -> Result<(), String> {
+    let _ = delete_cedar_policy(kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
+    wait_for_condition(
+        &format!("Cedar policy '{}' deleted", E2E_DEFAULT_POLICY_NAME),
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let kc = kubeconfig.to_string();
+            async move {
+                let exists = cedar_policy_exists(&kc, E2E_DEFAULT_POLICY_NAME).await;
+                Ok(!exists)
+            }
+        },
+    )
+    .await
+}
+
 /// Run all Cedar integration tests for a parent-child cluster pair.
 ///
 /// Main entry point for E2E tests. Each test uses its own namespace so both
@@ -366,21 +387,7 @@ pub async fn run_cedar_hierarchy_tests(
         return Ok(());
     }
 
-    // Remove default E2E policy so deny checks work correctly
-    let _ = delete_cedar_policy(&ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
-    wait_for_condition(
-        &format!("Cedar policy '{}' deleted", E2E_DEFAULT_POLICY_NAME),
-        Duration::from_secs(30),
-        Duration::from_millis(500),
-        || {
-            let kc = ctx.mgmt_kubeconfig.clone();
-            async move {
-                let exists = cedar_policy_exists(&kc, E2E_DEFAULT_POLICY_NAME).await;
-                Ok(!exists)
-            }
-        },
-    )
-    .await?;
+    remove_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
 
     let proxy_url = ctx.mgmt_proxy_url.as_deref();
     let kubeconfig = &ctx.mgmt_kubeconfig;
@@ -427,21 +434,9 @@ async fn test_cedar_sa_auth_standalone() {
     };
     let child_cluster_name = get_child_cluster_name();
 
-    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
-    wait_for_condition(
-        &format!("Cedar policy '{}' deleted", E2E_DEFAULT_POLICY_NAME),
-        Duration::from_secs(30),
-        Duration::from_millis(500),
-        || {
-            let kc = session.ctx.mgmt_kubeconfig.clone();
-            async move {
-                let exists = cedar_policy_exists(&kc, E2E_DEFAULT_POLICY_NAME).await;
-                Ok(!exists)
-            }
-        },
-    )
-    .await
-    .unwrap();
+    remove_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
+        .await
+        .unwrap();
 
     run_cedar_proxy_test(
         &session.ctx.mgmt_kubeconfig,
@@ -464,21 +459,9 @@ async fn test_cedar_group_policy_standalone() {
     };
     let child_cluster_name = get_child_cluster_name();
 
-    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
-    wait_for_condition(
-        &format!("Cedar policy '{}' deleted", E2E_DEFAULT_POLICY_NAME),
-        Duration::from_secs(30),
-        Duration::from_millis(500),
-        || {
-            let kc = session.ctx.mgmt_kubeconfig.clone();
-            async move {
-                let exists = cedar_policy_exists(&kc, E2E_DEFAULT_POLICY_NAME).await;
-                Ok(!exists)
-            }
-        },
-    )
-    .await
-    .unwrap();
+    remove_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
+        .await
+        .unwrap();
 
     run_cedar_group_test(
         &session.ctx.mgmt_kubeconfig,
