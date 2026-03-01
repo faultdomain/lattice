@@ -171,6 +171,11 @@ pub async fn compile_job(
     }
 
     // Training: label PVCs and pod templates so Velero's fs-backup can find them
+    let has_checkpoint = job
+        .spec
+        .training
+        .as_ref()
+        .is_some_and(|t| t.checkpoint.is_some());
     if job.spec.training.is_some() {
         for pvc in &mut config.pvcs {
             pvc.metadata
@@ -191,6 +196,21 @@ pub async fn compile_job(
                         "lattice.dev/training-job".to_string(),
                         serde_json::json!(name),
                     );
+                }
+
+                // Tell Velero's node-agent which volumes to fs-backup.
+                // defaultVolumesToFsBackup on the Schedule is unreliable;
+                // explicit pod annotations are the guaranteed path.
+                if has_checkpoint {
+                    let annotations = metadata
+                        .entry("annotations")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(annotations) = annotations.as_object_mut() {
+                        annotations.insert(
+                            "backup.velero.io/backup-volumes".to_string(),
+                            serde_json::json!("checkpoints"),
+                        );
+                    }
                 }
             }
         }
@@ -949,6 +969,7 @@ mod tests {
         };
 
         // Every task's pod template must carry the training-job label
+        // and the Velero backup-volumes annotation (checkpoint is configured)
         for task in &vcjob.spec.tasks {
             let label = task.template["metadata"]["labels"]["lattice.dev/training-job"]
                 .as_str()
@@ -956,6 +977,16 @@ mod tests {
             assert_eq!(
                 label, "my-train",
                 "Task '{}' pod template missing lattice.dev/training-job label",
+                task.name
+            );
+
+            let annotation = task.template["metadata"]["annotations"]
+                ["backup.velero.io/backup-volumes"]
+                .as_str()
+                .unwrap_or_default();
+            assert_eq!(
+                annotation, "checkpoints",
+                "Task '{}' pod template missing backup.velero.io/backup-volumes annotation",
                 task.name
             );
         }

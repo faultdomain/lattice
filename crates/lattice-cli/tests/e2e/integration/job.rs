@@ -24,16 +24,6 @@ const JOB_NAMESPACE: &str = "batch";
 const JOB_NAME: &str = "data-pipeline";
 const CRON_JOB_NAME: &str = "scheduled-pipeline";
 
-/// Load the batch-job fixture
-fn load_job_fixture() -> Result<lattice_common::crd::LatticeJob, String> {
-    load_fixture_config("batch-job.yaml")
-}
-
-/// Load the cron-job fixture
-fn load_cron_job_fixture() -> Result<lattice_common::crd::LatticeJob, String> {
-    load_fixture_config("cron-job.yaml")
-}
-
 /// Deploy a LatticeJob and verify the controller creates the expected resources
 async fn test_job_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[Job] Deploying LatticeJob from fixture...");
@@ -41,7 +31,7 @@ async fn test_job_deployment(kubeconfig: &str) -> Result<(), String> {
     // Ensure namespace exists before applying the job
     ensure_fresh_namespace(kubeconfig, JOB_NAMESPACE).await?;
 
-    let job = load_job_fixture()?;
+    let job: lattice_common::crd::LatticeJob = load_fixture_config("batch-job.yaml")?;
     let yaml =
         serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job fixture: {e}"))?;
     apply_yaml(kubeconfig, &yaml).await?;
@@ -313,7 +303,7 @@ async fn test_job_completion(kubeconfig: &str) -> Result<(), String> {
 async fn test_cron_job_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[CronJob] Deploying cron LatticeJob from fixture...");
 
-    let job = load_cron_job_fixture()?;
+    let job: lattice_common::crd::LatticeJob = load_fixture_config("cron-job.yaml")?;
     let yaml = serde_json::to_string(&job)
         .map_err(|e| format!("Failed to serialize cron job fixture: {e}"))?;
     apply_yaml(kubeconfig, &yaml).await?;

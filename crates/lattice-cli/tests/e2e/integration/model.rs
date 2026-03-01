@@ -33,18 +33,13 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Expected HuggingFace model ID used in model-serving fixture
 const EXPECTED_MODEL_ID: &str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
 
-/// Load the model-serving fixture
-fn load_model_fixture() -> Result<lattice_common::crd::LatticeModel, String> {
-    load_fixture_config("model-serving.yaml")
-}
-
 /// Deploy a LatticeModel and verify the controller starts reconciling
 async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Deploying LatticeModel from fixture...");
 
     ensure_fresh_namespace(kubeconfig, MODEL_NAMESPACE).await?;
 
-    let model = load_model_fixture()?;
+    let model: lattice_common::crd::LatticeModel = load_fixture_config("model-serving.yaml")?;
     let yaml = serde_json::to_string(&model)
         .map_err(|e| format!("Failed to serialize model fixture: {e}"))?;
     apply_yaml(kubeconfig, &yaml).await?;

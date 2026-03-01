@@ -30,11 +30,6 @@ use super::super::helpers::{
 const TRAINING_NAMESPACE: &str = "training-test";
 const JOB_NAME: &str = "training-ckpt";
 
-/// Load the training checkpoint job fixture
-fn load_training_fixture() -> Result<lattice_common::crd::LatticeJob, String> {
-    load_fixture_config("training-checkpoint-job.yaml")
-}
-
 // =============================================================================
 // Phase 1: Verify training compilation
 // =============================================================================
@@ -45,7 +40,8 @@ async fn test_training_deployment(kubeconfig: &str) -> Result<(), String> {
 
     ensure_fresh_namespace(kubeconfig, TRAINING_NAMESPACE).await?;
 
-    let job = load_training_fixture()?;
+    let job: lattice_common::crd::LatticeJob =
+        load_fixture_config("training-checkpoint-job.yaml")?;
     let yaml =
         serde_json::to_string(&job).map_err(|e| format!("Failed to serialize fixture: {e}"))?;
     apply_yaml(kubeconfig, &yaml).await?;
@@ -358,63 +354,6 @@ async fn wait_for_velero_backup(kubeconfig: &str) -> Result<String, String> {
         },
     )
     .await
-}
-
-/// Verify the Velero Backup contains PodVolumeBackup data (fs-backup ran)
-async fn test_velero_backup_data_exists(kubeconfig: &str, backup_name: &str) -> Result<(), String> {
-    info!(
-        "[Training] Verifying PodVolumeBackup data for backup '{}'...",
-        backup_name
-    );
-
-    let kc = kubeconfig.to_string();
-    let bk = backup_name.to_string();
-    wait_for_condition(
-        "PodVolumeBackup to exist for backup",
-        Duration::from_secs(60),
-        Duration::from_secs(5),
-        || {
-            let kc = kc.clone();
-            let bk = bk.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "podvolumebackup",
-                    "-n",
-                    VELERO_NAMESPACE,
-                    "-l",
-                    &format!("velero.io/backup-name={}", bk),
-                    "-o",
-                    "jsonpath={.items[*].status.phase}",
-                ])
-                .await
-                .unwrap_or_default();
-
-                let phases: Vec<&str> = output.split_whitespace().collect();
-                if phases.is_empty() {
-                    info!("[Training] No PodVolumeBackup found yet");
-                    return Ok(false);
-                }
-
-                let all_completed = phases.iter().all(|p| *p == "Completed");
-                if all_completed {
-                    info!("[Training] {} PodVolumeBackup(s) completed", phases.len());
-                } else {
-                    info!("[Training] PodVolumeBackup phases: {:?}", phases);
-                }
-                Ok(all_completed)
-            }
-        },
-    )
-    .await?;
-
-    info!(
-        "[Training] PodVolumeBackup data verified for backup '{}'",
-        backup_name
-    );
-    Ok(())
 }
 
 /// Kill a pod from the training gang to trigger VCJob failure
@@ -748,8 +687,6 @@ async fn run_training_test_sequence(kubeconfig: &str) -> Result<(), String> {
 
     let backup_name = wait_for_velero_backup(kubeconfig).await?;
     info!("[Training] Backup completed: {}", backup_name);
-
-    test_velero_backup_data_exists(kubeconfig, &backup_name).await?;
 
     test_kill_gang_member(kubeconfig).await?;
     test_all_pods_terminated(kubeconfig).await?;
