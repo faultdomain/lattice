@@ -87,6 +87,12 @@ pub fn pod_template_to_json(
             serde_json::to_value(&pt.image_pull_secrets).unwrap_or_default(),
         );
     }
+    if let Some(ref affinity) = pt.affinity {
+        spec_obj.insert(
+            "affinity".to_string(),
+            serde_json::to_value(affinity).unwrap_or_default(),
+        );
+    }
 
     Ok(serde_json::json!({
         "metadata": {

@@ -369,6 +369,22 @@ impl<'a> WorkloadCompiler<'a> {
             )?;
         }
 
+        // Collect shared volume IDs for pod co-location scheduling.
+        // Owners get labels (lattice.io/vol-<id>), consumers get pod affinity matching those labels.
+        let owned_volume_ids: Vec<String> = self
+            .workload
+            .owned_volume_ids()
+            .iter()
+            .map(|(_, vol_id)| vol_id.to_string())
+            .collect();
+
+        let referenced_volume_ids: Vec<String> = self
+            .workload
+            .referenced_volume_ids()
+            .iter()
+            .map(|(_, vol_id)| vol_id.to_string())
+            .collect();
+
         // Compile pod template
         let container_data = ContainerCompilationData {
             secret_refs: &compiled_secrets.secret_refs,
@@ -386,6 +402,8 @@ impl<'a> WorkloadCompiler<'a> {
             self.provider_type,
             &container_data,
             self.has_topology,
+            &owned_volume_ids,
+            &referenced_volume_ids,
         )?;
 
         // Assemble config and compute hash

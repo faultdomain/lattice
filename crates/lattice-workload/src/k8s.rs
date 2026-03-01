@@ -635,6 +635,38 @@ impl VolumeMount {
 }
 
 // =============================================================================
+// Affinity
+// =============================================================================
+
+/// Pod affinity specification for co-locating pods
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Affinity {
+    /// Pod affinity rules
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_affinity: Option<PodAffinity>,
+}
+
+/// Pod affinity rules
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PodAffinity {
+    /// Required pod affinity terms (hard constraint)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_during_scheduling_ignored_during_execution: Vec<PodAffinityTerm>,
+}
+
+/// A pod affinity term matching pods by label selector on a topology domain
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PodAffinityTerm {
+    /// Label selector to match pods
+    pub label_selector: LabelSelector,
+    /// Topology key (e.g., kubernetes.io/hostname)
+    pub topology_key: String,
+}
+
+// =============================================================================
 // Scheduling
 // =============================================================================
 

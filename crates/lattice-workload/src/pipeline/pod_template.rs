@@ -12,9 +12,9 @@ use crate::error::CompilationError;
 use crate::helpers::ContainerCompilationData;
 use crate::helpers::{gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources};
 use crate::k8s::{
-    AppArmorProfile, Capabilities, Container, ContainerPort, EnvVar, K8sSecurityContext,
-    LabelSelector, LocalObjectReference, PodSecurityContext, ResourceRequirements, SeccompProfile,
-    Sysctl, TopologySpreadConstraint, Volume,
+    Affinity, AppArmorProfile, Capabilities, Container, ContainerPort, EnvVar, K8sSecurityContext,
+    LabelSelector, LocalObjectReference, PodAffinity, PodAffinityTerm, PodSecurityContext,
+    ResourceRequirements, SeccompProfile, Sysctl, TopologySpreadConstraint, Volume,
 };
 use crate::pipeline::secrets::SecretRef;
 use crate::pipeline::volumes::GeneratedVolumes;
@@ -41,6 +41,8 @@ pub struct CompiledPodTemplate {
     pub image_pull_secrets: Vec<LocalObjectReference>,
     /// Scheduler name — set to "volcano" for GPU or topology-aware workloads
     pub scheduler_name: Option<String>,
+    /// Pod affinity for shared volume co-location
+    pub affinity: Option<Affinity>,
 }
 
 /// Shared pod template compiler.
@@ -67,6 +69,8 @@ impl PodTemplateCompiler {
         provider_type: ProviderType,
         container_data: &ContainerCompilationData<'_>,
         has_topology: bool,
+        owned_volume_ids: &[String],
+        referenced_volume_ids: &[String],
     ) -> Result<CompiledPodTemplate, CompilationError> {
         // Extract GPU params from resources (find the `type: gpu` resource)
         let gpu = Self::extract_gpu(workload);
@@ -90,6 +94,14 @@ impl PodTemplateCompiler {
             lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
         );
 
+        // Add volume ownership labels for shared volume co-location
+        for vol_id in owned_volume_ids {
+            labels.insert(
+                format!("{}{}", lattice_common::LABEL_VOLUME_PREFIX, vol_id),
+                "true".to_string(),
+            );
+        }
+
         // Build pod volumes from PVCs and emptyDir
         let mut pod_volumes: Vec<Volume> = volumes.volumes.clone();
 
@@ -112,6 +124,36 @@ impl PodTemplateCompiler {
         // Resolve imagePullSecrets from spec resource names to K8s Secret names
         let image_pull_secrets =
             Self::compile_image_pull_secrets(runtime, workload, container_data.secret_refs)?;
+
+        // Build pod affinity for shared volume co-location.
+        // Consumers match the volume ownership label (lattice.io/vol-<id>: true)
+        // on the owner's pods, forcing co-location on the same node.
+        let affinity = if referenced_volume_ids.is_empty() {
+            None
+        } else {
+            Some(Affinity {
+                pod_affinity: Some(PodAffinity {
+                    required_during_scheduling_ignored_during_execution: referenced_volume_ids
+                        .iter()
+                        .map(|vol_id| PodAffinityTerm {
+                            label_selector: LabelSelector {
+                                match_labels: [(
+                                    format!(
+                                        "{}{}",
+                                        lattice_common::LABEL_VOLUME_PREFIX,
+                                        vol_id
+                                    ),
+                                    "true".to_string(),
+                                )]
+                                .into_iter()
+                                .collect(),
+                            },
+                            topology_key: "kubernetes.io/hostname".to_string(),
+                        })
+                        .collect(),
+                }),
+            })
+        };
 
         Ok(CompiledPodTemplate {
             containers,
@@ -144,6 +186,7 @@ impl PodTemplateCompiler {
             } else {
                 None
             },
+            affinity,
         })
     }
 

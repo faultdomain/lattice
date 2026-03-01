@@ -317,6 +317,8 @@ pub const LABEL_NAME: &str = "app.kubernetes.io/name";
 pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 /// Standard managed-by label value for Lattice-managed resources
 pub const LABEL_MANAGED_BY_LATTICE: &str = "lattice";
+/// Label prefix for shared volume co-location (e.g., lattice.io/vol-media-storage)
+pub const LABEL_VOLUME_PREFIX: &str = "lattice.io/vol-";
 
 // Cilium label selectors (use k8s: prefix for Kubernetes labels)
 /// Cilium selector for app name label

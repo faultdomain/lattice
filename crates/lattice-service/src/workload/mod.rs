@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use lattice_common::kube_utils::{HasApiResource, ObjectMeta};
 use lattice_workload::k8s::{
-    Container, LabelSelector, LocalObjectReference, PodSecurityContext, SchedulingGate,
+    Affinity, Container, LabelSelector, LocalObjectReference, PodSecurityContext, SchedulingGate,
     TopologySpreadConstraint, Volume,
 };
 use lattice_workload::{CompilationError, CompiledPodTemplate};
@@ -147,6 +147,9 @@ pub struct PodSpec {
     /// Scheduler name (e.g., "volcano" for GPU workloads using Volcano vGPU)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler_name: Option<String>,
+    /// Pod affinity for shared volume co-location
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affinity: Option<Affinity>,
 }
 
 // =============================================================================
@@ -482,6 +485,7 @@ impl WorkloadCompiler {
                         scheduling_gates: pod_template.scheduling_gates,
                         image_pull_secrets: pod_template.image_pull_secrets,
                         scheduler_name: pod_template.scheduler_name,
+                        affinity: pod_template.affinity,
                     },
                 },
                 strategy,

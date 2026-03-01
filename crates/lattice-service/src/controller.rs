@@ -308,25 +308,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         let layer1_count = layer1.run("infrastructure").await?;
 
-        // ── Check: PVC node conflicts ──
-        // With local-path storage, bound PVCs pin to specific nodes. If stale
-        // PVCs from a previous deployment are on different nodes, the pod can
-        // never be scheduled. Detect this early instead of hanging forever.
-        if let Some(deployment) = &compiled.workloads.deployment {
-            let pvc_names: Vec<String> = deployment
-                .spec
-                .template
-                .spec
-                .volumes
-                .iter()
-                .filter_map(|v| v.persistent_volume_claim.as_ref())
-                .map(|pvc| pvc.claim_name.clone())
-                .collect();
-            if !pvc_names.is_empty() {
-                check_pvc_node_conflicts(&self.client, namespace, &pvc_names).await?;
-            }
-        }
-
         // ── Wait: imagePullSecrets must exist before the Deployment ──
         // ESO syncs K8s Secrets from the ExternalSecrets applied above.
         // On subsequent reconciles the secrets already exist so this is instant.
@@ -571,121 +552,6 @@ impl ServiceKubeClientImpl {
 // =============================================================================
 // PVC node conflict detection
 // =============================================================================
-
-/// Check that all bound PVCs are co-located on the same node.
-///
-/// With local-path storage, each PV is pinned to one node via node affinity.
-/// If a previous deployment left stale PVCs bound to different nodes, the
-/// scheduler cannot satisfy all volume constraints and pods stay `Pending`
-/// forever with a cryptic "volume node affinity conflict" message.
-///
-/// This check runs after Layer 1 (PVCs applied) and before Layer 2
-/// (Deployment created) so the service fails fast with an actionable error.
-async fn check_pvc_node_conflicts(
-    client: &Client,
-    namespace: &str,
-    pvc_claim_names: &[String],
-) -> Result<(), Error> {
-    use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim};
-
-    if pvc_claim_names.len() < 2 {
-        return Ok(());
-    }
-
-    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), namespace);
-    let pv_api: Api<PersistentVolume> = Api::all(client.clone());
-
-    let mut bindings: Vec<(String, Option<String>)> = Vec::new();
-
-    for claim_name in pvc_claim_names {
-        let pvc = match pvc_api.get_opt(claim_name).await? {
-            Some(pvc) => pvc,
-            None => continue, // PVC doesn't exist yet, scheduler will handle it
-        };
-
-        // Skip unbound PVCs — only bound PVCs have a committed node
-        let phase = pvc
-            .status
-            .as_ref()
-            .and_then(|s| s.phase.as_deref())
-            .unwrap_or("");
-        if phase != "Bound" {
-            bindings.push((claim_name.clone(), None));
-            continue;
-        }
-
-        let pv_name = match pvc.spec.as_ref().and_then(|s| s.volume_name.as_deref()) {
-            Some(name) => name.to_string(),
-            None => {
-                bindings.push((claim_name.clone(), None));
-                continue;
-            }
-        };
-
-        let node = match pv_api.get_opt(&pv_name).await? {
-            Some(pv) => extract_pv_node_hostname(&pv),
-            None => None,
-        };
-
-        bindings.push((claim_name.clone(), node));
-    }
-
-    detect_pvc_node_conflict(&bindings)
-}
-
-/// Pure conflict detection: given (pvc_name, optional_node) bindings, fail if
-/// bound PVCs are on more than one distinct node.
-fn detect_pvc_node_conflict(bindings: &[(String, Option<String>)]) -> Result<(), Error> {
-    use std::collections::{HashMap, HashSet};
-
-    let bound: HashMap<&str, &str> = bindings
-        .iter()
-        .filter_map(|(name, node)| node.as_deref().map(|n| (name.as_str(), n)))
-        .collect();
-
-    let distinct_nodes: HashSet<&str> = bound.values().copied().collect();
-
-    if distinct_nodes.len() > 1 {
-        let mut details: Vec<String> = bound
-            .iter()
-            .map(|(pvc, node)| format!("{pvc} bound to {node}"))
-            .collect();
-        details.sort(); // deterministic output
-        return Err(Error::internal_with_context(
-            "check_pvc_node_conflicts",
-            format!(
-                "PVC node conflict: {}. Delete conflicting PVCs to allow fresh co-location.",
-                details.join(", ")
-            ),
-        ));
-    }
-
-    Ok(())
-}
-
-/// Extract the hostname from a PersistentVolume's node affinity.
-///
-/// Looks for `kubernetes.io/hostname` in
-/// `spec.nodeAffinity.required.nodeSelectorTerms[].matchExpressions`.
-fn extract_pv_node_hostname(pv: &k8s_openapi::api::core::v1::PersistentVolume) -> Option<String> {
-    let required = pv
-        .spec
-        .as_ref()?
-        .node_affinity
-        .as_ref()?
-        .required
-        .as_ref()?;
-    for term in &required.node_selector_terms {
-        for expr in term.match_expressions.as_deref().unwrap_or_default() {
-            if expr.key == "kubernetes.io/hostname" {
-                if let Some(values) = &expr.values {
-                    return values.first().cloned();
-                }
-            }
-        }
-    }
-    None
-}
 
 // =============================================================================
 // Controller context
@@ -1111,23 +977,17 @@ async fn compile_and_apply(
         .await
     {
         let msg = e.to_string();
-        let is_volume_conflict = e.context() == Some("check_pvc_node_conflicts");
         if !status_check::is_status_unchanged(
             service.status.as_ref(),
             &ServicePhase::Failed,
             Some(&msg),
             service.metadata.generation,
         ) {
-            let event_reason = if is_volume_conflict {
-                reasons::VOLUME_NODE_CONFLICT
-            } else {
-                reasons::COMPILATION_FAILED
-            };
             ctx.events
                 .publish(
                     &service.object_ref(&()),
                     EventType::Warning,
-                    event_reason,
+                    reasons::COMPILATION_FAILED,
                     actions::COMPILE,
                     Some(msg.clone()),
                 )
@@ -2026,110 +1886,5 @@ mod tests {
             Action::requeue(REQUEUE_READY),
             "service should reach Ready even when orphan cleanup fails"
         );
-    }
-
-    // =========================================================================
-    // PVC Node Conflict Detection Tests
-    // =========================================================================
-
-    #[test]
-    fn pvc_node_conflict_no_bindings() {
-        let bindings: Vec<(String, Option<String>)> = vec![];
-        assert!(detect_pvc_node_conflict(&bindings).is_ok());
-    }
-
-    #[test]
-    fn pvc_node_conflict_all_same_node() {
-        let bindings = vec![
-            ("config".to_string(), Some("node-a".to_string())),
-            ("data".to_string(), Some("node-a".to_string())),
-            ("cache".to_string(), Some("node-a".to_string())),
-        ];
-        assert!(detect_pvc_node_conflict(&bindings).is_ok());
-    }
-
-    #[test]
-    fn pvc_node_conflict_unbound_skipped() {
-        let bindings = vec![
-            ("config".to_string(), None),
-            ("data".to_string(), None),
-        ];
-        assert!(detect_pvc_node_conflict(&bindings).is_ok());
-    }
-
-    #[test]
-    fn pvc_node_conflict_different_nodes() {
-        let bindings = vec![
-            ("config".to_string(), Some("node-a".to_string())),
-            ("media".to_string(), Some("node-c".to_string())),
-        ];
-        let err = detect_pvc_node_conflict(&bindings).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("PVC node conflict"), "got: {msg}");
-        assert!(msg.contains("config bound to node-a"), "got: {msg}");
-        assert!(msg.contains("media bound to node-c"), "got: {msg}");
-        assert!(msg.contains("Delete conflicting PVCs"), "got: {msg}");
-    }
-
-    #[test]
-    fn pvc_node_conflict_mixed_bound_unbound_same_node() {
-        let bindings = vec![
-            ("config".to_string(), Some("node-a".to_string())),
-            ("cache".to_string(), None), // unbound, ignored
-            ("data".to_string(), Some("node-a".to_string())),
-        ];
-        assert!(detect_pvc_node_conflict(&bindings).is_ok());
-    }
-
-    #[test]
-    fn pvc_node_conflict_single_bound_always_ok() {
-        let bindings = vec![
-            ("config".to_string(), Some("node-a".to_string())),
-            ("cache".to_string(), None),
-        ];
-        assert!(detect_pvc_node_conflict(&bindings).is_ok());
-    }
-
-    #[test]
-    fn extract_pv_node_hostname_parses_local_path() {
-        use k8s_openapi::api::core::v1::{
-            NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, PersistentVolume,
-            PersistentVolumeSpec, VolumeNodeAffinity,
-        };
-
-        let pv = PersistentVolume {
-            spec: Some(PersistentVolumeSpec {
-                node_affinity: Some(VolumeNodeAffinity {
-                    required: Some(NodeSelector {
-                        node_selector_terms: vec![NodeSelectorTerm {
-                            match_expressions: Some(vec![NodeSelectorRequirement {
-                                key: "kubernetes.io/hostname".to_string(),
-                                operator: "In".to_string(),
-                                values: Some(vec!["worker-2".to_string()]),
-                            }]),
-                            ..Default::default()
-                        }],
-                    }),
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            extract_pv_node_hostname(&pv),
-            Some("worker-2".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_pv_node_hostname_returns_none_without_affinity() {
-        use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeSpec};
-
-        let pv = PersistentVolume {
-            spec: Some(PersistentVolumeSpec::default()),
-            ..Default::default()
-        };
-        assert_eq!(extract_pv_node_hostname(&pv), None);
     }
 }
