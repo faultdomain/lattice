@@ -33,6 +33,20 @@ pub fn compile_vcjob(
         .min_available
         .or_else(|| Some(job.spec.tasks.values().map(|t| t.replicas).sum()));
 
+    // Training jobs enable the `svc` plugin so Volcano creates a headless
+    // Service and sets hostname/subdomain on each pod for per-pod DNS
+    // (e.g. `job-master-0.job.ns.svc.cluster.local`). Without `svc`,
+    // only the service-level DNS record exists and MASTER_ADDR can't resolve.
+    // `--publish-not-ready-addresses` is required because pods need to
+    // discover each other before becoming ready (init_process_group blocks).
+    let mut plugins = BTreeMap::from([("env".to_string(), vec![])]);
+    if job.spec.training.is_some() {
+        plugins.insert(
+            "svc".to_string(),
+            vec!["--publish-not-ready-addresses".to_string()],
+        );
+    }
+
     VCJob {
         api_version: "batch.volcano.sh/v1alpha1".to_string(),
         kind: "Job".to_string(),
@@ -63,7 +77,7 @@ pub fn compile_vcjob(
             priority_class_name: job.spec.priority_class_name.clone(),
             tasks,
             policies: default_policies(job.spec.max_retry),
-            plugins: BTreeMap::from([("env".to_string(), vec![])]),
+            plugins,
             network_topology: job
                 .spec
                 .topology

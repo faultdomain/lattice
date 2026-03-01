@@ -52,8 +52,6 @@ pub struct CompiledJob {
     pub mesh_members: Vec<LatticeMeshMember>,
     /// Tetragon TracingPolicyNamespaced resources — per-task runtime enforcement
     pub tracing_policies: Vec<TracingPolicyNamespaced>,
-    /// Headless K8s Service for training pod DNS resolution (training jobs only)
-    pub headless_service: Option<serde_json::Value>,
 }
 
 /// Compile a LatticeJob into Kubernetes resources.
@@ -194,15 +192,9 @@ pub async fn compile_job(
         }
     }
 
-    // Training: compile headless service for pod DNS resolution
-    let uid = job.metadata.uid.as_deref().unwrap_or_default();
-    let headless_service = job
-        .spec
-        .training
-        .as_ref()
-        .map(|_| compile_headless_service(name, namespace, uid));
-
-    // Build VCJob from aggregated pod templates, then wrap in VCCronJob if scheduled
+    // Build VCJob from aggregated pod templates, then wrap in VCCronJob if scheduled.
+    // For training jobs, the Volcano `svc` plugin creates the headless Service
+    // and sets hostname/subdomain on each pod — no manual service needed.
     let vcjob = lattice_volcano::compile_vcjob(job, &pod_templates);
     let workload = if job.spec.is_cron() {
         VolcanoWorkload::CronJob(lattice_volcano::compile_vccronjob(job, vcjob))
@@ -215,7 +207,6 @@ pub async fn compile_job(
         config,
         mesh_members,
         tracing_policies,
-        headless_service,
     })
 }
 
@@ -582,38 +573,6 @@ fn nccl_defaults_for_gpu(model: &str) -> Vec<(&'static str, String)> {
     }
 }
 
-/// Compile a headless K8s Service for training pod DNS resolution.
-fn compile_headless_service(name: &str, namespace: &str, owner_uid: &str) -> serde_json::Value {
-    serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Service",
-        "metadata": {
-            "name": name,
-            "namespace": namespace,
-            "labels": {
-                "app.kubernetes.io/managed-by": "lattice",
-                "app.kubernetes.io/name": name,
-                "lattice.dev/training-job": name
-            },
-            "ownerReferences": [{
-                "apiVersion": "lattice.dev/v1alpha1",
-                "kind": "LatticeJob",
-                "name": name,
-                "uid": owner_uid,
-                "controller": true,
-                "blockOwnerDeletion": true
-            }]
-        },
-        "spec": {
-            "clusterIP": "None",
-            "selector": {
-                "volcano.sh/job-name": name
-            },
-            "publishNotReadyAddresses": true
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,7 +662,6 @@ mod tests {
         assert_eq!(vcjob.spec.tasks[0].name, "worker");
         assert_eq!(vcjob.spec.tasks[0].replicas, 2);
         assert!(compiled.tracing_policies.is_empty());
-        assert!(compiled.headless_service.is_none());
     }
 
     #[tokio::test]
@@ -946,17 +904,66 @@ mod tests {
         );
     }
 
-    #[test]
-    fn headless_service_structure() {
-        let svc = compile_headless_service("my-training", "gpu-ns", "uid-abc");
-        assert_eq!(svc["spec"]["clusterIP"], "None");
-        assert_eq!(
-            svc["spec"]["selector"]["volcano.sh/job-name"],
-            "my-training"
+    #[tokio::test]
+    async fn training_job_enables_svc_plugin() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
+
+        let spec = LatticeJobSpec {
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "master".to_string(),
+                checkpoint: None,
+                nccl: None,
+            }),
+            tasks,
+            ..Default::default()
+        };
+        let mut job = LatticeJob::new("my-train", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("uid-svc".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        let vcjob = match &compiled.workload {
+            VolcanoWorkload::Job(v) => v,
+            VolcanoWorkload::CronJob(_) => panic!("expected VCJob"),
+        };
+
+        // svc plugin creates headless service + sets hostname/subdomain per pod
+        assert!(vcjob.spec.plugins.contains_key("svc"));
+        let svc_args = &vcjob.spec.plugins["svc"];
+        assert!(
+            svc_args.iter().any(|a| a.contains("publish-not-ready-addresses")),
+            "svc plugin must enable publishNotReadyAddresses for training pods"
         );
-        assert_eq!(svc["spec"]["publishNotReadyAddresses"], true);
-        assert_eq!(svc["metadata"]["namespace"], "gpu-ns");
-        assert_eq!(svc["metadata"]["ownerReferences"][0]["kind"], "LatticeJob");
+    }
+
+    #[tokio::test]
+    async fn non_training_job_omits_svc_plugin() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), make_task("worker:latest", 2));
+
+        let job = make_job(tasks);
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        let vcjob = match &compiled.workload {
+            VolcanoWorkload::Job(v) => v,
+            VolcanoWorkload::CronJob(_) => panic!("expected VCJob"),
+        };
+
+        assert!(!vcjob.spec.plugins.contains_key("svc"));
     }
 
     #[tokio::test]

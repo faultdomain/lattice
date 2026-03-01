@@ -395,12 +395,11 @@ async fn apply_layers(
 
     lattice_common::kube_utils::ensure_namespace(client, namespace, None, FIELD_MANAGER).await?;
 
-    // Layer 1: Infrastructure (config, mesh, security, service accounts, headless svc)
+    // Layer 1: Infrastructure (config, mesh, security, service accounts)
     let cm_ar = ApiResource::erase::<k8s_openapi::api::core::v1::ConfigMap>(&());
     let secret_ar = ApiResource::erase::<k8s_openapi::api::core::v1::Secret>(&());
     let pvc_ar = ApiResource::erase::<k8s_openapi::api::core::v1::PersistentVolumeClaim>(&());
     let sa_ar = ApiResource::erase::<k8s_openapi::api::core::v1::ServiceAccount>(&());
-    let svc_ar = ApiResource::erase::<k8s_openapi::api::core::v1::Service>(&());
 
     let mut layer1 = ApplyBatch::new(client.clone(), namespace, &params);
 
@@ -453,11 +452,6 @@ async fn apply_layers(
         |tp| &tp.metadata.name,
     )?;
 
-    if let Some(ref headless) = compiled.headless_service {
-        let svc_name = headless["metadata"]["name"].as_str().unwrap_or("unknown");
-        layer1.push("Service", svc_name, headless, &svc_ar)?;
-    }
-
     layer1.run("layer-1-infrastructure").await?;
 
     // Layer 2: Volcano workload (VCJob or VCCronJob, after mesh/security is ready)
@@ -479,7 +473,6 @@ async fn apply_layers(
         workload = %workload_name,
         mesh_members = compiled.mesh_members.len(),
         tracing_policies = compiled.tracing_policies.len(),
-        has_headless_service = compiled.headless_service.is_some(),
         "applied compiled job resources"
     );
 
