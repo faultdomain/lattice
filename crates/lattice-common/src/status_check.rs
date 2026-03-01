@@ -5,9 +5,9 @@
 //! stamps a fresh `lastTransitionTime`), so controllers must skip no-op updates.
 
 use crate::crd::{
-    CloudProviderPhase, CloudProviderStatus, JobPhase, LatticeJobStatus, LatticeMeshMemberStatus,
-    LatticeModelStatus, LatticeServiceStatus, MeshMemberPhase, ModelServingPhase,
-    SecretProviderPhase, SecretProviderStatus, ServicePhase,
+    CloudProviderPhase, CloudProviderStatus, JobPhase, LatticeJobStatus,
+    LatticeMeshMemberStatus, LatticeModelStatus, LatticeServiceStatus,
+    MeshMemberPhase, ModelServingPhase, SecretProviderPhase, SecretProviderStatus, ServicePhase,
 };
 
 /// Trait for CRD status structs that carry phase, message, and observed generation.

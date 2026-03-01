@@ -5,6 +5,10 @@
 //!
 //! When `spec.schedule` is set, the controller compiles a VCCronJob (recurring)
 //! instead of a bare VCJob (one-shot).
+//!
+//! When `spec.training` is set, the compiler injects framework-specific env vars
+//! (MASTER_ADDR, WORLD_SIZE, NCCL), creates a headless Service for pod DNS, and
+//! optionally configures Velero-based checkpoint snapshots for fault tolerance.
 
 use std::collections::BTreeMap;
 
@@ -28,6 +32,8 @@ pub enum JobPhase {
     Pending,
     /// Job is actively running
     Running,
+    /// Restarting from a Velero checkpoint snapshot after failure
+    Recovering,
     /// Job completed successfully
     Succeeded,
     /// Job has encountered an error
@@ -39,6 +45,7 @@ impl std::fmt::Display for JobPhase {
         match self {
             Self::Pending => write!(f, "Pending"),
             Self::Running => write!(f, "Running"),
+            Self::Recovering => write!(f, "Recovering"),
             Self::Succeeded => write!(f, "Succeeded"),
             Self::Failed => write!(f, "Failed"),
         }
@@ -207,6 +214,12 @@ pub struct LatticeJobSpec {
     /// Job tasks — each maps to a Volcano VCJob task with its own pod template
     #[serde(default)]
     pub tasks: BTreeMap<String, JobTaskSpec>,
+
+    /// Distributed training configuration. When set, the compiler injects
+    /// framework-specific env vars, NCCL tuning, headless Service for pod DNS,
+    /// and Velero-based checkpoint snapshots for fault tolerance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training: Option<TrainingConfig>,
 }
 
 impl Default for LatticeJobSpec {
@@ -225,6 +238,7 @@ impl Default for LatticeJobSpec {
             starting_deadline_seconds: None,
             topology: None,
             tasks: BTreeMap::new(),
+            training: None,
         }
     }
 }
@@ -254,6 +268,184 @@ pub struct LatticeJobStatus {
     /// Generation of the spec that was last reconciled
     #[serde(default)]
     pub observed_generation: Option<i64>,
+
+    /// Timestamp when the job started (training jobs only)
+    #[serde(default)]
+    pub start_time: Option<String>,
+
+    /// Timestamp when the job completed (training jobs only)
+    #[serde(default)]
+    pub completion_time: Option<String>,
+
+    /// Number of checkpoint recovery attempts so far (training jobs only)
+    #[serde(default)]
+    pub retry_count: u32,
+
+    /// Sub-phase within Recovering, tracking stop-the-world checkpoint restore progress
+    #[serde(default)]
+    pub recovery_phase: Option<RecoveryPhase>,
+}
+
+/// Sub-phases of the Recovering state for training checkpoint restore.
+///
+/// Tracks progress through the stop-the-world recovery flow:
+/// DeletingResources → WaitingForRestore → Restarting
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub enum RecoveryPhase {
+    /// VCJob and checkpoint PVCs are being deleted
+    DeletingResources,
+    /// Velero Restore CR has been created, waiting for completion
+    WaitingForRestore,
+    /// Restore complete, VCJob is being re-applied
+    Restarting,
+}
+
+// =============================================================================
+// Training
+// =============================================================================
+
+/// Supported distributed training frameworks
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[non_exhaustive]
+pub enum TrainingFramework {
+    /// PyTorch Distributed Data Parallel (torchrun / torch.distributed.launch)
+    #[default]
+    PyTorch,
+    /// DeepSpeed (deepspeed launcher)
+    DeepSpeed,
+    /// JAX distributed (jax.distributed)
+    Jax,
+}
+
+impl std::fmt::Display for TrainingFramework {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PyTorch => write!(f, "PyTorch"),
+            Self::DeepSpeed => write!(f, "DeepSpeed"),
+            Self::Jax => write!(f, "Jax"),
+        }
+    }
+}
+
+/// Distributed training configuration for a LatticeJob.
+///
+/// When set on a LatticeJob, the compiler injects framework-specific env vars
+/// (MASTER_ADDR, WORLD_SIZE, NCCL tuning), creates a headless Service for pod
+/// DNS resolution, and optionally sets up Velero-based checkpoint snapshots.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingConfig {
+    /// Training framework. Determines env vars and rendezvous method.
+    #[serde(default)]
+    pub framework: TrainingFramework,
+
+    /// Checkpoint configuration. When set, a PVC is mounted on all tasks and
+    /// a Velero Schedule periodically snapshots it. On failure the controller
+    /// performs stop-the-world recovery: tear down → Velero Restore → restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CheckpointSpec>,
+
+    /// Elastic scaling bounds. If omitted, job runs with fixed replica counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elastic: Option<ElasticSpec>,
+
+    /// NCCL tuning overrides. Auto-configured by default based on GPU model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nccl: Option<NcclConfig>,
+}
+
+/// Velero-backed checkpoint configuration for training fault tolerance.
+///
+/// The controller creates a PVC mounted at `local_path` (default: `/checkpoints`)
+/// on all training tasks. User code writes checkpoints to this path. A Velero
+/// Schedule periodically snapshots the PVC. On failure, the controller tears
+/// down the job, creates a Velero Restore from the latest snapshot, waits for
+/// completion, and restarts the job.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointSpec {
+    /// Cron expression for Velero snapshot frequency (e.g., "*/30 * * * *" for every 30m)
+    pub interval: String,
+
+    /// Local path inside containers where checkpoints are written (default: "/checkpoints")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+
+    /// PVC size for checkpoint storage (default: "50Gi")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_size: Option<String>,
+
+    /// Storage class for the checkpoint PVC
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_class: Option<String>,
+
+    /// Velero BackupStorageLocation name. If omitted, uses Velero's default BSL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_store: Option<String>,
+
+    /// TTL for Velero backups (default: "72h")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+impl CheckpointSpec {
+    /// Returns the local mount path, defaulting to "/checkpoints".
+    pub fn effective_local_path(&self) -> &str {
+        self.local_path.as_deref().unwrap_or("/checkpoints")
+    }
+
+    /// Returns the PVC size, defaulting to "50Gi".
+    pub fn effective_volume_size(&self) -> &str {
+        self.volume_size.as_deref().unwrap_or("50Gi")
+    }
+
+    /// Returns the Velero backup TTL, defaulting to "72h".
+    pub fn effective_ttl(&self) -> &str {
+        self.ttl.as_deref().unwrap_or("72h")
+    }
+}
+
+/// Elastic scaling bounds for dynamic worker count adjustment.
+///
+/// When set, the controller manages worker count between min and max
+/// based on GPU availability in the Volcano queue.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ElasticSpec {
+    /// Minimum number of workers (job pauses below this)
+    pub min_workers: u32,
+
+    /// Maximum number of workers (job won't scale beyond this)
+    pub max_workers: u32,
+
+    /// How long to wait for new workers before continuing without them (default: "5m")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_timeout: Option<String>,
+}
+
+/// NCCL tuning overrides. Auto-configured by default based on GPU model.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NcclConfig {
+    /// Network interface for NCCL traffic. Auto-detected if omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_if: Option<String>,
+
+    /// IB/RDMA HCA device. Auto-detected from NFD labels if omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ib_hca: Option<String>,
+
+    /// Enable GDR (GPU Direct RDMA). Default: true if InfiniBand detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gdr: Option<bool>,
+
+    /// NCCL debug level (default: "WARN")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<String>,
+
+    /// Additional NCCL env vars (NCCL_ALGO, NCCL_PROTO, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env: Option<BTreeMap<String, String>>,
 }
 
 // =============================================================================
@@ -375,5 +567,148 @@ mod tests {
         assert_eq!(value["successfulJobsHistoryLimit"], 5);
         assert_eq!(value["failedJobsHistoryLimit"], 2);
         assert_eq!(value["startingDeadlineSeconds"], 300);
+    }
+
+    #[test]
+    fn recovering_phase_display() {
+        assert_eq!(JobPhase::Recovering.to_string(), "Recovering");
+    }
+
+    #[test]
+    fn framework_display() {
+        assert_eq!(TrainingFramework::PyTorch.to_string(), "PyTorch");
+        assert_eq!(TrainingFramework::DeepSpeed.to_string(), "DeepSpeed");
+        assert_eq!(TrainingFramework::Jax.to_string(), "Jax");
+    }
+
+    #[test]
+    fn checkpoint_spec_defaults() {
+        let ckpt = CheckpointSpec {
+            interval: "*/30 * * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+            ttl: None,
+        };
+        assert_eq!(ckpt.effective_local_path(), "/checkpoints");
+        assert_eq!(ckpt.effective_volume_size(), "50Gi");
+        assert_eq!(ckpt.effective_ttl(), "72h");
+    }
+
+    #[test]
+    fn checkpoint_spec_overrides() {
+        let ckpt = CheckpointSpec {
+            interval: "0 * * * *".to_string(),
+            local_path: Some("/data/checkpoints".to_string()),
+            volume_size: Some("100Gi".to_string()),
+            storage_class: Some("ssd".to_string()),
+            backup_store: Some("my-bsl".to_string()),
+            ttl: Some("168h".to_string()),
+        };
+        assert_eq!(ckpt.effective_local_path(), "/data/checkpoints");
+        assert_eq!(ckpt.effective_volume_size(), "100Gi");
+        assert_eq!(ckpt.effective_ttl(), "168h");
+    }
+
+    #[test]
+    fn elastic_spec_serializes() {
+        let elastic = ElasticSpec {
+            min_workers: 2,
+            max_workers: 8,
+            scale_timeout: Some("10m".to_string()),
+        };
+        let json = serde_json::to_string(&elastic).unwrap();
+        let de: ElasticSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(elastic, de);
+    }
+
+    #[test]
+    fn nccl_config_defaults() {
+        let nccl = NcclConfig::default();
+        assert!(nccl.net_if.is_none());
+        assert!(nccl.ib_hca.is_none());
+        assert!(nccl.gdr.is_none());
+        assert!(nccl.debug.is_none());
+        assert!(nccl.extra_env.is_none());
+    }
+
+    #[test]
+    fn training_config_serde_roundtrip() {
+        let training = TrainingConfig {
+            framework: TrainingFramework::DeepSpeed,
+            checkpoint: Some(CheckpointSpec {
+                interval: "*/30 * * * *".to_string(),
+                local_path: None,
+                volume_size: None,
+                storage_class: None,
+                backup_store: None,
+                ttl: None,
+            }),
+            elastic: Some(ElasticSpec {
+                min_workers: 2,
+                max_workers: 8,
+                scale_timeout: None,
+            }),
+            nccl: Some(NcclConfig {
+                debug: Some("INFO".to_string()),
+                ..Default::default()
+            }),
+        };
+
+        let json = serde_json::to_string(&training).unwrap();
+        let de: TrainingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(training, de);
+    }
+
+    #[test]
+    fn job_spec_with_training() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "master".to_string(),
+            JobTaskSpec {
+                replicas: 1,
+                workload: WorkloadSpec::default(),
+                runtime: RuntimeSpec::default(),
+                restart_policy: None,
+            },
+        );
+
+        let spec = LatticeJobSpec {
+            tasks,
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                checkpoint: None,
+                elastic: None,
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+
+        assert!(spec.training.is_some());
+        assert_eq!(
+            spec.training.as_ref().unwrap().framework,
+            TrainingFramework::PyTorch
+        );
+    }
+
+    #[test]
+    fn job_status_training_fields() {
+        let status = LatticeJobStatus {
+            phase: JobPhase::Recovering,
+            message: Some("Recovering from checkpoint (retry 2/3)".to_string()),
+            observed_generation: Some(1),
+            start_time: Some("2026-02-28T00:00:00Z".to_string()),
+            completion_time: None,
+            retry_count: 2,
+            recovery_phase: Some(RecoveryPhase::WaitingForRestore),
+        };
+        assert_eq!(status.phase, JobPhase::Recovering);
+        assert_eq!(status.retry_count, 2);
+        assert!(status.start_time.is_some());
+        assert_eq!(
+            status.recovery_phase,
+            Some(RecoveryPhase::WaitingForRestore)
+        );
     }
 }

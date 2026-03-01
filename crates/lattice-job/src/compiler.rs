@@ -6,17 +6,29 @@
 //! - Aggregates mesh members, config, and tracing policies
 //!
 //! Then builds a Volcano VCJob from the aggregated pod templates.
+//!
+//! When `spec.training` is set, the compiler additionally:
+//! - Injects framework-specific env vars (MASTER_ADDR, WORLD_SIZE, NCCL)
+//! - Creates a headless Service for pod DNS resolution
+//! - Adds checkpoint PVCs and a Velero Schedule for periodic snapshots
 
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{LatticeJob, LatticeMeshMember, ProviderType};
+use lattice_common::crd::{
+    CheckpointSpec, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, ProviderType,
+    ResourceSpec, ResourceType, TrainingConfig, TrainingFramework, VolumeMount, WorkloadSpec,
+};
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
+use lattice_common::template::TemplateString;
 use lattice_volcano::{VCCronJob, VCJob};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
 use crate::error::JobError;
+
+const DEFAULT_MASTER_PORT: u16 = 29500;
+const DEFAULT_NCCL_DEBUG: &str = "WARN";
 
 /// Discriminated Volcano workload — either a one-shot VCJob or a scheduled VCCronJob.
 #[derive(Debug)]
@@ -36,6 +48,10 @@ pub struct CompiledJob {
     pub mesh_members: Vec<LatticeMeshMember>,
     /// Tetragon TracingPolicyNamespaced resources — per-task runtime enforcement
     pub tracing_policies: Vec<TracingPolicyNamespaced>,
+    /// Headless K8s Service for training pod DNS resolution (training jobs only)
+    pub headless_service: Option<serde_json::Value>,
+    /// Velero Schedule for periodic checkpoint PVC snapshots (training jobs with checkpoint)
+    pub velero_schedule: Option<serde_json::Value>,
 }
 
 /// Compile a LatticeJob into Kubernetes resources.
@@ -43,9 +59,9 @@ pub struct CompiledJob {
 /// For each task, runs the shared `WorkloadCompiler` pipeline and `lattice_tetragon`
 /// policy compiler, then aggregates results into a single `CompiledJob`.
 ///
-/// This function is pure compilation — it does NOT register tasks in the service graph.
-/// The caller (controller) is responsible for graph registration after successful compilation
-/// and cleanup on failure.
+/// When `spec.training` is set, training env vars (framework, NCCL, checkpoint)
+/// are injected into task workloads before compilation so they appear in the
+/// final pod templates.
 pub async fn compile_job(
     job: &LatticeJob,
     graph: &ServiceGraph,
@@ -64,15 +80,21 @@ pub async fn compile_job(
         return Err(JobError::NoTasks);
     }
 
+    // Pre-process tasks: if training is set, clone and inject training env vars
+    // into each task's workload BEFORE the WorkloadCompiler runs.
+    let tasks: BTreeMap<String, JobTaskSpec> = match job.spec.training {
+        Some(ref training) => prepare_training_tasks(name, &job.spec.tasks, training),
+        None => job.spec.tasks.clone(),
+    };
+
     let mut pod_templates: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let mut config = CompiledConfig::default();
     let mut mesh_members = Vec::new();
     let mut tracing_policies = Vec::new();
 
-    for (task_name, task_spec) in &job.spec.tasks {
+    for (task_name, task_spec) in &tasks {
         let task_full_name = format!("{}-{}", name, task_name);
 
-        // Compile workload → pod template + config resources + mesh member
         let mut compiler = WorkloadCompiler::new(
             &task_full_name,
             namespace,
@@ -97,20 +119,16 @@ pub async fn compile_job(
                 source: e,
             })?;
 
-        // Convert CompiledPodTemplate to JSON for VCJob
         let template_json = lattice_workload::pod_template_to_json(compiled.pod_template)
             .map_err(JobError::Serialization)?;
         pod_templates.insert(task_name.clone(), template_json);
 
-        // Collect config resources
         config.merge(compiled.config);
 
-        // Collect mesh member
         if let Some(mm) = compiled.mesh_member {
             mesh_members.push(mm);
         }
 
-        // Compile Tetragon tracing policies for this task
         let policies = lattice_tetragon::compile_tracing_policies(
             &task_full_name,
             namespace,
@@ -120,6 +138,20 @@ pub async fn compile_job(
         );
         tracing_policies.extend(policies);
     }
+
+    // Training: compile headless service and Velero schedule
+    let uid = job.metadata.uid.as_deref().unwrap_or_default();
+    let headless_service = job
+        .spec
+        .training
+        .as_ref()
+        .map(|_| compile_headless_service(name, namespace, uid));
+    let velero_schedule = job
+        .spec
+        .training
+        .as_ref()
+        .and_then(|t| t.checkpoint.as_ref())
+        .map(|ckpt| compile_velero_schedule(name, namespace, ckpt));
 
     // Build VCJob from aggregated pod templates, then wrap in VCCronJob if scheduled
     let vcjob = lattice_volcano::compile_vcjob(job, &pod_templates);
@@ -134,6 +166,290 @@ pub async fn compile_job(
         config,
         mesh_members,
         tracing_policies,
+        headless_service,
+        velero_schedule,
+    })
+}
+
+// =============================================================================
+// Training compilation
+// =============================================================================
+
+/// Clone tasks and inject training env vars into each task's workload.
+///
+/// Injects framework env vars, NCCL tuning, and checkpoint PVC/env. This runs
+/// before `WorkloadCompiler` so the injected values appear in pod templates.
+fn prepare_training_tasks(
+    job_name: &str,
+    tasks: &BTreeMap<String, JobTaskSpec>,
+    training: &TrainingConfig,
+) -> BTreeMap<String, JobTaskSpec> {
+    let world_size: u32 = tasks.values().map(|t| t.replicas).sum();
+    let master_addr = format!("{}-master-0.{}", job_name, job_name);
+
+    let mut result = BTreeMap::new();
+    for (task_name, task_spec) in tasks {
+        let mut task = task_spec.clone();
+        let is_master = task_name == "master";
+
+        // Default restart policy to OnFailure for training tasks
+        if task.restart_policy.is_none() {
+            task.restart_policy = Some(lattice_common::crd::RestartPolicy::OnFailure);
+        }
+
+        inject_framework_env(
+            &mut task.workload,
+            &training.framework,
+            &master_addr,
+            world_size,
+            is_master,
+        );
+
+        inject_nccl_env(&mut task.workload, training.nccl.as_ref());
+
+        if let Some(ref ckpt) = training.checkpoint {
+            inject_checkpoint_volume(&mut task.workload, ckpt);
+        }
+
+        result.insert(task_name.clone(), task);
+    }
+    result
+}
+
+/// Inject framework-specific env vars into all containers.
+fn inject_framework_env(
+    workload: &mut WorkloadSpec,
+    framework: &TrainingFramework,
+    master_addr: &str,
+    world_size: u32,
+    is_master: bool,
+) {
+    let env_vars: Vec<(&str, String)> = match framework {
+        TrainingFramework::PyTorch | TrainingFramework::DeepSpeed => {
+            let mut vars = vec![
+                ("MASTER_ADDR", master_addr.to_string()),
+                ("MASTER_PORT", DEFAULT_MASTER_PORT.to_string()),
+                ("WORLD_SIZE", world_size.to_string()),
+            ];
+            if is_master {
+                vars.push(("RANK", "0".to_string()));
+            }
+            vars
+        }
+        TrainingFramework::Jax => vec![
+            (
+                "JAX_COORDINATOR_ADDRESS",
+                format!("{}:{}", master_addr, DEFAULT_MASTER_PORT),
+            ),
+            ("JAX_NUM_PROCESSES", world_size.to_string()),
+        ],
+        _ => vec![
+            ("MASTER_ADDR", master_addr.to_string()),
+            ("MASTER_PORT", DEFAULT_MASTER_PORT.to_string()),
+            ("WORLD_SIZE", world_size.to_string()),
+        ],
+    };
+
+    inject_env_all(workload, &env_vars);
+}
+
+/// Inject NCCL env vars into all containers based on config and GPU model.
+fn inject_nccl_env(workload: &mut WorkloadSpec, nccl: Option<&NcclConfig>) {
+    let default_nccl = NcclConfig::default();
+    let nccl = nccl.unwrap_or(&default_nccl);
+
+    let mut env_vars: Vec<(&str, String)> = vec![(
+        "NCCL_DEBUG",
+        nccl.debug
+            .as_deref()
+            .unwrap_or(DEFAULT_NCCL_DEBUG)
+            .to_string(),
+    )];
+
+    if let Some(ref net_if) = nccl.net_if {
+        env_vars.push(("NCCL_SOCKET_IFNAME", net_if.clone()));
+    }
+    if let Some(ref ib_hca) = nccl.ib_hca {
+        env_vars.push(("NCCL_IB_HCA", ib_hca.clone()));
+    }
+    if let Some(gdr) = nccl.gdr {
+        env_vars.push((
+            "NCCL_NET_GDR_LEVEL",
+            if gdr { "5" } else { "0" }.to_string(),
+        ));
+    }
+
+    if let Some(model) = detect_gpu_model(workload) {
+        env_vars.extend(nccl_defaults_for_gpu(&model));
+    }
+
+    inject_env_all(workload, &env_vars);
+
+    // NCCL extra_env
+    if let Some(ref extra) = nccl.extra_env {
+        for container in workload.containers.values_mut() {
+            for (key, value) in extra {
+                container
+                    .variables
+                    .entry(key.clone())
+                    .or_insert_with(|| TemplateString::new(value));
+            }
+        }
+    }
+}
+
+/// Inject env vars into all containers (does not overwrite existing values).
+fn inject_env_all(workload: &mut WorkloadSpec, vars: &[(&str, String)]) {
+    for container in workload.containers.values_mut() {
+        for (key, value) in vars {
+            container
+                .variables
+                .entry(key.to_string())
+                .or_insert_with(|| TemplateString::new(value));
+        }
+    }
+}
+
+/// Add checkpoint PVC resource and CHECKPOINT_DIR env var to all containers.
+fn inject_checkpoint_volume(workload: &mut WorkloadSpec, ckpt: &CheckpointSpec) {
+    let local_path = ckpt.effective_local_path();
+
+    // Add CHECKPOINT_DIR env var
+    for container in workload.containers.values_mut() {
+        container
+            .variables
+            .entry("CHECKPOINT_DIR".to_string())
+            .or_insert_with(|| TemplateString::new(local_path));
+
+        container.volumes.insert(
+            local_path.to_string(),
+            VolumeMount {
+                source: Some(TemplateString::new("${resources.checkpoints}")),
+                ..Default::default()
+            },
+        );
+    }
+
+    // Add checkpoint PVC resource
+    workload.resources.insert(
+        "checkpoints".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Volume,
+            params: Some(BTreeMap::from([(
+                "size".to_string(),
+                serde_json::json!(ckpt.effective_volume_size()),
+            )])),
+            ..Default::default()
+        },
+    );
+}
+
+/// Detect GPU model from workload resources.
+fn detect_gpu_model(workload: &WorkloadSpec) -> Option<String> {
+    workload
+        .resources
+        .values()
+        .filter(|r| r.type_.is_gpu())
+        .find_map(|r| r.gpu_params().ok().flatten().and_then(|p| p.model.clone()))
+}
+
+/// NCCL defaults per GPU model.
+fn nccl_defaults_for_gpu(model: &str) -> Vec<(&'static str, String)> {
+    let m = model.to_uppercase();
+    if m.contains("H100") && m.contains("SXM") {
+        vec![
+            ("NCCL_ALGO", "Ring,Tree".to_string()),
+            ("NCCL_IB_DISABLE", "0".to_string()),
+        ]
+    } else if m.contains("H100") {
+        vec![
+            ("NCCL_ALGO", "Ring".to_string()),
+            ("NCCL_IB_DISABLE", "0".to_string()),
+        ]
+    } else if m.contains("A100") {
+        vec![("NCCL_ALGO", "Ring,Tree".to_string())]
+    } else if m.contains("L4") || m.contains("L40") || m.contains("T4") {
+        vec![
+            ("NCCL_ALGO", "Ring".to_string()),
+            ("NCCL_IB_DISABLE", "1".to_string()),
+        ]
+    } else {
+        vec![]
+    }
+}
+
+/// Compile a headless K8s Service for training pod DNS resolution.
+fn compile_headless_service(name: &str, namespace: &str, owner_uid: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": {
+                "app.kubernetes.io/managed-by": "lattice",
+                "app.kubernetes.io/name": name,
+                "lattice.dev/training-job": name
+            },
+            "ownerReferences": [{
+                "apiVersion": "lattice.dev/v1alpha1",
+                "kind": "LatticeJob",
+                "name": name,
+                "uid": owner_uid,
+                "controller": true,
+                "blockOwnerDeletion": true
+            }]
+        },
+        "spec": {
+            "clusterIP": "None",
+            "selector": {
+                "volcano.sh/job-name": name
+            },
+            "publishNotReadyAddresses": true
+        }
+    })
+}
+
+/// Compile a Velero Schedule for periodic checkpoint PVC snapshots.
+///
+/// Targets PVCs labeled with `lattice.dev/training-job: <name>` in the job's
+/// namespace. Uses CSI volume snapshots for fast, storage-level backups.
+fn compile_velero_schedule(
+    name: &str,
+    namespace: &str,
+    ckpt: &CheckpointSpec,
+) -> serde_json::Value {
+    let schedule_name = format!("lattice-training-{}", name);
+    serde_json::json!({
+        "apiVersion": "velero.io/v1",
+        "kind": "Schedule",
+        "metadata": {
+            "name": schedule_name,
+            "namespace": "velero",
+            "labels": {
+                "app.kubernetes.io/managed-by": "lattice",
+                "lattice.dev/training-job": name
+            }
+        },
+        "spec": {
+            "schedule": ckpt.interval,
+            "paused": false,
+            "template": {
+                "ttl": ckpt.effective_ttl(),
+                "includedNamespaces": [namespace],
+                "includedResources": [
+                    "persistentvolumeclaims",
+                    "persistentvolumes"
+                ],
+                "snapshotVolumes": true,
+                "storageLocation": ckpt.backup_store,
+                "labelSelector": {
+                    "matchLabels": {
+                        "lattice.dev/training-job": name
+                    }
+                }
+            }
+        }
     })
 }
 
@@ -143,7 +459,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use lattice_common::crd::{
-        ContainerSpec, JobTaskSpec, LatticeJobSpec, RestartPolicy, RuntimeSpec, WorkloadSpec,
+        CheckpointSpec, ContainerSpec, JobTaskSpec, LatticeJobSpec, NcclConfig, RestartPolicy,
+        RuntimeSpec, TrainingConfig, TrainingFramework, WorkloadSpec,
     };
 
     fn make_job(tasks: BTreeMap<String, JobTaskSpec>) -> LatticeJob {
@@ -177,10 +494,11 @@ mod tests {
         }
     }
 
-    /// Create a permit-all Cedar engine for tests (avoids default-deny blocking compilation)
     fn permit_all_cedar() -> PolicyEngine {
         PolicyEngine::with_policies("permit(principal, action, resource);").unwrap()
     }
+
+    // ── Non-training tests ──
 
     #[tokio::test]
     async fn compile_single_task_job() {
@@ -202,8 +520,9 @@ mod tests {
         assert_eq!(vcjob.spec.tasks.len(), 1);
         assert_eq!(vcjob.spec.tasks[0].name, "worker");
         assert_eq!(vcjob.spec.tasks[0].replicas, 2);
-        // No command = implicit wildcard = no binary restriction policies
         assert!(compiled.tracing_policies.is_empty());
+        assert!(compiled.headless_service.is_none());
+        assert!(compiled.velero_schedule.is_none());
     }
 
     #[tokio::test]
@@ -247,7 +566,6 @@ mod tests {
             ..Default::default()
         };
         let job = LatticeJob::new("test-job", spec);
-        // No namespace set
 
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
@@ -283,5 +601,200 @@ mod tests {
         };
         assert_eq!(cron.spec.schedule, "*/15 * * * *");
         assert_eq!(cron.spec.job_template.spec.tasks.len(), 1);
+    }
+
+    // ── Training compilation unit tests ──
+
+    #[test]
+    fn prepare_training_injects_pytorch_env() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_task("train:latest", 3));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            checkpoint: None,
+            elastic: None,
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+
+        let master_vars = &prepared["master"].workload.containers["main"].variables;
+        assert_eq!(master_vars["MASTER_ADDR"].as_str(), "my-job-master-0.my-job");
+        assert_eq!(master_vars["MASTER_PORT"].as_str(), "29500");
+        assert_eq!(master_vars["WORLD_SIZE"].as_str(), "4");
+        assert_eq!(master_vars["RANK"].as_str(), "0");
+
+        let worker_vars = &prepared["worker"].workload.containers["main"].variables;
+        assert!(worker_vars.contains_key("MASTER_ADDR"));
+        assert!(!worker_vars.contains_key("RANK"));
+    }
+
+    #[test]
+    fn prepare_training_injects_jax_env() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_task("jax:latest", 1));
+        tasks.insert("worker".to_string(), make_task("jax:latest", 2));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::Jax,
+            checkpoint: None,
+            elastic: None,
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+        let vars = &prepared["master"].workload.containers["main"].variables;
+        assert!(vars.contains_key("JAX_COORDINATOR_ADDRESS"));
+        assert!(vars.contains_key("JAX_NUM_PROCESSES"));
+        assert!(!vars.contains_key("MASTER_ADDR"));
+    }
+
+    #[test]
+    fn prepare_training_injects_nccl_overrides() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_task("train:latest", 1));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            checkpoint: None,
+            elastic: None,
+            nccl: Some(NcclConfig {
+                debug: Some("INFO".to_string()),
+                net_if: Some("ib0".to_string()),
+                gdr: Some(true),
+                ..Default::default()
+            }),
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+        let vars = &prepared["master"].workload.containers["main"].variables;
+        assert_eq!(vars["NCCL_DEBUG"].as_str(), "INFO");
+        assert_eq!(vars["NCCL_SOCKET_IFNAME"].as_str(), "ib0");
+        assert_eq!(vars["NCCL_NET_GDR_LEVEL"].as_str(), "5");
+    }
+
+    #[test]
+    fn prepare_training_injects_checkpoint_volume() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_task("train:latest", 2));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            checkpoint: Some(CheckpointSpec {
+                interval: "*/30 * * * *".to_string(),
+                local_path: None,
+                volume_size: None,
+                storage_class: None,
+                backup_store: None,
+                ttl: None,
+            }),
+            elastic: None,
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+
+        // Both master and worker get checkpoint volume
+        for task in prepared.values() {
+            assert_eq!(
+                task.workload.containers["main"].variables["CHECKPOINT_DIR"].as_str(),
+                "/checkpoints"
+            );
+            assert!(task.workload.resources.contains_key("checkpoints"));
+        }
+    }
+
+    #[test]
+    fn prepare_training_defaults_restart_policy_to_on_failure() {
+        let mut tasks = BTreeMap::new();
+        let mut task = make_task("train:latest", 1);
+        task.restart_policy = None; // unset
+        tasks.insert("worker".to_string(), task);
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            checkpoint: None,
+            elastic: None,
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+        assert_eq!(
+            prepared["worker"].restart_policy,
+            Some(RestartPolicy::OnFailure)
+        );
+    }
+
+    #[test]
+    fn headless_service_structure() {
+        let svc = compile_headless_service("my-training", "gpu-ns", "uid-abc");
+        assert_eq!(svc["spec"]["clusterIP"], "None");
+        assert_eq!(
+            svc["spec"]["selector"]["volcano.sh/job-name"],
+            "my-training"
+        );
+        assert_eq!(svc["spec"]["publishNotReadyAddresses"], true);
+        assert_eq!(svc["metadata"]["namespace"], "gpu-ns");
+        assert_eq!(
+            svc["metadata"]["ownerReferences"][0]["kind"],
+            "LatticeJob"
+        );
+    }
+
+    #[test]
+    fn velero_schedule_structure() {
+        let ckpt = CheckpointSpec {
+            interval: "*/30 * * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: Some("my-bsl".to_string()),
+            ttl: Some("168h".to_string()),
+        };
+
+        let schedule = compile_velero_schedule("my-training", "gpu-ns", &ckpt);
+        assert_eq!(schedule["apiVersion"], "velero.io/v1");
+        assert_eq!(schedule["kind"], "Schedule");
+        assert_eq!(
+            schedule["metadata"]["name"],
+            "lattice-training-my-training"
+        );
+        assert_eq!(schedule["spec"]["schedule"], "*/30 * * * *");
+        assert_eq!(schedule["spec"]["template"]["ttl"], "168h");
+        assert_eq!(
+            schedule["spec"]["template"]["storageLocation"],
+            "my-bsl"
+        );
+        assert_eq!(schedule["spec"]["template"]["snapshotVolumes"], true);
+        assert_eq!(
+            schedule["spec"]["template"]["includedNamespaces"][0],
+            "gpu-ns"
+        );
+        assert_eq!(
+            schedule["spec"]["template"]["labelSelector"]["matchLabels"]["lattice.dev/training-job"],
+            "my-training"
+        );
+    }
+
+    #[test]
+    fn nccl_defaults_h100_sxm() {
+        let defaults = nccl_defaults_for_gpu("H100-SXM-80GB");
+        assert!(defaults.iter().any(|(k, v)| *k == "NCCL_ALGO" && v == "Ring,Tree"));
+        assert!(defaults.iter().any(|(k, v)| *k == "NCCL_IB_DISABLE" && v == "0"));
+    }
+
+    #[test]
+    fn nccl_defaults_l4() {
+        let defaults = nccl_defaults_for_gpu("L4");
+        assert!(defaults.iter().any(|(k, v)| *k == "NCCL_IB_DISABLE" && v == "1"));
+    }
+
+    #[test]
+    fn nccl_defaults_unknown_gpu_empty() {
+        let defaults = nccl_defaults_for_gpu("RTX-4090");
+        assert!(defaults.is_empty());
     }
 }
