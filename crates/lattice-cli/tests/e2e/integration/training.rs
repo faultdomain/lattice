@@ -133,75 +133,62 @@ async fn test_headless_service(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify training env vars were injected into pod templates
+/// Verify training env vars were injected into ConfigMaps.
+///
+/// Training env vars are injected into `container.variables` by the job compiler,
+/// which the workload compiler renders into ConfigMaps (referenced via `envFrom`).
+/// The ConfigMap name follows the pattern: `{job}-{task}-{container}-env`.
 async fn test_training_env_vars(kubeconfig: &str) -> Result<(), String> {
     info!("[Training] Verifying training env vars...");
 
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "jobs.batch.volcano.sh",
-        JOB_NAME,
-        "-n",
-        TRAINING_NAMESPACE,
-        "-o",
-        "json",
-    ])
-    .await?;
+    for task_name in ["master", "worker"] {
+        let cm_name = format!("{}-{}-main-env", JOB_NAME, task_name);
 
-    let vcjob: serde_json::Value =
-        serde_json::from_str(&output).map_err(|e| format!("Failed to parse VCJob JSON: {e}"))?;
+        let output = run_kubectl(&[
+            "--kubeconfig",
+            kubeconfig,
+            "get",
+            "configmap",
+            &cm_name,
+            "-n",
+            TRAINING_NAMESPACE,
+            "-o",
+            "json",
+        ])
+        .await
+        .map_err(|e| format!("ConfigMap '{cm_name}' not found: {e}"))?;
 
-    let tasks = vcjob["spec"]["tasks"]
-        .as_array()
-        .ok_or("VCJob spec.tasks is not an array")?;
+        let cm: serde_json::Value = serde_json::from_str(&output)
+            .map_err(|e| format!("Failed to parse ConfigMap JSON: {e}"))?;
 
-    for task in tasks {
-        let name = task["name"].as_str().unwrap_or_default();
-        let containers = task["template"]["spec"]["containers"]
-            .as_array()
-            .ok_or(format!("Task '{name}' has no containers"))?;
-
-        let env = containers[0]["env"]
-            .as_array()
-            .ok_or(format!("Task '{name}' container has no env"))?;
-
-        let env_names: Vec<&str> = env
-            .iter()
-            .filter_map(|e| e["name"].as_str())
-            .collect();
+        let data = cm["data"]
+            .as_object()
+            .ok_or(format!("ConfigMap '{cm_name}' has no data"))?;
 
         // PyTorch distributed env vars
         for required in ["MASTER_ADDR", "MASTER_PORT", "WORLD_SIZE", "RANK"] {
-            if !env_names.contains(&required) {
+            if !data.contains_key(required) {
                 return Err(format!(
-                    "Task '{name}' missing training env var: {required}"
+                    "Task '{task_name}' ConfigMap missing training env var: {required}"
                 ));
             }
         }
 
         // Checkpoint env var
-        if !env_names.contains(&"CHECKPOINT_DIR") {
-            return Err(format!(
-                "Task '{name}' missing CHECKPOINT_DIR env var"
-            ));
-        }
-
-        // Verify CHECKPOINT_DIR value
-        let ckpt_dir = env
-            .iter()
-            .find(|e| e["name"].as_str() == Some("CHECKPOINT_DIR"))
-            .and_then(|e| e["value"].as_str())
-            .ok_or(format!("Task '{name}' CHECKPOINT_DIR has no value"))?;
+        let ckpt_dir = data
+            .get("CHECKPOINT_DIR")
+            .and_then(|v| v.as_str())
+            .ok_or(format!(
+                "Task '{task_name}' ConfigMap missing CHECKPOINT_DIR"
+            ))?;
 
         if ckpt_dir != "/checkpoints" {
             return Err(format!(
-                "Task '{name}' CHECKPOINT_DIR expected '/checkpoints', got: '{ckpt_dir}'"
+                "Task '{task_name}' CHECKPOINT_DIR expected '/checkpoints', got: '{ckpt_dir}'"
             ));
         }
 
-        info!("[Training] Task '{name}': env vars verified (MASTER_ADDR, WORLD_SIZE, CHECKPOINT_DIR)");
+        info!("[Training] Task '{task_name}': ConfigMap '{cm_name}' has training env vars");
     }
 
     Ok(())
