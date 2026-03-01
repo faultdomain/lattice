@@ -54,8 +54,27 @@ pub struct VCJobSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<VCJobTaskPolicy>,
 
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: BTreeMap<String, Vec<String>>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_topology: Option<serde_json::Value>,
+}
+
+impl Default for VCJobSpec {
+    fn default() -> Self {
+        Self {
+            scheduler_name: "volcano".to_string(),
+            min_available: None,
+            max_retry: None,
+            queue: None,
+            priority_class_name: None,
+            tasks: Vec::new(),
+            policies: Vec::new(),
+            plugins: BTreeMap::new(),
+            network_topology: None,
+        }
+    }
 }
 
 /// A single task within a VCJob
@@ -626,14 +645,8 @@ mod tests {
                 owner_references: vec![],
             },
             spec: VCJobSpec {
-                scheduler_name: "volcano".to_string(),
                 min_available: Some(2),
-                max_retry: None,
-                queue: None,
-                priority_class_name: None,
-                tasks: vec![],
-                policies: vec![],
-                network_topology: None,
+                ..Default::default()
             },
         };
 
@@ -665,19 +678,14 @@ mod tests {
                 starting_deadline_seconds: Some(60),
                 job_template: VCCronJobTemplate {
                     spec: VCJobSpec {
-                        scheduler_name: "volcano".to_string(),
                         min_available: Some(1),
-                        max_retry: None,
-                        queue: None,
-                        priority_class_name: None,
                         tasks: vec![VCJobTask {
                             name: "worker".to_string(),
                             replicas: 2,
                             template: serde_json::json!({"spec": {"containers": []}}),
                             policies: vec![],
                         }],
-                        policies: vec![],
-                        network_topology: None,
+                        ..Default::default()
                     },
                 },
             },
@@ -1035,14 +1043,9 @@ mod tests {
                 owner_references: vec![],
             },
             spec: VCJobSpec {
-                scheduler_name: "volcano".to_string(),
                 min_available: Some(2),
-                max_retry: None,
-                queue: None,
-                priority_class_name: None,
-                tasks: vec![],
-                policies: vec![],
                 network_topology: Some(network_topology_value(&topo)),
+                ..Default::default()
             },
         };
 

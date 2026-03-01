@@ -33,5 +33,4 @@ pub use compiler::WorkloadCompiler;
 pub use error::CompilationError;
 pub use pipeline::pod_template::CompiledPodTemplate;
 pub use pipeline::secrets::SecretRef;
-pub use pipeline::volumes::{PersistentVolumeClaim, PvcResources, PvcSpec, PvcStorage};
 pub use pod_template_json::pod_template_to_json;

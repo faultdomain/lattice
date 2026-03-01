@@ -378,12 +378,26 @@ impl<'a> WorkloadCompiler<'a> {
             .map(|(_, vol_id)| vol_id.to_string())
             .collect();
 
-        let referenced_volume_ids: Vec<String> = self
-            .workload
-            .referenced_volume_ids()
-            .iter()
-            .map(|(_, vol_id)| vol_id.to_string())
-            .collect();
+        // Only add affinity for referenced volumes that have a known different
+        // owner in the graph. This ensures the affinity target pod (the owner)
+        // actually exists before requiring co-location.
+        let referenced_volume_ids: Vec<String> = if let Some(graph) = self.graph {
+            self.workload
+                .referenced_volume_ids()
+                .iter()
+                .filter(|(_, vol_id)| {
+                    graph
+                        .get_volume_owner(self.namespace, vol_id)
+                        .is_some_and(|owner| {
+                            owner.owner_name != self.name
+                                || owner.owner_namespace != self.namespace
+                        })
+                })
+                .map(|(_, vol_id)| vol_id.to_string())
+                .collect()
+        } else {
+            vec![]
+        };
 
         // Compile pod template
         let container_data = ContainerCompilationData {
@@ -394,7 +408,7 @@ impl<'a> WorkloadCompiler<'a> {
             per_container_file_mounts: &per_container_file_mounts,
         };
 
-        let pod_template = PodTemplateCompiler::compile(
+        let mut pod_template = PodTemplateCompiler::compile(
             self.name,
             self.workload,
             self.runtime,
@@ -402,9 +416,43 @@ impl<'a> WorkloadCompiler<'a> {
             self.provider_type,
             &container_data,
             self.has_topology,
-            &owned_volume_ids,
-            &referenced_volume_ids,
         )?;
+
+        // Add volume ownership labels for shared volume co-location
+        for vol_id in &owned_volume_ids {
+            pod_template.labels.insert(
+                format!("{}{}", lattice_common::LABEL_VOLUME_PREFIX, vol_id),
+                "true".to_string(),
+            );
+        }
+
+        // Build pod affinity for shared volume co-location.
+        // Consumers match the volume ownership label (lattice.io/vol-<id>: true)
+        // on the owner's pods, forcing co-location on the same node.
+        if !referenced_volume_ids.is_empty() {
+            pod_template.affinity = Some(crate::k8s::Affinity {
+                pod_affinity: Some(crate::k8s::PodAffinity {
+                    required_during_scheduling_ignored_during_execution: referenced_volume_ids
+                        .iter()
+                        .map(|vol_id| crate::k8s::PodAffinityTerm {
+                            label_selector: crate::k8s::LabelSelector {
+                                match_labels: [(
+                                    format!(
+                                        "{}{}",
+                                        lattice_common::LABEL_VOLUME_PREFIX,
+                                        vol_id
+                                    ),
+                                    "true".to_string(),
+                                )]
+                                .into_iter()
+                                .collect(),
+                            },
+                            topology_key: "kubernetes.io/hostname".to_string(),
+                        })
+                        .collect(),
+                }),
+            });
+        }
 
         // Assemble config and compute hash
         let mut all_external_secrets = compiled_secrets.external_secrets;

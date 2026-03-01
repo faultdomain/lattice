@@ -496,13 +496,14 @@ impl ServiceGraph {
     pub fn put_service(&self, namespace: &str, name: &str, spec: &LatticeServiceSpec) {
         let node = ServiceNode::from_service_spec(namespace, name, spec);
         self.put_node(node);
-        self.update_volume_owners(namespace, name, spec);
+        self.update_volume_owners(namespace, name, &spec.workload);
     }
 
     /// Insert or update a workload in the graph (used by LatticeJob tasks)
     pub fn put_workload(&self, namespace: &str, name: &str, workload: &WorkloadSpec) {
         let node = ServiceNode::from_workload_spec(namespace, name, workload);
         self.put_node(node);
+        self.update_volume_owners(namespace, name, workload);
     }
 
     /// Insert or update a mesh member in the graph
@@ -978,17 +979,17 @@ impl ServiceGraph {
         self.volume_owners.get(&key).map(|v| v.clone())
     }
 
-    /// Update the volume ownership index for a service.
+    /// Update the volume ownership index for a workload.
     ///
-    /// Removes all previous ownership entries for this service, then indexes
+    /// Removes all previous ownership entries for this workload, then indexes
     /// any owned shared volumes (those with both `id` and `size`).
-    fn update_volume_owners(&self, namespace: &str, name: &str, spec: &LatticeServiceSpec) {
-        // Remove stale entries for this service
+    fn update_volume_owners(&self, namespace: &str, name: &str, workload: &WorkloadSpec) {
+        // Remove stale entries for this workload
         self.volume_owners
             .retain(|_, v| !(v.owner_namespace == namespace && v.owner_name == name));
 
         // Index owned shared volumes
-        for resource in spec.workload.resources.values() {
+        for resource in workload.resources.values() {
             if !resource.type_.is_volume() {
                 continue;
             }

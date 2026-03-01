@@ -63,6 +63,7 @@ pub fn compile_vcjob(
             priority_class_name: job.spec.priority_class_name.clone(),
             tasks,
             policies: default_policies(job.spec.max_retry),
+            plugins: BTreeMap::from([("env".to_string(), vec![])]),
             network_topology: job
                 .spec
                 .topology
@@ -199,6 +200,8 @@ mod tests {
             vcjob.spec.tasks[0].template["spec"]["restartPolicy"],
             "OnFailure"
         );
+        // Volcano env plugin injects VC_TASK_INDEX per pod
+        assert!(vcjob.spec.plugins.contains_key("env"));
     }
 
     #[test]

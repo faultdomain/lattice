@@ -20,6 +20,7 @@ use lattice_common::crd::{
     ResourceSpec, ResourceType, TrainingConfig, TrainingFramework, VolumeMount, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
+use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
 use lattice_common::template::TemplateString;
 use lattice_volcano::{VCCronJob, VCJob};
@@ -106,6 +107,16 @@ pub async fn compile_job(
         None => job.spec.tasks.clone(),
     };
 
+    // Forward the LatticeJob's ownerReferences to VolumeCompiler for PVC GC.
+    // For model downloads, the LatticeJob is owned by LatticeModel, so PVCs
+    // get LatticeModel ownerReferences and survive job restarts.
+    let owner_refs: Vec<OwnerReference> = job
+        .metadata
+        .owner_references
+        .as_ref()
+        .map(|refs| refs.iter().map(OwnerReference::from).collect())
+        .unwrap_or_default();
+
     let mut pod_templates: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let mut config = CompiledConfig::default();
     let mut mesh_members = Vec::new();
@@ -124,7 +135,8 @@ pub async fn compile_job(
         .with_cedar(cedar)
         .with_cluster_name(cluster_name)
         .with_graph(graph)
-        .with_image_pull_secrets(&task_spec.runtime.image_pull_secrets);
+        .with_image_pull_secrets(&task_spec.runtime.image_pull_secrets)
+        .with_owner_references(owner_refs.clone());
 
         if job.spec.topology.is_some() {
             compiler = compiler.with_topology();
@@ -184,6 +196,17 @@ pub async fn compile_job(
         }
     }
 
+    // Training: inject RANK into pod templates via K8s env var interpolation.
+    // The Volcano env plugin injects VC_TASK_INDEX per pod (globally unique
+    // across all tasks). We map RANK = $(VC_TASK_INDEX) directly in the pod
+    // spec so K8s interpolates it at pod creation time. This can't go in the
+    // ConfigMap because K8s only interpolates $(VAR) in pod spec env entries.
+    if job.spec.training.is_some() {
+        for template in pod_templates.values_mut() {
+            inject_rank_env(template);
+        }
+    }
+
     // Training: compile headless service and Velero schedule
     let uid = job.metadata.uid.as_deref().unwrap_or_default();
     let headless_service = job
@@ -236,7 +259,6 @@ fn prepare_training_tasks(
     let mut result = BTreeMap::new();
     for (task_name, task_spec) in tasks {
         let mut task = task_spec.clone();
-        let is_coordinator = task_name == coordinator;
 
         // Default restart policy to OnFailure for training tasks
         if task.restart_policy.is_none() {
@@ -248,7 +270,6 @@ fn prepare_training_tasks(
             &training.framework,
             &coordinator_addr,
             world_size,
-            is_coordinator,
         )?;
 
         inject_nccl_env(&mut task.workload, training.nccl.as_ref());
@@ -263,24 +284,23 @@ fn prepare_training_tasks(
 }
 
 /// Inject framework-specific env vars into all containers.
+///
+/// RANK is NOT injected here — it's set at the pod spec level via
+/// `$(VC_TASK_INDEX)` so K8s interpolates the per-pod value at runtime.
+/// See `inject_rank_env`.
 fn inject_framework_env(
     workload: &mut WorkloadSpec,
     framework: &TrainingFramework,
     coordinator_addr: &str,
     world_size: u32,
-    is_coordinator: bool,
 ) -> Result<(), JobError> {
     let env_vars: Vec<(&str, String)> = match framework {
         TrainingFramework::PyTorch | TrainingFramework::DeepSpeed => {
-            let mut vars = vec![
+            vec![
                 ("MASTER_ADDR", coordinator_addr.to_string()),
                 ("MASTER_PORT", DEFAULT_MASTER_PORT.to_string()),
                 ("WORLD_SIZE", world_size.to_string()),
-            ];
-            if is_coordinator {
-                vars.push(("RANK", "0".to_string()));
-            }
-            vars
+            ]
         }
         TrainingFramework::Jax => vec![
             (
@@ -350,6 +370,31 @@ fn inject_env_all(workload: &mut WorkloadSpec, vars: &[(&str, String)]) {
                 .variables
                 .entry(key.to_string())
                 .or_insert_with(|| TemplateString::new(value));
+        }
+    }
+}
+
+/// Inject `RANK` env var into a pod template JSON using K8s variable interpolation.
+///
+/// Sets `RANK = $(VC_TASK_INDEX)` directly in each container's `env` array.
+/// K8s interpolates `$(VC_TASK_INDEX)` at pod creation time using the value
+/// injected by the Volcano env plugin. This gives each pod a globally unique
+/// rank matching its VC_TASK_INDEX.
+fn inject_rank_env(template: &mut serde_json::Value) {
+    let rank_env = serde_json::json!({"name": "RANK", "value": "$(VC_TASK_INDEX)"});
+
+    let containers = template
+        .pointer_mut("/spec/containers")
+        .and_then(|c| c.as_array_mut());
+
+    if let Some(containers) = containers {
+        for container in containers {
+            let env = container
+                .as_object_mut()
+                .and_then(|c| c.entry("env").or_insert_with(|| serde_json::json!([])).as_array_mut());
+            if let Some(env) = env {
+                env.push(rank_env.clone());
+            }
         }
     }
 }
@@ -674,7 +719,9 @@ mod tests {
         assert_eq!(master_vars["MASTER_ADDR"].as_str(), "my-job-master-0.my-job");
         assert_eq!(master_vars["MASTER_PORT"].as_str(), "29500");
         assert_eq!(master_vars["WORLD_SIZE"].as_str(), "4");
-        assert_eq!(master_vars["RANK"].as_str(), "0");
+        // RANK is NOT in the ConfigMap — it's injected at pod spec level
+        // via $(VC_TASK_INDEX) by inject_rank_env
+        assert!(!master_vars.contains_key("RANK"));
 
         let worker_vars = &prepared["worker"].workload.containers["main"].variables;
         assert!(worker_vars.contains_key("MASTER_ADDR"));

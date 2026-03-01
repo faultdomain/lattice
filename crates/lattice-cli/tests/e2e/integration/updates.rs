@@ -1,20 +1,23 @@
 //! CRD update integration tests
 //!
-//! Verifies that controllers handle spec updates correctly:
+//! Verifies that controllers handle spec updates and failure modes correctly:
 //!
 //! LatticeService:
 //! - Ready → spec change → recompile → Ready
 //! - Failed → spec fix → recover → Ready
 //! - Failed (persistent) → no spec change → observed_generation set, no tight loop
 //! - replicas 2→1 → PDB orphan cleanup (PodDisruptionBudget deleted)
+//! - Delete parent → K8s GC cascade-deletes child resources (ownerReferences)
 //!
 //! LatticeModel:
 //! - Serving → spec change → recompile → Serving
 //! - Loading → spec change → detect and recompile (not stamp stale generation)
 //! - Role removal → orphan cleanup (removed role's MeshMember deleted)
+//! - Bad model source URI → download job fails → model Failed
 //!
 //! LatticeJob:
 //! - Failed sets observed_generation (no tight loop, jobs are immutable)
+//! - Cedar denies secret → compile fails → job Failed immediately
 //!
 //! # Running Standalone
 //!
@@ -52,6 +55,10 @@ const NS_JOB_FAILED_STABLE: &str = "update-t8";
 /// Separate namespace for `test_job_updates_standalone` so it doesn't collide
 /// with `test_updates_standalone` when both run concurrently.
 const NS_JOB_FAILED_STANDALONE: &str = "update-t8-sa";
+
+const NS_JOB_COMPILE_FAIL: &str = "update-t9";
+const NS_MODEL_DOWNLOAD_FAIL: &str = "update-t10";
+const NS_OWNER_REF_GC: &str = "update-t11";
 
 /// Dummy secret provider name (Cedar denies access → immediate compile failure)
 const DENIED_PROVIDER: &str = "nonexistent-provider";
@@ -1094,6 +1101,401 @@ fn build_simple_job(
 }
 
 // =============================================================================
+// Test 9: LatticeJob compile failure (Cedar deny → immediate Failed)
+// =============================================================================
+
+/// Deploy a job whose task has a secret resource referencing a nonexistent
+/// provider. Cedar default-deny blocks it, `compile_job` returns a non-retryable
+/// error, and the job transitions directly from Pending to Failed.
+async fn test_job_compile_failure(kubeconfig: &str, namespace: &str) -> Result<(), String> {
+    info!("[Updates] Test 9: LatticeJob compile failure (Cedar deny)");
+    ensure_fresh_namespace(kubeconfig, namespace).await?;
+
+    let job = build_job_with_secret("job-cedar-deny", namespace);
+    let yaml = serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job: {e}"))?;
+    apply_yaml(kubeconfig, &yaml).await?;
+
+    // Should fail fast (<30s) — Cedar deny is a compile-time check
+    wait_for_resource_phase(
+        kubeconfig,
+        "latticejob",
+        namespace,
+        "job-cedar-deny",
+        "Failed",
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    // Verify observed_generation is set
+    let observed =
+        get_resource_observed_generation(kubeconfig, "latticejob", namespace, "job-cedar-deny")
+            .await?;
+    if observed.is_empty() {
+        return Err(
+            "observed_generation is empty on compile-failed job — \
+             compile failures must set observed_generation to prevent tight-loop retries"
+                .to_string(),
+        );
+    }
+
+    // Verify status message references the secret denial
+    let message = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "latticejob",
+        "job-cedar-deny",
+        "-n",
+        namespace,
+        "-o",
+        "jsonpath={.status.message}",
+    ])
+    .await?;
+    let msg_lower = message.to_lowercase();
+    if !msg_lower.contains("secret access denied") && !msg_lower.contains("compile") {
+        return Err(format!(
+            "Expected status message to contain 'secret access denied' or 'compile', got: {message}"
+        ));
+    }
+
+    info!("[Updates] Status message: {message}");
+    delete_namespace(kubeconfig, namespace).await;
+    info!("[Updates] Test 9 passed: Job compile failure (Cedar deny → Failed)");
+    Ok(())
+}
+
+/// Build a LatticeJob whose task declares a secret resource with a nonexistent
+/// provider. Cedar default-deny will reject it at compile time.
+fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::LatticeJob {
+    use lattice_common::crd::{
+        ContainerSpec, JobTaskSpec, LatticeJobSpec, ResourceQuantity, ResourceRequirements,
+        ResourceSpec, ResourceType, RestartPolicy,
+    };
+    use std::collections::BTreeMap;
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
+            security: Some(lattice_common::crd::SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                run_as_user: Some(65534),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    // Secret resource with a nonexistent provider — Cedar default-deny blocks it
+    let mut secret_params = BTreeMap::new();
+    secret_params.insert("provider".to_string(), serde_json::json!(DENIED_PROVIDER));
+    secret_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+
+    let mut resources = BTreeMap::new();
+    resources.insert(
+        "denied-secret".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("some/denied/path".to_string()),
+            params: Some(secret_params),
+            ..Default::default()
+        },
+    );
+
+    let mut tasks = BTreeMap::new();
+    tasks.insert(
+        "worker".to_string(),
+        JobTaskSpec {
+            replicas: 1,
+            workload: lattice_common::crd::WorkloadSpec {
+                containers,
+                resources,
+                ..Default::default()
+            },
+            runtime: lattice_common::crd::RuntimeSpec {
+                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                ..Default::default()
+            },
+            restart_policy: Some(RestartPolicy::Never),
+        },
+    );
+
+    let spec = LatticeJobSpec {
+        max_retry: Some(0),
+        tasks,
+        ..Default::default()
+    };
+    let mut job = lattice_common::crd::LatticeJob::new(name, spec);
+    job.metadata.namespace = Some(namespace.to_string());
+    job
+}
+
+// =============================================================================
+// Test 10: LatticeModel download failure (bad HF URI → Failed)
+// =============================================================================
+
+/// Deploy a LatticeModel with a model_source URI that points to a nonexistent
+/// HuggingFace repo. The download job will fail, and the model should transition
+/// to Failed with "Model download failed".
+async fn test_model_download_failure(kubeconfig: &str, namespace: &str) -> Result<(), String> {
+    info!("[Updates] Test 10: LatticeModel download failure (bad HF URI)");
+    ensure_fresh_namespace(kubeconfig, namespace).await?;
+
+    let model = build_model_with_bad_source("bad-download", namespace);
+    let yaml =
+        serde_json::to_string(&model).map_err(|e| format!("Failed to serialize model: {e}"))?;
+    apply_yaml(kubeconfig, &yaml).await?;
+
+    // Download retries 3x (DOWNLOAD_BACKOFF_LIMIT), so allow up to 300s
+    wait_for_resource_phase(
+        kubeconfig,
+        "latticemodel",
+        namespace,
+        "bad-download",
+        "Failed",
+        Duration::from_secs(300),
+    )
+    .await?;
+
+    // Verify observed_generation is set
+    let observed =
+        get_resource_observed_generation(kubeconfig, "latticemodel", namespace, "bad-download")
+            .await?;
+    if observed.is_empty() {
+        return Err(
+            "observed_generation is empty on download-failed model — \
+             Failed status must include observed_generation"
+                .to_string(),
+        );
+    }
+
+    // Verify status message references download failure
+    let message = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "latticemodel",
+        "bad-download",
+        "-n",
+        namespace,
+        "-o",
+        "jsonpath={.status.message}",
+    ])
+    .await?;
+    let msg_lower = message.to_lowercase();
+    if !msg_lower.contains("download failed") {
+        return Err(format!(
+            "Expected status message to contain 'download failed', got: {message}"
+        ));
+    }
+
+    info!("[Updates] Status message: {message}");
+    delete_namespace(kubeconfig, namespace).await;
+    info!("[Updates] Test 10 passed: Model download failure → Failed");
+    Ok(())
+}
+
+/// Build a LatticeModel with a model_source pointing to a nonexistent HuggingFace repo.
+fn build_model_with_bad_source(
+    name: &str,
+    namespace: &str,
+) -> lattice_common::crd::LatticeModel {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use lattice_common::crd::{
+        ContainerSpec, LatticeModelSpec, ModelRoleSpec, ModelSourceSpec, ResourceQuantity,
+        ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec, WorkloadSpec,
+    };
+    use std::collections::BTreeMap;
+
+    // ghcr-creds resource for image pull secrets (same as fixture)
+    let mut reg_params = BTreeMap::new();
+    reg_params.insert(
+        "provider".to_string(),
+        serde_json::json!(super::super::helpers::REGCREDS_PROVIDER),
+    );
+    reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+
+    let ghcr_resource = ResourceSpec {
+        type_: ResourceType::Secret,
+        id: Some(super::super::helpers::REGCREDS_REMOTE_KEY.to_string()),
+        params: Some(reg_params.clone()),
+        ..Default::default()
+    };
+
+    // Model source with a nonexistent HF repo
+    let mut download_resources = BTreeMap::new();
+    download_resources.insert("ghcr-creds".to_string(), ghcr_resource.clone());
+
+    let model_source = ModelSourceSpec {
+        uri: "hf://nonexistent-org-abc123/nonexistent-model-xyz789".to_string(),
+        cache_size: "1Gi".to_string(),
+        storage_class: None,
+        mount_path: None,
+        token_secret: None,
+        downloader_image: None,
+        access_mode: None,
+        security: Some(lattice_common::crd::SecurityContext {
+            apparmor_profile: Some("Unconfined".to_string()),
+            allowed_binaries: vec!["*".to_string()],
+            ..Default::default()
+        }),
+        resources: download_resources,
+        image_pull_secrets: vec!["ghcr-creds".to_string()],
+    };
+
+    // Minimal decode role with busybox (needed for LatticeModel to be valid)
+    let mut role_containers = BTreeMap::new();
+    role_containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
+            security: Some(lattice_common::crd::SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                run_as_user: Some(65534),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    let mut role_resources = BTreeMap::new();
+    role_resources.insert("ghcr-creds".to_string(), ghcr_resource);
+
+    let mut roles = BTreeMap::new();
+    roles.insert(
+        "decode".to_string(),
+        ModelRoleSpec {
+            replicas: 1,
+            entry_workload: WorkloadSpec {
+                containers: role_containers,
+                resources: role_resources,
+                ..Default::default()
+            },
+            entry_runtime: RuntimeSpec {
+                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+
+    lattice_common::crd::LatticeModel {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeModelSpec {
+            model_source: Some(model_source),
+            roles,
+            ..Default::default()
+        },
+        status: None,
+    }
+}
+
+// =============================================================================
+// Test 11: Owner reference GC (delete LatticeService → children cascade-deleted)
+// =============================================================================
+
+/// Deploy a LatticeService to Ready, verify child resources exist, then delete
+/// the LatticeService and verify K8s garbage collector cascade-deletes the children.
+///
+/// Validates that ownerReferences with `controller: true, blockOwnerDeletion: true`
+/// are properly set (commit 54e8981).
+async fn test_service_owner_ref_gc(kubeconfig: &str) -> Result<(), String> {
+    info!("[Updates] Test 11: Owner reference GC (delete parent → children deleted)");
+    ensure_fresh_namespace(kubeconfig, NS_OWNER_REF_GC).await?;
+
+    // Deploy a simple service → should reach Ready
+    let svc = build_simple_service("svc-gc-test", NS_OWNER_REF_GC);
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_OWNER_REF_GC,
+        svc,
+        "Ready",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    // Verify child resources exist
+    wait_for_resource_exists(kubeconfig, "deployment", NS_OWNER_REF_GC, "svc-gc-test", true)
+        .await?;
+    wait_for_resource_exists(
+        kubeconfig,
+        "serviceaccount",
+        NS_OWNER_REF_GC,
+        "svc-gc-test",
+        true,
+    )
+    .await?;
+    info!("[Updates] Child resources (Deployment, ServiceAccount) exist");
+
+    // Delete the LatticeService
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "latticeservice",
+        "svc-gc-test",
+        "-n",
+        NS_OWNER_REF_GC,
+        "--wait=false",
+    ])
+    .await?;
+    info!("[Updates] Deleted LatticeService svc-gc-test, waiting for GC...");
+
+    // Wait for K8s GC to cascade-delete children (should be fast, <30s)
+    wait_for_resource_exists(
+        kubeconfig,
+        "deployment",
+        NS_OWNER_REF_GC,
+        "svc-gc-test",
+        false,
+    )
+    .await?;
+    info!("[Updates] Deployment GC'd");
+
+    wait_for_resource_exists(
+        kubeconfig,
+        "serviceaccount",
+        NS_OWNER_REF_GC,
+        "svc-gc-test",
+        false,
+    )
+    .await?;
+    info!("[Updates] ServiceAccount GC'd");
+
+    delete_namespace(kubeconfig, NS_OWNER_REF_GC).await;
+    info!("[Updates] Test 11 passed: Owner reference GC cascade-deletes children");
+    Ok(())
+}
+
+// =============================================================================
 // Orchestrators
 // =============================================================================
 
@@ -1110,6 +1512,9 @@ pub async fn run_service_update_tests(kubeconfig: &str) -> Result<(), String> {
         }),
         harness.run("PDB orphan cleanup", || {
             test_service_pdb_orphan_cleanup(kubeconfig)
+        }),
+        harness.run("Owner reference GC", || {
+            test_service_owner_ref_gc(kubeconfig)
         }),
     );
 
@@ -1132,6 +1537,9 @@ pub async fn run_model_update_tests(kubeconfig: &str) -> Result<(), String> {
         harness.run("Model role removal orphan cleanup", || {
             test_model_role_removal_orphan_cleanup(kubeconfig, NS_MODEL_ROLE_ORPHAN)
         }),
+        harness.run("Model download failure", || {
+            test_model_download_failure(kubeconfig, NS_MODEL_DOWNLOAD_FAIL)
+        }),
     );
 
     harness.finish()
@@ -1142,11 +1550,14 @@ pub async fn run_job_update_tests(kubeconfig: &str, namespace: &str) -> Result<(
     info!("[Updates] Running LatticeJob update tests on {kubeconfig}");
 
     let harness = TestHarness::new("Job Updates");
-    harness
-        .run("Job Failed observed_generation", || {
+    tokio::join!(
+        harness.run("Job Failed observed_generation", || {
             test_job_failed_sets_observed_generation(kubeconfig, namespace)
-        })
-        .await;
+        }),
+        harness.run("Job compile failure (Cedar deny)", || {
+            test_job_compile_failure(kubeconfig, NS_JOB_COMPILE_FAIL)
+        }),
+    );
 
     harness.finish()
 }

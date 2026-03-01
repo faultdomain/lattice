@@ -17,7 +17,7 @@ use tracing::info;
 
 use super::super::helpers::{
     apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_resource_phase,
+    run_kubectl, setup_regcreds_infrastructure, wait_for_resource_phase, DEFAULT_TIMEOUT,
 };
 
 const JOB_NAMESPACE: &str = "batch";
@@ -46,14 +46,16 @@ async fn test_job_deployment(kubeconfig: &str) -> Result<(), String> {
         serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job fixture: {e}"))?;
     apply_yaml(kubeconfig, &yaml).await?;
 
-    // Wait for controller to pick up and start reconciling
+    // Wait for controller to pick up and start reconciling.
+    // Gang scheduling (minAvailable = sum of all replicas) can be slow
+    // under cluster resource pressure from concurrent tests.
     wait_for_resource_phase(
         kubeconfig,
         "latticejob",
         JOB_NAMESPACE,
         JOB_NAME,
         "Running",
-        Duration::from_secs(120),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -269,7 +271,7 @@ async fn test_job_completion(kubeconfig: &str) -> Result<(), String> {
         JOB_NAMESPACE,
         JOB_NAME,
         "Succeeded",
-        Duration::from_secs(120),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -312,7 +314,7 @@ async fn test_cron_job_deployment(kubeconfig: &str) -> Result<(), String> {
         JOB_NAMESPACE,
         CRON_JOB_NAME,
         "Running",
-        Duration::from_secs(120),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 

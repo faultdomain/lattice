@@ -242,7 +242,20 @@ impl<'a> ServiceCompiler<'a> {
 
         let compiled = compiler.compile().await?;
 
-        let mesh_member = compiled.mesh_member;
+        // Stamp ownerReferences on the LatticeMeshMember so K8s GC
+        // cascade-deletes it when the LatticeService is deleted.
+        let mesh_member = compiled.mesh_member.map(|mut mm| {
+            use kube::ResourceExt;
+            mm.metadata.owner_references = Some(vec![k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                api_version: "lattice.dev/v1alpha1".to_string(),
+                kind: "LatticeService".to_string(),
+                name: name.to_string(),
+                uid: service.uid().unwrap_or_default(),
+                controller: Some(true),
+                block_owner_deletion: Some(true),
+            }]);
+            mm
+        });
 
         // Build service-specific resources from compiled pod template
         let mut workloads = WorkloadCompiler::compile(

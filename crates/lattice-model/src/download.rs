@@ -1,11 +1,15 @@
-//! Model download compilation — LatticeJob, PVC, and pod template injection
+//! Model download compilation — LatticeJob and pod template injection
 //!
 //! Pure compilation functions that take a `ModelSourceSpec` and produce:
 //! - A LatticeJob CRD that downloads the model through the Lattice compilation pipeline
-//! - A PVC for caching downloaded model artifacts (owned by LatticeModel for GC)
 //! - A ServiceAccount for SPIFFE identity
 //! - Volume + volumeMount injection for role pod templates
 //! - Scheduling gate injection so pods stay `SchedulingGated` until download completes
+//!
+//! The download job declares the model cache volume as an **owner** (with size). The job
+//! compiler forwards the LatticeJob's ownerReferences (pointing to LatticeModel) to
+//! VolumeCompiler, which creates the PVC with proper GC cascading. Serving pods reference
+//! the same volume id without size, getting pod affinity for co-location.
 //!
 //! The LatticeJob goes through the normal compilation pipeline (WorkloadCompiler → mesh
 //! member → VCJob). Entity-based egress (`entity:world:443`) is declared as an
@@ -27,7 +31,6 @@ use lattice_common::crd::{
 };
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::template::TemplateString;
-use lattice_workload::{PersistentVolumeClaim, PvcResources, PvcSpec, PvcStorage};
 
 use crate::error::ModelError;
 
@@ -48,10 +51,10 @@ const DEFAULT_DOWNLOADER_IMAGE: &str = "ghcr.io/evan-hines-js/lattice-downloader
 pub struct CompiledDownload {
     /// LatticeJob CRD for the download workload (compiled through the Lattice pipeline)
     pub job: LatticeJob,
-    /// PVC for model artifact cache (owned by LatticeModel for GC)
-    pub pvc: PersistentVolumeClaim,
     /// ServiceAccount for download pod SPIFFE identity
     pub service_account: serde_json::Value,
+    /// PVC name for model artifact cache (VolumeCompiler creates the PVC)
+    pvc_name: String,
     /// Mount path for model artifacts in serving containers
     mount_path: String,
 }
@@ -62,9 +65,9 @@ impl CompiledDownload {
         self.job.metadata.name.as_deref().unwrap_or_default()
     }
 
-    /// PVC name derived from the PersistentVolumeClaim metadata
+    /// PVC name for model artifact cache
     pub fn pvc_name(&self) -> &str {
-        &self.pvc.metadata.name
+        &self.pvc_name
     }
 
     /// Mount path for model artifacts in serving containers
@@ -116,10 +119,10 @@ fn parse_uri(uri: &str) -> Result<ParsedUri, ModelError> {
 
 /// Compile model download resources from a ModelSourceSpec.
 ///
-/// Produces a LatticeJob, PVC, and ServiceAccount ready for apply. The
-/// LatticeJob goes through the normal compilation pipeline, which generates
-/// a LatticeMeshMember for entity-based egress. This is a pure compilation
-/// function — no K8s API calls.
+/// Produces a LatticeJob and ServiceAccount ready for apply. The LatticeJob
+/// declares the model cache volume as an owner (with size), so the job
+/// compiler's VolumeCompiler creates the PVC with proper ownerReferences.
+/// This is a pure compilation function — no K8s API calls.
 pub fn compile_download(
     model_name: &str,
     namespace: &str,
@@ -136,18 +139,7 @@ pub fn compile_download(
     // Volume id for cross-workload PVC sharing. VolumeCompiler generates
     // PVC name as vol-{id}, so serving pods reference the same PVC.
     let volume_id = format!("{}-model-cache", model_name);
-    let volume_resource = ResourceSpec {
-        type_: ResourceType::Volume,
-        id: Some(volume_id.clone()),
-        ..Default::default()
-    };
-    let pvc_name = volume_resource
-        .volume_pvc_name(&job_name, VOLUME_NAME)
-        .ok_or_else(|| {
-            ModelError::DownloadFailed("volume resource did not produce a PVC name".to_string())
-        })?;
-
-    let access_mode = source.access_mode.as_deref().unwrap_or("ReadWriteOnce");
+    let pvc_name = format!("vol-{}", volume_id);
 
     let owner_ref = OwnerReference {
         api_version: "lattice.dev/v1alpha1".to_string(),
@@ -157,15 +149,6 @@ pub fn compile_download(
         controller: Some(true),
         block_owner_deletion: Some(true),
     };
-
-    let pvc = compile_pvc(
-        &pvc_name,
-        namespace,
-        &source.cache_size,
-        source.storage_class.as_deref(),
-        access_mode,
-        vec![owner_ref.clone()],
-    );
 
     let job = compile_lattice_job(
         &job_name,
@@ -181,40 +164,10 @@ pub fn compile_download(
 
     Ok(CompiledDownload {
         job,
-        pvc,
         service_account,
+        pvc_name,
         mount_path,
     })
-}
-
-fn compile_pvc(
-    name: &str,
-    namespace: &str,
-    cache_size: &str,
-    storage_class: Option<&str>,
-    access_mode: &str,
-    owner_references: Vec<OwnerReference>,
-) -> PersistentVolumeClaim {
-    use lattice_common::kube_utils::ObjectMeta;
-
-    let metadata = ObjectMeta::new(name, namespace)
-        .with_label("app.kubernetes.io/component", "model-cache")
-        .with_owner_references(owner_references);
-
-    PersistentVolumeClaim {
-        api_version: "v1".to_string(),
-        kind: "PersistentVolumeClaim".to_string(),
-        metadata,
-        spec: PvcSpec {
-            access_modes: vec![access_mode.to_string()],
-            resources: PvcResources {
-                requests: PvcStorage {
-                    storage: cache_size.to_string(),
-                },
-            },
-            storage_class_name: storage_class.map(|s| s.to_string()),
-        },
-    }
 }
 
 fn compile_lattice_job(
@@ -230,14 +183,24 @@ fn compile_lattice_job(
 
     let mut resources = BTreeMap::new();
 
-    // Volume reference — the PVC is created separately by the model controller
-    // with LatticeModel ownerReferences. This is a reference (no size) so
-    // VolumeCompiler generates the volume mount without creating a duplicate PVC.
+    // Volume owner — VolumeCompiler creates the PVC with ownerReferences
+    // forwarded from the LatticeJob (which point to LatticeModel for GC).
+    // The volume id enables cross-workload sharing: serving pods declare
+    // the same id as a reference and get pod affinity for co-location.
+    let mut volume_params: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    volume_params.insert("size".to_string(), serde_json::json!(source.cache_size));
+    if let Some(ref sc) = source.storage_class {
+        volume_params.insert("storageClass".to_string(), serde_json::json!(sc));
+    }
+    if let Some(ref am) = source.access_mode {
+        volume_params.insert("accessMode".to_string(), serde_json::json!(am));
+    }
     resources.insert(
         VOLUME_NAME.to_string(),
         ResourceSpec {
             type_: ResourceType::Volume,
             id: Some(volume_id.to_string()),
+            params: Some(volume_params),
             ..Default::default()
         },
     );
@@ -534,14 +497,16 @@ mod tests {
             "hf download Qwen/Qwen3-8B --local-dir /models/Qwen3-8B"
         );
 
-        // Volume reference (no size — PVC is created separately)
+        // Volume owner (has size — VolumeCompiler creates the PVC)
         let vol_resource = &task.workload.resources[VOLUME_NAME];
         assert_eq!(vol_resource.type_, ResourceType::Volume);
         assert_eq!(vol_resource.id.as_deref(), Some("llm-serving-model-cache"));
         assert!(
-            vol_resource.params.is_none(),
-            "volume should be a reference (no params/size)"
+            vol_resource.is_volume_owner(),
+            "volume should be an owner (has size in params)"
         );
+        let vol_params = vol_resource.volume_params().unwrap().unwrap();
+        assert_eq!(vol_params.size, Some("50Gi".to_string()));
 
         // Entity egress resource
         let egress_resource = &task.workload.resources["internet"];
@@ -559,16 +524,6 @@ mod tests {
         // No token secret → no secret resource, no env_from
         assert!(container.env_from.is_empty());
         assert!(!task.workload.resources.contains_key("token"));
-
-        // PVC checks (separate from LatticeJob)
-        assert_eq!(download.pvc.metadata.name, "vol-llm-serving-model-cache");
-        assert_eq!(download.pvc.metadata.namespace, "serving");
-        assert_eq!(download.pvc.spec.resources.requests.storage, "50Gi");
-        assert_eq!(download.pvc.spec.access_modes, vec!["ReadWriteOnce"]);
-        let pvc_owner = &download.pvc.metadata.owner_references[0];
-        assert_eq!(pvc_owner.kind, "LatticeModel");
-        assert_eq!(pvc_owner.name, "llm-serving");
-        assert_eq!(pvc_owner.uid, "uid-123");
     }
 
     #[test]
@@ -655,8 +610,10 @@ mod tests {
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
+        let vol_resource = &download.job.spec.tasks["download"].workload.resources[VOLUME_NAME];
+        let vol_params = vol_resource.volume_params().unwrap().unwrap();
         assert_eq!(
-            download.pvc.spec.storage_class_name,
+            vol_params.storage_class,
             Some("fast-nvme".to_string())
         );
     }
@@ -758,7 +715,6 @@ mod tests {
         let volume_id = vol_resource.id.as_deref().unwrap();
         let expected_pvc_name = format!("vol-{}", volume_id);
         assert_eq!(download.pvc_name(), expected_pvc_name);
-        assert_eq!(download.pvc.metadata.name, expected_pvc_name);
     }
 
     #[test]
@@ -769,7 +725,12 @@ mod tests {
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        assert_eq!(download.pvc.spec.access_modes, vec!["ReadWriteMany"]);
+        let vol_resource = &download.job.spec.tasks["download"].workload.resources[VOLUME_NAME];
+        let vol_params = vol_resource.volume_params().unwrap().unwrap();
+        assert_eq!(
+            vol_params.access_mode,
+            Some(lattice_common::crd::VolumeAccessMode::ReadWriteMany)
+        );
     }
 
     #[test]

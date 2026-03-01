@@ -811,10 +811,9 @@ async fn apply_download_resources(
     download: &CompiledDownload,
     params: &PatchParams,
 ) -> Result<(), ModelError> {
-    let pvc_ar = ApiResource::erase::<k8s_openapi::api::core::v1::PersistentVolumeClaim>(&());
     let sa_ar = ApiResource::erase::<k8s_openapi::api::core::v1::ServiceAccount>(&());
 
-    // Layer 0a: PVC + ServiceAccount (must exist before LatticeJob references them)
+    // Layer 0a: ServiceAccount (must exist before LatticeJob pod references it)
     let mut layer0a = ApplyBatch::new(client.clone(), namespace, params);
 
     layer0a.push(
@@ -824,16 +823,10 @@ async fn apply_download_resources(
         &sa_ar,
     )?;
 
-    layer0a.push(
-        "PersistentVolumeClaim",
-        download.pvc_name(),
-        &download.pvc,
-        &pvc_ar,
-    )?;
-
     layer0a.run("layer-0a-download-infra").await?;
 
-    // Layer 0b: LatticeJob (after PVC exists so the volume reference resolves)
+    // Layer 0b: LatticeJob (the job compiler's VolumeCompiler creates the PVC
+    // with ownerReferences forwarded from the LatticeJob metadata)
     let lj_api: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
     lj_api
         .patch(download.job_name(), params, &Patch::Apply(&download.job))

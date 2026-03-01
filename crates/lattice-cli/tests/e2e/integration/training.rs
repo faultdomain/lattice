@@ -165,8 +165,10 @@ async fn test_training_env_vars(kubeconfig: &str) -> Result<(), String> {
             .as_object()
             .ok_or(format!("ConfigMap '{cm_name}' has no data"))?;
 
-        // PyTorch distributed env vars
-        for required in ["MASTER_ADDR", "MASTER_PORT", "WORLD_SIZE", "RANK"] {
+        // PyTorch distributed env vars (shared across all pods in the task).
+        // RANK is NOT in the ConfigMap — it's injected at the pod spec level
+        // via $(VC_TASK_INDEX) from the Volcano env plugin.
+        for required in ["MASTER_ADDR", "MASTER_PORT", "WORLD_SIZE"] {
             if !data.contains_key(required) {
                 return Err(format!(
                     "Task '{task_name}' ConfigMap missing training env var: {required}"
