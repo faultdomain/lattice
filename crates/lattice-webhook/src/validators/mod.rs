@@ -1,6 +1,7 @@
 //! Validator registry and trait for CRD admission validation
 
 mod cluster;
+mod job;
 mod mesh_member;
 mod model;
 mod secret_provider;
@@ -28,6 +29,7 @@ impl ValidatorRegistry {
     pub fn new() -> Self {
         let validators: Vec<Box<dyn Validator>> = vec![
             Box::new(cluster::ClusterValidator),
+            Box::new(job::JobValidator),
             Box::new(service::ServiceValidator),
             Box::new(mesh_member::MeshMemberValidator),
             Box::new(model::ModelValidator),
@@ -72,6 +74,12 @@ mod tests {
                 .find("lattice.dev", "v1alpha1", "latticeclusters")
                 .is_some(),
             "should find LatticeCluster validator"
+        );
+        assert!(
+            registry
+                .find("lattice.dev", "v1alpha1", "latticejobs")
+                .is_some(),
+            "should find LatticeJob validator"
         );
         assert!(
             registry

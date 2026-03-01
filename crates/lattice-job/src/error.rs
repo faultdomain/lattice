@@ -36,6 +36,9 @@ pub enum JobError {
 
     #[error("unsupported training framework: {0}")]
     UnsupportedFramework(String),
+
+    #[error("training task '{task}' container '{container}' must specify a command")]
+    TrainingContainerNoCommand { task: String, container: String },
 }
 
 impl Retryable for JobError {
@@ -51,6 +54,7 @@ impl Retryable for JobError {
             Self::CronWithCheckpoint => false,
             Self::CoordinatorTaskMissing(_) => false,
             Self::UnsupportedFramework(_) => false,
+            Self::TrainingContainerNoCommand { .. } => false,
         }
     }
 }

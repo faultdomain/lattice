@@ -1,0 +1,5 @@
+FROM python:3.11-slim
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+ENV HOME=/tmp
+USER 65534:65534
+ENTRYPOINT ["python"]

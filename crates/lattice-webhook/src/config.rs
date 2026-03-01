@@ -132,6 +132,8 @@ fn build_webhook_configuration(ca_bundle: &[u8]) -> ValidatingWebhookConfigurati
     let rules = vec![
         // LatticeCluster (cluster-scoped)
         webhook_rule("latticeclusters", &["*"]),
+        // LatticeJob (namespaced)
+        webhook_rule("latticejobs", &["*"]),
         // LatticeService (namespaced)
         webhook_rule("latticeservices", &["*"]),
         // LatticeMeshMember (namespaced)
@@ -230,6 +232,7 @@ mod tests {
             .collect();
 
         assert!(resources.contains(&"latticeclusters"));
+        assert!(resources.contains(&"latticejobs"));
         assert!(resources.contains(&"latticeservices"));
         assert!(resources.contains(&"latticemeshmembers"));
         assert!(resources.contains(&"latticemodels"));

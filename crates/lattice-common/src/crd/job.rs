@@ -245,6 +245,59 @@ impl LatticeJobSpec {
     pub fn is_cron(&self) -> bool {
         self.schedule.is_some()
     }
+
+    /// Validate the job specification at admission time.
+    ///
+    /// Catches structural errors early (before compilation):
+    /// - Empty tasks
+    /// - Cron jobs with checkpoint (incompatible)
+    /// - Missing coordinator task
+    /// - Training containers without explicit command
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if self.tasks.is_empty() {
+            return Err(crate::Error::validation("job has no tasks"));
+        }
+
+        if let Some(ref training) = self.training {
+            if !self.tasks.contains_key(&training.coordinator_task) {
+                return Err(crate::Error::validation(format!(
+                    "training coordinator task '{}' not found in job tasks",
+                    training.coordinator_task
+                )));
+            }
+
+            if self.is_cron() && training.checkpoint.is_some() {
+                return Err(crate::Error::validation(
+                    "cron jobs cannot use training checkpoint recovery",
+                ));
+            }
+
+            // Training containers must declare explicit commands so the rank
+            // init container can wrap them with `. /lattice-env/rank.sh; exec "$@"`
+            for (task_name, task_spec) in &self.tasks {
+                for (container_name, container) in &task_spec.workload.containers {
+                    if container.command.is_none() {
+                        return Err(crate::Error::validation(format!(
+                            "training task '{}' container '{}' must specify a command",
+                            task_name, container_name
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Validate each task's workload containers
+        for (task_name, task_spec) in &self.tasks {
+            for (container_name, container) in &task_spec.workload.containers {
+                container.validate(container_name).map_err(|e| {
+                    crate::Error::validation(format!("task '{}': {}", task_name, e))
+                })?;
+            }
+            task_spec.runtime.validate()?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Status of a LatticeJob
@@ -401,6 +454,7 @@ pub struct NcclConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements};
 
     #[test]
     fn job_spec_default_has_empty_tasks() {
@@ -617,5 +671,194 @@ mod tests {
         };
         assert_eq!(status.phase, JobPhase::Running);
         assert!(status.start_time.is_some());
+    }
+
+    // =========================================================================
+    // LatticeJobSpec::validate() tests
+    // =========================================================================
+
+    /// Helper: build a task with an explicit command (required for training jobs)
+    fn task_with_command(replicas: u32) -> JobTaskSpec {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "train:latest".to_string(),
+                command: Some(vec!["/usr/bin/python".to_string(), "train.py".to_string()]),
+                resources: Some(ResourceRequirements {
+                    limits: Some(ResourceQuantity {
+                        cpu: Some("1".to_string()),
+                        memory: Some("1Gi".to_string()),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        JobTaskSpec {
+            replicas,
+            workload: WorkloadSpec {
+                containers,
+                ..Default::default()
+            },
+            runtime: RuntimeSpec::default(),
+            restart_policy: None,
+        }
+    }
+
+    /// Helper: build a task without a command
+    fn task_without_command(replicas: u32) -> JobTaskSpec {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "train:latest".to_string(),
+                resources: Some(ResourceRequirements {
+                    limits: Some(ResourceQuantity {
+                        cpu: Some("1".to_string()),
+                        memory: Some("1Gi".to_string()),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        JobTaskSpec {
+            replicas,
+            workload: WorkloadSpec {
+                containers,
+                ..Default::default()
+            },
+            runtime: RuntimeSpec::default(),
+            restart_policy: None,
+        }
+    }
+
+    #[test]
+    fn validate_allows_valid_job() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), task_with_command(2));
+
+        let spec = LatticeJobSpec {
+            tasks,
+            ..Default::default()
+        };
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_allows_valid_training_job() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), task_with_command(1));
+        tasks.insert("worker".to_string(), task_with_command(3));
+
+        let spec = LatticeJobSpec {
+            tasks,
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "master".to_string(),
+                checkpoint: None,
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_denies_empty_tasks() {
+        let spec = LatticeJobSpec {
+            tasks: BTreeMap::new(),
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err();
+        assert!(err.to_string().contains("no tasks"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_denies_missing_coordinator_task() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), task_with_command(1));
+
+        let spec = LatticeJobSpec {
+            tasks,
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "nonexistent".to_string(),
+                checkpoint: None,
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("nonexistent"),
+            "should mention missing task name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_denies_cron_with_checkpoint() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), task_with_command(1));
+
+        let spec = LatticeJobSpec {
+            tasks,
+            schedule: Some("*/5 * * * *".to_string()),
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "worker".to_string(),
+                checkpoint: Some(CheckpointSpec {
+                    local_path: None,
+                    volume_size: Some("10Gi".to_string()),
+                    storage_class: None,
+                }),
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("cron"),
+            "should mention cron incompatibility, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_denies_training_container_without_command() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), task_without_command(1));
+
+        let spec = LatticeJobSpec {
+            tasks,
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "worker".to_string(),
+                checkpoint: None,
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("command"),
+            "should mention missing command, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_allows_non_training_container_without_command() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), task_without_command(1));
+
+        let spec = LatticeJobSpec {
+            tasks,
+            // No training config — command is not required
+            ..Default::default()
+        };
+        assert!(
+            spec.validate().is_ok(),
+            "non-training jobs should not require command"
+        );
     }
 }

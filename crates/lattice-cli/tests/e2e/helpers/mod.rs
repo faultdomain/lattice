@@ -216,6 +216,9 @@ pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 /// Default model-downloader image (huggingface-cli, awscli, gsutil pre-installed)
 pub const DEFAULT_DOWNLOADER_IMAGE: &str = "ghcr.io/evan-hines-js/lattice-downloader:latest";
 
+/// PyTorch CPU test image for distributed training integration tests
+pub const DEFAULT_PYTORCH_TEST_IMAGE: &str = "ghcr.io/evan-hines-js/pytorch-test:latest";
+
 /// When `true`, rewrite all non-lattice test images to the GHCR mirror
 /// (`ghcr.io/evan-hines-js/{name}:{tag}`). Flip this single bool to switch.
 const USE_GHCR_MIRROR: bool = true;

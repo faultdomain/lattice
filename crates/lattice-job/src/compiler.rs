@@ -32,6 +32,7 @@ use crate::error::JobError;
 
 const DEFAULT_MASTER_PORT: u16 = 29500;
 const DEFAULT_NCCL_DEBUG: &str = "WARN";
+const RANK_INIT_IMAGE: &str = "busybox:latest";
 
 /// Discriminated Volcano workload — either a one-shot VCJob or a scheduled VCCronJob.
 #[derive(Debug)]
@@ -178,14 +179,18 @@ pub async fn compile_job(
         }
     }
 
-    // Training: inject RANK into pod templates via K8s env var interpolation.
-    // The Volcano env plugin injects VC_TASK_INDEX per pod (globally unique
-    // across all tasks). We map RANK = $(VC_TASK_INDEX) directly in the pod
-    // spec so K8s interpolates it at pod creation time. This can't go in the
-    // ConfigMap because K8s only interpolates $(VAR) in pod spec env entries.
+    // Training: inject per-pod RANK via init container + emptyDir.
+    // Volcano's VC_TASK_INDEX is per-task-group (not globally unique), so
+    // multi-task jobs need an offset: RANK = rank_offset + VC_TASK_INDEX.
+    // Tasks are iterated in BTreeMap order (alphabetical), accumulating
+    // cumulative offsets from each task's replica count.
     if job.spec.training.is_some() {
-        for template in pod_templates.values_mut() {
-            inject_rank_env(template);
+        let mut cumulative_offset = 0u32;
+        for (task_name, task_spec) in &tasks {
+            if let Some(template) = pod_templates.get_mut(task_name) {
+                inject_rank_env(template, cumulative_offset);
+            }
+            cumulative_offset += task_spec.replicas;
         }
     }
 
@@ -230,6 +235,20 @@ fn prepare_training_tasks(
     let world_size: u32 = tasks.values().map(|t| t.replicas).sum();
     let coordinator = &training.coordinator_task;
     let coordinator_addr = format!("{}-{}-0.{}", job_name, coordinator, job_name);
+
+    // Validate: every container in every training task must declare an explicit
+    // command. The rank injection wraps the command with `. /lattice-env/rank.sh;
+    // exec "$@"`, which requires a command to wrap.
+    for (task_name, task_spec) in tasks {
+        for (container_name, container) in &task_spec.workload.containers {
+            if container.command.is_none() {
+                return Err(JobError::TrainingContainerNoCommand {
+                    task: task_name.clone(),
+                    container: container_name.clone(),
+                });
+            }
+        }
+    }
 
     let mut result = BTreeMap::new();
     for (task_name, task_spec) in tasks {
@@ -376,34 +395,117 @@ fn inject_env_all(workload: &mut WorkloadSpec, vars: &[(&str, String)]) {
     }
 }
 
-/// Inject `RANK` and `NODE_RANK` env vars into a pod template JSON using
-/// K8s variable interpolation.
+/// Inject per-pod RANK computation into a pod template JSON.
 ///
-/// Sets both `RANK = $(VC_TASK_INDEX)` and `NODE_RANK = $(VC_TASK_INDEX)`
-/// directly in each container's `env` array. K8s interpolates
-/// `$(VC_TASK_INDEX)` at pod creation time using the value injected by the
-/// Volcano env plugin.
+/// Volcano's `VC_TASK_INDEX` is per-task-group (0-based within each task),
+/// not globally unique across the job. For multi-task jobs (e.g. master x1 +
+/// worker x3), both the master and worker-0 get `VC_TASK_INDEX=0`.
 ///
-/// `RANK` is the traditional PyTorch env var. `NODE_RANK` is the name
-/// expected by `torchrun` and DeepSpeed launchers.
-fn inject_rank_env(template: &mut serde_json::Value) {
-    let rank_env = serde_json::json!({"name": "RANK", "value": "$(VC_TASK_INDEX)"});
-    let node_rank_env = serde_json::json!({"name": "NODE_RANK", "value": "$(VC_TASK_INDEX)"});
+/// This function computes globally unique RANK = `rank_offset` + `VC_TASK_INDEX`
+/// via an init container that writes the result to a shared emptyDir volume.
+///
+/// Specifically:
+/// - Adds an `emptyDir` volume `lattice-env`
+/// - Adds an init container `lattice-rank` that computes RANK and writes
+///   `export RANK=<N> NODE_RANK=<N>` to `/lattice-env/rank.sh`
+/// - Wraps each main container's command to source `rank.sh` before exec
+fn inject_rank_env(template: &mut serde_json::Value, rank_offset: u32) {
+    let spec = match template.pointer_mut("/spec") {
+        Some(s) => s,
+        None => return,
+    };
+    let spec_obj = match spec.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
 
-    let containers = template
-        .pointer_mut("/spec/containers")
+    // Add emptyDir volume for rank.sh
+    let volumes = spec_obj
+        .entry("volumes")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut();
+    if let Some(volumes) = volumes {
+        volumes.push(serde_json::json!({
+            "name": "lattice-env",
+            "emptyDir": {}
+        }));
+    }
+
+    // Add init container that computes RANK from offset + VC_TASK_INDEX.
+    // busybox runs as root, so the container-level securityContext must
+    // override the pod-level runAsNonRoot: true.
+    let init_container = serde_json::json!({
+        "name": "lattice-rank",
+        "image": RANK_INIT_IMAGE,
+        "env": [
+            {"name": "LATTICE_RANK_OFFSET", "value": rank_offset.to_string()},
+        ],
+        "command": ["/bin/sh", "-c",
+            "RANK=$((LATTICE_RANK_OFFSET + VC_TASK_INDEX)); echo \"export RANK=$RANK NODE_RANK=$RANK\" > /lattice-env/rank.sh"
+        ],
+        "volumeMounts": [
+            {"name": "lattice-env", "mountPath": "/lattice-env"}
+        ],
+        "securityContext": {
+            "runAsNonRoot": false,
+            "runAsUser": 0,
+            "readOnlyRootFilesystem": true,
+            "allowPrivilegeEscalation": false,
+            "capabilities": {"drop": ["ALL"]},
+            "seccompProfile": {"type": "RuntimeDefault"}
+        }
+    });
+    let init_containers = spec_obj
+        .entry("initContainers")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut();
+    if let Some(init_containers) = init_containers {
+        init_containers.push(init_container);
+    }
+
+    // Wrap each main container's command to source rank.sh first.
+    // Original: command: ["/usr/bin/python", "-c", "script"], args: ["--flag"]
+    // Wrapped:  command: ["/bin/sh", "-c", ". /lattice-env/rank.sh; exec \"$@\"", "sh"]
+    //           args: ["/usr/bin/python", "-c", "script", "--flag"]
+    let containers = spec_obj
+        .get_mut("containers")
         .and_then(|c| c.as_array_mut());
-
     if let Some(containers) = containers {
         for container in containers {
-            let env = container.as_object_mut().and_then(|c| {
-                c.entry("env")
-                    .or_insert_with(|| serde_json::json!([]))
-                    .as_array_mut()
-            });
-            if let Some(env) = env {
-                env.push(rank_env.clone());
-                env.push(node_rank_env.clone());
+            let obj = match container.as_object_mut() {
+                Some(o) => o,
+                None => continue,
+            };
+
+            // Collect original command + args into new args
+            let orig_command: Vec<String> = obj
+                .get("command")
+                .and_then(|c| serde_json::from_value(c.clone()).ok())
+                .unwrap_or_default();
+            let orig_args: Vec<String> = obj
+                .get("args")
+                .and_then(|a| serde_json::from_value(a.clone()).ok())
+                .unwrap_or_default();
+
+            let mut new_args: Vec<String> = orig_command;
+            new_args.extend(orig_args);
+
+            obj.insert(
+                "command".to_string(),
+                serde_json::json!(["/bin/sh", "-c", ". /lattice-env/rank.sh; exec \"$@\"", "sh"]),
+            );
+            obj.insert("args".to_string(), serde_json::to_value(&new_args).unwrap());
+
+            // Add volume mount for lattice-env
+            let volume_mounts = obj
+                .entry("volumeMounts")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut();
+            if let Some(vm) = volume_mounts {
+                vm.push(serde_json::json!({
+                    "name": "lattice-env",
+                    "mountPath": "/lattice-env"
+                }));
             }
         }
     }
@@ -534,11 +636,32 @@ mod tests {
     }
 
     fn make_task(image: &str, replicas: u32) -> JobTaskSpec {
+        make_task_with_command(image, replicas, None)
+    }
+
+    fn make_training_task(image: &str, replicas: u32) -> JobTaskSpec {
+        make_task_with_command(
+            image,
+            replicas,
+            Some(vec![
+                "/usr/bin/python".to_string(),
+                "-c".to_string(),
+                "train()".to_string(),
+            ]),
+        )
+    }
+
+    fn make_task_with_command(
+        image: &str,
+        replicas: u32,
+        command: Option<Vec<String>>,
+    ) -> JobTaskSpec {
         let mut containers = BTreeMap::new();
         containers.insert(
             "main".to_string(),
             ContainerSpec {
                 image: image.to_string(),
+                command,
                 ..Default::default()
             },
         );
@@ -666,8 +789,8 @@ mod tests {
     #[test]
     fn prepare_training_injects_pytorch_env() {
         let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_task("train:latest", 1));
-        tasks.insert("worker".to_string(), make_task("train:latest", 3));
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 3));
 
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
@@ -703,8 +826,8 @@ mod tests {
     #[test]
     fn prepare_training_injects_jax_env() {
         let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_task("jax:latest", 1));
-        tasks.insert("worker".to_string(), make_task("jax:latest", 2));
+        tasks.insert("master".to_string(), make_training_task("jax:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("jax:latest", 2));
 
         let training = TrainingConfig {
             framework: TrainingFramework::Jax,
@@ -725,7 +848,7 @@ mod tests {
     #[test]
     fn prepare_training_injects_nccl_overrides() {
         let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_task("train:latest", 1));
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
 
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
@@ -749,8 +872,8 @@ mod tests {
     #[test]
     fn prepare_training_injects_checkpoint_volume() {
         let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_task("train:latest", 1));
-        tasks.insert("worker".to_string(), make_task("train:latest", 2));
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
 
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
@@ -778,7 +901,7 @@ mod tests {
     #[test]
     fn prepare_training_defaults_restart_policy_to_on_failure() {
         let mut tasks = BTreeMap::new();
-        let mut task = make_task("train:latest", 1);
+        let mut task = make_training_task("train:latest", 1);
         task.restart_policy = None; // unset
         tasks.insert("worker".to_string(), task);
 
@@ -799,7 +922,7 @@ mod tests {
     #[test]
     fn prepare_training_checkpoint_defaults_restart_policy_to_never() {
         let mut tasks = BTreeMap::new();
-        let mut task = make_task("train:latest", 1);
+        let mut task = make_training_task("train:latest", 1);
         task.restart_policy = None; // unset
         tasks.insert("worker".to_string(), task);
 
@@ -839,8 +962,8 @@ mod tests {
     #[tokio::test]
     async fn compile_job_labels_pvcs_for_training() {
         let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_task("train:latest", 1));
-        tasks.insert("worker".to_string(), make_task("train:latest", 2));
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
 
         let spec = LatticeJobSpec {
             training: Some(TrainingConfig {
@@ -903,8 +1026,7 @@ mod tests {
 
     // ── Multi-GPU tests ──
 
-    fn make_gpu_task(image: &str, replicas: u32, gpu_count: u32) -> JobTaskSpec {
-        let mut task = make_task(image, replicas);
+    fn add_gpu(mut task: JobTaskSpec, gpu_count: u32) -> JobTaskSpec {
         task.workload.resources.insert(
             "gpu".to_string(),
             ResourceSpec {
@@ -921,7 +1043,7 @@ mod tests {
 
     #[test]
     fn gpu_param_returns_count_from_gpu_resource() {
-        let task = make_gpu_task("train:latest", 1, 8);
+        let task = add_gpu(make_task("train:latest", 1), 8);
         assert_eq!(gpu_param(&task.workload, |p| Some(p.count)), Some(8));
     }
 
@@ -934,8 +1056,14 @@ mod tests {
     #[test]
     fn prepare_training_injects_nproc_per_node_for_pytorch() {
         let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_gpu_task("train:latest", 1, 8));
-        tasks.insert("worker".to_string(), make_gpu_task("train:latest", 4, 8));
+        tasks.insert(
+            "master".to_string(),
+            add_gpu(make_training_task("train:latest", 1), 8),
+        );
+        tasks.insert(
+            "worker".to_string(),
+            add_gpu(make_training_task("train:latest", 4), 8),
+        );
 
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
@@ -956,8 +1084,14 @@ mod tests {
     #[test]
     fn prepare_training_injects_jax_local_device_count() {
         let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_gpu_task("jax:latest", 1, 4));
-        tasks.insert("worker".to_string(), make_gpu_task("jax:latest", 3, 4));
+        tasks.insert(
+            "master".to_string(),
+            add_gpu(make_training_task("jax:latest", 1), 4),
+        );
+        tasks.insert(
+            "worker".to_string(),
+            add_gpu(make_training_task("jax:latest", 3), 4),
+        );
 
         let training = TrainingConfig {
             framework: TrainingFramework::Jax,
@@ -977,8 +1111,8 @@ mod tests {
     #[test]
     fn prepare_training_no_gpu_omits_nproc_per_node() {
         let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_task("train:latest", 1));
-        tasks.insert("worker".to_string(), make_task("train:latest", 3));
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 3));
 
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
@@ -997,26 +1131,143 @@ mod tests {
     }
 
     #[test]
-    fn inject_rank_env_adds_rank_and_node_rank() {
+    fn inject_rank_env_adds_init_container_and_wraps_command() {
         let mut template = serde_json::json!({
             "spec": {
                 "containers": [{
                     "name": "main",
+                    "command": ["/usr/bin/python", "-c", "print('hello')"],
                     "env": []
                 }]
             }
         });
 
-        inject_rank_env(&mut template);
+        inject_rank_env(&mut template, 0);
 
-        let env = template["spec"]["containers"][0]["env"].as_array().unwrap();
-        let names: Vec<&str> = env.iter().filter_map(|e| e["name"].as_str()).collect();
-        assert!(names.contains(&"RANK"), "missing RANK");
-        assert!(names.contains(&"NODE_RANK"), "missing NODE_RANK");
+        // Init container should be present with correct offset
+        let init_containers = template["spec"]["initContainers"].as_array().unwrap();
+        assert_eq!(init_containers.len(), 1);
+        assert_eq!(init_containers[0]["name"], "lattice-rank");
+        assert_eq!(init_containers[0]["image"], RANK_INIT_IMAGE);
 
-        let rank_val = env.iter().find(|e| e["name"] == "RANK").unwrap();
-        let node_rank_val = env.iter().find(|e| e["name"] == "NODE_RANK").unwrap();
-        assert_eq!(rank_val["value"], "$(VC_TASK_INDEX)");
-        assert_eq!(node_rank_val["value"], "$(VC_TASK_INDEX)");
+        let init_env = init_containers[0]["env"].as_array().unwrap();
+        let offset_env = init_env
+            .iter()
+            .find(|e| e["name"] == "LATTICE_RANK_OFFSET")
+            .unwrap();
+        assert_eq!(offset_env["value"], "0");
+
+        // Main container command should be wrapped
+        let main = &template["spec"]["containers"][0];
+        let cmd: Vec<String> = serde_json::from_value(main["command"].clone()).unwrap();
+        assert_eq!(
+            cmd,
+            vec!["/bin/sh", "-c", ". /lattice-env/rank.sh; exec \"$@\"", "sh"]
+        );
+
+        // Original command becomes args
+        let args: Vec<String> = serde_json::from_value(main["args"].clone()).unwrap();
+        assert_eq!(args, vec!["/usr/bin/python", "-c", "print('hello')"]);
+
+        // Volume should be present
+        let volumes = template["spec"]["volumes"].as_array().unwrap();
+        assert!(volumes.iter().any(|v| v["name"] == "lattice-env"));
+
+        // Volume mount on main container
+        let vm = main["volumeMounts"].as_array().unwrap();
+        assert!(vm.iter().any(|v| v["name"] == "lattice-env"));
+    }
+
+    #[test]
+    fn inject_rank_env_with_nonzero_offset() {
+        let mut template = serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "main",
+                    "command": ["/usr/bin/torchrun"],
+                    "env": []
+                }]
+            }
+        });
+
+        inject_rank_env(&mut template, 3);
+
+        let init_containers = template["spec"]["initContainers"].as_array().unwrap();
+        let init_env = init_containers[0]["env"].as_array().unwrap();
+        let offset_env = init_env
+            .iter()
+            .find(|e| e["name"] == "LATTICE_RANK_OFFSET")
+            .unwrap();
+        assert_eq!(offset_env["value"], "3");
+    }
+
+    #[test]
+    fn inject_rank_env_preserves_command_and_args() {
+        let mut template = serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "main",
+                    "command": ["/usr/bin/python", "-c", "script"],
+                    "args": ["--lr", "0.001", "--epochs", "10"]
+                }]
+            }
+        });
+
+        inject_rank_env(&mut template, 0);
+
+        let main = &template["spec"]["containers"][0];
+        let args: Vec<String> = serde_json::from_value(main["args"].clone()).unwrap();
+        // Original command elements followed by original args elements
+        assert_eq!(
+            args,
+            vec![
+                "/usr/bin/python",
+                "-c",
+                "script",
+                "--lr",
+                "0.001",
+                "--epochs",
+                "10"
+            ]
+        );
+    }
+
+    #[test]
+    fn training_container_no_command_returns_error() {
+        let mut tasks = BTreeMap::new();
+        // Container without command
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "train:latest".to_string(),
+                ..Default::default()
+            },
+        );
+        tasks.insert(
+            "worker".to_string(),
+            JobTaskSpec {
+                replicas: 1,
+                workload: WorkloadSpec {
+                    containers,
+                    ..Default::default()
+                },
+                runtime: RuntimeSpec::default(),
+                restart_policy: Some(RestartPolicy::Never),
+            },
+        );
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
+            checkpoint: None,
+            nccl: None,
+        };
+
+        let result = prepare_training_tasks("my-job", &tasks, &training);
+        assert!(matches!(
+            result,
+            Err(JobError::TrainingContainerNoCommand { .. })
+        ));
     }
 }
