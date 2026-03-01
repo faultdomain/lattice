@@ -30,7 +30,7 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_cedar_policy_crd, apply_yaml_with_retry, create_service_with_secrets,
+    apply_cedar_policy_crd, apply_yaml, create_service_with_secrets,
     delete_cedar_policies_by_label, delete_namespace, deploy_and_wait_for_phase,
     ensure_fresh_namespace, load_fixture_config, resolve_model_serving_name, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
@@ -282,7 +282,7 @@ async fn test_model_serving_spec_update(kubeconfig: &str, namespace: &str) -> Re
 
     // Deploy from fixture with overridden namespace
     let yaml = load_model_fixture_for_namespace(namespace)?;
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for Serving
     wait_for_resource_phase(
@@ -378,7 +378,7 @@ async fn test_model_loading_detects_spec_change(
 
     // Deploy from fixture (decode.replicas=1 in fixture)
     let yaml = load_model_fixture_for_namespace(namespace)?;
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for Loading (compilation done, resources applied, waiting for readiness)
     wait_for_resource_phase(
@@ -760,7 +760,7 @@ async fn test_model_role_removal_orphan_cleanup(
 
     // Deploy model fixture (has prefill + decode roles)
     let yaml = load_model_fixture_for_namespace(namespace)?;
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for Serving
     wait_for_resource_phase(
@@ -980,7 +980,7 @@ async fn test_job_failed_sets_observed_generation(
     // Deploy a job that fails permanently
     let job = build_simple_job("job-stable-fail", namespace, &["/bin/sh", "-c", "exit 1"]);
     let yaml = serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job: {e}"))?;
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for Failed
     wait_for_resource_phase(

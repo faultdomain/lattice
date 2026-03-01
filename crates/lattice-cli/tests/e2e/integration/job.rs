@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml_with_retry, delete_namespace, ensure_fresh_namespace, load_fixture_config,
+    apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config,
     run_kubectl, setup_regcreds_infrastructure, wait_for_resource_phase,
 };
 
@@ -44,7 +44,7 @@ async fn test_job_deployment(kubeconfig: &str) -> Result<(), String> {
     let job = load_job_fixture()?;
     let yaml =
         serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job fixture: {e}"))?;
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for controller to pick up and start reconciling
     wait_for_resource_phase(
@@ -303,7 +303,7 @@ async fn test_cron_job_deployment(kubeconfig: &str) -> Result<(), String> {
     let job = load_cron_job_fixture()?;
     let yaml = serde_json::to_string(&job)
         .map_err(|e| format!("Failed to serialize cron job fixture: {e}"))?;
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Cron jobs stay in Running (perpetual) — never transition to Succeeded
     wait_for_resource_phase(

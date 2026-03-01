@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml_with_retry, delete_namespace, ensure_fresh_namespace, load_fixture_config,
+    apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config,
     resolve_model_serving_name, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
     wait_for_resource_phase, TestHarness, DEFAULT_DOWNLOADER_IMAGE, DEFAULT_TIMEOUT,
 };
@@ -47,7 +47,7 @@ async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
     let model = load_model_fixture()?;
     let yaml = serde_json::to_string(&model)
         .map_err(|e| format!("Failed to serialize model fixture: {e}"))?;
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for controller to pick up and transition to Loading
     wait_for_resource_phase(

@@ -14,7 +14,7 @@ use std::time::Duration;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use tracing::info;
 
-use super::cedar::apply_yaml_with_retry;
+use super::cedar::apply_yaml;
 use super::docker::run_kubectl;
 use super::wait_for_condition;
 
@@ -176,7 +176,7 @@ stringData:
         namespace = LATTICE_SYSTEM_NAMESPACE,
         token = VAULT_DEV_TOKEN,
     );
-    apply_yaml_with_retry(kubeconfig, &token_secret_yaml).await?;
+    apply_yaml(kubeconfig, &token_secret_yaml).await?;
     info!("[Vault] Created token secret '{}'", VAULT_TOKEN_SECRET_NAME);
 
     // Apply SecretProvider CRD
@@ -205,7 +205,7 @@ spec:
         kv_mount = VAULT_KV_MOUNT,
         token_secret = VAULT_TOKEN_SECRET_NAME,
     );
-    apply_yaml_with_retry(kubeconfig, &provider_yaml).await?;
+    apply_yaml(kubeconfig, &provider_yaml).await?;
     info!("[Vault] Applied SecretProvider '{}'", VAULT_STORE_NAME);
 
     // Wait for SecretProvider to reach Ready phase.

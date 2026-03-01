@@ -22,13 +22,13 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml_with_retry, delete_namespace, ensure_fresh_namespace, load_fixture_config,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
+    apply_yaml, cleanup_minio_backup_storage, delete_namespace, ensure_fresh_namespace,
+    load_fixture_config, run_kubectl, setup_minio_backup_storage, setup_regcreds_infrastructure,
+    wait_for_condition, wait_for_resource_phase, VELERO_NAMESPACE,
 };
 
 const TRAINING_NAMESPACE: &str = "training-test";
 const JOB_NAME: &str = "training-ckpt";
-const VELERO_NAMESPACE: &str = "velero";
 
 /// Load the training checkpoint job fixture
 fn load_training_fixture() -> Result<lattice_common::crd::LatticeJob, String> {
@@ -48,7 +48,7 @@ async fn test_training_deployment(kubeconfig: &str) -> Result<(), String> {
     let job = load_training_fixture()?;
     let yaml =
         serde_json::to_string(&job).map_err(|e| format!("Failed to serialize fixture: {e}"))?;
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     wait_for_resource_phase(
         kubeconfig,
@@ -325,10 +325,11 @@ async fn test_checkpoint_data_written(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Wait for a Velero backup to complete for this training job
+/// Wait for a Velero backup to complete for this training job (hard assertion)
 async fn wait_for_velero_backup(kubeconfig: &str) -> Result<String, String> {
     info!("[Training] Waiting for Velero backup to complete (up to 3 minutes)...");
 
+    let schedule_name = format!("lattice-training-{}", JOB_NAME);
     let kc = kubeconfig.to_string();
     wait_for_condition(
         "Velero backup to complete",
@@ -336,6 +337,7 @@ async fn wait_for_velero_backup(kubeconfig: &str) -> Result<String, String> {
         Duration::from_secs(10),
         || {
             let kc = kc.clone();
+            let schedule_name = schedule_name.clone();
             async move {
                 let output = run_kubectl(&[
                     "--kubeconfig",
@@ -345,7 +347,7 @@ async fn wait_for_velero_backup(kubeconfig: &str) -> Result<String, String> {
                     "-n",
                     VELERO_NAMESPACE,
                     "-l",
-                    &format!("lattice.dev/training-job={}", JOB_NAME),
+                    &format!("velero.io/schedule-name={}", schedule_name),
                     "-o",
                     "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
                 ])
@@ -367,6 +369,69 @@ async fn wait_for_velero_backup(kubeconfig: &str) -> Result<String, String> {
         },
     )
     .await
+}
+
+/// Verify the Velero Backup contains PodVolumeBackup data (fs-backup ran)
+async fn test_velero_backup_data_exists(kubeconfig: &str, backup_name: &str) -> Result<(), String> {
+    info!(
+        "[Training] Verifying PodVolumeBackup data for backup '{}'...",
+        backup_name
+    );
+
+    let kc = kubeconfig.to_string();
+    let bk = backup_name.to_string();
+    wait_for_condition(
+        "PodVolumeBackup to exist for backup",
+        Duration::from_secs(60),
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let bk = bk.clone();
+            async move {
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "podvolumebackup",
+                    "-n",
+                    VELERO_NAMESPACE,
+                    "-l",
+                    &format!("velero.io/backup-name={}", bk),
+                    "-o",
+                    "jsonpath={.items[*].status.phase}",
+                ])
+                .await
+                .unwrap_or_default();
+
+                let phases: Vec<&str> = output.split_whitespace().collect();
+                if phases.is_empty() {
+                    info!("[Training] No PodVolumeBackup found yet");
+                    return Ok(false);
+                }
+
+                let all_completed = phases.iter().all(|p| *p == "Completed");
+                if all_completed {
+                    info!(
+                        "[Training] {} PodVolumeBackup(s) completed",
+                        phases.len()
+                    );
+                } else {
+                    info!(
+                        "[Training] PodVolumeBackup phases: {:?}",
+                        phases
+                    );
+                }
+                Ok(all_completed)
+            }
+        },
+    )
+    .await?;
+
+    info!(
+        "[Training] PodVolumeBackup data verified for backup '{}'",
+        backup_name
+    );
+    Ok(())
 }
 
 /// Kill a pod from the training gang to trigger VCJob failure
@@ -558,13 +623,13 @@ async fn test_recovery_completes(kubeconfig: &str) -> Result<(), String> {
 // Phase 3: Verify checkpoint data persistence
 // =============================================================================
 
-/// Verify pods read from the restored checkpoint (RESTORED in logs)
+/// Verify pods read from the restored checkpoint (RESTORED must appear in logs)
 async fn test_checkpoint_restored(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Checking if pods restored from checkpoint...");
+    info!("[Training] Waiting for restored pods to emit RESTORED...");
 
     let kc = kubeconfig.to_string();
     wait_for_condition(
-        "restarted pods to emit CHECKPOINT_READY",
+        "restarted pods to emit RESTORED",
         Duration::from_secs(120),
         Duration::from_secs(5),
         || {
@@ -583,33 +648,19 @@ async fn test_checkpoint_restored(kubeconfig: &str) -> Result<(), String> {
                 .await
                 .unwrap_or_default();
 
-                Ok(output.contains("CHECKPOINT_READY"))
+                if output.contains("RESTORED") {
+                    Ok(true)
+                } else if output.contains("FRESH") {
+                    Err("Pods started FRESH — checkpoint data was not restored from backup".to_string())
+                } else {
+                    Ok(false)
+                }
             }
         },
     )
     .await?;
 
-    // Check if we got RESTORED (data persisted) or FRESH (no backup available)
-    let logs = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "logs",
-        "-n",
-        TRAINING_NAMESPACE,
-        "-l",
-        &format!("volcano.sh/job-name={}", JOB_NAME),
-        "--tail=20",
-    ])
-    .await
-    .unwrap_or_default();
-
-    if logs.contains("RESTORED") {
-        info!("[Training] Checkpoint data was restored from Velero backup");
-    } else {
-        info!("[Training] No checkpoint data restored (Velero backup may not have completed before failure)");
-    }
-
-    info!("[Training] Checkpoint restoration check complete");
+    info!("[Training] Checkpoint data restored from Velero backup");
     Ok(())
 }
 
@@ -685,6 +736,7 @@ pub async fn run_training_tests(kubeconfig: &str) -> Result<(), String> {
     info!("========================================\n");
 
     setup_regcreds_infrastructure(kubeconfig).await?;
+    setup_minio_backup_storage(kubeconfig).await?;
 
     let result = run_training_test_sequence(kubeconfig).await;
 
@@ -702,23 +754,20 @@ async fn run_training_test_sequence(kubeconfig: &str) -> Result<(), String> {
     test_checkpoint_pvcs(kubeconfig).await?;
     test_velero_schedule(kubeconfig).await?;
 
-    // Phase 2: Write data, trigger failure, verify recovery
+    // Phase 2: Write data, wait for backup, trigger failure, verify recovery
     test_checkpoint_data_written(kubeconfig).await?;
 
-    // Try to wait for a Velero backup before killing. If Velero isn't fully
-    // operational (no CSI snapshots), we still test the recovery state machine
-    // — the controller will restart without checkpoint data.
-    match wait_for_velero_backup(kubeconfig).await {
-        Ok(backup_name) => info!("[Training] Backup available: {}", backup_name),
-        Err(e) => info!("[Training] No backup available (will test recovery without checkpoint): {}", e),
-    }
+    let backup_name = wait_for_velero_backup(kubeconfig).await?;
+    info!("[Training] Backup completed: {}", backup_name);
+
+    test_velero_backup_data_exists(kubeconfig, &backup_name).await?;
 
     test_kill_gang_member(kubeconfig).await?;
     test_all_pods_terminated(kubeconfig).await?;
     test_recovery_triggered(kubeconfig).await?;
     test_recovery_completes(kubeconfig).await?;
 
-    // Phase 3: Verify checkpoint data (informational — depends on Velero)
+    // Phase 3: Verify checkpoint data was actually restored
     test_checkpoint_restored(kubeconfig).await?;
 
     // Verify cleanup
@@ -732,48 +781,29 @@ async fn run_training_test_sequence(kubeconfig: &str) -> Result<(), String> {
 }
 
 async fn cleanup_training_tests(kubeconfig: &str) {
-    // Delete any leftover Velero resources
     let schedule_name = format!("lattice-training-{}", JOB_NAME);
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "schedule.velero.io",
-        &schedule_name,
-        "-n",
-        VELERO_NAMESPACE,
-        "--ignore-not-found",
-    ])
-    .await;
 
-    // Clean up Velero backups
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "backup",
-        "-n",
-        VELERO_NAMESPACE,
-        "-l",
-        &format!("lattice.dev/training-job={}", JOB_NAME),
-        "--ignore-not-found",
-    ])
-    .await;
+    // Delete leftover Velero resources (schedule, backups, restores)
+    for (kind, selector_flag, selector) in [
+        ("schedule.velero.io", "--field-selector", &format!("metadata.name={}", schedule_name) as &str),
+        ("backup", "-l", &format!("velero.io/schedule-name={}", schedule_name)),
+        ("restore", "-l", &format!("velero.io/schedule-name={}", schedule_name)),
+    ] {
+        let _ = run_kubectl(&[
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            kind,
+            "-n",
+            VELERO_NAMESPACE,
+            selector_flag,
+            selector,
+            "--ignore-not-found",
+        ])
+        .await;
+    }
 
-    // Clean up Velero restores
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "restore",
-        "-n",
-        VELERO_NAMESPACE,
-        "-l",
-        &format!("velero.io/restore-name=lattice-training-{}-restore", JOB_NAME),
-        "--ignore-not-found",
-    ])
-    .await;
-
+    cleanup_minio_backup_storage(kubeconfig).await;
     delete_namespace(kubeconfig, TRAINING_NAMESPACE).await;
 }
 

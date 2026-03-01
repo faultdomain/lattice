@@ -158,12 +158,29 @@ pub async fn compile_job(
         tracing_policies.extend(policies);
     }
 
-    // Training: label checkpoint PVCs so Velero Schedule and recovery can find them
+    // Training: label PVCs and pod templates so Velero's fs-backup can find them
     if job.spec.training.is_some() {
         for pvc in &mut config.pvcs {
             pvc.metadata
                 .labels
                 .insert("lattice.dev/training-job".to_string(), name.to_string());
+        }
+        for template in pod_templates.values_mut() {
+            let metadata = template
+                .as_object_mut()
+                .and_then(|t| t.get_mut("metadata"))
+                .and_then(|m| m.as_object_mut());
+            if let Some(metadata) = metadata {
+                let labels = metadata
+                    .entry("labels")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(labels) = labels.as_object_mut() {
+                    labels.insert(
+                        "lattice.dev/training-job".to_string(),
+                        serde_json::json!(name),
+                    );
+                }
+            }
         }
     }
 
@@ -437,10 +454,11 @@ fn compile_headless_service(name: &str, namespace: &str, owner_uid: &str) -> ser
     })
 }
 
-/// Compile a Velero Schedule for periodic checkpoint PVC snapshots.
+/// Compile a Velero Schedule for periodic checkpoint backups.
 ///
-/// Targets PVCs labeled with `lattice.dev/training-job: <name>` in the job's
-/// namespace. Uses CSI volume snapshots for fast, storage-level backups.
+/// Targets PVCs and pods labeled with `lattice.dev/training-job: <name>` in
+/// the job's namespace. Uses Kopia file-system backup (via Velero's node-agent)
+/// instead of CSI volume snapshots for broad storage class compatibility.
 fn compile_velero_schedule(
     name: &str,
     namespace: &str,
@@ -452,9 +470,11 @@ fn compile_velero_schedule(
         "includedNamespaces": [namespace],
         "includedResources": [
             "persistentvolumeclaims",
-            "persistentvolumes"
+            "persistentvolumes",
+            "pods"
         ],
-        "snapshotVolumes": true,
+        "defaultVolumesToFsBackup": true,
+        "snapshotVolumes": false,
         "labelSelector": {
             "matchLabels": {
                 "lattice.dev/training-job": name
@@ -798,11 +818,28 @@ mod tests {
             schedule["spec"]["template"]["storageLocation"],
             "my-bsl"
         );
-        assert_eq!(schedule["spec"]["template"]["snapshotVolumes"], true);
+        assert_eq!(
+            schedule["spec"]["template"]["defaultVolumesToFsBackup"],
+            true
+        );
+        assert_eq!(schedule["spec"]["template"]["snapshotVolumes"], false);
         assert_eq!(
             schedule["spec"]["template"]["includedNamespaces"][0],
             "gpu-ns"
         );
+
+        // Verify includedResources contains PVCs, PVs, and pods
+        let resources = schedule["spec"]["template"]["includedResources"]
+            .as_array()
+            .expect("includedResources should be an array");
+        let resource_strs: Vec<&str> = resources
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(resource_strs.contains(&"persistentvolumeclaims"));
+        assert!(resource_strs.contains(&"persistentvolumes"));
+        assert!(resource_strs.contains(&"pods"));
+
         assert_eq!(
             schedule["spec"]["template"]["labelSelector"]["matchLabels"]["lattice.dev/training-job"],
             "my-training"
@@ -825,6 +862,63 @@ mod tests {
             schedule["spec"]["template"].get("storageLocation").is_none(),
             "storageLocation should be absent when backup_store is None"
         );
+        assert_eq!(
+            schedule["spec"]["template"]["defaultVolumesToFsBackup"],
+            true
+        );
+        assert_eq!(schedule["spec"]["template"]["snapshotVolumes"], false);
+    }
+
+    #[tokio::test]
+    async fn compile_job_labels_pod_templates_for_training() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_task("train:latest", 2));
+
+        let spec = LatticeJobSpec {
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "master".to_string(),
+                checkpoint: Some(CheckpointSpec {
+                    interval: "*/30 * * * *".to_string(),
+                    local_path: None,
+                    volume_size: None,
+                    storage_class: None,
+                    backup_store: None,
+                    ttl: None,
+                }),
+                nccl: None,
+            }),
+            tasks,
+            ..Default::default()
+        };
+        let mut job = LatticeJob::new("my-train", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("uid-train".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        let vcjob = match &compiled.workload {
+            VolcanoWorkload::Job(v) => v,
+            VolcanoWorkload::CronJob(_) => panic!("expected VCJob"),
+        };
+
+        // Every task's pod template must carry the training-job label
+        for task in &vcjob.spec.tasks {
+            let label = task.template["metadata"]["labels"]["lattice.dev/training-job"]
+                .as_str()
+                .unwrap_or_default();
+            assert_eq!(
+                label, "my-train",
+                "Task '{}' pod template missing lattice.dev/training-job label",
+                task.name
+            );
+        }
     }
 
     #[test]

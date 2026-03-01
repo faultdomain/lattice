@@ -19,12 +19,11 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml_with_retry, delete_namespace, ensure_fresh_namespace, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
+    apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, VELERO_NAMESPACE,
 };
 
 const BACKUP_NAMESPACE: &str = "lattice-system";
-const VELERO_NAMESPACE: &str = "velero";
 const BACKUP_STORE_NAME: &str = "e2e-test-store";
 const CLUSTER_BACKUP_NAME: &str = "e2e-daily-platform";
 const RESTORE_NAME: &str = "e2e-test-restore";
@@ -75,7 +74,7 @@ async fn setup_backup_infrastructure(kubeconfig: &str) -> Result<(), String> {
 
     // Ensure velero namespace exists (idempotent)
     let ns_yaml = format!("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {VELERO_NAMESPACE}");
-    apply_yaml_with_retry(kubeconfig, &ns_yaml).await?;
+    apply_yaml(kubeconfig, &ns_yaml).await?;
 
     // Verify Velero CRDs are installed
     let output = run_kubectl(&[
@@ -118,7 +117,7 @@ spec:
       endpoint: "http://minio.test:9000"
       forcePathStyle: true"#
     );
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for controller to reconcile
     wait_for_resource_phase(
@@ -239,7 +238,7 @@ spec:
   retention:
     ttl: "720h""#
     );
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for Active phase
     wait_for_resource_phase(
@@ -364,7 +363,7 @@ spec:
   backupName: lattice-fake-backup-20260101
   restoreVolumes: true"#
     );
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for the controller to process the LatticeRestore (any non-empty phase).
     // The controller may go to InProgress (Velero Restore created) or Failed
@@ -535,7 +534,7 @@ spec:
     schedule: "0 3 * * *"
   replicas: 1"#
     );
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for the Velero Schedule to appear (backup controller acts independently)
     let expected_schedule = format!("lattice-svc-{SVC_NAMESPACE}-{SVC_NAME}");
@@ -661,7 +660,7 @@ spec:
   scope:
     controlPlane: true"#
     );
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
 
     // Wait for Failed phase
     wait_for_resource_phase(

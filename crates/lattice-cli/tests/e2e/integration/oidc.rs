@@ -25,7 +25,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    apply_yaml_with_retry, get_or_create_proxy, http_get_with_retry, proxy_service_exists,
+    apply_yaml, get_or_create_proxy, http_get_with_retry, proxy_service_exists,
     run_kubectl, wait_for_condition,
 };
 use super::cedar::{apply_cedar_policy_allow_group, apply_e2e_default_policy};
@@ -125,7 +125,7 @@ spec:
         client_id = KEYCLOAK_CLIENT_ID,
     );
 
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
     info!("[Integration/OIDC] Applied OIDCProvider CRD");
     Ok(())
 }
@@ -242,7 +242,7 @@ roleRef:
   kind: ClusterRole
   name: view
   apiGroup: rbac.authorization.k8s.io"#;
-    apply_yaml_with_retry(parent_kubeconfig, rbac_yaml).await?;
+    apply_yaml(parent_kubeconfig, rbac_yaml).await?;
     info!("[Integration/OIDC] Created K8s RBAC for lattice-admins group");
 
     // Create Cedar policy allowing lattice-admins group

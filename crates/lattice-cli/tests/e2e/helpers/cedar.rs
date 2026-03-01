@@ -18,7 +18,7 @@ use super::docker::run_kubectl;
 /// Apply YAML manifest via kubectl with retry for transient failures.
 ///
 /// Handles API server readiness issues by retrying with exponential backoff.
-pub async fn apply_yaml_with_retry(kubeconfig: &str, yaml: &str) -> Result<(), String> {
+pub async fn apply_yaml(kubeconfig: &str, yaml: &str) -> Result<(), String> {
     let retry_config = RetryConfig {
         max_attempts: 30,
         initial_delay: Duration::from_millis(500),
@@ -142,7 +142,7 @@ spec:
         indented = indented,
     );
 
-    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    apply_yaml(kubeconfig, &yaml).await?;
     info!(
         "Applied CedarPolicy '{}' (priority={}, label={})",
         name, priority, test_label

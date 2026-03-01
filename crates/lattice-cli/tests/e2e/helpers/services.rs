@@ -390,7 +390,7 @@ stringData:
         string_data = string_data,
     );
 
-    super::cedar::apply_yaml_with_retry(kubeconfig, &secret_yaml).await?;
+    super::cedar::apply_yaml(kubeconfig, &secret_yaml).await?;
 
     info!("[LocalSecrets] Source secret '{}' seeded", secret_name);
     Ok(())
@@ -407,7 +407,7 @@ metadata:
         namespace = namespace,
     );
 
-    super::cedar::apply_yaml_with_retry(kubeconfig, &ns_yaml).await
+    super::cedar::apply_yaml(kubeconfig, &ns_yaml).await
 }
 
 /// Wait for a ClusterSecretStore to exist in the cluster.
@@ -1093,7 +1093,7 @@ spec:
   selfSigned: {{}}"#,
     );
 
-    super::cedar::apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    super::cedar::apply_yaml(kubeconfig, &yaml).await?;
     info!(
         "[CertManager] ClusterIssuer '{}' ensured (self-signed)",
         name

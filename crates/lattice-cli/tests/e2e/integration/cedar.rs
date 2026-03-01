@@ -27,7 +27,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
-    apply_cedar_policy_crd, apply_yaml_with_retry, cedar_policy_exists,
+    apply_cedar_policy_crd, apply_yaml, cedar_policy_exists,
     delete_cedar_policies_by_label, delete_namespace, get_child_cluster_name, get_or_create_proxy,
     get_sa_token, http_get_with_retry, proxy_service_exists, run_kubectl, wait_for_condition,
     TestHarness,
@@ -70,7 +70,7 @@ metadata:
   name: {}"#,
         namespace
     );
-    apply_yaml_with_retry(kubeconfig, &namespace_yaml).await?;
+    apply_yaml(kubeconfig, &namespace_yaml).await?;
 
     // Create allowed ServiceAccount
     let allowed_sa_yaml = format!(
@@ -81,7 +81,7 @@ metadata:
   namespace: {}"#,
         ALLOWED_SA_NAME, namespace
     );
-    apply_yaml_with_retry(kubeconfig, &allowed_sa_yaml).await?;
+    apply_yaml(kubeconfig, &allowed_sa_yaml).await?;
 
     // Create denied ServiceAccount
     let denied_sa_yaml = format!(
@@ -92,7 +92,7 @@ metadata:
   namespace: {}"#,
         DENIED_SA_NAME, namespace
     );
-    apply_yaml_with_retry(kubeconfig, &denied_sa_yaml).await?;
+    apply_yaml(kubeconfig, &denied_sa_yaml).await?;
 
     info!("[Integration/Cedar] Test resources created successfully");
     Ok(())
