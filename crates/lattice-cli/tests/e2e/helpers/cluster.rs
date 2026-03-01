@@ -355,6 +355,20 @@ pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Build and push the pytorch-test Docker image (CPU-only PyTorch for training integration tests)
+pub async fn build_and_push_pytorch_test_image(image: &str) -> Result<(), String> {
+    info!("Building pytorch-test Docker image...");
+    docker_build(
+        "docker",
+        &["build", "-f", "Dockerfile.pytorch-test", "-t", image, "."],
+        "pytorch-test",
+    )?;
+    info!("Pushing pytorch-test image to registry...");
+    docker_push(image)?;
+    info!("PyTorch test image pushed successfully");
+    Ok(())
+}
+
 /// Build and push the lattice-downloader Docker image
 pub async fn build_and_push_downloader_image(image: &str) -> Result<(), String> {
     info!("Building lattice-downloader Docker image...");

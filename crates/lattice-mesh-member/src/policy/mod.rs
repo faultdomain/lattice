@@ -1032,4 +1032,47 @@ pub(crate) mod tests {
             "should have Cilium FQDN egress for external.example.com"
         );
     }
+
+    #[test]
+    fn peer_traffic_generates_hbone_ingress_and_egress() {
+        let graph = ServiceGraph::new();
+        let ns = "training-ns";
+
+        let labels = BTreeMap::from([("app".to_string(), "worker".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![("master", 29500, lattice_common::crd::PeerAuth::Strict)],
+            vec![],
+            vec![],
+        );
+        spec.allow_peer_traffic = true;
+        graph.put_mesh_member(ns, "worker", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("worker", ns);
+
+        let cnp = &output.cilium_policies[0];
+
+        // HBONE ingress for peer traffic delivery
+        let hbone_ingress = cnp.spec.ingress.iter().find(|r| {
+            r.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == mesh::HBONE_PORT.to_string()))
+        });
+        assert!(
+            hbone_ingress.is_some(),
+            "allow_peer_traffic should generate HBONE ingress"
+        );
+
+        // HBONE egress for peer traffic delivery
+        let hbone_egress = cnp.spec.egress.iter().find(|e| {
+            e.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == mesh::HBONE_PORT.to_string()))
+        });
+        assert!(
+            hbone_egress.is_some(),
+            "allow_peer_traffic should generate HBONE egress"
+        );
+    }
 }

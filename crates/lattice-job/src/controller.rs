@@ -220,8 +220,6 @@ async fn submit_job(
         }
     };
 
-    register_graph(job, &ctx.graph, namespace);
-
     let name = job.name_any();
     if let Err(e) = apply_layers(
         &ctx.client,
@@ -361,17 +359,6 @@ async fn handle_job_failure(
 // =============================================================================
 // Graph management
 // =============================================================================
-
-fn register_graph(job: &LatticeJob, graph: &ServiceGraph, namespace: &str) {
-    let name = job.metadata.name.as_deref().unwrap_or_default();
-    for (task_name, task_spec) in &job.spec.tasks {
-        graph.put_workload(
-            namespace,
-            &format!("{}-{}", name, task_name),
-            &task_spec.workload,
-        );
-    }
-}
 
 fn cleanup_graph(job: &LatticeJob, graph: &ServiceGraph, namespace: &str) {
     let name = job.metadata.name.as_deref().unwrap_or_default();

@@ -18,8 +18,9 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    CheckpointSpec, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, ProviderType,
-    ResourceSpec, ResourceType, TrainingConfig, TrainingFramework, VolumeMount, WorkloadSpec,
+    CheckpointSpec, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, PortSpec, ProviderType,
+    ResourceSpec, ResourceType, ServicePortsSpec, TrainingConfig, TrainingFramework, VolumeMount,
+    WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
@@ -105,6 +106,12 @@ pub async fn compile_job(
         None => job.spec.tasks.clone(),
     };
 
+    // Register each task in the service graph so WorkloadCompiler finds them
+    // and creates LatticeMeshMembers (same path as LatticeService).
+    for (task_name, task_spec) in &tasks {
+        graph.put_workload(namespace, &format!("{}-{}", name, task_name), &task_spec.workload);
+    }
+
     // Forward the LatticeJob's ownerReferences to VolumeCompiler for PVC GC.
     // For model downloads, the LatticeJob is owned by LatticeModel, so PVCs
     // get LatticeModel ownerReferences and survive job restarts.
@@ -166,6 +173,15 @@ pub async fn compile_job(
             &[],
         );
         tracing_policies.extend(policies);
+    }
+
+    // Training: allow inter-pod traffic so all tasks can communicate.
+    // All tasks share the same SA, so allow_peer_traffic on each mesh member
+    // authorizes cross-task traffic (master ↔ worker) via shared SPIFFE identity.
+    if job.spec.training.is_some() {
+        for mm in &mut mesh_members {
+            mm.spec.allow_peer_traffic = true;
+        }
     }
 
     // Training: label PVCs with training-job name for identification
@@ -256,6 +272,11 @@ fn prepare_training_tasks(
                 lattice_common::crd::RestartPolicy::OnFailure
             });
         }
+
+        // Inject the master port so WorkloadCompiler creates a LatticeMeshMember.
+        // Without a service port, no mesh member is generated and the cluster-wide
+        // default-deny blocks inter-pod traffic on port 29500.
+        inject_training_service_port(&mut task.workload);
 
         let gpu_count = gpu_param(&task.workload, |p| Some(p.count));
         inject_framework_env(
@@ -372,6 +393,20 @@ fn inject_nccl_env(workload: &mut WorkloadSpec, nccl: Option<&NcclConfig>) {
     }
 
     inject_env_all(workload, &env_vars);
+}
+
+/// Inject the training master port into the workload's service spec.
+///
+/// This ensures WorkloadCompiler creates a LatticeMeshMember with port 29500,
+/// which in turn generates CiliumNetworkPolicy rules. Without this, the
+/// cluster-wide default-deny blocks inter-pod training traffic.
+fn inject_training_service_port(workload: &mut WorkloadSpec) {
+    let service = workload.service.get_or_insert_with(ServicePortsSpec::default);
+    service.ports.entry("master".to_string()).or_insert(PortSpec {
+        port: DEFAULT_MASTER_PORT,
+        target_port: None,
+        protocol: None,
+    });
 }
 
 /// Inject env vars into all containers (does not overwrite existing values).
@@ -902,6 +937,46 @@ mod tests {
             prepared["worker"].restart_policy,
             Some(RestartPolicy::Never)
         );
+    }
+
+    #[tokio::test]
+    async fn training_job_creates_mesh_members_with_peer_traffic() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
+
+        let spec = LatticeJobSpec {
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "master".to_string(),
+                checkpoint: None,
+                nccl: None,
+            }),
+            tasks,
+            ..Default::default()
+        };
+        let mut job = LatticeJob::new("my-train", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("uid-mesh".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        assert!(
+            !compiled.mesh_members.is_empty(),
+            "training jobs must have mesh members for network policy"
+        );
+        for mm in &compiled.mesh_members {
+            assert!(
+                mm.spec.allow_peer_traffic,
+                "training mesh member '{}' must have allow_peer_traffic=true",
+                mm.metadata.name.as_deref().unwrap_or("?")
+            );
+        }
     }
 
     #[tokio::test]

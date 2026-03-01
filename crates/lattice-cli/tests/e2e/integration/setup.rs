@@ -47,7 +47,8 @@ use lattice_common::crd::LatticeCluster;
 use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    build_and_push_downloader_image, build_and_push_lattice_image, client_from_kubeconfig,
+    build_and_push_downloader_image, build_and_push_lattice_image,
+    build_and_push_pytorch_test_image, client_from_kubeconfig,
     create_with_retry, ensure_docker_network, get_docker_kubeconfig, kubeconfig_path,
     load_cluster_config, load_registry_credentials, run_cmd, wait_for_operator_ready,
     watch_cluster_phases, ProxySession,
@@ -60,8 +61,8 @@ use super::{capi, cedar, scaling};
 // =============================================================================
 
 use super::super::helpers::{
-    DEFAULT_DOWNLOADER_IMAGE, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME,
-    WORKLOAD_CLUSTER_NAME,
+    DEFAULT_DOWNLOADER_IMAGE, DEFAULT_LATTICE_IMAGE, DEFAULT_PYTORCH_TEST_IMAGE,
+    MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 
 /// Configuration for infrastructure setup
@@ -252,6 +253,8 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         build_and_push_lattice_image(&config.lattice_image).await?;
         info!("[Setup] Building and pushing downloader image...");
         build_and_push_downloader_image(DEFAULT_DOWNLOADER_IMAGE).await?;
+        info!("[Setup] Building and pushing pytorch-test image...");
+        build_and_push_pytorch_test_image(DEFAULT_PYTORCH_TEST_IMAGE).await?;
     }
 
     // Load cluster configurations
@@ -577,6 +580,8 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         build_and_push_lattice_image(&config.lattice_image).await?;
         info!("[Setup] Building and pushing downloader image...");
         build_and_push_downloader_image(DEFAULT_DOWNLOADER_IMAGE).await?;
+        info!("[Setup] Building and pushing pytorch-test image...");
+        build_and_push_pytorch_test_image(DEFAULT_PYTORCH_TEST_IMAGE).await?;
     }
 
     let (_, mgmt_cluster) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;

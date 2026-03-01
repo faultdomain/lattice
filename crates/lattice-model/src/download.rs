@@ -27,7 +27,8 @@ use std::collections::BTreeMap;
 use lattice_common::crd::workload::container::VolumeMount;
 use lattice_common::crd::{
     ContainerSpec, DependencyDirection, JobTaskSpec, LatticeJob, LatticeJobSpec, ModelSourceSpec,
-    ResourceSpec, ResourceType, RestartPolicy, RuntimeSpec, WorkloadSpec,
+    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RestartPolicy, RuntimeSpec,
+    WorkloadSpec,
 };
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::template::TemplateString;
@@ -263,6 +264,16 @@ fn compile_lattice_job(
             volumes,
             env_from,
             security: source.security.clone(),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("100m".to_string()),
+                    memory: Some("256Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("1".to_string()),
+                    memory: Some("1Gi".to_string()),
+                }),
+            }),
             ..Default::default()
         },
     );

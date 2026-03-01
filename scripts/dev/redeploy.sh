@@ -14,13 +14,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 IMAGE="ghcr.io/evan-hines-js/lattice:latest"
+PYTORCH_TEST_IMAGE="ghcr.io/evan-hines-js/pytorch-test:latest"
 NAMESPACE="lattice-system"
 LABEL="app=lattice-operator"
 
 # Step 1: Build and push
 echo "=== Building and pushing $IMAGE ==="
 "$SCRIPT_DIR/docker-build.sh" -t "$IMAGE" --push
+
+echo "=== Building and pushing $PYTORCH_TEST_IMAGE ==="
+DOCKER_BUILDKIT=1 docker build -f "$PROJECT_ROOT/Dockerfile.pytorch-test" -t "$PYTORCH_TEST_IMAGE" "$PROJECT_ROOT"
+docker push "$PYTORCH_TEST_IMAGE"
 
 # Step 2: Collect kubeconfigs
 KUBECONFIGS=("$@")
