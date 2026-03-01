@@ -8,7 +8,9 @@
 //! Then builds a Volcano VCJob from the aggregated pod templates.
 //!
 //! When `spec.training` is set, the compiler additionally:
-//! - Injects framework-specific env vars (MASTER_ADDR, WORLD_SIZE, NCCL)
+//! - Injects framework-specific env vars (MASTER_ADDR, WORLD_SIZE, NNODES, NCCL)
+//! - Injects per-pod RANK and NODE_RANK via Volcano env plugin interpolation
+//! - Injects NPROC_PER_NODE from GPU resource count (when GPUs are declared)
 //! - Creates a headless Service for pod DNS resolution
 //! - Adds checkpoint PVCs and a Velero Schedule for periodic snapshots
 
@@ -280,16 +282,26 @@ fn prepare_training_tasks(
     for (task_name, task_spec) in tasks {
         let mut task = task_spec.clone();
 
-        // Default restart policy to OnFailure for training tasks
+        // Checkpoint training: Never restart — let the failure propagate to
+        // Volcano's PodFailed event so the Lattice controller can trigger
+        // stop-the-world checkpoint recovery.
+        // Non-checkpoint training: OnFailure — let K8s restart transient
+        // container failures without full job restarts.
         if task.restart_policy.is_none() {
-            task.restart_policy = Some(lattice_common::crd::RestartPolicy::OnFailure);
+            task.restart_policy = Some(if training.checkpoint.is_some() {
+                lattice_common::crd::RestartPolicy::Never
+            } else {
+                lattice_common::crd::RestartPolicy::OnFailure
+            });
         }
 
+        let gpu_count = detect_gpu_count(&task.workload);
         inject_framework_env(
             &mut task.workload,
             &training.framework,
             &coordinator_addr,
             world_size,
+            gpu_count,
         )?;
 
         inject_nccl_env(&mut task.workload, training.nccl.as_ref());
@@ -305,30 +317,54 @@ fn prepare_training_tasks(
 
 /// Inject framework-specific env vars into all containers.
 ///
-/// RANK is NOT injected here — it's set at the pod spec level via
-/// `$(VC_TASK_INDEX)` so K8s interpolates the per-pod value at runtime.
-/// See `inject_rank_env`.
+/// `nnodes` is the total pod count (sum of all task replicas). `gpu_count`
+/// is the number of GPUs on this specific task (None if no GPU resource).
+///
+/// RANK and NODE_RANK are NOT injected here — they're set at the pod spec
+/// level via `$(VC_TASK_INDEX)` so K8s interpolates the per-pod value at
+/// runtime. See `inject_rank_env`.
+///
+/// When `gpu_count` is `Some`, injects `NPROC_PER_NODE` (PyTorch/DeepSpeed)
+/// or `JAX_LOCAL_DEVICE_COUNT` (JAX) so launchers like `torchrun` know how
+/// many processes to spawn per node. `WORLD_SIZE` is then set to
+/// `nnodes * nproc_per_node` (total processes). When `gpu_count` is `None`,
+/// `WORLD_SIZE` equals `nnodes`.
 fn inject_framework_env(
     workload: &mut WorkloadSpec,
     framework: &TrainingFramework,
     coordinator_addr: &str,
-    world_size: u32,
+    nnodes: u32,
+    gpu_count: Option<u32>,
 ) -> Result<(), JobError> {
+    let nproc_per_node = gpu_count.unwrap_or(1);
+    let world_size = nnodes * nproc_per_node;
+
     let env_vars: Vec<(&str, String)> = match framework {
         TrainingFramework::PyTorch | TrainingFramework::DeepSpeed => {
-            vec![
+            let mut vars = vec![
                 ("MASTER_ADDR", coordinator_addr.to_string()),
                 ("MASTER_PORT", DEFAULT_MASTER_PORT.to_string()),
                 ("WORLD_SIZE", world_size.to_string()),
-            ]
+                ("NNODES", nnodes.to_string()),
+            ];
+            if let Some(count) = gpu_count {
+                vars.push(("NPROC_PER_NODE", count.to_string()));
+            }
+            vars
         }
-        TrainingFramework::Jax => vec![
-            (
-                "JAX_COORDINATOR_ADDRESS",
-                format!("{}:{}", coordinator_addr, DEFAULT_MASTER_PORT),
-            ),
-            ("JAX_NUM_PROCESSES", world_size.to_string()),
-        ],
+        TrainingFramework::Jax => {
+            let mut vars = vec![
+                (
+                    "JAX_COORDINATOR_ADDRESS",
+                    format!("{}:{}", coordinator_addr, DEFAULT_MASTER_PORT),
+                ),
+                ("JAX_NUM_PROCESSES", world_size.to_string()),
+            ];
+            if let Some(count) = gpu_count {
+                vars.push(("JAX_LOCAL_DEVICE_COUNT", count.to_string()));
+            }
+            vars
+        }
         // #[non_exhaustive] requires a wildcard — new variants must add an explicit arm above
         _ => return Err(JobError::UnsupportedFramework(framework.to_string())),
     };
@@ -394,14 +430,19 @@ fn inject_env_all(workload: &mut WorkloadSpec, vars: &[(&str, String)]) {
     }
 }
 
-/// Inject `RANK` env var into a pod template JSON using K8s variable interpolation.
+/// Inject `RANK` and `NODE_RANK` env vars into a pod template JSON using
+/// K8s variable interpolation.
 ///
-/// Sets `RANK = $(VC_TASK_INDEX)` directly in each container's `env` array.
-/// K8s interpolates `$(VC_TASK_INDEX)` at pod creation time using the value
-/// injected by the Volcano env plugin. This gives each pod a globally unique
-/// rank matching its VC_TASK_INDEX.
+/// Sets both `RANK = $(VC_TASK_INDEX)` and `NODE_RANK = $(VC_TASK_INDEX)`
+/// directly in each container's `env` array. K8s interpolates
+/// `$(VC_TASK_INDEX)` at pod creation time using the value injected by the
+/// Volcano env plugin.
+///
+/// `RANK` is the traditional PyTorch env var. `NODE_RANK` is the name
+/// expected by `torchrun` and DeepSpeed launchers.
 fn inject_rank_env(template: &mut serde_json::Value) {
     let rank_env = serde_json::json!({"name": "RANK", "value": "$(VC_TASK_INDEX)"});
+    let node_rank_env = serde_json::json!({"name": "NODE_RANK", "value": "$(VC_TASK_INDEX)"});
 
     let containers = template
         .pointer_mut("/spec/containers")
@@ -416,6 +457,7 @@ fn inject_rank_env(template: &mut serde_json::Value) {
             });
             if let Some(env) = env {
                 env.push(rank_env.clone());
+                env.push(node_rank_env.clone());
             }
         }
     }
@@ -462,6 +504,18 @@ fn detect_gpu_model(workload: &WorkloadSpec) -> Option<String> {
         .values()
         .filter(|r| r.type_.is_gpu())
         .find_map(|r| r.gpu_params().ok().flatten().and_then(|p| p.model.clone()))
+}
+
+/// Detect GPU count per pod from workload resources.
+///
+/// Returns the `count` from the first GPU resource found, or `None` if the
+/// task has no GPU resource declared.
+fn detect_gpu_count(workload: &WorkloadSpec) -> Option<u32> {
+    workload
+        .resources
+        .values()
+        .filter(|r| r.type_.is_gpu())
+        .find_map(|r| r.gpu_params().ok().flatten().map(|p| p.count))
 }
 
 /// NCCL defaults per GPU model.
@@ -576,8 +630,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use lattice_common::crd::{
-        CheckpointSpec, ContainerSpec, JobTaskSpec, LatticeJobSpec, NcclConfig, RestartPolicy,
-        RuntimeSpec, TrainingConfig, TrainingFramework, WorkloadSpec,
+        CheckpointSpec, ContainerSpec, JobTaskSpec, LatticeJobSpec, NcclConfig, ResourceSpec,
+        ResourceType, RestartPolicy, RuntimeSpec, TrainingConfig, TrainingFramework, WorkloadSpec,
     };
 
     fn make_job(tasks: BTreeMap<String, JobTaskSpec>) -> LatticeJob {
@@ -743,13 +797,19 @@ mod tests {
             "my-job-master-0.my-job"
         );
         assert_eq!(master_vars["MASTER_PORT"].as_str(), "29500");
+        // No GPU resource → WORLD_SIZE = NNODES (4 replicas, 1 process each)
         assert_eq!(master_vars["WORLD_SIZE"].as_str(), "4");
-        // RANK is NOT in the ConfigMap — it's injected at pod spec level
+        assert_eq!(master_vars["NNODES"].as_str(), "4");
+        // No GPU resource → NPROC_PER_NODE not injected
+        assert!(!master_vars.contains_key("NPROC_PER_NODE"));
+        // RANK/NODE_RANK are NOT in the ConfigMap — injected at pod spec level
         // via $(VC_TASK_INDEX) by inject_rank_env
         assert!(!master_vars.contains_key("RANK"));
+        assert!(!master_vars.contains_key("NODE_RANK"));
 
         let worker_vars = &prepared["worker"].workload.containers["main"].variables;
         assert!(worker_vars.contains_key("MASTER_ADDR"));
+        assert!(worker_vars.contains_key("NNODES"));
         assert!(!worker_vars.contains_key("RANK"));
     }
 
@@ -769,7 +829,9 @@ mod tests {
         let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
         let vars = &prepared["master"].workload.containers["main"].variables;
         assert!(vars.contains_key("JAX_COORDINATOR_ADDRESS"));
-        assert!(vars.contains_key("JAX_NUM_PROCESSES"));
+        // No GPU resource → JAX_NUM_PROCESSES = nnodes (3 replicas)
+        assert_eq!(vars["JAX_NUM_PROCESSES"].as_str(), "3");
+        assert!(!vars.contains_key("JAX_LOCAL_DEVICE_COUNT"));
         assert!(!vars.contains_key("MASTER_ADDR"));
     }
 
@@ -846,6 +908,35 @@ mod tests {
         assert_eq!(
             prepared["worker"].restart_policy,
             Some(RestartPolicy::OnFailure)
+        );
+    }
+
+    #[test]
+    fn prepare_training_checkpoint_defaults_restart_policy_to_never() {
+        let mut tasks = BTreeMap::new();
+        let mut task = make_task("train:latest", 1);
+        task.restart_policy = None; // unset
+        tasks.insert("worker".to_string(), task);
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
+            checkpoint: Some(CheckpointSpec {
+                interval: "*/30 * * * *".to_string(),
+                local_path: None,
+                volume_size: None,
+                storage_class: None,
+                backup_store: None,
+            }),
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
+        // Checkpoint training: Never restart — failures must propagate to
+        // Volcano so the Lattice controller can trigger checkpoint recovery
+        assert_eq!(
+            prepared["worker"].restart_policy,
+            Some(RestartPolicy::Never)
         );
     }
 
@@ -1015,5 +1106,126 @@ mod tests {
     fn nccl_defaults_unknown_gpu_empty() {
         let defaults = nccl_defaults_for_gpu("RTX-4090");
         assert!(defaults.is_empty());
+    }
+
+    // ── Multi-GPU tests ──
+
+    fn make_gpu_task(image: &str, replicas: u32, gpu_count: u32) -> JobTaskSpec {
+        let mut task = make_task(image, replicas);
+        task.workload.resources.insert(
+            "gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some(BTreeMap::from([(
+                    "count".to_string(),
+                    serde_json::json!(gpu_count),
+                )])),
+                ..Default::default()
+            },
+        );
+        task
+    }
+
+    #[test]
+    fn detect_gpu_count_returns_count_from_gpu_resource() {
+        let task = make_gpu_task("train:latest", 1, 8);
+        assert_eq!(detect_gpu_count(&task.workload), Some(8));
+    }
+
+    #[test]
+    fn detect_gpu_count_returns_none_without_gpu_resource() {
+        let task = make_task("train:latest", 1);
+        assert_eq!(detect_gpu_count(&task.workload), None);
+    }
+
+    #[test]
+    fn prepare_training_injects_nproc_per_node_for_pytorch() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_gpu_task("train:latest", 1, 8));
+        tasks.insert("worker".to_string(), make_gpu_task("train:latest", 4, 8));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
+            checkpoint: None,
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
+        let vars = &prepared["worker"].workload.containers["main"].variables;
+
+        // 5 pods × 8 GPUs = 40 total processes
+        assert_eq!(vars["NNODES"].as_str(), "5");
+        assert_eq!(vars["NPROC_PER_NODE"].as_str(), "8");
+        assert_eq!(vars["WORLD_SIZE"].as_str(), "40");
+    }
+
+    #[test]
+    fn prepare_training_injects_jax_local_device_count() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_gpu_task("jax:latest", 1, 4));
+        tasks.insert("worker".to_string(), make_gpu_task("jax:latest", 3, 4));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::Jax,
+            coordinator_task: "master".to_string(),
+            checkpoint: None,
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
+        let vars = &prepared["worker"].workload.containers["main"].variables;
+
+        // 4 pods × 4 GPUs = 16 total processes
+        assert_eq!(vars["JAX_NUM_PROCESSES"].as_str(), "16");
+        assert_eq!(vars["JAX_LOCAL_DEVICE_COUNT"].as_str(), "4");
+    }
+
+    #[test]
+    fn prepare_training_no_gpu_omits_nproc_per_node() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_task("train:latest", 3));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
+            checkpoint: None,
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
+        let vars = &prepared["worker"].workload.containers["main"].variables;
+
+        assert!(!vars.contains_key("NPROC_PER_NODE"));
+        // Without GPU, WORLD_SIZE = NNODES (1 process per pod)
+        assert_eq!(vars["NNODES"].as_str(), "4");
+        assert_eq!(vars["WORLD_SIZE"].as_str(), "4");
+    }
+
+    #[test]
+    fn inject_rank_env_adds_rank_and_node_rank() {
+        let mut template = serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "main",
+                    "env": []
+                }]
+            }
+        });
+
+        inject_rank_env(&mut template);
+
+        let env = template["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = env.iter().filter_map(|e| e["name"].as_str()).collect();
+        assert!(names.contains(&"RANK"), "missing RANK");
+        assert!(names.contains(&"NODE_RANK"), "missing NODE_RANK");
+
+        let rank_val = env.iter().find(|e| e["name"] == "RANK").unwrap();
+        let node_rank_val = env.iter().find(|e| e["name"] == "NODE_RANK").unwrap();
+        assert_eq!(rank_val["value"], "$(VC_TASK_INDEX)");
+        assert_eq!(node_rank_val["value"], "$(VC_TASK_INDEX)");
     }
 }
