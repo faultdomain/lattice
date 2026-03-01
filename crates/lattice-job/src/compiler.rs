@@ -12,7 +12,7 @@
 //! - Injects per-pod RANK and NODE_RANK via Volcano env plugin interpolation
 //! - Injects NPROC_PER_NODE from GPU resource count (when GPUs are declared)
 //! - Creates a headless Service for pod DNS resolution
-//! - Adds checkpoint PVCs and a Velero Schedule for periodic snapshots
+//! - Adds checkpoint PVCs for fault-tolerant training
 
 use std::collections::BTreeMap;
 
@@ -28,7 +28,6 @@ use lattice_common::template::TemplateString;
 use lattice_volcano::{VCCronJob, VCJob};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
-use crate::controller::VELERO_NAMESPACE;
 use crate::error::JobError;
 
 const DEFAULT_MASTER_PORT: u16 = 29500;
@@ -54,8 +53,6 @@ pub struct CompiledJob {
     pub tracing_policies: Vec<TracingPolicyNamespaced>,
     /// Headless K8s Service for training pod DNS resolution (training jobs only)
     pub headless_service: Option<serde_json::Value>,
-    /// Velero Schedule for periodic checkpoint PVC snapshots (training jobs with checkpoint)
-    pub velero_schedule: Option<serde_json::Value>,
 }
 
 /// Compile a LatticeJob into Kubernetes resources.
@@ -172,49 +169,12 @@ pub async fn compile_job(
         tracing_policies.extend(policies);
     }
 
-    // Training: label PVCs and pod templates so Velero's fs-backup can find them
-    let has_checkpoint = job
-        .spec
-        .training
-        .as_ref()
-        .is_some_and(|t| t.checkpoint.is_some());
+    // Training: label PVCs with training-job name for identification
     if job.spec.training.is_some() {
         for pvc in &mut config.pvcs {
             pvc.metadata
                 .labels
                 .insert("lattice.dev/training-job".to_string(), name.to_string());
-        }
-        for template in pod_templates.values_mut() {
-            let metadata = template
-                .as_object_mut()
-                .and_then(|t| t.get_mut("metadata"))
-                .and_then(|m| m.as_object_mut());
-            if let Some(metadata) = metadata {
-                let labels = metadata
-                    .entry("labels")
-                    .or_insert_with(|| serde_json::json!({}));
-                if let Some(labels) = labels.as_object_mut() {
-                    labels.insert(
-                        "lattice.dev/training-job".to_string(),
-                        serde_json::json!(name),
-                    );
-                }
-
-                // Tell Velero's node-agent which volumes to fs-backup.
-                // defaultVolumesToFsBackup on the Schedule is unreliable;
-                // explicit pod annotations are the guaranteed path.
-                if has_checkpoint {
-                    let annotations = metadata
-                        .entry("annotations")
-                        .or_insert_with(|| serde_json::json!({}));
-                    if let Some(annotations) = annotations.as_object_mut() {
-                        annotations.insert(
-                            "backup.velero.io/backup-volumes".to_string(),
-                            serde_json::json!("checkpoints"),
-                        );
-                    }
-                }
-            }
         }
     }
 
@@ -229,19 +189,13 @@ pub async fn compile_job(
         }
     }
 
-    // Training: compile headless service and Velero schedule
+    // Training: compile headless service for pod DNS resolution
     let uid = job.metadata.uid.as_deref().unwrap_or_default();
     let headless_service = job
         .spec
         .training
         .as_ref()
         .map(|_| compile_headless_service(name, namespace, uid));
-    let velero_schedule = job
-        .spec
-        .training
-        .as_ref()
-        .and_then(|t| t.checkpoint.as_ref())
-        .map(|ckpt| compile_velero_schedule(name, namespace, ckpt));
 
     // Build VCJob from aggregated pod templates, then wrap in VCCronJob if scheduled
     let vcjob = lattice_volcano::compile_vcjob(job, &pod_templates);
@@ -257,7 +211,6 @@ pub async fn compile_job(
         mesh_members,
         tracing_policies,
         headless_service,
-        velero_schedule,
     })
 }
 
@@ -294,7 +247,7 @@ fn prepare_training_tasks(
             });
         }
 
-        let gpu_count = detect_gpu_count(&task.workload);
+        let gpu_count = gpu_param(&task.workload, |p| Some(p.count));
         inject_framework_env(
             &mut task.workload,
             &training.framework,
@@ -398,23 +351,17 @@ fn inject_nccl_env(workload: &mut WorkloadSpec, nccl: Option<&NcclConfig>) {
         ));
     }
 
-    if let Some(model) = detect_gpu_model(workload) {
+    if let Some(model) = gpu_param(workload, |p| p.model.clone()) {
         env_vars.extend(nccl_defaults_for_gpu(&model));
     }
 
-    inject_env_all(workload, &env_vars);
-
-    // NCCL extra_env
     if let Some(ref extra) = nccl.extra_env {
-        for container in workload.containers.values_mut() {
-            for (key, value) in extra {
-                container
-                    .variables
-                    .entry(key.clone())
-                    .or_insert_with(|| TemplateString::new(value));
-            }
-        }
+        let extra_vars: Vec<(&str, String)> =
+            extra.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        env_vars.extend(extra_vars);
     }
+
+    inject_env_all(workload, &env_vars);
 }
 
 /// Inject env vars into all containers (does not overwrite existing values).
@@ -496,25 +443,16 @@ fn inject_checkpoint_volume(workload: &mut WorkloadSpec, ckpt: &CheckpointSpec) 
     );
 }
 
-/// Detect GPU model from workload resources.
-fn detect_gpu_model(workload: &WorkloadSpec) -> Option<String> {
+/// Extract a field from the first GPU resource in the workload.
+fn gpu_param<T>(
+    workload: &WorkloadSpec,
+    f: impl Fn(&lattice_common::crd::GpuParams) -> Option<T>,
+) -> Option<T> {
     workload
         .resources
         .values()
         .filter(|r| r.type_.is_gpu())
-        .find_map(|r| r.gpu_params().ok().flatten().and_then(|p| p.model.clone()))
-}
-
-/// Detect GPU count per pod from workload resources.
-///
-/// Returns the `count` from the first GPU resource found, or `None` if the
-/// task has no GPU resource declared.
-fn detect_gpu_count(workload: &WorkloadSpec) -> Option<u32> {
-    workload
-        .resources
-        .values()
-        .filter(|r| r.type_.is_gpu())
-        .find_map(|r| r.gpu_params().ok().flatten().map(|p| p.count))
+        .find_map(|r| r.gpu_params().ok().flatten().and_then(|p| f(&p)))
 }
 
 /// NCCL defaults per GPU model.
@@ -570,55 +508,6 @@ fn compile_headless_service(name: &str, namespace: &str, owner_uid: &str) -> ser
                 "volcano.sh/job-name": name
             },
             "publishNotReadyAddresses": true
-        }
-    })
-}
-
-/// Compile a Velero Schedule for periodic checkpoint backups.
-///
-/// Targets PVCs and pods labeled with `lattice.dev/training-job: <name>` in
-/// the job's namespace. Uses Kopia file-system backup (via Velero's node-agent)
-/// instead of CSI volume snapshots for broad storage class compatibility.
-fn compile_velero_schedule(
-    name: &str,
-    namespace: &str,
-    ckpt: &CheckpointSpec,
-) -> serde_json::Value {
-    let schedule_name = format!("lattice-training-{}", name);
-    let mut template = serde_json::json!({
-        "ttl": ckpt.effective_ttl(),
-        "includedNamespaces": [namespace],
-        "includedResources": [
-            "persistentvolumeclaims",
-            "persistentvolumes",
-            "pods"
-        ],
-        "defaultVolumesToFsBackup": true,
-        "snapshotVolumes": false,
-        "labelSelector": {
-            "matchLabels": {
-                "lattice.dev/training-job": name
-            }
-        }
-    });
-    if let Some(ref bsl) = ckpt.backup_store {
-        template["storageLocation"] = serde_json::json!(bsl);
-    }
-    serde_json::json!({
-        "apiVersion": "velero.io/v1",
-        "kind": "Schedule",
-        "metadata": {
-            "name": schedule_name,
-            "namespace": VELERO_NAMESPACE,
-            "labels": {
-                "app.kubernetes.io/managed-by": "lattice",
-                "lattice.dev/training-job": name
-            }
-        },
-        "spec": {
-            "schedule": ckpt.interval,
-            "paused": false,
-            "template": template
         }
     })
 }
@@ -692,7 +581,6 @@ mod tests {
         assert_eq!(vcjob.spec.tasks[0].replicas, 2);
         assert!(compiled.tracing_policies.is_empty());
         assert!(compiled.headless_service.is_none());
-        assert!(compiled.velero_schedule.is_none());
     }
 
     #[tokio::test]
@@ -868,11 +756,9 @@ mod tests {
             framework: TrainingFramework::PyTorch,
             coordinator_task: "master".to_string(),
             checkpoint: Some(CheckpointSpec {
-                interval: "*/30 * * * *".to_string(),
                 local_path: None,
                 volume_size: None,
                 storage_class: None,
-                backup_store: None,
             }),
             nccl: None,
         };
@@ -921,11 +807,9 @@ mod tests {
             framework: TrainingFramework::PyTorch,
             coordinator_task: "master".to_string(),
             checkpoint: Some(CheckpointSpec {
-                interval: "*/30 * * * *".to_string(),
                 local_path: None,
                 volume_size: None,
                 storage_class: None,
-                backup_store: None,
             }),
             nccl: None,
         };
@@ -952,76 +836,8 @@ mod tests {
         assert_eq!(svc["metadata"]["ownerReferences"][0]["kind"], "LatticeJob");
     }
 
-    #[test]
-    fn velero_schedule_structure() {
-        let ckpt = CheckpointSpec {
-            interval: "*/30 * * * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: Some("my-bsl".to_string()),
-        };
-
-        let schedule = compile_velero_schedule("my-training", "gpu-ns", &ckpt);
-        assert_eq!(schedule["apiVersion"], "velero.io/v1");
-        assert_eq!(schedule["kind"], "Schedule");
-        assert_eq!(schedule["metadata"]["name"], "lattice-training-my-training");
-        assert_eq!(schedule["spec"]["schedule"], "*/30 * * * *");
-        // TTL auto-computed: 30min interval × 3 = 90min
-        assert_eq!(schedule["spec"]["template"]["ttl"], "90m");
-        assert_eq!(schedule["spec"]["template"]["storageLocation"], "my-bsl");
-        assert_eq!(
-            schedule["spec"]["template"]["defaultVolumesToFsBackup"],
-            true
-        );
-        assert_eq!(schedule["spec"]["template"]["snapshotVolumes"], false);
-        assert_eq!(
-            schedule["spec"]["template"]["includedNamespaces"][0],
-            "gpu-ns"
-        );
-
-        // Verify includedResources contains PVCs, PVs, and pods
-        let resources = schedule["spec"]["template"]["includedResources"]
-            .as_array()
-            .expect("includedResources should be an array");
-        let resource_strs: Vec<&str> = resources.iter().filter_map(|v| v.as_str()).collect();
-        assert!(resource_strs.contains(&"persistentvolumeclaims"));
-        assert!(resource_strs.contains(&"persistentvolumes"));
-        assert!(resource_strs.contains(&"pods"));
-
-        assert_eq!(
-            schedule["spec"]["template"]["labelSelector"]["matchLabels"]
-                ["lattice.dev/training-job"],
-            "my-training"
-        );
-    }
-
-    #[test]
-    fn velero_schedule_omits_storage_location_when_none() {
-        let ckpt = CheckpointSpec {
-            interval: "*/30 * * * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-
-        let schedule = compile_velero_schedule("my-training", "gpu-ns", &ckpt);
-        assert!(
-            schedule["spec"]["template"]
-                .get("storageLocation")
-                .is_none(),
-            "storageLocation should be absent when backup_store is None"
-        );
-        assert_eq!(
-            schedule["spec"]["template"]["defaultVolumesToFsBackup"],
-            true
-        );
-        assert_eq!(schedule["spec"]["template"]["snapshotVolumes"], false);
-    }
-
     #[tokio::test]
-    async fn compile_job_labels_pod_templates_for_training() {
+    async fn compile_job_labels_pvcs_for_training() {
         let mut tasks = BTreeMap::new();
         tasks.insert("master".to_string(), make_task("train:latest", 1));
         tasks.insert("worker".to_string(), make_task("train:latest", 2));
@@ -1031,11 +847,9 @@ mod tests {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "master".to_string(),
                 checkpoint: Some(CheckpointSpec {
-                    interval: "*/30 * * * *".to_string(),
                     local_path: None,
                     volume_size: None,
                     storage_class: None,
-                    backup_store: None,
                 }),
                 nccl: None,
             }),
@@ -1053,31 +867,11 @@ mod tests {
             .await
             .unwrap();
 
-        let vcjob = match &compiled.workload {
-            VolcanoWorkload::Job(v) => v,
-            VolcanoWorkload::CronJob(_) => panic!("expected VCJob"),
-        };
-
-        // Every task's pod template must carry the training-job label
-        // and the Velero backup-volumes annotation (checkpoint is configured)
-        for task in &vcjob.spec.tasks {
-            let label = task.template["metadata"]["labels"]["lattice.dev/training-job"]
-                .as_str()
-                .unwrap_or_default();
+        // PVCs should be labeled with the training job name
+        for pvc in &compiled.config.pvcs {
             assert_eq!(
-                label, "my-train",
-                "Task '{}' pod template missing lattice.dev/training-job label",
-                task.name
-            );
-
-            let annotation = task.template["metadata"]["annotations"]
-                ["backup.velero.io/backup-volumes"]
-                .as_str()
-                .unwrap_or_default();
-            assert_eq!(
-                annotation, "checkpoints",
-                "Task '{}' pod template missing backup.velero.io/backup-volumes annotation",
-                task.name
+                pvc.metadata.labels.get("lattice.dev/training-job"),
+                Some(&"my-train".to_string()),
             );
         }
     }
@@ -1126,15 +920,15 @@ mod tests {
     }
 
     #[test]
-    fn detect_gpu_count_returns_count_from_gpu_resource() {
+    fn gpu_param_returns_count_from_gpu_resource() {
         let task = make_gpu_task("train:latest", 1, 8);
-        assert_eq!(detect_gpu_count(&task.workload), Some(8));
+        assert_eq!(gpu_param(&task.workload, |p| Some(p.count)), Some(8));
     }
 
     #[test]
-    fn detect_gpu_count_returns_none_without_gpu_resource() {
+    fn gpu_param_returns_none_without_gpu_resource() {
         let task = make_task("train:latest", 1);
-        assert_eq!(detect_gpu_count(&task.workload), None);
+        assert_eq!(gpu_param(&task.workload, |p| Some(p.count)), None);
     }
 
     #[test]
@@ -1215,9 +1009,7 @@ mod tests {
 
         inject_rank_env(&mut template);
 
-        let env = template["spec"]["containers"][0]["env"]
-            .as_array()
-            .unwrap();
+        let env = template["spec"]["containers"][0]["env"].as_array().unwrap();
         let names: Vec<&str> = env.iter().filter_map(|e| e["name"].as_str()).collect();
         assert!(names.contains(&"RANK"), "missing RANK");
         assert!(names.contains(&"NODE_RANK"), "missing NODE_RANK");

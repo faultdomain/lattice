@@ -10,10 +10,8 @@ spec:
     framework: PyTorch
     coordinatorTask: master
     checkpoint:
-      interval: "*/1 * * * *"
       localPath: /checkpoints
       volumeSize: 1Gi
-      backupStore: minio
   tasks:
     master:
       replicas: 1

@@ -15,7 +15,6 @@ pub mod cedar;
 pub mod cluster;
 pub mod docker;
 pub mod kubernetes;
-pub mod minio;
 pub mod services;
 pub mod test_harness;
 pub mod vault;
@@ -25,7 +24,6 @@ pub use cedar::*;
 pub use cluster::*;
 pub use docker::*;
 pub use kubernetes::*;
-pub use minio::*;
 pub use services::*;
 pub use test_harness::*;
 pub use vault::*;
@@ -204,7 +202,7 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 /// policy propagation, etc.). Generous to avoid flakes on CPU-starved machines.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Velero namespace — shared across backup, training, and MinIO helpers.
+/// Velero namespace — used by cluster backup tests.
 pub const VELERO_NAMESPACE: &str = "velero";
 
 /// Cycle markers emitted by traffic generators to indicate test progress.

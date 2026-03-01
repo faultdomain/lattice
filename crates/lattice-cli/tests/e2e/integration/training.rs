@@ -5,8 +5,6 @@
 //! - Training env var injection (MASTER_ADDR, WORLD_SIZE, CHECKPOINT_DIR)
 //! - Headless Service creation for pod DNS resolution
 //! - Checkpoint PVCs with training-job labels
-//! - Velero Schedule for periodic PVC snapshots (disaster recovery)
-//! - Velero Schedule cleanup via finalizer on job deletion
 //!
 //! Run standalone:
 //! ```
@@ -21,9 +19,8 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml, cleanup_minio_backup_storage, delete_namespace, ensure_fresh_namespace,
-    load_fixture_config, run_kubectl, setup_minio_backup_storage, setup_regcreds_infrastructure,
-    wait_for_condition, wait_for_resource_phase, VELERO_NAMESPACE,
+    apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config, run_kubectl,
+    setup_regcreds_infrastructure, wait_for_resource_phase,
 };
 
 const TRAINING_NAMESPACE: &str = "training-test";
@@ -39,8 +36,7 @@ async fn test_training_deployment(kubeconfig: &str) -> Result<(), String> {
 
     ensure_fresh_namespace(kubeconfig, TRAINING_NAMESPACE).await?;
 
-    let job: lattice_common::crd::LatticeJob =
-        load_fixture_config("training-checkpoint-job.yaml")?;
+    let job: lattice_common::crd::LatticeJob = load_fixture_config("training-checkpoint-job.yaml")?;
     let yaml =
         serde_json::to_string(&job).map_err(|e| format!("Failed to serialize fixture: {e}"))?;
     apply_yaml(kubeconfig, &yaml).await?;
@@ -218,118 +214,6 @@ async fn test_checkpoint_pvcs(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify the Velero Schedule was created for periodic snapshots
-async fn test_velero_schedule(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Verifying Velero Schedule...");
-
-    let schedule_name = format!("lattice-training-{}", JOB_NAME);
-
-    let schedule = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "schedule.velero.io",
-        &schedule_name,
-        "-n",
-        VELERO_NAMESPACE,
-        "-o",
-        "jsonpath={.spec.schedule}",
-    ])
-    .await?;
-
-    if schedule.trim() != "*/1 * * * *" {
-        return Err(format!(
-            "Expected Velero Schedule '*/1 * * * *', got: '{}'",
-            schedule.trim()
-        ));
-    }
-
-    // Verify label selector targets our training job's PVCs
-    let label_selector = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "schedule.velero.io",
-        &schedule_name,
-        "-n",
-        VELERO_NAMESPACE,
-        "-o",
-        "jsonpath={.spec.template.labelSelector.matchLabels.lattice\\.dev/training-job}",
-    ])
-    .await?;
-
-    if label_selector.trim() != JOB_NAME {
-        return Err(format!(
-            "Expected Schedule labelSelector lattice.dev/training-job={}, got: '{}'",
-            JOB_NAME,
-            label_selector.trim()
-        ));
-    }
-
-    info!("[Training] Velero Schedule verified: schedule=*/1 * * * *, correct label selector");
-    Ok(())
-}
-
-// =============================================================================
-// Cleanup verification
-// =============================================================================
-
-/// Delete the job and verify Velero Schedule is cleaned up via finalizer
-async fn test_velero_schedule_cleanup(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Deleting job to verify Velero Schedule cleanup...");
-
-    run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "latticejob",
-        JOB_NAME,
-        "-n",
-        TRAINING_NAMESPACE,
-    ])
-    .await?;
-
-    let schedule_name = format!("lattice-training-{}", JOB_NAME);
-    let kc = kubeconfig.to_string();
-    wait_for_condition(
-        "Velero Schedule to be cleaned up",
-        Duration::from_secs(60),
-        Duration::from_secs(5),
-        || {
-            let kc = kc.clone();
-            let schedule_name = schedule_name.clone();
-            async move {
-                let result = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "schedule.velero.io",
-                    &schedule_name,
-                    "-n",
-                    VELERO_NAMESPACE,
-                ])
-                .await;
-
-                match result {
-                    Err(e) if e.contains("NotFound") || e.contains("not found") => Ok(true),
-                    Ok(_) => {
-                        info!("[Training] Velero Schedule still exists, waiting...");
-                        Ok(false)
-                    }
-                    Err(e) => {
-                        info!("[Training] Unexpected error checking schedule: {}", e);
-                        Ok(false)
-                    }
-                }
-            }
-        },
-    )
-    .await?;
-
-    info!("[Training] Velero Schedule cleaned up after job deletion");
-    Ok(())
-}
-
 // =============================================================================
 // Public API
 // =============================================================================
@@ -341,7 +225,6 @@ pub async fn run_training_tests(kubeconfig: &str) -> Result<(), String> {
     info!("========================================\n");
 
     setup_regcreds_infrastructure(kubeconfig).await?;
-    setup_minio_backup_storage(kubeconfig).await?;
 
     let result = run_training_test_sequence(kubeconfig).await;
 
@@ -351,15 +234,10 @@ pub async fn run_training_tests(kubeconfig: &str) -> Result<(), String> {
 }
 
 async fn run_training_test_sequence(kubeconfig: &str) -> Result<(), String> {
-    // Verify compilation produces the correct resources
     test_training_deployment(kubeconfig).await?;
     test_headless_service(kubeconfig).await?;
     test_training_env_vars(kubeconfig).await?;
     test_checkpoint_pvcs(kubeconfig).await?;
-    test_velero_schedule(kubeconfig).await?;
-
-    // Verify finalizer cleans up cross-namespace Velero Schedule
-    test_velero_schedule_cleanup(kubeconfig).await?;
 
     info!("\n========================================");
     info!("Training Compilation Tests: PASSED");
@@ -369,35 +247,6 @@ async fn run_training_test_sequence(kubeconfig: &str) -> Result<(), String> {
 }
 
 async fn cleanup_training_tests(kubeconfig: &str) {
-    let schedule_name = format!("lattice-training-{}", JOB_NAME);
-
-    for (kind, selector_flag, selector) in [
-        (
-            "schedule.velero.io",
-            "--field-selector",
-            &format!("metadata.name={}", schedule_name) as &str,
-        ),
-        (
-            "backup",
-            "-l",
-            &format!("velero.io/schedule-name={}", schedule_name),
-        ),
-    ] {
-        let _ = run_kubectl(&[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            kind,
-            "-n",
-            VELERO_NAMESPACE,
-            selector_flag,
-            selector,
-            "--ignore-not-found",
-        ])
-        .await;
-    }
-
-    cleanup_minio_backup_storage(kubeconfig).await;
     delete_namespace(kubeconfig, TRAINING_NAMESPACE).await;
 }
 

@@ -8,7 +8,7 @@
 //!
 //! When `spec.training` is set, the compiler injects framework-specific env vars
 //! (MASTER_ADDR, WORLD_SIZE, NCCL), creates a headless Service for pod DNS, and
-//! optionally configures Velero-based checkpoint snapshots for fault tolerance.
+//! optionally creates checkpoint PVCs for fault tolerance.
 
 use std::collections::BTreeMap;
 
@@ -214,7 +214,7 @@ pub struct LatticeJobSpec {
 
     /// Distributed training configuration. When set, the compiler injects
     /// framework-specific env vars, NCCL tuning, headless Service for pod DNS,
-    /// and Velero-based checkpoint snapshots for fault tolerance.
+    /// and checkpoint PVCs for fault tolerance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training: Option<TrainingConfig>,
 }
@@ -306,7 +306,7 @@ impl std::fmt::Display for TrainingFramework {
 ///
 /// When set on a LatticeJob, the compiler injects framework-specific env vars
 /// (MASTER_ADDR, WORLD_SIZE, NCCL tuning), creates a headless Service for pod
-/// DNS resolution, and optionally sets up Velero-based checkpoint snapshots.
+/// DNS resolution, and optionally creates checkpoint PVCs.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainingConfig {
@@ -319,9 +319,9 @@ pub struct TrainingConfig {
     #[serde(default = "TrainingConfig::default_coordinator_task")]
     pub coordinator_task: String,
 
-    /// Checkpoint configuration. When set, a PVC is mounted on all tasks and
-    /// a Velero Schedule periodically snapshots it. On failure the controller
-    /// performs stop-the-world recovery: tear down → Velero Restore → restart.
+    /// Checkpoint configuration. When set, a PVC is mounted on all tasks.
+    /// PVCs persist across Volcano gang restarts so checkpoint data survives
+    /// pod failures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<CheckpointSpec>,
 
@@ -336,19 +336,14 @@ impl TrainingConfig {
     }
 }
 
-/// Velero-backed checkpoint configuration for training fault tolerance.
+/// Checkpoint volume configuration for training fault tolerance.
 ///
-/// The controller creates a PVC mounted at `local_path` (default: `/checkpoints`)
-/// on all training tasks. User code writes checkpoints to this path. A Velero
-/// Schedule periodically snapshots the PVC. On failure, the controller tears
-/// down the job, creates a Velero Restore from the latest snapshot, waits for
-/// completion, and restarts the job.
+/// The compiler creates a PVC mounted at `local_path` (default: `/checkpoints`)
+/// on all training tasks with `CHECKPOINT_DIR` env var. PVCs persist across
+/// Volcano gang restarts so checkpoint data survives pod failures.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointSpec {
-    /// Cron expression for Velero snapshot frequency (e.g., "*/30 * * * *" for every 30m)
-    pub interval: String,
-
     /// Local path inside containers where checkpoints are written (default: "/checkpoints")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
@@ -360,10 +355,6 @@ pub struct CheckpointSpec {
     /// Storage class for the checkpoint PVC
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_class: Option<String>,
-
-    /// Velero BackupStorageLocation name. If omitted, uses Velero's default BSL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup_store: Option<String>,
 }
 
 impl CheckpointSpec {
@@ -375,81 +366,6 @@ impl CheckpointSpec {
     /// Returns the PVC size, defaulting to "50Gi".
     pub fn effective_volume_size(&self) -> &str {
         self.volume_size.as_deref().unwrap_or("50Gi")
-    }
-
-    /// Compute Velero backup TTL to retain exactly 2 snapshots.
-    ///
-    /// Parses the cron `interval` to estimate the period between snapshots,
-    /// then returns `3 × period` as a Velero duration string. This ensures
-    /// 2 snapshots are always live (the 3rd fires just as the 1st expires,
-    /// with a full period of buffer).
-    ///
-    /// Panics at compile-time validation if the cron expression is
-    /// completely unparseable (invalid field count).
-    pub fn effective_ttl(&self) -> String {
-        let minutes = Self::parse_cron_period_minutes(&self.interval);
-        let ttl_minutes = minutes * 3;
-        if ttl_minutes >= 60 && ttl_minutes % 60 == 0 {
-            format!("{}h", ttl_minutes / 60)
-        } else {
-            format!("{}m", ttl_minutes)
-        }
-    }
-
-    /// Parse a standard 5-field cron expression and return the period in minutes.
-    ///
-    /// Determines the dominant frequency from the most-specific varying field:
-    ///
-    /// | minute    | hour   | dom | dow | Result                    |
-    /// |-----------|--------|-----|-----|---------------------------|
-    /// | `*/N`     | `*`    | `*` | `*` | every N minutes           |
-    /// | fixed/`*` | `*/N`  | `*` | `*` | every N hours             |
-    /// | fixed     | `*`    | `*` | `*` | every hour (60 min)       |
-    /// | fixed     | fixed  | `*` | `*` | daily (1440 min)          |
-    /// | fixed     | fixed  | `*` | set | weekly (10080 min)        |
-    /// | fixed     | fixed  | set | `*` | monthly (43200 min)       |
-    fn parse_cron_period_minutes(cron: &str) -> u64 {
-        let fields: Vec<&str> = cron.split_whitespace().collect();
-        assert!(
-            fields.len() == 5,
-            "checkpoint interval must be a 5-field cron expression, got: '{cron}'"
-        );
-        let (minute, hour, dom, _month, dow) =
-            (fields[0], fields[1], fields[2], fields[3], fields[4]);
-
-        // Minute step: `*/N ...` with wildcard hour → every N minutes
-        if let Some(step) = minute.strip_prefix("*/") {
-            if hour == "*" {
-                return step.parse().expect("invalid minute step in cron interval");
-            }
-        }
-
-        // Hour step: `M */N * * *` → every N hours
-        if let Some(step) = hour.strip_prefix("*/") {
-            return step
-                .parse::<u64>()
-                .expect("invalid hour step in cron interval")
-                * 60;
-        }
-
-        // Fixed minute with wildcard hour: `30 * * * *` → hourly
-        if hour == "*" {
-            return 60;
-        }
-
-        // Both minute and hour are fixed — check day fields
-        // Specific day-of-month: `0 2 15 * *` → monthly (~30 days)
-        if dom != "*" {
-            return 43200;
-        }
-
-        // Specific day-of-week: `0 9 * * MON-FRI` → weekly
-        if dow != "*" {
-            return 10080;
-        }
-
-        // All day fields wildcard: `0 2 * * *` → daily
-        1440
     }
 }
 
@@ -609,145 +525,20 @@ mod tests {
     #[test]
     fn checkpoint_spec_defaults() {
         let ckpt = CheckpointSpec {
-            interval: "*/30 * * * *".to_string(),
             local_path: None,
             volume_size: None,
             storage_class: None,
-            backup_store: None,
         };
         assert_eq!(ckpt.effective_local_path(), "/checkpoints");
         assert_eq!(ckpt.effective_volume_size(), "50Gi");
-        // 30min × 3 = 90min
-        assert_eq!(ckpt.effective_ttl(), "90m");
-    }
-
-    #[test]
-    fn checkpoint_spec_ttl_scales_with_interval() {
-        // Every-minute: 1min × 3 = 3min
-        let ckpt = CheckpointSpec {
-            interval: "*/1 * * * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "3m");
-
-        // Every-30-min: 30min × 3 = 90min
-        let ckpt = CheckpointSpec {
-            interval: "*/30 * * * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "90m");
-
-        // Hourly: 60min × 3 = 3h
-        let ckpt = CheckpointSpec {
-            interval: "0 */1 * * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "3h");
-
-        // Every-2-hours: 120min × 3 = 6h
-        let ckpt = CheckpointSpec {
-            interval: "0 */2 * * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "6h");
-
-        // Daily at midnight: 1440min × 3 = 72h
-        let ckpt = CheckpointSpec {
-            interval: "0 0 * * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "72h");
-
-        // Daily at 2am: 1440min × 3 = 72h
-        let ckpt = CheckpointSpec {
-            interval: "0 2 * * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "72h");
-
-        // Weekly (Sunday at midnight): 10080min × 3 = 504h
-        let ckpt = CheckpointSpec {
-            interval: "0 0 * * 0".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "504h");
-
-        // Weekdays at 9am: weekly period → 504h
-        let ckpt = CheckpointSpec {
-            interval: "0 9 * * MON-FRI".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "504h");
-
-        // Monthly (1st at midnight): 43200min × 3 = 2160h
-        let ckpt = CheckpointSpec {
-            interval: "0 0 1 * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "2160h");
-    }
-
-    #[test]
-    #[should_panic(expected = "must be a 5-field cron expression")]
-    fn checkpoint_spec_ttl_panics_on_invalid_cron() {
-        let ckpt = CheckpointSpec {
-            interval: "garbage".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        ckpt.effective_ttl();
-    }
-
-    #[test]
-    fn checkpoint_spec_ttl_hourly_fixed_minute() {
-        // `30 * * * *` → every hour at :30
-        let ckpt = CheckpointSpec {
-            interval: "30 * * * *".to_string(),
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-            backup_store: None,
-        };
-        assert_eq!(ckpt.effective_ttl(), "3h");
     }
 
     #[test]
     fn checkpoint_spec_overrides() {
         let ckpt = CheckpointSpec {
-            interval: "0 */1 * * *".to_string(),
             local_path: Some("/data/checkpoints".to_string()),
             volume_size: Some("100Gi".to_string()),
             storage_class: Some("ssd".to_string()),
-            backup_store: Some("my-bsl".to_string()),
         };
         assert_eq!(ckpt.effective_local_path(), "/data/checkpoints");
         assert_eq!(ckpt.effective_volume_size(), "100Gi");
@@ -769,11 +560,9 @@ mod tests {
             framework: TrainingFramework::DeepSpeed,
             coordinator_task: "master".to_string(),
             checkpoint: Some(CheckpointSpec {
-                interval: "*/30 * * * *".to_string(),
                 local_path: None,
                 volume_size: None,
                 storage_class: None,
-                backup_store: None,
             }),
             nccl: Some(NcclConfig {
                 debug: Some("INFO".to_string()),
