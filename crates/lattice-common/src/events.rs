@@ -145,6 +145,8 @@ pub mod reasons {
     pub const SECURITY_OVERRIDE_DENIED: &str = "SecurityOverrideDenied";
     /// Volume access denied (owner consent or Cedar policy)
     pub const VOLUME_ACCESS_DENIED: &str = "VolumeAccessDenied";
+    /// PVCs bound to different nodes (scheduling impossible with local storage)
+    pub const VOLUME_NODE_CONFLICT: &str = "VolumeNodeConflict";
 }
 
 /// Well-known event action strings.
