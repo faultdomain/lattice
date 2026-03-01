@@ -1,10 +1,10 @@
 //! LatticeJob controller implementation
 //!
 //! Reconciles LatticeJob resources through a state machine:
-//! Pending → Running → Succeeded/Failed
+//! Pending -> Running -> Succeeded/Failed
 //!
 //! For training jobs with checkpoints, adds a Recovering phase:
-//! Running → (failure) → Recovering → Running
+//! Running -> (failure) -> Recovering -> Running
 //!
 //! Recovery uses stop-the-world Velero checkpoint restore:
 //! - Delete the VCJob and PVCs
@@ -14,7 +14,7 @@
 //!
 //! Resources are applied in layers to prevent race conditions:
 //! - Layer 1: ConfigMaps, Secrets, ExternalSecrets, PVCs, MeshMembers, TracingPolicies,
-//!            headless Service, Velero Schedule
+//!   headless Service, Velero Schedule
 //! - Layer 2: VCJob (only after mesh/security is ready)
 
 use std::sync::Arc;
@@ -42,6 +42,12 @@ const REQUEUE_RUNNING: Duration = Duration::from_secs(15);
 
 /// Requeue interval during recovery (checking Velero Restore status)
 const REQUEUE_RECOVERING: Duration = Duration::from_secs(10);
+
+/// Namespace where Velero resources (Schedules, Backups, Restores) live
+pub(crate) const VELERO_NAMESPACE: &str = "velero";
+
+/// Finalizer for cleaning up cross-namespace Velero Schedules on job deletion
+const FINALIZER: &str = "lattice.dev/velero-schedule-cleanup";
 
 /// Shared context for the LatticeJob controller
 pub struct JobContext {
@@ -82,6 +88,22 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
         .as_deref()
         .ok_or(JobError::MissingNamespace)?;
 
+    // Handle deletion: clean up cross-namespace Velero Schedule before allowing GC
+    if job.metadata.deletion_timestamp.is_some() {
+        let has_finalizer = job
+            .metadata
+            .finalizers
+            .as_ref()
+            .map(|f| f.iter().any(|s| s == FINALIZER))
+            .unwrap_or(false);
+        if has_finalizer {
+            cleanup_training(&job, &ctx.client).await;
+            cleanup_graph(&job, &ctx.graph, namespace);
+            remove_finalizer(&ctx.client, &name, namespace).await?;
+        }
+        return Ok(Action::await_change());
+    }
+
     let generation = job.metadata.generation.unwrap_or(0);
     let phase = job
         .status
@@ -120,7 +142,9 @@ async fn reconcile_pending(
             );
             let mut status = current_status(job);
             status.message = Some(msg);
-            let _ = patch_status(&ctx.client, &job.name_any(), namespace, &status).await;
+            let _ =
+                patch_status(&ctx.client, &job.name_any(), namespace, &status, job.status.as_ref())
+                    .await;
             return Err(JobError::VolcanoCrdMissing {
                 kind: crd_kind.kind_str(),
             });
@@ -142,20 +166,36 @@ async fn reconcile_pending(
             if e.is_retryable() {
                 let mut status = current_status(job);
                 status.message = Some(format!("Compile failed (will retry): {}", e));
-                let _ = patch_status(&ctx.client, &name, namespace, &status).await;
+                let _ =
+                    patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref())
+                        .await;
             } else {
                 cleanup_graph(job, &ctx.graph, namespace);
                 let mut status = current_status(job);
                 status.phase = JobPhase::Failed;
                 status.message = Some(format!("Failed to compile job: {}", e));
                 status.observed_generation = Some(generation);
-                let _ = patch_status(&ctx.client, &name, namespace, &status).await;
+                let _ =
+                    patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref())
+                        .await;
             }
             return Err(e);
         }
     };
 
     register_graph(job, &ctx.graph, namespace);
+
+    // Add finalizer for training jobs with checkpoints (Velero Schedule is cross-namespace
+    // and can't use ownerReferences, so we need a finalizer to clean it up on deletion)
+    if job
+        .spec
+        .training
+        .as_ref()
+        .and_then(|t| t.checkpoint.as_ref())
+        .is_some()
+    {
+        ensure_finalizer(&ctx.client, job, namespace).await?;
+    }
 
     let name = job.name_any();
     if let Err(e) = apply_layers(
@@ -170,7 +210,7 @@ async fn reconcile_pending(
         cleanup_graph(job, &ctx.graph, namespace);
         let mut status = current_status(job);
         status.message = Some(format!("Apply failed (will retry): {}", e));
-        let _ = patch_status(&ctx.client, &name, namespace, &status).await;
+        let _ = patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await;
         return Err(e);
     }
 
@@ -187,7 +227,7 @@ async fn reconcile_pending(
     if job.spec.training.is_some() {
         status.start_time = Some(chrono::Utc::now().to_rfc3339());
     }
-    patch_status(&ctx.client, &name, namespace, &status).await?;
+    patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await?;
     Ok(Action::requeue(REQUEUE_RUNNING))
 }
 
@@ -230,7 +270,7 @@ async fn reconcile_running(
             status.message = Some("All tasks completed successfully".to_string());
             status.observed_generation = Some(generation);
             status.completion_time = Some(chrono::Utc::now().to_rfc3339());
-            patch_status(&ctx.client, name, namespace, &status).await?;
+            patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
             Ok(Action::await_change())
         }
         Some(VCJobPhase::Failed) => {
@@ -279,7 +319,8 @@ async fn reconcile_running_cron(
                 active, last_schedule
             ));
             status.observed_generation = Some(generation);
-            let _ = patch_status(&ctx.client, name, namespace, &status).await;
+            let _ =
+                patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await;
         }
         Err(kube::Error::Api(ae)) if ae.code == 404 => {
             warn!(job = %name, "VCCronJob not found — may have been deleted externally");
@@ -326,7 +367,7 @@ async fn handle_job_failure(
         status.retry_count = retry_count + 1;
         status.observed_generation = Some(generation);
         status.recovery_phase = Some(RecoveryPhase::DeletingResources);
-        patch_status(&ctx.client, name, namespace, &status).await?;
+        patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
         Ok(Action::requeue(REQUEUE_RECOVERING))
     } else {
         error!(job = %name, "job failed (no retries left or no checkpoint configured)");
@@ -337,7 +378,7 @@ async fn handle_job_failure(
         status.message = Some("Job failed".to_string());
         status.observed_generation = Some(generation);
         status.completion_time = Some(chrono::Utc::now().to_rfc3339());
-        patch_status(&ctx.client, name, namespace, &status).await?;
+        patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
         Ok(Action::await_change())
     }
 }
@@ -401,7 +442,7 @@ async fn recover_delete_resources(
     let mut status = current_status(job);
     status.recovery_phase = Some(RecoveryPhase::WaitingForRestore);
     status.message = Some("Waiting for Velero restore".to_string());
-    patch_status(&ctx.client, name, namespace, &status).await?;
+    patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
     Ok(Action::requeue(REQUEUE_RECOVERING))
 }
 
@@ -421,7 +462,7 @@ async fn recover_wait_for_restore(
             let mut status = current_status(job);
             status.recovery_phase = Some(RecoveryPhase::Restarting);
             status.message = Some("Restore complete, restarting training".to_string());
-            patch_status(&ctx.client, name, namespace, &status).await?;
+            patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
             Ok(Action::requeue(REQUEUE_RECOVERING))
         }
         Some(VeleroRestorePhase::InProgress) => Ok(Action::requeue(REQUEUE_RECOVERING)),
@@ -435,7 +476,7 @@ async fn recover_wait_for_restore(
             status.observed_generation = Some(generation);
             status.completion_time = Some(chrono::Utc::now().to_rfc3339());
             status.recovery_phase = None;
-            patch_status(&ctx.client, name, namespace, &status).await?;
+            patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
             Ok(Action::await_change())
         }
         None => {
@@ -458,7 +499,8 @@ async fn recover_wait_for_restore(
                     status.recovery_phase = Some(RecoveryPhase::Restarting);
                     status.message =
                         Some("No checkpoint found, restarting training".to_string());
-                    patch_status(&ctx.client, name, namespace, &status).await?;
+                    patch_status(&ctx.client, name, namespace, &status, job.status.as_ref())
+                        .await?;
                 }
             }
             Ok(Action::requeue(REQUEUE_RECOVERING))
@@ -507,7 +549,7 @@ async fn recover_restart(
     status.message = Some("Training restarted from checkpoint".to_string());
     status.observed_generation = Some(generation);
     status.recovery_phase = None;
-    patch_status(&ctx.client, name, namespace, &status).await?;
+    patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
     Ok(Action::requeue(REQUEUE_RUNNING))
 }
 
@@ -539,6 +581,62 @@ async fn cleanup_training(job: &LatticeJob, client: &Client) {
         let name = job.metadata.name.as_deref().unwrap_or_default();
         cleanup_velero_schedule(client, name).await;
     }
+}
+
+// =============================================================================
+// Finalizer management
+// =============================================================================
+
+/// Ensure the Velero cleanup finalizer is present on the job.
+async fn ensure_finalizer(
+    client: &Client,
+    job: &LatticeJob,
+    namespace: &str,
+) -> Result<(), JobError> {
+    let finalizers = job.metadata.finalizers.as_deref().unwrap_or(&[]);
+    if finalizers.iter().any(|s| s == FINALIZER) {
+        return Ok(());
+    }
+    let name = job.name_any();
+    let mut new_finalizers: Vec<String> = finalizers.to_vec();
+    new_finalizers.push(FINALIZER.to_string());
+    let patch = serde_json::json!({
+        "metadata": { "finalizers": new_finalizers }
+    });
+    let api: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
+    api.patch(
+        &name,
+        &PatchParams::default(),
+        &kube::api::Patch::Merge(&patch),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove the Velero cleanup finalizer from the job, allowing deletion to proceed.
+async fn remove_finalizer(
+    client: &Client,
+    name: &str,
+    namespace: &str,
+) -> Result<(), JobError> {
+    let api: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
+    let job = api.get(name).await?;
+    let finalizers: Vec<String> = job
+        .metadata
+        .finalizers
+        .as_ref()
+        .map(|f| f.iter().filter(|s| s.as_str() != FINALIZER).cloned().collect())
+        .unwrap_or_default();
+    let patch = serde_json::json!({
+        "metadata": { "finalizers": finalizers }
+    });
+    api.patch(
+        name,
+        &PatchParams::default(),
+        &kube::api::Patch::Merge(&patch),
+    )
+    .await?;
+    Ok(())
 }
 
 // =============================================================================
@@ -668,7 +766,7 @@ async fn apply_velero_resource(
     let name = resource["metadata"]["name"].as_str().unwrap_or("unknown");
     let namespace = resource["metadata"]["namespace"]
         .as_str()
-        .unwrap_or("velero");
+        .unwrap_or(VELERO_NAMESPACE);
 
     let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind::gvk(
         "velero.io",
@@ -722,7 +820,7 @@ async fn find_latest_velero_backup(
         "v1",
         "Backup",
     ));
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), "velero", &ar);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), VELERO_NAMESPACE, &ar);
 
     let label_selector = format!("lattice.dev/training-job={}", job_name);
     let list_params = kube::api::ListParams::default().labels(&label_selector);
@@ -771,7 +869,7 @@ async fn check_velero_restore_status(
         "v1",
         "Restore",
     ));
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), "velero", &ar);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), VELERO_NAMESPACE, &ar);
 
     match api.get(restore_name).await {
         Ok(obj) => {
@@ -809,7 +907,7 @@ async fn create_velero_restore(
         "kind": "Restore",
         "metadata": {
             "name": restore_name,
-            "namespace": "velero",
+            "namespace": VELERO_NAMESPACE,
             "labels": {
                 "app.kubernetes.io/managed-by": "lattice"
             }
@@ -903,13 +1001,17 @@ async fn patch_status(
     client: &Client,
     name: &str,
     namespace: &str,
-    status: &LatticeJobStatus,
+    new_status: &LatticeJobStatus,
+    current: Option<&LatticeJobStatus>,
 ) -> Result<(), JobError> {
+    if current == Some(new_status) {
+        return Ok(());
+    }
     lattice_common::kube_utils::patch_resource_status::<LatticeJob>(
         client,
         name,
         namespace,
-        status,
+        new_status,
         FIELD_MANAGER,
     )
     .await?;
@@ -928,7 +1030,7 @@ async fn cleanup_velero_schedule(client: &Client, job_name: &str) {
         "v1",
         "Schedule",
     ));
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), "velero", &ar);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), VELERO_NAMESPACE, &ar);
     match api
         .delete(&schedule_name, &kube::api::DeleteParams::default())
         .await

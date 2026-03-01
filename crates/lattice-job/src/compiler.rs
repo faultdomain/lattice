@@ -15,8 +15,6 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
-use tracing::warn;
-
 use lattice_common::crd::{
     CheckpointSpec, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, ProviderType,
     ResourceSpec, ResourceType, TrainingConfig, TrainingFramework, VolumeMount, WorkloadSpec,
@@ -27,6 +25,7 @@ use lattice_common::template::TemplateString;
 use lattice_volcano::{VCCronJob, VCJob};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
+use crate::controller::VELERO_NAMESPACE;
 use crate::error::JobError;
 
 const DEFAULT_MASTER_PORT: u16 = 29500;
@@ -103,7 +102,7 @@ pub async fn compile_job(
     // Pre-process tasks: if training is set, clone and inject training env vars
     // into each task's workload BEFORE the WorkloadCompiler runs.
     let tasks: BTreeMap<String, JobTaskSpec> = match job.spec.training {
-        Some(ref training) => prepare_training_tasks(name, &job.spec.tasks, training),
+        Some(ref training) => prepare_training_tasks(name, &job.spec.tasks, training)?,
         None => job.spec.tasks.clone(),
     };
 
@@ -212,7 +211,7 @@ fn prepare_training_tasks(
     job_name: &str,
     tasks: &BTreeMap<String, JobTaskSpec>,
     training: &TrainingConfig,
-) -> BTreeMap<String, JobTaskSpec> {
+) -> Result<BTreeMap<String, JobTaskSpec>, JobError> {
     let world_size: u32 = tasks.values().map(|t| t.replicas).sum();
     let coordinator = &training.coordinator_task;
     let coordinator_addr = format!("{}-{}-0.{}", job_name, coordinator, job_name);
@@ -233,7 +232,7 @@ fn prepare_training_tasks(
             &coordinator_addr,
             world_size,
             is_coordinator,
-        );
+        )?;
 
         inject_nccl_env(&mut task.workload, training.nccl.as_ref());
 
@@ -243,7 +242,7 @@ fn prepare_training_tasks(
 
         result.insert(task_name.clone(), task);
     }
-    result
+    Ok(result)
 }
 
 /// Inject framework-specific env vars into all containers.
@@ -253,7 +252,7 @@ fn inject_framework_env(
     coordinator_addr: &str,
     world_size: u32,
     is_coordinator: bool,
-) {
+) -> Result<(), JobError> {
     let env_vars: Vec<(&str, String)> = match framework {
         TrainingFramework::PyTorch | TrainingFramework::DeepSpeed => {
             let mut vars = vec![
@@ -273,17 +272,12 @@ fn inject_framework_env(
             ),
             ("JAX_NUM_PROCESSES", world_size.to_string()),
         ],
-        _ => {
-            warn!(framework = %framework, "unknown training framework, using generic env vars");
-            vec![
-                ("MASTER_ADDR", coordinator_addr.to_string()),
-                ("MASTER_PORT", DEFAULT_MASTER_PORT.to_string()),
-                ("WORLD_SIZE", world_size.to_string()),
-            ]
-        }
+        // #[non_exhaustive] requires a wildcard — new variants must add an explicit arm above
+        _ => return Err(JobError::UnsupportedFramework(framework.to_string())),
     };
 
     inject_env_all(workload, &env_vars);
+    Ok(())
 }
 
 /// Inject NCCL env vars into all containers based on config and GPU model.
@@ -453,12 +447,29 @@ fn compile_velero_schedule(
     ckpt: &CheckpointSpec,
 ) -> serde_json::Value {
     let schedule_name = format!("lattice-training-{}", name);
+    let mut template = serde_json::json!({
+        "ttl": ckpt.effective_ttl(),
+        "includedNamespaces": [namespace],
+        "includedResources": [
+            "persistentvolumeclaims",
+            "persistentvolumes"
+        ],
+        "snapshotVolumes": true,
+        "labelSelector": {
+            "matchLabels": {
+                "lattice.dev/training-job": name
+            }
+        }
+    });
+    if let Some(ref bsl) = ckpt.backup_store {
+        template["storageLocation"] = serde_json::json!(bsl);
+    }
     serde_json::json!({
         "apiVersion": "velero.io/v1",
         "kind": "Schedule",
         "metadata": {
             "name": schedule_name,
-            "namespace": "velero",
+            "namespace": VELERO_NAMESPACE,
             "labels": {
                 "app.kubernetes.io/managed-by": "lattice",
                 "lattice.dev/training-job": name
@@ -467,21 +478,7 @@ fn compile_velero_schedule(
         "spec": {
             "schedule": ckpt.interval,
             "paused": false,
-            "template": {
-                "ttl": ckpt.effective_ttl(),
-                "includedNamespaces": [namespace],
-                "includedResources": [
-                    "persistentvolumeclaims",
-                    "persistentvolumes"
-                ],
-                "snapshotVolumes": true,
-                "storageLocation": ckpt.backup_store,
-                "labelSelector": {
-                    "matchLabels": {
-                        "lattice.dev/training-job": name
-                    }
-                }
-            }
+            "template": template
         }
     })
 }
@@ -651,7 +648,7 @@ mod tests {
             nccl: None,
         };
 
-        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
 
         let master_vars = &prepared["master"].workload.containers["main"].variables;
         assert_eq!(master_vars["MASTER_ADDR"].as_str(), "my-job-master-0.my-job");
@@ -677,7 +674,7 @@ mod tests {
             nccl: None,
         };
 
-        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
         let vars = &prepared["master"].workload.containers["main"].variables;
         assert!(vars.contains_key("JAX_COORDINATOR_ADDRESS"));
         assert!(vars.contains_key("JAX_NUM_PROCESSES"));
@@ -701,7 +698,7 @@ mod tests {
             }),
         };
 
-        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
         let vars = &prepared["master"].workload.containers["main"].variables;
         assert_eq!(vars["NCCL_DEBUG"].as_str(), "INFO");
         assert_eq!(vars["NCCL_SOCKET_IFNAME"].as_str(), "ib0");
@@ -728,7 +725,7 @@ mod tests {
             nccl: None,
         };
 
-        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
 
         // Both master and worker get checkpoint volume
         for task in prepared.values() {
@@ -754,7 +751,7 @@ mod tests {
             nccl: None,
         };
 
-        let prepared = prepare_training_tasks("my-job", &tasks, &training);
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
         assert_eq!(
             prepared["worker"].restart_policy,
             Some(RestartPolicy::OnFailure)
@@ -809,6 +806,24 @@ mod tests {
         assert_eq!(
             schedule["spec"]["template"]["labelSelector"]["matchLabels"]["lattice.dev/training-job"],
             "my-training"
+        );
+    }
+
+    #[test]
+    fn velero_schedule_omits_storage_location_when_none() {
+        let ckpt = CheckpointSpec {
+            interval: "*/30 * * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+            ttl: None,
+        };
+
+        let schedule = compile_velero_schedule("my-training", "gpu-ns", &ckpt);
+        assert!(
+            schedule["spec"]["template"].get("storageLocation").is_none(),
+            "storageLocation should be absent when backup_store is None"
         );
     }
 

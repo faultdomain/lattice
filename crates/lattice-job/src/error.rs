@@ -33,6 +33,9 @@ pub enum JobError {
 
     #[error("training coordinator task '{0}' not found in job tasks")]
     CoordinatorTaskMissing(String),
+
+    #[error("unsupported training framework: {0}")]
+    UnsupportedFramework(String),
 }
 
 impl Retryable for JobError {
@@ -47,6 +50,7 @@ impl Retryable for JobError {
             Self::VolcanoCrdMissing { .. } => true,
             Self::CronWithCheckpoint => false,
             Self::CoordinatorTaskMissing(_) => false,
+            Self::UnsupportedFramework(_) => false,
         }
     }
 }
