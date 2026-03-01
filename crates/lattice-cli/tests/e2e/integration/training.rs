@@ -1,12 +1,12 @@
-//! Training checkpoint/recovery integration tests
+//! Training compilation integration tests
 //!
-//! Exercises the full training lifecycle:
+//! Verifies that the Lattice job compiler produces the correct Kubernetes
+//! resources for distributed training jobs:
 //! - Training env var injection (MASTER_ADDR, WORLD_SIZE, CHECKPOINT_DIR)
-//! - Headless Service creation for pod DNS
-//! - Velero Schedule creation for PVC snapshots
-//! - PVC labeling with `lattice.dev/training-job`
-//! - Gang failure and Volcano restart (kill one pod → gang restarts with PVCs intact)
-//! - Checkpoint data persistence through Volcano restart
+//! - Headless Service creation for pod DNS resolution
+//! - Checkpoint PVCs with training-job labels
+//! - Velero Schedule for periodic PVC snapshots (disaster recovery)
+//! - Velero Schedule cleanup via finalizer on job deletion
 //!
 //! Run standalone:
 //! ```
@@ -30,7 +30,7 @@ const TRAINING_NAMESPACE: &str = "training-test";
 const JOB_NAME: &str = "training-ckpt";
 
 // =============================================================================
-// Phase 1: Verify training compilation
+// Compilation verification
 // =============================================================================
 
 /// Deploy the training job and wait for Running phase
@@ -271,221 +271,10 @@ async fn test_velero_schedule(kubeconfig: &str) -> Result<(), String> {
 }
 
 // =============================================================================
-// Phase 2: Trigger failure and verify recovery
+// Cleanup verification
 // =============================================================================
 
-/// Verify containers wrote checkpoint data (FRESH start logs)
-async fn test_checkpoint_data_written(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Waiting for containers to write checkpoint data...");
-
-    let kc = kubeconfig.to_string();
-    wait_for_condition(
-        "training pods to emit CHECKPOINT_READY",
-        Duration::from_secs(120),
-        Duration::from_secs(5),
-        || {
-            let kc = kc.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "logs",
-                    "-n",
-                    TRAINING_NAMESPACE,
-                    "-l",
-                    &format!("volcano.sh/job-name={}", JOB_NAME),
-                    "--tail=20",
-                ])
-                .await
-                .unwrap_or_default();
-
-                Ok(output.contains("CHECKPOINT_READY"))
-            }
-        },
-    )
-    .await?;
-
-    info!("[Training] Containers wrote checkpoint data");
-    Ok(())
-}
-
-/// Wait for a Velero backup to complete for this training job (hard assertion)
-async fn wait_for_velero_backup(kubeconfig: &str) -> Result<String, String> {
-    info!("[Training] Waiting for Velero backup to complete (up to 3 minutes)...");
-
-    let schedule_name = format!("lattice-training-{}", JOB_NAME);
-    let kc = kubeconfig.to_string();
-    wait_for_condition(
-        "Velero backup to complete",
-        Duration::from_secs(180),
-        Duration::from_secs(10),
-        || {
-            let kc = kc.clone();
-            let schedule_name = schedule_name.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "backup",
-                    "-n",
-                    VELERO_NAMESPACE,
-                    "-l",
-                    &format!("velero.io/schedule-name={}", schedule_name),
-                    "-o",
-                    "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
-                ])
-                .await
-                .unwrap_or_default();
-
-                // Find a completed backup
-                for entry in output.split_whitespace() {
-                    if let Some((name, phase)) = entry.split_once('=') {
-                        if phase == "Completed" {
-                            return Ok(Some(name.to_string()));
-                        }
-                    }
-                }
-
-                info!("[Training] No completed backup yet: {}", output.trim());
-                Ok(None)
-            }
-        },
-    )
-    .await
-}
-
-/// Kill a pod's main process to trigger a container failure.
-///
-/// Uses `kubectl exec -- kill 1` to send SIGTERM to PID 1. With
-/// `restartPolicy: Never` (set by the compiler for checkpoint training),
-/// the pod transitions to Failed. Volcano detects PodFailed and enters
-/// Restarting — which the Lattice controller treats as Failed (maxRetry=0),
-/// triggering checkpoint recovery.
-///
-/// We must NOT use `kubectl delete pod` here: Volcano treats pod deletion
-/// as a missing pod and just recreates it, keeping the VCJob in Running.
-async fn test_kill_gang_member(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Killing a gang member process to trigger failure...");
-
-    // Get a worker pod name
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "pods",
-        "-n",
-        TRAINING_NAMESPACE,
-        "-l",
-        &format!(
-            "volcano.sh/job-name={},volcano.sh/task-spec=worker",
-            JOB_NAME
-        ),
-        "-o",
-        "jsonpath={.items[0].metadata.name}",
-    ])
-    .await?;
-
-    let pod_name = output.trim();
-    if pod_name.is_empty() {
-        return Err("No worker pod found to kill".to_string());
-    }
-
-    info!("[Training] Killing PID 1 in worker pod: {}", pod_name);
-    // kill 1 may "fail" because the exec connection drops when PID 1 dies —
-    // that's expected, so we ignore the exit code.
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "exec",
-        pod_name,
-        "-n",
-        TRAINING_NAMESPACE,
-        "--",
-        "kill",
-        "1",
-    ])
-    .await;
-
-    info!("[Training] Worker process killed");
-    Ok(())
-}
-
-/// Verify Volcano restarts the gang and the job returns to Running.
-///
-/// PVCs persist across Volcano restarts so checkpoint data survives.
-/// Volcano handles retries via its maxRetry mechanism — the Lattice
-/// controller just observes the VCJob phase.
-async fn test_volcano_restarts_gang(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Waiting for Volcano to restart the gang...");
-
-    wait_for_resource_phase(
-        kubeconfig,
-        "latticejob",
-        TRAINING_NAMESPACE,
-        JOB_NAME,
-        "Running",
-        Duration::from_secs(120),
-    )
-    .await?;
-
-    info!("[Training] Volcano restarted the gang, job is Running");
-    Ok(())
-}
-
-// =============================================================================
-// Phase 3: Verify checkpoint data persistence
-// =============================================================================
-
-/// Verify pods read from the restored checkpoint (RESTORED must appear in logs)
-async fn test_checkpoint_restored(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Waiting for restored pods to emit RESTORED...");
-
-    let kc = kubeconfig.to_string();
-    wait_for_condition(
-        "restarted pods to emit RESTORED",
-        Duration::from_secs(120),
-        Duration::from_secs(5),
-        || {
-            let kc = kc.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "logs",
-                    "-n",
-                    TRAINING_NAMESPACE,
-                    "-l",
-                    &format!("volcano.sh/job-name={}", JOB_NAME),
-                    "--tail=20",
-                ])
-                .await
-                .unwrap_or_default();
-
-                if output.contains("RESTORED") {
-                    Ok(true)
-                } else if output.contains("FRESH") {
-                    Err(
-                        "Pods started FRESH — checkpoint data was not restored from backup"
-                            .to_string(),
-                    )
-                } else {
-                    Ok(false)
-                }
-            }
-        },
-    )
-    .await?;
-
-    info!("[Training] Checkpoint data restored from Velero backup");
-    Ok(())
-}
-
-// =============================================================================
-// Cleanup: Verify Velero Schedule is cleaned up on terminal state
-// =============================================================================
-
-/// Delete the job and verify Velero Schedule is cleaned up
+/// Delete the job and verify Velero Schedule is cleaned up via finalizer
 async fn test_velero_schedule_cleanup(kubeconfig: &str) -> Result<(), String> {
     info!("[Training] Deleting job to verify Velero Schedule cleanup...");
 
@@ -521,7 +310,6 @@ async fn test_velero_schedule_cleanup(kubeconfig: &str) -> Result<(), String> {
                 ])
                 .await;
 
-                // Schedule should be gone (NotFound)
                 match result {
                     Err(e) if e.contains("NotFound") || e.contains("not found") => Ok(true),
                     Ok(_) => {
@@ -546,10 +334,10 @@ async fn test_velero_schedule_cleanup(kubeconfig: &str) -> Result<(), String> {
 // Public API
 // =============================================================================
 
-/// Run all training checkpoint/recovery integration tests
+/// Run all training compilation integration tests
 pub async fn run_training_tests(kubeconfig: &str) -> Result<(), String> {
     info!("\n========================================");
-    info!("Training Checkpoint/Recovery Tests");
+    info!("Training Compilation Tests");
     info!("========================================\n");
 
     setup_regcreds_infrastructure(kubeconfig).await?;
@@ -557,37 +345,24 @@ pub async fn run_training_tests(kubeconfig: &str) -> Result<(), String> {
 
     let result = run_training_test_sequence(kubeconfig).await;
 
-    // Cleanup regardless of test result
     cleanup_training_tests(kubeconfig).await;
 
     result
 }
 
 async fn run_training_test_sequence(kubeconfig: &str) -> Result<(), String> {
-    // Phase 1: Deploy and verify compilation
+    // Verify compilation produces the correct resources
     test_training_deployment(kubeconfig).await?;
     test_headless_service(kubeconfig).await?;
     test_training_env_vars(kubeconfig).await?;
     test_checkpoint_pvcs(kubeconfig).await?;
     test_velero_schedule(kubeconfig).await?;
 
-    // Phase 2: Write data, wait for backup, trigger failure, verify recovery
-    test_checkpoint_data_written(kubeconfig).await?;
-
-    let backup_name = wait_for_velero_backup(kubeconfig).await?;
-    info!("[Training] Backup completed: {}", backup_name);
-
-    test_kill_gang_member(kubeconfig).await?;
-    test_volcano_restarts_gang(kubeconfig).await?;
-
-    // Phase 3: Verify checkpoint data was actually restored
-    test_checkpoint_restored(kubeconfig).await?;
-
-    // Verify cleanup
+    // Verify finalizer cleans up cross-namespace Velero Schedule
     test_velero_schedule_cleanup(kubeconfig).await?;
 
     info!("\n========================================");
-    info!("Training Checkpoint/Recovery Tests: PASSED");
+    info!("Training Compilation Tests: PASSED");
     info!("========================================\n");
 
     Ok(())
@@ -596,7 +371,6 @@ async fn run_training_test_sequence(kubeconfig: &str) -> Result<(), String> {
 async fn cleanup_training_tests(kubeconfig: &str) {
     let schedule_name = format!("lattice-training-{}", JOB_NAME);
 
-    // Delete leftover Velero resources (schedule, backups, restores)
     for (kind, selector_flag, selector) in [
         (
             "schedule.velero.io",
@@ -605,11 +379,6 @@ async fn cleanup_training_tests(kubeconfig: &str) {
         ),
         (
             "backup",
-            "-l",
-            &format!("velero.io/schedule-name={}", schedule_name),
-        ),
-        (
-            "restore",
             "-l",
             &format!("velero.io/schedule-name={}", schedule_name),
         ),

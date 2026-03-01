@@ -283,8 +283,7 @@ fn prepare_training_tasks(
         let mut task = task_spec.clone();
 
         // Checkpoint training: Never restart — let the failure propagate to
-        // Volcano's PodFailed event so the Lattice controller can trigger
-        // stop-the-world checkpoint recovery.
+        // Volcano's PodFailed policy so it triggers a full gang RestartJob.
         // Non-checkpoint training: OnFailure — let K8s restart transient
         // container failures without full job restarts.
         if task.restart_policy.is_none() {

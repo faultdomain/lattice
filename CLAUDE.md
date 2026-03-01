@@ -6,6 +6,12 @@ Every E2E test does a full rebuild with the current code. Never assume or sugges
 
 ---
 
+## Important: No Silent Fallbacks
+
+**NEVER use fallback/default values when data is missing.** If a value is expected (e.g., GPU count from a resource spec), require it explicitly or return an error. Silent fallbacks (like defaulting to 1) mask bugs and produce incorrect behavior that's hard to trace. If something isn't there, fail loudly.
+
+---
+
 ## Debugging: Mesh/Network Issues
 
 **Always check ztunnel logs first** when debugging mesh connectivity or policy issues:

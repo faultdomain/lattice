@@ -129,10 +129,8 @@ fn compile_tasks(
 }
 
 fn default_policies(_max_retry: Option<u32>) -> Vec<VCJobTaskPolicy> {
-    // PodFailed is always included. With maxRetry=0 (checkpoint training),
-    // Volcano enters Restarting but can't actually restart — the Lattice
-    // controller detects Restarting+maxRetry=0 and treats it as Failed,
-    // triggering stop-the-world checkpoint recovery.
+    // PodEvicted and PodFailed both trigger RestartJob. Volcano manages
+    // retries via maxRetry on the VCJob spec.
     vec![
         VCJobTaskPolicy {
             event: "PodEvicted".to_string(),
