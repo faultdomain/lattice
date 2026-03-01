@@ -488,7 +488,8 @@ fn inject_rank_env(template: &mut serde_json::Value, rank_offset: u32) {
         None => return,
     };
 
-    // Add emptyDir volume for rank.sh
+    // Add emptyDir volumes for rank.sh and writable /tmp
+    // (root filesystem is read-only; frameworks like PyTorch need a writable /tmp)
     let volumes = spec_obj
         .entry("volumes")
         .or_insert_with(|| serde_json::json!([]))
@@ -496,6 +497,10 @@ fn inject_rank_env(template: &mut serde_json::Value, rank_offset: u32) {
     if let Some(volumes) = volumes {
         volumes.push(serde_json::json!({
             "name": "lattice-env",
+            "emptyDir": {}
+        }));
+        volumes.push(serde_json::json!({
+            "name": "lattice-tmp",
             "emptyDir": {}
         }));
     }
@@ -565,7 +570,7 @@ fn inject_rank_env(template: &mut serde_json::Value, rank_offset: u32) {
             );
             obj.insert("args".to_string(), serde_json::to_value(&new_args).unwrap());
 
-            // Add volume mount for lattice-env
+            // Add volume mounts for lattice-env and writable /tmp
             let volume_mounts = obj
                 .entry("volumeMounts")
                 .or_insert_with(|| serde_json::json!([]))
@@ -574,6 +579,10 @@ fn inject_rank_env(template: &mut serde_json::Value, rank_offset: u32) {
                 vm.push(serde_json::json!({
                     "name": "lattice-env",
                     "mountPath": "/lattice-env"
+                }));
+                vm.push(serde_json::json!({
+                    "name": "lattice-tmp",
+                    "mountPath": "/tmp"
                 }));
             }
         }
@@ -1385,13 +1394,18 @@ mod tests {
         let args: Vec<String> = serde_json::from_value(main["args"].clone()).unwrap();
         assert_eq!(args, vec!["/usr/bin/python", "-c", "print('hello')"]);
 
-        // Volume should be present
+        // Volumes should be present
         let volumes = template["spec"]["volumes"].as_array().unwrap();
         assert!(volumes.iter().any(|v| v["name"] == "lattice-env"));
+        assert!(volumes.iter().any(|v| v["name"] == "lattice-tmp"));
 
-        // Volume mount on main container
+        // Volume mounts on main container
         let vm = main["volumeMounts"].as_array().unwrap();
         assert!(vm.iter().any(|v| v["name"] == "lattice-env"));
+        assert!(
+            vm.iter()
+                .any(|v| v["name"] == "lattice-tmp" && v["mountPath"] == "/tmp")
+        );
     }
 
     #[test]
