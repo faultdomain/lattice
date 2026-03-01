@@ -7,14 +7,10 @@
 //! jobs that complete before we observe Running transition directly: Pending -> Succeeded.
 //! VCJobs stuck in Pending past PENDING_TIMEOUT transition: Pending -> Failed.
 //!
-//! For training jobs with checkpoints, adds a Recovering phase:
-//! Running -> (failure) -> Recovering -> Running
-//!
-//! Recovery uses stop-the-world Velero checkpoint restore:
-//! - Delete the VCJob and PVCs
-//! - Create a Velero Restore from the latest checkpoint snapshot
-//! - Wait for Restore to complete
-//! - Re-apply the VCJob (PVCs now contain checkpoint data)
+//! For training jobs with checkpoints, Volcano handles retries via its maxRetry
+//! mechanism. PVCs persist across restarts so checkpoint data survives pod failures.
+//! A Velero Schedule periodically snapshots checkpoint PVCs as disaster recovery
+//! insurance, but automated restore is not implemented.
 //!
 //! Resources are applied in layers to prevent race conditions:
 //! - Layer 1: ConfigMaps, Secrets, ExternalSecrets, PVCs, MeshMembers, TracingPolicies,
@@ -31,7 +27,7 @@ use kube::{Client, ResourceExt};
 use tracing::{error, info, warn};
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{JobPhase, LatticeJob, LatticeJobStatus, ProviderType, RecoveryPhase};
+use lattice_common::crd::{JobPhase, LatticeJob, LatticeJobStatus, ProviderType};
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
@@ -43,9 +39,6 @@ const FIELD_MANAGER: &str = "lattice-job-controller";
 
 /// Requeue interval while waiting for job to complete
 const REQUEUE_RUNNING: Duration = Duration::from_secs(15);
-
-/// Requeue interval during recovery (checking Velero Restore status)
-const REQUEUE_RECOVERING: Duration = Duration::from_secs(10);
 
 /// Timeout for VCJob stuck in Pending (e.g. ImagePullBackOff, unschedulable)
 const PENDING_TIMEOUT: Duration = Duration::from_secs(300);
@@ -124,9 +117,6 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
     match phase {
         JobPhase::Pending => reconcile_pending(&job, &ctx, namespace, generation).await,
         JobPhase::Running => reconcile_running(&job, &ctx, &name, namespace, generation).await,
-        JobPhase::Recovering => {
-            reconcile_recovering(&job, &ctx, &name, namespace, generation).await
-        }
         _ => Ok(Action::await_change()),
     }
 }
@@ -380,8 +370,7 @@ async fn reconcile_running_cron(
     Ok(Action::requeue(REQUEUE_RUNNING))
 }
 
-/// Handle a failed VCJob. If training with checkpoint + retries left, transition
-/// to Recovering. Otherwise, mark as Failed.
+/// Handle a failed VCJob — Volcano has exhausted its retries, mark as Failed.
 async fn handle_job_failure(
     job: &LatticeJob,
     ctx: &JobContext,
@@ -389,209 +378,18 @@ async fn handle_job_failure(
     namespace: &str,
     generation: i64,
 ) -> Result<Action, JobError> {
-    let has_checkpoint = job
-        .spec
-        .training
-        .as_ref()
-        .and_then(|t| t.checkpoint.as_ref())
-        .is_some();
-    let retry_count = job.status.as_ref().map(|s| s.retry_count).unwrap_or(0);
-    let max_retry = job.spec.max_retry.unwrap_or(0);
-
-    if has_checkpoint && retry_count < max_retry {
-        info!(
-            job = %name,
-            retry = retry_count + 1,
-            max_retry = max_retry,
-            "VCJob failed, initiating stop-the-world checkpoint recovery"
-        );
-        let mut status = current_status(job);
-        status.phase = JobPhase::Recovering;
-        status.message = Some(format!(
-            "Recovering from checkpoint (retry {}/{})",
-            retry_count + 1,
-            max_retry
-        ));
-        status.retry_count = retry_count + 1;
-        status.observed_generation = Some(generation);
-        status.recovery_phase = Some(RecoveryPhase::DeletingResources);
-        patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
-        Ok(Action::requeue(REQUEUE_RECOVERING))
-    } else {
-        error!(job = %name, "job failed (no retries left or no checkpoint configured)");
-        cleanup_graph(job, &ctx.graph, namespace);
-        cleanup_training(job, &ctx.client).await;
-        let mut status = current_status(job);
-        status.phase = JobPhase::Failed;
-        status.message = Some("Job failed".to_string());
-        status.observed_generation = Some(generation);
-        status.completion_time = Some(chrono::Utc::now().to_rfc3339());
-        patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
-        Ok(Action::await_change())
-    }
-}
-
-/// Stop-the-world recovery flow:
-///
-/// DeletingResources: Delete VCJob and checkpoint PVCs
-/// WaitingForRestore: Create Velero Restore, poll until complete
-/// Restarting: Re-compile and apply the VCJob
-async fn reconcile_recovering(
-    job: &LatticeJob,
-    ctx: &JobContext,
-    name: &str,
-    namespace: &str,
-    generation: i64,
-) -> Result<Action, JobError> {
-    let recovery_phase = job
-        .status
-        .as_ref()
-        .and_then(|s| s.recovery_phase.clone())
-        .unwrap_or(RecoveryPhase::DeletingResources);
-
-    match recovery_phase {
-        RecoveryPhase::DeletingResources => {
-            recover_delete_resources(job, ctx, name, namespace).await
-        }
-        RecoveryPhase::WaitingForRestore => {
-            recover_wait_for_restore(job, ctx, name, namespace, generation).await
-        }
-        RecoveryPhase::Restarting => recover_restart(job, ctx, name, namespace, generation).await,
-    }
-}
-
-async fn recover_delete_resources(
-    job: &LatticeJob,
-    ctx: &JobContext,
-    name: &str,
-    namespace: &str,
-) -> Result<Action, JobError> {
-    info!(job = %name, "recovery: deleting VCJob and checkpoint PVCs");
-
-    let volcano_api = match resolve_volcano_api(&ctx.registry, CrdKind::VolcanoJob).await? {
-        Some(ar) => ar,
-        None => return Ok(Action::requeue(REQUEUE_RECOVERING)),
-    };
-    let api: Api<DynamicObject> = Api::namespaced_with(ctx.client.clone(), namespace, &volcano_api);
-    match api.delete(name, &kube::api::DeleteParams::default()).await {
-        Ok(_) => info!(job = %name, "deleted VCJob for recovery"),
-        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
-        Err(e) => {
-            warn!(job = %name, error = %e, "failed to delete VCJob, will retry");
-            return Ok(Action::requeue(REQUEUE_RECOVERING));
-        }
-    }
-
-    delete_checkpoint_pvcs(&ctx.client, name, namespace).await;
-
+    error!(job = %name, "VCJob failed (Volcano exhausted retries)");
+    cleanup_graph(job, &ctx.graph, namespace);
+    cleanup_training(job, &ctx.client).await;
     let mut status = current_status(job);
-    status.recovery_phase = Some(RecoveryPhase::WaitingForRestore);
-    status.message = Some("Waiting for Velero restore".to_string());
-    patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
-    Ok(Action::requeue(REQUEUE_RECOVERING))
-}
-
-async fn recover_wait_for_restore(
-    job: &LatticeJob,
-    ctx: &JobContext,
-    name: &str,
-    namespace: &str,
-    generation: i64,
-) -> Result<Action, JobError> {
-    let retry_count = job.status.as_ref().map(|s| s.retry_count).unwrap_or(1);
-    let restore_name = format!("lattice-training-{}-restore-{}", name, retry_count);
-
-    match check_velero_restore_status(&ctx.client, &restore_name).await {
-        Some(VeleroRestorePhase::Completed) => {
-            info!(job = %name, "Velero restore completed");
-            let mut status = current_status(job);
-            status.recovery_phase = Some(RecoveryPhase::Restarting);
-            status.message = Some("Restore complete, restarting training".to_string());
-            patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
-            Ok(Action::requeue(REQUEUE_RECOVERING))
-        }
-        Some(VeleroRestorePhase::InProgress) => Ok(Action::requeue(REQUEUE_RECOVERING)),
-        Some(VeleroRestorePhase::Failed) => {
-            error!(job = %name, "Velero restore failed");
-            cleanup_graph(job, &ctx.graph, namespace);
-            cleanup_training(job, &ctx.client).await;
-            let mut status = current_status(job);
-            status.phase = JobPhase::Failed;
-            status.message = Some("Velero checkpoint restore failed".to_string());
-            status.observed_generation = Some(generation);
-            status.completion_time = Some(chrono::Utc::now().to_rfc3339());
-            status.recovery_phase = None;
-            patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
-            Ok(Action::await_change())
-        }
-        None => {
-            // Restore doesn't exist yet — create it
-            let latest_backup = find_latest_velero_backup(&ctx.client, name).await;
-            match latest_backup {
-                Some(backup_name) => {
-                    info!(job = %name, backup = %backup_name, "creating Velero Restore");
-                    create_velero_restore(&ctx.client, &restore_name, &backup_name, namespace)
-                        .await?;
-                }
-                None => {
-                    warn!(job = %name, "no Velero backups found, restarting without checkpoint");
-                    let mut status = current_status(job);
-                    status.recovery_phase = Some(RecoveryPhase::Restarting);
-                    status.message = Some("No checkpoint found, restarting training".to_string());
-                    patch_status(&ctx.client, name, namespace, &status, job.status.as_ref())
-                        .await?;
-                }
-            }
-            Ok(Action::requeue(REQUEUE_RECOVERING))
-        }
-    }
-}
-
-async fn recover_restart(
-    job: &LatticeJob,
-    ctx: &JobContext,
-    name: &str,
-    namespace: &str,
-    generation: i64,
-) -> Result<Action, JobError> {
-    info!(job = %name, "recovery: re-applying VCJob");
-
-    let volcano_api = match resolve_volcano_api(&ctx.registry, CrdKind::VolcanoJob).await? {
-        Some(ar) => ar,
-        None => return Ok(Action::requeue(REQUEUE_RECOVERING)),
-    };
-
-    let compiled = compile_job(
-        job,
-        &ctx.graph,
-        &ctx.cluster_name,
-        ctx.provider_type,
-        &ctx.cedar,
-    )
-    .await?;
-
-    if let Err(e) = apply_layers(
-        &ctx.client,
-        namespace,
-        &compiled,
-        &ctx.registry,
-        &volcano_api,
-    )
-    .await
-    {
-        warn!(job = %name, error = %e, "failed to re-apply VCJob during recovery, will retry");
-        return Ok(Action::requeue(REQUEUE_RECOVERING));
-    }
-
-    // Go back to Pending — wait for the VCJob to actually start before reporting Running
-    let mut status = current_status(job);
-    status.phase = JobPhase::Pending;
-    status.message = Some(SUBMITTED_MESSAGE.to_string());
+    status.phase = JobPhase::Failed;
+    status.message = Some("Job failed".to_string());
     status.observed_generation = Some(generation);
-    status.recovery_phase = None;
+    status.completion_time = Some(chrono::Utc::now().to_rfc3339());
     patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
-    Ok(Action::requeue(REQUEUE_RUNNING))
+    Ok(Action::await_change())
 }
+
 
 // =============================================================================
 // Graph management
@@ -821,148 +619,6 @@ async fn apply_velero_resource(
         .await?;
 
     Ok(())
-}
-
-/// Delete checkpoint PVCs labeled with `lattice.dev/training-job: <name>`.
-async fn delete_checkpoint_pvcs(client: &Client, job_name: &str, namespace: &str) {
-    let pvcs: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
-        Api::namespaced(client.clone(), namespace);
-
-    let label_selector = format!("lattice.dev/training-job={}", job_name);
-    let list_params = kube::api::ListParams::default().labels(&label_selector);
-
-    match pvcs.list(&list_params).await {
-        Ok(list) => {
-            for pvc in list.items {
-                let pvc_name = pvc.metadata.name.as_deref().unwrap_or_default();
-                match pvcs
-                    .delete(pvc_name, &kube::api::DeleteParams::default())
-                    .await
-                {
-                    Ok(_) => info!(job = %job_name, pvc = %pvc_name, "deleted checkpoint PVC"),
-                    Err(e) => {
-                        warn!(job = %job_name, pvc = %pvc_name, error = %e, "failed to delete PVC")
-                    }
-                }
-            }
-        }
-        Err(e) => warn!(job = %job_name, error = %e, "failed to list checkpoint PVCs"),
-    }
-}
-
-/// Find the latest completed Velero Backup for a training job.
-///
-/// Sorts by `completionTimestamp` string comparison — works because Velero
-/// uses RFC 3339 timestamps which sort lexicographically.
-async fn find_latest_velero_backup(client: &Client, job_name: &str) -> Option<String> {
-    let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind::gvk(
-        "velero.io",
-        "v1",
-        "Backup",
-    ));
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), VELERO_NAMESPACE, &ar);
-
-    let label_selector = format!("lattice.dev/training-job={}", job_name);
-    let list_params = kube::api::ListParams::default().labels(&label_selector);
-
-    match api.list(&list_params).await {
-        Ok(list) => list
-            .items
-            .into_iter()
-            .filter(|b| {
-                b.data
-                    .get("status")
-                    .and_then(|s| s.get("phase"))
-                    .and_then(|p| p.as_str())
-                    == Some("Completed")
-            })
-            .max_by_key(|b| {
-                b.data
-                    .get("status")
-                    .and_then(|s| s.get("completionTimestamp"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            })
-            .and_then(|b| b.metadata.name),
-        Err(e) => {
-            warn!(job = %job_name, error = %e, "failed to list Velero backups");
-            None
-        }
-    }
-}
-
-enum VeleroRestorePhase {
-    InProgress,
-    Completed,
-    Failed,
-}
-
-/// Check the status of a Velero Restore CR.
-async fn check_velero_restore_status(
-    client: &Client,
-    restore_name: &str,
-) -> Option<VeleroRestorePhase> {
-    let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind::gvk(
-        "velero.io",
-        "v1",
-        "Restore",
-    ));
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), VELERO_NAMESPACE, &ar);
-
-    match api.get(restore_name).await {
-        Ok(obj) => {
-            let phase = obj
-                .data
-                .get("status")
-                .and_then(|s| s.get("phase"))
-                .and_then(|p| p.as_str());
-
-            match phase {
-                Some("Completed") => Some(VeleroRestorePhase::Completed),
-                Some("Failed" | "PartiallyFailed" | "FailedValidation") => {
-                    Some(VeleroRestorePhase::Failed)
-                }
-                _ => Some(VeleroRestorePhase::InProgress),
-            }
-        }
-        Err(kube::Error::Api(ae)) if ae.code == 404 => None,
-        Err(e) => {
-            warn!(restore = %restore_name, error = %e, "failed to check Velero Restore status");
-            None
-        }
-    }
-}
-
-/// Create a Velero Restore CR targeting a specific backup.
-async fn create_velero_restore(
-    client: &Client,
-    restore_name: &str,
-    backup_name: &str,
-    namespace: &str,
-) -> Result<(), JobError> {
-    let restore = serde_json::json!({
-        "apiVersion": "velero.io/v1",
-        "kind": "Restore",
-        "metadata": {
-            "name": restore_name,
-            "namespace": VELERO_NAMESPACE,
-            "labels": {
-                "app.kubernetes.io/managed-by": "lattice"
-            }
-        },
-        "spec": {
-            "backupName": backup_name,
-            "includedNamespaces": [namespace],
-            "includedResources": [
-                "persistentvolumeclaims",
-                "persistentvolumes"
-            ],
-            "restorePVs": true
-        }
-    });
-
-    apply_velero_resource(client, &restore).await
 }
 
 // =============================================================================

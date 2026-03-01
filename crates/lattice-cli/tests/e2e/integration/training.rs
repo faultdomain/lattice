@@ -5,9 +5,8 @@
 //! - Headless Service creation for pod DNS
 //! - Velero Schedule creation for PVC snapshots
 //! - PVC labeling with `lattice.dev/training-job`
-//! - Gang failure (kill one pod → all die)
-//! - Recovery state machine (Recovering → DeletingResources → WaitingForRestore → Restarting)
-//! - Checkpoint data persistence through recovery
+//! - Gang failure and Volcano restart (kill one pod → gang restarts with PVCs intact)
+//! - Checkpoint data persistence through Volcano restart
 //!
 //! Run standalone:
 //! ```
@@ -162,9 +161,9 @@ async fn test_training_env_vars(kubeconfig: &str) -> Result<(), String> {
             .ok_or(format!("ConfigMap '{cm_name}' has no data"))?;
 
         // PyTorch distributed env vars (shared across all pods in the task).
-        // RANK is NOT in the ConfigMap — it's injected at the pod spec level
-        // via $(VC_TASK_INDEX) from the Volcano env plugin.
-        for required in ["MASTER_ADDR", "MASTER_PORT", "WORLD_SIZE"] {
+        // RANK/NODE_RANK are NOT in the ConfigMap — they're injected at the
+        // pod spec level via $(VC_TASK_INDEX) from the Volcano env plugin.
+        for required in ["MASTER_ADDR", "MASTER_PORT", "WORLD_SIZE", "NNODES"] {
             if !data.contains_key(required) {
                 return Err(format!(
                     "Task '{task_name}' ConfigMap missing training env var: {required}"
@@ -356,9 +355,18 @@ async fn wait_for_velero_backup(kubeconfig: &str) -> Result<String, String> {
     .await
 }
 
-/// Kill a pod from the training gang to trigger VCJob failure
+/// Kill a pod's main process to trigger a container failure.
+///
+/// Uses `kubectl exec -- kill 1` to send SIGTERM to PID 1. With
+/// `restartPolicy: Never` (set by the compiler for checkpoint training),
+/// the pod transitions to Failed. Volcano detects PodFailed and enters
+/// Restarting — which the Lattice controller treats as Failed (maxRetry=0),
+/// triggering checkpoint recovery.
+///
+/// We must NOT use `kubectl delete pod` here: Volcano treats pod deletion
+/// as a missing pod and just recreates it, keeping the VCJob in Running.
 async fn test_kill_gang_member(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Killing a gang member pod to trigger failure...");
+    info!("[Training] Killing a gang member process to trigger failure...");
 
     // Get a worker pod name
     let output = run_kubectl(&[
@@ -383,118 +391,33 @@ async fn test_kill_gang_member(kubeconfig: &str) -> Result<(), String> {
         return Err("No worker pod found to kill".to_string());
     }
 
-    info!("[Training] Deleting worker pod: {}", pod_name);
-    run_kubectl(&[
+    info!("[Training] Killing PID 1 in worker pod: {}", pod_name);
+    // kill 1 may "fail" because the exec connection drops when PID 1 dies —
+    // that's expected, so we ignore the exit code.
+    let _ = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
-        "delete",
-        "pod",
+        "exec",
         pod_name,
         "-n",
         TRAINING_NAMESPACE,
-        "--grace-period=0",
-        "--force",
+        "--",
+        "kill",
+        "1",
     ])
-    .await?;
+    .await;
 
-    info!("[Training] Worker pod deleted");
+    info!("[Training] Worker process killed");
     Ok(())
 }
 
-/// Verify the job transitions to Recovering phase after gang failure
-async fn test_recovery_triggered(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Waiting for Recovering phase...");
-
-    wait_for_resource_phase(
-        kubeconfig,
-        "latticejob",
-        TRAINING_NAMESPACE,
-        JOB_NAME,
-        "Recovering",
-        Duration::from_secs(120),
-    )
-    .await?;
-
-    info!("[Training] Job entered Recovering phase");
-
-    // Verify retry_count was incremented
-    let retry_count = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticejob",
-        JOB_NAME,
-        "-n",
-        TRAINING_NAMESPACE,
-        "-o",
-        "jsonpath={.status.retryCount}",
-    ])
-    .await?;
-
-    let count: u32 = retry_count
-        .trim()
-        .parse()
-        .map_err(|e| format!("Failed to parse retryCount: {e}"))?;
-
-    if count == 0 {
-        return Err("Expected retryCount > 0 during recovery".to_string());
-    }
-
-    info!("[Training] Recovery triggered: retryCount={}", count);
-    Ok(())
-}
-
-/// Verify all pods from the gang were terminated
-async fn test_all_pods_terminated(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Verifying all gang pods terminated...");
-
-    let kc = kubeconfig.to_string();
-    wait_for_condition(
-        "all training pods to terminate",
-        Duration::from_secs(60),
-        Duration::from_secs(5),
-        || {
-            let kc = kc.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "pods",
-                    "-n",
-                    TRAINING_NAMESPACE,
-                    "-l",
-                    &format!("volcano.sh/job-name={}", JOB_NAME),
-                    "--field-selector=status.phase=Running",
-                    "-o",
-                    "jsonpath={.items[*].metadata.name}",
-                ])
-                .await
-                .unwrap_or_default();
-
-                let running_pods: Vec<&str> = output.split_whitespace().collect();
-                if running_pods.is_empty() {
-                    Ok(true)
-                } else {
-                    info!(
-                        "[Training] {} pods still running: {:?}",
-                        running_pods.len(),
-                        running_pods
-                    );
-                    Ok(false)
-                }
-            }
-        },
-    )
-    .await?;
-
-    info!("[Training] All gang pods terminated");
-    Ok(())
-}
-
-/// Verify the job recovers and returns to Running phase
-async fn test_recovery_completes(kubeconfig: &str) -> Result<(), String> {
-    info!("[Training] Waiting for job to recover and return to Running...");
+/// Verify Volcano restarts the gang and the job returns to Running.
+///
+/// PVCs persist across Volcano restarts so checkpoint data survives.
+/// Volcano handles retries via its maxRetry mechanism — the Lattice
+/// controller just observes the VCJob phase.
+async fn test_volcano_restarts_gang(kubeconfig: &str) -> Result<(), String> {
+    info!("[Training] Waiting for Volcano to restart the gang...");
 
     wait_for_resource_phase(
         kubeconfig,
@@ -502,45 +425,11 @@ async fn test_recovery_completes(kubeconfig: &str) -> Result<(), String> {
         TRAINING_NAMESPACE,
         JOB_NAME,
         "Running",
-        Duration::from_secs(300),
+        Duration::from_secs(120),
     )
     .await?;
 
-    // Verify recovery_phase is cleared
-    let recovery_phase = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticejob",
-        JOB_NAME,
-        "-n",
-        TRAINING_NAMESPACE,
-        "-o",
-        "jsonpath={.status.recoveryPhase}",
-    ])
-    .await?;
-
-    if !recovery_phase.trim().is_empty() {
-        return Err(format!(
-            "Expected recovery_phase cleared after recovery, got: '{}'",
-            recovery_phase.trim()
-        ));
-    }
-
-    let message = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticejob",
-        JOB_NAME,
-        "-n",
-        TRAINING_NAMESPACE,
-        "-o",
-        "jsonpath={.status.message}",
-    ])
-    .await?;
-
-    info!("[Training] Recovery complete: message='{}'", message.trim());
+    info!("[Training] Volcano restarted the gang, job is Running");
     Ok(())
 }
 
@@ -689,9 +578,7 @@ async fn run_training_test_sequence(kubeconfig: &str) -> Result<(), String> {
     info!("[Training] Backup completed: {}", backup_name);
 
     test_kill_gang_member(kubeconfig).await?;
-    test_all_pods_terminated(kubeconfig).await?;
-    test_recovery_triggered(kubeconfig).await?;
-    test_recovery_completes(kubeconfig).await?;
+    test_volcano_restarts_gang(kubeconfig).await?;
 
     // Phase 3: Verify checkpoint data was actually restored
     test_checkpoint_restored(kubeconfig).await?;

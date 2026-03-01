@@ -32,8 +32,6 @@ pub enum JobPhase {
     Pending,
     /// Job is actively running
     Running,
-    /// Restarting from a Velero checkpoint snapshot after failure
-    Recovering,
     /// Job completed successfully
     Succeeded,
     /// Job has encountered an error
@@ -45,7 +43,6 @@ impl std::fmt::Display for JobPhase {
         match self {
             Self::Pending => write!(f, "Pending"),
             Self::Running => write!(f, "Running"),
-            Self::Recovering => write!(f, "Recovering"),
             Self::Succeeded => write!(f, "Succeeded"),
             Self::Failed => write!(f, "Failed"),
         }
@@ -276,28 +273,6 @@ pub struct LatticeJobStatus {
     /// Timestamp when the job completed (training jobs only)
     #[serde(default)]
     pub completion_time: Option<String>,
-
-    /// Number of checkpoint recovery attempts so far (training jobs only)
-    #[serde(default)]
-    pub retry_count: u32,
-
-    /// Sub-phase within Recovering, tracking stop-the-world checkpoint restore progress
-    #[serde(default)]
-    pub recovery_phase: Option<RecoveryPhase>,
-}
-
-/// Sub-phases of the Recovering state for training checkpoint restore.
-///
-/// Tracks progress through the stop-the-world recovery flow:
-/// DeletingResources → WaitingForRestore → Restarting
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub enum RecoveryPhase {
-    /// VCJob and checkpoint PVCs are being deleted
-    DeletingResources,
-    /// Velero Restore CR has been created, waiting for completion
-    WaitingForRestore,
-    /// Restore complete, VCJob is being re-applied
-    Restarting,
 }
 
 // =============================================================================
@@ -625,11 +600,6 @@ mod tests {
     }
 
     #[test]
-    fn recovering_phase_display() {
-        assert_eq!(JobPhase::Recovering.to_string(), "Recovering");
-    }
-
-    #[test]
     fn framework_display() {
         assert_eq!(TrainingFramework::PyTorch.to_string(), "PyTorch");
         assert_eq!(TrainingFramework::DeepSpeed.to_string(), "DeepSpeed");
@@ -850,20 +820,13 @@ mod tests {
     #[test]
     fn job_status_training_fields() {
         let status = LatticeJobStatus {
-            phase: JobPhase::Recovering,
-            message: Some("Recovering from checkpoint (retry 2/3)".to_string()),
+            phase: JobPhase::Running,
+            message: Some("Running".to_string()),
             observed_generation: Some(1),
             start_time: Some("2026-02-28T00:00:00Z".to_string()),
             completion_time: None,
-            retry_count: 2,
-            recovery_phase: Some(RecoveryPhase::WaitingForRestore),
         };
-        assert_eq!(status.phase, JobPhase::Recovering);
-        assert_eq!(status.retry_count, 2);
+        assert_eq!(status.phase, JobPhase::Running);
         assert!(status.start_time.is_some());
-        assert_eq!(
-            status.recovery_phase,
-            Some(RecoveryPhase::WaitingForRestore)
-        );
     }
 }
