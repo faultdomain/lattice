@@ -82,12 +82,7 @@ pub async fn compile_job(
     }
 
     // Apply defaults to each task via strategic merge patch (compile-time only)
-    let mut tasks = job.spec.tasks.clone();
-    if let Some(ref defaults) = job.spec.defaults {
-        for task in tasks.values_mut() {
-            task.apply_defaults(defaults);
-        }
-    }
+    let tasks = job.spec.merged_tasks();
 
     // Validate: coordinator task must exist
     if let Some(ref training) = job.spec.training {

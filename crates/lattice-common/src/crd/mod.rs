@@ -16,7 +16,6 @@ mod providers;
 mod restore;
 mod secrets_provider;
 mod service;
-mod service_policy;
 mod topology;
 mod types;
 pub mod workload;
@@ -38,10 +37,11 @@ pub use cluster_backup::{
     BackupRetentionSpec, BackupScopeSpec, ClusterBackupPhase, LatticeClusterBackup,
     LatticeClusterBackupSpec, LatticeClusterBackupStatus,
 };
+pub use cluster_backup::{LabelSelectorOperator, LabelSelectorRequirement, NamespaceSelector};
 pub use external_endpoint::{ParsedEndpoint, Resolution};
 pub use job::{
-    ConcurrencyPolicy, JobPhase, JobTaskDefaults, JobTaskSpec, LatticeJob, LatticeJobSpec,
-    LatticeJobStatus, NcclConfig, RestartPolicy, TrainingConfig, TrainingFramework, VolcanoPolicy,
+    ConcurrencyPolicy, JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus,
+    NcclConfig, RestartPolicy, TrainingConfig, TrainingFramework, VolcanoPolicy,
     VolcanoPolicyAction, VolcanoPolicyEvent,
 };
 pub use mesh_member::{
@@ -52,10 +52,10 @@ pub use mesh_member::{
 pub use model_serving::{
     HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModel,
     LatticeModelSpec, LatticeModelStatus, ModelAutoscalingBehavior, ModelAutoscalingSpec,
-    ModelCondition, ModelMatch, ModelParentRef, ModelRoleDefaults, ModelRoleSpec, ModelRouteRule,
-    ModelRouteSpec, ModelRoutingSpec, ModelScaleDownBehavior, ModelScaleUpBehavior,
-    ModelServingPhase, ModelSourceSpec, RateLimit, RateLimitUnit, RecoveryPolicy, RetryPolicy,
-    SecretKeySelector, TargetModel, TrafficPolicy, DEFAULT_KV_SIDE_CHANNEL_PORT,
+    ModelCondition, ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
+    ModelRoutingSpec, ModelScaleDownBehavior, ModelScaleUpBehavior, ModelServingPhase,
+    ModelSourceSpec, RateLimit, RateLimitUnit, RecoveryPolicy, RetryPolicy, SecretKeySelector,
+    TargetModel, TrafficPolicy, DEFAULT_KV_SIDE_CHANNEL_PORT,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
@@ -68,11 +68,6 @@ pub use secrets_provider::{
     SecretProvider, SecretProviderPhase, SecretProviderSpec, SecretProviderStatus,
 };
 pub use service::{LatticeService, LatticeServiceSpec, LatticeServiceStatus, ServicePhase};
-pub use service_policy::{
-    IngressPolicySpec, LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,
-    LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,
-    ServiceSelector,
-};
 pub use topology::{
     LabelDiscoveryConfig, LabelTier, NetworkTopologyConfig, TopologyDiscoverySpec,
     UfmDiscoveryConfig,
@@ -96,7 +91,6 @@ pub use workload::ingress::{
     CertIssuerRef, GrpcMethodMatch, HeaderMatch, HeaderMatchType, IngressSpec, IngressTls,
     PathMatch, PathMatchType, RouteKind, RouteMatch, RouteRule, RouteSpec,
 };
-pub use workload::merge::Merge;
 pub use workload::ports::{PortSpec, ServicePortsSpec};
 pub use workload::resources::{
     DependencyDirection, ExternalServiceParams, GpuParams, ResourceMetadata, ResourceQuantity,

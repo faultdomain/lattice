@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use super::container::{ContainerSpec, SecurityContext};
 use super::resources::{ResourceQuantity, ResourceRequirements};
 use super::spec::{RuntimeSpec, WorkloadSpec};
+use crate::crd::job::JobTaskSpec;
+use crate::crd::model_serving::ModelRoleSpec;
 
 /// Strategic merge patch: populate `self` with values from `defaults` where
 /// `self` has no value set. Already-set fields on `self` are never overwritten.
@@ -197,6 +199,33 @@ impl Merge for ResourceQuantity {
     fn merge_from(&mut self, defaults: &Self) {
         merge_option(&mut self.cpu, &defaults.cpu);
         merge_option(&mut self.memory, &defaults.memory);
+    }
+}
+
+// =============================================================================
+// JobTaskSpec
+// =============================================================================
+
+impl Merge for JobTaskSpec {
+    fn merge_from(&mut self, defaults: &Self) {
+        self.workload.merge_from(&defaults.workload);
+        self.runtime.merge_from(&defaults.runtime);
+        merge_option(&mut self.restart_policy, &defaults.restart_policy);
+        merge_option(&mut self.policies, &defaults.policies);
+    }
+}
+
+// =============================================================================
+// ModelRoleSpec
+// =============================================================================
+
+impl Merge for ModelRoleSpec {
+    fn merge_from(&mut self, defaults: &Self) {
+        self.entry_workload.merge_from(&defaults.entry_workload);
+        self.entry_runtime.merge_from(&defaults.entry_runtime);
+        merge_option_deep(&mut self.worker_workload, &defaults.worker_workload);
+        merge_option_deep(&mut self.worker_runtime, &defaults.worker_runtime);
+        merge_option(&mut self.autoscaling, &defaults.autoscaling);
     }
 }
 

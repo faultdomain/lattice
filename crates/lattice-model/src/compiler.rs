@@ -91,12 +91,7 @@ pub async fn compile_model(
     }
 
     // Apply defaults to each role via strategic merge patch (compile-time only)
-    let mut roles = model.spec.roles.clone();
-    if let Some(ref defaults) = model.spec.defaults {
-        for role in roles.values_mut() {
-            role.apply_defaults(defaults);
-        }
-    }
+    let roles = model.spec.merged_roles();
 
     let mut role_templates: BTreeMap<String, RoleTemplates> = BTreeMap::new();
     let mut config = CompiledConfig::default();

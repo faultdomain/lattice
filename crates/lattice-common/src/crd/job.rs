@@ -15,7 +15,6 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::workload::merge::Merge;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 use super::workload::topology::WorkloadNetworkTopology;
 
@@ -195,6 +194,7 @@ pub struct JobTaskSpec {
     pub replicas: u32,
 
     /// Shared workload spec (containers, volumes, env, etc.)
+    #[serde(default)]
     pub workload: WorkloadSpec,
 
     /// Lattice runtime extensions (sidecars, sysctls, hostNetwork, etc.)
@@ -211,47 +211,16 @@ pub struct JobTaskSpec {
     pub policies: Option<Vec<VolcanoPolicy>>,
 }
 
-impl JobTaskSpec {
-    /// Apply defaults into this task spec via strategic merge patch.
-    ///
-    /// Fields already set on the task are preserved. Only missing fields are
-    /// filled from defaults.
-    pub fn apply_defaults(&mut self, defaults: &JobTaskDefaults) {
-        if let Some(ref default_workload) = defaults.workload {
-            self.workload.merge_from(default_workload);
-        }
-        self.runtime.merge_from(&defaults.runtime);
-        if self.restart_policy.is_none() {
-            self.restart_policy = defaults.restart_policy.clone();
-        }
-        if self.policies.is_none() {
-            self.policies = defaults.policies.clone();
+impl Default for JobTaskSpec {
+    fn default() -> Self {
+        Self {
+            replicas: default_one(),
+            workload: WorkloadSpec::default(),
+            runtime: RuntimeSpec::default(),
+            restart_policy: None,
+            policies: None,
         }
     }
-}
-
-/// Default values for job tasks — same shape as `JobTaskSpec` but all fields optional.
-///
-/// When `LatticeJobSpec::defaults` is set, each task inherits these values
-/// via strategic merge patch at compile time. The stored spec is unchanged.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct JobTaskDefaults {
-    /// Default workload spec (containers, resources, service)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workload: Option<WorkloadSpec>,
-
-    /// Default runtime extensions (sidecars, sysctls, imagePullSecrets, etc.)
-    #[serde(default, flatten)]
-    pub runtime: RuntimeSpec,
-
-    /// Default pod restart policy
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub restart_policy: Option<RestartPolicy>,
-
-    /// Default Volcano lifecycle policies
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policies: Option<Vec<VolcanoPolicy>>,
 }
 
 fn default_one() -> u32 {
@@ -341,7 +310,7 @@ pub struct LatticeJobSpec {
     /// Default values inherited by all tasks via strategic merge patch.
     /// Task-level fields override defaults. Applied at compile time only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub defaults: Option<JobTaskDefaults>,
+    pub defaults: Option<JobTaskSpec>,
 
     /// Job tasks — each maps to a Volcano VCJob task with its own pod template
     #[serde(default)]
@@ -383,6 +352,18 @@ impl LatticeJobSpec {
         self.schedule.is_some()
     }
 
+    /// Returns tasks with defaults merged in. Used by both validation and compilation.
+    pub fn merged_tasks(&self) -> BTreeMap<String, JobTaskSpec> {
+        use super::workload::merge::Merge;
+        let mut tasks = self.tasks.clone();
+        if let Some(ref defaults) = self.defaults {
+            for task in tasks.values_mut() {
+                task.merge_from(defaults);
+            }
+        }
+        tasks
+    }
+
     /// Validate the job specification at admission time.
     ///
     /// Runs validation on the **merged** result (defaults applied to each task)
@@ -398,13 +379,7 @@ impl LatticeJobSpec {
             return Err(crate::Error::validation("job has no tasks"));
         }
 
-        // Apply defaults to get the effective task specs for validation
-        let mut tasks = self.tasks.clone();
-        if let Some(ref defaults) = self.defaults {
-            for task in tasks.values_mut() {
-                task.apply_defaults(defaults);
-            }
-        }
+        let tasks = self.merged_tasks();
 
         if let Some(ref training) = self.training {
             if !tasks.contains_key(&training.coordinator_task) {
@@ -1092,63 +1067,14 @@ mod tests {
     }
 
     // =========================================================================
-    // JobTaskDefaults tests
+    // Defaults merge tests
     // =========================================================================
 
-    #[test]
-    fn job_task_defaults_serde_roundtrip() {
-        let defaults = JobTaskDefaults {
-            workload: Some(WorkloadSpec {
-                containers: BTreeMap::from([(
-                    "main".to_string(),
-                    ContainerSpec {
-                        image: "train:latest".to_string(),
-                        command: Some(vec!["/usr/bin/python".to_string()]),
-                        resources: Some(ResourceRequirements {
-                            limits: Some(ResourceQuantity {
-                                cpu: Some("1".to_string()),
-                                memory: Some("1Gi".to_string()),
-                            }),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                )]),
-                ..Default::default()
-            }),
-            runtime: RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
-                ..Default::default()
-            },
-            restart_policy: Some(RestartPolicy::Never),
-            policies: None,
-        };
-
-        let json = serde_json::to_string(&defaults).unwrap();
-        let de: JobTaskDefaults = serde_json::from_str(&json).unwrap();
-        assert_eq!(defaults, de);
-    }
-
-    #[test]
-    fn job_spec_with_defaults_serde_roundtrip() {
-        let spec = LatticeJobSpec {
-            defaults: Some(JobTaskDefaults {
-                workload: Some(WorkloadSpec::default()),
-                restart_policy: Some(RestartPolicy::Never),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let json = serde_json::to_string(&spec).unwrap();
-        let de: LatticeJobSpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(spec.defaults, de.defaults);
-    }
-
-    #[test]
-    fn apply_defaults_fills_missing_workload() {
-        let defaults = JobTaskDefaults {
-            workload: Some(WorkloadSpec {
+    /// Helper: build a defaults spec with image, command, resources, and pull secrets
+    fn defaults_spec() -> JobTaskSpec {
+        JobTaskSpec {
+            replicas: 1,
+            workload: WorkloadSpec {
                 containers: BTreeMap::from([(
                     "main".to_string(),
                     ContainerSpec {
@@ -1165,24 +1091,47 @@ mod tests {
                     },
                 )]),
                 ..Default::default()
-            }),
+            },
             runtime: RuntimeSpec {
                 image_pull_secrets: vec!["ghcr-creds".to_string()],
                 ..Default::default()
             },
             restart_policy: Some(RestartPolicy::Never),
             policies: None,
+        }
+    }
+
+    #[test]
+    fn job_spec_with_defaults_serde_roundtrip() {
+        let spec = LatticeJobSpec {
+            defaults: Some(JobTaskSpec {
+                restart_policy: Some(RestartPolicy::Never),
+                ..Default::default()
+            }),
+            ..Default::default()
         };
 
-        // Task with only replicas — everything else from defaults
-        let mut task = JobTaskSpec {
-            replicas: 3,
-            workload: WorkloadSpec::default(),
-            runtime: RuntimeSpec::default(),
-            restart_policy: None,
-            policies: None,
+        let json = serde_json::to_string(&spec).unwrap();
+        let de: LatticeJobSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec.defaults, de.defaults);
+    }
+
+    #[test]
+    fn merged_tasks_fills_missing_workload() {
+        let spec = LatticeJobSpec {
+            defaults: Some(defaults_spec()),
+            tasks: BTreeMap::from([(
+                "worker".to_string(),
+                JobTaskSpec {
+                    replicas: 3,
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
         };
-        task.apply_defaults(&defaults);
+
+        let tasks = spec.merged_tasks();
+        let task = &tasks["worker"];
 
         assert_eq!(task.replicas, 3);
         assert_eq!(task.workload.containers["main"].image, "train:latest");
@@ -1195,54 +1144,39 @@ mod tests {
     }
 
     #[test]
-    fn apply_defaults_preserves_task_overrides() {
-        let defaults = JobTaskDefaults {
-            workload: Some(WorkloadSpec {
-                containers: BTreeMap::from([(
-                    "main".to_string(),
-                    ContainerSpec {
-                        image: "train:latest".to_string(),
-                        resources: Some(ResourceRequirements {
-                            limits: Some(ResourceQuantity {
-                                cpu: Some("2".to_string()),
-                                memory: Some("4Gi".to_string()),
-                            }),
-                            ..Default::default()
-                        }),
+    fn merged_tasks_preserves_task_overrides() {
+        let spec = LatticeJobSpec {
+            defaults: Some(defaults_spec()),
+            tasks: BTreeMap::from([(
+                "worker".to_string(),
+                JobTaskSpec {
+                    replicas: 1,
+                    workload: WorkloadSpec {
+                        containers: BTreeMap::from([(
+                            "main".to_string(),
+                            ContainerSpec {
+                                image: "".to_string(),
+                                resources: Some(ResourceRequirements {
+                                    limits: Some(ResourceQuantity {
+                                        memory: Some("8Gi".to_string()),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                        )]),
                         ..Default::default()
                     },
-                )]),
-                ..Default::default()
-            }),
-            restart_policy: Some(RestartPolicy::Never),
+                    restart_policy: Some(RestartPolicy::OnFailure),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
 
-        // Task overrides memory only
-        let mut task = JobTaskSpec {
-            replicas: 1,
-            workload: WorkloadSpec {
-                containers: BTreeMap::from([(
-                    "main".to_string(),
-                    ContainerSpec {
-                        image: "".to_string(),
-                        resources: Some(ResourceRequirements {
-                            limits: Some(ResourceQuantity {
-                                memory: Some("8Gi".to_string()),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                )]),
-                ..Default::default()
-            },
-            runtime: RuntimeSpec::default(),
-            restart_policy: Some(RestartPolicy::OnFailure),
-            policies: None,
-        };
-        task.apply_defaults(&defaults);
+        let tasks = spec.merged_tasks();
+        let task = &tasks["worker"];
 
         let limits = task.workload.containers["main"]
             .resources
@@ -1265,54 +1199,25 @@ mod tests {
     }
 
     #[test]
-    fn validate_works_after_defaults_merge() {
-        let defaults = JobTaskDefaults {
-            workload: Some(WorkloadSpec {
-                containers: BTreeMap::from([(
-                    "main".to_string(),
-                    ContainerSpec {
-                        image: "train:latest".to_string(),
-                        command: Some(vec!["/usr/bin/python".to_string(), "train.py".to_string()]),
-                        resources: Some(ResourceRequirements {
-                            limits: Some(ResourceQuantity {
-                                cpu: Some("1".to_string()),
-                                memory: Some("1Gi".to_string()),
-                            }),
-                            ..Default::default()
-                        }),
+    fn validate_works_with_defaults() {
+        let spec = LatticeJobSpec {
+            defaults: Some(defaults_spec()),
+            tasks: BTreeMap::from([
+                (
+                    "master".to_string(),
+                    JobTaskSpec {
+                        replicas: 1,
                         ..Default::default()
                     },
-                )]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        // Tasks with only replicas — need defaults to be valid
-        let mut tasks = BTreeMap::new();
-        let mut master = JobTaskSpec {
-            replicas: 1,
-            workload: WorkloadSpec::default(),
-            runtime: RuntimeSpec::default(),
-            restart_policy: None,
-            policies: None,
-        };
-        master.apply_defaults(&defaults);
-        tasks.insert("master".to_string(), master);
-
-        let mut worker = JobTaskSpec {
-            replicas: 3,
-            workload: WorkloadSpec::default(),
-            runtime: RuntimeSpec::default(),
-            restart_policy: None,
-            policies: None,
-        };
-        worker.apply_defaults(&defaults);
-        tasks.insert("worker".to_string(), worker);
-
-        let spec = LatticeJobSpec {
-            defaults: Some(defaults),
-            tasks,
+                ),
+                (
+                    "worker".to_string(),
+                    JobTaskSpec {
+                        replicas: 3,
+                        ..Default::default()
+                    },
+                ),
+            ]),
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "master".to_string(),
@@ -1321,7 +1226,6 @@ mod tests {
             ..Default::default()
         };
 
-        // Validation should pass on the merged result
         assert!(spec.validate().is_ok());
     }
 }

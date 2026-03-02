@@ -9,7 +9,6 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::workload::merge::Merge;
 use super::workload::scaling::AutoscalingMetric;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 use super::workload::topology::WorkloadNetworkTopology;
@@ -76,6 +75,7 @@ pub struct ModelRoleSpec {
     pub replicas: u32,
 
     /// Entry pod workload spec (containers, volumes, env, etc.)
+    #[serde(default)]
     pub entry_workload: WorkloadSpec,
 
     /// Entry pod runtime extensions (sidecars, sysctls, hostNetwork, etc.)
@@ -96,62 +96,6 @@ pub struct ModelRoleSpec {
 
     /// Autoscaling configuration for this role.
     /// Compiles to Kthena AutoscalingPolicy + AutoscalingPolicyBinding.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub autoscaling: Option<ModelAutoscalingSpec>,
-}
-
-impl ModelRoleSpec {
-    /// Apply defaults into this role spec via strategic merge patch.
-    ///
-    /// Fields already set on the role are preserved. Only missing fields are
-    /// filled from defaults.
-    pub fn apply_defaults(&mut self, defaults: &ModelRoleDefaults) {
-        if let Some(ref default_workload) = defaults.entry_workload {
-            self.entry_workload.merge_from(default_workload);
-        }
-        self.entry_runtime.merge_from(&defaults.entry_runtime);
-        if let Some(ref default_worker_workload) = defaults.worker_workload {
-            match self.worker_workload {
-                Some(ref mut ww) => ww.merge_from(default_worker_workload),
-                None => self.worker_workload = Some(default_worker_workload.clone()),
-            }
-        }
-        if let Some(ref default_worker_runtime) = defaults.worker_runtime {
-            match self.worker_runtime {
-                Some(ref mut wr) => wr.merge_from(default_worker_runtime),
-                None => self.worker_runtime = Some(default_worker_runtime.clone()),
-            }
-        }
-        if self.autoscaling.is_none() {
-            self.autoscaling = defaults.autoscaling.clone();
-        }
-    }
-}
-
-/// Default values for model roles — same shape as `ModelRoleSpec` but all fields optional.
-///
-/// When `LatticeModelSpec::defaults` is set, each role inherits these values
-/// via strategic merge patch at compile time. The stored spec is unchanged.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelRoleDefaults {
-    /// Default entry pod workload spec
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry_workload: Option<WorkloadSpec>,
-
-    /// Default entry pod runtime extensions
-    #[serde(default)]
-    pub entry_runtime: RuntimeSpec,
-
-    /// Default worker pod workload spec
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_workload: Option<WorkloadSpec>,
-
-    /// Default worker pod runtime extensions
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_runtime: Option<RuntimeSpec>,
-
-    /// Default autoscaling configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autoscaling: Option<ModelAutoscalingSpec>,
 }
@@ -607,7 +551,7 @@ pub struct LatticeModelSpec {
     /// Default values inherited by all roles via strategic merge patch.
     /// Role-level fields override defaults. Applied at compile time only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub defaults: Option<ModelRoleDefaults>,
+    pub defaults: Option<ModelRoleSpec>,
 
     /// Model serving roles — each maps to a ModelServing role (e.g. prefill, decode)
     #[serde(default)]
@@ -625,14 +569,21 @@ pub struct LatticeModelSpec {
 }
 
 impl LatticeModelSpec {
-    /// Validate the model specification (all roles, with defaults applied).
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    /// Returns roles with defaults merged in. Used by both validation and compilation.
+    pub fn merged_roles(&self) -> BTreeMap<String, ModelRoleSpec> {
+        use super::workload::merge::Merge;
         let mut roles = self.roles.clone();
         if let Some(ref defaults) = self.defaults {
             for role in roles.values_mut() {
-                role.apply_defaults(defaults);
+                role.merge_from(defaults);
             }
         }
+        roles
+    }
+
+    /// Validate the model specification (all roles, with defaults applied).
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        let roles = self.merged_roles();
         for (role_name, role_spec) in &roles {
             role_spec
                 .validate()
@@ -884,68 +835,17 @@ mod tests {
     }
 
     // =========================================================================
-    // ModelRoleDefaults tests
+    // Defaults merge tests
     // =========================================================================
 
-    #[test]
-    fn model_role_defaults_serde_roundtrip() {
+    /// Helper: build a defaults role spec with image, command, resources, and pull secrets
+    fn defaults_role() -> ModelRoleSpec {
         use crate::crd::workload::container::ContainerSpec;
         use crate::crd::workload::resources::{ResourceQuantity, ResourceRequirements};
 
-        let defaults = ModelRoleDefaults {
-            entry_workload: Some(WorkloadSpec {
-                containers: BTreeMap::from([(
-                    "main".to_string(),
-                    ContainerSpec {
-                        image: "vllm:latest".to_string(),
-                        resources: Some(ResourceRequirements {
-                            limits: Some(ResourceQuantity {
-                                cpu: Some("8".to_string()),
-                                memory: Some("64Gi".to_string()),
-                            }),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                )]),
-                ..Default::default()
-            }),
-            entry_runtime: RuntimeSpec {
-                image_pull_secrets: vec!["reg-creds".to_string()],
-                ..Default::default()
-            },
-            worker_workload: None,
-            worker_runtime: None,
-            autoscaling: None,
-        };
-
-        let json = serde_json::to_string(&defaults).unwrap();
-        let de: ModelRoleDefaults = serde_json::from_str(&json).unwrap();
-        assert_eq!(defaults, de);
-    }
-
-    #[test]
-    fn model_spec_with_defaults_serde_roundtrip() {
-        let spec = LatticeModelSpec {
-            defaults: Some(ModelRoleDefaults {
-                entry_workload: Some(WorkloadSpec::default()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let json = serde_json::to_string(&spec).unwrap();
-        let de: LatticeModelSpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(spec.defaults, de.defaults);
-    }
-
-    #[test]
-    fn apply_defaults_fills_missing_entry_workload() {
-        use crate::crd::workload::container::ContainerSpec;
-        use crate::crd::workload::resources::{ResourceQuantity, ResourceRequirements};
-
-        let defaults = ModelRoleDefaults {
-            entry_workload: Some(WorkloadSpec {
+        ModelRoleSpec {
+            replicas: 1,
+            entry_workload: WorkloadSpec {
                 containers: BTreeMap::from([(
                     "main".to_string(),
                     ContainerSpec {
@@ -962,20 +862,43 @@ mod tests {
                     },
                 )]),
                 ..Default::default()
-            }),
+            },
             entry_runtime: RuntimeSpec {
                 image_pull_secrets: vec!["reg-creds".to_string()],
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+    }
 
-        // Role with only replicas — everything else from defaults
-        let mut role = ModelRoleSpec {
-            replicas: 4,
+    #[test]
+    fn model_spec_with_defaults_serde_roundtrip() {
+        let spec = LatticeModelSpec {
+            defaults: Some(ModelRoleSpec::default()),
             ..Default::default()
         };
-        role.apply_defaults(&defaults);
+
+        let json = serde_json::to_string(&spec).unwrap();
+        let de: LatticeModelSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec.defaults, de.defaults);
+    }
+
+    #[test]
+    fn merged_roles_fills_missing_entry_workload() {
+        let spec = LatticeModelSpec {
+            defaults: Some(defaults_role()),
+            roles: BTreeMap::from([(
+                "prefill".to_string(),
+                ModelRoleSpec {
+                    replicas: 4,
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let roles = spec.merged_roles();
+        let role = &roles["prefill"];
 
         assert_eq!(role.replicas, 4);
         assert_eq!(role.entry_workload.containers["main"].image, "vllm:latest");
@@ -983,54 +906,41 @@ mod tests {
     }
 
     #[test]
-    fn apply_defaults_preserves_role_overrides() {
+    fn merged_roles_preserves_role_overrides() {
         use crate::crd::workload::container::ContainerSpec;
         use crate::crd::workload::resources::{ResourceQuantity, ResourceRequirements};
 
-        let defaults = ModelRoleDefaults {
-            entry_workload: Some(WorkloadSpec {
-                containers: BTreeMap::from([(
-                    "main".to_string(),
-                    ContainerSpec {
-                        image: "vllm:latest".to_string(),
-                        resources: Some(ResourceRequirements {
-                            limits: Some(ResourceQuantity {
-                                cpu: Some("8".to_string()),
-                                memory: Some("64Gi".to_string()),
-                            }),
-                            ..Default::default()
-                        }),
+        let spec = LatticeModelSpec {
+            defaults: Some(defaults_role()),
+            roles: BTreeMap::from([(
+                "decode".to_string(),
+                ModelRoleSpec {
+                    replicas: 2,
+                    entry_workload: WorkloadSpec {
+                        containers: BTreeMap::from([(
+                            "main".to_string(),
+                            ContainerSpec {
+                                image: "".to_string(),
+                                resources: Some(ResourceRequirements {
+                                    limits: Some(ResourceQuantity {
+                                        memory: Some("128Gi".to_string()),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                        )]),
                         ..Default::default()
                     },
-                )]),
-                ..Default::default()
-            }),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
 
-        // Role overrides memory only
-        let mut role = ModelRoleSpec {
-            replicas: 2,
-            entry_workload: WorkloadSpec {
-                containers: BTreeMap::from([(
-                    "main".to_string(),
-                    ContainerSpec {
-                        image: "".to_string(),
-                        resources: Some(ResourceRequirements {
-                            limits: Some(ResourceQuantity {
-                                memory: Some("128Gi".to_string()),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                )]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        role.apply_defaults(&defaults);
+        let roles = spec.merged_roles();
+        let role = &roles["decode"];
 
         let limits = role.entry_workload.containers["main"]
             .resources
