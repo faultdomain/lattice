@@ -368,15 +368,15 @@ pub struct KthenaRetryPolicy {
 }
 
 /// KV connector configuration for PD disaggregation
+///
+/// Only includes fields recognized by the upstream Kthena ModelServer CRD schema.
+/// The side-channel port is a Lattice-side concept used for peer-discovery Services
+/// and must not be serialized here.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KthenaKvConnector {
     #[serde(rename = "type")]
     pub type_: lattice_common::crd::KvConnectorType,
-
-    /// Side-channel port for KV cache transfer metadata exchange
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub port: Option<u16>,
 }
 
 /// Kthena ModelRoute resource — defines routing rules for a model
@@ -805,7 +805,6 @@ mod tests {
                 }),
                 kv_connector: Some(KthenaKvConnector {
                     type_: lattice_common::crd::KvConnectorType::Nixl,
-                    port: None,
                 }),
             },
         };

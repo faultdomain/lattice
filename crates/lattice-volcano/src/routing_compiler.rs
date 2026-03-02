@@ -105,7 +105,6 @@ fn compile_model_server(
                 }),
             kv_connector: routing.kv_connector.as_ref().map(|kv| KthenaKvConnector {
                 type_: kv.type_.clone(),
-                port: kv.port,
             }),
         },
     }
