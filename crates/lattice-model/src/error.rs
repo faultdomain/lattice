@@ -36,6 +36,15 @@ pub enum ModelError {
 
     #[error("model download failed: {0}")]
     DownloadFailed(String),
+
+    #[error("missing name on LatticeModel")]
+    MissingName,
+
+    #[error("missing UID on LatticeModel")]
+    MissingUid,
+
+    #[error("routing configured but inference port not specified")]
+    MissingInferencePort,
 }
 
 impl Retryable for ModelError {
@@ -51,6 +60,9 @@ impl Retryable for ModelError {
             Self::KthenaCrdMissing => true,
             Self::InvalidModelUri(_) => false,
             Self::DownloadFailed(_) => true,
+            Self::MissingName => false,
+            Self::MissingUid => false,
+            Self::MissingInferencePort => false,
         }
     }
 }

@@ -11,14 +11,12 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    derived_name, CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, LatticeModel,
-    MeshMemberPort, MeshMemberTarget, PeerAuth, ProviderType,
+    derived_name, CallerRef, LatticeMeshMember, LatticeModel, MeshMemberPort, PeerAuth,
+    ProviderType,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
-use lattice_common::{
-    KTHENA_AUTOSCALER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_MODEL, LABEL_NAME,
-};
+use lattice_common::{KTHENA_AUTOSCALER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_MODEL};
 use lattice_volcano::routing_compiler::{PD_ROLE_DECODE, PD_ROLE_PREFILL};
 use lattice_volcano::{CompiledAutoscaling, CompiledRouting, ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
@@ -75,7 +73,11 @@ pub async fn compile_model(
     cedar: &PolicyEngine,
     role_suffix: &str,
 ) -> Result<CompiledModel, ModelError> {
-    let name = model.metadata.name.as_deref().unwrap_or_default();
+    let name = model
+        .metadata
+        .name
+        .as_deref()
+        .ok_or(ModelError::MissingName)?;
     let namespace = model
         .metadata
         .namespace
@@ -233,7 +235,11 @@ pub async fn compile_model(
     }
 
     // Compile model download (PVC + Job) if modelSource is configured
-    let uid = model.metadata.uid.as_deref().unwrap_or_default();
+    let uid = model
+        .metadata
+        .uid
+        .as_deref()
+        .ok_or(ModelError::MissingUid)?;
     let download = model
         .spec
         .model_source
@@ -281,12 +287,6 @@ pub async fn compile_model(
         lattice_volcano::compile_model_routing(model, routing_spec, serving_name)
     });
 
-    // When routing is configured, ensure mesh policies allow the Kthena router
-    // to reach model pods, and enable peer traffic for PD disaggregation.
-    if let Some(ref routing_spec) = model.spec.routing {
-        ensure_routing_mesh_members(name, &model.spec.roles, routing_spec, &mut mesh_members);
-    }
-
     // Compile autoscaling (AutoscalingPolicy + AutoscalingPolicyBinding) if configured
     let autoscaling = {
         let compiled = lattice_volcano::compile_model_autoscaling(model);
@@ -297,11 +297,15 @@ pub async fn compile_model(
         }
     };
 
-    // When autoscaling is configured, ensure mesh policies allow the Kthena autoscaler
-    // to reach model pods for metrics scraping.
-    if autoscaling.is_some() {
-        ensure_autoscaling_mesh_members(name, &model.spec.roles, &mut mesh_members);
-    }
+    // When routing or autoscaling is configured, ensure mesh policies allow
+    // the Kthena router/autoscaler to reach model pods.
+    augment_infra_callers(
+        name,
+        &model.spec.roles,
+        model.spec.routing.as_ref(),
+        autoscaling.is_some(),
+        &mut mesh_members,
+    )?;
 
     // Model serving: opt out of ambient mesh. All model pods share the
     // `lattice.dev/model` group label for Cilium L4 peer traffic rules.
@@ -328,187 +332,105 @@ pub async fn compile_model(
     })
 }
 
-/// Ensure mesh members allow inference traffic from the Kthena router.
+/// Augment mesh members with infrastructure callers for routing and autoscaling.
 ///
-/// For each model role, this function:
-/// - Adds the Kthena router as an infrastructure allowed caller (its SPIFFE
-///   identity will be used in AuthorizationPolicy since it won't be in the
-///   service graph — same pattern as vmagent, KEDA, etc.)
-/// - Adds the inference port if not already present
-/// - Enables `allow_peer_traffic` only on "prefill" and "decode" roles when PD
-///   disaggregation is active. Other roles (e.g. "embedding") are not part of
-///   the PD pair and do not need lateral traffic.
+/// For each model role, adds callers and ports to existing mesh members:
+/// - Kthena router + inference port (when routing is configured)
+/// - Kthena autoscaler + metrics port (when autoscaling is active)
+/// - `allow_peer_traffic` on "prefill"/"decode" roles for PD disaggregation
 ///
-/// If a role has no existing mesh member (the workload spec had no service
-/// ports), a new one is created.
-fn ensure_routing_mesh_members(
+/// Mesh members must already exist (created by WorkloadCompiler after graph
+/// registration). Workers without mesh members are silently skipped — they
+/// don't receive direct inference traffic.
+fn augment_infra_callers(
     model_name: &str,
     roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
-    routing: &lattice_common::crd::ModelRoutingSpec,
-    mesh_members: &mut Vec<LatticeMeshMember>,
-) {
-    let inference_port = routing.port.unwrap_or(8000);
-    let router_caller = CallerRef {
+    routing: Option<&lattice_common::crd::ModelRoutingSpec>,
+    has_autoscaling: bool,
+    mesh_members: &mut [LatticeMeshMember],
+) -> Result<(), ModelError> {
+    let router_caller = routing.map(|_| CallerRef {
         name: KTHENA_ROUTER_SA.to_string(),
         namespace: Some(KTHENA_NAMESPACE.to_string()),
-    };
-    let has_pd =
-        routing.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(roles);
+    });
 
-    for role_name in roles.keys() {
-        // Only PD roles need peer traffic for KV cache transfer
-        let needs_peer_traffic =
-            has_pd && (role_name == PD_ROLE_PREFILL || role_name == PD_ROLE_DECODE);
+    let inference_port = routing
+        .map(|r| r.port.ok_or(ModelError::MissingInferencePort))
+        .transpose()?;
 
-        let entry_name = format!("{}-{}", model_name, role_name);
-        ensure_infra_caller_on_mesh_member(
-            mesh_members,
-            &entry_name,
-            &router_caller,
-            Some((inference_port, "inference")),
-            needs_peer_traffic,
-        );
+    let has_pd = routing
+        .map(|r| r.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(roles))
+        .unwrap_or(false);
 
-        // Also handle worker mesh members if they exist
-        let worker_name = format!("{}-{}-worker", model_name, role_name);
-        augment_existing_mesh_member(
-            mesh_members,
-            &worker_name,
-            &router_caller,
-            Some((inference_port, "inference")),
-            needs_peer_traffic,
-        );
-    }
-}
-
-/// Ensure mesh members allow metrics scraping from the Kthena autoscaler.
-///
-/// For each model role that has autoscaling configured, this function:
-/// - Adds the Kthena autoscaler as an infrastructure allowed caller
-/// - Adds the metrics port discovered from `entry_workload.service.ports["metrics"]`
-///   if present and not already on the mesh member
-///
-/// If a role has no existing mesh member, a new one is created.
-fn ensure_autoscaling_mesh_members(
-    model_name: &str,
-    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
-    mesh_members: &mut Vec<LatticeMeshMember>,
-) {
-    let autoscaler_caller = CallerRef {
-        name: KTHENA_AUTOSCALER_SA.to_string(),
-        namespace: Some(KTHENA_NAMESPACE.to_string()),
+    let autoscaler_caller = if has_autoscaling {
+        Some(CallerRef {
+            name: KTHENA_AUTOSCALER_SA.to_string(),
+            namespace: Some(KTHENA_NAMESPACE.to_string()),
+        })
+    } else {
+        None
     };
 
     for (role_name, role_spec) in roles {
-        if role_spec.autoscaling.is_none() {
-            continue;
+        let entry_name = format!("{}-{}", model_name, role_name);
+        let worker_name = format!("{}-{}-worker", model_name, role_name);
+
+        let needs_peer_traffic =
+            has_pd && (role_name == PD_ROLE_PREFILL || role_name == PD_ROLE_DECODE);
+
+        if let (Some(caller), Some(port)) = (&router_caller, inference_port) {
+            augment_mesh_member(
+                mesh_members,
+                &entry_name,
+                caller,
+                Some((port, "inference")),
+                needs_peer_traffic,
+            );
+            augment_mesh_member(
+                mesh_members,
+                &worker_name,
+                caller,
+                Some((port, "inference")),
+                needs_peer_traffic,
+            );
         }
 
-        let metrics_port = role_spec
-            .entry_workload
-            .service
-            .as_ref()
-            .and_then(|svc| svc.ports.get("metrics"))
-            .map(|ps| ps.port);
+        if let Some(ref caller) = autoscaler_caller {
+            if role_spec.autoscaling.is_some() {
+                let metrics_port = role_spec
+                    .entry_workload
+                    .service
+                    .as_ref()
+                    .and_then(|svc| svc.ports.get("metrics"))
+                    .map(|ps| (ps.port, "metrics"));
 
-        let entry_name = format!("{}-{}", model_name, role_name);
-
-        let metrics = metrics_port.map(|p| (p, "metrics"));
-        ensure_infra_caller_on_mesh_member(
-            mesh_members,
-            &entry_name,
-            &autoscaler_caller,
-            metrics,
-            false,
-        );
-
-        // Also handle worker mesh members if they exist
-        let worker_name = format!("{}-{}-worker", model_name, role_name);
-        augment_existing_mesh_member(
-            mesh_members,
-            &worker_name,
-            &autoscaler_caller,
-            metrics,
-            false,
-        );
+                augment_mesh_member(mesh_members, &entry_name, caller, metrics_port, false);
+                augment_mesh_member(mesh_members, &worker_name, caller, metrics_port, false);
+            }
+        }
     }
+
+    Ok(())
 }
 
-/// Add an infrastructure caller (and optionally a port) to a mesh member, creating it if absent.
-fn ensure_infra_caller_on_mesh_member(
-    mesh_members: &mut Vec<LatticeMeshMember>,
-    name: &str,
-    caller: &CallerRef,
-    port: Option<(u16, &str)>,
-    allow_peer_traffic: bool,
-) {
-    if let Some(mm) = mesh_members
-        .iter_mut()
-        .find(|mm| mm.metadata.name.as_deref() == Some(name))
-    {
-        add_caller_and_port(mm, caller, port, allow_peer_traffic);
-    } else {
-        // No existing mesh member — create one
-        let ports = match port {
-            Some((p, name)) => vec![MeshMemberPort {
-                port: p,
-                service_port: None,
-                name: name.to_string(),
-                peer_auth: PeerAuth::Strict,
-            }],
-            None => Vec::new(),
-        };
-
-        let mm = LatticeMeshMember::new(
-            name,
-            LatticeMeshMemberSpec {
-                target: MeshMemberTarget::Selector(
-                    [(LABEL_NAME.to_string(), name.to_string())]
-                        .into_iter()
-                        .collect(),
-                ),
-                ports,
-                allowed_callers: vec![caller.clone()],
-                dependencies: vec![],
-                egress: vec![],
-                allow_peer_traffic,
-                depends_all: false,
-                ingress: None,
-                service_account: None,
-                ambient: true,
-            },
-        );
-        mesh_members.push(mm);
-    }
-}
-
-/// Augment an existing mesh member with a caller and port. Does nothing if the member doesn't exist.
+/// Add a caller and optional port to an existing mesh member.
 ///
-/// Workers may not have a mesh member if they have no service ports. This is expected —
-/// workers typically don't receive direct inference traffic and are only reached by their
-/// entry pod via intra-group communication.
-fn augment_existing_mesh_member(
+/// Does nothing if the member doesn't exist — workers may lack mesh members
+/// when they have no service ports.
+fn augment_mesh_member(
     mesh_members: &mut [LatticeMeshMember],
     name: &str,
     caller: &CallerRef,
     port: Option<(u16, &str)>,
     allow_peer_traffic: bool,
 ) {
-    if let Some(mm) = mesh_members
+    let Some(mm) = mesh_members
         .iter_mut()
         .find(|mm| mm.metadata.name.as_deref() == Some(name))
-    {
-        add_caller_and_port(mm, caller, port, allow_peer_traffic);
-    }
-}
+    else {
+        return;
+    };
 
-/// Shared logic: add a caller + optional port to a mesh member, deduplicating both.
-fn add_caller_and_port(
-    mm: &mut LatticeMeshMember,
-    caller: &CallerRef,
-    port: Option<(u16, &str)>,
-    allow_peer_traffic: bool,
-) {
     if !mm.spec.allowed_callers.contains(caller) {
         mm.spec.allowed_callers.push(caller.clone());
         mm.spec
@@ -516,12 +438,12 @@ fn add_caller_and_port(
             .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
     }
 
-    if let Some((p, name)) = port {
+    if let Some((p, port_name)) = port {
         if !mm.spec.ports.iter().any(|existing| existing.port == p) {
             mm.spec.ports.push(MeshMemberPort {
                 port: p,
                 service_port: None,
-                name: name.to_string(),
+                name: port_name.to_string(),
                 peer_auth: PeerAuth::Strict,
             });
         }
@@ -564,10 +486,20 @@ mod tests {
                 ..Default::default()
             },
         );
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "inference".to_string(),
+            PortSpec {
+                port: 8000,
+                target_port: None,
+                protocol: None,
+            },
+        );
         ModelRoleSpec {
             replicas,
             entry_workload: WorkloadSpec {
                 containers,
+                service: Some(ServicePortsSpec { ports }),
                 ..Default::default()
             },
             entry_runtime: RuntimeSpec::default(),
@@ -582,11 +514,26 @@ mod tests {
         PolicyEngine::with_policies("permit(principal, action, resource);").unwrap()
     }
 
+    /// Register model roles in the service graph, matching what the controller
+    /// does before calling `compile_model`. This ensures WorkloadCompiler creates
+    /// mesh members for entry workloads.
+    fn register_model_roles(model: &LatticeModel, graph: &ServiceGraph) {
+        let name = model.metadata.name.as_deref().unwrap();
+        let namespace = model.metadata.namespace.as_deref().unwrap();
+        for (role_name, role_spec) in &model.spec.roles {
+            graph.put_workload(
+                namespace,
+                &format!("{}-{}", name, role_name),
+                &role_spec.entry_workload,
+            );
+        }
+    }
+
     fn basic_routing() -> ModelRoutingSpec {
         ModelRoutingSpec {
             inference_engine: InferenceEngine::VLlm,
             model: "test-org/test-model".to_string(),
-            port: None,
+            port: Some(8000),
             protocol: None,
             traffic_policy: None,
             kv_connector: None,
@@ -755,6 +702,7 @@ mod tests {
         model.metadata.uid = Some("uid-456".to_string());
 
         let graph = ServiceGraph::new();
+        register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -808,6 +756,7 @@ mod tests {
         model.metadata.uid = Some("uid-456".to_string());
 
         let graph = ServiceGraph::new();
+        register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -859,6 +808,7 @@ mod tests {
         model.metadata.uid = Some("uid-456".to_string());
 
         let graph = ServiceGraph::new();
+        register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -1054,6 +1004,7 @@ mod tests {
         model.metadata.uid = Some("uid-456".to_string());
 
         let graph = ServiceGraph::new();
+        register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -1201,6 +1152,7 @@ mod tests {
         model.metadata.uid = Some("uid-456".to_string());
 
         let graph = ServiceGraph::new();
+        register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -1233,7 +1185,7 @@ mod tests {
 
     #[test]
     fn role_key_suffix_deterministic() {
-        let roles = vec!["decode".to_string(), "prefill".to_string()];
+        let roles = ["decode".to_string(), "prefill".to_string()];
         let a = role_key_suffix(roles.iter());
         let b = role_key_suffix(roles.iter());
         assert_eq!(a, b);
@@ -1241,15 +1193,114 @@ mod tests {
 
     #[test]
     fn role_key_suffix_order_independent() {
-        let fwd = vec!["decode".to_string(), "prefill".to_string()];
-        let rev = vec!["prefill".to_string(), "decode".to_string()];
+        let fwd = ["decode".to_string(), "prefill".to_string()];
+        let rev = ["prefill".to_string(), "decode".to_string()];
         assert_eq!(role_key_suffix(fwd.iter()), role_key_suffix(rev.iter()));
     }
 
     #[test]
     fn role_key_suffix_different_roles_differ() {
-        let a = vec!["decode".to_string()];
-        let b = vec!["decode".to_string(), "prefill".to_string()];
+        let a = ["decode".to_string()];
+        let b = ["decode".to_string(), "prefill".to_string()];
         assert_ne!(role_key_suffix(a.iter()), role_key_suffix(b.iter()));
+    }
+
+    #[tokio::test]
+    async fn missing_name_returns_error() {
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), make_role("decoder:latest", 1));
+        let spec = LatticeModelSpec {
+            roles,
+            ..Default::default()
+        };
+        // Create model with no name
+        let mut model = LatticeModel::new("", spec);
+        model.metadata.name = None;
+        model.metadata.namespace = Some("default".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
+
+        let result = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await;
+        assert!(matches!(result, Err(ModelError::MissingName)));
+    }
+
+    #[tokio::test]
+    async fn missing_uid_returns_error() {
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), make_role("decoder:latest", 1));
+        let spec = LatticeModelSpec {
+            roles,
+            model_source: Some(ModelSourceSpec {
+                uri: "hf://test/model".to_string(),
+                cache_size: "10Gi".to_string(),
+                storage_class: None,
+                mount_path: None,
+                token_secret: None,
+                downloader_image: None,
+                access_mode: None,
+                security: None,
+                resources: BTreeMap::new(),
+                image_pull_secrets: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = None;
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let result = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await;
+        assert!(matches!(result, Err(ModelError::MissingUid)));
+    }
+
+    #[tokio::test]
+    async fn routing_without_port_returns_error() {
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), make_role("decoder:latest", 2));
+
+        let mut routing = basic_routing();
+        routing.port = None;
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(routing),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let result = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await;
+        assert!(matches!(result, Err(ModelError::MissingInferencePort)));
     }
 }

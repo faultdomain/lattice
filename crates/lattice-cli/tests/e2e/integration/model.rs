@@ -1224,6 +1224,91 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Verify the vLLM mock inference endpoint returns a valid OpenAI-compatible response.
+///
+/// Sends a POST to `/v1/completions` on the decode entry service and checks that
+/// the response contains a `choices` array. Runs from `kthena-system` (system namespace,
+/// exempt from mesh default-deny) to avoid needing additional mesh policies.
+async fn test_model_inference(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Verifying inference endpoint on decode entry service...");
+
+    let svc_url = format!(
+        "http://{}-decode.{}.svc.cluster.local:8000/v1/completions",
+        MODEL_NAME, MODEL_NAMESPACE
+    );
+
+    let kc = kubeconfig.to_string();
+    let url = svc_url.clone();
+
+    wait_for_condition(
+        "inference endpoint to return valid response",
+        LONG_TIMEOUT,
+        POLL_INTERVAL,
+        || {
+            let kc = kc.clone();
+            let url = url.clone();
+            async move {
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "run",
+                    "inference-test",
+                    "--image",
+                    &CURL_IMAGE,
+                    "--restart=Never",
+                    "--rm",
+                    "-i",
+                    "-n",
+                    "kthena-system",
+                    "--",
+                    "curl",
+                    "-sf",
+                    "-X",
+                    "POST",
+                    &url,
+                    "-H",
+                    "Content-Type: application/json",
+                    "-d",
+                    r#"{"model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B","prompt":"hello","max_tokens":1}"#,
+                ])
+                .await;
+
+                match output {
+                    Ok(body) => {
+                        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&body);
+                        match parsed {
+                            Ok(json) => {
+                                let has_choices = json["choices"].is_array();
+                                if has_choices {
+                                    info!("[Model] Inference response valid: has choices array");
+                                } else {
+                                    warn!(
+                                        "[Model] Inference response missing choices array: {}",
+                                        body
+                                    );
+                                }
+                                Ok(has_choices)
+                            }
+                            Err(e) => {
+                                warn!("[Model] Inference response not valid JSON: {e}");
+                                Ok(false)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("[Model] Inference curl failed: {e}");
+                        Ok(false)
+                    }
+                }
+            }
+        },
+    )
+    .await?;
+
+    info!("[Model] Inference endpoint verified: valid OpenAI-compatible response");
+    Ok(())
+}
+
 /// Verify P/D cross-role connectivity via curl sidecar logs.
 ///
 /// Reads the connectivity-test sidecar logs from prefill and decode pods,
@@ -1435,6 +1520,9 @@ async fn run_model_test_sequence(kubeconfig: &str) -> Result<(), String> {
 
     // Serving phase depends on download lifecycle (scheduling gates removed)
     test_model_serving_phase(kubeconfig).await?;
+
+    // Inference requires pods to be running (Serving phase)
+    test_model_inference(kubeconfig).await?;
 
     // P/D connectivity requires pods to be running (Serving phase)
     test_pd_cross_role_connectivity(kubeconfig).await?;
