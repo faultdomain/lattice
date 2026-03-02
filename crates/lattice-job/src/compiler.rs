@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, PortSpec, ProviderType, ServicePortsSpec,
-    TrainingConfig, TrainingFramework, WorkloadSpec,
+    JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, PortSpec, ProviderType,
+    ServicePortsSpec, TrainingConfig, TrainingFramework, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
@@ -81,20 +81,28 @@ pub async fn compile_job(
         return Err(JobError::NoTasks);
     }
 
+    // Apply defaults to each task via strategic merge patch (compile-time only)
+    let mut tasks = job.spec.tasks.clone();
+    if let Some(ref defaults) = job.spec.defaults {
+        for task in tasks.values_mut() {
+            task.apply_defaults(defaults);
+        }
+    }
+
     // Validate: coordinator task must exist
     if let Some(ref training) = job.spec.training {
-        if !job.spec.tasks.contains_key(&training.coordinator_task) {
+        if !tasks.contains_key(&training.coordinator_task) {
             return Err(JobError::CoordinatorTaskMissing(
                 training.coordinator_task.clone(),
             ));
         }
     }
 
-    // Pre-process tasks: if training is set, clone and inject training env vars
+    // Pre-process tasks: if training is set, inject training env vars
     // into each task's workload BEFORE the WorkloadCompiler runs.
     let tasks: BTreeMap<String, JobTaskSpec> = match job.spec.training {
-        Some(ref training) => prepare_training_tasks(name, &job.spec.tasks, training)?,
-        None => job.spec.tasks.clone(),
+        Some(ref training) => prepare_training_tasks(name, &tasks, training)?,
+        None => tasks,
     };
 
     // Register each task in the service graph so WorkloadCompiler finds them

@@ -7,6 +7,7 @@ pub mod backup;
 pub mod container;
 pub mod deploy;
 pub mod ingress;
+pub mod merge;
 pub mod ports;
 pub mod resources;
 pub mod scaling;

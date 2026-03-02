@@ -1290,7 +1290,7 @@ async fn test_model_inference(kubeconfig: &str) -> Result<(), String> {
                                 Ok(has_choices)
                             }
                             Err(e) => {
-                                warn!("[Model] Inference response not valid JSON: {e}");
+                                warn!("[Model] Inference response not valid JSON: {e} body={body:?}");
                                 Ok(false)
                             }
                         }

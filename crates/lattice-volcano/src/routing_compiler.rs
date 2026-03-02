@@ -105,6 +105,7 @@ fn compile_model_server(
                 }),
             kv_connector: routing.kv_connector.as_ref().map(|kv| KthenaKvConnector {
                 type_: kv.type_.clone(),
+                port: kv.port,
             }),
         },
     }
@@ -351,6 +352,7 @@ mod tests {
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
             type_: KvConnectorType::Nixl,
+            port: None,
         });
 
         let compiled = compile_model_routing(&model, &routing, "test-model-test");
@@ -400,6 +402,7 @@ mod tests {
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
             type_: KvConnectorType::Nixl,
+            port: None,
         });
 
         let compiled = compile_model_routing(&model, &routing, "test-model-test");
@@ -705,6 +708,7 @@ mod tests {
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
             type_: KvConnectorType::Nixl,
+            port: None,
         });
 
         let compiled = compile_model_routing(&model, &routing, "test-model-test");

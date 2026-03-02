@@ -504,11 +504,7 @@ async fn cleanup_removed_roles(
         // Delete orphaned peer-discovery Service
         let svc_ar = ApiResource::erase::<k8s_openapi::api::core::v1::Service>(&());
         if let Err(e) = lattice_common::kube_utils::delete_resource_if_exists(
-            client,
-            namespace,
-            &svc_ar,
-            role_key,
-            "Service",
+            client, namespace, &svc_ar, role_key, "Service",
         )
         .await
         {

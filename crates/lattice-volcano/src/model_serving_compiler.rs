@@ -418,6 +418,7 @@ mod tests {
                 model: "test-model".to_string(),
                 kv_connector: Some(KvConnector {
                     type_: KvConnectorType::Nixl,
+                    port: None,
                 }),
                 port: None,
                 protocol: None,
@@ -455,6 +456,7 @@ mod tests {
                 model: "test-model".to_string(),
                 kv_connector: Some(KvConnector {
                     type_: KvConnectorType::Mooncake,
+                    port: None,
                 }),
                 port: None,
                 protocol: None,

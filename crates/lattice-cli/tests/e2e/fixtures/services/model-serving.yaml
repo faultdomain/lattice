@@ -22,55 +22,41 @@ spec:
           refreshInterval: 1h
     imagePullSecrets:
       - ghcr-creds
+  defaults:
+    entryWorkload:
+      containers:
+        main:
+          image: ghcr.io/yaozengzeng/vllm-mock:latest
+          command: ["python3", "app.py"]
+          variables:
+            MODEL_NAME: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          security:
+            runAsUser: 65534
+            apparmorProfile: Unconfined
+      resources:
+        ghcr-creds:
+          type: secret
+          id: local-regcreds
+          params:
+            provider: lattice-local
+            refreshInterval: 1h
+    entryRuntime:
+      imagePullSecrets:
+        - ghcr-creds
   roles:
     prefill:
       replicas: 1
-      entryWorkload:
-        containers:
-          main:
-            image: ghcr.io/yaozengzeng/vllm-mock:latest
-            command: ["python3", "app.py"]
-            variables:
-              MODEL_NAME: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-            resources:
-              requests:
-                cpu: 100m
-                memory: 64Mi
-              limits:
-                cpu: 200m
-                memory: 128Mi
-            security:
-              runAsUser: 65534
-              apparmorProfile: Unconfined
-        resources:
-          ghcr-creds:
-            type: secret
-            id: local-regcreds
-            params:
-              provider: lattice-local
-              refreshInterval: 1h
-      entryRuntime:
-        imagePullSecrets:
-          - ghcr-creds
     decode:
       replicas: 1
       entryWorkload:
         containers:
-          main:
-            image: ghcr.io/yaozengzeng/vllm-mock:latest
-            command: ["python3", "app.py"]
-            variables:
-              MODEL_NAME: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-            resources:
-              requests:
-                cpu: 100m
-                memory: 64Mi
-              limits:
-                cpu: 200m
-                memory: 128Mi
-            security:
-              runAsUser: 65534
-              apparmorProfile: Unconfined
           metrics:
             image: ghcr.io/evan-hines-js/busybox:latest
             command: ["/bin/sh", "-c", "mkdir -p /tmp/www && printf '# HELP gpu_kv_cache_usage KV cache usage ratio\\n# TYPE gpu_kv_cache_usage gauge\\ngpu_kv_cache_usage 0.95\\n' > /tmp/www/metrics && httpd -f -p 9090 -h /tmp/www"]
@@ -90,16 +76,6 @@ spec:
           ports:
             metrics:
               port: 9090
-        resources:
-          ghcr-creds:
-            type: secret
-            id: local-regcreds
-            params:
-              provider: lattice-local
-              refreshInterval: 1h
-      entryRuntime:
-        imagePullSecrets:
-          - ghcr-creds
       autoscaling:
         max: 8
         metrics:
@@ -139,6 +115,7 @@ spec:
     port: 8000
     kvConnector:
       type: nixl
+      port: 5557
     trafficPolicy:
       retry:
         attempts: 3

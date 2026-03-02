@@ -469,10 +469,8 @@ mod tests {
         );
 
         let job = test_job(tasks);
-        let templates = BTreeMap::from([(
-            "coordinator".to_string(),
-            test_pod_template("coord:latest"),
-        )]);
+        let templates =
+            BTreeMap::from([("coordinator".to_string(), test_pod_template("coord:latest"))]);
 
         let vcjob = compile_vcjob(&job, &templates);
 

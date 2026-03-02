@@ -90,12 +90,20 @@ pub async fn compile_model(
         return Err(ModelError::NoRoles);
     }
 
+    // Apply defaults to each role via strategic merge patch (compile-time only)
+    let mut roles = model.spec.roles.clone();
+    if let Some(ref defaults) = model.spec.defaults {
+        for role in roles.values_mut() {
+            role.apply_defaults(defaults);
+        }
+    }
+
     let mut role_templates: BTreeMap<String, RoleTemplates> = BTreeMap::new();
     let mut config = CompiledConfig::default();
     let mut mesh_members = Vec::new();
     let mut tracing_policies = Vec::new();
 
-    for (role_name, role_spec) in &model.spec.roles {
+    for (role_name, role_spec) in &roles {
         role_spec
             .validate()
             .map_err(|e| ModelError::RoleValidation {
@@ -303,7 +311,7 @@ pub async fn compile_model(
     // the Kthena router/autoscaler to reach model pods.
     augment_infra_callers(
         name,
-        &model.spec.roles,
+        &roles,
         model.spec.routing.as_ref(),
         autoscaling.is_some(),
         &mut mesh_members,
@@ -318,22 +326,24 @@ pub async fn compile_model(
             .routing
             .as_ref()
             .map(|r| {
-                r.kv_connector.is_some()
-                    && lattice_volcano::routing_compiler::has_pd_roles(&model.spec.roles)
+                r.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(&roles)
             })
             .unwrap_or(false);
 
         if has_pd {
-            let inference_port = model
-                .spec
-                .routing
+            let routing_spec = model.spec.routing.as_ref().unwrap();
+            let inference_port = routing_spec.port.ok_or(ModelError::MissingInferencePort)?;
+            let side_channel_port = routing_spec
+                .kv_connector
                 .as_ref()
-                .and_then(|r| r.port)
-                .ok_or(ModelError::MissingInferencePort)?;
+                .and_then(|kv| kv.port)
+                .unwrap_or(lattice_common::crd::DEFAULT_KV_SIDE_CHANNEL_PORT);
 
             [PD_ROLE_PREFILL, PD_ROLE_DECODE]
                 .iter()
-                .map(|role| compile_peer_service(name, role, namespace, inference_port))
+                .map(|role| {
+                    compile_peer_service(name, role, namespace, inference_port, side_channel_port)
+                })
                 .collect()
         } else {
             Vec::new()
@@ -371,11 +381,13 @@ pub async fn compile_model(
 /// Creates a Service with a predictable name (`{model_name}-{role_name}`) that
 /// pods can use for DNS-based peer discovery during nixl KV cache transfer.
 /// The selector uses `LABEL_NAME` to match pods labeled by `PodTemplateCompiler`.
+/// Exposes both the inference port and the KV cache side-channel port.
 fn compile_peer_service(
     model_name: &str,
     role_name: &str,
     namespace: &str,
     inference_port: u16,
+    side_channel_port: u16,
 ) -> serde_json::Value {
     let service_name = format!("{}-{}", model_name, role_name);
     serde_json::json!({
@@ -389,12 +401,20 @@ fn compile_peer_service(
             "selector": {
                 lattice_common::LABEL_NAME: service_name
             },
-            "ports": [{
-                "name": "inference",
-                "port": inference_port,
-                "targetPort": inference_port,
-                "protocol": "TCP"
-            }]
+            "ports": [
+                {
+                    "name": "inference",
+                    "port": inference_port,
+                    "targetPort": inference_port,
+                    "protocol": "TCP"
+                },
+                {
+                    "name": "kv-side-channel",
+                    "port": side_channel_port,
+                    "targetPort": side_channel_port,
+                    "protocol": "TCP"
+                }
+            ]
         }
     })
 }
@@ -811,6 +831,7 @@ mod tests {
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
             type_: KvConnectorType::Nixl,
+            port: None,
         });
 
         let spec = LatticeModelSpec {
@@ -863,6 +884,7 @@ mod tests {
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
             type_: KvConnectorType::Nixl,
+            port: None,
         });
 
         let spec = LatticeModelSpec {
@@ -1380,6 +1402,7 @@ mod tests {
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
             type_: KvConnectorType::Nixl,
+            port: None,
         });
 
         let spec = LatticeModelSpec {
@@ -1438,10 +1461,62 @@ mod tests {
             );
 
             let ports = svc["spec"]["ports"].as_array().expect("ports should exist");
-            assert_eq!(ports.len(), 1);
+            assert_eq!(
+                ports.len(),
+                2,
+                "should have inference + kv-side-channel ports"
+            );
             assert_eq!(ports[0]["name"], "inference");
             assert_eq!(ports[0]["port"], 8000);
             assert_eq!(ports[0]["targetPort"], 8000);
+            assert_eq!(ports[1]["name"], "kv-side-channel");
+            assert_eq!(ports[1]["port"], 5557);
+            assert_eq!(ports[1]["targetPort"], 5557);
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_services_use_explicit_side_channel_port() {
+        let mut roles = BTreeMap::new();
+        roles.insert("prefill".to_string(), make_role("prefill:latest", 1));
+        roles.insert("decode".to_string(), make_role("decode:latest", 4));
+
+        let mut routing = basic_routing();
+        routing.kv_connector = Some(KvConnector {
+            type_: KvConnectorType::Nixl,
+            port: Some(6000),
+        });
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(routing),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        register_model_roles(&model, &graph);
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        for svc in &compiled.peer_services {
+            let ports = svc["spec"]["ports"].as_array().expect("ports should exist");
+            assert_eq!(ports.len(), 2);
+            assert_eq!(ports[1]["name"], "kv-side-channel");
+            assert_eq!(ports[1]["port"], 6000);
+            assert_eq!(ports[1]["targetPort"], 6000);
         }
     }
 

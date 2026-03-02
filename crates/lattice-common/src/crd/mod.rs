@@ -40,8 +40,8 @@ pub use cluster_backup::{
 };
 pub use external_endpoint::{ParsedEndpoint, Resolution};
 pub use job::{
-    ConcurrencyPolicy, JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus,
-    NcclConfig, RestartPolicy, TrainingConfig, TrainingFramework, VolcanoPolicy,
+    ConcurrencyPolicy, JobPhase, JobTaskDefaults, JobTaskSpec, LatticeJob, LatticeJobSpec,
+    LatticeJobStatus, NcclConfig, RestartPolicy, TrainingConfig, TrainingFramework, VolcanoPolicy,
     VolcanoPolicyAction, VolcanoPolicyEvent,
 };
 pub use mesh_member::{
@@ -52,10 +52,10 @@ pub use mesh_member::{
 pub use model_serving::{
     HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModel,
     LatticeModelSpec, LatticeModelStatus, ModelAutoscalingBehavior, ModelAutoscalingSpec,
-    ModelCondition, ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
-    ModelRoutingSpec, ModelScaleDownBehavior, ModelScaleUpBehavior, ModelServingPhase,
-    ModelSourceSpec, RateLimit, RateLimitUnit, RecoveryPolicy, RetryPolicy, SecretKeySelector,
-    TargetModel, TrafficPolicy,
+    ModelCondition, ModelMatch, ModelParentRef, ModelRoleDefaults, ModelRoleSpec, ModelRouteRule,
+    ModelRouteSpec, ModelRoutingSpec, ModelScaleDownBehavior, ModelScaleUpBehavior,
+    ModelServingPhase, ModelSourceSpec, RateLimit, RateLimitUnit, RecoveryPolicy, RetryPolicy,
+    SecretKeySelector, TargetModel, TrafficPolicy, DEFAULT_KV_SIDE_CHANNEL_PORT,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
@@ -96,6 +96,7 @@ pub use workload::ingress::{
     CertIssuerRef, GrpcMethodMatch, HeaderMatch, HeaderMatchType, IngressSpec, IngressTls,
     PathMatch, PathMatchType, RouteKind, RouteMatch, RouteRule, RouteSpec,
 };
+pub use workload::merge::Merge;
 pub use workload::ports::{PortSpec, ServicePortsSpec};
 pub use workload::resources::{
     DependencyDirection, ExternalServiceParams, GpuParams, ResourceMetadata, ResourceQuantity,
