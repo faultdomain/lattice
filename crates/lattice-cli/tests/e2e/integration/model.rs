@@ -11,15 +11,20 @@
 
 #![cfg(feature = "provider-e2e")]
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
-use tracing::info;
+use tracing::{info, warn};
+
+use lattice_common::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements, SecurityContext};
 
 use super::super::helpers::{
     apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config,
     resolve_model_serving_name, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
-    wait_for_resource_phase, TestHarness, DEFAULT_DOWNLOADER_IMAGE, DEFAULT_TIMEOUT,
+    wait_for_resource_phase, TestHarness, CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER,
+    DEFAULT_DOWNLOADER_IMAGE, DEFAULT_TIMEOUT,
 };
+use super::super::mesh_helpers::parse_traffic_result;
 
 const MODEL_NAMESPACE: &str = "serving";
 const MODEL_NAME: &str = "llm-serving";
@@ -33,13 +38,20 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Expected HuggingFace model ID used in model-serving fixture
 const EXPECTED_MODEL_ID: &str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
 
-/// Deploy a LatticeModel and verify the controller starts reconciling
+/// Deploy a LatticeModel and verify the controller starts reconciling.
+///
+/// Injects curl-based connectivity-test sidecars into prefill and decode roles
+/// so we can verify P/D cross-role traffic via log parsing (same pattern as
+/// mesh bilateral agreement tests).
 async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Deploying LatticeModel from fixture...");
 
     ensure_fresh_namespace(kubeconfig, MODEL_NAMESPACE).await?;
 
-    let model: lattice_common::crd::LatticeModel = load_fixture_config("model-serving.yaml")?;
+    let mut model: lattice_common::crd::LatticeModel =
+        load_fixture_config("model-serving.yaml")?;
+    inject_pd_connectivity_sidecars(&mut model);
+
     let yaml = serde_json::to_string(&model)
         .map_err(|e| format!("Failed to serialize model fixture: {e}"))?;
     apply_yaml(kubeconfig, &yaml).await?;
@@ -57,6 +69,117 @@ async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
 
     info!("[Model] LatticeModel reached Loading phase");
     Ok(())
+}
+
+/// Inject curl-based connectivity-test sidecar containers into P/D roles.
+///
+/// Each sidecar continuously curls the peer role's service on the inference port
+/// and logs ALLOWED/BLOCKED results with cycle markers, matching the mesh test
+/// traffic generator pattern.
+fn inject_pd_connectivity_sidecars(model: &mut lattice_common::crd::LatticeModel) {
+    let inference_port = model
+        .spec
+        .routing
+        .as_ref()
+        .and_then(|r| r.port)
+        .unwrap_or(8000);
+
+    let roles: Vec<String> = model.spec.roles.keys().cloned().collect();
+    let pd_roles: Vec<&str> = roles
+        .iter()
+        .filter(|r| r.as_str() == "prefill" || r.as_str() == "decode")
+        .map(|s| s.as_str())
+        .collect();
+
+    if pd_roles.len() != 2 {
+        return;
+    }
+
+    for role_name in &pd_roles {
+        let peer = if *role_name == "prefill" {
+            "decode"
+        } else {
+            "prefill"
+        };
+        let peer_svc = format!(
+            "{}-{}.{}.svc.cluster.local",
+            MODEL_NAME, peer, MODEL_NAMESPACE
+        );
+        let source = format!("{}-{}", MODEL_NAME, role_name);
+        let target = format!("{}-{}", MODEL_NAME, peer);
+
+        let script = format!(
+            r#"while true; do
+echo "{cycle_start}"
+MAX_ATTEMPTS=3
+ATTEMPT=0
+RESULT="UNKNOWN"
+while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+    HTTP_CODE=$(curl -sk -o /dev/null -w "%{{http_code}}" --connect-timeout 2 --max-time 3 http://{peer_svc}:{port}/ 2>/dev/null; true)
+    if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "404" ]; then
+        RESULT="ALLOWED"
+        break
+    elif [ "$HTTP_CODE" = "403" ]; then
+        RESULT="BLOCKED"
+        break
+    else
+        ATTEMPT=$((ATTEMPT + 1))
+        if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then sleep 1; fi
+    fi
+done
+if [ "$RESULT" = "ALLOWED" ]; then
+    echo "{source}->{target}:ALLOWED"
+elif [ "$RESULT" = "BLOCKED" ]; then
+    echo "{source}->{target}:BLOCKED"
+else
+    echo "{source}->{target}:BLOCKED (timeout)"
+fi
+echo "{cycle_end}"
+sleep 5
+done
+"#,
+            cycle_start = CYCLE_START_MARKER,
+            cycle_end = CYCLE_END_MARKER,
+            peer_svc = peer_svc,
+            port = inference_port,
+            source = source,
+            target = target,
+        );
+
+        let sidecar = ContainerSpec {
+            image: CURL_IMAGE.to_string(),
+            command: Some(vec!["/bin/sh".to_string()]),
+            args: Some(vec!["-c".to_string(), script]),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
+            security: Some(SecurityContext {
+                run_as_user: Some(100),
+                apparmor_profile: Some("Unconfined".to_string()),
+                allowed_binaries: vec!["*".to_string()],
+                ..Default::default()
+            }),
+            volumes: {
+                let mut v = BTreeMap::new();
+                v.insert("/tmp".to_string(), Default::default());
+                v
+            },
+            ..Default::default()
+        };
+
+        if let Some(role) = model.spec.roles.get_mut(*role_name) {
+            role.entry_workload
+                .containers
+                .insert("connectivity-test".to_string(), sidecar);
+        }
+    }
 }
 
 /// Verify ModelServing resource was created with expected role structure
@@ -1130,6 +1253,97 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Verify P/D cross-role connectivity via curl sidecar logs.
+///
+/// Reads the connectivity-test sidecar logs from prefill and decode pods,
+/// verifying that cross-role traffic is ALLOWED. Uses the same cycle-based
+/// log parsing as mesh bilateral agreement tests.
+async fn test_pd_cross_role_connectivity(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Verifying P/D cross-role connectivity via sidecar logs...");
+
+    let directions = [
+        ("prefill", "llm-serving-prefill->llm-serving-decode"),
+        ("decode", "llm-serving-decode->llm-serving-prefill"),
+    ];
+
+    // Retry verification to handle policy propagation delays
+    let timeout = DEFAULT_TIMEOUT;
+    let start = std::time::Instant::now();
+
+    loop {
+        let mut all_passed = true;
+        let mut failures = Vec::new();
+
+        for (role, expected_pattern) in &directions {
+            let label_selector =
+                format!("app.kubernetes.io/name={}-{}", MODEL_NAME, role);
+            let logs = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "logs",
+                "-n",
+                MODEL_NAMESPACE,
+                "-l",
+                &label_selector,
+                "-c",
+                "connectivity-test",
+                "--tail",
+                "500",
+            ])
+            .await
+            .unwrap_or_default();
+
+            // Check we have at least one complete cycle
+            let cycle_count = logs.matches(CYCLE_END_MARKER).count();
+            if cycle_count == 0 {
+                all_passed = false;
+                failures.push(format!("{}: no complete cycles yet", role));
+                continue;
+            }
+
+            let allowed_pattern = format!("{}:ALLOWED", expected_pattern);
+            let blocked_pattern = format!("{}:BLOCKED", expected_pattern);
+
+            match parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern) {
+                Some(true) => {
+                    info!("[Model] {} cross-role traffic: ALLOWED", role);
+                }
+                Some(false) => {
+                    all_passed = false;
+                    failures.push(format!(
+                        "{}: BLOCKED — mesh policy denying cross-role traffic",
+                        role
+                    ));
+                }
+                None => {
+                    all_passed = false;
+                    failures.push(format!("{}: no traffic result in logs", role));
+                }
+            }
+        }
+
+        if all_passed {
+            info!("[Model] P/D cross-role connectivity verified: bidirectional traffic ALLOWED");
+            return Ok(());
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "P/D cross-role connectivity failed after {:.0}s: {}",
+                start.elapsed().as_secs_f64(),
+                failures.join("; ")
+            ));
+        }
+
+        warn!(
+            "[Model] P/D connectivity not yet confirmed (elapsed: {:.0}s): {}",
+            start.elapsed().as_secs_f64(),
+            failures.join("; ")
+        );
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+
 /// Verify download LatticeJob completes and scheduling gates are removed
 async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Waiting for download LatticeJob to complete...");
@@ -1254,6 +1468,9 @@ async fn run_model_test_sequence(kubeconfig: &str) -> Result<(), String> {
 
     // Serving phase depends on download lifecycle (scheduling gates removed)
     test_model_serving_phase(kubeconfig).await?;
+
+    // P/D connectivity requires pods to be running (Serving phase)
+    test_pd_cross_role_connectivity(kubeconfig).await?;
 
     info!("[Model] All LatticeModel integration tests passed!");
     Ok(())

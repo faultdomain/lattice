@@ -58,7 +58,7 @@ spec:
         containers:
           main:
             image: ghcr.io/evan-hines-js/busybox:latest
-            command: ["/bin/sh", "-c", "mkdir -p /tmp/www && printf '# HELP gpu_kv_cache_usage KV cache usage ratio\\n# TYPE gpu_kv_cache_usage gauge\\ngpu_kv_cache_usage 0.95\\n' > /tmp/www/metrics && httpd -f -p 9090 -h /tmp/www"]
+            command: ["/bin/sh", "-c", "mkdir -p /tmp/www && printf '# HELP gpu_kv_cache_usage KV cache usage ratio\\n# TYPE gpu_kv_cache_usage gauge\\ngpu_kv_cache_usage 0.95\\n' > /tmp/www/metrics && echo ok > /tmp/www/index.html && httpd -p 8000 -h /tmp/www && httpd -f -p 9090 -h /tmp/www"]
             volumes:
               /tmp: {}
             resources:
