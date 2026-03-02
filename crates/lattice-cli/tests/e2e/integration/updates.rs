@@ -1087,6 +1087,7 @@ fn build_simple_job(
                 ..Default::default()
             },
             restart_policy: Some(RestartPolicy::Never),
+            policies: None,
         },
     );
 
@@ -1227,6 +1228,7 @@ fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::La
                 ..Default::default()
             },
             restart_policy: Some(RestartPolicy::Never),
+            policies: None,
         },
     );
 

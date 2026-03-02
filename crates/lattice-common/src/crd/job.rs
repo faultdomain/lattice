@@ -103,6 +103,82 @@ impl std::fmt::Display for ConcurrencyPolicy {
 }
 
 // =============================================================================
+// Volcano Policy Types
+// =============================================================================
+
+/// Volcano lifecycle policy event trigger
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[non_exhaustive]
+pub enum VolcanoPolicyEvent {
+    /// A pod in the job failed
+    PodFailed,
+    /// A pod in the job was evicted
+    PodEvicted,
+    /// A pod is stuck in Pending
+    PodPending,
+    /// A task completed (all replicas finished)
+    TaskCompleted,
+    /// Unknown event
+    Unknown,
+    /// Matches any event
+    Any,
+}
+
+impl std::fmt::Display for VolcanoPolicyEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PodFailed => write!(f, "PodFailed"),
+            Self::PodEvicted => write!(f, "PodEvicted"),
+            Self::PodPending => write!(f, "PodPending"),
+            Self::TaskCompleted => write!(f, "TaskCompleted"),
+            Self::Unknown => write!(f, "Unknown"),
+            Self::Any => write!(f, "*"),
+        }
+    }
+}
+
+/// Volcano lifecycle policy action
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[non_exhaustive]
+pub enum VolcanoPolicyAction {
+    /// Abort the entire job
+    AbortJob,
+    /// Restart the entire job (all tasks)
+    RestartJob,
+    /// Restart the failed task only
+    RestartTask,
+    /// Restart the failed pod only
+    RestartPod,
+    /// Terminate the job (mark as terminated)
+    TerminateJob,
+    /// Complete the job (mark as completed)
+    CompleteJob,
+}
+
+impl std::fmt::Display for VolcanoPolicyAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AbortJob => write!(f, "AbortJob"),
+            Self::RestartJob => write!(f, "RestartJob"),
+            Self::RestartTask => write!(f, "RestartTask"),
+            Self::RestartPod => write!(f, "RestartPod"),
+            Self::TerminateJob => write!(f, "TerminateJob"),
+            Self::CompleteJob => write!(f, "CompleteJob"),
+        }
+    }
+}
+
+/// A Volcano lifecycle policy binding an event to an action
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VolcanoPolicy {
+    /// Event that triggers this policy
+    pub event: VolcanoPolicyEvent,
+    /// Action to take when the event occurs
+    pub action: VolcanoPolicyAction,
+}
+
+// =============================================================================
 // Task Spec
 // =============================================================================
 
@@ -127,6 +203,11 @@ pub struct JobTaskSpec {
     /// Pod restart policy
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_policy: Option<RestartPolicy>,
+
+    /// Volcano lifecycle policies for this task.
+    /// When set, these are applied to the VCJobTask directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<Vec<VolcanoPolicy>>,
 }
 
 fn default_one() -> u32 {
@@ -207,6 +288,12 @@ pub struct LatticeJobSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topology: Option<WorkloadNetworkTopology>,
 
+    /// Volcano lifecycle policies for the entire job.
+    /// When set, overrides the default policies (PodEvicted→RestartJob,
+    /// PodFailed→RestartJob). When absent, defaults are applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<Vec<VolcanoPolicy>>,
+
     /// Job tasks — each maps to a Volcano VCJob task with its own pod template
     #[serde(default)]
     pub tasks: BTreeMap<String, JobTaskSpec>,
@@ -233,6 +320,7 @@ impl Default for LatticeJobSpec {
             failed_jobs_history_limit: None,
             starting_deadline_seconds: None,
             topology: None,
+            policies: None,
             tasks: BTreeMap::new(),
             training: None,
         }
@@ -251,6 +339,7 @@ impl LatticeJobSpec {
     /// - Empty tasks
     /// - Missing coordinator task
     /// - Training containers without explicit command
+    /// - Training tasks with restart_policy != Never
     pub fn validate(&self) -> Result<(), crate::Error> {
         if self.tasks.is_empty() {
             return Err(crate::Error::validation("job has no tasks"));
@@ -272,6 +361,22 @@ impl LatticeJobSpec {
                         return Err(crate::Error::validation(format!(
                             "training task '{}' container '{}' must specify a command",
                             task_name, container_name
+                        )));
+                    }
+                }
+            }
+
+            // Training tasks must use restart_policy=Never so that kubelet
+            // doesn't locally restart containers, which would prevent Volcano's
+            // PodFailed→RestartJob gang restart from triggering.
+            for (task_name, task_spec) in &self.tasks {
+                if let Some(ref policy) = task_spec.restart_policy {
+                    if *policy != RestartPolicy::Never {
+                        return Err(crate::Error::validation(format!(
+                            "training task '{}' has restart_policy '{}', \
+                             but training jobs require 'Never' so Volcano \
+                             can manage gang restarts",
+                            task_name, policy
                         )));
                     }
                 }
@@ -423,6 +528,7 @@ mod tests {
             workload: WorkloadSpec::default(),
             runtime: RuntimeSpec::default(),
             restart_policy: Some(RestartPolicy::OnFailure),
+            policies: None,
         };
         assert!(task.workload.containers.is_empty());
         assert_eq!(task.replicas, 2);
@@ -438,6 +544,7 @@ mod tests {
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
+                policies: None,
             },
         );
         tasks.insert(
@@ -447,6 +554,7 @@ mod tests {
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::OnFailure),
+                policies: None,
             },
         );
 
@@ -565,6 +673,7 @@ mod tests {
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
+                policies: None,
             },
         );
 
@@ -628,6 +737,7 @@ mod tests {
             },
             runtime: RuntimeSpec::default(),
             restart_policy: None,
+            policies: None,
         }
     }
 
@@ -656,6 +766,7 @@ mod tests {
             },
             runtime: RuntimeSpec::default(),
             restart_policy: None,
+            policies: None,
         }
     }
 
@@ -755,5 +866,168 @@ mod tests {
             spec.validate().is_ok(),
             "non-training jobs should not require command"
         );
+    }
+
+    #[test]
+    fn validate_denies_training_task_with_non_never_restart_policy() {
+        let mut task = task_with_command(1);
+        task.restart_policy = Some(RestartPolicy::OnFailure);
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), task);
+
+        let spec = LatticeJobSpec {
+            tasks,
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "worker".to_string(),
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("restart_policy")
+                || err.to_string().contains("OnFailure"),
+            "should mention bad restart policy, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_allows_training_task_with_never_restart_policy() {
+        let mut task = task_with_command(1);
+        task.restart_policy = Some(RestartPolicy::Never);
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), task);
+
+        let spec = LatticeJobSpec {
+            tasks,
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "worker".to_string(),
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_allows_training_task_with_no_restart_policy() {
+        // None means the compiler will set it — validation should allow
+        let task = task_with_command(1);
+        assert!(task.restart_policy.is_none());
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), task);
+
+        let spec = LatticeJobSpec {
+            tasks,
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "worker".to_string(),
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_allows_non_training_task_with_on_failure() {
+        let mut task = task_with_command(1);
+        task.restart_policy = Some(RestartPolicy::OnFailure);
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), task);
+
+        let spec = LatticeJobSpec {
+            tasks,
+            // No training config — OnFailure is fine
+            ..Default::default()
+        };
+        assert!(spec.validate().is_ok());
+    }
+
+    // =========================================================================
+    // Volcano policy types tests
+    // =========================================================================
+
+    #[test]
+    fn volcano_policy_event_display() {
+        assert_eq!(VolcanoPolicyEvent::PodFailed.to_string(), "PodFailed");
+        assert_eq!(VolcanoPolicyEvent::PodEvicted.to_string(), "PodEvicted");
+        assert_eq!(VolcanoPolicyEvent::PodPending.to_string(), "PodPending");
+        assert_eq!(
+            VolcanoPolicyEvent::TaskCompleted.to_string(),
+            "TaskCompleted"
+        );
+        assert_eq!(VolcanoPolicyEvent::Unknown.to_string(), "Unknown");
+        assert_eq!(VolcanoPolicyEvent::Any.to_string(), "*");
+    }
+
+    #[test]
+    fn volcano_policy_action_display() {
+        assert_eq!(VolcanoPolicyAction::AbortJob.to_string(), "AbortJob");
+        assert_eq!(VolcanoPolicyAction::RestartJob.to_string(), "RestartJob");
+        assert_eq!(VolcanoPolicyAction::RestartTask.to_string(), "RestartTask");
+        assert_eq!(VolcanoPolicyAction::RestartPod.to_string(), "RestartPod");
+        assert_eq!(
+            VolcanoPolicyAction::TerminateJob.to_string(),
+            "TerminateJob"
+        );
+        assert_eq!(VolcanoPolicyAction::CompleteJob.to_string(), "CompleteJob");
+    }
+
+    #[test]
+    fn volcano_policy_serde_roundtrip() {
+        let policies = vec![
+            VolcanoPolicy {
+                event: VolcanoPolicyEvent::PodFailed,
+                action: VolcanoPolicyAction::RestartJob,
+            },
+            VolcanoPolicy {
+                event: VolcanoPolicyEvent::TaskCompleted,
+                action: VolcanoPolicyAction::CompleteJob,
+            },
+        ];
+
+        let json = serde_json::to_string(&policies).unwrap();
+        let de: Vec<VolcanoPolicy> = serde_json::from_str(&json).unwrap();
+        assert_eq!(policies, de);
+    }
+
+    #[test]
+    fn job_spec_with_explicit_policies_serde_roundtrip() {
+        let spec = LatticeJobSpec {
+            policies: Some(vec![VolcanoPolicy {
+                event: VolcanoPolicyEvent::PodEvicted,
+                action: VolcanoPolicyAction::AbortJob,
+            }]),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&spec).unwrap();
+        let de: LatticeJobSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec.policies, de.policies);
+    }
+
+    #[test]
+    fn task_spec_with_policies_serde_roundtrip() {
+        let task = JobTaskSpec {
+            replicas: 1,
+            workload: WorkloadSpec::default(),
+            runtime: RuntimeSpec::default(),
+            restart_policy: None,
+            policies: Some(vec![VolcanoPolicy {
+                event: VolcanoPolicyEvent::TaskCompleted,
+                action: VolcanoPolicyAction::CompleteJob,
+            }]),
+        };
+
+        let json = serde_json::to_string(&task).unwrap();
+        let de: JobTaskSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(task.policies, de.policies);
     }
 }

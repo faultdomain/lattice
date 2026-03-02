@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{LatticeJob, LatticeJobSpec, RestartPolicy};
+use lattice_common::crd::{LatticeJob, LatticeJobSpec, RestartPolicy, VolcanoPolicy};
 
 use lattice_common::kube_utils::OwnerReference;
 
@@ -76,7 +76,10 @@ pub fn compile_vcjob(
             queue: job.spec.queue.clone(),
             priority_class_name: job.spec.priority_class_name.clone(),
             tasks,
-            policies: default_policies(job.spec.max_retry),
+            policies: match &job.spec.policies {
+                Some(user_policies) => user_policies.iter().map(to_wire_policy).collect(),
+                None => default_policies(job.spec.max_retry),
+            },
             plugins,
             network_topology: job
                 .spec
@@ -132,14 +135,28 @@ fn compile_tasks(
                 spec["restartPolicy"] = serde_json::Value::String(restart_policy.to_string());
             }
 
+            let task_policies = task_spec
+                .policies
+                .as_ref()
+                .map(|p| p.iter().map(to_wire_policy).collect())
+                .unwrap_or_default();
+
             Some(VCJobTask {
                 name: task_name.clone(),
                 replicas: task_spec.replicas,
                 template,
-                policies: vec![],
+                policies: task_policies,
             })
         })
         .collect()
+}
+
+/// Convert a typed `VolcanoPolicy` to a wire-format `VCJobTaskPolicy` with string fields.
+fn to_wire_policy(policy: &VolcanoPolicy) -> VCJobTaskPolicy {
+    VCJobTaskPolicy {
+        event: policy.event.to_string(),
+        action: policy.action.to_string(),
+    }
 }
 
 fn default_policies(_max_retry: Option<u32>) -> Vec<VCJobTaskPolicy> {
@@ -161,7 +178,8 @@ fn default_policies(_max_retry: Option<u32>) -> Vec<VCJobTaskPolicy> {
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        ConcurrencyPolicy, JobTaskSpec, LatticeJobSpec, RuntimeSpec, WorkloadSpec,
+        ConcurrencyPolicy, JobTaskSpec, LatticeJobSpec, RuntimeSpec, VolcanoPolicy,
+        VolcanoPolicyAction, VolcanoPolicyEvent, WorkloadSpec,
     };
 
     fn test_job(tasks: BTreeMap<String, JobTaskSpec>) -> LatticeJob {
@@ -188,6 +206,7 @@ mod tests {
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::OnFailure),
+                policies: None,
             },
         );
 
@@ -223,6 +242,7 @@ mod tests {
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
+                policies: None,
             },
         );
         tasks.insert(
@@ -232,6 +252,7 @@ mod tests {
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::OnFailure),
+                policies: None,
             },
         );
 
@@ -257,6 +278,7 @@ mod tests {
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
+                policies: None,
             },
         );
 
@@ -299,6 +321,7 @@ mod tests {
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
+                policies: None,
             },
         );
 
@@ -350,6 +373,7 @@ mod tests {
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::Never),
+                policies: None,
             },
         );
 
@@ -407,5 +431,77 @@ mod tests {
         job.metadata.namespace = Some("default".to_string());
         job.metadata.uid = Some("test-uid-123".to_string());
         job
+    }
+
+    #[test]
+    fn explicit_job_policies_override_defaults() {
+        let spec = LatticeJobSpec {
+            policies: Some(vec![VolcanoPolicy {
+                event: VolcanoPolicyEvent::PodFailed,
+                action: VolcanoPolicyAction::AbortJob,
+            }]),
+            ..Default::default()
+        };
+
+        let job = test_job_with_spec(spec);
+        let vcjob = compile_vcjob(&job, &BTreeMap::new());
+
+        assert_eq!(vcjob.spec.policies.len(), 1);
+        assert_eq!(vcjob.spec.policies[0].event, "PodFailed");
+        assert_eq!(vcjob.spec.policies[0].action, "AbortJob");
+    }
+
+    #[test]
+    fn task_level_policies_on_vcjob_task() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "coordinator".to_string(),
+            JobTaskSpec {
+                replicas: 1,
+                workload: WorkloadSpec::default(),
+                runtime: RuntimeSpec::default(),
+                restart_policy: None,
+                policies: Some(vec![VolcanoPolicy {
+                    event: VolcanoPolicyEvent::TaskCompleted,
+                    action: VolcanoPolicyAction::CompleteJob,
+                }]),
+            },
+        );
+
+        let job = test_job(tasks);
+        let templates = BTreeMap::from([(
+            "coordinator".to_string(),
+            test_pod_template("coord:latest"),
+        )]);
+
+        let vcjob = compile_vcjob(&job, &templates);
+
+        assert_eq!(vcjob.spec.tasks.len(), 1);
+        assert_eq!(vcjob.spec.tasks[0].policies.len(), 1);
+        assert_eq!(vcjob.spec.tasks[0].policies[0].event, "TaskCompleted");
+        assert_eq!(vcjob.spec.tasks[0].policies[0].action, "CompleteJob");
+    }
+
+    #[test]
+    fn no_task_policies_yields_empty_vec() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "worker".to_string(),
+            JobTaskSpec {
+                replicas: 1,
+                workload: WorkloadSpec::default(),
+                runtime: RuntimeSpec::default(),
+                restart_policy: None,
+                policies: None,
+            },
+        );
+
+        let job = test_job(tasks);
+        let templates =
+            BTreeMap::from([("worker".to_string(), test_pod_template("worker:latest"))]);
+
+        let vcjob = compile_vcjob(&job, &templates);
+
+        assert!(vcjob.spec.tasks[0].policies.is_empty());
     }
 }

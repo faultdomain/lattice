@@ -41,7 +41,8 @@ pub use cluster_backup::{
 pub use external_endpoint::{ParsedEndpoint, Resolution};
 pub use job::{
     ConcurrencyPolicy, JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus,
-    NcclConfig, RestartPolicy, TrainingConfig, TrainingFramework,
+    NcclConfig, RestartPolicy, TrainingConfig, TrainingFramework, VolcanoPolicy,
+    VolcanoPolicyAction, VolcanoPolicyEvent,
 };
 pub use mesh_member::{
     derived_name, AppliedResourceRef, CallerRef, EgressRule, EgressTarget, LatticeMeshMember,

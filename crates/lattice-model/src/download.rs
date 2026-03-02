@@ -302,6 +302,7 @@ fn compile_lattice_job(
             workload,
             runtime,
             restart_policy: Some(RestartPolicy::Never),
+            policies: None,
         },
     );
 

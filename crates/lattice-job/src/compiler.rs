@@ -267,10 +267,34 @@ fn prepare_training_tasks(
     for (task_name, task_spec) in tasks {
         let mut task = task_spec.clone();
 
-        // Default: OnFailure — let K8s restart transient container failures
-        // without full job restarts.
-        if task.restart_policy.is_none() {
-            task.restart_policy = Some(lattice_common::crd::RestartPolicy::OnFailure);
+        // Training tasks MUST use restart_policy=Never. With OnFailure, kubelet
+        // restarts the container locally, which prevents Volcano's PodFailed→RestartJob
+        // gang restart from ever triggering. Override if the user set something else.
+        match &task.restart_policy {
+            Some(policy) if *policy != lattice_common::crd::RestartPolicy::Never => {
+                tracing::warn!(
+                    task = task_name.as_str(),
+                    policy = %policy,
+                    "overriding restart_policy to Never for training task \
+                     (was '{}' — kubelet restarts prevent Volcano gang restart)",
+                    policy,
+                );
+                task.restart_policy = Some(lattice_common::crd::RestartPolicy::Never);
+            }
+            None => {
+                task.restart_policy = Some(lattice_common::crd::RestartPolicy::Never);
+            }
+            Some(_) => {} // Already Never
+        }
+
+        // Inject TaskCompleted→CompleteJob on the coordinator task so Volcano
+        // marks the job as completed when the coordinator finishes. Only inject
+        // if the user hasn't provided explicit task-level policies.
+        if *task_name == *coordinator && task.policies.is_none() {
+            task.policies = Some(vec![lattice_common::crd::VolcanoPolicy {
+                event: lattice_common::crd::VolcanoPolicyEvent::TaskCompleted,
+                action: lattice_common::crd::VolcanoPolicyAction::CompleteJob,
+            }]);
         }
 
         // Inject the master port so WorkloadCompiler creates a LatticeMeshMember.
@@ -643,6 +667,7 @@ mod tests {
             },
             runtime: RuntimeSpec::default(),
             restart_policy: Some(RestartPolicy::Never),
+            policies: None,
         }
     }
 
@@ -836,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_training_defaults_restart_policy_to_on_failure() {
+    fn prepare_training_defaults_restart_policy_to_never() {
         let mut tasks = BTreeMap::new();
         let mut task = make_training_task("train:latest", 1);
         task.restart_policy = None; // unset
@@ -851,7 +876,87 @@ mod tests {
         let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
         assert_eq!(
             prepared["worker"].restart_policy,
-            Some(RestartPolicy::OnFailure)
+            Some(RestartPolicy::Never)
+        );
+    }
+
+    #[test]
+    fn prepare_training_overrides_on_failure_to_never() {
+        let mut tasks = BTreeMap::new();
+        let mut task = make_training_task("train:latest", 1);
+        task.restart_policy = Some(RestartPolicy::OnFailure);
+        tasks.insert("worker".to_string(), task);
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            coordinator_task: "worker".to_string(),
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
+        assert_eq!(
+            prepared["worker"].restart_policy,
+            Some(RestartPolicy::Never),
+            "training compiler must override OnFailure to Never"
+        );
+    }
+
+    #[test]
+    fn prepare_training_injects_coordinator_complete_policy() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 3));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
+
+        // Coordinator task should get TaskCompleted→CompleteJob
+        let master_policies = prepared["master"].policies.as_ref().unwrap();
+        assert_eq!(master_policies.len(), 1);
+        assert_eq!(
+            master_policies[0].event,
+            lattice_common::crd::VolcanoPolicyEvent::TaskCompleted
+        );
+        assert_eq!(
+            master_policies[0].action,
+            lattice_common::crd::VolcanoPolicyAction::CompleteJob
+        );
+
+        // Worker task should have no policies injected
+        assert!(prepared["worker"].policies.is_none());
+    }
+
+    #[test]
+    fn prepare_training_respects_explicit_coordinator_policies() {
+        let mut tasks = BTreeMap::new();
+        let mut master = make_training_task("train:latest", 1);
+        master.policies = Some(vec![lattice_common::crd::VolcanoPolicy {
+            event: lattice_common::crd::VolcanoPolicyEvent::TaskCompleted,
+            action: lattice_common::crd::VolcanoPolicyAction::TerminateJob,
+        }]);
+        tasks.insert("master".to_string(), master);
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 3));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
+
+        // User's explicit policy should be preserved, not overridden
+        let master_policies = prepared["master"].policies.as_ref().unwrap();
+        assert_eq!(master_policies.len(), 1);
+        assert_eq!(
+            master_policies[0].action,
+            lattice_common::crd::VolcanoPolicyAction::TerminateJob,
+            "user's explicit policy should not be overridden"
         );
     }
 
@@ -1314,6 +1419,7 @@ mod tests {
                 },
                 runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::Never),
+                policies: None,
             },
         );
 

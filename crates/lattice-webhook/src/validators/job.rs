@@ -180,4 +180,82 @@ mod tests {
         let response = validator.validate(&request);
         assert!(!response.allowed, "missing object should be denied");
     }
+
+    #[test]
+    fn denies_training_task_with_on_failure_restart() {
+        let json = serde_json::json!({
+            "apiVersion": "lattice.dev/v1alpha1",
+            "kind": "LatticeJob",
+            "metadata": { "name": "bad-job", "namespace": "default" },
+            "spec": {
+                "training": {
+                    "framework": "PyTorch",
+                    "coordinatorTask": "worker"
+                },
+                "tasks": {
+                    "worker": {
+                        "replicas": 1,
+                        "restartPolicy": "OnFailure",
+                        "workload": {
+                            "containers": {
+                                "main": {
+                                    "image": "train:latest",
+                                    "command": ["/usr/bin/python", "-c", "train()"],
+                                    "resources": {
+                                        "limits": { "cpu": "1", "memory": "1Gi" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let validator = JobValidator;
+        let request = make_admission_request("lattice.dev", "v1alpha1", "latticejobs", json);
+        let response = validator.validate(&request);
+        assert!(
+            !response.allowed,
+            "training task with OnFailure restart should be denied"
+        );
+    }
+
+    #[test]
+    fn allows_job_with_explicit_policies() {
+        let json = serde_json::json!({
+            "apiVersion": "lattice.dev/v1alpha1",
+            "kind": "LatticeJob",
+            "metadata": { "name": "my-job", "namespace": "default" },
+            "spec": {
+                "policies": [
+                    { "event": "PodFailed", "action": "AbortJob" }
+                ],
+                "tasks": {
+                    "worker": {
+                        "replicas": 2,
+                        "workload": {
+                            "containers": {
+                                "main": {
+                                    "image": "train:latest",
+                                    "command": ["/usr/bin/python", "-c", "train()"],
+                                    "resources": {
+                                        "limits": { "cpu": "1", "memory": "1Gi" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let validator = JobValidator;
+        let request = make_admission_request("lattice.dev", "v1alpha1", "latticejobs", json);
+        let response = validator.validate(&request);
+        assert!(
+            response.allowed,
+            "job with explicit policies should be allowed"
+        );
+    }
 }
