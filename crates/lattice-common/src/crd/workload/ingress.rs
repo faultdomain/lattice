@@ -59,7 +59,7 @@ pub struct RouteSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<Vec<RouteRule>>,
 
-    /// TLS configuration — inheritable from LatticeServicePolicy
+    /// TLS configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<IngressTls>,
 }

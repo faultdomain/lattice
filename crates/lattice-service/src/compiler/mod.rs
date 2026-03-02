@@ -40,7 +40,7 @@ use lattice_common::crd::LatticeMeshMember;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
 use lattice_workload::CompilationError;
 
-use crate::crd::{LatticeService, MonitoringConfig, ProviderType, ServiceBackupSpec};
+use crate::crd::{LatticeService, MonitoringConfig, ProviderType};
 use crate::graph::ServiceGraph;
 use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
 
@@ -139,7 +139,6 @@ pub struct ServiceCompiler<'a> {
     cedar: &'a PolicyEngine,
     monitoring: MonitoringConfig,
     extension_phases: &'a [Arc<dyn CompilerPhase>],
-    effective_backup: Option<ServiceBackupSpec>,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -165,7 +164,6 @@ impl<'a> ServiceCompiler<'a> {
             cedar,
             monitoring,
             extension_phases: &[],
-            effective_backup: None,
         }
     }
 
@@ -175,14 +173,6 @@ impl<'a> ServiceCompiler<'a> {
     /// `DynamicResource` entries to `compiled.extensions`.
     pub fn with_phases(mut self, phases: &'a [Arc<dyn CompilerPhase>]) -> Self {
         self.extension_phases = phases;
-        self
-    }
-
-    /// Set the effective backup spec (merged from policies + inline).
-    ///
-    /// When set, this overrides the service's inline `spec.backup` during compilation.
-    pub fn with_effective_backup(mut self, backup: Option<ServiceBackupSpec>) -> Self {
-        self.effective_backup = backup;
         self
     }
 
@@ -282,12 +272,7 @@ impl<'a> ServiceCompiler<'a> {
         }
 
         // Inject Velero backup annotations into pod template if backup is configured.
-        // Use effective_backup (merged from policies + inline) when set, else fall back
-        // to the service's inline spec.backup.
-        let backup_spec = self
-            .effective_backup
-            .as_ref()
-            .or(service.spec.backup.as_ref());
+        let backup_spec = service.spec.backup.as_ref();
         if let Some(backup_spec) = backup_spec {
             let backup_annotations =
                 lattice_workload::backup::compile_backup_annotations(backup_spec);
@@ -302,8 +287,7 @@ impl<'a> ServiceCompiler<'a> {
         }
 
         // Collect backup hook binaries for Tetragon whitelist inclusion.
-        // Uses the effective backup (merged from policies + inline) so policy-injected
-        // hooks are also whitelisted. Velero executes these inside the pod.
+        // Velero executes these inside the pod.
         let hook_binaries = backup_spec.map(|b| b.hook_binaries()).unwrap_or_default();
         let tracing_policies = lattice_tetragon::compile_tracing_policies(
             name,
@@ -997,100 +981,5 @@ mod tests {
         let output = compiler.compile(&service).await.unwrap();
 
         assert!(output.workloads.deployment.is_some());
-    }
-
-    // =========================================================================
-    // Story: Effective Backup from Policy Overrides Inline
-    // =========================================================================
-
-    #[tokio::test]
-    async fn effective_backup_overrides_inline() {
-        use crate::crd::{
-            BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
-            VolumeBackupSpec,
-        };
-
-        let (graph, cedar) = test_setup();
-
-        // Service has inline backup with hooks only
-        let mut service = make_service("my-db", "prod");
-        service.spec.backup = Some(ServiceBackupSpec {
-            hooks: Some(BackupHooksSpec {
-                pre: vec![BackupHook {
-                    name: "inline-freeze".to_string(),
-                    container: "main".to_string(),
-                    command: vec!["/bin/sh".to_string(), "-c".to_string(), "sync".to_string()],
-                    timeout: None,
-                    on_error: HookErrorAction::Continue,
-                }],
-                post: vec![],
-            }),
-            volumes: None,
-            ..Default::default()
-        });
-
-        // Effective backup from policy merge: has volumes but no hooks
-        let effective = ServiceBackupSpec {
-            hooks: None,
-            volumes: Some(VolumeBackupSpec {
-                include: vec!["data".to_string()],
-                exclude: vec![],
-                default_policy: VolumeBackupDefault::OptIn,
-            }),
-            ..Default::default()
-        };
-
-        let compiler = test_compiler(&graph, &cedar).with_effective_backup(Some(effective));
-        let output = compiler.compile(&service).await.unwrap();
-
-        let deployment = output.workloads.deployment.expect("should have deployment");
-        let annotations = &deployment.spec.template.metadata.annotations;
-
-        // Effective backup is used — it has volumes but NOT hooks
-        assert_eq!(
-            annotations.get("backup.velero.io/backup-volumes"),
-            Some(&"data".to_string())
-        );
-        // Inline hooks are NOT used because effective_backup takes precedence
-        assert!(!annotations.contains_key("pre.hook.backup.velero.io/container"));
-    }
-
-    #[tokio::test]
-    async fn effective_backup_none_falls_back_to_inline() {
-        use crate::crd::{BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec};
-
-        let (graph, cedar) = test_setup();
-
-        let mut service = make_service("my-db", "prod");
-        service.spec.backup = Some(ServiceBackupSpec {
-            hooks: Some(BackupHooksSpec {
-                pre: vec![BackupHook {
-                    name: "inline-hook".to_string(),
-                    container: "main".to_string(),
-                    command: vec!["/bin/sh".to_string(), "-c".to_string(), "sync".to_string()],
-                    timeout: Some("30s".to_string()),
-                    on_error: HookErrorAction::Fail,
-                }],
-                post: vec![],
-            }),
-            volumes: None,
-            ..Default::default()
-        });
-
-        // No effective backup — should fall back to inline
-        let compiler = test_compiler(&graph, &cedar).with_effective_backup(None);
-        let output = compiler.compile(&service).await.unwrap();
-
-        let deployment = output.workloads.deployment.expect("should have deployment");
-        let annotations = &deployment.spec.template.metadata.annotations;
-
-        assert_eq!(
-            annotations.get("pre.hook.backup.velero.io/container"),
-            Some(&"main".to_string())
-        );
-        assert_eq!(
-            annotations.get("pre.hook.backup.velero.io/timeout"),
-            Some(&"30s".to_string())
-        );
     }
 }

@@ -95,8 +95,7 @@ pub struct VolumeBackupSpec {
 /// Service-level backup configuration
 ///
 /// Defines Velero backup hooks and volume backup policies for a service.
-/// This spec is shared between `LatticeService.spec.backup` (inline) and
-/// `LatticeServicePolicy.spec.backup` (policy overlay).
+/// This spec is used via `LatticeService.spec.backup`.
 ///
 /// When `schedule` is set, the service controller generates a dedicated Velero
 /// Schedule scoped to this service's namespace and labels. When `schedule` is

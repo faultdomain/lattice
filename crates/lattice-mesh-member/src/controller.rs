@@ -223,12 +223,7 @@ pub async fn reconcile(
     let inbound_edges = ctx.graph.get_active_inbound_edges(namespace, &name);
     let outbound_edges = ctx.graph.get_active_outbound_edges(namespace, &name);
     let cedar_epoch = ctx.cedar.as_ref().map_or(0, |c| c.reload_epoch());
-    let graph_hash = compute_edge_hash(
-        &inbound_edges,
-        &outbound_edges,
-        ctx.graph.policy_epoch(),
-        cedar_epoch,
-    );
+    let graph_hash = compute_edge_hash(&inbound_edges, &outbound_edges, cedar_epoch);
 
     // Skip reconciliation if spec AND graph state haven't changed
     if is_status_current(&member, &graph_hash) {

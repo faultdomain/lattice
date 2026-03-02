@@ -8,7 +8,6 @@
 
 pub mod compiler;
 pub mod controller;
-pub mod policy_controller;
 pub mod workload;
 
 // Bridge lattice_common types into this crate's namespace.

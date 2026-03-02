@@ -8,15 +8,14 @@
 //! can declare dependencies on services in other namespaces.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::{DashMap, DashSet};
 use tracing::warn;
 
 use crate::crd::{
-    EgressRule, IngressPolicySpec, LatticeMeshMemberSpec, LatticeServicePolicy, LatticeServiceSpec,
-    MeshMemberTarget, PeerAuth, ServiceBackupSpec, ServiceSelector, VolumeParams, WorkloadSpec,
+    EgressRule, LatticeMeshMemberSpec, LatticeServiceSpec, MeshMemberTarget, PeerAuth,
+    VolumeParams, WorkloadSpec,
 };
 
 /// Fully qualified service reference: (namespace, name)
@@ -377,48 +376,17 @@ fn edge_fingerprint(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
 ///
 /// Sorts edges by namespace/name so the hash is stable regardless of graph
 /// iteration order, appends policy and cedar epoch suffixes, then feeds the
-/// result through `deterministic_hash`. The epochs ensure that policy changes
+/// result through `deterministic_hash`. The cedar epoch ensures that policy changes
 /// trigger re-reconciliation even when graph topology is unchanged.
 pub fn compute_edge_hash(
     inbound: &[ActiveEdge],
     outbound: &[ActiveEdge],
-    policy_epoch: u64,
     cedar_epoch: u64,
 ) -> String {
     use std::fmt::Write;
     let mut input = edge_fingerprint(inbound, outbound);
-    let _ = write!(input, "policy:{policy_epoch},cedar:{cedar_epoch}");
+    let _ = write!(input, "cedar:{cedar_epoch}");
     crate::deterministic_hash(&input)
-}
-
-/// A cached policy node in the service graph
-#[derive(Clone, Debug)]
-pub struct PolicyNode {
-    /// Policy name
-    pub name: String,
-    /// Policy namespace
-    pub namespace: String,
-    /// Selector for matching services
-    pub selector: ServiceSelector,
-    /// Priority (higher = evaluated first)
-    pub priority: i32,
-    /// Backup configuration
-    pub backup: Option<ServiceBackupSpec>,
-    /// Ingress defaults
-    pub ingress: Option<IngressPolicySpec>,
-}
-
-impl From<&LatticeServicePolicy> for PolicyNode {
-    fn from(policy: &LatticeServicePolicy) -> Self {
-        Self {
-            name: policy.metadata.name.clone().unwrap_or_default(),
-            namespace: policy.metadata.namespace.clone().unwrap_or_default(),
-            selector: policy.spec.selector.clone(),
-            priority: policy.spec.priority,
-            backup: policy.spec.backup.clone(),
-            ingress: policy.spec.ingress.clone(),
-        }
-    }
 }
 
 /// Volume ownership record: who owns a shared volume and who may consume it
@@ -450,12 +418,6 @@ pub struct ServiceGraph {
     /// Namespace index: namespace -> [service_names]
     ns_index: DashMap<String, HashSet<String>>,
 
-    /// Cached LatticeServicePolicy nodes: (namespace, name) -> PolicyNode
-    policies: DashMap<QualifiedName, PolicyNode>,
-
-    /// Cached namespace labels: namespace -> labels
-    ns_labels: DashMap<String, BTreeMap<String, String>>,
-
     /// Services with `depends_all: true` (wildcard outbound)
     depends_all_nodes: DashSet<QualifiedName>,
 
@@ -464,11 +426,6 @@ pub struct ServiceGraph {
     /// Only shared volumes (those with both `id` and `size`) are indexed.
     /// Updated on put_service/delete_service.
     volume_owners: DashMap<(String, String), VolumeOwnership>,
-
-    /// Monotonic counter bumped when cedar or service policies change.
-    /// Used by the service controller to detect external state changes
-    /// that require recompilation even when the service spec is unchanged.
-    policy_epoch: AtomicU64,
 
     /// Outbound edge targets added or removed by the most recent `put_node()`.
     /// Keyed by the service that changed. Consumed by `drain_edge_diffs()`.
@@ -489,11 +446,8 @@ impl ServiceGraph {
             edges_out: DashMap::new(),
             edges_in: DashMap::new(),
             ns_index: DashMap::new(),
-            policies: DashMap::new(),
-            ns_labels: DashMap::new(),
             depends_all_nodes: DashSet::new(),
             volume_owners: DashMap::new(),
-            policy_epoch: AtomicU64::new(0),
             edge_diffs: DashMap::new(),
         }
     }
@@ -902,30 +856,6 @@ impl ServiceGraph {
             .unwrap_or(0)
     }
 
-    /// Insert or update a policy in the graph
-    pub fn put_policy(&self, node: PolicyNode) {
-        let key = (node.namespace.clone(), node.name.clone());
-        self.policies.insert(key, node);
-    }
-
-    /// Remove a policy from the graph
-    pub fn delete_policy(&self, namespace: &str, name: &str) {
-        let key = (namespace.to_string(), name.to_string());
-        self.policies.remove(&key);
-    }
-
-    /// Increment the policy epoch to signal that cedar or service policies changed.
-    /// Service controllers use this to detect when recompilation is needed even
-    /// though the service spec itself is unchanged.
-    pub fn bump_policy_epoch(&self) {
-        self.policy_epoch.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Read the current policy epoch.
-    pub fn policy_epoch(&self) -> u64 {
-        self.policy_epoch.load(Ordering::Relaxed)
-    }
-
     /// Drain edge diffs recorded by `put_node()` for a given service.
     ///
     /// Returns the set of outbound edge targets that were added or removed
@@ -934,48 +864,6 @@ impl ServiceGraph {
     pub fn drain_edge_diffs(&self, namespace: &str, name: &str) -> Option<HashSet<QualifiedName>> {
         let key = (namespace.to_string(), name.to_string());
         self.edge_diffs.remove(&key).map(|(_, diff)| diff)
-    }
-
-    /// Cache namespace labels
-    pub fn put_namespace_labels(&self, namespace: &str, labels: BTreeMap<String, String>) {
-        self.ns_labels.insert(namespace.to_string(), labels);
-    }
-
-    /// Get cached namespace labels (returns None if not yet cached)
-    pub fn get_namespace_labels(&self, namespace: &str) -> Option<BTreeMap<String, String>> {
-        self.ns_labels.get(namespace).map(|v| v.clone())
-    }
-
-    /// Find policies matching a service, sorted by priority DESC then name ASC
-    pub fn matching_policies(
-        &self,
-        service_labels: &BTreeMap<String, String>,
-        service_namespace: &str,
-    ) -> Vec<PolicyNode> {
-        let ns_labels = self
-            .ns_labels
-            .get(service_namespace)
-            .map(|v| v.clone())
-            .unwrap_or_default();
-
-        let mut matching: Vec<PolicyNode> = self
-            .policies
-            .iter()
-            .filter(|entry| {
-                let p = entry.value();
-                p.selector
-                    .matches(service_labels, &ns_labels, &p.namespace, service_namespace)
-            })
-            .map(|entry| entry.value().clone())
-            .collect();
-
-        matching.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-
-        matching
     }
 
     /// Get the owner of a shared volume by namespace and volume ID.
@@ -1028,8 +916,6 @@ impl ServiceGraph {
         self.edges_out.clear();
         self.edges_in.clear();
         self.ns_index.clear();
-        self.policies.clear();
-        self.ns_labels.clear();
         self.depends_all_nodes.clear();
         self.volume_owners.clear();
     }

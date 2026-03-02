@@ -7,7 +7,6 @@
 //! The controller maintains a ServiceGraph for tracking service dependencies
 //! and allowed callers for network policy generation.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,12 +33,11 @@ use lattice_common::NoopEventPublisher;
 
 use crate::compiler::{ApplyLayer, CompiledService, CompilerPhase, ServiceCompiler};
 use crate::crd::{
-    Condition, ConditionStatus, LatticeService, LatticeServicePolicy, LatticeServiceSpec,
-    LatticeServiceStatus, MonitoringConfig, ProviderType, ServiceBackupSpec, ServicePhase,
+    Condition, ConditionStatus, LatticeService, LatticeServiceSpec, LatticeServiceStatus,
+    MonitoringConfig, ProviderType, ServicePhase,
 };
 use crate::graph::ServiceGraph;
 use crate::Error;
-use lattice_workload::backup::merge_backup_specs;
 
 const FIELD_MANAGER: &str = "lattice-service-controller";
 
@@ -83,12 +81,6 @@ pub trait ServiceKubeClient: Send + Sync {
     /// List all LatticeServices across all namespaces
     async fn list_services(&self) -> Result<Vec<LatticeService>, Error>;
 
-    /// List all LatticeServicePolicies across all namespaces
-    async fn list_policies(&self) -> Result<Vec<LatticeServicePolicy>, Error>;
-
-    /// Get labels for a namespace (returns empty map if namespace not found)
-    async fn get_namespace_labels(&self, name: &str) -> Result<BTreeMap<String, String>, Error>;
-
     /// Apply compiled workloads and policies to the cluster
     async fn apply_compiled_service(
         &self,
@@ -127,20 +119,6 @@ pub trait ServiceKubeClient: Send + Sync {
 pub struct ServiceKubeClientImpl {
     client: Client,
     registry: Arc<CrdRegistry>,
-}
-
-/// Fetch labels for a Kubernetes namespace. Returns empty map if not found.
-pub(crate) async fn fetch_namespace_labels(
-    client: &Client,
-    name: &str,
-) -> Result<BTreeMap<String, String>, kube::Error> {
-    use k8s_openapi::api::core::v1::Namespace;
-    let api: Api<Namespace> = Api::all(client.clone());
-    Ok(api
-        .get_opt(name)
-        .await?
-        .and_then(|ns| ns.metadata.labels)
-        .unwrap_or_default())
 }
 
 impl ServiceKubeClientImpl {
@@ -188,16 +166,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let api: Api<LatticeService> = Api::all(self.client.clone());
         let list = api.list(&Default::default()).await?;
         Ok(list.items)
-    }
-
-    async fn list_policies(&self) -> Result<Vec<LatticeServicePolicy>, Error> {
-        let api: Api<LatticeServicePolicy> = Api::all(self.client.clone());
-        let list = api.list(&Default::default()).await?;
-        Ok(list.items)
-    }
-
-    async fn get_namespace_labels(&self, name: &str) -> Result<BTreeMap<String, String>, Error> {
-        Ok(fetch_namespace_labels(&self.client, name).await?)
     }
 
     async fn apply_compiled_service(
@@ -757,12 +725,8 @@ pub async fn reconcile(
     // All other phases share the same compile path with an inputs-hash guard.
     let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
     let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
-    let inputs_hash = lattice_common::graph::compute_edge_hash(
-        &active_in,
-        &active_out,
-        ctx.graph.policy_epoch(),
-        ctx.cedar.reload_epoch(),
-    );
+    let inputs_hash =
+        lattice_common::graph::compute_edge_hash(&active_in, &active_out, ctx.cedar.reload_epoch());
 
     // Skip reconcile when spec and external inputs are unchanged (Ready only).
     // Compiling and Failed services always re-enter the compile path.
@@ -814,54 +778,6 @@ fn check_missing_dependencies(
         .collect()
 }
 
-/// Resolve policy defaults (backup + ingress) for a service in one pass.
-///
-/// Reads cached policies and namespace labels from the ServiceGraph.
-/// On the first reconcile for a namespace, fetches labels from the API
-/// server and caches them in the graph.
-///
-/// Extracts:
-/// - Backup: merged from matching policies (priority-ordered) + inline spec
-/// - Ingress: first matching policy with ingress set wins (no deep merge)
-async fn resolve_policy_defaults(
-    service: &LatticeService,
-    namespace: &str,
-    ctx: &ServiceContext,
-) -> (
-    Option<ServiceBackupSpec>,
-    Option<crate::crd::IngressPolicySpec>,
-) {
-    // Ensure namespace labels are cached
-    if ctx.graph.get_namespace_labels(namespace).is_none() {
-        match ctx.kube.get_namespace_labels(namespace).await {
-            Ok(labels) => ctx.graph.put_namespace_labels(namespace, labels),
-            Err(e) => {
-                debug!(error = %e, "failed to get namespace labels");
-            }
-        }
-    }
-
-    let svc_labels = service.labels();
-    let matched = ctx.graph.matching_policies(svc_labels, namespace);
-    if matched.is_empty() {
-        return (None, None);
-    }
-
-    // Backup: merge matching policy backup specs with inline spec
-    let policy_backup_specs: Vec<&ServiceBackupSpec> =
-        matched.iter().filter_map(|p| p.backup.as_ref()).collect();
-    let effective_backup = if policy_backup_specs.is_empty() {
-        None
-    } else {
-        merge_backup_specs(&policy_backup_specs, service.spec.backup.as_ref())
-    };
-
-    // Ingress: first matching policy with ingress wins
-    let ingress_defaults = matched.into_iter().find_map(|p| p.ingress);
-
-    (effective_backup, ingress_defaults)
-}
-
 /// Compile a service, apply resources, update status, and record the inputs hash.
 ///
 /// The inputs hash is stored as an annotation so the reconcile guard can
@@ -875,35 +791,6 @@ async fn compile_and_apply(
     ctx: &ServiceContext,
     inputs_hash: &str,
 ) -> Result<Action, Error> {
-    // Resolve policy defaults (backup + ingress) in one pass
-    let (effective_backup, ingress_defaults) =
-        resolve_policy_defaults(service, namespace, ctx).await;
-
-    // Apply ingress defaults to service if needed
-    let mut service_with_defaults;
-    let effective_service = if let (Some(ref ingress_spec), Some(ref defaults)) =
-        (&service.spec.ingress, &ingress_defaults)
-    {
-        let mut ingress = ingress_spec.clone();
-        // Apply default gateway class if not set
-        if ingress.gateway_class.is_none() {
-            ingress.gateway_class.clone_from(&defaults.gateway_class);
-        }
-        // Apply default TLS to routes that have no TLS
-        if let Some(ref default_tls) = defaults.tls {
-            for (_route_name, route) in ingress.routes.iter_mut() {
-                if route.tls.is_none() {
-                    route.tls = Some(default_tls.clone());
-                }
-            }
-        }
-        service_with_defaults = service.clone();
-        service_with_defaults.spec.ingress = Some(ingress);
-        &service_with_defaults
-    } else {
-        service
-    };
-
     let compiler = ServiceCompiler::new(
         &ctx.graph,
         &ctx.cluster_name,
@@ -911,9 +798,8 @@ async fn compile_and_apply(
         &ctx.cedar,
         ctx.monitoring.clone(),
     )
-    .with_phases(&ctx.extension_phases)
-    .with_effective_backup(effective_backup);
-    let compiled = match compiler.compile(effective_service).await {
+    .with_phases(&ctx.extension_phases);
+    let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {
             let msg = e.to_string();
@@ -1172,11 +1058,8 @@ async fn update_service_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{
-        BackupHook, BackupHooksSpec, ContainerSpec, DependencyDirection, HookErrorAction,
-        LatticeServicePolicySpec, ResourceSpec, ServiceSelector, VolumeBackupDefault,
-        VolumeBackupSpec, WorkloadSpec,
-    };
+    use std::collections::BTreeMap;
+    use crate::crd::{ContainerSpec, DependencyDirection, ResourceSpec, WorkloadSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
     // =========================================================================
@@ -1273,16 +1156,12 @@ mod tests {
     // Mock Setup
     // =========================================================================
 
-    fn mock_kube_with_policies(policies: Vec<LatticeServicePolicy>) -> MockServiceKubeClient {
+    fn mock_kube() -> MockServiceKubeClient {
         let mut mock = MockServiceKubeClient::new();
         mock.expect_patch_service_status()
             .returning(|_, _, _| Ok(()));
         mock.expect_get_service().returning(|_, _| Ok(None));
         mock.expect_list_services().returning(|| Ok(vec![]));
-        mock.expect_list_policies()
-            .returning(move || Ok(policies.clone()));
-        mock.expect_get_namespace_labels()
-            .returning(|_| Ok(BTreeMap::new()));
         mock.expect_apply_compiled_service()
             .returning(|_, _, _| Ok(()));
         mock.expect_patch_service_annotation()
@@ -1290,23 +1169,6 @@ mod tests {
         mock.expect_is_mesh_member_ready()
             .returning(|_, _| Ok(true));
         mock
-    }
-
-    /// Helper to populate the graph with policies from LatticeServicePolicy objects
-    fn populate_graph_policies(ctx: &ServiceContext, policies: &[LatticeServicePolicy]) {
-        for p in policies {
-            ctx.graph.put_policy(p.into());
-        }
-    }
-
-    fn make_hook(name: &str, cmd: &str) -> BackupHook {
-        BackupHook {
-            name: name.to_string(),
-            container: "main".to_string(),
-            command: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()],
-            timeout: None,
-            on_error: HookErrorAction::Continue,
-        }
     }
 
     // =========================================================================
@@ -1317,7 +1179,7 @@ mod tests {
     #[tokio::test]
     async fn new_service_transitions_to_compiling() {
         let service = Arc::new(sample_service("my-service"));
-        let mock_kube = mock_kube_with_policies(vec![]);
+        let mock_kube = mock_kube();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         let action = reconcile(service, ctx.clone())
@@ -1339,7 +1201,7 @@ mod tests {
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
         let service = Arc::new(service);
 
-        let mock_kube = mock_kube_with_policies(vec![]);
+        let mock_kube = mock_kube();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Put the service in the graph first
@@ -1360,7 +1222,7 @@ mod tests {
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
         let service = Arc::new(service);
 
-        let mut mock_kube = mock_kube_with_policies(vec![]);
+        let mut mock_kube = mock_kube();
         mock_kube
             .expect_cleanup_orphaned_resources()
             .returning(|_, _, _| Ok(()));
@@ -1386,7 +1248,7 @@ mod tests {
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Ready));
         let service = Arc::new(service);
 
-        let mut mock_kube = mock_kube_with_policies(vec![]);
+        let mut mock_kube = mock_kube();
         mock_kube
             .expect_cleanup_orphaned_resources()
             .returning(|_, _, _| Ok(()));
@@ -1410,7 +1272,7 @@ mod tests {
         service.spec.workload.containers.clear();
         let service = Arc::new(service);
 
-        let mock_kube = mock_kube_with_policies(vec![]);
+        let mock_kube = mock_kube();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         let action = reconcile(service, ctx)
@@ -1428,7 +1290,7 @@ mod tests {
     /// Story: Graph tracks active edges with bilateral agreements
     #[tokio::test]
     async fn graph_tracks_bilateral_agreements() {
-        let mock_kube = mock_kube_with_policies(vec![]);
+        let mock_kube = mock_kube();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Frontend depends on backend
@@ -1448,7 +1310,7 @@ mod tests {
     /// Story: Graph handles service deletion
     #[tokio::test]
     async fn graph_handles_deletion() {
-        let mock_kube = mock_kube_with_policies(vec![]);
+        let mock_kube = mock_kube();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Add a service
@@ -1499,7 +1361,7 @@ mod tests {
     /// Story: Services are isolated by environment
     #[tokio::test]
     async fn services_isolated_by_environment() {
-        let mock_kube = mock_kube_with_policies(vec![]);
+        let mock_kube = mock_kube();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Add same-named service to different environments
@@ -1524,8 +1386,8 @@ mod tests {
     /// Story: Context can share graph across instances
     #[test]
     fn shared_graph_across_contexts() {
-        let mock_kube1 = Arc::new(mock_kube_with_policies(vec![]));
-        let mock_kube2 = Arc::new(mock_kube_with_policies(vec![]));
+        let mock_kube1 = Arc::new(mock_kube());
+        let mock_kube2 = Arc::new(mock_kube());
         let shared_graph = Arc::new(ServiceGraph::new());
         let cedar = Arc::new(PolicyEngine::new());
 
@@ -1554,136 +1416,6 @@ mod tests {
 
         // Should be visible via ctx2
         assert!(ctx2.graph.get_service("shared", "svc").is_some());
-    }
-
-    // =========================================================================
-    // Story: Policy-based backup merging in compile_and_apply
-    // =========================================================================
-
-    fn make_policy(
-        name: &str,
-        namespace: &str,
-        priority: i32,
-        backup: Option<ServiceBackupSpec>,
-    ) -> LatticeServicePolicy {
-        LatticeServicePolicy {
-            metadata: ObjectMeta {
-                name: Some(name.to_string()),
-                namespace: Some(namespace.to_string()),
-                ..Default::default()
-            },
-            spec: LatticeServicePolicySpec {
-                selector: ServiceSelector::default(), // matches all in same namespace
-                description: None,
-                priority,
-                backup,
-                ingress: None,
-            },
-            status: None,
-        }
-    }
-
-    /// Story: When policies with backup specs match a service, compile_and_apply
-    /// produces backup annotations on the deployment
-    #[tokio::test]
-    async fn policy_backup_applied_to_service() {
-        let policy_backup = ServiceBackupSpec {
-            hooks: Some(BackupHooksSpec {
-                pre: vec![BackupHook {
-                    timeout: Some("60s".to_string()),
-                    on_error: HookErrorAction::Fail,
-                    ..make_hook("policy-freeze", "sync")
-                }],
-                post: vec![],
-            }),
-            volumes: Some(VolumeBackupSpec {
-                include: vec!["data".to_string()],
-                exclude: vec![],
-                default_policy: VolumeBackupDefault::OptIn,
-            }),
-            ..Default::default()
-        };
-
-        let policy = make_policy("db-backup", "test", 100, Some(policy_backup));
-        let mut mock_kube = mock_kube_with_policies(vec![]);
-        mock_kube
-            .expect_cleanup_orphaned_resources()
-            .returning(|_, _, _| Ok(()));
-
-        let mut service = sample_service("my-db");
-        service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
-
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
-        populate_graph_policies(&ctx, &[policy]);
-        ctx.graph.put_service("test", "my-db", &service.spec);
-
-        let result = reconcile(Arc::new(service), ctx).await;
-        assert!(result.is_ok());
-    }
-
-    /// Story: resolve_policy_defaults merges policy + inline correctly
-    #[tokio::test]
-    async fn resolve_effective_backup_merges_policies() {
-        // Low-priority policy: hooks + volumes
-        let low_policy = make_policy(
-            "low",
-            "test",
-            10,
-            Some(ServiceBackupSpec {
-                hooks: Some(BackupHooksSpec {
-                    pre: vec![make_hook("low-hook", "low")],
-                    post: vec![],
-                }),
-                volumes: Some(VolumeBackupSpec {
-                    include: vec!["low-vol".to_string()],
-                    exclude: vec![],
-                    default_policy: VolumeBackupDefault::OptIn,
-                }),
-                ..Default::default()
-            }),
-        );
-
-        // High-priority policy: hooks override low, no volumes
-        let high_policy = make_policy(
-            "high",
-            "test",
-            100,
-            Some(ServiceBackupSpec {
-                hooks: Some(BackupHooksSpec {
-                    pre: vec![make_hook("high-hook", "high")],
-                    post: vec![],
-                }),
-                volumes: None,
-                ..Default::default()
-            }),
-        );
-
-        let policies = vec![low_policy, high_policy];
-        let mock_kube = mock_kube_with_policies(vec![]);
-        let service = sample_service("my-app");
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
-        populate_graph_policies(&ctx, &policies);
-
-        let (backup, _ingress) = resolve_policy_defaults(&service, "test", &ctx).await;
-
-        let backup = backup.expect("should have merged backup");
-        // Hooks from high-priority policy
-        assert_eq!(backup.hooks.as_ref().unwrap().pre[0].name, "high-hook");
-        // Volumes from low-priority (high didn't set them)
-        assert_eq!(backup.volumes.as_ref().unwrap().include, vec!["low-vol"]);
-    }
-
-    /// Story: No matching policies returns None
-    #[tokio::test]
-    async fn resolve_effective_backup_no_policies() {
-        let mock_kube = mock_kube_with_policies(vec![]);
-        let service = sample_service("my-app");
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
-
-        let (backup, ingress) = resolve_policy_defaults(&service, "test", &ctx).await;
-
-        assert!(backup.is_none());
-        assert!(ingress.is_none());
     }
 
     // =========================================================================
@@ -1774,35 +1506,6 @@ mod tests {
         );
     }
 
-    /// Story: Policy matches only same namespace when no namespace selector
-    #[tokio::test]
-    async fn resolve_effective_backup_namespace_scoping() {
-        // Policy in "other" namespace — should NOT match service in "test"
-        let policy = make_policy(
-            "other-ns-policy",
-            "other",
-            100,
-            Some(ServiceBackupSpec {
-                hooks: Some(BackupHooksSpec {
-                    pre: vec![make_hook("should-not-match", "true")],
-                    post: vec![],
-                }),
-                volumes: None,
-                ..Default::default()
-            }),
-        );
-
-        let mock_kube = mock_kube_with_policies(vec![]);
-        let service = sample_service("my-app");
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
-        populate_graph_policies(&ctx, &[policy]);
-
-        let (backup, _ingress) = resolve_policy_defaults(&service, "test", &ctx).await;
-
-        // Policy is in "other" namespace, service is in "test" — no match
-        assert!(backup.is_none());
-    }
-
     // =========================================================================
     // Orphan Cleanup Tests — verify resources are cleaned up on spec updates
     // =========================================================================
@@ -1811,7 +1514,7 @@ mod tests {
     fn mock_kube_tracking_cleanup(
         flag: Arc<std::sync::atomic::AtomicBool>,
     ) -> MockServiceKubeClient {
-        let mut mock = mock_kube_with_policies(vec![]);
+        let mut mock = mock_kube();
         mock.expect_cleanup_orphaned_resources()
             .returning(move |_, _, _| {
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1868,7 +1571,7 @@ mod tests {
     /// transition to Ready even if cleanup encounters an error.
     #[tokio::test]
     async fn cleanup_failure_is_nonfatal() {
-        let mut mock = mock_kube_with_policies(vec![]);
+        let mut mock = mock_kube();
         mock.expect_cleanup_orphaned_resources()
             .returning(|_, _, _| Err(Error::internal("cleanup failed")));
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock)));

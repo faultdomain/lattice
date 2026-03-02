@@ -27,15 +27,14 @@ use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     BackupStore, CedarPolicy, CloudProvider, LatticeCluster, LatticeClusterBackup, LatticeJob,
-    LatticeMeshMember, LatticeModel, LatticeRestore, LatticeService, LatticeServicePolicy,
-    MonitoringConfig, OIDCProvider, ProviderType, SecretProvider,
+    LatticeMeshMember, LatticeModel, LatticeRestore, LatticeService, MonitoringConfig,
+    OIDCProvider, ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
-use lattice_service::policy_controller as service_policy_ctrl;
 
 /// Watcher timeout (seconds) - must be less than client read_timeout (30s)
 /// This forces the API server to close the watch before the client times out,
@@ -73,7 +72,7 @@ pub fn build_cluster_controllers(
     )]
 }
 
-/// Build service controller futures (LatticeService, LatticeServicePolicy)
+/// Build service controller futures (LatticeService, LatticeMeshMember)
 ///
 /// Returns the controller futures and the shared ServiceGraph (for use by job controllers).
 pub async fn build_service_controllers(
@@ -109,11 +108,9 @@ pub async fn build_service_controllers(
     let services_for_watch = services.clone();
     let graph_for_dep_watch = service_ctx.graph.clone();
     let graph_for_cedar_watch = service_ctx.graph.clone();
-    let graph_for_policy_watch = service_ctx.graph.clone();
     let graph_for_mm_watch = service_ctx.graph.clone();
     let cedar_policies: Api<CedarPolicy> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let service_policies: Api<LatticeServicePolicy> = Api::all(client.clone());
     let mesh_members_for_svc: Api<LatticeMeshMember> = Api::all(client.clone());
 
     let svc_ctrl = Controller::new(services, watcher_config())
@@ -131,41 +128,14 @@ pub async fn build_service_controllers(
                 .collect()
         })
         .watches(cedar_policies, watcher_config(), move |_policy| {
-            // NOTE: Do NOT bump_policy_epoch here. The cedar validation controller
-            // reloads the PolicyEngine (which bumps its own reload_epoch) and then
-            // patches the CedarPolicy status. That status patch triggers another
-            // watch event, ensuring services re-reconcile after reload is complete.
+            // The cedar validation controller reloads the PolicyEngine (which bumps
+            // its own reload_epoch) and then patches the CedarPolicy status. That
+            // status patch triggers another watch event, ensuring services
+            // re-reconcile after reload is complete.
             let refs = all_service_refs(&graph_for_cedar_watch);
             tracing::info!(
                 service_count = refs.len(),
                 "CedarPolicy changed, re-reconciling all services"
-            );
-            refs
-        })
-        .watches(service_policies, watcher_config(), move |policy| {
-            let graph = graph_for_policy_watch.clone();
-            let policy_name = policy
-                .metadata
-                .name
-                .as_deref()
-                .unwrap_or_default()
-                .to_string();
-            let policy_ns = policy
-                .metadata
-                .namespace
-                .as_deref()
-                .unwrap_or_default()
-                .to_string();
-
-            graph.put_policy(lattice_common::graph::PolicyNode::from(&policy));
-            graph.bump_policy_epoch();
-
-            let refs = all_service_refs(&graph);
-            tracing::info!(
-                policy = %policy_name,
-                namespace = %policy_ns,
-                service_count = refs.len(),
-                "LatticeServicePolicy changed, re-reconciling services"
             );
             refs
         })
@@ -189,19 +159,6 @@ pub async fn build_service_controllers(
             service_ctx.clone(),
         )
         .for_each(log_reconcile_result("Service"));
-
-    let policy_ctx = Arc::new(ControllerContext::new(client.clone()));
-    let policy_ctrl = Controller::new(
-        Api::<LatticeServicePolicy>::all(client.clone()),
-        watcher_config(),
-    )
-    .shutdown_on_signal()
-    .run(
-        service_policy_ctrl::reconcile,
-        lattice_common::default_error_policy,
-        policy_ctx,
-    )
-    .for_each(log_reconcile_result("ServicePolicy"));
 
     // ── MeshMember controller ──
     let mm_ctx = Arc::new(mesh_member_ctrl::MeshMemberContext {
@@ -256,15 +213,11 @@ pub async fn build_service_controllers(
         .for_each(log_reconcile_result("MeshMember"));
 
     tracing::info!("- LatticeService controller");
-    tracing::info!("- LatticeServicePolicy controller");
     tracing::info!("- LatticeMeshMember controller");
 
     let graph = service_ctx.graph.clone();
 
-    (
-        vec![Box::pin(svc_ctrl), Box::pin(policy_ctrl), Box::pin(mm_ctrl)],
-        graph,
-    )
+    (vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)], graph)
 }
 
 /// Build job controller futures (LatticeJob)
@@ -523,11 +476,6 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
         let ns = item.metadata.namespace.as_deref().unwrap_or_default();
         let name = item.metadata.name.as_deref().unwrap_or_default();
         graph.put_service(ns, name, &item.spec);
-    })
-    .await;
-
-    warmup_list::<LatticeServicePolicy>(client, "LatticeServicePolicies", |item| {
-        graph.put_policy(item.into());
     })
     .await;
 
