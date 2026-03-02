@@ -275,5 +275,4 @@ mod tests {
         let annotations = compile_backup_annotations(&spec);
         assert!(annotations.is_empty());
     }
-
 }

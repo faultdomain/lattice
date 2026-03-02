@@ -578,7 +578,7 @@ mod tests {
             },
         );
         ModelRoleSpec {
-            replicas,
+            replicas: Some(replicas),
             entry_workload: WorkloadSpec {
                 containers,
                 service: Some(ServicePortsSpec { ports }),
@@ -1179,7 +1179,7 @@ mod tests {
         );
 
         let role = ModelRoleSpec {
-            replicas: 1,
+            replicas: Some(1),
             entry_workload: WorkloadSpec {
                 containers: entry_containers,
                 resources: entry_resources,

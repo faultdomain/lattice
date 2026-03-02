@@ -150,7 +150,7 @@ fn compile_roles(
             let templates = role_templates.get(role_name)?;
             Some(ModelServingRole {
                 name: role_name.clone(),
-                replicas: role_spec.replicas,
+                replicas: role_spec.replicas(),
                 entry_template: templates.entry_template.clone(),
                 worker_replicas: role_spec.worker_replicas.unwrap_or(0),
                 worker_template: templates.worker_template.clone(),
@@ -196,7 +196,7 @@ mod tests {
 
     fn make_role(replicas: u32) -> ModelRoleSpec {
         ModelRoleSpec {
-            replicas,
+            replicas: Some(replicas),
             entry_workload: WorkloadSpec::default(),
             entry_runtime: RuntimeSpec::default(),
             worker_replicas: None,
@@ -244,7 +244,7 @@ mod tests {
         roles.insert(
             "decode".to_string(),
             ModelRoleSpec {
-                replicas: 1,
+                replicas: Some(1),
                 entry_workload: WorkloadSpec::default(),
                 entry_runtime: RuntimeSpec::default(),
                 worker_replicas: Some(4),

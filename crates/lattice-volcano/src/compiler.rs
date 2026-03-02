@@ -31,7 +31,7 @@ pub fn compile_vcjob(
     let min_available = job
         .spec
         .min_available
-        .or_else(|| Some(job.spec.tasks.values().map(|t| t.replicas).sum()));
+        .or_else(|| Some(job.spec.tasks.values().map(|t| t.replicas()).sum()));
 
     // Training jobs enable the `svc` plugin so Volcano creates a headless
     // Service and sets hostname/subdomain on each pod for per-pod DNS
@@ -143,7 +143,7 @@ fn compile_tasks(
 
             Some(VCJobTask {
                 name: task_name.clone(),
-                replicas: task_spec.replicas,
+                replicas: task_spec.replicas(),
                 template,
                 policies: task_policies,
             })
@@ -202,7 +202,7 @@ mod tests {
         tasks.insert(
             "worker".to_string(),
             JobTaskSpec {
-                replicas: 3,
+                replicas: Some(3),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::OnFailure),
@@ -238,7 +238,7 @@ mod tests {
         tasks.insert(
             "master".to_string(),
             JobTaskSpec {
-                replicas: 1,
+                replicas: Some(1),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
@@ -248,7 +248,7 @@ mod tests {
         tasks.insert(
             "worker".to_string(),
             JobTaskSpec {
-                replicas: 4,
+                replicas: Some(4),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::OnFailure),
@@ -274,7 +274,7 @@ mod tests {
         tasks.insert(
             "worker".to_string(),
             JobTaskSpec {
-                replicas: 4,
+                replicas: Some(4),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
@@ -317,7 +317,7 @@ mod tests {
         tasks.insert(
             "worker".to_string(),
             JobTaskSpec {
-                replicas: 1,
+                replicas: Some(1),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
@@ -369,7 +369,7 @@ mod tests {
         tasks.insert(
             "worker".to_string(),
             JobTaskSpec {
-                replicas: 2,
+                replicas: Some(2),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::Never),
@@ -457,7 +457,7 @@ mod tests {
         tasks.insert(
             "coordinator".to_string(),
             JobTaskSpec {
-                replicas: 1,
+                replicas: Some(1),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
@@ -486,7 +486,7 @@ mod tests {
         tasks.insert(
             "worker".to_string(),
             JobTaskSpec {
-                replicas: 1,
+                replicas: Some(1),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,

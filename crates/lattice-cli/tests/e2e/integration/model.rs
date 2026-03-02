@@ -19,10 +19,10 @@ use tracing::{info, warn};
 use lattice_common::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements, SecurityContext};
 
 use super::super::helpers::{
-    apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config,
-    resolve_model_serving_name, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
-    wait_for_resource_phase, TestHarness, CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER,
-    DEFAULT_DOWNLOADER_IMAGE, DEFAULT_TIMEOUT,
+    apply_yaml, build_busybox_service, delete_namespace, deploy_and_wait_for_phase,
+    ensure_fresh_namespace, load_fixture_config, resolve_model_serving_name, run_kubectl,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, TestHarness,
+    CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER, DEFAULT_DOWNLOADER_IMAGE, DEFAULT_TIMEOUT,
 };
 use super::super::mesh_helpers::parse_traffic_result;
 
@@ -1227,74 +1227,88 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
 const INFERENCE_TESTER_NAME: &str = "inference-tester";
 const INFERENCE_TESTER_NAMESPACE: &str = "kthena-system";
 
-/// Deploy a long-lived inference tester pod that continuously curls the decode
-/// entry service and emits cycle markers with INFERENCE:VALID / INFERENCE:INVALID
-/// results.
+/// Deploy a long-lived inference tester as a LatticeService that continuously
+/// curls the decode entry service and emits cycle markers with
+/// INFERENCE:VALID / INFERENCE:INVALID results.
 ///
-/// Runs in `kthena-system` (system namespace, exempt from mesh default-deny) to
-/// avoid needing additional mesh policies.
+/// Deployed in `kthena-system` (system namespace, exempt from mesh default-deny)
+/// to avoid needing additional mesh policies.
 async fn deploy_inference_tester(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Deploying long-lived inference tester pod...");
+    info!("[Model] Deploying inference tester LatticeService...");
 
-    let svc_url = format!(
-        "http://{}-decode.{}.svc.cluster.local:8000/v1/completions",
-        MODEL_NAME, MODEL_NAMESPACE
-    );
+    let svc_url = "http://kthena-router.kthena-system.svc.cluster.local/v1/completions";
 
-    let pod_yaml = format!(
-        r#"apiVersion: v1
-kind: Pod
-metadata:
-  name: {name}
-  namespace: {namespace}
-spec:
-  containers:
-  - name: curl
-    image: {image}
-    command: ["/bin/sh", "-c"]
-    args:
-    - |
-      while true; do
-        echo "{cycle_start}"
-        RESP=$(curl -sf -X POST "{url}" \
-          -H "Content-Type: application/json" \
-          -d '{{"model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B","prompt":"hello","max_tokens":1}}' 2>&1) || RESP=""
-        if echo "$RESP" | grep -q '"choices"'; then
-          echo "INFERENCE:VALID"
-        else
-          echo "INFERENCE:INVALID resp=$RESP"
-        fi
-        echo "{cycle_end}"
-        sleep 5
-      done
-    resources:
-      requests:
-        cpu: 10m
-        memory: 16Mi
-      limits:
-        cpu: 100m
-        memory: 64Mi
-  restartPolicy: Never"#,
-        name = INFERENCE_TESTER_NAME,
-        namespace = INFERENCE_TESTER_NAMESPACE,
-        image = *CURL_IMAGE,
+    let script = format!(
+        r#"while true; do
+echo "{cycle_start}"
+RESP=$(curl -sf -X POST "{url}" \
+  -H "Content-Type: application/json" \
+  -d '{{"model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B","prompt":"hello","max_tokens":1}}' 2>&1) || RESP=""
+if echo "$RESP" | grep -q '"choices"'; then
+  echo "INFERENCE:VALID"
+else
+  echo "INFERENCE:INVALID resp=$RESP"
+fi
+echo "{cycle_end}"
+sleep 5
+done"#,
         url = svc_url,
         cycle_start = CYCLE_START_MARKER,
         cycle_end = CYCLE_END_MARKER,
     );
 
-    apply_yaml(kubeconfig, &pod_yaml).await?;
-    info!("[Model] Inference tester pod deployed");
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "curl".to_string(),
+        ContainerSpec {
+            image: CURL_IMAGE.clone(),
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                script,
+            ]),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("10m".to_string()),
+                    memory: Some("16Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("100m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+            }),
+            ..Default::default()
+        },
+    );
+
+    let service = build_busybox_service(
+        INFERENCE_TESTER_NAME,
+        INFERENCE_TESTER_NAMESPACE,
+        containers,
+        BTreeMap::new(),
+    );
+
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        INFERENCE_TESTER_NAMESPACE,
+        service,
+        "Ready",
+        None,
+        LONG_TIMEOUT,
+    )
+    .await?;
+
+    info!("[Model] Inference tester LatticeService deployed and Ready");
     Ok(())
 }
 
-/// Clean up the inference tester pod.
+/// Clean up the inference tester LatticeService.
 async fn cleanup_inference_tester(kubeconfig: &str) {
     let _ = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
         "delete",
-        "pod",
+        "latticeservice",
         INFERENCE_TESTER_NAME,
         "-n",
         INFERENCE_TESTER_NAMESPACE,
@@ -1318,11 +1332,15 @@ async fn test_model_inference(kubeconfig: &str) -> Result<(), String> {
     let start = std::time::Instant::now();
 
     loop {
+        let label = format!("lattice.dev/service={}", INFERENCE_TESTER_NAME);
         let logs = run_kubectl(&[
             "--kubeconfig",
             kubeconfig,
             "logs",
-            INFERENCE_TESTER_NAME,
+            "-l",
+            &label,
+            "-c",
+            "curl",
             "-n",
             INFERENCE_TESTER_NAMESPACE,
             "--tail",

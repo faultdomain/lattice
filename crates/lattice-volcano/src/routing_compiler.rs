@@ -270,7 +270,7 @@ mod tests {
 
     fn make_role(replicas: u32) -> ModelRoleSpec {
         ModelRoleSpec {
-            replicas,
+            replicas: Some(replicas),
             entry_workload: WorkloadSpec::default(),
             entry_runtime: RuntimeSpec::default(),
             worker_replicas: None,

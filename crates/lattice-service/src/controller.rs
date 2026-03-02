@@ -1058,9 +1058,9 @@ async fn update_service_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use crate::crd::{ContainerSpec, DependencyDirection, ResourceSpec, WorkloadSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use std::collections::BTreeMap;
 
     // =========================================================================
     // Test Fixtures

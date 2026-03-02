@@ -208,6 +208,7 @@ impl Merge for ResourceQuantity {
 
 impl Merge for JobTaskSpec {
     fn merge_from(&mut self, defaults: &Self) {
+        merge_option(&mut self.replicas, &defaults.replicas);
         self.workload.merge_from(&defaults.workload);
         self.runtime.merge_from(&defaults.runtime);
         merge_option(&mut self.restart_policy, &defaults.restart_policy);
@@ -221,8 +222,10 @@ impl Merge for JobTaskSpec {
 
 impl Merge for ModelRoleSpec {
     fn merge_from(&mut self, defaults: &Self) {
+        merge_option(&mut self.replicas, &defaults.replicas);
         self.entry_workload.merge_from(&defaults.entry_workload);
         self.entry_runtime.merge_from(&defaults.entry_runtime);
+        merge_option(&mut self.worker_replicas, &defaults.worker_replicas);
         merge_option_deep(&mut self.worker_workload, &defaults.worker_workload);
         merge_option_deep(&mut self.worker_runtime, &defaults.worker_runtime);
         merge_option(&mut self.autoscaling, &defaults.autoscaling);

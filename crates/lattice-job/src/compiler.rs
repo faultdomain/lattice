@@ -213,7 +213,7 @@ pub async fn compile_job(
                     ],
                 );
             }
-            cumulative_offset += task_spec.replicas;
+            cumulative_offset += task_spec.replicas();
         }
     }
 
@@ -248,7 +248,7 @@ fn prepare_training_tasks(
     tasks: &BTreeMap<String, JobTaskSpec>,
     training: &TrainingConfig,
 ) -> Result<BTreeMap<String, JobTaskSpec>, JobError> {
-    let world_size: u32 = tasks.values().map(|t| t.replicas).sum();
+    let world_size: u32 = tasks.values().map(|t| t.replicas()).sum();
     let coordinator = &training.coordinator_task;
     let coordinator_addr = format!("{}-{}-0.{}", job_name, coordinator, job_name);
 
@@ -663,7 +663,7 @@ mod tests {
             },
         );
         JobTaskSpec {
-            replicas,
+            replicas: Some(replicas),
             workload: WorkloadSpec {
                 containers,
                 ..Default::default()
@@ -1415,7 +1415,7 @@ mod tests {
         tasks.insert(
             "worker".to_string(),
             JobTaskSpec {
-                replicas: 1,
+                replicas: Some(1),
                 workload: WorkloadSpec {
                     containers,
                     ..Default::default()

@@ -1077,7 +1077,7 @@ fn build_simple_job(
     tasks.insert(
         "worker".to_string(),
         JobTaskSpec {
-            replicas: 1,
+            replicas: Some(1),
             workload: lattice_common::crd::WorkloadSpec {
                 containers,
                 ..Default::default()
@@ -1217,7 +1217,7 @@ fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::La
     tasks.insert(
         "worker".to_string(),
         JobTaskSpec {
-            replicas: 1,
+            replicas: Some(1),
             workload: lattice_common::crd::WorkloadSpec {
                 containers,
                 resources,
@@ -1383,7 +1383,7 @@ fn build_model_with_bad_source(name: &str, namespace: &str) -> lattice_common::c
     roles.insert(
         "decode".to_string(),
         ModelRoleSpec {
-            replicas: 1,
+            replicas: Some(1),
             entry_workload: WorkloadSpec {
                 containers: role_containers,
                 resources: role_resources,

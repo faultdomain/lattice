@@ -160,7 +160,7 @@ pub fn compile_model_autoscaling(model: &LatticeModel) -> CompiledAutoscaling {
                         }),
                         metric_endpoint,
                     },
-                    min_replicas: role_spec.replicas,
+                    min_replicas: role_spec.replicas(),
                     max_replicas: autoscaling.max,
                 },
             },
@@ -199,7 +199,7 @@ mod tests {
 
     fn make_role_with_service(replicas: u32, service: Option<ServicePortsSpec>) -> ModelRoleSpec {
         ModelRoleSpec {
-            replicas,
+            replicas: Some(replicas),
             entry_workload: WorkloadSpec {
                 service,
                 ..Default::default()

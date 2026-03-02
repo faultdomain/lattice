@@ -298,7 +298,7 @@ fn compile_lattice_job(
     tasks.insert(
         "download".to_string(),
         JobTaskSpec {
-            replicas: 1,
+            replicas: Some(1),
             workload,
             runtime,
             restart_policy: Some(RestartPolicy::Never),
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(job.spec.tasks.len(), 1);
 
         let task = &job.spec.tasks["download"];
-        assert_eq!(task.replicas, 1);
+        assert_eq!(task.replicas, Some(1));
         assert_eq!(task.restart_policy, Some(RestartPolicy::Never));
 
         // Container

@@ -67,12 +67,12 @@ impl std::fmt::Display for RecoveryPolicy {
 ///
 /// Each role maps to a Volcano ModelServing role (e.g. prefill, decode)
 /// with separate entry and optional worker pod templates for disaggregated inference.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRoleSpec {
-    /// Number of entry replicas for this role
-    #[serde(default = "default_one")]
-    pub replicas: u32,
+    /// Number of entry replicas for this role (defaults to 1 when omitted)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<u32>,
 
     /// Entry pod workload spec (containers, volumes, env, etc.)
     #[serde(default)]
@@ -100,21 +100,10 @@ pub struct ModelRoleSpec {
     pub autoscaling: Option<ModelAutoscalingSpec>,
 }
 
-fn default_one() -> u32 {
-    1
-}
-
-impl Default for ModelRoleSpec {
-    fn default() -> Self {
-        Self {
-            replicas: default_one(),
-            entry_workload: WorkloadSpec::default(),
-            entry_runtime: RuntimeSpec::default(),
-            worker_replicas: None,
-            worker_workload: None,
-            worker_runtime: None,
-            autoscaling: None,
-        }
+impl ModelRoleSpec {
+    /// Resolved replica count (defaults to 1 when unset).
+    pub fn replicas(&self) -> u32 {
+        self.replicas.unwrap_or(1)
     }
 }
 
@@ -193,7 +182,7 @@ impl ModelRoleSpec {
     /// Validate role constraints (e.g. replicas must not exceed autoscaling max).
     pub fn validate(&self) -> Result<(), crate::Error> {
         if let Some(ref autoscaling) = self.autoscaling {
-            if self.replicas > autoscaling.max {
+            if self.replicas() > autoscaling.max {
                 return Err(crate::Error::validation(
                     "replicas cannot exceed autoscaling max",
                 ));
@@ -679,7 +668,7 @@ mod tests {
     #[test]
     fn model_role_spec_entry_only() {
         let role = ModelRoleSpec {
-            replicas: 2,
+            replicas: Some(2),
             entry_workload: WorkloadSpec::default(),
             entry_runtime: RuntimeSpec::default(),
             worker_replicas: None,
@@ -688,14 +677,14 @@ mod tests {
             autoscaling: None,
         };
         assert!(role.entry_workload.containers.is_empty());
-        assert_eq!(role.replicas, 2);
+        assert_eq!(role.replicas, Some(2));
         assert_eq!(role.worker_replicas, None);
     }
 
     #[test]
     fn model_role_spec_with_workers() {
         let role = ModelRoleSpec {
-            replicas: 1,
+            replicas: Some(1),
             entry_workload: WorkloadSpec::default(),
             entry_runtime: RuntimeSpec::default(),
             worker_replicas: Some(4),
@@ -703,7 +692,7 @@ mod tests {
             worker_runtime: None,
             autoscaling: None,
         };
-        assert_eq!(role.replicas, 1);
+        assert_eq!(role.replicas, Some(1));
         assert_eq!(role.worker_replicas, Some(4));
         assert!(role.worker_workload.is_some());
         assert!(role.worker_runtime.is_none());
@@ -715,7 +704,7 @@ mod tests {
         roles.insert(
             "prefill".to_string(),
             ModelRoleSpec {
-                replicas: 1,
+                replicas: Some(1),
                 entry_workload: WorkloadSpec::default(),
                 entry_runtime: RuntimeSpec::default(),
                 worker_replicas: None,
@@ -727,7 +716,7 @@ mod tests {
         roles.insert(
             "decode".to_string(),
             ModelRoleSpec {
-                replicas: 2,
+                replicas: Some(2),
                 entry_workload: WorkloadSpec::default(),
                 entry_runtime: RuntimeSpec::default(),
                 worker_replicas: Some(4),
@@ -743,8 +732,8 @@ mod tests {
         };
 
         assert_eq!(spec.roles.len(), 2);
-        assert_eq!(spec.roles["prefill"].replicas, 1);
-        assert_eq!(spec.roles["decode"].replicas, 2);
+        assert_eq!(spec.roles["prefill"].replicas, Some(1));
+        assert_eq!(spec.roles["decode"].replicas, Some(2));
         assert_eq!(spec.roles["decode"].worker_replicas, Some(4));
     }
 
@@ -844,7 +833,7 @@ mod tests {
         use crate::crd::workload::resources::{ResourceQuantity, ResourceRequirements};
 
         ModelRoleSpec {
-            replicas: 1,
+            replicas: Some(1),
             entry_workload: WorkloadSpec {
                 containers: BTreeMap::from([(
                     "main".to_string(),
@@ -890,7 +879,7 @@ mod tests {
             roles: BTreeMap::from([(
                 "prefill".to_string(),
                 ModelRoleSpec {
-                    replicas: 4,
+                    replicas: Some(4),
                     ..Default::default()
                 },
             )]),
@@ -900,7 +889,7 @@ mod tests {
         let roles = spec.merged_roles();
         let role = &roles["prefill"];
 
-        assert_eq!(role.replicas, 4);
+        assert_eq!(role.replicas, Some(4));
         assert_eq!(role.entry_workload.containers["main"].image, "vllm:latest");
         assert_eq!(role.entry_runtime.image_pull_secrets, vec!["reg-creds"]);
     }
@@ -915,7 +904,7 @@ mod tests {
             roles: BTreeMap::from([(
                 "decode".to_string(),
                 ModelRoleSpec {
-                    replicas: 2,
+                    replicas: Some(2),
                     entry_workload: WorkloadSpec {
                         containers: BTreeMap::from([(
                             "main".to_string(),

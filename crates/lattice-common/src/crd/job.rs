@@ -189,9 +189,9 @@ pub struct VolcanoPolicy {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct JobTaskSpec {
-    /// Number of replicas for this task
-    #[serde(default = "default_one")]
-    pub replicas: u32,
+    /// Number of replicas for this task (defaults to 1 when omitted)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<u32>,
 
     /// Shared workload spec (containers, volumes, env, etc.)
     #[serde(default)]
@@ -211,20 +211,11 @@ pub struct JobTaskSpec {
     pub policies: Option<Vec<VolcanoPolicy>>,
 }
 
-impl Default for JobTaskSpec {
-    fn default() -> Self {
-        Self {
-            replicas: default_one(),
-            workload: WorkloadSpec::default(),
-            runtime: RuntimeSpec::default(),
-            restart_policy: None,
-            policies: None,
-        }
+impl JobTaskSpec {
+    /// Resolved replica count (defaults to 1 when unset).
+    pub fn replicas(&self) -> u32 {
+        self.replicas.unwrap_or(1)
     }
-}
-
-fn default_one() -> u32 {
-    1
 }
 
 fn default_scheduler() -> String {
@@ -560,14 +551,14 @@ mod tests {
     #[test]
     fn job_task_spec_composes_with_workload() {
         let task = JobTaskSpec {
-            replicas: 2,
+            replicas: Some(2),
             workload: WorkloadSpec::default(),
             runtime: RuntimeSpec::default(),
             restart_policy: Some(RestartPolicy::OnFailure),
             policies: None,
         };
         assert!(task.workload.containers.is_empty());
-        assert_eq!(task.replicas, 2);
+        assert_eq!(task.replicas, Some(2));
     }
 
     #[test]
@@ -576,7 +567,7 @@ mod tests {
         tasks.insert(
             "master".to_string(),
             JobTaskSpec {
-                replicas: 1,
+                replicas: Some(1),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
@@ -586,7 +577,7 @@ mod tests {
         tasks.insert(
             "worker".to_string(),
             JobTaskSpec {
-                replicas: 4,
+                replicas: Some(4),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::OnFailure),
@@ -600,8 +591,8 @@ mod tests {
         };
 
         assert_eq!(spec.tasks.len(), 2);
-        assert_eq!(spec.tasks["master"].replicas, 1);
-        assert_eq!(spec.tasks["worker"].replicas, 4);
+        assert_eq!(spec.tasks["master"].replicas, Some(1));
+        assert_eq!(spec.tasks["worker"].replicas, Some(4));
     }
 
     #[test]
@@ -705,7 +696,7 @@ mod tests {
         tasks.insert(
             "master".to_string(),
             JobTaskSpec {
-                replicas: 1,
+                replicas: Some(1),
                 workload: WorkloadSpec::default(),
                 runtime: RuntimeSpec::default(),
                 restart_policy: None,
@@ -766,7 +757,7 @@ mod tests {
             },
         );
         JobTaskSpec {
-            replicas,
+            replicas: Some(replicas),
             workload: WorkloadSpec {
                 containers,
                 ..Default::default()
@@ -795,7 +786,7 @@ mod tests {
             },
         );
         JobTaskSpec {
-            replicas,
+            replicas: Some(replicas),
             workload: WorkloadSpec {
                 containers,
                 ..Default::default()
@@ -1051,7 +1042,7 @@ mod tests {
     #[test]
     fn task_spec_with_policies_serde_roundtrip() {
         let task = JobTaskSpec {
-            replicas: 1,
+            replicas: Some(1),
             workload: WorkloadSpec::default(),
             runtime: RuntimeSpec::default(),
             restart_policy: None,
@@ -1073,7 +1064,7 @@ mod tests {
     /// Helper: build a defaults spec with image, command, resources, and pull secrets
     fn defaults_spec() -> JobTaskSpec {
         JobTaskSpec {
-            replicas: 1,
+            replicas: Some(1),
             workload: WorkloadSpec {
                 containers: BTreeMap::from([(
                     "main".to_string(),
@@ -1105,8 +1096,11 @@ mod tests {
     fn job_spec_with_defaults_serde_roundtrip() {
         let spec = LatticeJobSpec {
             defaults: Some(JobTaskSpec {
+                replicas: None,
+                workload: WorkloadSpec::default(),
+                runtime: RuntimeSpec::default(),
                 restart_policy: Some(RestartPolicy::Never),
-                ..Default::default()
+                policies: None,
             }),
             ..Default::default()
         };
@@ -1123,8 +1117,11 @@ mod tests {
             tasks: BTreeMap::from([(
                 "worker".to_string(),
                 JobTaskSpec {
-                    replicas: 3,
-                    ..Default::default()
+                    replicas: Some(3),
+                    workload: WorkloadSpec::default(),
+                    runtime: RuntimeSpec::default(),
+                    restart_policy: None,
+                    policies: None,
                 },
             )]),
             ..Default::default()
@@ -1133,7 +1130,7 @@ mod tests {
         let tasks = spec.merged_tasks();
         let task = &tasks["worker"];
 
-        assert_eq!(task.replicas, 3);
+        assert_eq!(task.replicas, Some(3));
         assert_eq!(task.workload.containers["main"].image, "train:latest");
         assert_eq!(
             task.workload.containers["main"].command,
@@ -1150,7 +1147,7 @@ mod tests {
             tasks: BTreeMap::from([(
                 "worker".to_string(),
                 JobTaskSpec {
-                    replicas: 1,
+                    replicas: Some(1),
                     workload: WorkloadSpec {
                         containers: BTreeMap::from([(
                             "main".to_string(),
@@ -1169,7 +1166,8 @@ mod tests {
                         ..Default::default()
                     },
                     restart_policy: Some(RestartPolicy::OnFailure),
-                    ..Default::default()
+                    runtime: RuntimeSpec::default(),
+                    policies: None,
                 },
             )]),
             ..Default::default()
@@ -1206,15 +1204,21 @@ mod tests {
                 (
                     "master".to_string(),
                     JobTaskSpec {
-                        replicas: 1,
-                        ..Default::default()
+                        replicas: Some(1),
+                        workload: WorkloadSpec::default(),
+                        runtime: RuntimeSpec::default(),
+                        restart_policy: None,
+                        policies: None,
                     },
                 ),
                 (
                     "worker".to_string(),
                     JobTaskSpec {
-                        replicas: 3,
-                        ..Default::default()
+                        replicas: Some(3),
+                        workload: WorkloadSpec::default(),
+                        runtime: RuntimeSpec::default(),
+                        restart_policy: None,
+                        policies: None,
                     },
                 ),
             ]),
