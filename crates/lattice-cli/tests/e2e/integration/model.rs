@@ -1224,89 +1224,147 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify the vLLM mock inference endpoint returns a valid OpenAI-compatible response.
+const INFERENCE_TESTER_NAME: &str = "inference-tester";
+const INFERENCE_TESTER_NAMESPACE: &str = "kthena-system";
+
+/// Deploy a long-lived inference tester pod that continuously curls the decode
+/// entry service and emits cycle markers with INFERENCE:VALID / INFERENCE:INVALID
+/// results.
 ///
-/// Sends a POST to `/v1/completions` on the decode entry service and checks that
-/// the response contains a `choices` array. Runs from `kthena-system` (system namespace,
-/// exempt from mesh default-deny) to avoid needing additional mesh policies.
-async fn test_model_inference(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Verifying inference endpoint on decode entry service...");
+/// Runs in `kthena-system` (system namespace, exempt from mesh default-deny) to
+/// avoid needing additional mesh policies.
+async fn deploy_inference_tester(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Deploying long-lived inference tester pod...");
 
     let svc_url = format!(
         "http://{}-decode.{}.svc.cluster.local:8000/v1/completions",
         MODEL_NAME, MODEL_NAMESPACE
     );
 
-    let kc = kubeconfig.to_string();
-    let url = svc_url.clone();
+    let pod_yaml = format!(
+        r#"apiVersion: v1
+kind: Pod
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  containers:
+  - name: curl
+    image: {image}
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      while true; do
+        echo "{cycle_start}"
+        RESP=$(curl -sf -X POST "{url}" \
+          -H "Content-Type: application/json" \
+          -d '{{"model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B","prompt":"hello","max_tokens":1}}' 2>&1) || RESP=""
+        if echo "$RESP" | grep -q '"choices"'; then
+          echo "INFERENCE:VALID"
+        else
+          echo "INFERENCE:INVALID resp=$RESP"
+        fi
+        echo "{cycle_end}"
+        sleep 5
+      done
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+  restartPolicy: Never"#,
+        name = INFERENCE_TESTER_NAME,
+        namespace = INFERENCE_TESTER_NAMESPACE,
+        image = *CURL_IMAGE,
+        url = svc_url,
+        cycle_start = CYCLE_START_MARKER,
+        cycle_end = CYCLE_END_MARKER,
+    );
 
-    wait_for_condition(
-        "inference endpoint to return valid response",
-        LONG_TIMEOUT,
-        POLL_INTERVAL,
-        || {
-            let kc = kc.clone();
-            let url = url.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "run",
-                    "inference-test",
-                    "--image",
-                    &CURL_IMAGE,
-                    "--restart=Never",
-                    "--rm",
-                    "-i",
-                    "-n",
-                    "kthena-system",
-                    "--",
-                    "curl",
-                    "-sf",
-                    "-X",
-                    "POST",
-                    &url,
-                    "-H",
-                    "Content-Type: application/json",
-                    "-d",
-                    r#"{"model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B","prompt":"hello","max_tokens":1}"#,
-                ])
-                .await;
+    apply_yaml(kubeconfig, &pod_yaml).await?;
+    info!("[Model] Inference tester pod deployed");
+    Ok(())
+}
 
-                match output {
-                    Ok(body) => {
-                        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&body);
-                        match parsed {
-                            Ok(json) => {
-                                let has_choices = json["choices"].is_array();
-                                if has_choices {
-                                    info!("[Model] Inference response valid: has choices array");
-                                } else {
-                                    warn!(
-                                        "[Model] Inference response missing choices array: {}",
-                                        body
-                                    );
-                                }
-                                Ok(has_choices)
-                            }
-                            Err(e) => {
-                                warn!("[Model] Inference response not valid JSON: {e} body={body:?}");
-                                Ok(false)
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("[Model] Inference curl failed: {e}");
-                        Ok(false)
-                    }
+/// Clean up the inference tester pod.
+async fn cleanup_inference_tester(kubeconfig: &str) {
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "pod",
+        INFERENCE_TESTER_NAME,
+        "-n",
+        INFERENCE_TESTER_NAMESPACE,
+        "--ignore-not-found",
+    ])
+    .await;
+}
+
+/// Verify the vLLM mock inference endpoint returns a valid OpenAI-compatible response.
+///
+/// Reads logs from the long-lived inference tester pod (deployed earlier in the
+/// test sequence) and checks for INFERENCE:VALID results using the same
+/// cycle-based log parsing pattern as mesh bilateral agreement tests.
+async fn test_model_inference(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Verifying inference endpoint via inference tester logs...");
+
+    let allowed_pattern = "INFERENCE:VALID";
+    let blocked_pattern = "INFERENCE:INVALID";
+
+    let timeout = LONG_TIMEOUT;
+    let start = std::time::Instant::now();
+
+    loop {
+        let logs = run_kubectl(&[
+            "--kubeconfig",
+            kubeconfig,
+            "logs",
+            INFERENCE_TESTER_NAME,
+            "-n",
+            INFERENCE_TESTER_NAMESPACE,
+            "--tail",
+            "500",
+        ])
+        .await
+        .unwrap_or_default();
+
+        let cycle_count = logs.matches(CYCLE_END_MARKER).count();
+        if cycle_count > 0 {
+            match parse_traffic_result(&logs, allowed_pattern, blocked_pattern) {
+                Some(true) => {
+                    info!(
+                        "[Model] Inference endpoint verified: valid OpenAI-compatible response ({} cycles)",
+                        cycle_count
+                    );
+                    return Ok(());
+                }
+                Some(false) => {
+                    // Latest result is INVALID — keep retrying until timeout
+                }
+                None => {
+                    // No result markers yet
                 }
             }
-        },
-    )
-    .await?;
+        }
 
-    info!("[Model] Inference endpoint verified: valid OpenAI-compatible response");
-    Ok(())
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "Inference endpoint did not return valid response after {:.0}s (cycles={})",
+                start.elapsed().as_secs_f64(),
+                cycle_count
+            ));
+        }
+
+        warn!(
+            "[Model] Inference not yet confirmed (elapsed: {:.0}s, cycles: {})",
+            start.elapsed().as_secs_f64(),
+            cycle_count
+        );
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
 }
 
 /// Verify P/D cross-role connectivity via curl sidecar logs.
@@ -1481,6 +1539,7 @@ pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
     let result = run_model_test_sequence(kubeconfig).await;
 
     // Cleanup regardless of test result
+    cleanup_inference_tester(kubeconfig).await;
     delete_namespace(kubeconfig, MODEL_NAMESPACE).await;
 
     result
@@ -1489,6 +1548,10 @@ pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
 async fn run_model_test_sequence(kubeconfig: &str) -> Result<(), String> {
     // Deploy the model (must complete before verification)
     test_model_deployment(kubeconfig).await?;
+
+    // Deploy the inference tester early so it's ready by the time we need it.
+    // It will keep curling until we read its logs after serving phase.
+    deploy_inference_tester(kubeconfig).await?;
 
     // All resource verifications + download lifecycle run concurrently
     // (they are independent reads against already-created K8s resources)
@@ -1526,6 +1589,8 @@ async fn run_model_test_sequence(kubeconfig: &str) -> Result<(), String> {
 
     // P/D connectivity requires pods to be running (Serving phase)
     test_pd_cross_role_connectivity(kubeconfig).await?;
+
+    cleanup_inference_tester(kubeconfig).await;
 
     info!("[Model] All LatticeModel integration tests passed!");
     Ok(())
