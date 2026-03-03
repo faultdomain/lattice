@@ -61,8 +61,8 @@ pub struct CompiledModel {
 
 /// Compile a LatticeModel into Kubernetes resources.
 ///
-/// For each role, runs the shared `WorkloadCompiler` pipeline and `lattice_tetragon`
-/// policy compiler, then aggregates results into a single `CompiledModel`.
+/// Orchestrates: role preparation, per-role workload compilation, download
+/// injection, ModelServing assembly, routing/autoscaling, and mesh finalization.
 ///
 /// This function is pure compilation — it does NOT register roles in the service graph.
 /// The caller (controller) is responsible for graph registration after successful compilation
@@ -86,17 +86,62 @@ pub async fn compile_model(
         .as_deref()
         .ok_or(ModelError::MissingNamespace)?;
 
+    let roles = prepare_roles(model)?;
+
+    let ctx = CompilationCtx {
+        namespace,
+        provider_type,
+        cedar,
+        cluster_name,
+        graph,
+        has_topology: model.spec.topology.is_some(),
+    };
+
+    let mut compiled = compile_roles(name, &roles, &ctx).await?;
+
+    let download =
+        compile_download_phase(model, name, namespace, &mut compiled.role_templates)?;
+
+    inject_model_labels(name, &mut compiled.role_templates);
+
+    let assembled = assemble_serving(model, &compiled.role_templates, role_suffix)?;
+
+    let peer_services =
+        compile_peer_services(name, namespace, &roles, model.spec.routing.as_ref())?;
+
+    finalize_mesh(
+        name,
+        &roles,
+        model.spec.routing.as_ref(),
+        assembled.autoscaling.is_some(),
+        &mut compiled.mesh_members,
+    )?;
+
+    Ok(CompiledModel {
+        model_serving: assembled.model_serving,
+        config: compiled.config,
+        mesh_members: compiled.mesh_members,
+        tracing_policies: compiled.tracing_policies,
+        routing: assembled.routing,
+        autoscaling: assembled.autoscaling,
+        download,
+        auto_topology: assembled.auto_topology,
+        peer_services,
+    })
+}
+
+/// Validate model spec and prepare roles with merged defaults and routing ports.
+fn prepare_roles(
+    model: &LatticeModel,
+) -> Result<BTreeMap<String, lattice_common::crd::ModelRoleSpec>, ModelError> {
     if model.spec.roles.is_empty() {
         return Err(ModelError::NoRoles);
     }
 
-    // Apply defaults to each role via strategic merge patch (compile-time only)
     let mut roles = model.spec.merged_roles();
 
-    // When routing is configured with a port, inject it as "inference" into each
-    // role's entry workload. Roles like prefill may declare no service.ports,
-    // causing WorkloadCompiler to skip mesh member creation. The inference port
-    // ensures every role gets a mesh member and participates in the service graph.
+    // Inject routing inference port into each role so WorkloadCompiler creates
+    // mesh members even for roles that don't declare service.ports.
     if let Some(ref routing) = model.spec.routing {
         if let Some(inference_port) = routing.port {
             for role_spec in roles.values_mut() {
@@ -115,12 +160,97 @@ pub async fn compile_model(
         }
     }
 
-    let mut role_templates: BTreeMap<String, RoleTemplates> = BTreeMap::new();
-    let mut config = CompiledConfig::default();
-    let mut mesh_members = Vec::new();
-    let mut tracing_policies = Vec::new();
+    Ok(roles)
+}
 
-    for (role_name, role_spec) in &roles {
+/// Shared context for compiling workloads within a model.
+struct CompilationCtx<'a> {
+    namespace: &'a str,
+    provider_type: ProviderType,
+    cedar: &'a PolicyEngine,
+    cluster_name: &'a str,
+    graph: &'a ServiceGraph,
+    has_topology: bool,
+}
+
+/// Compile a single workload (entry or worker) through the WorkloadCompiler pipeline.
+///
+/// Returns the pod template JSON, compiled config, optional mesh member, and tracing policies.
+async fn compile_workload(
+    ctx: &CompilationCtx<'_>,
+    workload_name: &str,
+    workload: &lattice_common::crd::WorkloadSpec,
+    runtime: &lattice_common::crd::RuntimeSpec,
+    role_label: &str,
+) -> Result<
+    (
+        serde_json::Value,
+        CompiledConfig,
+        Option<LatticeMeshMember>,
+        Vec<TracingPolicyNamespaced>,
+    ),
+    ModelError,
+> {
+    let mut compiler = WorkloadCompiler::new(
+        workload_name,
+        ctx.namespace,
+        workload,
+        runtime,
+        ctx.provider_type,
+    )
+    .with_cedar(ctx.cedar)
+    .with_cluster_name(ctx.cluster_name)
+    .with_graph(ctx.graph)
+    .with_image_pull_secrets(&runtime.image_pull_secrets);
+
+    if ctx.has_topology {
+        compiler = compiler.with_topology();
+    }
+
+    let compiled = compiler
+        .compile()
+        .await
+        .map_err(|e| ModelError::RoleCompilation {
+            role: role_label.to_string(),
+            source: e,
+        })?;
+
+    let template = lattice_workload::pod_template_to_json(compiled.pod_template)
+        .map_err(ModelError::Serialization)?;
+
+    let policies = lattice_tetragon::compile_tracing_policies(
+        workload_name,
+        ctx.namespace,
+        workload,
+        runtime,
+        &[],
+    );
+
+    Ok((template, compiled.config, compiled.mesh_member, policies))
+}
+
+/// Aggregated output from compiling all roles.
+struct CompiledRoles {
+    role_templates: BTreeMap<String, RoleTemplates>,
+    config: CompiledConfig,
+    mesh_members: Vec<LatticeMeshMember>,
+    tracing_policies: Vec<TracingPolicyNamespaced>,
+}
+
+/// Compile all roles (entry + optional worker workloads).
+async fn compile_roles(
+    name: &str,
+    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    ctx: &CompilationCtx<'_>,
+) -> Result<CompiledRoles, ModelError> {
+    let mut result = CompiledRoles {
+        role_templates: BTreeMap::new(),
+        config: CompiledConfig::default(),
+        mesh_members: Vec::new(),
+        tracing_policies: Vec::new(),
+    };
+
+    for (role_name, role_spec) in roles {
         role_spec
             .validate()
             .map_err(|e| ModelError::RoleValidation {
@@ -130,48 +260,18 @@ pub async fn compile_model(
 
         let entry_full_name = format!("{}-{}", name, role_name);
 
-        // Compile entry workload (always present)
-        let mut entry_compiler = WorkloadCompiler::new(
+        let (entry_json, entry_config, entry_mm, entry_policies) = compile_workload(
+            ctx,
             &entry_full_name,
-            namespace,
             &role_spec.entry_workload,
             &role_spec.entry_runtime,
-            provider_type,
+            role_name,
         )
-        .with_cedar(cedar)
-        .with_cluster_name(cluster_name)
-        .with_graph(graph)
-        .with_image_pull_secrets(&role_spec.entry_runtime.image_pull_secrets);
+        .await?;
 
-        if model.spec.topology.is_some() {
-            entry_compiler = entry_compiler.with_topology();
-        }
-
-        let entry_compiled =
-            entry_compiler
-                .compile()
-                .await
-                .map_err(|e| ModelError::RoleCompilation {
-                    role: role_name.clone(),
-                    source: e,
-                })?;
-
-        let entry_json = lattice_workload::pod_template_to_json(entry_compiled.pod_template)
-            .map_err(ModelError::Serialization)?;
-        config.merge(entry_compiled.config);
-
-        if let Some(mm) = entry_compiled.mesh_member {
-            mesh_members.push(mm);
-        }
-
-        let entry_policies = lattice_tetragon::compile_tracing_policies(
-            &entry_full_name,
-            namespace,
-            &role_spec.entry_workload,
-            &role_spec.entry_runtime,
-            &[],
-        );
-        tracing_policies.extend(entry_policies);
+        result.config.merge(entry_config);
+        result.mesh_members.extend(entry_mm);
+        result.tracing_policies.extend(entry_policies);
 
         // Compile worker workload (if present)
         let worker_json = if let Some(ref worker_workload) = role_spec.worker_workload {
@@ -184,7 +284,7 @@ pub async fn compile_model(
             // When worker_runtime falls back to entry_runtime, imagePullSecrets
             // may reference secret resources only declared in entry_workload.
             // Propagate those missing resources so the worker compilation can
-            // resolve them (each compilation creates its own K8s Secret via ESO).
+            // resolve them.
             let effective_worker_workload;
             let workload_ref = if role_spec.worker_runtime.is_none() {
                 let mut cloned = worker_workload.clone();
@@ -204,55 +304,25 @@ pub async fn compile_model(
                 worker_workload
             };
 
-            let mut worker_compiler = WorkloadCompiler::new(
+            let (worker_template, worker_config, worker_mm, worker_policies) = compile_workload(
+                ctx,
                 &worker_name,
-                namespace,
                 workload_ref,
                 worker_runtime,
-                provider_type,
+                &format!("{}-worker", role_name),
             )
-            .with_cedar(cedar)
-            .with_cluster_name(cluster_name)
-            .with_graph(graph)
-            .with_image_pull_secrets(&worker_runtime.image_pull_secrets);
+            .await?;
 
-            if model.spec.topology.is_some() {
-                worker_compiler = worker_compiler.with_topology();
-            }
-
-            let worker_compiled =
-                worker_compiler
-                    .compile()
-                    .await
-                    .map_err(|e| ModelError::RoleCompilation {
-                        role: format!("{}-worker", role_name),
-                        source: e,
-                    })?;
-
-            let worker_template =
-                lattice_workload::pod_template_to_json(worker_compiled.pod_template)
-                    .map_err(ModelError::Serialization)?;
-            config.merge(worker_compiled.config);
-
-            if let Some(mm) = worker_compiled.mesh_member {
-                mesh_members.push(mm);
-            }
-
-            let worker_policies = lattice_tetragon::compile_tracing_policies(
-                &worker_name,
-                namespace,
-                worker_workload,
-                worker_runtime,
-                &[],
-            );
-            tracing_policies.extend(worker_policies);
+            result.config.merge(worker_config);
+            result.mesh_members.extend(worker_mm);
+            result.tracing_policies.extend(worker_policies);
 
             Some(worker_template)
         } else {
             None
         };
 
-        role_templates.insert(
+        result.role_templates.insert(
             role_name.clone(),
             RoleTemplates {
                 entry_template: entry_json,
@@ -261,12 +331,22 @@ pub async fn compile_model(
         );
     }
 
-    // Compile model download (PVC + Job) if modelSource is configured
+    Ok(result)
+}
+
+/// Compile model download and inject volume + scheduling gate into all role templates.
+fn compile_download_phase(
+    model: &LatticeModel,
+    name: &str,
+    namespace: &str,
+    role_templates: &mut BTreeMap<String, RoleTemplates>,
+) -> Result<Option<CompiledDownload>, ModelError> {
     let uid = model
         .metadata
         .uid
         .as_deref()
         .ok_or(ModelError::MissingUid)?;
+
     let download = model
         .spec
         .model_source
@@ -274,8 +354,6 @@ pub async fn compile_model(
         .map(|source| download::compile_download(name, namespace, uid, source))
         .transpose()?;
 
-    // When modelSource is set, inject model cache volume + scheduling gate
-    // into every role's entry and worker pod templates
     if let Some(ref dl) = download {
         for templates in role_templates.values_mut() {
             download::inject_model_volume(
@@ -292,7 +370,11 @@ pub async fn compile_model(
         }
     }
 
-    // Inject model group label and ambient mesh opt-out into all pod templates
+    Ok(download)
+}
+
+/// Inject model group label and ambient mesh opt-out into all pod templates.
+fn inject_model_labels(name: &str, role_templates: &mut BTreeMap<String, RoleTemplates>) {
     let model_labels: &[(&str, &str)] = &[(LABEL_MODEL, name), ("istio.io/dataplane-mode", "none")];
     for templates in role_templates.values_mut() {
         lattice_workload::inject_pod_labels(&mut templates.entry_template, model_labels);
@@ -300,21 +382,29 @@ pub async fn compile_model(
             lattice_workload::inject_pod_labels(worker, model_labels);
         }
     }
+}
 
-    // Build ModelServing from aggregated role templates.
-    // The role suffix ensures the resource name changes when the role set changes,
-    // avoiding PodGroup name collisions with still-Terminating old resources.
-    let compilation = lattice_volcano::compile_model_serving(model, &role_templates, role_suffix);
-    let model_serving = compilation.model_serving;
-    let auto_topology = compilation.auto_topology;
-    let serving_name = &model_serving.metadata.name;
+/// Output from assembling ModelServing, routing, and autoscaling.
+struct AssembledServing {
+    model_serving: ModelServing,
+    auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
+    routing: Option<CompiledRouting>,
+    autoscaling: Option<CompiledAutoscaling>,
+}
 
-    // Compile routing (ModelServer + ModelRoutes) if configured
+/// Build ModelServing, routing, and autoscaling from compiled role templates.
+fn assemble_serving(
+    model: &LatticeModel,
+    role_templates: &BTreeMap<String, RoleTemplates>,
+    role_suffix: &str,
+) -> Result<AssembledServing, ModelError> {
+    let compilation = lattice_volcano::compile_model_serving(model, role_templates, role_suffix);
+    let serving_name = &compilation.model_serving.metadata.name;
+
     let routing = model.spec.routing.as_ref().map(|routing_spec| {
         lattice_volcano::compile_model_routing(model, routing_spec, serving_name)
     });
 
-    // Compile autoscaling (AutoscalingPolicy + AutoscalingPolicyBinding) if configured
     let autoscaling = {
         let compiled = lattice_volcano::compile_model_autoscaling(model);
         if compiled.policies.is_empty() {
@@ -324,54 +414,54 @@ pub async fn compile_model(
         }
     };
 
-    // When routing or autoscaling is configured, ensure mesh policies allow
-    // the Kthena router/autoscaler to reach model pods.
-    augment_kthena_callers(
-        name,
-        &roles,
-        model.spec.routing.as_ref(),
-        autoscaling.is_some(),
-        &mut mesh_members,
-    )?;
+    Ok(AssembledServing {
+        model_serving: compilation.model_serving,
+        auto_topology: compilation.auto_topology,
+        routing,
+        autoscaling,
+    })
+}
 
-    // Create peer-discovery Services for P/D roles when kv_connector disaggregation
-    // is active. These provide stable DNS names (e.g., llm-serving-prefill) for
-    // nixl KV cache transfer between prefill and decode pods.
-    let peer_services = {
-        let has_pd = model
-            .spec
-            .routing
-            .as_ref()
-            .map(|r| {
-                r.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(&roles)
-            })
-            .unwrap_or(false);
+/// Compile peer-discovery Services for P/D roles when kv_connector is active.
+fn compile_peer_services(
+    name: &str,
+    namespace: &str,
+    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    routing: Option<&lattice_common::crd::ModelRoutingSpec>,
+) -> Result<Vec<serde_json::Value>, ModelError> {
+    let has_pd = routing
+        .map(|r| r.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(roles))
+        .unwrap_or(false);
 
-        if has_pd {
-            let routing_spec = model.spec.routing.as_ref().unwrap();
-            let inference_port = routing_spec.port.ok_or(ModelError::MissingInferencePort)?;
-            let side_channel_port = routing_spec
-                .kv_connector
-                .as_ref()
-                .and_then(|kv| kv.port)
-                .unwrap_or(lattice_common::crd::DEFAULT_KV_SIDE_CHANNEL_PORT);
+    if !has_pd {
+        return Ok(Vec::new());
+    }
 
-            [PD_ROLE_PREFILL, PD_ROLE_DECODE]
-                .iter()
-                .map(|role| {
-                    compile_peer_service(name, role, namespace, inference_port, side_channel_port)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
-    };
+    let routing_spec = routing.unwrap();
+    let inference_port = routing_spec.port.ok_or(ModelError::MissingInferencePort)?;
+    let side_channel_port = routing_spec
+        .kv_connector
+        .as_ref()
+        .and_then(|kv| kv.port)
+        .unwrap_or(lattice_common::crd::DEFAULT_KV_SIDE_CHANNEL_PORT);
 
-    // Model serving: opt out of ambient mesh. All model pods share the
-    // `lattice.dev/model` group label for Cilium L4 peer traffic rules.
-    // Kthena callers (router, autoscaler) are handled by bilateral agreement
-    // via compile_direct_cilium_policy label-based ingress.
-    for mm in &mut mesh_members {
+    Ok([PD_ROLE_PREFILL, PD_ROLE_DECODE]
+        .iter()
+        .map(|role| compile_peer_service(name, role, namespace, inference_port, side_channel_port))
+        .collect())
+}
+
+/// Finalize mesh members: augment Kthena callers, opt out of ambient, set group selector.
+fn finalize_mesh(
+    name: &str,
+    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    routing: Option<&lattice_common::crd::ModelRoutingSpec>,
+    has_autoscaling: bool,
+    mesh_members: &mut [LatticeMeshMember],
+) -> Result<(), ModelError> {
+    augment_kthena_callers(name, roles, routing, has_autoscaling, mesh_members)?;
+
+    for mm in mesh_members.iter_mut() {
         mm.spec.ambient = false;
         mm.spec.target = lattice_common::crd::MeshMemberTarget::Selector(
             [(LABEL_MODEL.to_string(), name.to_string())]
@@ -380,17 +470,7 @@ pub async fn compile_model(
         );
     }
 
-    Ok(CompiledModel {
-        model_serving,
-        config,
-        mesh_members,
-        tracing_policies,
-        routing,
-        autoscaling,
-        download,
-        auto_topology,
-        peer_services,
-    })
+    Ok(())
 }
 
 /// Compile a peer-discovery ClusterIP Service for a P/D role.
