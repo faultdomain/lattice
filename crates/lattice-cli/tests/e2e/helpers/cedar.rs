@@ -46,6 +46,8 @@ fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
             "--kubeconfig",
             kubeconfig,
             "apply",
+            "--server-side",
+            "--force-conflicts",
             "--validate=false",
             "-f",
             "-",

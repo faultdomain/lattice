@@ -438,9 +438,10 @@ fn spec_role_keys(
 
 /// Compute the set of role graph keys currently in the graph for a model.
 ///
-/// Enumerates all services in the namespace and filters by the model name prefix.
-/// This captures roles that were registered in a previous reconcile but may have
-/// been removed from the spec.
+/// Enumerates both Local services and MeshMembers in the namespace and filters
+/// by the model name prefix. The MeshMember controller may overwrite a role's
+/// graph node type from Local to MeshMember between reconciles, so checking
+/// only Local nodes would miss roles and prevent orphan cleanup.
 fn current_graph_role_keys(
     graph: &ServiceGraph,
     model_name: &str,
@@ -450,6 +451,7 @@ fn current_graph_role_keys(
     graph
         .list_services(namespace)
         .into_iter()
+        .chain(graph.list_mesh_members(namespace))
         .filter(|node| node.name.starts_with(&prefix))
         .map(|node| node.name)
         .collect()
@@ -1221,6 +1223,42 @@ mod tests {
         assert!(keys.contains("llm-serving-prefill"));
         assert!(keys.contains("llm-serving-decode"));
         assert!(!keys.contains("other-service"));
+    }
+
+    /// The MeshMember controller may overwrite a role's graph node type from
+    /// Local to MeshMember between reconciles. current_graph_role_keys must
+    /// still find the role so cleanup_removed_roles can detect it.
+    #[test]
+    fn current_graph_role_keys_finds_mesh_member_nodes() {
+        use lattice_common::crd::{LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget};
+
+        let graph = ServiceGraph::new();
+
+        // Model controller registers prefill as Local workload
+        graph.put_workload("ns", "llm-serving-decode", &make_minimal_workload());
+
+        // MeshMember controller overwrites prefill to MeshMember type
+        let mm_spec = LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Labels(std::collections::BTreeMap::from([(
+                "app".to_string(),
+                "llm-serving-prefill".to_string(),
+            )])),
+            ports: vec![MeshMemberPort {
+                port: 8080,
+                name: Some("http".to_string()),
+                protocol: None,
+                app_protocol: None,
+            }],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![],
+        };
+        graph.put_mesh_member("ns", "llm-serving-prefill", &mm_spec);
+
+        let keys = current_graph_role_keys(&graph, "llm-serving", "ns");
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains("llm-serving-prefill"));
+        assert!(keys.contains("llm-serving-decode"));
     }
 
     /// When a model spec changes from {prefill, decode} to {decode}, the old

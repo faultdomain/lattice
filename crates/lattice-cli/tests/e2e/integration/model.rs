@@ -1578,14 +1578,13 @@ pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
     // GHCR registry credentials + Cedar policies (includes AppArmor override)
     setup_regcreds_infrastructure(kubeconfig).await?;
 
-    let result = run_model_test_sequence(kubeconfig).await;
+    run_model_test_sequence(kubeconfig).await?;
 
-    // Cleanup regardless of test result
     cleanup_inference_tester(kubeconfig).await;
     delete_namespace(kubeconfig, INFERENCE_TESTER_NAMESPACE).await;
     delete_namespace(kubeconfig, MODEL_NAMESPACE).await;
 
-    result
+    Ok(())
 }
 
 async fn run_model_test_sequence(kubeconfig: &str) -> Result<(), String> {

@@ -535,11 +535,11 @@ pub async fn run_topology_tests(kubeconfig: &str) -> Result<(), String> {
     // Service deployment tests
     setup_regcreds_infrastructure(kubeconfig).await?;
 
-    let result = run_topology_test_sequence(kubeconfig).await;
+    run_topology_test_sequence(kubeconfig).await?;
 
     delete_namespace(kubeconfig, TOPOLOGY_NS).await;
 
-    result
+    Ok(())
 }
 
 async fn run_topology_test_sequence(kubeconfig: &str) -> Result<(), String> {

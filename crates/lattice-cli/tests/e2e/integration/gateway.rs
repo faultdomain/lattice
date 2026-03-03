@@ -55,12 +55,11 @@ pub async fn run_gateway_tests(kubeconfig: &str) -> Result<(), String> {
 
     setup_gateway_infrastructure(kubeconfig).await?;
 
-    let result = run_gateway_test_sequence(kubeconfig).await;
+    run_gateway_test_sequence(kubeconfig).await?;
 
-    // Cleanup regardless of test result
     delete_namespace(kubeconfig, GATEWAY_TEST_NAMESPACE).await;
 
-    result
+    Ok(())
 }
 
 async fn run_gateway_test_sequence(kubeconfig: &str) -> Result<(), String> {

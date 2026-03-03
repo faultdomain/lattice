@@ -385,24 +385,20 @@ pub async fn run_webapp_postgres_tests(kubeconfig: &str) -> Result<(), String> {
     info!("Web App + PostgreSQL Integration Test");
     info!("========================================\n");
 
-    let result = async {
-        deploy_services(kubeconfig).await?;
-        wait_for_services_ready(kubeconfig, NAMESPACE, 3).await?;
-        verify_postgres_ready(kubeconfig).await?;
-        verify_env_vars(kubeconfig).await?;
+    deploy_services(kubeconfig).await?;
+    wait_for_services_ready(kubeconfig, NAMESPACE, 3).await?;
+    verify_postgres_ready(kubeconfig).await?;
+    verify_env_vars(kubeconfig).await?;
 
-        let kc = kubeconfig.to_string();
-        retry_verification("WebApp+PG", || verify_traffic_logs(&kc)).await?;
+    let kc = kubeconfig.to_string();
+    retry_verification("WebApp+PG", || verify_traffic_logs(&kc)).await?;
 
-        info!("\n========================================");
-        info!("Web App + PostgreSQL: PASSED");
-        info!("========================================\n");
-        Ok(())
-    }
-    .await;
+    info!("\n========================================");
+    info!("Web App + PostgreSQL: PASSED");
+    info!("========================================\n");
 
     delete_namespace(kubeconfig, NAMESPACE).await;
-    result
+    Ok(())
 }
 
 #[tokio::test]

@@ -6,7 +6,12 @@ set -euo pipefail
 #
 # Usage:
 #   LATTICE_KUBECONFIG=$(pwd)/management-kubeconfig-ea1501 ./endurance-test.sh
+#
+# Options:
+#   FAIL_FAST=1  — stop on first failure without cleaning up (default)
+#   FAIL_FAST=0  — continue past failures for the full duration
 
+FAIL_FAST=${FAIL_FAST:-1}
 DURATION_HOURS=${DURATION_HOURS:-12}
 DURATION_SECS=$((DURATION_HOURS * 3600))
 LOG_DIR="endurance-logs"
@@ -40,8 +45,13 @@ while true; do
     else
         FAIL=$((FAIL + 1))
         echo "    FAIL (log: $LOG_FILE)"
-        # Extract failure lines
         grep -E "^failures:|FAILED|panicked" "$LOG_FILE" | head -5 || true
+        if [ "$FAIL_FAST" = "1" ]; then
+            echo ""
+            echo "=== FAIL_FAST: stopping after first failure (clusters left for debugging) ==="
+            echo "=== Runs: ${RUN} | Pass: ${PASS} | Fail: ${FAIL} ==="
+            exit 1
+        fi
     fi
 done
 

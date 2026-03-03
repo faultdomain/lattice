@@ -20,7 +20,7 @@ use tracing::info;
 
 use super::context::init_e2e_test;
 use super::helpers::{
-    run_id, teardown_mgmt_cluster, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+    teardown_mgmt_cluster, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::{self, setup};
 
@@ -35,12 +35,13 @@ async fn test_workload2_e2e() {
     match result {
         Ok(Ok(())) => info!("TEST PASSED: workload2"),
         Ok(Err(e)) => {
-            setup::cleanup_bootstrap_cluster(run_id()).await;
-            panic!("Workload2 E2E failed: {}", e);
+            panic!("Workload2 E2E failed (resources left for debugging): {}", e);
         }
         Err(_) => {
-            setup::cleanup_bootstrap_cluster(run_id()).await;
-            panic!("Workload2 E2E timed out after {:?}", E2E_TIMEOUT);
+            panic!(
+                "Workload2 E2E timed out after {:?} (resources left for debugging)",
+                E2E_TIMEOUT
+            );
         }
     }
 }

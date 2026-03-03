@@ -247,7 +247,6 @@ async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Result<Ac
 │  E2E TESTS (build everything, compose integration tests)        │
 │  ├─ unified_e2e.rs          - Full lifecycle                      │
 │  ├─ upgrade_e2e.rs        - Upgrade with mesh traffic           │
-│  ├─ endurance_e2e.rs      - Infinite loop stress test           │
 │  └─ docker_independence_e2e.rs - Parent deletion survival       │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -473,7 +472,6 @@ crates/lattice-cli/tests/e2e/
 │
 ├── unified_e2e.rs        # Full lifecycle E2E
 ├── upgrade_e2e.rs      # Upgrade with mesh traffic
-├── endurance_e2e.rs    # Infinite loop stress test
 └── docker_independence_e2e.rs  # Parent deletion survival
 ```
 

@@ -39,7 +39,7 @@ use super::super::helpers::{
     apply_apparmor_override_policy, apply_cedar_policy_crd, create_service_with_security_overrides,
     delete_cedar_policies_by_label, delete_namespace, deploy_and_wait_for_phase,
     ensure_fresh_namespace, wait_for_no_cedar_policies_with_label, wait_for_service_phase,
-    TestHarness,
+    TestHarness, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -281,7 +281,7 @@ async fn test_policy_lifecycle(kubeconfig: &str) -> Result<(), String> {
         service_with_cap("svc-lifecycle", NS_LIFECYCLE, "SYS_MODULE"),
         "Failed",
         None,
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -413,10 +413,9 @@ pub async fn run_cedar_security_tests(kubeconfig: &str) -> Result<(), String> {
         harness.run("Run as root", || test_run_as_root(kubeconfig)),
     );
 
-    // Always clean up policies, even on failure
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
-
     harness.finish()?;
+
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
 
     info!("[CedarSecurity] All Cedar security override tests passed!");
     Ok(())

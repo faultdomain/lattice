@@ -29,7 +29,7 @@ use tracing::info;
 use lattice_common::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
-use super::helpers::{client_from_kubeconfig, run_kubectl, test_image, OPERATOR_LABEL};
+use super::helpers::{apply_yaml, client_from_kubeconfig, run_kubectl, test_image, OPERATOR_LABEL};
 use super::providers::InfraProvider;
 
 /// Create a seeded RNG from a string (typically run_id).
@@ -613,12 +613,7 @@ async fn cut_network(
     _cancel: &CancellationToken,
     blackout_secs: u64,
 ) {
-    let job_file = format!("/tmp/chaos-job-{}.yaml", cluster);
     let manifest = network_blackout_job_manifest(blackout_secs);
-
-    if std::fs::write(&job_file, &manifest).is_err() {
-        return;
-    }
 
     // Delete any previous job first (in case ttl hasn't cleaned it up yet)
     let _ = run_kubectl(&[
@@ -634,7 +629,7 @@ async fn cut_network(
     .await;
 
     // Deploy the self-cleaning blackout job
-    match run_kubectl(&["--kubeconfig", kubeconfig, "apply", "-f", &job_file]).await {
+    match apply_yaml(kubeconfig, &manifest).await {
         Ok(_) => {
             info!(
                 "[Chaos] Network cut on {}: blackout job deployed for {}s",
@@ -654,8 +649,6 @@ async fn cut_network(
             );
         }
     }
-
-    let _ = std::fs::remove_file(&job_file);
 }
 
 fn is_unreachable(output: &str) -> bool {

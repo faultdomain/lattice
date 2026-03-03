@@ -405,14 +405,11 @@ pub async fn run_vault_secrets_tests(kubeconfig: &str) -> Result<(), String> {
         apply_run_as_root_override_policy(kubeconfig, VAULT_TEST_NAMESPACE, svc).await?;
     }
 
-    // Run the tests, always cleanup afterward
-    let result = run_vault_route_tests_inner(kubeconfig, VAULT_TEST_NAMESPACE).await;
+    run_vault_route_tests_inner(kubeconfig, VAULT_TEST_NAMESPACE).await?;
 
     delete_namespace(kubeconfig, VAULT_TEST_NAMESPACE).await;
     delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
     cleanup_vault_infrastructure(kubeconfig).await;
-
-    result?;
 
     info!("[Vault/Secrets] All Vault secrets tests passed!");
     Ok(())

@@ -43,12 +43,11 @@ pub async fn run_backup_tests(kubeconfig: &str) -> Result<(), String> {
 
     setup_backup_infrastructure(kubeconfig).await?;
 
-    let result = run_backup_test_sequence(kubeconfig).await;
+    run_backup_test_sequence(kubeconfig).await?;
 
-    // Cleanup regardless of test result
     cleanup_backup_tests(kubeconfig).await;
 
-    result
+    Ok(())
 }
 
 async fn run_backup_test_sequence(kubeconfig: &str) -> Result<(), String> {

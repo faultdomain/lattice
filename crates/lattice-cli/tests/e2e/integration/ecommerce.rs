@@ -471,23 +471,19 @@ pub async fn run_ecommerce_tests(kubeconfig: &str) -> Result<(), String> {
     info!("E-Commerce Microservices Integration Test");
     info!("========================================\n");
 
-    let result = async {
-        deploy_services(kubeconfig).await?;
-        wait_for_services_ready(kubeconfig, NAMESPACE, 7).await?;
-        verify_databases_ready(kubeconfig).await?;
+    deploy_services(kubeconfig).await?;
+    wait_for_services_ready(kubeconfig, NAMESPACE, 7).await?;
+    verify_databases_ready(kubeconfig).await?;
 
-        let kc = kubeconfig.to_string();
-        retry_verification("Ecommerce", || verify_traffic_logs(&kc)).await?;
+    let kc = kubeconfig.to_string();
+    retry_verification("Ecommerce", || verify_traffic_logs(&kc)).await?;
 
-        info!("\n========================================");
-        info!("E-Commerce Microservices: PASSED");
-        info!("========================================\n");
-        Ok(())
-    }
-    .await;
+    info!("\n========================================");
+    info!("E-Commerce Microservices: PASSED");
+    info!("========================================\n");
 
     delete_namespace(kubeconfig, NAMESPACE).await;
-    result
+    Ok(())
 }
 
 #[tokio::test]

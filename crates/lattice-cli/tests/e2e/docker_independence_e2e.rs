@@ -93,7 +93,6 @@ async fn test_docker_independence() {
     cleanup_orphans_and_clusters(mgmt_name, workload_name).await;
 
     if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
-        cleanup_clusters(mgmt_name, workload_name).await;
         panic!("Failed to build image: {}", e);
     }
 
@@ -103,17 +102,22 @@ async fn test_docker_independence() {
     )
     .await;
 
-    cleanup_clusters(mgmt_name, workload_name).await;
-
     match result {
         Ok(Ok(())) => {
+            cleanup_clusters(mgmt_name, workload_name).await;
             info!("TEST PASSED");
         }
         Ok(Err(e)) => {
-            panic!("Independence test failed: {}", e);
+            panic!(
+                "Independence test failed (resources left for debugging): {}",
+                e
+            );
         }
         Err(_) => {
-            panic!("Test timed out after {:?}", E2E_TIMEOUT);
+            panic!(
+                "Test timed out after {:?} (resources left for debugging)",
+                E2E_TIMEOUT
+            );
         }
     }
 }

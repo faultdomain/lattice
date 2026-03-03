@@ -494,24 +494,20 @@ pub async fn run_celery_queue_tests(kubeconfig: &str) -> Result<(), String> {
     info!("Celery Task Queue Integration Test");
     info!("========================================\n");
 
-    let result = async {
-        deploy_services(kubeconfig).await?;
-        wait_for_services_ready(kubeconfig, NAMESPACE, 5).await?;
-        verify_redis_ready(kubeconfig).await?;
-        verify_env_vars(kubeconfig).await?;
+    deploy_services(kubeconfig).await?;
+    wait_for_services_ready(kubeconfig, NAMESPACE, 5).await?;
+    verify_redis_ready(kubeconfig).await?;
+    verify_env_vars(kubeconfig).await?;
 
-        let kc = kubeconfig.to_string();
-        retry_verification("Celery", || verify_traffic_logs(&kc)).await?;
+    let kc = kubeconfig.to_string();
+    retry_verification("Celery", || verify_traffic_logs(&kc)).await?;
 
-        info!("\n========================================");
-        info!("Celery Task Queue: PASSED");
-        info!("========================================\n");
-        Ok(())
-    }
-    .await;
+    info!("\n========================================");
+    info!("Celery Task Queue: PASSED");
+    info!("========================================\n");
 
     delete_namespace(kubeconfig, NAMESPACE).await;
-    result
+    Ok(())
 }
 
 #[tokio::test]

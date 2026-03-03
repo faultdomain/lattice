@@ -421,12 +421,11 @@ pub async fn run_job_tests(kubeconfig: &str) -> Result<(), String> {
     // GHCR registry credentials + Cedar policies (includes AppArmor override)
     setup_regcreds_infrastructure(kubeconfig).await?;
 
-    let result = run_job_test_sequence(kubeconfig).await;
+    run_job_test_sequence(kubeconfig).await?;
 
-    // Cleanup regardless of test result
     delete_namespace(kubeconfig, JOB_NAMESPACE).await;
 
-    result
+    Ok(())
 }
 
 async fn run_job_test_sequence(kubeconfig: &str) -> Result<(), String> {

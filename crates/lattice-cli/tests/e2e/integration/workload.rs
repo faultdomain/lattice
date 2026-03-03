@@ -384,11 +384,11 @@ pub async fn run_workload_tests(kubeconfig: &str) -> Result<(), String> {
 
     setup_regcreds_infrastructure(kubeconfig).await?;
 
-    let result = run_workload_test_sequence(kubeconfig).await;
+    run_workload_test_sequence(kubeconfig).await?;
 
     delete_namespace(kubeconfig, WORKLOAD_NS).await;
 
-    result
+    Ok(())
 }
 
 async fn run_workload_test_sequence(kubeconfig: &str) -> Result<(), String> {

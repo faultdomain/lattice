@@ -161,6 +161,31 @@ pub fn generate_mesh_proxy_egress_policy() -> CiliumClusterwideNetworkPolicy {
             },
             ingress: vec![],
             egress: vec![
+                // Allow DNS resolution to kube-dns
+                ClusterwideEgressRule {
+                    to_endpoints: vec![EndpointSelector::from_labels(BTreeMap::from([
+                        (
+                            "k8s:io.kubernetes.pod.namespace".to_string(),
+                            "kube-system".to_string(),
+                        ),
+                        ("k8s:k8s-app".to_string(), "kube-dns".to_string()),
+                    ]))],
+                    to_entities: vec![],
+                    to_cidr: vec![],
+                    to_ports: vec![CiliumPortRule {
+                        ports: vec![
+                            CiliumPort {
+                                port: "53".to_string(),
+                                protocol: "UDP".to_string(),
+                            },
+                            CiliumPort {
+                                port: "53".to_string(),
+                                protocol: "TCP".to_string(),
+                            },
+                        ],
+                        rules: None,
+                    }],
+                },
                 // Allow xDS and certificate signing to istiod
                 ClusterwideEgressRule {
                     to_endpoints: vec![EndpointSelector::from_labels(BTreeMap::from([
@@ -279,11 +304,18 @@ mod tests {
         assert_eq!(expr.operator, "Exists");
         assert!(expr.values.is_empty());
 
-        // Should have egress rules for istiod, HBONE, internal, and external forwarding
-        assert_eq!(policy.spec.egress.len(), 4);
+        // Should have egress rules for DNS, istiod, HBONE, internal, and external forwarding
+        assert_eq!(policy.spec.egress.len(), 5);
 
-        // First egress rule: istiod xDS
-        let istiod_rule = &policy.spec.egress[0];
+        // First egress rule: DNS
+        let dns_rule = &policy.spec.egress[0];
+        assert!(dns_rule
+            .to_endpoints
+            .iter()
+            .any(|e| e.match_labels.get("k8s:k8s-app") == Some(&"kube-dns".to_string())));
+
+        // Second egress rule: istiod xDS
+        let istiod_rule = &policy.spec.egress[1];
         assert!(istiod_rule
             .to_endpoints
             .iter()
@@ -293,21 +325,25 @@ mod tests {
             .iter()
             .any(|port| port.port == ISTIOD_XDS_PORT.to_string())));
 
-        // Second egress rule: HBONE
-        let hbone_rule = &policy.spec.egress[1];
+        // Third egress rule: HBONE
+        let hbone_rule = &policy.spec.egress[2];
         assert!(hbone_rule.to_ports.iter().any(|p| p
             .ports
             .iter()
             .any(|port| port.port == HBONE_PORT.to_string())));
 
-        // Third egress rule: internal forwarding excludes system namespaces
-        let internal_rule = &policy.spec.egress[2];
+        // Fourth egress rule: internal forwarding excludes system namespaces
+        let internal_rule = &policy.spec.egress[3];
         assert!(!internal_rule.to_endpoints.is_empty());
         let expr = &internal_rule.to_endpoints[0].match_expressions[0];
         assert_eq!(expr.key, "k8s:io.kubernetes.pod.namespace");
         assert_eq!(expr.operator, "NotIn");
         assert!(expr.values.contains(&"kube-system".to_string()));
         assert!(expr.values.contains(&"istio-system".to_string()));
+
+        // Fifth egress rule: external forwarding
+        let external_rule = &policy.spec.egress[4];
+        assert_eq!(external_rule.to_cidr, vec!["0.0.0.0/0".to_string()]);
     }
 
     #[test]

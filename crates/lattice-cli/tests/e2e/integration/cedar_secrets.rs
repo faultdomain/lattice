@@ -417,10 +417,9 @@ pub async fn run_cedar_secret_tests(kubeconfig: &str) -> Result<(), String> {
         )),
     );
 
-    // Always clean up policies, even on failure
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
-
     harness.finish()?;
+
+    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
 
     info!("[CedarSecrets] All Cedar secret authorization tests passed!");
     Ok(())

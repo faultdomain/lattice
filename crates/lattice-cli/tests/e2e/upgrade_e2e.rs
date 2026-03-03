@@ -89,16 +89,14 @@ async fn test_upgrade_with_mesh_traffic() {
         }
         Ok(Err(e)) => {
             error!("=========================================================");
-            error!("UPGRADE TEST FAILED: {}", e);
+            error!("UPGRADE TEST FAILED (resources left for debugging): {}", e);
             error!("=========================================================");
-            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Upgrade test failed: {}", e);
         }
         Err(_) => {
             error!("=========================================================");
-            error!("UPGRADE TEST TIMED OUT");
+            error!("UPGRADE TEST TIMED OUT (resources left for debugging)");
             error!("=========================================================");
-            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!("Upgrade test timed out after {:?}", TEST_TIMEOUT);
         }
     }

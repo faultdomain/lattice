@@ -472,9 +472,23 @@ impl ServiceGraph {
         self.update_volume_owners(namespace, name, &spec.workload);
     }
 
-    /// Insert or update a workload in the graph (used by LatticeJob tasks)
+    /// Insert or update a workload in the graph (used by model/job controllers).
+    ///
+    /// The model controller doesn't know about callers, so if an existing
+    /// MeshMember node has `allowed_callers`/`allows_all`, carry them forward.
+    /// This differs from `put_service` where the LS spec is authoritative —
+    /// empty callers there means "remove all callers."
     pub fn put_workload(&self, namespace: &str, name: &str, workload: &WorkloadSpec) {
-        let node = ServiceNode::from_workload_spec(namespace, name, workload);
+        let mut node = ServiceNode::from_workload_spec(namespace, name, workload);
+        let key = (namespace.to_string(), name.to_string());
+        if let Some(existing) = self.vertices.get(&key) {
+            if existing.type_ == ServiceType::MeshMember {
+                if node.allowed_callers.is_empty() {
+                    node.allowed_callers = existing.allowed_callers.clone();
+                }
+                node.allows_all = node.allows_all || existing.allows_all;
+            }
+        }
         self.put_node(node);
         self.update_volume_owners(namespace, name, workload);
     }
@@ -520,6 +534,7 @@ impl ServiceGraph {
                         node.allow_peer_traffic || existing.allow_peer_traffic;
                     node.depends_all = node.depends_all || existing.depends_all;
                     node.ambient = existing.ambient;
+                    node.type_ = existing.type_.clone();
                 }
             }
         }
@@ -2001,5 +2016,73 @@ mod tests {
         let node = graph.get_service("ns", "frontend").unwrap();
         assert_eq!(node.egress_rules.len(), 1);
         assert_eq!(node.type_, ServiceType::MeshMember);
+    }
+
+    /// Regression: model controller's put_workload must not wipe
+    /// allowed_callers set by mesh member controller's put_mesh_member.
+    #[test]
+    fn test_put_workload_preserves_allowed_callers() {
+        let graph = ServiceGraph::new();
+
+        // Mesh member controller sets allowed_callers
+        let labels = BTreeMap::from([("app".to_string(), "serving".to_string())]);
+        let mm_spec =
+            make_mesh_member_spec(labels, vec![("inference", 8000)], vec!["router"], vec![]);
+        graph.put_mesh_member("ns", "serving-prefill", &mm_spec);
+
+        // Model controller overwrites with put_workload (no callers)
+        let svc_spec = make_service_spec(vec![], vec![]);
+        graph.put_workload("ns", "serving-prefill", &svc_spec.workload);
+
+        let node = graph.get_service("ns", "serving-prefill").unwrap();
+        assert!(
+            !node.allowed_callers.is_empty(),
+            "put_workload must preserve allowed_callers from MeshMember"
+        );
+    }
+
+    /// Regression: put_service (LS controller) MUST be able to clear callers.
+    /// This is the feedback loop fix — LS is authoritative on callers.
+    #[test]
+    fn test_put_service_clears_allowed_callers() {
+        let graph = ServiceGraph::new();
+
+        // Mesh member controller sets allowed_callers
+        let labels = BTreeMap::from([("app".to_string(), "rm-internal".to_string())]);
+        let mm_spec =
+            make_mesh_member_spec(labels, vec![("http", 8080)], vec!["rm-client"], vec![]);
+        graph.put_mesh_member("ns", "rm-internal", &mm_spec);
+
+        // LS controller reconciles with no callers (rm-client removed from spec)
+        let svc_spec = make_service_spec(vec![], vec![]);
+        graph.put_service("ns", "rm-internal", &svc_spec);
+
+        let node = graph.get_service("ns", "rm-internal").unwrap();
+        assert!(
+            node.allowed_callers.is_empty(),
+            "put_service must clear allowed_callers when spec has none, got: {:?}",
+            node.allowed_callers
+        );
+    }
+
+    /// Regression: allows_all must survive put_workload overwrite.
+    #[test]
+    fn test_put_workload_preserves_allows_all() {
+        let graph = ServiceGraph::new();
+
+        // Mesh member with wildcard callers
+        let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+        let mm_spec = make_mesh_member_spec(labels, vec![("http", 80)], vec!["*"], vec![]);
+        graph.put_mesh_member("ns", "api", &mm_spec);
+
+        // Model controller overwrites with put_workload
+        let svc_spec = make_service_spec(vec![], vec![]);
+        graph.put_workload("ns", "api", &svc_spec.workload);
+
+        let node = graph.get_service("ns", "api").unwrap();
+        assert!(
+            node.allows_all,
+            "allows_all must survive put_workload overwrite"
+        );
     }
 }

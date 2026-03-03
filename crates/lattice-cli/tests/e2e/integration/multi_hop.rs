@@ -94,12 +94,11 @@ pub async fn run_multi_hop_proxy_tests(ctx: &InfraContext) -> Result<(), String>
     ensure_fresh_namespace(kubeconfig, MULTI_HOP_NAMESPACE).await?;
 
     // Run tests in sequence (each depends on previous)
-    let result = run_test_sequence(kubeconfig).await;
+    run_test_sequence(kubeconfig).await?;
 
-    // Cleanup regardless of test result
     delete_namespace(kubeconfig, MULTI_HOP_NAMESPACE).await;
 
-    result
+    Ok(())
 }
 
 /// Run the test sequence after namespace setup.

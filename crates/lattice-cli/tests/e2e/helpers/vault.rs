@@ -28,15 +28,6 @@ const VAULT_HOST_URL: &str = "http://127.0.0.1:8200";
 /// Vault URL inside Docker/kind network (container name from docker-compose)
 const VAULT_INTERNAL_URL: &str = "http://lattice-vault:8200";
 
-/// Docker container name for Vault
-const VAULT_CONTAINER_NAME: &str = "lattice-vault";
-
-/// Vault port
-const VAULT_PORT: u16 = 8200;
-
-/// Namespace where ESO is deployed (headless Service goes here for DNS resolution)
-const ESO_NAMESPACE: &str = "external-secrets";
-
 /// Dev-mode root token (set via VAULT_DEV_ROOT_TOKEN_ID in docker-compose)
 const VAULT_DEV_TOKEN: &str = "root";
 
@@ -217,12 +208,6 @@ spec:
     apply_yaml(kubeconfig, &provider_yaml).await?;
     info!("[Vault] Applied SecretProvider '{}'", VAULT_STORE_NAME);
 
-    // Register the Docker container in CoreDNS so ESO pods can resolve
-    // `lattice-vault` to the real container IP (required for toFQDNs and
-    // ServiceEntry resolution: DNS to work).
-    super::docker::ensure_docker_dns(kubeconfig, VAULT_CONTAINER_NAME, ESO_NAMESPACE, VAULT_PORT)
-        .await?;
-
     // Wait for SecretProvider to reach Ready phase.
     // ESO re-validation can take >120s when a stale ClusterSecretStore exists
     // from a previous run, so allow 180s.
@@ -294,8 +279,6 @@ pub async fn cleanup_vault_infrastructure(kubeconfig: &str) {
         "--ignore-not-found",
     ])
     .await;
-
-    super::docker::cleanup_docker_dns(kubeconfig, VAULT_CONTAINER_NAME, ESO_NAMESPACE).await;
 
     info!("[Vault] Cleanup complete");
 }

@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_apparmor_override_policy, ensure_namespace, run_kubectl, wait_for_condition,
+    apply_apparmor_override_policy, apply_yaml, ensure_namespace, run_kubectl, wait_for_condition,
 };
 
 const WEBHOOK_TEST_NS: &str = "webhook-test";
@@ -36,13 +36,7 @@ fn sanitize_desc(desc: &str) -> String {
 
 /// Apply YAML via kubectl and expect it to succeed
 async fn apply_should_succeed(kubeconfig: &str, yaml: &str, desc: &str) -> Result<(), String> {
-    let tmpfile = format!("/tmp/webhook-test-{}.yaml", sanitize_desc(desc));
-    tokio::fs::write(&tmpfile, yaml)
-        .await
-        .map_err(|e| format!("Failed to write temp file: {e}"))?;
-
-    run_kubectl(&["--kubeconfig", kubeconfig, "apply", "-f", &tmpfile]).await?;
-
+    apply_yaml(kubeconfig, yaml).await?;
     info!("[Webhook] {desc}: accepted (expected)");
     Ok(())
 }

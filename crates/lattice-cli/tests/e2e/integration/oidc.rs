@@ -190,13 +190,6 @@ async fn cleanup_oidc_test_resources(kubeconfig: &str) {
     ])
     .await;
 
-    super::super::helpers::docker::cleanup_docker_dns(
-        kubeconfig,
-        KEYCLOAK_CONTAINER_NAME,
-        LATTICE_SYSTEM_NAMESPACE,
-    )
-    .await;
-
     info!("[Integration/OIDC] Cleanup complete");
 }
 
@@ -226,31 +219,26 @@ pub async fn run_oidc_auth_test(
     let (proxy_url, _port_forward) =
         get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
 
-    // 1. Register Docker container in CoreDNS so the operator can resolve
-    //    `lattice-keycloak` to the real container IP.
-    super::super::helpers::docker::ensure_docker_dns(
-        parent_kubeconfig,
-        KEYCLOAK_CONTAINER_NAME,
-        LATTICE_SYSTEM_NAMESPACE,
-        KEYCLOAK_PORT,
-    )
-    .await?;
-
-    // 2. Apply OIDCProvider CRD
+    // 1. Apply OIDCProvider CRD
+    //    The OIDC controller creates an egress LMM which the mesh compiler turns
+    //    into a ServiceEntry (MESH_EXTERNAL, resolution: DNS). Istio assigns a
+    //    virtual IP so the operator pod can resolve the hostname without a K8s
+    //    Service. A headless Service would conflict — ztunnel would see the
+    //    endpoint IP as a mesh workload and attempt HBONE to the Docker container.
     apply_oidc_provider(parent_kubeconfig).await?;
 
-    // 3. Wait for Ready status
+    // 2. Wait for Ready status
     wait_for_oidc_provider_ready(parent_kubeconfig).await?;
     info!("[Integration/OIDC] OIDCProvider is Ready");
 
-    // 4. Get OIDC tokens from Keycloak (does not depend on operator OIDC reload)
+    // 3. Get OIDC tokens from Keycloak (does not depend on operator OIDC reload)
     let admin_token = get_keycloak_token("admin@lattice.dev", "admin").await?;
     info!("[Integration/OIDC] Got admin token from Keycloak");
 
     let viewer_token = get_keycloak_token("viewer@lattice.dev", "viewer").await?;
     info!("[Integration/OIDC] Got viewer token from Keycloak");
 
-    // 5. Create K8s RBAC bindings so the impersonated OIDC user can list namespaces
+    // 4. Create K8s RBAC bindings so the impersonated OIDC user can list namespaces
     let rbac_yaml = r#"apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -322,7 +310,6 @@ roleRef:
     info!("[Integration/OIDC] Testing viewer access (should be denied)...");
     let response = http_get_with_retry(&url, &viewer_token, 10).await?;
     if !response.is_forbidden() {
-        cleanup_oidc_test_resources(parent_kubeconfig).await;
         return Err(format!(
             "Expected viewer OIDC access to be denied (403), got HTTP {}",
             response.status_code

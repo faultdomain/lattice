@@ -32,7 +32,7 @@ use tracing::info;
 
 use super::context::init_e2e_test;
 use super::helpers::{
-    run_id, teardown_mgmt_cluster, TestHarness, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME,
+    teardown_mgmt_cluster, TestHarness, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME,
     WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::{self, setup};
@@ -52,13 +52,11 @@ async fn test_configurable_provider_pivot() {
             info!("TEST PASSED");
         }
         Ok(Err(e)) => {
-            setup::cleanup_bootstrap_cluster(run_id()).await;
-            panic!("E2E test failed: {} (manual cleanup may be required)", e);
+            panic!("E2E test failed (resources left for debugging): {}", e);
         }
         Err(_) => {
-            setup::cleanup_bootstrap_cluster(run_id()).await;
             panic!(
-                "E2E test timed out after {:?} (manual cleanup required)",
+                "E2E test timed out after {:?} (resources left for debugging)",
                 E2E_TIMEOUT
             );
         }

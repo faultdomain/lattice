@@ -177,19 +177,14 @@ pub async fn run_pytorch_training_tests(kubeconfig: &str) -> Result<(), String> 
 
     setup_regcreds_infrastructure(kubeconfig).await?;
 
-    let result = async {
-        test_pytorch_distributed_training(kubeconfig).await?;
+    test_pytorch_distributed_training(kubeconfig).await?;
 
-        info!("\n========================================");
-        info!("PyTorch Distributed Training Tests: PASSED");
-        info!("========================================\n");
-
-        Ok(())
-    }
-    .await;
+    info!("\n========================================");
+    info!("PyTorch Distributed Training Tests: PASSED");
+    info!("========================================\n");
 
     delete_namespace(kubeconfig, PYTORCH_NAMESPACE).await;
-    result
+    Ok(())
 }
 
 #[tokio::test]

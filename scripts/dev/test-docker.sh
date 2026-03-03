@@ -41,7 +41,6 @@ case "$TEST_NAME" in
     oidc)            TEST_MODULE="oidc_e2e" ;;
     pivot)           TEST_MODULE="pivot_standalone_e2e" ;;
     upgrade)         TEST_MODULE="upgrade_e2e" ;;
-    endurance)       TEST_MODULE="endurance_e2e" ;;
     independence)    TEST_MODULE="docker_independence_e2e" ;;
     media-server)    TEST_MODULE="media_server_e2e" ;;
     *)               TEST_MODULE="${TEST_NAME}_e2e" ;;

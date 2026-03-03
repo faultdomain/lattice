@@ -41,7 +41,6 @@
 //! │  UNIFIED E2E (full lifecycle, all tests in sequence)            │
 //! │  ├─ unified_e2e.rs           - Full lifecycle                   │
 //! │  ├─ upgrade_e2e.rs           - Upgrade with mesh traffic        │
-//! │  ├─ endurance_e2e.rs         - Infinite loop stress test        │
 //! │  └─ docker_independence_e2e.rs - Parent deletion survival       │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
@@ -91,7 +90,6 @@ mod unified_e2e;
 
 // Specialized E2E
 mod docker_independence_e2e;
-mod endurance_e2e;
 mod upgrade_e2e;
 
 // Per-integration E2E (isolated: setup, one test, teardown)

@@ -292,7 +292,7 @@ where
     F: FnOnce(InfraContext) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
-    use super::helpers::{run_id, teardown_mgmt_cluster, MGMT_CLUSTER_NAME};
+    use super::helpers::{teardown_mgmt_cluster, MGMT_CLUSTER_NAME};
     use super::integration::setup;
     use tracing::info;
 
@@ -309,12 +309,13 @@ where
     match tokio::time::timeout(timeout, run_inner).await {
         Ok(Ok(())) => info!("TEST PASSED: {}", name),
         Ok(Err(e)) => {
-            setup::cleanup_bootstrap_cluster(run_id()).await;
-            panic!("{} E2E failed: {}", name, e);
+            panic!("{} E2E failed (resources left for debugging): {}", name, e);
         }
         Err(_) => {
-            setup::cleanup_bootstrap_cluster(run_id()).await;
-            panic!("{} E2E timed out after {:?}", name, timeout);
+            panic!(
+                "{} E2E timed out after {:?} (resources left for debugging)",
+                name, timeout
+            );
         }
     }
 }

@@ -476,21 +476,17 @@ pub async fn run_mesh_onboarding_tests(kubeconfig: &str) -> Result<(), String> {
     info!("Third-Party Mesh Onboarding Test");
     info!("========================================\n");
 
-    let result = async {
-        deploy_services(kubeconfig).await?;
+    deploy_services(kubeconfig).await?;
 
-        let kc = kubeconfig.to_string();
-        retry_verification("MeshOnboard", || verify_traffic_logs(&kc)).await?;
+    let kc = kubeconfig.to_string();
+    retry_verification("MeshOnboard", || verify_traffic_logs(&kc)).await?;
 
-        info!("\n========================================");
-        info!("Third-Party Mesh Onboarding: PASSED");
-        info!("========================================\n");
-        Ok(())
-    }
-    .await;
+    info!("\n========================================");
+    info!("Third-Party Mesh Onboarding: PASSED");
+    info!("========================================\n");
 
     delete_namespace(kubeconfig, NAMESPACE).await;
-    result
+    Ok(())
 }
 
 #[tokio::test]
