@@ -20,8 +20,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use tracing::{info, warn};
 
 use lattice_common::crd::{
-    ContainerSpec, ExecProbe, LatticeService, LatticeServiceSpec, PortSpec, Probe,
-    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec,
+    ContainerSpec, ExecProbe, LatticeService, LatticeServiceSpec, PortSpec, Probe, ResourceParams,
+    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec, SecretParams,
     SecurityContext, ServicePortsSpec, SidecarSpec, VolumeMount, WorkloadSpec,
 };
 
@@ -122,17 +122,17 @@ fn wrap_service(
     containers: BTreeMap<String, ContainerSpec>,
     sidecars: BTreeMap<String, SidecarSpec>,
 ) -> LatticeService {
-    let mut reg_params = BTreeMap::new();
-    reg_params.insert("provider".to_string(), serde_json::json!(REGCREDS_PROVIDER));
-    reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
-
     let mut resources = BTreeMap::new();
     resources.insert(
         "ghcr-creds".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some(REGCREDS_REMOTE_KEY.to_string()),
-            params: Some(reg_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: REGCREDS_PROVIDER.to_string(),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );

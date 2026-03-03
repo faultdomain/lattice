@@ -214,8 +214,8 @@ fn add_secret_env_vars(mut service: LatticeService, vars: &[(&str, &str)]) -> La
 /// resource paths and provider.
 fn create_vault_all_routes_service(name: &str, namespace: &str) -> LatticeService {
     use lattice_common::crd::{
-        ContainerSpec, FileMount, ResourceQuantity, ResourceRequirements, ResourceSpec,
-        ResourceType,
+        ContainerSpec, FileMount, ResourceParams, ResourceQuantity, ResourceRequirements,
+        ResourceSpec, ResourceType, SecretParams,
     };
     use lattice_common::template::TemplateString;
 
@@ -287,62 +287,63 @@ fn create_vault_all_routes_service(name: &str, namespace: &str) -> LatticeServic
     let mut resources = BTreeMap::new();
 
     // Routes 1, 2, 3: db-creds with explicit keys
-    let mut db_params = BTreeMap::new();
-    db_params.insert("provider".to_string(), serde_json::json!(VAULT_STORE_NAME));
-    db_params.insert(
-        "keys".to_string(),
-        serde_json::json!(["username", "password"]),
-    );
-    db_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
     resources.insert(
         "db-creds".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some("vault-db-creds".to_string()),
-            params: Some(db_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: VAULT_STORE_NAME.to_string(),
+                keys: Some(vec!["username".to_string(), "password".to_string()]),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
 
     // Route 3: api-key with explicit key
-    let mut api_params = BTreeMap::new();
-    api_params.insert("provider".to_string(), serde_json::json!(VAULT_STORE_NAME));
-    api_params.insert("keys".to_string(), serde_json::json!(["key"]));
-    api_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
     resources.insert(
         "api-key".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some("vault-api-key".to_string()),
-            params: Some(api_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: VAULT_STORE_NAME.to_string(),
+                keys: Some(vec!["key".to_string()]),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
 
     // Route 5: dataFrom (all keys, no explicit keys param)
-    let mut all_params = BTreeMap::new();
-    all_params.insert("provider".to_string(), serde_json::json!(VAULT_STORE_NAME));
-    all_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
     resources.insert(
         "all-db-config".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some("vault-database-config".to_string()),
-            params: Some(all_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: VAULT_STORE_NAME.to_string(),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
 
     // Route 4: ghcr-creds for imagePullSecrets (Vault-backed)
-    let mut reg_params = BTreeMap::new();
-    reg_params.insert("provider".to_string(), serde_json::json!(VAULT_STORE_NAME));
-    reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
     resources.insert(
         "ghcr-creds".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some("vault-regcreds".to_string()),
-            params: Some(reg_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: VAULT_STORE_NAME.to_string(),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );

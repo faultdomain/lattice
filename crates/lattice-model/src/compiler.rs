@@ -570,8 +570,8 @@ mod tests {
     use lattice_common::crd::{
         AutoscalingMetric, ContainerSpec, InferenceEngine, KvConnector, KvConnectorType,
         LatticeModelSpec, ModelAutoscalingSpec, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
-        ModelRoutingSpec, ModelSourceSpec, PortSpec, ResourceSpec, ResourceType, RuntimeSpec,
-        ServicePortsSpec, TargetModel, WorkloadSpec,
+        ModelRoutingSpec, ModelSourceSpec, PortSpec, ResourceParams, ResourceSpec, ResourceType,
+        RuntimeSpec, SecretParams, ServicePortsSpec, TargetModel, WorkloadSpec,
     };
 
     fn make_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
@@ -1172,16 +1172,16 @@ mod tests {
         // entry_runtime has imagePullSecrets referencing resources only in
         // entry_workload, the compiler should propagate those resources to
         // the worker workload so compilation succeeds.
-        let mut secret_params = BTreeMap::new();
-        secret_params.insert("provider".to_string(), serde_json::json!("lattice-local"));
-
         let mut entry_resources = BTreeMap::new();
         entry_resources.insert(
             "ghcr-creds".to_string(),
             ResourceSpec {
                 type_: ResourceType::Secret,
                 id: Some("registry-creds".to_string()),
-                params: Some(secret_params),
+                params: ResourceParams::Secret(SecretParams {
+                    provider: "lattice-local".to_string(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );

@@ -310,7 +310,7 @@ impl VolumeCompiler {
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        ContainerSpec, ResourceParams, ResourceSpec, ResourceType, WorkloadSpec,
+        ContainerSpec, ResourceParams, ResourceSpec, ResourceType, VolumeParams, WorkloadSpec,
     };
     use lattice_common::template::TemplateString;
 

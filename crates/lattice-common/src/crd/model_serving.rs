@@ -470,9 +470,9 @@ pub struct ModelSourceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloader_image: Option<String>,
 
-    /// PVC access mode (default: "ReadWriteOnce")
+    /// PVC access mode (default: ReadWriteOnce)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_mode: Option<String>,
+    pub access_mode: Option<super::workload::resources::VolumeAccessMode>,
 
     /// Security context for the download container (AppArmor, allowed binaries, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]

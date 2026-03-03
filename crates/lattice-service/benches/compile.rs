@@ -14,8 +14,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
     CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, LatticeService,
-    LatticeServiceSpec, MonitoringConfig, PortSpec, ProviderType, ResourceSpec, ResourceType,
-    RouteKind, RouteSpec, ServicePortsSpec, WorkloadSpec,
+    LatticeServiceSpec, MonitoringConfig, PortSpec, ProviderType, ResourceParams, ResourceSpec,
+    ResourceType, RouteKind, RouteSpec, SecretParams, ServicePortsSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_service::compiler::ServiceCompiler;
@@ -100,19 +100,22 @@ fn secrets_spec(num_secrets: usize, keys_per_secret: usize) -> LatticeServiceSpe
     let mut spec = baseline_spec();
 
     for i in 0..num_secrets {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!("vault-prod"));
-        if keys_per_secret > 0 {
-            let keys: Vec<String> = (0..keys_per_secret).map(|k| format!("key-{}", k)).collect();
-            params.insert("keys".to_string(), serde_json::json!(keys));
-        }
+        let keys = if keys_per_secret > 0 {
+            Some((0..keys_per_secret).map(|k| format!("key-{}", k)).collect())
+        } else {
+            None
+        };
 
         spec.workload.resources.insert(
             format!("secret-{}", i),
             ResourceSpec {
                 type_: ResourceType::Secret,
                 id: Some(format!("path/to/secret-{}", i)),
-                params: Some(params),
+                params: ResourceParams::Secret(SecretParams {
+                    provider: "vault-prod".to_string(),
+                    keys,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
@@ -151,17 +154,16 @@ fn full_spec(num_deps: usize, num_callers: usize, num_secrets: usize) -> Lattice
 
     // Add secrets
     for i in 0..num_secrets {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!("vault-prod"));
-        let keys: Vec<String> = (0..3).map(|k| format!("key-{}", k)).collect();
-        params.insert("keys".to_string(), serde_json::json!(keys));
-
         spec.workload.resources.insert(
             format!("secret-{}", i),
             ResourceSpec {
                 type_: ResourceType::Secret,
                 id: Some(format!("path/to/secret-{}", i)),
-                params: Some(params),
+                params: ResourceParams::Secret(SecretParams {
+                    provider: "vault-prod".to_string(),
+                    keys: Some((0..3).map(|k| format!("key-{}", k)).collect()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );

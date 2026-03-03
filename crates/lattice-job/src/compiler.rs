@@ -617,8 +617,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use lattice_common::crd::{
-        ContainerSpec, JobTaskSpec, LatticeJobSpec, NcclConfig, ResourceSpec, ResourceType,
-        RestartPolicy, RuntimeSpec, TrainingConfig, TrainingFramework, WorkloadSpec,
+        ContainerSpec, GpuParams, JobTaskSpec, LatticeJobSpec, NcclConfig, ResourceParams,
+        ResourceSpec, ResourceType, RestartPolicy, RuntimeSpec, TrainingConfig, TrainingFramework,
+        WorkloadSpec,
     };
 
     fn make_job(tasks: BTreeMap<String, JobTaskSpec>) -> LatticeJob {
@@ -1198,10 +1199,7 @@ mod tests {
             "gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: Some(BTreeMap::from([(
-                    "count".to_string(),
-                    serde_json::json!(gpu_count),
-                )])),
+                params: ResourceParams::Gpu(GpuParams { count: gpu_count, ..Default::default() }),
                 ..Default::default()
             },
         );

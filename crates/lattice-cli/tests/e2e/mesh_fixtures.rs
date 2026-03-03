@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use lattice_common::crd::{
-    ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec,
-    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec,
-    SecurityContext, ServicePortsSpec, VolumeMount, WorkloadSpec,
+    ContainerSpec, DependencyDirection, ExternalServiceParams, LatticeService, LatticeServiceSpec,
+    PortSpec, ResourceParams, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
+    RuntimeSpec, SecretParams, SecurityContext, ServicePortsSpec, VolumeMount, WorkloadSpec,
 };
 
 use super::helpers::{CURL_IMAGE, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY};
@@ -186,24 +186,18 @@ pub fn entity_egress(entity: &str, port: u16) -> (String, ResourceSpec) {
 }
 
 pub fn external_outbound_dep(name: &str, url: &str) -> (String, ResourceSpec) {
-    let mut endpoints = serde_json::Map::new();
-    endpoints.insert(
-        "default".to_string(),
-        serde_json::Value::String(url.to_string()),
-    );
-
-    let mut params = BTreeMap::new();
-    params.insert(
-        "endpoints".to_string(),
-        serde_json::Value::Object(endpoints),
-    );
+    let mut endpoints = BTreeMap::new();
+    endpoints.insert("default".to_string(), url.to_string());
 
     (
         name.to_string(),
         ResourceSpec {
             type_: ResourceType::ExternalService,
             direction: DependencyDirection::Outbound,
-            params: Some(params),
+            params: ResourceParams::ExternalService(ExternalServiceParams {
+                endpoints,
+                ..Default::default()
+            }),
             ..Default::default()
         },
     )
@@ -219,16 +213,16 @@ pub fn external_outbound_dep(name: &str, url: &str) -> (String, ResourceSpec) {
 /// resource and reference it in `image_pull_secrets`. The resource points at the
 /// seeded `local-regcreds` K8s Secret via the local SecretProvider.
 fn ghcr_creds_resource() -> (String, ResourceSpec) {
-    let mut params = BTreeMap::new();
-    params.insert("provider".to_string(), serde_json::json!(REGCREDS_PROVIDER));
-    params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
-
     (
         "ghcr-creds".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some(REGCREDS_REMOTE_KEY.to_string()),
-            params: Some(params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: REGCREDS_PROVIDER.to_string(),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     )

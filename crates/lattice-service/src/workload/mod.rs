@@ -734,8 +734,8 @@ fn is_valid_promql_metric_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::crd::{
-        AutoscalingMetric, AutoscalingSpec, ContainerSpec, PortSpec, ResourceSpec, ResourceType,
-        ServicePortsSpec,
+        AutoscalingMetric, AutoscalingSpec, ContainerSpec, GpuParams, PortSpec, ResourceParams,
+        ResourceSpec, ResourceType, SecretParams, ServicePortsSpec,
     };
 
     /// Helper to compile a service through the lattice_workload pipeline then
@@ -1135,11 +1135,7 @@ mod tests {
             "my-gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
+                params: ResourceParams::Gpu(GpuParams { count: 1, ..Default::default() }),
                 ..Default::default()
             },
         );
@@ -1161,11 +1157,7 @@ mod tests {
             "my-gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
+                params: ResourceParams::Gpu(GpuParams { count: 1, ..Default::default() }),
                 ..Default::default()
             },
         );
@@ -1187,11 +1179,7 @@ mod tests {
             "my-gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
+                params: ResourceParams::Gpu(GpuParams { count: 1, ..Default::default() }),
                 ..Default::default()
             },
         );
@@ -1221,11 +1209,7 @@ mod tests {
             "my-gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
+                params: ResourceParams::Gpu(GpuParams { count: 1, ..Default::default() }),
                 ..Default::default()
             },
         );
@@ -1285,11 +1269,10 @@ mod tests {
             crate::crd::ResourceSpec {
                 type_: crate::crd::ResourceType::Secret,
                 id: Some("vault/path".to_string()),
-                params: Some({
-                    let mut p = BTreeMap::new();
-                    p.insert("provider".to_string(), serde_json::json!("vault"));
-                    p.insert("keys".to_string(), serde_json::json!(["password"]));
-                    p
+                params: ResourceParams::Secret(SecretParams {
+                    provider: "vault".to_string(),
+                    keys: Some(vec!["password".to_string()]),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },

@@ -1167,8 +1167,8 @@ async fn test_job_compile_failure(kubeconfig: &str, namespace: &str) -> Result<(
 /// provider. Cedar default-deny will reject it at compile time.
 fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::LatticeJob {
     use lattice_common::crd::{
-        ContainerSpec, JobTaskSpec, LatticeJobSpec, ResourceQuantity, ResourceRequirements,
-        ResourceSpec, ResourceType, RestartPolicy,
+        ContainerSpec, JobTaskSpec, LatticeJobSpec, ResourceParams, ResourceQuantity,
+        ResourceRequirements, ResourceSpec, ResourceType, RestartPolicy, SecretParams,
     };
     use std::collections::BTreeMap;
 
@@ -1197,18 +1197,17 @@ fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::La
         },
     );
 
-    // Secret resource with a nonexistent provider — Cedar default-deny blocks it
-    let mut secret_params = BTreeMap::new();
-    secret_params.insert("provider".to_string(), serde_json::json!(DENIED_PROVIDER));
-    secret_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
-
     let mut resources = BTreeMap::new();
     resources.insert(
         "denied-secret".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some("some/denied/path".to_string()),
-            params: Some(secret_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: DENIED_PROVIDER.to_string(),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
@@ -1309,23 +1308,20 @@ async fn test_model_download_failure(kubeconfig: &str, namespace: &str) -> Resul
 fn build_model_with_bad_source(name: &str, namespace: &str) -> lattice_common::crd::LatticeModel {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        ContainerSpec, LatticeModelSpec, ModelRoleSpec, ModelSourceSpec, ResourceQuantity,
-        ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec, WorkloadSpec,
+        ContainerSpec, LatticeModelSpec, ModelRoleSpec, ModelSourceSpec, ResourceParams,
+        ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec,
+        SecretParams, WorkloadSpec,
     };
     use std::collections::BTreeMap;
-
-    // ghcr-creds resource for image pull secrets (same as fixture)
-    let mut reg_params = BTreeMap::new();
-    reg_params.insert(
-        "provider".to_string(),
-        serde_json::json!(super::super::helpers::REGCREDS_PROVIDER),
-    );
-    reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
 
     let ghcr_resource = ResourceSpec {
         type_: ResourceType::Secret,
         id: Some(super::super::helpers::REGCREDS_REMOTE_KEY.to_string()),
-        params: Some(reg_params.clone()),
+        params: ResourceParams::Secret(SecretParams {
+            provider: super::super::helpers::REGCREDS_PROVIDER.to_string(),
+            refresh_interval: Some("1h".to_string()),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 

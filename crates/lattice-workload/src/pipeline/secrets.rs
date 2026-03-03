@@ -219,7 +219,7 @@ impl SecretsCompiler {
                 SecretRef {
                     secret_name: k8s_secret_name,
                     remote_key: remote_key.clone(),
-                    keys: params.keys,
+                    keys: params.keys.clone(),
                     store_name: params.provider.clone(),
                 },
             );

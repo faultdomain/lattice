@@ -389,11 +389,7 @@ impl<'de> Deserialize<'de> for ResourceSpec {
                         "secret resource requires 'params' with 'provider'",
                     ));
                 }
-                ResourceType::ExternalService => {
-                    return Err(serde::de::Error::custom(
-                        "external service resource requires 'params' with 'endpoints'",
-                    ));
-                }
+                ResourceType::ExternalService => ResourceParams::None,
                 _ => ResourceParams::None,
             },
             Some(value) => match &raw.type_ {
@@ -539,7 +535,7 @@ pub struct VolumeParams {
 }
 
 /// Volume access mode
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum VolumeAccessMode {
     /// Single node read-write (default)
     #[default]

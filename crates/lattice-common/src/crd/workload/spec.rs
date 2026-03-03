@@ -227,7 +227,11 @@ impl WorkloadSpec {
                 }
             }
 
-            // GPU params are validated during deserialization (ResourceSpec custom Deserialize)
+            if let Some(gpu) = resource.params.as_gpu() {
+                gpu.validate().map_err(|e| {
+                    crate::Error::validation(format!("resource '{}': {}", name, e))
+                })?;
+            }
         }
 
         Ok(())

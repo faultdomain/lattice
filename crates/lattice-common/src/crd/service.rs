@@ -828,10 +828,12 @@ workload:
         count: 0
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let spec: LatticeServiceSpec =
-            serde_json::from_value(value).expect("gpu resource should parse");
-
-        assert!(spec.workload.validate().is_err());
+        let result: Result<LatticeServiceSpec, _> = serde_json::from_value(value);
+        assert!(result.is_err(), "gpu count=0 should fail at deserialization");
+        assert!(
+            result.unwrap_err().to_string().contains("count"),
+            "error should mention count"
+        );
     }
 
     // =========================================================================

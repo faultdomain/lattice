@@ -196,9 +196,7 @@ fn compile_lattice_job(
             params: ResourceParams::Volume(VolumeParams {
                 size: Some(source.cache_size.clone()),
                 storage_class: source.storage_class.clone(),
-                access_mode: source.access_mode.as_deref().and_then(|am| {
-                    serde_json::from_value(serde_json::json!(am)).ok()
-                }),
+                access_mode: source.access_mode.clone(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -516,7 +514,7 @@ mod tests {
             vol_resource.is_volume_owner(),
             "volume should be an owner (has size in params)"
         );
-        let vol_params = vol_resource.volume_params().unwrap().unwrap();
+        let vol_params = vol_resource.params.as_volume().expect("should be Volume");
         assert_eq!(vol_params.size, Some("50Gi".to_string()));
 
         // Entity egress resource
@@ -622,7 +620,7 @@ mod tests {
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
         let vol_resource = &download.job.spec.tasks["download"].workload.resources[VOLUME_NAME];
-        let vol_params = vol_resource.volume_params().unwrap().unwrap();
+        let vol_params = vol_resource.params.as_volume().expect("should be Volume");
         assert_eq!(vol_params.storage_class, Some("fast-nvme".to_string()));
     }
 
@@ -642,8 +640,8 @@ mod tests {
         let secret_resource = &task.workload.resources["token"];
         assert_eq!(secret_resource.type_, ResourceType::Secret);
         assert_eq!(secret_resource.id.as_deref(), Some("hf-credentials"));
-        let params = secret_resource.params.as_ref().unwrap();
-        assert_eq!(params["provider"], serde_json::json!("lattice-local"));
+        let params = secret_resource.params.as_secret().expect("should be Secret");
+        assert_eq!(params.provider, "lattice-local");
 
         // Container env_from references the secret resource
         let container = &task.workload.containers["download"];
@@ -727,17 +725,19 @@ mod tests {
 
     #[test]
     fn custom_access_mode_propagated() {
+        use lattice_common::crd::VolumeAccessMode;
+
         let source = ModelSourceSpec {
-            access_mode: Some("ReadWriteMany".to_string()),
+            access_mode: Some(VolumeAccessMode::ReadWriteMany),
             ..hf_source()
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
         let vol_resource = &download.job.spec.tasks["download"].workload.resources[VOLUME_NAME];
-        let vol_params = vol_resource.volume_params().unwrap().unwrap();
+        let vol_params = vol_resource.params.as_volume().expect("should be Volume");
         assert_eq!(
             vol_params.access_mode,
-            Some(lattice_common::crd::VolumeAccessMode::ReadWriteMany)
+            Some(VolumeAccessMode::ReadWriteMany)
         );
     }
 
@@ -770,14 +770,15 @@ mod tests {
     #[test]
     fn image_pull_secrets_propagated_to_runtime() {
         let mut resources = BTreeMap::new();
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!("lattice-local"));
         resources.insert(
             "ghcr-creds".to_string(),
             ResourceSpec {
                 type_: ResourceType::Secret,
                 id: Some("local-regcreds".to_string()),
-                params: Some(params),
+                params: ResourceParams::Secret(SecretParams {
+                    provider: "lattice-local".to_string(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );

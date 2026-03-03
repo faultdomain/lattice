@@ -34,21 +34,22 @@ pub fn build_busybox_service(
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType, RuntimeSpec, ServicePortsSpec,
-        WorkloadSpec,
+        LatticeServiceSpec, PortSpec, ResourceParams, ResourceSpec, ResourceType, RuntimeSpec,
+        SecretParams, ServicePortsSpec, WorkloadSpec,
     };
 
     // Add ghcr-creds only if not already provided by the caller
     if !resources.contains_key("ghcr-creds") {
-        let mut reg_params = BTreeMap::new();
-        reg_params.insert("provider".to_string(), serde_json::json!(REGCREDS_PROVIDER));
-        reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
         resources.insert(
             "ghcr-creds".to_string(),
             ResourceSpec {
                 type_: ResourceType::Secret,
                 id: Some(REGCREDS_REMOTE_KEY.to_string()),
-                params: Some(reg_params),
+                params: ResourceParams::Secret(SecretParams {
+                    provider: REGCREDS_PROVIDER.to_string(),
+                    refresh_interval: Some("1h".to_string()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
@@ -101,24 +102,23 @@ pub fn create_service_with_secrets(
     secrets: Vec<(&str, &str, &str, Option<Vec<&str>>)>,
 ) -> LatticeService {
     use lattice_common::crd::{
-        ContainerSpec, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
+        ContainerSpec, ResourceParams, ResourceQuantity, ResourceRequirements, ResourceSpec,
+        ResourceType, SecretParams,
     };
 
     let mut resources = BTreeMap::new();
     for (resource_name, remote_key, provider, keys) in secrets {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!(provider));
-        if let Some(ks) = keys {
-            params.insert("keys".to_string(), serde_json::json!(ks));
-        }
-        params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
-
         resources.insert(
             resource_name.to_string(),
             ResourceSpec {
                 type_: ResourceType::Secret,
                 id: Some(remote_key.to_string()),
-                params: Some(params),
+                params: ResourceParams::Secret(SecretParams {
+                    provider: provider.to_string(),
+                    keys: keys.map(|ks| ks.into_iter().map(|k| k.to_string()).collect()),
+                    refresh_interval: Some("1h".to_string()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
@@ -533,8 +533,8 @@ pub fn create_service_with_all_secret_routes(
     provider: &str,
 ) -> LatticeService {
     use lattice_common::crd::{
-        ContainerSpec, FileMount, ResourceQuantity, ResourceRequirements, ResourceSpec,
-        ResourceType,
+        ContainerSpec, FileMount, ResourceParams, ResourceQuantity, ResourceRequirements,
+        ResourceSpec, ResourceType, SecretParams,
     };
     use lattice_common::template::TemplateString;
 
@@ -606,62 +606,63 @@ pub fn create_service_with_all_secret_routes(
     let mut resources = BTreeMap::new();
 
     // Routes 1, 2, 3: db-creds with explicit keys
-    let mut db_params = BTreeMap::new();
-    db_params.insert("provider".to_string(), serde_json::json!(provider));
-    db_params.insert(
-        "keys".to_string(),
-        serde_json::json!(["username", "password"]),
-    );
-    db_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
     resources.insert(
         "db-creds".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some("local-db-creds".to_string()),
-            params: Some(db_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                keys: Some(vec!["username".to_string(), "password".to_string()]),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
 
     // Route 3: api-key with explicit key
-    let mut api_params = BTreeMap::new();
-    api_params.insert("provider".to_string(), serde_json::json!(provider));
-    api_params.insert("keys".to_string(), serde_json::json!(["key"]));
-    api_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
     resources.insert(
         "api-key".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some("local-api-key".to_string()),
-            params: Some(api_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                keys: Some(vec!["key".to_string()]),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
 
     // Route 5: dataFrom (all keys, no explicit keys param)
-    let mut all_params = BTreeMap::new();
-    all_params.insert("provider".to_string(), serde_json::json!(provider));
-    all_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
     resources.insert(
         "all-db-config".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some("local-database-config".to_string()),
-            params: Some(all_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
 
     // Route 4: ghcr-creds for imagePullSecrets (custom provider)
-    let mut reg_params = BTreeMap::new();
-    reg_params.insert("provider".to_string(), serde_json::json!(provider));
-    reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
     resources.insert(
         "ghcr-creds".to_string(),
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some("local-regcreds".to_string()),
-            params: Some(reg_params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                refresh_interval: Some("1h".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
