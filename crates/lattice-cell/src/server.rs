@@ -32,6 +32,7 @@ use lattice_proto::{
 
 use crate::connection::K8sResponseRegistry;
 use crate::kubeconfig::patch_kubeconfig_for_proxy;
+use crate::state_sync;
 use crate::subtree_registry::{ClusterInfo, SubtreeRegistry};
 use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::ServerMtlsConfig;
@@ -373,6 +374,24 @@ async fn process_agent_message(
             if let Some(age) = registry.heartbeat_age_seconds(cluster_name) {
                 lattice_common::metrics::set_agent_heartbeat_age(cluster_name, age);
             }
+
+            // Check spec/status hashes for state sync
+            if registry.update_hashes(cluster_name, &hb.spec_hash, &hb.status_hash) {
+                debug!(cluster = %cluster_name, "Hash mismatch detected, requesting state sync");
+                let sync_cmd = CellCommand {
+                    command_id: format!("state-sync-{}", cluster_name),
+                    command: Some(lattice_proto::cell_command::Command::StateSyncRequest(
+                        lattice_proto::RequestStateSync {},
+                    )),
+                };
+                if let Err(e) = command_tx.send(sync_cmd).await {
+                    warn!(
+                        cluster = %cluster_name,
+                        error = %e,
+                        "Failed to send state sync request"
+                    );
+                }
+            }
         }
         Some(Payload::ClusterHealth(health)) => {
             // Legacy standalone health message — persist to registry
@@ -623,6 +642,15 @@ async fn process_agent_message(
             // and can emit them as K8s Events on the parent's LatticeCluster CRD
             // if needed in the future.
         }
+        Some(Payload::StateSyncResponse(sync)) => {
+            debug!(
+                cluster = %cluster_name,
+                spec_len = sync.spec_json.len(),
+                status_len = sync.status_json.len(),
+                "Received state sync response"
+            );
+            state_sync::handle_state_sync_response(cluster_name, sync, kube_client).await;
+        }
         None => {
             warn!(cluster = %cluster_name, "Received message with no payload");
         }
@@ -812,6 +840,7 @@ mod tests {
             }
             Some(Payload::ExecData(_)) => {}
             Some(Payload::Event(_)) => {}
+            Some(Payload::StateSyncResponse(_)) => {}
             None => {}
         }
     }
@@ -887,6 +916,8 @@ mod tests {
                 timestamp: None,
                 uptime_seconds: 3600,
                 health: None,
+                spec_hash: vec![],
+                status_hash: vec![],
             })),
         }
     }
@@ -912,6 +943,7 @@ mod tests {
                 ready_control_plane: 1,
                 total_control_plane: 1,
                 conditions: vec![],
+                pool_resources: vec![],
             })),
         }
     }

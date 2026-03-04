@@ -16,7 +16,7 @@ use lattice_capi::installer::{
     copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
 };
 use lattice_common::crd::{
-    BackupsConfig, CloudProvider, LatticeCluster, MonitoringConfig, ProviderType,
+    BackupsConfig, InfraProvider, LatticeCluster, MonitoringConfig, ProviderType,
 };
 use lattice_infra::bootstrap::{self, InfrastructureConfig};
 
@@ -44,7 +44,7 @@ pub async fn ensure_capi_infrastructure(
         if let (Some(installer), Some(c)) = (capi_installer, &cluster) {
             apply_cert_manager_phase(client).await?;
             let provider_type = c.spec.provider.provider_type();
-            let cloud_providers: Api<CloudProvider> =
+            let cloud_providers: Api<InfraProvider> =
                 Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
             let cp = cloud_providers.get(&c.spec.provider_ref).await.ok();
             ensure_capi(client, provider_type, cp.as_ref(), installer).await?;
@@ -221,7 +221,7 @@ async fn find_lattice_cluster(
 
 /// Install CAPI on the bootstrap cluster.
 ///
-/// Waits for the CloudProvider CRD (created by `lattice install` after the
+/// Waits for the InfraProvider CRD (created by `lattice install` after the
 /// operator starts) before installing providers.
 async fn ensure_capi_on_bootstrap(
     client: &Client,
@@ -235,11 +235,11 @@ async fn ensure_capi_on_bootstrap(
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid LATTICE_PROVIDER '{}': {}", provider_str, e))?;
 
-    let cloud_providers: Api<CloudProvider> =
+    let cloud_providers: Api<InfraProvider> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    tracing::info!(provider_ref = %provider_ref, "Waiting for CloudProvider...");
+    tracing::info!(provider_ref = %provider_ref, "Waiting for InfraProvider...");
     let cp = wait_for_resource(
-        &format!("CloudProvider '{}'", provider_ref),
+        &format!("InfraProvider '{}'", provider_ref),
         DEFAULT_RESOURCE_TIMEOUT,
         DEFAULT_POLL_INTERVAL,
         || {
@@ -265,7 +265,7 @@ async fn ensure_capi_on_bootstrap(
 async fn ensure_capi(
     client: &Client,
     provider_type: ProviderType,
-    cloud_provider: Option<&CloudProvider>,
+    cloud_provider: Option<&InfraProvider>,
     installer: &dyn CapiInstaller,
 ) -> anyhow::Result<()> {
     tracing::info!(infrastructure = ?provider_type, "Installing CAPI providers");

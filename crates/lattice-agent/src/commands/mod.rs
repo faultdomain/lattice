@@ -8,6 +8,7 @@ mod exec;
 mod kubernetes;
 mod move_batch;
 mod move_complete;
+mod state_sync;
 mod status_request;
 mod sync_resources;
 
@@ -125,6 +126,9 @@ pub async fn handle_command(command: &CellCommand, ctx: &CommandContext) {
         }
         Some(Command::ExecCancel(cancel)) => {
             exec::handle_exec_cancel(cancel, ctx).await;
+        }
+        Some(Command::StateSyncRequest(_)) => {
+            state_sync::handle(&command.command_id, ctx).await;
         }
         None => {
             warn!(command_id = %command.command_id, "Received command with no payload");

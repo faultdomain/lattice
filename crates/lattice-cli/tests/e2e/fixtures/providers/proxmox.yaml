@@ -1,7 +1,7 @@
-# Proxmox CloudProvider for E2E testing
+# Proxmox InfraProvider for E2E testing
 # Credentials are loaded from PROXMOX_* environment variables
 apiVersion: lattice.dev/v1alpha1
-kind: CloudProvider
+kind: InfraProvider
 metadata:
   name: proxmox
 spec:

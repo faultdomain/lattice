@@ -23,11 +23,11 @@ pub struct CsrResponse {
 
 /// Resources distributed from parent cell to child clusters
 ///
-/// Used during pivot to sync CloudProviders, SecretProviders, CedarPolicies,
+/// Used during pivot to sync InfraProviders, SecretProviders, CedarPolicies,
 /// OIDCProviders, and their referenced secrets from the parent to the child cluster.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DistributableResources {
-    /// Serialized CloudProvider CRDs (JSON bytes)
+    /// Serialized InfraProvider CRDs (JSON bytes)
     pub cloud_providers: Vec<Vec<u8>>,
     /// Serialized SecretProvider CRDs (JSON bytes)
     pub secrets_providers: Vec<Vec<u8>>,

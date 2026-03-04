@@ -1,8 +1,8 @@
-//! CloudProvider controller for Lattice
+//! InfraProvider controller for Lattice
 //!
-//! This controller watches CloudProvider CRDs and:
+//! This controller watches InfraProvider CRDs and:
 //! - Validates cloud credentials
-//! - Updates CloudProvider status
+//! - Updates InfraProvider status
 //! - (Future) Manages cloud-specific resources
 
 #![deny(missing_docs)]

@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod network;
 pub mod policy;
 pub mod protocol;
+pub mod resources;
 pub mod retry;
 pub mod status_check;
 pub mod system_namespaces;

@@ -1,10 +1,10 @@
-//! CloudProvider reconciliation controller
+//! InfraProvider reconciliation controller
 //!
-//! Watches CloudProvider CRDs and reconciles credentials.
+//! Watches InfraProvider CRDs and reconciles credentials.
 //!
 //! ## Credential Modes
 //!
-//! CloudProvider supports three mutually exclusive credential modes:
+//! InfraProvider supports three mutually exclusive credential modes:
 //!
 //! 1. **ESO mode** (`credentials` field): The controller creates an ESO ExternalSecret
 //!    that syncs credentials from a ClusterSecretStore. Optionally shaped with
@@ -24,7 +24,7 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{
-    CloudProvider, CloudProviderPhase, CloudProviderStatus, CloudProviderType,
+    InfraProvider, InfraProviderPhase, InfraProviderStatus, InfraProviderType,
 };
 use lattice_common::status_check;
 use lattice_common::template::extract_secret_refs;
@@ -38,12 +38,12 @@ use lattice_secret_provider::eso::{
     apply_external_secret, build_external_secret, build_templated_external_secret,
 };
 
-/// Reconcile a CloudProvider
+/// Reconcile a InfraProvider
 ///
 /// Reconciles credentials (ESO or manual) and updates status.
 /// Skips work when the spec hasn't changed (generation matches) and already Ready.
 pub async fn reconcile(
-    cp: Arc<CloudProvider>,
+    cp: Arc<InfraProvider>,
     ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
     let name = cp.name_any();
@@ -53,14 +53,14 @@ pub async fn reconcile(
     // Skip work if spec unchanged and already Ready
     if status_check::is_status_unchanged(
         cp.status.as_ref(),
-        &CloudProviderPhase::Ready,
+        &InfraProviderPhase::Ready,
         None,
         Some(generation),
     ) {
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
-    info!(cloud_provider = %name, provider_type = ?cp.spec.provider_type, "Reconciling CloudProvider");
+    info!(cloud_provider = %name, provider_type = ?cp.spec.provider_type, "Reconciling InfraProvider");
 
     match reconcile_credentials(client, &cp).await {
         Ok(()) => {
@@ -69,7 +69,7 @@ pub async fn reconcile(
             update_status(
                 client,
                 &cp,
-                CloudProviderPhase::Ready,
+                InfraProviderPhase::Ready,
                 Some("Credentials reconciled successfully".to_string()),
                 Some(generation),
             )
@@ -88,7 +88,7 @@ pub async fn reconcile(
             update_status(
                 client,
                 &cp,
-                CloudProviderPhase::Failed,
+                InfraProviderPhase::Failed,
                 Some(e.to_string()),
                 Some(generation),
             )
@@ -105,7 +105,7 @@ pub async fn reconcile(
 /// - **ESO mode**: Creates ExternalSecret from `credentials` (+ optional `credentialData`)
 /// - **Manual mode**: Validates `credentialsSecretRef` is present
 /// - **Docker**: No credentials required
-async fn reconcile_credentials(client: &Client, cp: &CloudProvider) -> Result<(), ReconcileError> {
+async fn reconcile_credentials(client: &Client, cp: &InfraProvider) -> Result<(), ReconcileError> {
     // Mutual exclusion validation
     if cp.spec.credentials.is_some() && cp.spec.credentials_secret_ref.is_some() {
         return Err(ReconcileError::Validation(
@@ -119,7 +119,7 @@ async fn reconcile_credentials(client: &Client, cp: &CloudProvider) -> Result<()
     }
 
     match cp.spec.provider_type {
-        CloudProviderType::Docker => {
+        InfraProviderType::Docker => {
             debug!(cloud_provider = %cp.name_any(), "Docker provider requires no credentials");
             Ok(())
         }
@@ -197,11 +197,11 @@ async fn reconcile_credentials(client: &Client, cp: &CloudProvider) -> Result<()
     }
 }
 
-/// Update CloudProvider status
+/// Update InfraProvider status
 async fn update_status(
     client: &Client,
-    cp: &CloudProvider,
-    phase: CloudProviderPhase,
+    cp: &InfraProvider,
+    phase: InfraProviderPhase,
     message: Option<String>,
     observed_generation: Option<i64>,
 ) -> Result<(), ReconcileError> {
@@ -220,7 +220,7 @@ async fn update_status(
         .namespace()
         .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
 
-    let status = CloudProviderStatus {
+    let status = InfraProviderStatus {
         phase,
         message,
         last_validated: Some(chrono::Utc::now().to_rfc3339()),
@@ -228,7 +228,7 @@ async fn update_status(
         observed_generation,
     };
 
-    lattice_common::kube_utils::patch_resource_status::<CloudProvider>(
+    lattice_common::kube_utils::patch_resource_status::<InfraProvider>(
         client,
         &name,
         &namespace,
@@ -246,7 +246,7 @@ mod tests {
     use super::*;
     use kube::core::ObjectMeta;
     use lattice_common::crd::{
-        CloudProviderSpec, ResourceParams, ResourceSpec, ResourceType, SecretParams, SecretRef,
+        InfraProviderSpec, ResourceParams, ResourceSpec, ResourceType, SecretParams, SecretRef,
     };
     use lattice_common::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
 
@@ -254,12 +254,12 @@ mod tests {
     // Test Helpers
     // =========================================================================
 
-    fn sample_provider(provider_type: CloudProviderType) -> CloudProvider {
+    fn sample_provider(provider_type: InfraProviderType) -> InfraProvider {
         let (name, region, creds_namespace) = match provider_type {
-            CloudProviderType::Docker => ("docker", None, None),
-            CloudProviderType::AWS => ("aws-prod", Some("us-east-1"), Some(CAPA_NAMESPACE)),
-            CloudProviderType::Proxmox => ("proxmox-homelab", None, Some(CAPMOX_NAMESPACE)),
-            CloudProviderType::OpenStack => {
+            InfraProviderType::Docker => ("docker", None, None),
+            InfraProviderType::AWS => ("aws-prod", Some("us-east-1"), Some(CAPA_NAMESPACE)),
+            InfraProviderType::Proxmox => ("proxmox-homelab", None, Some(CAPMOX_NAMESPACE)),
+            InfraProviderType::OpenStack => {
                 ("openstack-prod", Some("RegionOne"), Some(CAPO_NAMESPACE))
             }
             _ => ("unknown", None, None),
@@ -270,9 +270,9 @@ mod tests {
             namespace: ns.to_string(),
         });
 
-        CloudProvider::new(
+        InfraProvider::new(
             name,
-            CloudProviderSpec {
+            InfraProviderSpec {
                 provider_type,
                 region: region.map(String::from),
                 credentials_secret_ref,
@@ -286,10 +286,10 @@ mod tests {
         )
     }
 
-    fn sample_eso_provider(name: &str, provider_type: CloudProviderType) -> CloudProvider {
-        CloudProvider::new(
+    fn sample_eso_provider(name: &str, provider_type: InfraProviderType) -> InfraProvider {
+        InfraProvider::new(
             name,
-            CloudProviderSpec {
+            InfraProviderSpec {
                 provider_type,
                 region: None,
                 credentials_secret_ref: None,
@@ -317,18 +317,18 @@ mod tests {
 
     #[tokio::test]
     async fn docker_no_credentials() {
-        let cp = sample_provider(CloudProviderType::Docker);
+        let cp = sample_provider(InfraProviderType::Docker);
         // Docker doesn't need a client — no ESO apply
         // reconcile_credentials requires &Client, but Docker returns before using it.
         // We can't call it without a client, so test the validation logic directly.
-        assert_eq!(cp.spec.provider_type, CloudProviderType::Docker);
+        assert_eq!(cp.spec.provider_type, InfraProviderType::Docker);
         assert!(cp.spec.credentials.is_none());
         assert!(cp.spec.credentials_secret_ref.is_none());
     }
 
     #[tokio::test]
     async fn manual_mode_unchanged() {
-        let cp = sample_provider(CloudProviderType::AWS);
+        let cp = sample_provider(InfraProviderType::AWS);
         // Has credentialsSecretRef, no credentials
         assert!(cp.spec.credentials_secret_ref.is_some());
         assert!(cp.spec.credentials.is_none());
@@ -336,10 +336,10 @@ mod tests {
 
     #[tokio::test]
     async fn mutual_exclusion_validation() {
-        let cp = CloudProvider::new(
+        let cp = InfraProvider::new(
             "test",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::AWS,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::AWS,
                 region: None,
                 credentials_secret_ref: Some(SecretRef {
                     name: "manual".to_string(),
@@ -372,10 +372,10 @@ mod tests {
         let mut data = BTreeMap::new();
         data.insert("key".to_string(), "value".to_string());
 
-        let cp = CloudProvider::new(
+        let cp = InfraProvider::new(
             "test",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::AWS,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::AWS,
                 region: None,
                 credentials_secret_ref: None,
                 credentials: None,
@@ -393,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn simple_mode_builds_external_secret() {
-        let cp = sample_eso_provider("aws-test", CloudProviderType::AWS);
+        let cp = sample_eso_provider("aws-test", InfraProviderType::AWS);
 
         let resource = cp.spec.credentials.as_ref().unwrap();
         let params = resource.params.as_secret().unwrap();
@@ -425,10 +425,10 @@ mod tests {
             "auth:\n  username: \"${secret.credentials.username}\"\n  password: \"${secret.credentials.password}\"".to_string(),
         );
 
-        let cp = CloudProvider::new(
+        let cp = InfraProvider::new(
             "openstack-test",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::OpenStack,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::OpenStack,
                 region: None,
                 credentials_secret_ref: None,
                 credentials: Some(ResourceSpec {
@@ -491,10 +491,10 @@ mod tests {
 
     #[tokio::test]
     async fn missing_credentials_for_cloud_provider() {
-        let cp = CloudProvider::new(
+        let cp = InfraProvider::new(
             "aws-no-creds",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::AWS,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::AWS,
                 region: None,
                 credentials_secret_ref: None,
                 credentials: None,
@@ -518,9 +518,9 @@ mod tests {
 
     #[tokio::test]
     async fn status_unchanged_skips_update() {
-        let mut cp = sample_provider(CloudProviderType::Docker);
-        cp.status = Some(CloudProviderStatus {
-            phase: CloudProviderPhase::Ready,
+        let mut cp = sample_provider(InfraProviderType::Docker);
+        cp.status = Some(InfraProviderStatus {
+            phase: InfraProviderPhase::Ready,
             message: None,
             last_validated: Some("2024-01-01T00:00:00Z".to_string()),
             cluster_count: 0,
@@ -529,25 +529,25 @@ mod tests {
 
         assert!(status_check::is_status_unchanged(
             cp.status.as_ref(),
-            &CloudProviderPhase::Ready,
+            &InfraProviderPhase::Ready,
             None,
             Some(1)
         ));
         assert!(!status_check::is_status_unchanged(
             cp.status.as_ref(),
-            &CloudProviderPhase::Failed,
+            &InfraProviderPhase::Failed,
             None,
             Some(1)
         ));
         assert!(!status_check::is_status_unchanged(
             cp.status.as_ref(),
-            &CloudProviderPhase::Ready,
+            &InfraProviderPhase::Ready,
             None,
             Some(2)
         ));
         assert!(!status_check::is_status_unchanged(
             cp.status.as_ref(),
-            &CloudProviderPhase::Ready,
+            &InfraProviderPhase::Ready,
             Some("msg"),
             Some(1)
         ));
@@ -555,15 +555,15 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_provider_status_fields() {
-        let status = CloudProviderStatus {
-            phase: CloudProviderPhase::Failed,
+        let status = InfraProviderStatus {
+            phase: InfraProviderPhase::Failed,
             message: Some("Test error message".to_string()),
             last_validated: Some(chrono::Utc::now().to_rfc3339()),
             cluster_count: 5,
             observed_generation: Some(2),
         };
 
-        assert_eq!(status.phase, CloudProviderPhase::Failed);
+        assert_eq!(status.phase, InfraProviderPhase::Failed);
         assert!(status.message.is_some());
         assert!(status.last_validated.is_some());
         assert_eq!(status.cluster_count, 5);
@@ -576,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_with_namespace_uses_it() {
-        let mut cp = sample_provider(CloudProviderType::Docker);
+        let mut cp = sample_provider(InfraProviderType::Docker);
         cp.metadata = ObjectMeta {
             name: Some("test-provider".to_string()),
             namespace: Some("custom-namespace".to_string()),
@@ -588,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_without_namespace_uses_default() {
-        let cp = sample_provider(CloudProviderType::Docker);
+        let cp = sample_provider(InfraProviderType::Docker);
         let namespace = cp
             .namespace()
             .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
@@ -598,10 +598,10 @@ mod tests {
     #[tokio::test]
     async fn all_provider_types_covered() {
         let provider_types = [
-            CloudProviderType::Docker,
-            CloudProviderType::AWS,
-            CloudProviderType::Proxmox,
-            CloudProviderType::OpenStack,
+            InfraProviderType::Docker,
+            InfraProviderType::AWS,
+            InfraProviderType::Proxmox,
+            InfraProviderType::OpenStack,
         ];
 
         for provider_type in provider_types {

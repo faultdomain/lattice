@@ -19,11 +19,12 @@ use lattice_common::{Error, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE};
 use super::pure::{is_control_plane_node, is_node_ready};
 use super::FIELD_MANAGER;
 
-/// Ready node counts returned by [`KubeClient::get_ready_node_counts`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Ready node counts and per-pool resource capacity returned by [`KubeClient::get_ready_node_counts`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeCounts {
     pub ready_control_plane: u32,
     pub ready_workers: u32,
+    pub pool_resources: Vec<lattice_common::crd::PoolResourceSummary>,
 }
 
 /// Helper function to get a Kubernetes resource by name, returning None if not found.
@@ -130,13 +131,13 @@ pub trait KubeClient: Send + Sync {
     /// List all LatticeCluster resources
     async fn list_clusters(&self) -> Result<Vec<LatticeCluster>, Error>;
 
-    /// Get a CloudProvider by name
+    /// Get a InfraProvider by name
     ///
-    /// CloudProviders are namespaced in lattice-system.
+    /// InfraProviders are namespaced in lattice-system.
     async fn get_cloud_provider(
         &self,
         name: &str,
-    ) -> Result<Option<lattice_common::crd::CloudProvider>, Error>;
+    ) -> Result<Option<lattice_common::crd::InfraProvider>, Error>;
 }
 
 /// Real Kubernetes client implementation
@@ -167,8 +168,8 @@ impl KubeClient for KubeClientImpl {
     async fn get_ready_node_counts(&self) -> Result<NodeCounts, Error> {
         use k8s_openapi::api::core::v1::Node;
 
-        let api: Api<Node> = Api::all(self.client.clone());
-        let nodes = api.list(&Default::default()).await?;
+        let node_api: Api<Node> = Api::all(self.client.clone());
+        let nodes = node_api.list(&Default::default()).await?;
 
         let mut ready_control_plane = 0u32;
         let mut ready_workers = 0u32;
@@ -183,9 +184,13 @@ impl KubeClient for KubeClientImpl {
             }
         }
 
+        let pool_resources =
+            lattice_common::resources::gather_pool_resources(&self.client).await;
+
         Ok(NodeCounts {
             ready_control_plane,
             ready_workers,
+            pool_resources,
         })
     }
 
@@ -460,10 +465,10 @@ impl KubeClient for KubeClientImpl {
     async fn get_cloud_provider(
         &self,
         name: &str,
-    ) -> Result<Option<lattice_common::crd::CloudProvider>, Error> {
-        use lattice_common::crd::CloudProvider;
+    ) -> Result<Option<lattice_common::crd::InfraProvider>, Error> {
+        use lattice_common::crd::InfraProvider;
 
-        let api: Api<CloudProvider> =
+        let api: Api<InfraProvider> =
             Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
         get_optional(&api, name).await
     }

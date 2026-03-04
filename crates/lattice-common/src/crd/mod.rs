@@ -4,7 +4,7 @@
 
 mod backup_store;
 mod cedar_policy;
-mod cloud_provider;
+mod infra_provider;
 mod cluster;
 mod cluster_backup;
 mod external_endpoint;
@@ -25,13 +25,14 @@ pub use backup_store::{
     BackupStoreSpec, BackupStoreStatus, GcsStorageConfig, S3StorageConfig,
 };
 pub use cedar_policy::{CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus};
-pub use cloud_provider::{
-    AwsProviderConfig, CloudProvider, CloudProviderPhase, CloudProviderSpec, CloudProviderStatus,
-    CloudProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
+pub use infra_provider::{
+    AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,
+    InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
 };
 pub use cluster::{
     BackupsConfig, ChildClusterHealth, InfraComponentPhase, InfraComponentStatus, LatticeCluster,
-    LatticeClusterSpec, LatticeClusterStatus, MonitoringConfig, WorkerPoolStatus,
+    LatticeClusterSpec, LatticeClusterStatus, MonitoringConfig, PoolResourceSummary,
+    WorkerPoolStatus,
 };
 pub use cluster_backup::{
     BackupRetentionSpec, BackupScopeSpec, ClusterBackupPhase, LatticeClusterBackup,

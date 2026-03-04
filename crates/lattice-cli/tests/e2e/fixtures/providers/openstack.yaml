@@ -1,7 +1,7 @@
-# OpenStack CloudProvider for E2E testing
+# OpenStack InfraProvider for E2E testing
 # Credentials are loaded from OS_* environment variables
 apiVersion: lattice.dev/v1alpha1
-kind: CloudProvider
+kind: InfraProvider
 metadata:
   name: openstack
 spec:

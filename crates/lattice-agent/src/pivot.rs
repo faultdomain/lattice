@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - Kubeconfig patching for self-management (internal K8s endpoint)
-//! - Distributed resource application (CloudProviders, SecretProviders, Secrets, etc.)
+//! - Distributed resource application (InfraProviders, SecretProviders, Secrets, etc.)
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use k8s_openapi::api::core::v1::Secret;
@@ -13,7 +13,7 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::kube_client::KubeClientProvider;
-use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretProvider};
+use lattice_common::crd::{CedarPolicy, InfraProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{kubeconfig_secret_name, LATTICE_SYSTEM_NAMESPACE};
 
@@ -299,13 +299,13 @@ pub async fn apply_distributed_resources(
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     apply_resources(&secret_api, &resources.secrets, &params, "Secret").await?;
 
-    // Apply CloudProviders
-    let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    // Apply InfraProviders
+    let cp_api: Api<InfraProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     apply_resources(
         &cp_api,
         &resources.cloud_providers,
         &params,
-        "CloudProvider",
+        "InfraProvider",
     )
     .await?;
 

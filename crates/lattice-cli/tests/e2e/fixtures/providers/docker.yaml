@@ -1,7 +1,7 @@
-# Docker CloudProvider for E2E testing
+# Docker InfraProvider for E2E testing
 # Docker provider doesn't need credentials - uses local Docker socket
 apiVersion: lattice.dev/v1alpha1
-kind: CloudProvider
+kind: InfraProvider
 metadata:
   name: docker
 spec:

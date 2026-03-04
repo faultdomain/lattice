@@ -26,7 +26,7 @@ use lattice_cell::parent::ParentServers;
 use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
-    BackupStore, CedarPolicy, CloudProvider, LatticeCluster, LatticeClusterBackup, LatticeJob,
+    BackupStore, CedarPolicy, InfraProvider, LatticeCluster, LatticeClusterBackup, LatticeJob,
     LatticeMeshMember, LatticeModel, LatticeRestore, LatticeService, MonitoringConfig,
     OIDCProvider, ProviderType, SecretProvider,
 };
@@ -305,7 +305,7 @@ pub async fn build_model_controllers(
     vec![Box::pin(model_ctrl)]
 }
 
-/// Build provider controller futures (CloudProvider, SecretProvider, CedarPolicy, OIDCProvider)
+/// Build provider controller futures (InfraProvider, SecretProvider, CedarPolicy, OIDCProvider)
 pub fn build_provider_controllers(
     client: Client,
     cedar: Arc<PolicyEngine>,
@@ -317,14 +317,14 @@ pub fn build_provider_controllers(
     });
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
-    let cloud_ctrl = Controller::new(Api::<CloudProvider>::all(client.clone()), watcher_config())
+    let cloud_ctrl = Controller::new(Api::<InfraProvider>::all(client.clone()), watcher_config())
         .shutdown_on_signal()
         .run(
             cloud_provider_ctrl::reconcile,
             lattice_common::default_error_policy,
             ctx.clone(),
         )
-        .for_each(log_reconcile_result("CloudProvider"));
+        .for_each(log_reconcile_result("InfraProvider"));
 
     let secrets_ctrl =
         Controller::new(Api::<SecretProvider>::all(client.clone()), watcher_config())
@@ -394,7 +394,7 @@ pub fn build_provider_controllers(
         )
         .for_each(log_reconcile_result("ServiceBackup"));
 
-    tracing::info!("- CloudProvider controller");
+    tracing::info!("- InfraProvider controller");
     tracing::info!("- SecretProvider controller");
     tracing::info!("- CedarPolicy controller");
     tracing::info!("- OIDCProvider controller");

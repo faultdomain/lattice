@@ -1,6 +1,6 @@
-//! CloudProvider CRD for registering cloud accounts/credentials
+//! InfraProvider CRD for registering cloud accounts/credentials
 //!
-//! A CloudProvider represents a named cloud account that clusters can reference.
+//! A InfraProvider represents a named cloud account that clusters can reference.
 
 use kube::{CustomResource, ResourceExt};
 use schemars::JsonSchema;
@@ -11,12 +11,12 @@ use super::types::SecretRef;
 use super::workload::resources::ResourceSpec;
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
-/// CloudProvider defines a cloud account/region that clusters can be deployed to.
+/// InfraProvider defines a cloud account/region that clusters can be deployed to.
 ///
 /// Example:
 /// ```yaml
 /// apiVersion: lattice.dev/v1alpha1
-/// kind: CloudProvider
+/// kind: InfraProvider
 /// metadata:
 ///   name: aws-prod
 /// spec:
@@ -32,19 +32,19 @@ use crate::LATTICE_SYSTEM_NAMESPACE;
 #[kube(
     group = "lattice.dev",
     version = "v1alpha1",
-    kind = "CloudProvider",
+    kind = "InfraProvider",
     namespaced,
-    status = "CloudProviderStatus",
+    status = "InfraProviderStatus",
     printcolumn = r#"{"name":"Type","type":"string","jsonPath":".spec.type"}"#,
     printcolumn = r#"{"name":"Region","type":"string","jsonPath":".spec.region"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
-pub struct CloudProviderSpec {
+pub struct InfraProviderSpec {
     /// Cloud provider type
     #[serde(rename = "type")]
-    pub provider_type: CloudProviderType,
+    pub provider_type: InfraProviderType,
 
     /// Region/location for this provider
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,7 +90,7 @@ pub struct CloudProviderSpec {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
-pub enum CloudProviderType {
+pub enum InfraProviderType {
     /// Amazon Web Services
     AWS,
     /// Proxmox VE (on-premises)
@@ -154,16 +154,16 @@ pub struct OpenStackProviderConfig {
     pub floating_ip_pool: Option<String>,
 }
 
-/// CloudProvider status
+/// InfraProvider status
 ///
 /// All optional fields serialize as `null` (no `skip_serializing_if`) so that
 /// merge-patch status updates correctly clear stale values.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct CloudProviderStatus {
+pub struct InfraProviderStatus {
     /// Current phase
     #[serde(default)]
-    pub phase: CloudProviderPhase,
+    pub phase: InfraProviderPhase,
 
     /// Human-readable message
     #[serde(default)]
@@ -182,10 +182,10 @@ pub struct CloudProviderStatus {
     pub observed_generation: Option<i64>,
 }
 
-/// CloudProvider phase
+/// InfraProvider phase
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum CloudProviderPhase {
+pub enum InfraProviderPhase {
     /// Provider is being validated
     #[default]
     Pending,
@@ -195,7 +195,7 @@ pub enum CloudProviderPhase {
     Failed,
 }
 
-impl std::fmt::Display for CloudProviderPhase {
+impl std::fmt::Display for InfraProviderPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pending => write!(f, "Pending"),
@@ -205,7 +205,7 @@ impl std::fmt::Display for CloudProviderPhase {
     }
 }
 
-impl CloudProvider {
+impl InfraProvider {
     /// Resolve the K8s Secret that contains provider credentials.
     ///
     /// - ESO mode (`credentials` set): returns a synthetic ref pointing to the
@@ -229,15 +229,15 @@ mod tests {
     use super::*;
     use crate::crd::{ResourceParams, ResourceType, SecretParams};
 
-    fn make_provider(name: &str, spec: CloudProviderSpec) -> CloudProvider {
-        CloudProvider::new(name, spec)
+    fn make_provider(name: &str, spec: InfraProviderSpec) -> InfraProvider {
+        InfraProvider::new(name, spec)
     }
 
     #[test]
     fn aws_provider_yaml() {
         let yaml = r#"
 apiVersion: lattice.dev/v1alpha1
-kind: CloudProvider
+kind: InfraProvider
 metadata:
   name: aws-prod
 spec:
@@ -252,8 +252,8 @@ spec:
       - subnet-b
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let provider: CloudProvider = serde_json::from_value(value).expect("parse");
-        assert_eq!(provider.spec.provider_type, CloudProviderType::AWS);
+        let provider: InfraProvider = serde_json::from_value(value).expect("parse");
+        assert_eq!(provider.spec.provider_type, InfraProviderType::AWS);
         assert_eq!(provider.spec.region, Some("us-east-1".to_string()));
     }
 
@@ -261,7 +261,7 @@ spec:
     fn proxmox_provider_yaml() {
         let yaml = r#"
 apiVersion: lattice.dev/v1alpha1
-kind: CloudProvider
+kind: InfraProvider
 metadata:
   name: proxmox-lab
 spec:
@@ -274,8 +274,8 @@ spec:
     storage: local-lvm
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let provider: CloudProvider = serde_json::from_value(value).expect("parse");
-        assert_eq!(provider.spec.provider_type, CloudProviderType::Proxmox);
+        let provider: InfraProvider = serde_json::from_value(value).expect("parse");
+        assert_eq!(provider.spec.provider_type, InfraProviderType::Proxmox);
     }
 
     // =========================================================================
@@ -286,8 +286,8 @@ spec:
     fn k8s_secret_ref_manual_mode() {
         let cp = make_provider(
             "aws-prod",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::AWS,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::AWS,
                 region: None,
                 credentials_secret_ref: Some(SecretRef {
                     name: "my-manual-secret".to_string(),
@@ -311,8 +311,8 @@ spec:
     fn k8s_secret_ref_eso_mode() {
         let cp = make_provider(
             "aws-prod",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::AWS,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::AWS,
                 region: None,
                 credentials_secret_ref: None,
                 credentials: Some(ResourceSpec {
@@ -341,8 +341,8 @@ spec:
     fn k8s_secret_ref_none() {
         let cp = make_provider(
             "docker",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::Docker,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::Docker,
                 region: None,
                 credentials_secret_ref: None,
                 credentials: None,
@@ -361,7 +361,7 @@ spec:
     fn credential_data_yaml_parsing() {
         let yaml = r#"
 apiVersion: lattice.dev/v1alpha1
-kind: CloudProvider
+kind: InfraProvider
 metadata:
   name: openstack-prod
 spec:
@@ -387,9 +387,9 @@ spec:
     authUrl: https://openstack.example.com:5000/v3
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let provider: CloudProvider = serde_json::from_value(value).expect("parse");
+        let provider: InfraProvider = serde_json::from_value(value).expect("parse");
 
-        assert_eq!(provider.spec.provider_type, CloudProviderType::OpenStack);
+        assert_eq!(provider.spec.provider_type, InfraProviderType::OpenStack);
         assert!(provider.spec.credentials.is_some());
         assert!(provider.spec.credential_data.is_some());
 
@@ -413,8 +413,8 @@ spec:
     fn eso_credentials_take_priority_over_manual() {
         let cp = make_provider(
             "test",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::AWS,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::AWS,
                 region: None,
                 credentials_secret_ref: Some(SecretRef {
                     name: "manual".to_string(),

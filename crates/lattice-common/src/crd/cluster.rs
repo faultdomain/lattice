@@ -72,9 +72,9 @@ impl Default for BackupsConfig {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeClusterSpec {
-    /// Reference to a CloudProvider for credentials and account-level config
+    /// Reference to a InfraProvider for credentials and account-level config
     ///
-    /// The cluster uses the referenced CloudProvider's credentials.
+    /// The cluster uses the referenced InfraProvider's credentials.
     /// The provider field still contains cluster-specific config (k8s version, instance types).
     pub provider_ref: String,
 
@@ -147,6 +147,36 @@ impl LatticeClusterSpec {
     }
 }
 
+/// Resource capacity for a single worker pool.
+///
+/// Each pool has homogeneous nodes (same instance type). Reports both
+/// the per-node resource shape and aggregate allocation across the pool,
+/// giving the scheduler enough to determine workload schedulability.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolResourceSummary {
+    /// Pool name (matches lattice.dev/pool label on nodes)
+    pub pool_name: String,
+    /// Number of ready nodes in this pool
+    pub ready_nodes: u32,
+    /// Total number of nodes in this pool
+    pub total_nodes: u32,
+    /// Allocatable CPU per node (millicores)
+    pub node_cpu_millis: i64,
+    /// Allocatable memory per node (bytes)
+    pub node_memory_bytes: i64,
+    /// GPU devices per node (0 if no GPUs)
+    pub node_gpu_count: u32,
+    /// GPU type from NFD label (e.g. "NVIDIA-H100"), empty if no GPUs
+    pub gpu_type: String,
+    /// Sum of pod CPU requests across pool (millicores)
+    pub allocated_cpu_millis: i64,
+    /// Sum of pod memory requests across pool (bytes)
+    pub allocated_memory_bytes: i64,
+    /// Sum of pod GPU requests across pool
+    pub allocated_gpu_count: u32,
+}
+
 /// Health of a child cluster connected via agent
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +201,9 @@ pub struct ChildClusterHealth {
     /// Last heartbeat timestamp (ISO 8601)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_heartbeat: Option<String>,
+    /// Per-worker-pool resource capacity (CPU, memory, GPU)
+    #[serde(default)]
+    pub pool_resources: Vec<PoolResourceSummary>,
 }
 
 /// Status for a worker pool
@@ -332,6 +365,10 @@ pub struct LatticeClusterStatus {
     /// for a single component (Istio, Cilium, cert-manager, etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub infrastructure: Vec<InfraComponentStatus>,
+
+    /// Per-worker-pool resource capacity (CPU, memory, GPU)
+    #[serde(default)]
+    pub pool_resources: Vec<PoolResourceSummary>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -592,7 +629,7 @@ mod tests {
 
     /// Story: Empty provider_ref fails validation
     ///
-    /// Every cluster must reference a CloudProvider for credentials.
+    /// Every cluster must reference a InfraProvider for credentials.
     #[test]
     fn empty_provider_ref_fails_validation() {
         let spec = LatticeClusterSpec {
@@ -800,6 +837,90 @@ nodes:
             serde_json::from_str(&json).expect("LatticeClusterSpec deserialization should succeed");
 
         assert_eq!(spec, parsed, "Spec should survive roundtrip");
+    }
+
+    // =========================================================================
+    // PoolResourceSummary Serialization Tests
+    // =========================================================================
+
+    /// Story: PoolResourceSummary survives JSON serialization roundtrip
+    ///
+    /// Pool resource summaries are stored in LatticeClusterStatus and transmitted
+    /// via heartbeats. All fields must survive serialization to/from JSON.
+    #[test]
+    fn pool_resource_summary_survives_json_roundtrip() {
+        let summary = PoolResourceSummary {
+            pool_name: "gpu-pool".to_string(),
+            ready_nodes: 3,
+            total_nodes: 4,
+            node_cpu_millis: 16000,
+            node_memory_bytes: 68_719_476_736, // 64 GiB
+            node_gpu_count: 8,
+            gpu_type: "NVIDIA-H100".to_string(),
+            allocated_cpu_millis: 12000,
+            allocated_memory_bytes: 51_539_607_552, // 48 GiB
+            allocated_gpu_count: 6,
+        };
+
+        let json = serde_json::to_string(&summary)
+            .expect("PoolResourceSummary serialization should succeed");
+        let parsed: PoolResourceSummary = serde_json::from_str(&json)
+            .expect("PoolResourceSummary deserialization should succeed");
+
+        assert_eq!(summary, parsed, "PoolResourceSummary should survive roundtrip");
+    }
+
+    /// Story: Default PoolResourceSummary roundtrips cleanly
+    ///
+    /// A default (zeroed) summary should also serialize and deserialize without loss.
+    #[test]
+    fn pool_resource_summary_default_roundtrip() {
+        let summary = PoolResourceSummary::default();
+
+        let json = serde_json::to_string(&summary)
+            .expect("default PoolResourceSummary serialization should succeed");
+        let parsed: PoolResourceSummary = serde_json::from_str(&json)
+            .expect("default PoolResourceSummary deserialization should succeed");
+
+        assert_eq!(summary, parsed, "Default PoolResourceSummary should survive roundtrip");
+    }
+
+    /// Story: PoolResourceSummary uses camelCase in JSON (Kubernetes convention)
+    ///
+    /// The struct uses `#[serde(rename_all = "camelCase")]`, so JSON keys must be
+    /// camelCase to match Kubernetes CRD conventions.
+    #[test]
+    fn pool_resource_summary_uses_camel_case_keys() {
+        let summary = PoolResourceSummary {
+            pool_name: "default".to_string(),
+            ready_nodes: 2,
+            total_nodes: 2,
+            node_cpu_millis: 4000,
+            node_memory_bytes: 8_589_934_592,
+            node_gpu_count: 0,
+            gpu_type: String::new(),
+            allocated_cpu_millis: 1000,
+            allocated_memory_bytes: 2_147_483_648,
+            allocated_gpu_count: 0,
+        };
+
+        let json_value = serde_json::to_value(&summary)
+            .expect("serialization should succeed");
+        let obj = json_value.as_object().expect("should be a JSON object");
+
+        assert!(obj.contains_key("poolName"), "should have camelCase key 'poolName'");
+        assert!(obj.contains_key("readyNodes"), "should have camelCase key 'readyNodes'");
+        assert!(obj.contains_key("nodeCpuMillis"), "should have camelCase key 'nodeCpuMillis'");
+        assert!(obj.contains_key("nodeMemoryBytes"), "should have camelCase key 'nodeMemoryBytes'");
+        assert!(obj.contains_key("nodeGpuCount"), "should have camelCase key 'nodeGpuCount'");
+        assert!(obj.contains_key("gpuType"), "should have camelCase key 'gpuType'");
+        assert!(obj.contains_key("allocatedCpuMillis"), "should have camelCase key 'allocatedCpuMillis'");
+        assert!(obj.contains_key("allocatedMemoryBytes"), "should have camelCase key 'allocatedMemoryBytes'");
+        assert!(obj.contains_key("allocatedGpuCount"), "should have camelCase key 'allocatedGpuCount'");
+
+        // Verify snake_case keys are NOT present
+        assert!(!obj.contains_key("pool_name"), "should not have snake_case keys");
+        assert!(!obj.contains_key("ready_nodes"), "should not have snake_case keys");
     }
 
     // =========================================================================

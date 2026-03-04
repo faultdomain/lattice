@@ -1,7 +1,7 @@
-# AWS CloudProvider for E2E testing
+# AWS InfraProvider for E2E testing
 # Credentials are loaded from AWS_* environment variables
 apiVersion: lattice.dev/v1alpha1
-kind: CloudProvider
+kind: InfraProvider
 metadata:
   name: aws
 spec:

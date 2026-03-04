@@ -2,15 +2,19 @@
 //!
 //! Collects node health information from the Kubernetes API and converts
 //! it into the protobuf ClusterHealth message for inclusion in heartbeats.
+//! Includes per-pool resource capacity (CPU, memory, GPU) for scheduling.
 
+use k8s_openapi::api::core::v1::Node;
+use lattice_common::resources::{is_control_plane_node, is_node_ready};
 use tracing::{debug, warn};
 
 use crate::kube_client::KubeClientProvider;
-use lattice_proto::{ClusterHealth, NodeCondition};
+use lattice_proto::{ClusterHealth, NodeCondition, PoolResources};
 
 /// Gather cluster health from the Kubernetes API.
 ///
 /// Lists nodes and counts ready vs total for control-plane and worker nodes.
+/// Also gathers per-pool resource capacity (CPU, memory, GPU) from nodes and pods.
 /// Returns None if the K8s client cannot be created or nodes cannot be listed.
 pub async fn gather_cluster_health(
     kube_provider: &dyn KubeClientProvider,
@@ -23,8 +27,8 @@ pub async fn gather_cluster_health(
         }
     };
 
-    let nodes: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client);
-    let node_list = match nodes.list(&Default::default()).await {
+    let node_api: kube::Api<Node> = kube::Api::all(client.clone());
+    let node_list = match node_api.list(&Default::default()).await {
         Ok(list) => list,
         Err(e) => {
             warn!(error = %e, "Failed to list nodes for health gathering");
@@ -41,24 +45,13 @@ pub async fn gather_cluster_health(
     for node in &node_list.items {
         total_nodes += 1;
 
-        let is_cp = node
-            .metadata
-            .labels
-            .as_ref()
-            .map(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
-            .unwrap_or(false);
+        let is_cp = is_control_plane_node(node);
 
         if is_cp {
             total_control_plane += 1;
         }
 
-        let node_ready = node
-            .status
-            .as_ref()
-            .and_then(|s| s.conditions.as_ref())
-            .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
-            .map(|c| c.status == "True")
-            .unwrap_or(false);
+        let node_ready = is_node_ready(node);
 
         if node_ready {
             ready_nodes += 1;
@@ -71,7 +64,6 @@ pub async fn gather_cluster_health(
         if let Some(status) = &node.status {
             if let Some(conds) = &status.conditions {
                 for cond in conds {
-                    // Only include non-healthy conditions (or Ready conditions)
                     let is_notable = cond.type_ == "Ready" || cond.status == "True";
                     if is_notable
                         && !conditions.iter().any(|c: &NodeCondition| {
@@ -90,9 +82,31 @@ pub async fn gather_cluster_health(
         }
     }
 
+    // Gather per-pool resource capacity using the shared function
+    let pool_summaries = lattice_common::resources::gather_pool_resources(&client).await;
+    let pool_resources: Vec<PoolResources> = pool_summaries
+        .into_iter()
+        .map(|s| PoolResources {
+            pool_name: s.pool_name,
+            ready_nodes: s.ready_nodes as i32,
+            total_nodes: s.total_nodes as i32,
+            node_cpu_millis: s.node_cpu_millis,
+            node_memory_bytes: s.node_memory_bytes,
+            node_gpu_count: s.node_gpu_count as i32,
+            gpu_type: s.gpu_type,
+            allocated_cpu_millis: s.allocated_cpu_millis,
+            allocated_memory_bytes: s.allocated_memory_bytes,
+            allocated_gpu_count: s.allocated_gpu_count as i32,
+        })
+        .collect();
+
     debug!(
         ready_nodes,
-        total_nodes, ready_control_plane, total_control_plane, "Gathered cluster health"
+        total_nodes,
+        ready_control_plane,
+        total_control_plane,
+        pool_count = pool_resources.len(),
+        "Gathered cluster health"
     );
 
     Some(ClusterHealth {
@@ -101,5 +115,6 @@ pub async fn gather_cluster_health(
         ready_control_plane,
         total_control_plane,
         conditions,
+        pool_resources,
     })
 }

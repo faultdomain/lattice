@@ -383,7 +383,7 @@ fn compute_provider_actions(
 // Credential copying
 // =============================================================================
 
-/// Copy credentials from CloudProvider's secret reference to the CAPI provider namespace.
+/// Copy credentials from InfraProvider's secret reference to the CAPI provider namespace.
 ///
 /// CAPI providers expect credentials in specific namespaces with specific names.
 /// This copies the source secret to the location expected by each CAPI provider.

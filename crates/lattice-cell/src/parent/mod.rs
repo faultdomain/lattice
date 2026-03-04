@@ -31,7 +31,7 @@ use crate::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::resources::fetch_distributable_resources;
 use crate::server::{AgentServer, SharedSubtreeRegistry};
 use crate::subtree_registry::SubtreeRegistry;
-use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretProvider};
+use lattice_common::crd::{CedarPolicy, InfraProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{
     lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY, CELL_SERVICE_NAME,
@@ -204,11 +204,11 @@ async fn push_resources_to_agents(
 
 /// Run the resource sync service
 ///
-/// Watches for changes to CloudProvider, SecretProvider, CedarPolicy, and OIDCProvider CRDs and:
+/// Watches for changes to InfraProvider, SecretProvider, CedarPolicy, and OIDCProvider CRDs and:
 /// 1. Immediately pushes changes to all connected agents (watch-triggered)
 /// 2. Periodically does a full sync as a safety net
 async fn run_resource_sync(client: Client, registry: SharedAgentRegistry, cluster_name: String) {
-    let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let cp_api: Api<InfraProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let sp_api: Api<SecretProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let cedar_api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let oidc_api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
@@ -235,9 +235,9 @@ async fn run_resource_sync(client: Client, registry: SharedAgentRegistry, cluste
 
     loop {
         tokio::select! {
-            // Watch for CloudProvider changes
+            // Watch for InfraProvider changes
             Some(event) = cp_watcher.next() => {
-                handle_resource_event(&client, &registry, &cluster_name, event, "CloudProvider").await;
+                handle_resource_event(&client, &registry, &cluster_name, event, "InfraProvider").await;
             }
             // Watch for SecretProvider changes
             Some(event) = sp_watcher.next() => {
@@ -692,7 +692,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         let ca_bundle = self.ca_bundle.read().await;
 
         // Create bootstrap state
-        // CloudProvider/SecretProvider CRDs and their referenced secrets
+        // InfraProvider/SecretProvider CRDs and their referenced secrets
         // are automatically synced to child clusters during pivot
         let bootstrap_state = Arc::new(BootstrapState::new(
             manifest_generator,

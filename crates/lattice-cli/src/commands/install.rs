@@ -39,7 +39,7 @@ use lattice_cell::bootstrap::{
     generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
 };
 use lattice_common::crd::{
-    BootstrapProvider, CloudProvider, CloudProviderSpec, CloudProviderType, LatticeCluster,
+    BootstrapProvider, InfraProvider, InfraProviderSpec, InfraProviderType, LatticeCluster,
     ProviderType, SecretRef,
 };
 use lattice_common::credentials::{
@@ -314,9 +314,9 @@ impl Installer {
         info!("[Phase 2/8] Deploying Lattice operator...");
         self.deploy_lattice_operator(&bootstrap_client).await?;
 
-        // CloudProvider must be created AFTER operator deploys CRDs
-        // Operator waits for CloudProvider before installing CAPI
-        info!("[Phase 3/8] Creating CloudProvider and credentials...");
+        // InfraProvider must be created AFTER operator deploys CRDs
+        // Operator waits for InfraProvider before installing CAPI
+        info!("[Phase 3/8] Creating InfraProvider and credentials...");
         self.create_cloud_provider_with_credentials(&bootstrap_client)
             .await?;
 
@@ -589,7 +589,7 @@ impl Installer {
             .map_err(|e| Error::command_failed(e.to_string()))
     }
 
-    /// Copy CloudProvider and its credentials secret from bootstrap to management cluster
+    /// Copy InfraProvider and its credentials secret from bootstrap to management cluster
     async fn copy_cloud_provider_to_management(
         &self,
         bootstrap_client: &Client,
@@ -598,19 +598,19 @@ impl Installer {
         use lattice_agent::apply_distributed_resources;
         use lattice_cell::fetch_distributable_resources;
 
-        // Fetch all distributable resources (CloudProviders, SecretProviders, CedarPolicies, OIDCProviders, secrets)
+        // Fetch all distributable resources (InfraProviders, SecretProviders, CedarPolicies, OIDCProviders, secrets)
         // Use "bootstrap" as the origin cluster name since this is the initial install
         let resources = fetch_distributable_resources(bootstrap_client, "bootstrap")
             .await
             .map_err(|e| Error::command_failed(format!("Failed to fetch resources: {}", e)))?;
 
         if resources.is_empty() {
-            info!("No CloudProviders or SecretProviders to copy");
+            info!("No InfraProviders or SecretProviders to copy");
             return Ok(());
         }
 
         info!(
-            "Copying {} CloudProvider(s), {} SecretProvider(s), {} CedarPolicy(s), {} OIDCProvider(s), {} secret(s) to management cluster",
+            "Copying {} InfraProvider(s), {} SecretProvider(s), {} CedarPolicy(s), {} OIDCProvider(s), {} secret(s) to management cluster",
             resources.cloud_providers.len(),
             resources.secrets_providers.len(),
             resources.cedar_policies.len(),
@@ -776,17 +776,17 @@ impl Installer {
         .cmd_err()
     }
 
-    /// Create CloudProvider and provider-specific credentials.
+    /// Create InfraProvider and provider-specific credentials.
     ///
     /// Must be called AFTER operator deploys CRDs but BEFORE creating LatticeCluster.
-    /// The operator waits for this CloudProvider to install CAPI providers.
+    /// The operator waits for this InfraProvider to install CAPI providers.
     async fn create_cloud_provider_with_credentials(&self, client: &Client) -> Result<()> {
         match self.provider() {
             ProviderType::Proxmox => self.create_proxmox_credentials(client).await,
             ProviderType::Aws => self.create_aws_credentials(client).await,
             ProviderType::OpenStack => self.create_openstack_credentials(client).await,
             ProviderType::Docker => {
-                self.create_cloud_provider(client, CloudProviderType::Docker, "")
+                self.create_cloud_provider(client, InfraProviderType::Docker, "")
                     .await
             }
             ProviderType::Gcp | ProviderType::Azure => {
@@ -806,7 +806,7 @@ impl Installer {
         Self::apply_credentials_secret(client, &creds.to_k8s_secret()).await?;
         self.create_cloud_provider(
             client,
-            CloudProviderType::Proxmox,
+            InfraProviderType::Proxmox,
             PROXMOX_CREDENTIALS_SECRET,
         )
         .await
@@ -817,7 +817,7 @@ impl Installer {
         info!("AWS_REGION: {}", creds.region);
 
         Self::apply_credentials_secret(client, &creds.to_k8s_secret()).await?;
-        self.create_cloud_provider(client, CloudProviderType::AWS, AWS_CREDENTIALS_SECRET)
+        self.create_cloud_provider(client, InfraProviderType::AWS, AWS_CREDENTIALS_SECRET)
             .await
     }
 
@@ -829,7 +829,7 @@ impl Installer {
         Self::apply_credentials_secret(client, &creds.to_k8s_secret()).await?;
         self.create_cloud_provider(
             client,
-            CloudProviderType::OpenStack,
+            InfraProviderType::OpenStack,
             OPENSTACK_CREDENTIALS_SECRET,
         )
         .await
@@ -869,11 +869,11 @@ impl Installer {
         Ok(())
     }
 
-    /// Create a CloudProvider CRD referencing credentials
+    /// Create a InfraProvider CRD referencing credentials
     async fn create_cloud_provider(
         &self,
         client: &Client,
-        provider_type: CloudProviderType,
+        provider_type: InfraProviderType,
         secret_name: &str,
     ) -> Result<()> {
         use kube::api::{Api, Patch, PatchParams};
@@ -898,9 +898,9 @@ impl Installer {
             })
         };
 
-        let mut cloud_provider = CloudProvider::new(
+        let mut cloud_provider = InfraProvider::new(
             provider_ref,
-            CloudProviderSpec {
+            InfraProviderSpec {
                 provider_type,
                 region,
                 credentials_secret_ref,
@@ -914,16 +914,16 @@ impl Installer {
         );
         cloud_provider.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
 
-        let api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let api: Api<InfraProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
         api.patch(
             provider_ref,
             &PatchParams::apply("lattice-cli").force(),
             &Patch::Apply(&cloud_provider),
         )
         .await
-        .map_err(|e| Error::command_failed(format!("Failed to create CloudProvider: {}", e)))?;
+        .map_err(|e| Error::command_failed(format!("Failed to create InfraProvider: {}", e)))?;
 
-        info!("Created CloudProvider '{}'", provider_ref);
+        info!("Created InfraProvider '{}'", provider_ref);
         Ok(())
     }
 
@@ -1290,7 +1290,7 @@ pub async fn run(args: InstallArgs) -> Result<()> {
         info!("Provider: {}", installer.provider());
         info!("1. Create bootstrap kind cluster");
         info!("2. Deploy Lattice operator (installs CRDs, CAPI)");
-        info!("3. Create CloudProvider and credentials");
+        info!("3. Create InfraProvider and credentials");
         info!("4. Apply LatticeCluster: {}", args.config_file.display());
         info!("5. Wait for cluster provisioning");
         info!("6. Apply bootstrap manifests to management cluster");

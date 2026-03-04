@@ -5,7 +5,7 @@
 //! stamps a fresh `lastTransitionTime`), so controllers must skip no-op updates.
 
 use crate::crd::{
-    CloudProviderPhase, CloudProviderStatus, JobPhase, LatticeJobStatus, LatticeMeshMemberStatus,
+    InfraProviderPhase, InfraProviderStatus, JobPhase, LatticeJobStatus, LatticeMeshMemberStatus,
     LatticeModelStatus, LatticeServiceStatus, MeshMemberPhase, ModelServingPhase,
     SecretProviderPhase, SecretProviderStatus, ServicePhase,
 };
@@ -46,8 +46,8 @@ pub fn is_status_unchanged<S: StatusFields>(
         .unwrap_or(false)
 }
 
-impl StatusFields for CloudProviderStatus {
-    type Phase = CloudProviderPhase;
+impl StatusFields for InfraProviderStatus {
+    type Phase = InfraProviderPhase;
     fn phase(&self) -> &Self::Phase {
         &self.phase
     }
@@ -130,15 +130,15 @@ mod tests {
 
     #[test]
     fn unchanged_when_all_fields_match() {
-        let status = CloudProviderStatus {
-            phase: CloudProviderPhase::Ready,
+        let status = InfraProviderStatus {
+            phase: InfraProviderPhase::Ready,
             message: None,
             observed_generation: Some(1),
             ..Default::default()
         };
         assert!(is_status_unchanged(
             Some(&status),
-            &CloudProviderPhase::Ready,
+            &InfraProviderPhase::Ready,
             None,
             Some(1),
         ));
@@ -146,15 +146,15 @@ mod tests {
 
     #[test]
     fn changed_when_phase_differs() {
-        let status = CloudProviderStatus {
-            phase: CloudProviderPhase::Ready,
+        let status = InfraProviderStatus {
+            phase: InfraProviderPhase::Ready,
             message: None,
             observed_generation: Some(1),
             ..Default::default()
         };
         assert!(!is_status_unchanged(
             Some(&status),
-            &CloudProviderPhase::Failed,
+            &InfraProviderPhase::Failed,
             None,
             Some(1),
         ));
@@ -162,15 +162,15 @@ mod tests {
 
     #[test]
     fn changed_when_generation_differs() {
-        let status = CloudProviderStatus {
-            phase: CloudProviderPhase::Ready,
+        let status = InfraProviderStatus {
+            phase: InfraProviderPhase::Ready,
             message: None,
             observed_generation: Some(1),
             ..Default::default()
         };
         assert!(!is_status_unchanged(
             Some(&status),
-            &CloudProviderPhase::Ready,
+            &InfraProviderPhase::Ready,
             None,
             Some(2),
         ));
@@ -178,15 +178,15 @@ mod tests {
 
     #[test]
     fn changed_when_message_differs() {
-        let status = CloudProviderStatus {
-            phase: CloudProviderPhase::Ready,
+        let status = InfraProviderStatus {
+            phase: InfraProviderPhase::Ready,
             message: Some("all good".to_string()),
             observed_generation: Some(1),
             ..Default::default()
         };
         assert!(!is_status_unchanged(
             Some(&status),
-            &CloudProviderPhase::Ready,
+            &InfraProviderPhase::Ready,
             None,
             Some(1),
         ));
@@ -194,9 +194,9 @@ mod tests {
 
     #[test]
     fn changed_when_status_is_none() {
-        assert!(!is_status_unchanged::<CloudProviderStatus>(
+        assert!(!is_status_unchanged::<InfraProviderStatus>(
             None,
-            &CloudProviderPhase::Ready,
+            &InfraProviderPhase::Ready,
             None,
             Some(1),
         ));

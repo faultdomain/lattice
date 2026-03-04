@@ -86,7 +86,7 @@ pub struct BackupStorageSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure: Option<AzureStorageConfig>,
 
-    /// Reference to a CloudProvider for credentials
+    /// Reference to a InfraProvider for credentials
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud_provider_ref: Option<String>,
 

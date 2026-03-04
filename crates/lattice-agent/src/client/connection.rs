@@ -205,6 +205,11 @@ impl AgentClient {
                 let current_state = *heartbeat_state.read().await;
                 let health =
                     crate::health::gather_cluster_health(heartbeat_kube_provider.as_ref()).await;
+
+                // Compute spec/status hashes for state sync detection
+                let (spec_hash, status_hash) =
+                    compute_cluster_hashes(heartbeat_kube_provider.as_ref(), &cluster_name).await;
+
                 let msg = AgentMessage {
                     cluster_name: cluster_name.clone(),
                     payload: Some(Payload::Heartbeat(Heartbeat {
@@ -212,6 +217,8 @@ impl AgentClient {
                         timestamp: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
                         uptime_seconds: start_time.elapsed().as_secs() as i64,
                         health,
+                        spec_hash,
+                        status_hash,
                     })),
                 };
 
@@ -349,6 +356,41 @@ pub(super) fn extract_domain(endpoint: &str) -> Result<String, ClientError> {
         .filter(|h| !h.is_empty())
         .map(|h| h.to_string())
         .ok_or_else(|| ClientError::InvalidEndpoint(format!("URL has no host: {}", endpoint)))
+}
+
+/// Compute SHA-256 hashes of this cluster's LatticeCluster spec and status.
+///
+/// Returns `(spec_hash, status_hash)` — empty vectors if the CRD can't be read
+/// (best-effort, don't block heartbeats on hash failures).
+async fn compute_cluster_hashes(
+    kube_provider: &dyn crate::kube_client::KubeClientProvider,
+    cluster_name: &str,
+) -> (Vec<u8>, Vec<u8>) {
+    let client = match kube_provider.create().await {
+        Ok(c) => c,
+        Err(_) => return (vec![], vec![]),
+    };
+
+    let api: kube::Api<lattice_common::crd::LatticeCluster> = kube::Api::all(client);
+    let cluster = match api.get(cluster_name).await {
+        Ok(c) => c,
+        Err(_) => return (vec![], vec![]),
+    };
+
+    let spec_hash = match serde_json::to_vec(&cluster.spec) {
+        Ok(json) => lattice_common::kube_utils::sha256(&json),
+        Err(_) => vec![],
+    };
+
+    let status_hash = match cluster.status.as_ref() {
+        Some(status) => match serde_json::to_vec(status) {
+            Ok(json) => lattice_common::kube_utils::sha256(&json),
+            Err(_) => vec![],
+        },
+        None => lattice_common::kube_utils::sha256(b"{}"),
+    };
+
+    (spec_hash, status_hash)
 }
 
 #[cfg(test)]

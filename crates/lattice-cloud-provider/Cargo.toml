@@ -3,7 +3,7 @@ name = "lattice-cloud-provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CloudProvider controller for Lattice - manages cloud account validation and resources"
+description = "InfraProvider controller for Lattice - manages cloud account validation and resources"
 
 [dependencies]
 lattice-common = { workspace = true }

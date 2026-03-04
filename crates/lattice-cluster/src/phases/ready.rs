@@ -215,6 +215,7 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
         NodeCounts {
             ready_control_plane: 0,
             ready_workers: 0,
+            pool_resources: vec![],
         }
     });
 
@@ -230,7 +231,7 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
     };
 
     // Update status with node counts, worker pool information, and children health
-    update_node_status(cluster, ctx, &name, pool_statuses, counts, children_health).await;
+    update_node_status(cluster, ctx, &name, pool_statuses, &counts, children_health).await;
 
     debug!(
         desired = total_desired,
@@ -459,11 +460,11 @@ async fn update_node_status(
     ctx: &Context,
     name: &str,
     mut pool_statuses: BTreeMap<String, WorkerPoolStatus>,
-    counts: NodeCounts,
+    counts: &NodeCounts,
     children_health: Vec<lattice_common::crd::ChildClusterHealth>,
 ) {
-    // Distribute ready workers proportionally across pools based on desired_replicas.
-    // This is a stopgap until per-pool node counting via label matching is implemented.
+    // Distribute ready workers proportionally across pools for parent-side visibility.
+    // Agents report accurate per-pool counts in ClusterHealth.pool_resources.
     let total_desired: u32 = pool_statuses.values().map(|p| p.desired_replicas).sum();
     if total_desired > 0 && counts.ready_workers > 0 {
         let mut remaining = counts.ready_workers;
@@ -490,6 +491,7 @@ async fn update_node_status(
         ready_workers: Some(counts.ready_workers),
         ready_control_plane: Some(counts.ready_control_plane),
         children_health,
+        pool_resources: counts.pool_resources.clone(),
         ..current_status
     };
 

@@ -77,6 +77,10 @@ pub struct AgentConnection {
     pub health: Option<lattice_proto::ClusterHealth>,
     /// Timestamp of last heartbeat
     pub last_heartbeat: Option<std::time::Instant>,
+    /// SHA-256 hash of the child's LatticeCluster spec (from last heartbeat)
+    pub spec_hash: Vec<u8>,
+    /// SHA-256 hash of the child's LatticeCluster status (from last heartbeat)
+    pub status_hash: Vec<u8>,
 }
 
 impl AgentConnection {
@@ -98,6 +102,8 @@ impl AgentConnection {
             connected: true,
             health: None,
             last_heartbeat: None,
+            spec_hash: vec![],
+            status_hash: vec![],
         }
     }
 
@@ -438,6 +444,34 @@ impl AgentRegistry {
         }
     }
 
+    /// Update spec/status hashes from heartbeat and detect if a state sync is needed.
+    ///
+    /// Returns true if either hash changed (or this is the first heartbeat with hashes),
+    /// indicating the cell should send a RequestStateSync command.
+    pub fn update_hashes(
+        &self,
+        cluster_name: &str,
+        new_spec_hash: &[u8],
+        new_status_hash: &[u8],
+    ) -> bool {
+        if new_spec_hash.is_empty() && new_status_hash.is_empty() {
+            return false;
+        }
+
+        if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+            let first_hashes = agent.spec_hash.is_empty() && agent.status_hash.is_empty();
+            let spec_changed = agent.spec_hash != new_spec_hash;
+            let status_changed = agent.status_hash != new_status_hash;
+
+            agent.spec_hash = new_spec_hash.to_vec();
+            agent.status_hash = new_status_hash.to_vec();
+
+            first_hashes || spec_changed || status_changed
+        } else {
+            false
+        }
+    }
+
     /// Get the latest cluster health for a cluster
     pub fn get_health(&self, cluster_name: &str) -> Option<lattice_proto::ClusterHealth> {
         self.agents.get(cluster_name).and_then(|a| a.health.clone())
@@ -474,6 +508,25 @@ impl AgentRegistry {
                     let age = t.elapsed().as_secs();
                     format!("{}s ago", age)
                 });
+                let pool_resources = if let Some(ref h) = agent.health {
+                    h.pool_resources
+                        .iter()
+                        .map(|p| lattice_common::crd::PoolResourceSummary {
+                            pool_name: p.pool_name.clone(),
+                            ready_nodes: p.ready_nodes as u32,
+                            total_nodes: p.total_nodes as u32,
+                            node_cpu_millis: p.node_cpu_millis,
+                            node_memory_bytes: p.node_memory_bytes,
+                            node_gpu_count: p.node_gpu_count as u32,
+                            gpu_type: p.gpu_type.clone(),
+                            allocated_cpu_millis: p.allocated_cpu_millis,
+                            allocated_memory_bytes: p.allocated_memory_bytes,
+                            allocated_gpu_count: p.allocated_gpu_count as u32,
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
                 lattice_common::crd::ChildClusterHealth {
                     name: agent.cluster_name.clone(),
                     ready_nodes,
@@ -482,6 +535,7 @@ impl AgentRegistry {
                     total_control_plane: total_cp,
                     agent_state: format!("{:?}", agent.state),
                     last_heartbeat,
+                    pool_resources,
                 }
             })
             .collect()
@@ -1368,5 +1422,96 @@ mod tests {
         // No heartbeat received yet (still in handshake)
         let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
         assert!(stale.is_empty());
+    }
+
+    // =========================================================================
+    // update_hashes Tests
+    // =========================================================================
+
+    #[test]
+    fn test_update_hashes_first_update_returns_true() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        let spec_hash = vec![1, 2, 3];
+        let status_hash = vec![4, 5, 6];
+
+        let changed = registry.update_hashes("cluster-a", &spec_hash, &status_hash);
+        assert!(changed, "First hash update should trigger sync");
+    }
+
+    #[test]
+    fn test_update_hashes_same_hashes_returns_false() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        let spec_hash = vec![1, 2, 3];
+        let status_hash = vec![4, 5, 6];
+
+        // First update (sets initial hashes)
+        registry.update_hashes("cluster-a", &spec_hash, &status_hash);
+
+        // Same hashes again
+        let changed = registry.update_hashes("cluster-a", &spec_hash, &status_hash);
+        assert!(!changed, "Identical hashes should not trigger sync");
+    }
+
+    #[test]
+    fn test_update_hashes_changed_spec_returns_true() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        let spec_hash = vec![1, 2, 3];
+        let status_hash = vec![4, 5, 6];
+
+        // Set initial hashes
+        registry.update_hashes("cluster-a", &spec_hash, &status_hash);
+
+        // Change spec hash only
+        let new_spec_hash = vec![7, 8, 9];
+        let changed = registry.update_hashes("cluster-a", &new_spec_hash, &status_hash);
+        assert!(changed, "Changed spec hash should trigger sync");
+    }
+
+    #[test]
+    fn test_update_hashes_changed_status_returns_true() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        let spec_hash = vec![1, 2, 3];
+        let status_hash = vec![4, 5, 6];
+
+        // Set initial hashes
+        registry.update_hashes("cluster-a", &spec_hash, &status_hash);
+
+        // Change status hash only
+        let new_status_hash = vec![10, 11, 12];
+        let changed = registry.update_hashes("cluster-a", &spec_hash, &new_status_hash);
+        assert!(changed, "Changed status hash should trigger sync");
+    }
+
+    #[test]
+    fn test_update_hashes_empty_hashes_returns_false() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        let changed = registry.update_hashes("cluster-a", &[], &[]);
+        assert!(!changed, "Empty hashes should not trigger sync");
+    }
+
+    #[test]
+    fn test_update_hashes_unknown_cluster_returns_false() {
+        let registry = AgentRegistry::new();
+
+        let spec_hash = vec![1, 2, 3];
+        let status_hash = vec![4, 5, 6];
+
+        let changed = registry.update_hashes("nonexistent", &spec_hash, &status_hash);
+        assert!(!changed, "Unknown cluster should not trigger sync");
     }
 }

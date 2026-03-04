@@ -22,6 +22,7 @@ pub mod parent;
 pub mod resilient_tunnel;
 pub mod resources;
 pub mod server;
+pub mod state_sync;
 pub mod subtree_registry;
 
 pub use bootstrap::{

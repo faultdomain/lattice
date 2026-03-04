@@ -66,6 +66,8 @@ message AgentMessage {
     ExecData exec_data = 12;
     // Lattice lifecycle event forwarded from child
     LatticeEvent event = 13;
+    // Response to RequestStateSync with full spec + status
+    StateSyncResponse state_sync_response = 14;
   }
 }
 
@@ -138,8 +140,12 @@ message Heartbeat {
   google.protobuf.Timestamp timestamp = 2;
   // Uptime in seconds
   int64 uptime_seconds = 3;
-  // Cluster health data (node counts, conditions)
+  // Cluster health data (node counts, conditions, GPU capacity)
   ClusterHealth health = 4;
+  // SHA-256 hash of this cluster's LatticeCluster spec (JSON-serialized)
+  bytes spec_hash = 5;
+  // SHA-256 hash of this cluster's LatticeCluster status (JSON-serialized)
+  bytes status_hash = 6;
 }
 
 // Cluster health information
@@ -154,6 +160,37 @@ message ClusterHealth {
   int32 total_control_plane = 4;
   // Kubernetes conditions (Ready, MemoryPressure, etc.)
   repeated NodeCondition conditions = 5;
+  // Per-worker-pool resource capacity (CPU, memory, GPU)
+  repeated PoolResources pool_resources = 6;
+}
+
+// Resource capacity for a single worker pool.
+//
+// Each pool has homogeneous nodes (same instance type), so per-node
+// resource shape is the same across the pool. This lets the scheduler
+// determine schedulability without per-node data:
+// "pool has N nodes shaped like X, with Y aggregate allocation"
+message PoolResources {
+  // Pool name (matches lattice.dev/pool label on nodes)
+  string pool_name = 1;
+  // Number of ready nodes in this pool
+  int32 ready_nodes = 2;
+  // Total number of nodes in this pool
+  int32 total_nodes = 3;
+  // Allocatable CPU per node (millicores, from node.status.allocatable)
+  int64 node_cpu_millis = 4;
+  // Allocatable memory per node (bytes, from node.status.allocatable)
+  int64 node_memory_bytes = 5;
+  // GPU devices per node (from nvidia.com/gpu allocatable, 0 if no GPUs)
+  int32 node_gpu_count = 6;
+  // GPU type from NFD label (nvidia.com/gpu.product), empty if no GPUs
+  string gpu_type = 7;
+  // Sum of pod CPU requests across all nodes in this pool (millicores)
+  int64 allocated_cpu_millis = 8;
+  // Sum of pod memory requests across all nodes in this pool (bytes)
+  int64 allocated_memory_bytes = 9;
+  // Sum of pod GPU requests across all nodes in this pool
+  int32 allocated_gpu_count = 10;
 }
 
 // Response to StatusRequest
@@ -239,6 +276,8 @@ message CellCommand {
     ExecResize exec_resize = 10;
     // Exec/attach/portforward: cancel session (client disconnected)
     ExecCancel exec_cancel = 11;
+    // Request child to send full spec + status (triggered by hash mismatch)
+    RequestStateSync state_sync_request = 12;
   }
 }
 
@@ -252,7 +291,7 @@ message ApplyManifestsCommand {
 // pivot operations and ongoing synchronization. They include infrastructure
 // providers, secrets, and policy resources that children need to operate.
 message DistributableResources {
-  // CloudProvider CRDs (JSON) - infrastructure provider configurations
+  // InfraProvider CRDs (JSON) - infrastructure provider configurations
   repeated bytes cloud_providers = 1;
   // SecretProvider CRDs (JSON) - external secrets integrations
   repeated bytes secrets_providers = 2;
@@ -590,4 +629,26 @@ message ExecResize {
 message ExecCancel {
   // Session ID to cancel
   string request_id = 1;
+}
+
+// =============================================================================
+// State Sync Messages (hash-based spec/status sync)
+// =============================================================================
+
+// Cell → Agent: Request full spec + status
+//
+// Sent when the cell detects a hash mismatch between what it has stored
+// and what the agent reported in its heartbeat. This keeps the parent's
+// copy of the child's LatticeCluster CRD up to date after pivot.
+message RequestStateSync {}
+
+// Agent → Cell: Full spec + status response
+//
+// Sent in response to RequestStateSync. Contains the full LatticeCluster
+// spec and status as JSON so the parent can patch its local copy.
+message StateSyncResponse {
+  // Full LatticeClusterSpec as JSON
+  bytes spec_json = 1;
+  // Full LatticeClusterStatus as JSON
+  bytes status_json = 2;
 }

@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::debug;
 
-use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretProvider};
+use lattice_common::crd::{CedarPolicy, InfraProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{
     INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL,
@@ -62,10 +62,10 @@ pub async fn fetch_distributable_resources(
     let lp = ListParams::default();
     let mut secret_names: HashSet<String> = HashSet::new();
 
-    // Fetch CloudProvider CRDs
-    let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    // Fetch InfraProvider CRDs
+    let cp_api: Api<InfraProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let mut cloud_providers = Vec::new();
-    if let Some(cp_list) = list_crd_optional(&cp_api, &lp, "CloudProvider").await? {
+    if let Some(cp_list) = list_crd_optional(&cp_api, &lp, "InfraProvider").await? {
         for cp in &cp_list.items {
             cloud_providers.push(serialize_for_distribution(cp)?);
             if let Some(secret_ref) = cp.k8s_secret_ref() {
@@ -204,18 +204,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{CloudProviderSpec, CloudProviderType, SecretRef};
+    use lattice_common::crd::{InfraProviderSpec, InfraProviderType, SecretRef};
     use lattice_common::CAPA_NAMESPACE;
 
     // =========================================================================
     // serialize_for_distribution Tests
     // =========================================================================
 
-    fn sample_cloud_provider() -> CloudProvider {
-        let mut cp = CloudProvider::new(
+    fn sample_cloud_provider() -> InfraProvider {
+        let mut cp = InfraProvider::new(
             "test-provider",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::Docker,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::Docker,
                 region: None,
                 credentials_secret_ref: None,
                 credentials: None,
@@ -247,7 +247,7 @@ mod tests {
 
         let json = String::from_utf8(result.unwrap()).unwrap();
         assert!(json.contains("test-provider"));
-        // CloudProviderType uses rename_all = "lowercase", so Docker -> docker
+        // InfraProviderType uses rename_all = "lowercase", so Docker -> docker
         assert!(json.contains("docker"));
     }
 

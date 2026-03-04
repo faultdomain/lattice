@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use lattice_capi::installer::{
     copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig, NativeInstaller,
 };
-use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
+use lattice_common::crd::{InfraProvider, LatticeCluster, ProviderType};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::config::CAPI_CRD_POLL_INTERVAL;
@@ -44,23 +44,23 @@ impl AgentClient {
 
         info!(infrastructure = %provider_str, "Installing CAPI providers");
 
-        // Copy credentials from CloudProvider to CAPI provider namespace
+        // Copy credentials from InfraProvider to CAPI provider namespace
         if infrastructure != ProviderType::Docker {
-            let cloud_providers: kube::Api<CloudProvider> =
+            let cloud_providers: kube::Api<InfraProvider> =
                 kube::Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
             let cp = cloud_providers
                 .get(&cluster.spec.provider_ref)
                 .await
                 .map_err(|e| {
                     std::io::Error::other(format!(
-                        "CloudProvider '{}' not found: {}",
+                        "InfraProvider '{}' not found: {}",
                         cluster.spec.provider_ref, e
                     ))
                 })?;
 
             let secret_ref = cp.k8s_secret_ref().ok_or_else(|| {
                 std::io::Error::other(format!(
-                    "CloudProvider '{}' missing credentials",
+                    "InfraProvider '{}' missing credentials",
                     cluster.spec.provider_ref
                 ))
             })?;

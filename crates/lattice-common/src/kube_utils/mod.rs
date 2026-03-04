@@ -63,4 +63,4 @@ pub use dynamic::{
 };
 
 // hash.rs
-pub use hash::deterministic_hash;
+pub use hash::{deterministic_hash, sha256};

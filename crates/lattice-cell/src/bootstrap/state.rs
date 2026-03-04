@@ -295,7 +295,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             BootstrapError::Internal(format!("failed to serialize parent config Secret: {}", e))
         })?);
 
-        // Note: CloudProvider and SecretProvider resources (with their referenced secrets)
+        // Note: InfraProvider and SecretProvider resources (with their referenced secrets)
         // are added by the bootstrap_manifests_handler after calling this method.
 
         Ok(BootstrapResponse {

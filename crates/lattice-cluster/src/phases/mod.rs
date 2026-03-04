@@ -170,6 +170,7 @@ pub async fn update_status(
         last_heartbeat: current_status.last_heartbeat,
         version: current_status.version,
         infrastructure: current_status.infrastructure,
+        pool_resources: current_status.pool_resources,
     };
 
     // Set pivot_complete if requested (persists pivot completion across restarts)

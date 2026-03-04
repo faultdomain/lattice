@@ -14,27 +14,8 @@ pub fn is_self_cluster(cluster_name: &str, self_cluster_name: Option<&str>) -> b
         .unwrap_or(false)
 }
 
-/// Check if a node is a control plane node based on labels.
-pub(crate) fn is_control_plane_node(node: &k8s_openapi::api::core::v1::Node) -> bool {
-    node.metadata
-        .labels
-        .as_ref()
-        .map(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
-        .unwrap_or(false)
-}
-
-/// Check if a node has the Ready condition set to True.
-pub(crate) fn is_node_ready(node: &k8s_openapi::api::core::v1::Node) -> bool {
-    node.status
-        .as_ref()
-        .and_then(|s| s.conditions.as_ref())
-        .map(|conds| {
-            conds
-                .iter()
-                .any(|c| c.type_ == "Ready" && c.status == "True")
-        })
-        .unwrap_or(false)
-}
+pub(crate) use lattice_common::resources::is_control_plane_node;
+pub(crate) use lattice_common::resources::is_node_ready;
 
 /// Actions that can be taken during the pivot phase.
 #[derive(Debug, Clone, PartialEq, Eq)]

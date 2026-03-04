@@ -120,7 +120,7 @@ async fn handle_self_cluster(
 /// Handle a child cluster in Pending phase.
 ///
 /// Child clusters need to have their infrastructure provisioned:
-/// 1. Validate CloudProvider exists
+/// 1. Validate InfraProvider exists
 /// 2. Copy provider credentials
 /// 3. Ensure CAPI is installed
 /// 4. Generate and apply CAPI manifests
@@ -130,7 +130,7 @@ async fn handle_child_cluster(
     ctx: &Context,
     name: &str,
 ) -> Result<Action, Error> {
-    // Look up the CloudProvider referenced by provider_ref
+    // Look up the InfraProvider referenced by provider_ref
     let provider_type = cluster.spec.provider.provider_type();
     let cloud_provider = ctx
         .kube
@@ -138,22 +138,22 @@ async fn handle_child_cluster(
         .await?
         .ok_or_else(|| {
             Error::validation(format!(
-                "CloudProvider '{}' not found",
+                "InfraProvider '{}' not found",
                 cluster.spec.provider_ref
             ))
         })?;
 
-    // Validate CloudProvider has credentials for non-Docker providers
+    // Validate InfraProvider has credentials for non-Docker providers
     if provider_type != lattice_common::crd::ProviderType::Docker
         && cloud_provider.k8s_secret_ref().is_none()
     {
         return Err(Error::validation(format!(
-            "CloudProvider '{}' requires credentials for {} provider",
+            "InfraProvider '{}' requires credentials for {} provider",
             cluster.spec.provider_ref, provider_type
         )));
     }
 
-    // Copy provider credentials from CloudProvider's secret to provider namespace
+    // Copy provider credentials from InfraProvider's secret to provider namespace
     if let (Some(ref client), Some(ref secret_ref)) =
         (&ctx.client, &cloud_provider.k8s_secret_ref())
     {

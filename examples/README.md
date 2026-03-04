@@ -13,7 +13,7 @@ lattice install -f examples/cluster/management-cluster.yaml
 This will:
 1. Create a temporary kind bootstrap cluster
 2. Deploy CAPI and the Lattice operator
-3. Create the CloudProvider and credentials automatically (based on `providerRef` and `provider.config`)
+3. Create the InfraProvider and credentials automatically (based on `providerRef` and `provider.config`)
 4. Provision the management cluster
 5. Pivot CAPI resources to make it self-managing
 6. Delete the bootstrap cluster

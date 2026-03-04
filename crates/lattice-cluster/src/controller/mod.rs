@@ -279,7 +279,7 @@ mod tests {
     use lattice_capi::installer::CapiProviderConfig;
     use lattice_capi::provider::CAPIManifest;
     use lattice_common::crd::{
-        BackupsConfig, BootstrapProvider, CloudProvider, Condition, ConditionStatus,
+        BackupsConfig, BootstrapProvider, InfraProvider, Condition, ConditionStatus,
         ControlPlaneSpec, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, MonitoringConfig,
         NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
     };
@@ -376,14 +376,14 @@ mod tests {
         cluster
     }
 
-    /// Create a sample Docker CloudProvider for testing
-    fn sample_docker_provider() -> CloudProvider {
-        use lattice_common::crd::{CloudProviderSpec, CloudProviderType};
+    /// Create a sample Docker InfraProvider for testing
+    fn sample_docker_provider() -> InfraProvider {
+        use lattice_common::crd::{InfraProviderSpec, InfraProviderType};
 
-        CloudProvider::new(
+        InfraProvider::new(
             "test-provider",
-            CloudProviderSpec {
-                provider_type: CloudProviderType::Docker,
+            InfraProviderSpec {
+                provider_type: InfraProviderType::Docker,
                 region: None,
                 credentials_secret_ref: None,
                 credentials: None,
@@ -542,7 +542,7 @@ mod tests {
             mock.expect_ensure_namespace().returning(|_| Ok(()));
             // Non-self clusters get a finalizer added on first reconcile
             mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
-            // Return a Docker CloudProvider (no credentials needed)
+            // Return a Docker InfraProvider (no credentials needed)
             mock.expect_get_cloud_provider()
                 .returning(|_| Ok(Some(sample_docker_provider())));
 
@@ -568,13 +568,14 @@ mod tests {
                 Ok(NodeCounts {
                     ready_control_plane: 1,
                     ready_workers: 2,
+                    pool_resources: vec![],
                 })
             });
             // Non-self clusters get a finalizer added on first reconcile
             mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
             // Ready phase updates worker pool status
             mock.expect_patch_status().returning(|_, _| Ok(()));
-            // Return a Docker CloudProvider (no credentials needed)
+            // Return a Docker InfraProvider (no credentials needed)
             mock.expect_get_cloud_provider()
                 .returning(|_| Ok(Some(sample_docker_provider())));
 
@@ -615,7 +616,7 @@ mod tests {
             });
             // Non-self clusters get a finalizer added on first reconcile
             mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
-            // Return a Docker CloudProvider (no credentials needed)
+            // Return a Docker InfraProvider (no credentials needed)
             mock.expect_get_cloud_provider()
                 .returning(|_| Ok(Some(sample_docker_provider())));
 

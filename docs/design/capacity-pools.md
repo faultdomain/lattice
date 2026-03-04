@@ -35,7 +35,7 @@ This creates three concrete problems:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     Platform Engineer UX                             │
 │                                                                     │
-│   CloudProvider         CapacityPool                                │
+│   InfraProvider         CapacityPool                                │
 │   (credentials)    ───► (capacity limits, warm floor, capabilities) │
 │                                                                     │
 │   "I have an AWS account     "Keep 16 H100 GPUs warm.               │
@@ -161,7 +161,7 @@ The management-side workload CRD is retained as a placement record. Its status t
 /// CapacityPool declares a pool of cloud capacity available for workload placement.
 ///
 /// Platform engineers create CapacityPool resources to register capacity that
-/// the planner can draw from. Each pool references a CloudProvider for credentials
+/// the planner can draw from. Each pool references a InfraProvider for credentials
 /// and declares resource limits, warm capacity, and hardware capabilities.
 ///
 /// Example:
@@ -219,12 +219,12 @@ The management-side workload CRD is retained as a placement record. Its status t
 )]
 #[serde(rename_all = "camelCase")]
 pub struct CapacityPoolSpec {
-    /// Reference to a CloudProvider for credentials and account config.
-    /// The CloudProvider must exist and be in Ready phase.
+    /// Reference to a InfraProvider for credentials and account config.
+    /// The InfraProvider must exist and be in Ready phase.
     pub provider_ref: String,
 
     /// Region for clusters created in this pool.
-    /// Overrides the CloudProvider's region if set.
+    /// Overrides the InfraProvider's region if set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 
@@ -489,7 +489,7 @@ pub struct CapacityPoolStatus {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CapacityPoolPhase {
-    /// Pool is being validated (CloudProvider check).
+    /// Pool is being validated (InfraProvider check).
     #[default]
     Pending,
     /// Pool is active and accepting workload placement.
@@ -911,7 +911,7 @@ blast_radius: region
     Only applicable to stateless LatticeService workloads.
 
 blast_radius: provider
-  → Planner places replicas across pools backed by different CloudProvider types.
+  → Planner places replicas across pools backed by different InfraProvider types.
     Only applicable to stateless LatticeService workloads.
 ```
 
@@ -932,7 +932,7 @@ The sequence number monotonically increases per pool (tracked in `status.next_cl
 ### CRD Relationships
 
 ```
-CloudProvider (existing, unchanged)
+InfraProvider (existing, unchanged)
      │
      │ credentials + account config
      ▼
@@ -974,7 +974,7 @@ Manual escape hatch:
 **New crate: `lattice-capacity`**
 
 - Controller watching CapacityPool and workload CRDs
-- Validate CapacityPool specs (CloudProvider exists and is Ready, limits are consistent)
+- Validate CapacityPool specs (InfraProvider exists and is Ready, limits are consistent)
 - Set CapacityPool phase to Ready when validated
 - `PlannerSnapshot` construction from cluster state
 - Aggregate utilization calculation and CapacityPool status updates
