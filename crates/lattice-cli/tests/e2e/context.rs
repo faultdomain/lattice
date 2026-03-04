@@ -213,6 +213,8 @@ pub struct StandaloneKubeconfig {
     pub kubeconfig: String,
     /// Proxy session (kept alive for port-forward). None when using direct access.
     _session: Option<TestSession>,
+    /// Chaos monkey (kept alive for duration of test). None when chaos is disabled.
+    _chaos: Option<super::chaos::ChaosMonkey>,
     /// Concurrency permit — released when this struct is dropped
     _permit: TestPermit,
 }
@@ -226,25 +228,50 @@ impl StandaloneKubeconfig {
     pub async fn resolve() -> Result<Self, String> {
         let permit = acquire_test_permit();
 
-        if let Some(kc) = standalone_kubeconfig() {
-            return Ok(Self {
-                kubeconfig: kc,
-                _session: None,
-                _permit: permit,
-            });
-        }
+        let (kubeconfig, session) = if let Some(kc) = standalone_kubeconfig() {
+            (kc, None)
+        } else {
+            let session = TestSession::from_env(
+                "Set LATTICE_KUBECONFIG or LATTICE_MGMT_KUBECONFIG + LATTICE_WORKLOAD_KUBECONFIG",
+            )
+            .await?;
+            super::integration::cedar::apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
+                .await?;
+            let kc = session.ctx.require_workload()?.to_string();
+            (kc, Some(session))
+        };
 
-        let session = TestSession::from_env(
-            "Set LATTICE_KUBECONFIG or LATTICE_MGMT_KUBECONFIG + LATTICE_WORKLOAD_KUBECONFIG",
-        )
-        .await?;
-        super::integration::cedar::apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig).await?;
-        let kc = session.ctx.require_workload()?.to_string();
+        let chaos = if Self::chaos_enabled() {
+            use std::sync::Arc;
+            use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
+            use super::providers::InfraProvider;
+
+            let targets = Arc::new(ChaosTargets::new(super::helpers::run_id()));
+            targets.add("standalone", &kubeconfig, None);
+            let provider = InfraContext::provider_from_env();
+            let config = ChaosConfig::for_provider(provider);
+            Some(ChaosMonkey::start_with_config(targets, config))
+        } else {
+            None
+        };
+
         Ok(Self {
-            kubeconfig: kc,
-            _session: Some(session),
+            kubeconfig,
+            _session: session,
+            _chaos: chaos,
             _permit: permit,
         })
+    }
+
+    /// Check if chaos monkey is enabled via `LATTICE_ENABLE_CHAOS` env var.
+    fn chaos_enabled() -> bool {
+        matches!(
+            std::env::var("LATTICE_ENABLE_CHAOS")
+                .unwrap_or_default()
+                .to_lowercase()
+                .as_str(),
+            "1" | "true" | "yes"
+        )
     }
 }
 

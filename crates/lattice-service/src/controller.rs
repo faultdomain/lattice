@@ -47,8 +47,6 @@ const IMAGE_PULL_SECRET_TIMEOUT: Duration = Duration::from_secs(120);
 const IMAGE_PULL_SECRET_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Requeue interval when service is in Pending phase.
 const REQUEUE_PENDING: Duration = Duration::from_secs(5);
-/// Requeue interval when waiting for dependencies or mesh readiness.
-const REQUEUE_WAITING: Duration = Duration::from_secs(10);
 /// Requeue interval when service is Ready (periodic drift check).
 const REQUEUE_READY: Duration = Duration::from_secs(60);
 
@@ -737,13 +735,11 @@ pub async fn reconcile(
 
     let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
     if !missing_deps.is_empty() {
-        if current_phase == ServicePhase::Ready {
-            warn!(?missing_deps, "dependencies no longer available");
-        } else {
-            debug!(?missing_deps, "waiting for dependencies");
-        }
-        update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
-        return Ok(Action::requeue(REQUEUE_WAITING));
+        // Log but don't block compilation. The graph already handles Unknown stubs
+        // correctly — they don't form bilateral agreements. Blocking here would
+        // prevent the service from updating its policies/mesh when a dependency is
+        // deleted, causing a liveness hazard.
+        warn!(?missing_deps, "some dependencies not yet in graph, compiling anyway");
     }
 
     compile_and_apply(&service, &name, namespace, &ctx, &inputs_hash).await
@@ -1194,25 +1190,28 @@ mod tests {
         assert!(node.is_some());
     }
 
-    /// Story: Service with dependencies waits for them
+    /// Story: Service with missing dependencies still compiles (doesn't block)
     #[tokio::test]
-    async fn service_waits_for_dependencies() {
+    async fn service_compiles_with_missing_dependencies() {
         let mut service = service_with_deps("frontend", vec!["backend"]);
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
         let service = Arc::new(service);
 
-        let mock_kube = mock_kube();
+        let mut mock_kube = mock_kube();
+        mock_kube
+            .expect_cleanup_orphaned_resources()
+            .returning(|_, _, _| Ok(()));
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
-        // Put the service in the graph first
+        // Put the service in the graph first (but NOT its dependency "backend")
         ctx.graph.put_service("test", "frontend", &service.spec);
 
         let action = reconcile(service, ctx)
             .await
             .expect("reconcile should succeed");
 
-        // Should requeue to wait for dependencies
-        assert_eq!(action, Action::requeue(REQUEUE_WAITING));
+        // Should proceed to compile (Ready), not block waiting for deps
+        assert_eq!(action, Action::requeue(REQUEUE_READY));
     }
 
     /// Story: Service becomes ready when dependencies exist

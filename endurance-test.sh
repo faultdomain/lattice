@@ -8,10 +8,12 @@ set -euo pipefail
 #   LATTICE_KUBECONFIG=$(pwd)/management-kubeconfig-ea1501 ./endurance-test.sh
 #
 # Options:
-#   FAIL_FAST=1  — stop on first failure without cleaning up (default)
-#   FAIL_FAST=0  — continue past failures for the full duration
+#   FAIL_FAST=1          — stop on first failure without cleaning up (default)
+#   FAIL_FAST=0          — continue past failures for the full duration
+#   LATTICE_ENABLE_CHAOS — enable chaos monkey (pod kills + network cuts) during tests
 
 FAIL_FAST=${FAIL_FAST:-1}
+export LATTICE_ENABLE_CHAOS=${LATTICE_ENABLE_CHAOS:-1}
 DURATION_HOURS=${DURATION_HOURS:-12}
 DURATION_SECS=$((DURATION_HOURS * 3600))
 LOG_DIR="endurance-logs"
@@ -23,7 +25,7 @@ PASS=0
 FAIL=0
 
 echo "=== Endurance test starting at $(date) ==="
-echo "=== Duration: ${DURATION_HOURS}h | Logs: ${LOG_DIR}/ ==="
+echo "=== Duration: ${DURATION_HOURS}h | Logs: ${LOG_DIR}/ | Chaos: ${LATTICE_ENABLE_CHAOS} ==="
 echo ""
 
 while true; do
