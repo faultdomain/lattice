@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use lattice_common::retry::{retry_with_backoff, RetryConfig};
+use lattice_common::retry::{retry_with_backoff_bail, RetryConfig};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -29,17 +29,28 @@ pub async fn apply_yaml(kubeconfig: &str, yaml: &str) -> Result<(), String> {
     let kubeconfig_owned = kubeconfig.to_string();
     let yaml_owned = yaml.to_string();
 
-    retry_with_backoff(&retry_config, "kubectl_apply", || {
-        let kubeconfig = kubeconfig_owned.clone();
-        let yaml = yaml_owned.clone();
-        async move { apply_yaml_internal(&kubeconfig, &yaml) }
-    })
+    retry_with_backoff_bail(
+        &retry_config,
+        "kubectl_apply",
+        || {
+            let kubeconfig = kubeconfig_owned.clone();
+            let yaml = yaml_owned.clone();
+            async move { apply_yaml_internal(&kubeconfig, &yaml) }
+        },
+        |e| e.contains("namespaces") && e.contains("not found"),
+    )
     .await
 }
 
 fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    // Strip resourceVersion from the YAML before applying. With --server-side
+    // --force-conflicts, resourceVersion is unnecessary and causes spurious
+    // 409 Conflict errors when the resource is modified between fetch and apply
+    // (e.g., by the operator reconciling annotations or status).
+    let yaml = strip_resource_version(yaml);
 
     let mut child = Command::new("kubectl")
         .args([
@@ -60,7 +71,7 @@ fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin
-            .write_all(yaml.as_bytes())
+            .write_all(yaml.as_ref())
             .map_err(|e| format!("Failed to write to kubectl stdin: {}", e))?;
     }
 
@@ -92,6 +103,18 @@ fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Strip `resourceVersion` from YAML metadata so that server-side apply
+/// doesn't fail with 409 Conflict when the resource was modified since fetch.
+fn strip_resource_version(yaml: &str) -> String {
+    yaml.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("resourceVersion:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // =============================================================================

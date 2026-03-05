@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::kube_utils::ObjectMeta;
+use lattice_common::kube_utils::{LabelSelector, ObjectMeta};
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
@@ -676,29 +676,6 @@ pub struct PodAffinityTerm {
 pub struct SchedulingGate {
     /// Gate name
     pub name: String,
-}
-
-/// Topology spread constraint for distributing pods across failure domains
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TopologySpreadConstraint {
-    /// Maximum difference in pod count between topology domains
-    pub max_skew: i32,
-    /// Topology key (e.g., topology.kubernetes.io/zone)
-    pub topology_key: String,
-    /// What to do when constraint can't be satisfied
-    pub when_unsatisfiable: String,
-    /// Label selector to find pods to spread
-    pub label_selector: LabelSelector,
-}
-
-/// Label selector for topology spread constraints
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct LabelSelector {
-    /// Match labels
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub match_labels: BTreeMap<String, String>,
 }
 
 /// Kubernetes toleration

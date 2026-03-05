@@ -22,7 +22,7 @@ use super::super::helpers::{
     apply_yaml, build_busybox_service, delete_namespace, deploy_and_wait_for_phase,
     ensure_fresh_namespace, load_fixture_config, resolve_model_serving_name, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, TestHarness,
-    CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER, DEFAULT_DOWNLOADER_IMAGE, DEFAULT_TIMEOUT,
+    CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER, DEFAULT_TIMEOUT,
 };
 use super::super::mesh_helpers::parse_traffic_result;
 
@@ -31,7 +31,7 @@ const MODEL_NAME: &str = "llm-serving";
 
 /// Timeout for waiting on phase transitions (e.g., Pending → Loading)
 const PHASE_TIMEOUT: Duration = Duration::from_secs(120);
-/// Timeout for longer operations (Serving phase, download Job completion)
+/// Timeout for longer operations (Serving phase, init container completion)
 const LONG_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 /// Interval between polls when waiting for a condition
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -772,203 +772,9 @@ async fn test_model_autoscaling_created(kubeconfig: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Verify model download PVC was created
-async fn test_model_download_pvc(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Verifying model download PVC...");
-
-    let pvc_name = format!("vol-{}-model-cache", MODEL_NAME);
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "pvc",
-        &pvc_name,
-        "-n",
-        MODEL_NAMESPACE,
-        "-o",
-        "json",
-    ])
-    .await?;
-
-    let pvc: serde_json::Value =
-        serde_json::from_str(&output).map_err(|e| format!("Failed to parse PVC JSON: {e}"))?;
-
-    // Verify size
-    let storage = pvc["spec"]["resources"]["requests"]["storage"]
-        .as_str()
-        .unwrap_or_default();
-    if storage != "1Gi" {
-        return Err(format!("PVC storage should be '1Gi', got: '{storage}'"));
-    }
-
-    // Verify access mode
-    let access_modes = pvc["spec"]["accessModes"]
-        .as_array()
-        .ok_or("PVC accessModes is not an array")?;
-    if !access_modes.iter().any(|m| m == "ReadWriteOnce") {
-        return Err(format!(
-            "PVC should have ReadWriteOnce access mode, got: {:?}",
-            access_modes
-        ));
-    }
-
-    // Verify owner reference
-    let owner_kind = pvc["metadata"]["ownerReferences"][0]["kind"]
-        .as_str()
-        .unwrap_or_default();
-    if owner_kind != "LatticeModel" {
-        return Err(format!(
-            "PVC ownerReference kind should be 'LatticeModel', got: '{owner_kind}'"
-        ));
-    }
-
-    info!("[Model] Model download PVC verified: 1Gi, ReadWriteOnce, correct owner ref");
-    Ok(())
-}
-
-/// Verify model download LatticeJob was created
-async fn test_model_download_job(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Verifying model download LatticeJob...");
-
-    let job_name = format!("{}-download", MODEL_NAME);
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticejob",
-        &job_name,
-        "-n",
-        MODEL_NAMESPACE,
-        "-o",
-        "json",
-    ])
-    .await?;
-
-    let job: serde_json::Value = serde_json::from_str(&output)
-        .map_err(|e| format!("Failed to parse LatticeJob JSON: {e}"))?;
-
-    // Verify maxRetry
-    if job["spec"]["maxRetry"].as_u64() != Some(3) {
-        return Err(format!(
-            "LatticeJob maxRetry should be 3, got: {}",
-            job["spec"]["maxRetry"]
-        ));
-    }
-
-    // Verify single "download" task
-    let tasks = &job["spec"]["tasks"];
-    if tasks["download"].is_null() {
-        return Err("LatticeJob should have a 'download' task".to_string());
-    }
-
-    let task = &tasks["download"];
-
-    // Verify container image (unified lattice-downloader image)
-    let image = task["workload"]["containers"]["download"]["image"]
-        .as_str()
-        .unwrap_or_default();
-    if image != DEFAULT_DOWNLOADER_IMAGE {
-        return Err(format!(
-            "Download container image should be '{DEFAULT_DOWNLOADER_IMAGE}', got: '{image}'"
-        ));
-    }
-
-    // Verify command references the model
-    let cmd = task["workload"]["containers"]["download"]["command"][2]
-        .as_str()
-        .unwrap_or_default();
-    if !cmd.contains("hf download hf-internal-testing/tiny-random-LlamaForCausalLM") {
-        return Err(format!(
-            "Download command should reference 'hf-internal-testing/tiny-random-LlamaForCausalLM', got: '{cmd}'"
-        ));
-    }
-
-    // Verify volume resource (reference to PVC)
-    let vol_resource = &task["workload"]["resources"]["model-cache"];
-    if vol_resource["type"].as_str() != Some("volume") {
-        return Err(format!(
-            "model-cache resource type should be 'volume', got: {}",
-            vol_resource["type"]
-        ));
-    }
-
-    // Verify entity egress resource
-    let egress_resource = &task["workload"]["resources"]["internet"];
-    if egress_resource["type"].as_str() != Some("external-service") {
-        return Err(format!(
-            "internet resource type should be 'external-service', got: {}",
-            egress_resource["type"]
-        ));
-    }
-    if egress_resource["id"].as_str() != Some("entity:world:443") {
-        return Err(format!(
-            "internet resource id should be 'entity:world:443', got: {}",
-            egress_resource["id"]
-        ));
-    }
-
-    info!("[Model] LatticeJob verified: lattice-downloader image, hf download, volume + egress resources");
-    Ok(())
-}
-
-/// Verify download mesh member has entity egress
-async fn test_model_download_mesh_member(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Verifying download mesh member (entity egress)...");
-
-    // LatticeJob task "download" with job name "llm-serving-download" produces
-    // mesh member named "llm-serving-download-download"
-    let mm_name = format!("{}-download-download", MODEL_NAME);
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticemeshmembers",
-        &mm_name,
-        "-n",
-        MODEL_NAMESPACE,
-        "-o",
-        "json",
-    ])
-    .await?;
-
-    let mm: serde_json::Value = serde_json::from_str(&output)
-        .map_err(|e| format!("Failed to parse download MeshMember JSON: {e}"))?;
-
-    // Should have egress rules
-    let egress = mm["spec"]["egress"]
-        .as_array()
-        .ok_or("Download mesh member should have egress rules")?;
-    if egress.is_empty() {
-        return Err("Download mesh member egress should not be empty".to_string());
-    }
-
-    // Verify entity egress target
-    let has_world_egress = egress
-        .iter()
-        .any(|rule| rule["target"]["entity"].as_str() == Some("world"));
-    if !has_world_egress {
-        return Err(format!(
-            "Download mesh member should have Entity(\"world\") egress, got: {:?}",
-            egress
-        ));
-    }
-
-    // Should be egress-only (no ports)
-    let ports = mm["spec"]["ports"].as_array().map(|p| p.len()).unwrap_or(0);
-    if ports != 0 {
-        return Err(format!(
-            "Download mesh member should have no ports (egress-only), got: {}",
-            ports
-        ));
-    }
-
-    info!("[Model] Download mesh member verified: entity egress to 'world', egress-only");
-    Ok(())
-}
-
-/// Verify ModelServing pod templates have scheduling gates and model volume
+/// Verify ModelServing pod templates have init containers and model volume for download injection
 async fn test_model_serving_has_download_injection(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Verifying scheduling gates and model volume on ModelServing...");
+    info!("[Model] Verifying init containers and model volume on ModelServing...");
 
     let serving_name = resolve_model_serving_name(kubeconfig, MODEL_NAMESPACE, MODEL_NAME).await?;
 
@@ -995,25 +801,25 @@ async fn test_model_serving_has_download_injection(kubeconfig: &str) -> Result<(
     for role in roles {
         let role_name = role["name"].as_str().unwrap_or("unknown");
 
-        // Check scheduling gate on entry template
-        let gates = role["entryTemplate"]["spec"]["schedulingGates"]
+        // Check init container "model-downloader" on entry template
+        let empty = vec![];
+        let init_containers = role["entryTemplate"]["spec"]["initContainers"]
             .as_array()
             .ok_or(format!(
-                "role '{}' entryTemplate missing schedulingGates",
+                "role '{}' entryTemplate missing initContainers",
                 role_name
             ))?;
-        let has_download_gate = gates
+        let has_downloader = init_containers
             .iter()
-            .any(|g| g["name"] == "lattice.dev/model-download");
-        if !has_download_gate {
+            .any(|c| c["name"] == "model-downloader");
+        if !has_downloader {
             return Err(format!(
-                "role '{}' entryTemplate missing lattice.dev/model-download gate",
+                "role '{}' entryTemplate missing model-downloader init container",
                 role_name
             ));
         }
 
         // Check model-cache volume on entry template
-        let empty = vec![];
         let volumes = role["entryTemplate"]["spec"]["volumes"]
             .as_array()
             .unwrap_or(&empty);
@@ -1025,7 +831,7 @@ async fn test_model_serving_has_download_injection(kubeconfig: &str) -> Result<(
             ));
         }
 
-        // Check volumeMount on entry template containers
+        // Check volumeMount on entry template containers (readOnly at /models)
         let containers = role["entryTemplate"]["spec"]["containers"]
             .as_array()
             .ok_or(format!(
@@ -1048,30 +854,28 @@ async fn test_model_serving_has_download_injection(kubeconfig: &str) -> Result<(
 
         // Check worker template if present (decode role has workers)
         if !role["workerTemplate"].is_null() {
-            let worker_gates = role["workerTemplate"]["spec"]["schedulingGates"]
+            let worker_init = role["workerTemplate"]["spec"]["initContainers"]
                 .as_array()
                 .ok_or(format!(
-                    "role '{}' workerTemplate missing schedulingGates",
+                    "role '{}' workerTemplate missing initContainers",
                     role_name
                 ))?;
-            let worker_has_gate = worker_gates
-                .iter()
-                .any(|g| g["name"] == "lattice.dev/model-download");
-            if !worker_has_gate {
+            let worker_has_downloader = worker_init.iter().any(|c| c["name"] == "model-downloader");
+            if !worker_has_downloader {
                 return Err(format!(
-                    "role '{}' workerTemplate missing lattice.dev/model-download gate",
+                    "role '{}' workerTemplate missing model-downloader init container",
                     role_name
                 ));
             }
         }
 
         info!(
-            "[Model] Role '{}': scheduling gate + model volume verified",
+            "[Model] Role '{}': init container + model volume verified",
             role_name
         );
     }
 
-    info!("[Model] All role templates have scheduling gates and model volume");
+    info!("[Model] All role templates have model-downloader init container and model volume");
     Ok(())
 }
 
@@ -1103,21 +907,9 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
         return Err("No LatticeMeshMember resources found".to_string());
     }
 
-    // Filter out download mesh member (egress-only, no ports/callers) —
-    // it's verified separately in test_model_download_mesh_member.
-    let download_mm_name = format!("{}-download-download", MODEL_NAME);
-    let role_items: Vec<_> = items
-        .iter()
-        .filter(|item| item["metadata"]["name"].as_str() != Some(&download_mm_name))
-        .collect();
-
-    if role_items.is_empty() {
-        return Err("No role LatticeMeshMember resources found (only download)".to_string());
-    }
-
     let empty = vec![];
 
-    for item in &role_items {
+    for item in items {
         let mm_name = item["metadata"]["name"].as_str().unwrap_or("unknown");
 
         // Verify ambient: false (model serving opts out of Istio ambient)
@@ -1499,24 +1291,10 @@ async fn test_pd_cross_role_connectivity(kubeconfig: &str) -> Result<(), String>
     }
 }
 
-/// Verify download LatticeJob completes and scheduling gates are removed
+/// Verify model pods transition past Init state (init containers completed)
 async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Waiting for download LatticeJob to complete...");
+    info!("[Model] Waiting for model pods to complete init containers...");
 
-    let job_name = format!("{}-download", MODEL_NAME);
-    wait_for_resource_phase(
-        kubeconfig,
-        "latticejob",
-        MODEL_NAMESPACE,
-        &job_name,
-        "Succeeded",
-        LONG_TIMEOUT,
-    )
-    .await?;
-
-    info!("[Model] Download LatticeJob completed, verifying scheduling gates are removed...");
-
-    // After Job completes, the controller should remove scheduling gates from pods.
     // Kthena labels pods with the ModelServing resource name (model name + role suffix).
     let serving_name = resolve_model_serving_name(kubeconfig, MODEL_NAMESPACE, MODEL_NAME).await?;
     let label_selector = format!("modelserving.volcano.sh/name={}", serving_name);
@@ -1524,8 +1302,8 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
     let ls = label_selector.clone();
 
     wait_for_condition(
-        "scheduling gates to be removed from model pods",
-        PHASE_TIMEOUT,
+        "model pods to complete init containers",
+        LONG_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();
@@ -1541,24 +1319,73 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
                     "-l",
                     &ls,
                     "-o",
-                    "jsonpath={.items[*].spec.schedulingGates}",
+                    "json",
                 ])
                 .await;
 
                 match output {
-                    Ok(gates) => {
-                        let gates = gates.trim();
-                        // Empty or no gates means they've been removed
-                        let removed =
-                            gates.is_empty() || !gates.contains("lattice.dev/model-download");
+                    Ok(json_str) => {
+                        let pods: serde_json::Value = match serde_json::from_str(&json_str) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                info!("[Model] Could not parse pods JSON: {}", e);
+                                return Ok(false);
+                            }
+                        };
+
+                        let items = match pods["items"].as_array() {
+                            Some(arr) => arr,
+                            None => return Ok(false),
+                        };
+
+                        if items.is_empty() {
+                            info!("[Model] No model pods found yet");
+                            return Ok(false);
+                        }
+
+                        // Check that all pods have all init containers completed
+                        let all_init_done = items.iter().all(|pod| {
+                            let init_statuses = pod["status"]["initContainerStatuses"].as_array();
+                            match init_statuses {
+                                Some(statuses) => {
+                                    !statuses.is_empty()
+                                        && statuses.iter().all(|s| {
+                                            // Init container is done when terminated with
+                                            // exit code 0, or when ready is true
+                                            s["state"]["terminated"]["exitCode"].as_i64() == Some(0)
+                                                || s["ready"].as_bool() == Some(true)
+                                        })
+                                }
+                                None => false,
+                            }
+                        });
+
+                        let pod_count = items.len();
                         info!(
-                            "[Model] Scheduling gates: {}",
-                            if gates.is_empty() { "(none)" } else { gates }
+                            "[Model] Init container status: {}/{} pods completed",
+                            items
+                                .iter()
+                                .filter(|pod| {
+                                    pod["status"]["initContainerStatuses"]
+                                        .as_array()
+                                        .map(|statuses| {
+                                            !statuses.is_empty()
+                                                && statuses.iter().all(|s| {
+                                                    s["state"]["terminated"]["exitCode"].as_i64()
+                                                        == Some(0)
+                                                        || s["ready"].as_bool() == Some(true)
+                                                })
+                                        })
+                                        .unwrap_or(false)
+                                })
+                                .count(),
+                            pod_count
                         );
-                        Ok(removed)
+
+                        Ok(all_init_done)
                     }
                     Err(e) => {
-                        info!("[Model] Could not check scheduling gates: {}", e);
+                        info!("[Model] Could not check pod init containers: {}", e);
                         Ok(false)
                     }
                 }
@@ -1567,7 +1394,7 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    info!("[Model] Download lifecycle verified: LatticeJob completed + scheduling gates removed");
+    info!("[Model] Download lifecycle verified: all init containers completed");
     Ok(())
 }
 
@@ -1599,11 +1426,6 @@ async fn run_model_test_sequence(kubeconfig: &str) -> Result<(), String> {
     // (they are independent reads against already-created K8s resources)
     let harness = TestHarness::new("Model Tests");
     tokio::join!(
-        harness.run("Download PVC", || test_model_download_pvc(kubeconfig)),
-        harness.run("Download Job", || test_model_download_job(kubeconfig)),
-        harness.run("Download MeshMember", || {
-            test_model_download_mesh_member(kubeconfig)
-        }),
         harness.run("Download injection", || {
             test_model_serving_has_download_injection(kubeconfig)
         }),
@@ -1623,7 +1445,7 @@ async fn run_model_test_sequence(kubeconfig: &str) -> Result<(), String> {
     );
     harness.finish()?;
 
-    // Serving phase depends on download lifecycle (scheduling gates removed)
+    // Serving phase depends on download lifecycle (init containers completed)
     test_model_serving_phase(kubeconfig).await?;
 
     // Inference requires pods to be running (Serving phase)

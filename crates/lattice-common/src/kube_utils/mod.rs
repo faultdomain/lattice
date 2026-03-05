@@ -19,7 +19,9 @@ mod waiting;
 // Re-export everything so `use lattice_common::kube_utils::*` continues to work.
 
 // metadata.rs
-pub use metadata::{strip_export_metadata, ObjectMeta, OwnerReference};
+pub use metadata::{
+    strip_export_metadata, LabelSelector, ObjectMeta, OwnerReference, TopologySpreadConstraint,
+};
 
 // api_resource.rs
 pub use api_resource::{

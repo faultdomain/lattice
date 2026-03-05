@@ -4,10 +4,10 @@
 
 mod backup_store;
 mod cedar_policy;
-mod infra_provider;
 mod cluster;
 mod cluster_backup;
 mod external_endpoint;
+mod infra_provider;
 mod job;
 mod mesh_member;
 mod model_serving;
@@ -25,10 +25,6 @@ pub use backup_store::{
     BackupStoreSpec, BackupStoreStatus, GcsStorageConfig, S3StorageConfig,
 };
 pub use cedar_policy::{CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus};
-pub use infra_provider::{
-    AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,
-    InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
-};
 pub use cluster::{
     BackupsConfig, ChildClusterHealth, InfraComponentPhase, InfraComponentStatus, LatticeCluster,
     LatticeClusterSpec, LatticeClusterStatus, MonitoringConfig, PoolResourceSummary,
@@ -40,6 +36,10 @@ pub use cluster_backup::{
 };
 pub use cluster_backup::{LabelSelectorOperator, LabelSelectorRequirement, NamespaceSelector};
 pub use external_endpoint::{ParsedEndpoint, Resolution};
+pub use infra_provider::{
+    AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,
+    InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
+};
 pub use job::{
     ConcurrencyPolicy, JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus,
     NcclConfig, RestartPolicy, TrainingConfig, TrainingFramework, VolcanoPolicy,

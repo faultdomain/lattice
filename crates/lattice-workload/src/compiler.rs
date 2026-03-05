@@ -12,7 +12,7 @@ use lattice_common::crd::{
     MeshMemberPort, MeshMemberTarget, PeerAuth, ProviderType, RuntimeSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
-use lattice_common::kube_utils::OwnerReference;
+use lattice_common::kube_utils::{LabelSelector, OwnerReference};
 use lattice_common::mesh;
 use lattice_common::template::{RenderConfig, TemplateRenderer};
 use lattice_common::LABEL_NAME;
@@ -434,7 +434,7 @@ impl<'a> WorkloadCompiler<'a> {
                     required_during_scheduling_ignored_during_execution: referenced_volume_ids
                         .iter()
                         .map(|vol_id| crate::k8s::PodAffinityTerm {
-                            label_selector: crate::k8s::LabelSelector {
+                            label_selector: LabelSelector {
                                 match_labels: [(
                                     format!("{}{}", lattice_common::LABEL_VOLUME_PREFIX, vol_id),
                                     "true".to_string(),
@@ -581,35 +581,27 @@ impl<'a> WorkloadCompiler<'a> {
             })
             .collect();
 
-        let has_mesh_participation =
-            !ports.is_empty() || !dependencies.is_empty() || !inline_egress.is_empty();
-        // Generate mesh member for workloads in the service graph, OR for
-        // egress-only workloads (e.g., download jobs) that have inline egress
-        // but no graph node.
-        let mesh_member =
-            if has_mesh_participation && (service_node.is_some() || !inline_egress.is_empty()) {
-                Some(LatticeMeshMember::new(
-                    self.name,
-                    LatticeMeshMemberSpec {
-                        target: MeshMemberTarget::Selector(
-                            [(LABEL_NAME.to_string(), self.name.to_string())]
-                                .into_iter()
-                                .collect(),
-                        ),
-                        ports,
-                        allowed_callers,
-                        dependencies,
-                        egress: inline_egress,
-                        allow_peer_traffic: false,
-                        ingress: self.ingress,
-                        service_account: None,
-                        depends_all: false,
-                        ambient: true,
-                    },
-                ))
-            } else {
-                None
-            };
+        // Every workload gets a MeshMember so it always gets a CNP (at minimum
+        // allowing DNS). Ports/dependencies/egress may be empty.
+        let mesh_member = Some(LatticeMeshMember::new(
+            self.name,
+            LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(
+                    [(LABEL_NAME.to_string(), self.name.to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ports,
+                allowed_callers,
+                dependencies,
+                egress: inline_egress,
+                allow_peer_traffic: false,
+                ingress: self.ingress,
+                service_account: None,
+                depends_all: false,
+                ambient: true,
+            },
+        ));
 
         Ok(CompiledWorkload {
             pod_template,

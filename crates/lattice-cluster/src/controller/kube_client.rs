@@ -184,8 +184,7 @@ impl KubeClient for KubeClientImpl {
             }
         }
 
-        let pool_resources =
-            lattice_common::resources::gather_pool_resources(&self.client).await;
+        let pool_resources = lattice_common::resources::gather_pool_resources(&self.client).await;
 
         Ok(NodeCounts {
             ready_control_plane,

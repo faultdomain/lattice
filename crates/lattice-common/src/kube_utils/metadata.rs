@@ -109,6 +109,31 @@ impl ObjectMeta {
     }
 }
 
+/// Label selector for Kubernetes resources (topology spread, affinity, etc.)
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelSelector {
+    /// Match labels
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub match_labels: BTreeMap<String, String>,
+}
+
+/// Topology spread constraint for distributing pods across failure domains.
+///
+/// Reusable across LatticeService, LatticeJob, and ModelServing.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopologySpreadConstraint {
+    /// Maximum difference in pod count between topology domains
+    pub max_skew: i32,
+    /// Topology key (e.g., kubernetes.io/hostname, topology.kubernetes.io/zone)
+    pub topology_key: String,
+    /// What to do when constraint can't be satisfied (DoNotSchedule, ScheduleAnyway)
+    pub when_unsatisfiable: String,
+    /// Label selector to find pods to spread
+    pub label_selector: LabelSelector,
+}
+
 /// Strip cluster-specific metadata from a resource for export/distribution.
 ///
 /// Removes fields that would cause server-side apply to fail on a target cluster:

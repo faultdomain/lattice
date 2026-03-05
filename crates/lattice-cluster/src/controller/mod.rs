@@ -279,8 +279,8 @@ mod tests {
     use lattice_capi::installer::CapiProviderConfig;
     use lattice_capi::provider::CAPIManifest;
     use lattice_common::crd::{
-        BackupsConfig, BootstrapProvider, InfraProvider, Condition, ConditionStatus,
-        ControlPlaneSpec, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, MonitoringConfig,
+        BackupsConfig, BootstrapProvider, Condition, ConditionStatus, ControlPlaneSpec,
+        EndpointsSpec, InfraProvider, KubernetesSpec, LatticeClusterSpec, MonitoringConfig,
         NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
     };
     use mockall::mock;

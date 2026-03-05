@@ -40,12 +40,6 @@ const KEYCLOAK_HOST_URL: &str = "http://127.0.0.1:8080";
 /// Keycloak URL inside Docker/kind network
 const KEYCLOAK_INTERNAL_URL: &str = "http://lattice-keycloak:8080";
 
-/// Docker container name for Keycloak
-const KEYCLOAK_CONTAINER_NAME: &str = "lattice-keycloak";
-
-/// Keycloak port
-const KEYCLOAK_PORT: u16 = 8080;
-
 /// Keycloak realm
 const KEYCLOAK_REALM: &str = "lattice";
 

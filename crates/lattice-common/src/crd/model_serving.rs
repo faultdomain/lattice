@@ -437,11 +437,14 @@ pub struct ModelParentRef {
 // Model Source
 // =============================================================================
 
-/// Declarative model artifact source for automatic downloading.
+/// Declarative model artifact source — each pod downloads its own model via
+/// an init container before the main serving container starts.
 ///
-/// Generates a PVC + LatticeJob to download model artifacts, and injects
-/// a scheduling gate on all role pod templates so they remain `SchedulingGated`
-/// until the download Job completes and the operator removes the gate.
+/// On model spec change, the init container args change → Kthena rolling update →
+/// new pods download the new model → old pods serve until new pods are ready → zero downtime.
+///
+/// Multiple pods' init containers may download concurrently to shared storage.
+/// This is safe because download tools (`hf download`, `aws s3 sync`) are idempotent.
 ///
 /// Supported URI schemes: `hf://` (HuggingFace Hub), `s3://`, `gs://`
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -451,42 +454,36 @@ pub struct ModelSourceSpec {
     /// Examples: `hf://Qwen/Qwen3-8B`, `s3://bucket/models/llama`, `gs://bucket/models/llama`
     pub uri: String,
 
-    /// PVC size for caching downloaded model artifacts (e.g. "50Gi")
-    pub cache_size: String,
-
-    /// Storage class for the PVC (uses cluster default if omitted)
+    /// Cache volume spec. Determines where downloaded models are stored.
+    /// - `pvc://claim-name` → existing PVC (shared across pods, recommended for large models)
+    /// - `hostpath:///path/to/cache` → host directory (shared per-node)
+    /// - omitted → emptyDir (per-pod, requires `cache_size`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_class: Option<String>,
+    pub cache_uri: Option<String>,
 
-    /// Mount path in model serving containers (default: "/models")
+    /// Size limit for emptyDir cache (e.g. "50Gi"). Required when `cache_uri` is omitted.
+    /// Ignored when `cache_uri` is `pvc://` or `hostpath://`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_size: Option<String>,
+
+    /// Mount path in serving containers (default: "/models")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_path: Option<String>,
 
-    /// K8s Secret reference for authentication tokens
+    /// K8s Secret name for download auth (mounted as envFrom on init container)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_secret: Option<SecretKeySelector>,
 
-    /// Override the default downloader container image
+    /// Override the default downloader image (default: Kthena's downloader)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloader_image: Option<String>,
 
-    /// PVC access mode (default: ReadWriteOnce)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_mode: Option<super::workload::resources::VolumeAccessMode>,
-
-    /// Security context for the download container (AppArmor, allowed binaries, etc.)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub security: Option<super::workload::container::SecurityContext>,
-
-    /// Secret resources needed by the download job (e.g. registry credentials).
-    /// Keys become resource names in the compiled LatticeJob workload.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub resources: BTreeMap<String, super::ResourceSpec>,
-
-    /// Image pull secret resource names (must reference entries in `resources`).
-    /// Added to the download job's RuntimeSpec so the pod can pull private images.
+    /// Egress FQDNs the downloader needs to reach.
+    /// When omitted, defaults are derived from the URI scheme:
+    /// `hf://` → huggingface.co, `s3://` → *.amazonaws.com, `gs://` → storage.googleapis.com.
+    /// When specified, fully overrides the defaults (e.g. for private mirrors).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub image_pull_secrets: Vec<String>,
+    pub egress: Vec<String>,
 }
 
 /// Reference to a K8s Secret whose keys are mounted as env vars via `envFrom`.
@@ -533,7 +530,7 @@ pub struct LatticeModelSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_grace_period_seconds: Option<u32>,
 
-    /// Declarative model artifact source — auto-generates PVC + download Job + scheduling gates
+    /// Declarative model artifact source — injects downloader init container into pod templates
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_source: Option<ModelSourceSpec>,
 
@@ -749,23 +746,20 @@ mod tests {
     fn model_source_spec_serialization() {
         let source = ModelSourceSpec {
             uri: "hf://Qwen/Qwen3-8B".to_string(),
-            cache_size: "50Gi".to_string(),
-            storage_class: Some("fast-nvme".to_string()),
+            cache_uri: Some("pvc://model-cache".to_string()),
+            cache_size: None,
             mount_path: None,
             token_secret: Some(SecretKeySelector {
                 name: "hf-creds".to_string(),
             }),
             downloader_image: None,
-            access_mode: None,
-            security: None,
-            resources: BTreeMap::new(),
-            image_pull_secrets: vec![],
+            egress: vec![],
         };
 
         let json = serde_json::to_value(&source).unwrap();
         assert_eq!(json["uri"], "hf://Qwen/Qwen3-8B");
-        assert_eq!(json["cacheSize"], "50Gi");
-        assert_eq!(json["storageClass"], "fast-nvme");
+        assert_eq!(json["cacheUri"], "pvc://model-cache");
+        assert!(json.get("cacheSize").is_none());
         assert!(json.get("mountPath").is_none());
         assert_eq!(json["tokenSecret"]["name"], "hf-creds");
         assert!(json.get("downloaderImage").is_none());
@@ -780,8 +774,8 @@ mod tests {
 
         let source: ModelSourceSpec = serde_json::from_value(json).unwrap();
         assert_eq!(source.uri, "s3://bucket/model");
-        assert_eq!(source.cache_size, "100Gi");
-        assert!(source.storage_class.is_none());
+        assert_eq!(source.cache_size.as_deref(), Some("100Gi"));
+        assert!(source.cache_uri.is_none());
         assert!(source.mount_path.is_none());
         assert!(source.token_secret.is_none());
         assert!(source.downloader_image.is_none());

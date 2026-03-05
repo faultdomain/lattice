@@ -739,7 +739,10 @@ pub async fn reconcile(
         // correctly — they don't form bilateral agreements. Blocking here would
         // prevent the service from updating its policies/mesh when a dependency is
         // deleted, causing a liveness hazard.
-        warn!(?missing_deps, "some dependencies not yet in graph, compiling anyway");
+        warn!(
+            ?missing_deps,
+            "some dependencies not yet in graph, compiling anyway"
+        );
     }
 
     compile_and_apply(&service, &name, namespace, &ctx, &inputs_hash).await

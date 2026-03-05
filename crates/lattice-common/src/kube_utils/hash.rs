@@ -47,7 +47,10 @@ mod tests {
     fn sha256_different_inputs_produce_different_hashes() {
         let hash_a = sha256(b"input a");
         let hash_b = sha256(b"input b");
-        assert_ne!(hash_a, hash_b, "Different inputs should produce different hashes");
+        assert_ne!(
+            hash_a, hash_b,
+            "Different inputs should produce different hashes"
+        );
     }
 
     #[test]
@@ -57,7 +60,10 @@ mod tests {
         // SHA-256 of empty string is a well-known constant
         let expected_hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let actual_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
-        assert_eq!(actual_hex, expected_hex, "Empty-string SHA-256 must match the known digest");
+        assert_eq!(
+            actual_hex, expected_hex,
+            "Empty-string SHA-256 must match the known digest"
+        );
     }
 
     #[test]
@@ -74,6 +80,9 @@ mod tests {
     fn deterministic_hash_is_stable() {
         let hash1 = deterministic_hash("stable");
         let hash2 = deterministic_hash("stable");
-        assert_eq!(hash1, hash2, "Same input must produce identical truncated hashes");
+        assert_eq!(
+            hash1, hash2,
+            "Same input must produce identical truncated hashes"
+        );
     }
 }

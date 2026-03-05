@@ -867,7 +867,10 @@ nodes:
         let parsed: PoolResourceSummary = serde_json::from_str(&json)
             .expect("PoolResourceSummary deserialization should succeed");
 
-        assert_eq!(summary, parsed, "PoolResourceSummary should survive roundtrip");
+        assert_eq!(
+            summary, parsed,
+            "PoolResourceSummary should survive roundtrip"
+        );
     }
 
     /// Story: Default PoolResourceSummary roundtrips cleanly
@@ -882,7 +885,10 @@ nodes:
         let parsed: PoolResourceSummary = serde_json::from_str(&json)
             .expect("default PoolResourceSummary deserialization should succeed");
 
-        assert_eq!(summary, parsed, "Default PoolResourceSummary should survive roundtrip");
+        assert_eq!(
+            summary, parsed,
+            "Default PoolResourceSummary should survive roundtrip"
+        );
     }
 
     /// Story: PoolResourceSummary uses camelCase in JSON (Kubernetes convention)
@@ -904,23 +910,55 @@ nodes:
             allocated_gpu_count: 0,
         };
 
-        let json_value = serde_json::to_value(&summary)
-            .expect("serialization should succeed");
+        let json_value = serde_json::to_value(&summary).expect("serialization should succeed");
         let obj = json_value.as_object().expect("should be a JSON object");
 
-        assert!(obj.contains_key("poolName"), "should have camelCase key 'poolName'");
-        assert!(obj.contains_key("readyNodes"), "should have camelCase key 'readyNodes'");
-        assert!(obj.contains_key("nodeCpuMillis"), "should have camelCase key 'nodeCpuMillis'");
-        assert!(obj.contains_key("nodeMemoryBytes"), "should have camelCase key 'nodeMemoryBytes'");
-        assert!(obj.contains_key("nodeGpuCount"), "should have camelCase key 'nodeGpuCount'");
-        assert!(obj.contains_key("gpuType"), "should have camelCase key 'gpuType'");
-        assert!(obj.contains_key("allocatedCpuMillis"), "should have camelCase key 'allocatedCpuMillis'");
-        assert!(obj.contains_key("allocatedMemoryBytes"), "should have camelCase key 'allocatedMemoryBytes'");
-        assert!(obj.contains_key("allocatedGpuCount"), "should have camelCase key 'allocatedGpuCount'");
+        assert!(
+            obj.contains_key("poolName"),
+            "should have camelCase key 'poolName'"
+        );
+        assert!(
+            obj.contains_key("readyNodes"),
+            "should have camelCase key 'readyNodes'"
+        );
+        assert!(
+            obj.contains_key("nodeCpuMillis"),
+            "should have camelCase key 'nodeCpuMillis'"
+        );
+        assert!(
+            obj.contains_key("nodeMemoryBytes"),
+            "should have camelCase key 'nodeMemoryBytes'"
+        );
+        assert!(
+            obj.contains_key("nodeGpuCount"),
+            "should have camelCase key 'nodeGpuCount'"
+        );
+        assert!(
+            obj.contains_key("gpuType"),
+            "should have camelCase key 'gpuType'"
+        );
+        assert!(
+            obj.contains_key("allocatedCpuMillis"),
+            "should have camelCase key 'allocatedCpuMillis'"
+        );
+        assert!(
+            obj.contains_key("allocatedMemoryBytes"),
+            "should have camelCase key 'allocatedMemoryBytes'"
+        );
+        assert!(
+            obj.contains_key("allocatedGpuCount"),
+            "should have camelCase key 'allocatedGpuCount'"
+        );
 
         // Verify snake_case keys are NOT present
-        assert!(!obj.contains_key("pool_name"), "should not have snake_case keys");
-        assert!(!obj.contains_key("ready_nodes"), "should not have snake_case keys");
+        assert!(
+            !obj.contains_key("pool_name"),
+            "should not have snake_case keys"
+        );
+        assert!(
+            !obj.contains_key("ready_nodes"),
+            "should not have snake_case keys"
+        );
     }
 
     // =========================================================================

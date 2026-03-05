@@ -242,9 +242,8 @@ impl StandaloneKubeconfig {
         };
 
         let chaos = if Self::chaos_enabled() {
-            use std::sync::Arc;
             use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
-            use super::providers::InfraProvider;
+            use std::sync::Arc;
 
             let targets = Arc::new(ChaosTargets::new(super::helpers::run_id()));
             targets.add("standalone", &kubeconfig, None);

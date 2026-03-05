@@ -44,21 +44,49 @@ async fn apply_should_succeed(kubeconfig: &str, yaml: &str, desc: &str) -> Resul
 /// Apply YAML via kubectl and expect it to be rejected by the admission webhook.
 ///
 /// Returns the error message from the rejection for further assertions.
-///
-/// Retries up to 10 times on transient errors (auth failures, connection
-/// issues) before giving up. Only returns once kubectl reaches the API server
-/// and gets a definitive accept/reject from the admission webhook.
+/// For static YAML that doesn't change between retries. For live resources
+/// that may be modified by the operator between attempts, use
+/// `try_apply_expecting_rejection` directly with a refresh closure.
 async fn apply_should_be_rejected(
     kubeconfig: &str,
     yaml: &str,
     desc: &str,
 ) -> Result<String, String> {
+    let yaml = yaml.to_string();
+    try_apply_expecting_rejection(
+        kubeconfig,
+        || {
+            let y = yaml.clone();
+            async move { Ok(y) }
+        },
+        desc,
+    )
+    .await
+}
+
+/// Core retry loop for webhook rejection tests.
+///
+/// Re-generates YAML via `make_yaml` before each attempt, handling Conflict
+/// errors from concurrent operator updates (annotation changes, status patches).
+/// Retries up to 10 times on transient errors. Returns once kubectl gets a
+/// definitive accept/reject from the admission webhook.
+async fn try_apply_expecting_rejection<F, Fut>(
+    kubeconfig: &str,
+    make_yaml: F,
+    desc: &str,
+) -> Result<String, String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
     let tmpfile = format!("/tmp/webhook-test-{}.yaml", sanitize_desc(desc));
-    tokio::fs::write(&tmpfile, yaml)
-        .await
-        .map_err(|e| format!("Failed to write temp file: {e}"))?;
 
     for attempt in 1..=10 {
+        let yaml = make_yaml().await?;
+        tokio::fs::write(&tmpfile, &yaml)
+            .await
+            .map_err(|e| format!("Failed to write temp file: {e}"))?;
+
         let result = tokio::process::Command::new("kubectl")
             .args(["--kubeconfig", kubeconfig, "apply", "-f", &tmpfile])
             .output()
@@ -266,13 +294,14 @@ spec:
     apply_should_succeed(kubeconfig, &yaml, "valid LatticeMeshMember").await
 }
 
-/// Test: LatticeMeshMember with no ports/deps/egress is rejected
-async fn test_invalid_mesh_member_rejected(kubeconfig: &str) -> Result<(), String> {
+/// Test: LatticeMeshMember with no ports/deps/egress is accepted (empty LMM
+/// is valid — gives workload a CNP with DNS access at minimum).
+async fn test_empty_mesh_member_accepted(kubeconfig: &str) -> Result<(), String> {
     let yaml = format!(
         r#"apiVersion: lattice.dev/v1alpha1
 kind: LatticeMeshMember
 metadata:
-  name: webhook-test-bad-mesh
+  name: webhook-test-empty-mesh
   namespace: {WEBHOOK_TEST_NS}
 spec:
   target:
@@ -283,8 +312,7 @@ spec:
   egress: []
 "#
     );
-    apply_should_be_rejected(kubeconfig, &yaml, "mesh member with no ports/deps/egress").await?;
-    Ok(())
+    apply_should_succeed(kubeconfig, &yaml, "empty LatticeMeshMember").await
 }
 
 // =============================================================================
@@ -449,16 +477,26 @@ async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String>
         info!("[Webhook] Workload cluster promoted to parent");
     }
 
-    // Fetch the updated YAML (now with parent_config)
-    let current_yaml = get_cluster_yaml(kubeconfig, &cluster_name).await?;
-
     // Modification: try to change grpc_port → should be rejected
-    let modified_yaml = current_yaml.replace("grpcPort: 50051", "grpcPort: 9999");
-    if modified_yaml == current_yaml {
-        return Err("Failed to inject modified grpcPort into YAML".to_string());
-    }
-    let err =
-        apply_should_be_rejected(kubeconfig, &modified_yaml, "modify parent_config ports").await?;
+    // Re-fetch before each attempt because operator reconciliation can modify
+    // the resource (annotations, status), causing Conflict errors with stale YAML.
+    let err = try_apply_expecting_rejection(
+        kubeconfig,
+        || {
+            let kc = kubeconfig.to_string();
+            let cn = cluster_name.clone();
+            async move {
+                let yaml = get_cluster_yaml(&kc, &cn).await?;
+                let modified = yaml.replace("grpcPort: 50051", "grpcPort: 9999");
+                if modified == yaml {
+                    return Err("Failed to inject modified grpcPort into YAML".to_string());
+                }
+                Ok(modified)
+            }
+        },
+        "modify parent_config ports",
+    )
+    .await?;
     if !err.contains("immutable") {
         return Err(format!(
             "Expected rejection to mention 'immutable', got: {err}"
@@ -466,8 +504,21 @@ async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String>
     }
 
     // Removal: try to strip parent_config → should be rejected
-    let stripped_yaml = strip_parent_config(&current_yaml);
-    let err = apply_should_be_rejected(kubeconfig, &stripped_yaml, "remove parent_config").await?;
+    // Re-fetch before each attempt because operator reconciliation can modify
+    // the resource (annotations, status), causing Conflict errors with stale YAML.
+    let err = try_apply_expecting_rejection(
+        kubeconfig,
+        || {
+            let kc = kubeconfig.to_string();
+            let cn = cluster_name.clone();
+            async move {
+                let yaml = get_cluster_yaml(&kc, &cn).await?;
+                Ok(strip_parent_config(&yaml))
+            }
+        },
+        "remove parent_config",
+    )
+    .await?;
     if !err.contains("cannot be removed") {
         return Err(format!(
             "Expected rejection to mention 'cannot be removed', got: {err}"
@@ -567,7 +618,7 @@ pub async fn run_webhook_tests(kubeconfig: &str) -> Result<(), String> {
     // Invalid resources should be rejected by the webhook
     test_invalid_service_rejected(kubeconfig).await?;
     test_invalid_model_rejected(kubeconfig).await?;
-    test_invalid_mesh_member_rejected(kubeconfig).await?;
+    test_empty_mesh_member_accepted(kubeconfig).await?;
 
     // LatticeCluster EndpointsSpec validation (CREATE rejection — no clusters created)
     test_cluster_duplicate_ports_rejected(kubeconfig).await?;

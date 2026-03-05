@@ -15,10 +15,11 @@
 use std::collections::BTreeMap;
 
 use kube::ResourceExt;
-use lattice_common::kube_utils::{HasApiResource, ObjectMeta, OwnerReference};
+use lattice_common::kube_utils::{
+    HasApiResource, LabelSelector, ObjectMeta, OwnerReference, TopologySpreadConstraint,
+};
 use lattice_workload::k8s::{
-    Affinity, Container, LabelSelector, LocalObjectReference, PodSecurityContext, SchedulingGate,
-    TopologySpreadConstraint, Volume,
+    Affinity, Container, LocalObjectReference, PodSecurityContext, SchedulingGate, Volume,
 };
 use lattice_workload::{CompilationError, CompiledPodTemplate};
 use serde::{Deserialize, Serialize};

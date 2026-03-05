@@ -11,10 +11,11 @@ use lattice_common::crd::{GpuParams, ProviderType, RuntimeSpec, WorkloadSpec};
 use crate::error::CompilationError;
 use crate::helpers::ContainerCompilationData;
 use crate::helpers::{gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources};
+use lattice_common::kube_utils::{LabelSelector, TopologySpreadConstraint};
+
 use crate::k8s::{
     Affinity, AppArmorProfile, Capabilities, Container, ContainerPort, EnvVar, K8sSecurityContext,
-    LabelSelector, LocalObjectReference, PodSecurityContext, ResourceRequirements, SeccompProfile,
-    Sysctl, TopologySpreadConstraint, Volume,
+    LocalObjectReference, PodSecurityContext, ResourceRequirements, SeccompProfile, Sysctl, Volume,
 };
 use crate::pipeline::secrets::SecretRef;
 use crate::pipeline::volumes::GeneratedVolumes;

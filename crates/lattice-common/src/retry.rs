@@ -73,12 +73,29 @@ impl RetryConfig {
 pub async fn retry_with_backoff<F, Fut, T, E>(
     config: &RetryConfig,
     operation_name: &str,
-    mut operation: F,
+    operation: F,
 ) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
     E: std::fmt::Display,
+{
+    retry_with_backoff_bail(config, operation_name, operation, |_| false).await
+}
+
+/// Like [`retry_with_backoff`], but accepts an `is_fatal` predicate. If `is_fatal`
+/// returns `true` for an error, retries stop immediately and the error is returned.
+pub async fn retry_with_backoff_bail<F, Fut, T, E, B>(
+    config: &RetryConfig,
+    operation_name: &str,
+    mut operation: F,
+    is_fatal: B,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+    B: Fn(&E) -> bool,
 {
     let mut attempt = 0u32;
     let mut delay = config.initial_delay;
@@ -89,6 +106,17 @@ where
         match operation().await {
             Ok(result) => return Ok(result),
             Err(e) => {
+                // Bail immediately on fatal errors
+                if is_fatal(&e) {
+                    error!(
+                        operation = %operation_name,
+                        attempt = attempt,
+                        error = %e,
+                        "Operation hit fatal error, not retrying"
+                    );
+                    return Err(e);
+                }
+
                 // Check if we've exhausted retries
                 if config.max_attempts > 0 && attempt >= config.max_attempts {
                     error!(
@@ -189,5 +217,40 @@ mod tests {
 
         assert_eq!(result, Err("always fails"));
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_bail_stops_immediately() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let config = RetryConfig {
+            max_attempts: 10,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            backoff_multiplier: 2.0,
+        };
+
+        let result: Result<i32, String> = retry_with_backoff_bail(
+            &config,
+            "op",
+            || {
+                let c = c.clone();
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        Err("transient".to_string())
+                    } else {
+                        Err("fatal: not found".to_string())
+                    }
+                }
+            },
+            |e| e.contains("fatal"),
+        )
+        .await;
+
+        assert_eq!(result, Err("fatal: not found".to_string()));
+        // Should have run exactly 2 attempts: one transient, one fatal
+        assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 }

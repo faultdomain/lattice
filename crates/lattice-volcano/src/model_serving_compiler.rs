@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 
 use lattice_common::crd::{KvConnectorType, LatticeModel, TopologyMode, WorkloadNetworkTopology};
-
 use lattice_common::kube_utils::OwnerReference;
 
 use crate::types::{

@@ -280,18 +280,6 @@ pub enum MeshMemberScope {
 impl LatticeMeshMemberSpec {
     /// Validate the spec
     pub fn validate(&self) -> Result<(), crate::Error> {
-        // A mesh member must serve traffic (ports), call other services (dependencies),
-        // or have non-mesh egress rules
-        if self.ports.is_empty()
-            && self.dependencies.is_empty()
-            && self.egress.is_empty()
-            && !self.depends_all
-        {
-            return Err(crate::Error::validation(
-                "at least one port, dependency, or egress rule is required",
-            ));
-        }
-
         for port in &self.ports {
             super::validate_dns_label(&port.name, "port name").map_err(crate::Error::validation)?;
         }

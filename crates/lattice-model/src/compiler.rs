@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    derived_name, CallerRef, LatticeMeshMember, LatticeModel, MeshMemberPort, PeerAuth, PortSpec,
-    ProviderType,
+    derived_name, CallerRef, EgressRule, EgressTarget, LatticeMeshMember, LatticeModel,
+    MeshMemberPort, ModelSourceSpec, PeerAuth, PortSpec, ProviderType,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
@@ -21,8 +21,14 @@ use lattice_volcano::routing_compiler::{PD_ROLE_DECODE, PD_ROLE_PREFILL};
 use lattice_volcano::{CompiledAutoscaling, CompiledRouting, ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
-use crate::download::{self, CompiledDownload};
 use crate::error::ModelError;
+
+const DEFAULT_DOWNLOADER_IMAGE: &str = "ghcr.io/volcano-sh/downloader:latest";
+const DEFAULT_MOUNT_PATH: &str = "/models";
+const VOLUME_NAME: &str = "model-cache";
+const INIT_CONTAINER_NAME: &str = "model-downloader";
+const SCRATCH_VOLUME_NAME: &str = "model-downloader-scratch";
+const DSHM_VOLUME_NAME: &str = "dshm";
 
 fn entry_workload_name(model_name: &str, role_name: &str) -> String {
     format!("{}-{}", model_name, role_name)
@@ -76,8 +82,6 @@ pub struct CompiledModel {
     pub routing: Option<CompiledRouting>,
     /// Kthena autoscaling resources (AutoscalingPolicy + AutoscalingPolicyBinding)
     pub autoscaling: Option<CompiledAutoscaling>,
-    /// Model download resources (PVC + Job) when modelSource is configured
-    pub download: Option<CompiledDownload>,
     /// Auto-injected topology from kv_connector (for status reporting, never mutates spec)
     pub auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
     /// Peer-discovery K8s Services for P/D roles (stable DNS for nixl KV cache transfer)
@@ -124,7 +128,10 @@ pub async fn compile_model(
 
     let mut compiled = compile_roles(name, &roles, &ctx).await?;
 
-    let download = compile_download_phase(model, name, namespace, &mut compiled.role_templates)?;
+    inject_model_download(
+        model.spec.model_source.as_ref(),
+        &mut compiled.role_templates,
+    );
 
     inject_model_labels(name, &mut compiled.role_templates);
 
@@ -138,6 +145,7 @@ pub async fn compile_model(
         &roles,
         model.spec.routing.as_ref(),
         assembled.autoscaling.is_some(),
+        model.spec.model_source.as_ref(),
         &mut compiled.mesh_members,
     )?;
 
@@ -148,7 +156,6 @@ pub async fn compile_model(
         tracing_policies: compiled.tracing_policies,
         routing: assembled.routing,
         autoscaling: assembled.autoscaling,
-        download,
         auto_topology: assembled.auto_topology,
         peer_services,
     })
@@ -365,43 +372,200 @@ async fn compile_roles(
     Ok(result)
 }
 
-/// Compile model download and inject volume + scheduling gate into all role templates.
-fn compile_download_phase(
-    model: &LatticeModel,
-    name: &str,
-    namespace: &str,
+/// Inject a downloader init container and cache volume into all role pod templates.
+///
+/// When `model_source` is set, each pod template gets:
+/// - A cache volume (emptyDir, PVC, or hostPath based on `cache_uri`)
+/// - A read-only volumeMount on all existing containers
+/// - A downloader init container that downloads the model before serving starts
+///
+/// On model spec change, the init container args change → Kthena rolling update →
+/// new pods download the new model → old pods serve until new pods are ready.
+fn inject_model_download(
+    source: Option<&ModelSourceSpec>,
     role_templates: &mut BTreeMap<String, RoleTemplates>,
-) -> Result<Option<CompiledDownload>, ModelError> {
-    let uid = model
-        .metadata
-        .uid
-        .as_deref()
-        .ok_or(ModelError::MissingUid)?;
+) {
+    let Some(source) = source else {
+        return;
+    };
 
-    let download = model
-        .spec
-        .model_source
-        .as_ref()
-        .map(|source| download::compile_download(name, namespace, uid, source))
-        .transpose()?;
+    let mount_path = source.mount_path.as_deref().unwrap_or(DEFAULT_MOUNT_PATH);
 
-    if let Some(ref dl) = download {
-        for templates in role_templates.values_mut() {
-            download::inject_model_volume(
-                &mut templates.entry_template,
-                dl.pvc_name(),
-                dl.mount_path(),
+    // Deterministic, collision-free download subdirectory
+    let uri_hash = derived_name("", &[&source.uri]);
+    let download_dir = format!("{}/{}", mount_path, uri_hash);
+
+    let cache_volume = build_cache_volume(source);
+    let init_container = build_init_container(source, &download_dir);
+
+    let read_only_mount = serde_json::json!({
+        "name": VOLUME_NAME,
+        "mountPath": mount_path,
+        "readOnly": true
+    });
+
+    let is_hf = source.uri.starts_with("hf://");
+
+    for templates in role_templates.values_mut() {
+        inject_into_template(
+            &mut templates.entry_template,
+            &cache_volume,
+            &init_container,
+            &read_only_mount,
+            is_hf,
+        );
+        if let Some(ref mut worker) = templates.worker_template {
+            inject_into_template(
+                worker,
+                &cache_volume,
+                &init_container,
+                &read_only_mount,
+                is_hf,
             );
-            download::inject_scheduling_gate(&mut templates.entry_template);
+        }
+    }
+}
 
-            if let Some(ref mut worker) = templates.worker_template {
-                download::inject_model_volume(worker, dl.pvc_name(), dl.mount_path());
-                download::inject_scheduling_gate(worker);
+/// Inject cache volume, init container, dshm volume, and read-only mounts into a single pod template.
+///
+/// When `is_hf` is true, also injects `HF_HUB_OFFLINE=1` on serving containers
+/// (not the init container) to prevent the HuggingFace client from making
+/// network calls at runtime.
+fn inject_into_template(
+    template: &mut serde_json::Value,
+    cache_volume: &serde_json::Value,
+    init_container: &serde_json::Value,
+    read_only_mount: &serde_json::Value,
+    is_hf: bool,
+) {
+    let spec = &mut template["spec"];
+
+    json_array_push(spec, "volumes", cache_volume.clone());
+    json_array_push(
+        spec,
+        "volumes",
+        serde_json::json!({"name": SCRATCH_VOLUME_NAME, "emptyDir": {}}),
+    );
+    // /dev/shm memory volume for NCCL multi-GPU communication
+    json_array_push(
+        spec,
+        "volumes",
+        serde_json::json!({"name": DSHM_VOLUME_NAME, "emptyDir": {"medium": "Memory"}}),
+    );
+    json_array_push(spec, "initContainers", init_container.clone());
+
+    // Add read-only mount, dshm mount, and (for HF models) HF_HUB_OFFLINE=1 to all serving containers
+    if let Some(containers) = spec.get_mut("containers").and_then(|v| v.as_array_mut()) {
+        for container in containers {
+            json_array_push(container, "volumeMounts", read_only_mount.clone());
+            json_array_push(
+                container,
+                "volumeMounts",
+                serde_json::json!({"name": DSHM_VOLUME_NAME, "mountPath": "/dev/shm"}),
+            );
+            if is_hf {
+                json_array_push(
+                    container,
+                    "env",
+                    serde_json::json!({"name": "HF_HUB_OFFLINE", "value": "1"}),
+                );
             }
         }
     }
+}
 
-    Ok(download)
+/// Build the cache volume JSON based on `cache_uri`.
+fn build_cache_volume(source: &ModelSourceSpec) -> serde_json::Value {
+    match source.cache_uri.as_deref() {
+        Some(uri) if uri.starts_with("pvc://") => {
+            let claim_name = &uri["pvc://".len()..];
+            serde_json::json!({
+                "name": VOLUME_NAME,
+                "persistentVolumeClaim": {
+                    "claimName": claim_name
+                }
+            })
+        }
+        Some(uri) if uri.starts_with("hostpath://") => {
+            let path = &uri["hostpath://".len()..];
+            serde_json::json!({
+                "name": VOLUME_NAME,
+                "hostPath": {
+                    "path": path,
+                    "type": "DirectoryOrCreate"
+                }
+            })
+        }
+        _ => {
+            // emptyDir with optional sizeLimit
+            let mut empty_dir = serde_json::json!({});
+            if let Some(ref size) = source.cache_size {
+                empty_dir["sizeLimit"] = serde_json::json!(size);
+            }
+            serde_json::json!({
+                "name": VOLUME_NAME,
+                "emptyDir": empty_dir
+            })
+        }
+    }
+}
+
+/// Build the downloader init container JSON.
+fn build_init_container(source: &ModelSourceSpec, download_dir: &str) -> serde_json::Value {
+    let image = source
+        .downloader_image
+        .as_deref()
+        .unwrap_or(DEFAULT_DOWNLOADER_IMAGE);
+
+    let mount_path = source.mount_path.as_deref().unwrap_or(DEFAULT_MOUNT_PATH);
+
+    let mut init = serde_json::json!({
+        "name": INIT_CONTAINER_NAME,
+        "image": image,
+        "args": ["--source", &source.uri, "--output-dir", download_dir],
+        "env": [{"name": "HOME", "value": "/home/downloader"}],
+        "volumeMounts": [
+            {
+                "name": VOLUME_NAME,
+                "mountPath": mount_path
+            },
+            {
+                "name": SCRATCH_VOLUME_NAME,
+                "mountPath": "/home/downloader"
+            }
+        ],
+        "securityContext": {
+            "runAsUser": 65534,
+            "runAsNonRoot": true,
+            "allowPrivilegeEscalation": false
+        }
+    });
+
+    if let Some(ref token_secret) = source.token_secret {
+        init["envFrom"] = serde_json::json!([{
+            "secretRef": {
+                "name": token_secret.name
+            }
+        }]);
+    }
+
+    init
+}
+
+/// Push a value onto a JSON array field, creating the array if absent.
+///
+/// Uses `get_mut` internally so it never inserts null keys — mutable indexing
+/// on `serde_json::Value` silently inserts `Null` for missing keys, which
+/// Kubernetes rejects on array-typed fields.
+fn json_array_push(object: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+    if let Some(obj) = object.as_object_mut() {
+        match obj.get_mut(key).and_then(|v| v.as_array_mut()) {
+            Some(arr) => arr.push(value),
+            None => {
+                obj.insert(key.to_string(), serde_json::json!([value]));
+            }
+        }
+    }
 }
 
 /// Inject model group label and ambient mesh opt-out into all pod templates.
@@ -478,12 +642,14 @@ fn compile_peer_services(
         .collect())
 }
 
-/// Finalize mesh members: augment Kthena callers, opt out of ambient, set group selector.
+/// Finalize mesh members: augment Kthena callers, opt out of ambient, set group selector,
+/// and inject model download egress rules when a model source is configured.
 fn finalize_mesh(
     name: &str,
     roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
     routing: Option<&lattice_common::crd::ModelRoutingSpec>,
     has_autoscaling: bool,
+    model_source: Option<&ModelSourceSpec>,
     mesh_members: &mut [LatticeMeshMember],
 ) -> Result<(), ModelError> {
     augment_kthena_callers(name, roles, routing, has_autoscaling, mesh_members)?;
@@ -495,9 +661,46 @@ fn finalize_mesh(
                 .into_iter()
                 .collect(),
         );
+
+        if let Some(source) = model_source {
+            for fqdn in download_egress_fqdns(source) {
+                mm.spec.egress.push(EgressRule {
+                    target: EgressTarget::Fqdn(fqdn),
+                    ports: vec![443],
+                });
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Return the FQDN(s) that the downloader init container needs to reach.
+///
+/// Derives defaults from the URI scheme, then merges any user-specified egress FQDNs:
+/// - `hf://` → huggingface.co, cdn-lfs-us-1.hf.co, cdn-lfs.hf.co
+/// - `s3://` → *.amazonaws.com
+/// - `gs://` → storage.googleapis.com
+fn download_egress_fqdns(source: &ModelSourceSpec) -> Vec<String> {
+    if !source.egress.is_empty() {
+        return source.egress.clone();
+    }
+
+    if source.uri.starts_with("hf://") {
+        vec![
+            "huggingface.co".to_string(),
+            "cdn-lfs-us-1.hf.co".to_string(),
+            "cdn-lfs.hf.co".to_string(),
+            "cas-server.xethub.hf.co".to_string(),
+            "transfer.xethub.hf.co".to_string(),
+        ]
+    } else if source.uri.starts_with("s3://") {
+        vec!["*.amazonaws.com".to_string()]
+    } else if source.uri.starts_with("gs://") {
+        vec!["storage.googleapis.com".to_string()]
+    } else {
+        vec![]
+    }
 }
 
 /// Compile a peer-discovery ClusterIP Service for a P/D role.
@@ -1078,7 +1281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_source_produces_download() {
+    async fn model_source_injects_init_container() {
         let mut roles = BTreeMap::new();
         roles.insert("decode".to_string(), make_role("decoder:latest", 2));
 
@@ -1086,15 +1289,12 @@ mod tests {
             roles,
             model_source: Some(ModelSourceSpec {
                 uri: "hf://Qwen/Qwen3-8B".to_string(),
-                cache_size: "50Gi".to_string(),
-                storage_class: None,
+                cache_uri: None,
+                cache_size: Some("50Gi".to_string()),
                 mount_path: None,
                 token_secret: None,
                 downloader_image: None,
-                access_mode: None,
-                security: None,
-                resources: BTreeMap::new(),
-                image_pull_secrets: Vec::new(),
+                egress: vec![],
             }),
             ..Default::default()
         };
@@ -1116,20 +1316,17 @@ mod tests {
         .await
         .unwrap();
 
-        let download = compiled.download.as_ref().expect("download should be Some");
-        assert_eq!(download.pvc_name(), "vol-test-model-model-cache");
-        assert_eq!(download.mount_path(), "/models");
-
-        // Verify scheduling gate + volume injected into pod templates
+        // Verify init container + volume injected into pod templates
         let role = &compiled.model_serving.spec.template.roles[0];
-        let gates = role.entry_template["spec"]["schedulingGates"]
+
+        let init_containers = role.entry_template["spec"]["initContainers"]
             .as_array()
-            .expect("schedulingGates should be set");
+            .expect("initContainers should be set");
         assert!(
-            gates
+            init_containers
                 .iter()
-                .any(|g| g["name"] == "lattice.dev/model-download"),
-            "model-download scheduling gate should be present"
+                .any(|c| c["name"] == "model-downloader"),
+            "model-downloader init container should be present"
         );
 
         let volumes = role.entry_template["spec"]["volumes"]
@@ -1139,10 +1336,48 @@ mod tests {
             volumes.iter().any(|v| v["name"] == "model-cache"),
             "model-cache volume should be present"
         );
+
+        // Verify read-only mount on existing containers
+        let containers = role.entry_template["spec"]["containers"]
+            .as_array()
+            .expect("containers should be set");
+        for c in containers {
+            let mounts = c["volumeMounts"]
+                .as_array()
+                .expect("volumeMounts should exist");
+            assert!(
+                mounts
+                    .iter()
+                    .any(|m| m["name"] == "model-cache" && m["readOnly"] == true),
+                "container should have read-only model-cache mount"
+            );
+            // /dev/shm mount for NCCL multi-GPU communication
+            assert!(
+                mounts
+                    .iter()
+                    .any(|m| m["name"] == "dshm" && m["mountPath"] == "/dev/shm"),
+                "container should have /dev/shm mount"
+            );
+            // HF_HUB_OFFLINE=1 for HuggingFace models
+            let env = c["env"].as_array().expect("env should exist");
+            assert!(
+                env.iter()
+                    .any(|e| e["name"] == "HF_HUB_OFFLINE" && e["value"] == "1"),
+                "container should have HF_HUB_OFFLINE=1"
+            );
+        }
+
+        // Verify dshm volume exists
+        assert!(
+            volumes
+                .iter()
+                .any(|v| v["name"] == "dshm" && v["emptyDir"]["medium"] == "Memory"),
+            "dshm memory volume should be present"
+        );
     }
 
     #[tokio::test]
-    async fn no_model_source_means_no_download() {
+    async fn no_model_source_means_no_init_container() {
         let mut roles = BTreeMap::new();
         roles.insert("decode".to_string(), make_role("decoder:latest", 2));
 
@@ -1161,14 +1396,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(compiled.download.is_none());
-
-        // Verify no scheduling gate on pod templates
+        // Verify no init container on pod templates
         let role = &compiled.model_serving.spec.template.roles[0];
-        let gates = role.entry_template["spec"]["schedulingGates"].as_array();
+        let init_containers = role.entry_template["spec"]
+            .as_object()
+            .and_then(|o| o.get("initContainers"))
+            .and_then(|v| v.as_array());
         assert!(
-            gates.is_none_or(|g| g.is_empty()),
-            "no scheduling gates when model_source is None"
+            init_containers.is_none_or(|c| c.is_empty()),
+            "no init containers when model_source is None"
         );
     }
 
@@ -1436,45 +1672,6 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(ModelError::MissingName)));
-    }
-
-    #[tokio::test]
-    async fn missing_uid_returns_error() {
-        let mut roles = BTreeMap::new();
-        roles.insert("decode".to_string(), make_role("decoder:latest", 1));
-        let spec = LatticeModelSpec {
-            roles,
-            model_source: Some(ModelSourceSpec {
-                uri: "hf://test/model".to_string(),
-                cache_size: "10Gi".to_string(),
-                storage_class: None,
-                mount_path: None,
-                token_secret: None,
-                downloader_image: None,
-                access_mode: None,
-                security: None,
-                resources: BTreeMap::new(),
-                image_pull_secrets: Vec::new(),
-            }),
-            ..Default::default()
-        };
-        let mut model = LatticeModel::new("test-model", spec);
-        model.metadata.namespace = Some("default".to_string());
-        model.metadata.uid = None;
-
-        let graph = ServiceGraph::new();
-        let cedar = permit_all_cedar();
-
-        let result = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-        )
-        .await;
-        assert!(matches!(result, Err(ModelError::MissingUid)));
     }
 
     #[tokio::test]

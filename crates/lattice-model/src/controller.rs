@@ -4,22 +4,21 @@
 //! Pending → Loading → Serving | Failed
 //!
 //! Resources are applied in layers to prevent race conditions:
-//! - Layer 0: Model download PVC + Job (only when modelSource is configured)
 //! - Layer 1: ConfigMaps, Secrets, ExternalSecrets, PVCs, MeshMembers, TracingPolicies
 //! - Layer 2: ModelServing (only after mesh/security is ready)
 //! - Layer 3: Routing — ModelServer + ModelRoutes
 //! - Layer 4a: Autoscaling — AutoscalingPolicy (must exist before bindings)
 //! - Layer 4b: Autoscaling — AutoscalingPolicyBinding (references policies)
 //!
-//! When `modelSource` is set, pods are created with a `lattice.dev/model-download`
-//! scheduling gate that keeps them `SchedulingGated` (zero resource usage, no GPU
-//! allocation) until the download Job completes. The Loading phase checks Job status
-//! and removes the gate on success.
+//! When `modelSource` is set, a downloader init container is injected into each
+//! pod template. The init container downloads model artifacts before the main
+//! serving container starts. On model spec change, the init container args change →
+//! Kthena rolling update → zero downtime model updates.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, DynamicObject, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
@@ -27,8 +26,7 @@ use tracing::{error, info, warn};
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    JobPhase, LatticeJob, LatticeModel, LatticeModelStatus, ModelCondition, ModelServingPhase,
-    ProviderType,
+    LatticeModel, LatticeModelStatus, ModelCondition, ModelServingPhase, ProviderType,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
@@ -36,7 +34,6 @@ use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
 
 use crate::compiler::{compile_model, role_key_suffix, CompiledModel};
-use crate::download::{CompiledDownload, SCHEDULING_GATE_MODEL_DOWNLOAD};
 use crate::error::ModelError;
 
 const FIELD_MANAGER: &str = "lattice-model-controller";
@@ -112,19 +109,6 @@ pub async fn reconcile(
         .map(|s| s.phase.clone())
         .unwrap_or(ModelServingPhase::Pending);
 
-    // Kthena may create new pods (scale-up, worker addition) after the initial
-    // gate removal in Loading. Run gate removal on every reconcile past Pending
-    // when the download job has completed, so late-arriving pods get ungated.
-    if model.spec.model_source.is_some() && phase != ModelServingPhase::Pending {
-        let job_name = format!("{}-download", name);
-        if matches!(
-            check_download_job_status(&ctx.client, &job_name, namespace).await,
-            Some(DownloadState::Succeeded)
-        ) {
-            remove_scheduling_gates(&ctx.client, &serving_name, namespace).await?;
-        }
-    }
-
     match phase {
         ModelServingPhase::Pending => {
             let compiled = compile_model(
@@ -196,41 +180,8 @@ pub async fn reconcile(
                 return Ok(Action::requeue(REQUEUE_RETRY));
             }
 
-            // When modelSource is configured, check download Job before ModelServing.
-            // Gate removal already happened above (pre-phase); here we only gate on
-            // the download status to block ModelServing readiness checks.
-            if model.spec.model_source.is_some() {
-                let job_name = format!("{}-download", name);
-                match check_download_job_status(&ctx.client, &job_name, namespace).await {
-                    Some(DownloadState::Succeeded) => {
-                        info!(model = %name, "model download job completed");
-                    }
-                    Some(DownloadState::Failed { permanent }) => {
-                        if permanent {
-                            // VCJob ran and failed — permanent download failure
-                            error!(model = %name, "model download job permanently failed");
-                            cleanup_graph(&model, &ctx.graph, namespace);
-                            StatusUpdate::new(ModelServingPhase::Failed)
-                                .message("Model download failed")
-                                .observed_generation(generation)
-                                .apply(&ctx.client, &model, namespace)
-                                .await?;
-                            return Ok(Action::await_change());
-                        }
-                        // LatticeJob is retrying (transient failure) — keep polling
-                        info!(model = %name, "model download job retrying, waiting");
-                        return Ok(Action::requeue(REQUEUE_LOADING));
-                    }
-                    Some(DownloadState::Running) => {
-                        info!(model = %name, "model download in progress");
-                        return Ok(Action::requeue(REQUEUE_LOADING));
-                    }
-                    None => {
-                        warn!(model = %name, "download job not found, requeuing");
-                        return Ok(Action::requeue(REQUEUE_LOADING));
-                    }
-                }
-            }
+            // No download job gating — init containers naturally block pod startup
+            // until model download completes.
 
             let (state, conditions) =
                 check_model_serving_status(&ctx.client, &serving_name, namespace, &ctx.registry)
@@ -352,9 +303,8 @@ pub async fn reconcile(
                     let _ = s.apply(&ctx.client, &model, namespace).await;
                     return Err(e);
                 }
-                // Transition to Loading so the next reconcile checks the
-                // download job and removes scheduling gates on new pods.
-                // Staying in Serving would skip gate removal (only in Loading).
+                // Transition to Loading so the next reconcile checks
+                // ModelServing readiness after the rolling update.
                 StatusUpdate::new(ModelServingPhase::Loading)
                     .message("Spec changed, reloading")
                     .observed_generation(generation)
@@ -578,11 +528,6 @@ async fn apply_layers(
     ms_api: &ApiResource,
     params: &PatchParams,
 ) -> Result<(), ModelError> {
-    // Layer 0: Model download (PVC + Job + MeshMember + SA) — only when modelSource is configured
-    if let Some(ref download) = compiled.download {
-        apply_download_resources(client, namespace, download, params).await?;
-    }
-
     // Layer 1: Infrastructure (config, mesh, security, service accounts)
     let cm_ar = ApiResource::erase::<k8s_openapi::api::core::v1::ConfigMap>(&());
     let secret_ar = ApiResource::erase::<k8s_openapi::api::core::v1::Secret>(&());
@@ -717,7 +662,6 @@ async fn apply_layers(
         tracing_policies = compiled.tracing_policies.len(),
         has_routing = compiled.routing.is_some(),
         has_autoscaling = compiled.autoscaling.is_some(),
-        has_download = compiled.download.is_some(),
         "applied compiled model resources"
     );
 
@@ -817,169 +761,6 @@ async fn check_model_serving_status(
     let conditions = read_model_serving_conditions(client, name, namespace, registry).await;
     let state = derive_model_serving_state(conditions.as_deref());
     (state, conditions)
-}
-
-/// Apply model download resources (PVC + ServiceAccount + LatticeJob) as Layer 0.
-///
-/// The PVC is owned by the LatticeModel (for GC cascading). The LatticeJob
-/// references the PVC as a volume. The LatticeJob controller handles mesh
-/// member generation (entity egress) through the normal compilation pipeline.
-async fn apply_download_resources(
-    client: &Client,
-    namespace: &str,
-    download: &CompiledDownload,
-    params: &PatchParams,
-) -> Result<(), ModelError> {
-    let sa_ar = ApiResource::erase::<k8s_openapi::api::core::v1::ServiceAccount>(&());
-
-    // Layer 0a: ServiceAccount (must exist before LatticeJob pod references it)
-    let mut layer0a = ApplyBatch::new(client.clone(), namespace, params);
-
-    layer0a.push(
-        "ServiceAccount",
-        download.job_name(),
-        &download.service_account,
-        &sa_ar,
-    )?;
-
-    layer0a.run("layer-0a-download-infra").await?;
-
-    // Layer 0b: LatticeJob (the job compiler's VolumeCompiler creates the PVC
-    // with ownerReferences forwarded from the LatticeJob metadata)
-    let lj_api: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
-    lj_api
-        .patch(download.job_name(), params, &Patch::Apply(&download.job))
-        .await?;
-
-    info!(
-        pvc = %download.pvc_name(),
-        job = %download.job_name(),
-        mount_path = %download.mount_path(),
-        "applied model download resources (Layer 0)"
-    );
-
-    Ok(())
-}
-
-enum DownloadState {
-    Succeeded,
-    /// Download job failed. `permanent` is true when the underlying VCJob
-    /// actually ran and failed (observed_generation set), false when the
-    /// failure was transient (webhook not ready, etc.) and the LatticeJob
-    /// controller will retry automatically.
-    Failed {
-        permanent: bool,
-    },
-    Running,
-}
-
-/// Check the status of a model download LatticeJob
-async fn check_download_job_status(
-    client: &Client,
-    name: &str,
-    namespace: &str,
-) -> Option<DownloadState> {
-    let jobs: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
-
-    match jobs.get(name).await {
-        Ok(job) => {
-            let status = job.status.as_ref()?;
-            match &status.phase {
-                JobPhase::Succeeded => Some(DownloadState::Succeeded),
-                JobPhase::Failed => {
-                    // Permanent if observed_generation is set (VCJob ran and failed).
-                    // Transient if None (apply error, webhook not ready — LatticeJob retries).
-                    let permanent = status.observed_generation.is_some();
-                    Some(DownloadState::Failed { permanent })
-                }
-                JobPhase::Pending | JobPhase::Running | _ => Some(DownloadState::Running),
-            }
-        }
-        Err(kube::Error::Api(ae)) if ae.code == 404 => {
-            warn!(job = %name, "download LatticeJob not found");
-            None
-        }
-        Err(e) => {
-            warn!(job = %name, error = %e, "failed to check download LatticeJob status");
-            None
-        }
-    }
-}
-
-/// Remove the model-download scheduling gate from all ModelServing pods.
-///
-/// Lists pods by the `modelserving.volcano.sh/name` label and patches each
-/// one that has the `lattice.dev/model-download` gate to remove it, allowing
-/// the kube-scheduler to schedule them.
-///
-/// `serving_name` must be the ModelServing resource name (model name + role suffix),
-/// since Kthena labels pods with `modelserving.volcano.sh/name={ModelServing.metadata.name}`.
-async fn remove_scheduling_gates(
-    client: &Client,
-    serving_name: &str,
-    namespace: &str,
-) -> Result<(), ModelError> {
-    use kube::api::ListParams;
-
-    let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(client.clone(), namespace);
-    let lp =
-        ListParams::default().labels(&format!("modelserving.volcano.sh/name={}", serving_name));
-
-    let pod_list = pods.list(&lp).await?;
-    let mut removed = 0u32;
-
-    for pod in &pod_list {
-        let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
-        let has_gate = pod
-            .spec
-            .as_ref()
-            .and_then(|s| s.scheduling_gates.as_ref())
-            .is_some_and(|gates| {
-                gates
-                    .iter()
-                    .any(|g| g.name == SCHEDULING_GATE_MODEL_DOWNLOAD)
-            });
-
-        if has_gate {
-            // Remove the scheduling gate via JSON merge patch
-            let new_gates: Vec<&k8s_openapi::api::core::v1::PodSchedulingGate> = pod
-                .spec
-                .as_ref()
-                .and_then(|s| s.scheduling_gates.as_ref())
-                .map(|gates| {
-                    gates
-                        .iter()
-                        .filter(|g| g.name != SCHEDULING_GATE_MODEL_DOWNLOAD)
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let patch = if new_gates.is_empty() {
-                serde_json::json!({ "spec": { "schedulingGates": null } })
-            } else {
-                serde_json::json!({ "spec": { "schedulingGates": new_gates } })
-            };
-
-            match pods
-                .patch(pod_name, &PatchParams::default(), &Patch::Merge(&patch))
-                .await
-            {
-                Ok(_) => {
-                    removed += 1;
-                    info!(pod = %pod_name, "removed model-download scheduling gate");
-                }
-                Err(e) => {
-                    warn!(pod = %pod_name, error = %e, "failed to remove scheduling gate");
-                }
-            }
-        }
-    }
-
-    if removed > 0 {
-        info!(serving = %serving_name, count = removed, "removed scheduling gates from pods");
-    }
-
-    Ok(())
 }
 
 /// Check if the spec changed since the last compilation.
@@ -1230,7 +1011,9 @@ mod tests {
     /// still find the role so cleanup_removed_roles can detect it.
     #[test]
     fn current_graph_role_keys_finds_mesh_member_nodes() {
-        use lattice_common::crd::{LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget};
+        use lattice_common::crd::{
+            LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
+        };
 
         let graph = ServiceGraph::new();
 
@@ -1239,19 +1022,24 @@ mod tests {
 
         // MeshMember controller overwrites prefill to MeshMember type
         let mm_spec = LatticeMeshMemberSpec {
-            target: MeshMemberTarget::Labels(std::collections::BTreeMap::from([(
+            target: MeshMemberTarget::Selector(std::collections::BTreeMap::from([(
                 "app".to_string(),
                 "llm-serving-prefill".to_string(),
             )])),
             ports: vec![MeshMemberPort {
                 port: 8080,
-                name: Some("http".to_string()),
-                protocol: None,
-                app_protocol: None,
+                name: "http".to_string(),
+                service_port: None,
+                peer_auth: PeerAuth::default(),
             }],
             allowed_callers: vec![],
             dependencies: vec![],
             egress: vec![],
+            allow_peer_traffic: false,
+            depends_all: false,
+            ingress: None,
+            service_account: None,
+            ambient: true,
         };
         graph.put_mesh_member("ns", "llm-serving-prefill", &mm_spec);
 
