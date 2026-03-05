@@ -144,7 +144,23 @@ async fn reconcile_pending(
         .unwrap_or(false);
 
     if !already_submitted {
-        submit_job(job, ctx, namespace, generation, is_cron, &volcano_api).await?;
+        // Guard against re-submitting a VCJob that already exists on the cluster.
+        // This can happen if apply_layers succeeded but the subsequent status patch
+        // failed — the VCJob runs to completion while the LatticeJob status still
+        // lacks SUBMITTED_MESSAGE. Re-applying to a Completed VCJob triggers
+        // Volcano's immutable-field webhook rejection, creating an infinite retry loop.
+        let vcjob_exists = check_vcjob_status(&ctx.client, &job.name_any(), namespace, &volcano_api)
+            .await
+            .is_some();
+        if vcjob_exists {
+            info!(job = %job.name_any(), "VCJob already exists, skipping re-submission");
+            let mut status = current_status(job);
+            status.message = Some(SUBMITTED_MESSAGE.to_string());
+            status.observed_generation = Some(generation);
+            patch_status(&ctx.client, &job.name_any(), namespace, &status, job.status.as_ref()).await?;
+        } else {
+            submit_job(job, ctx, namespace, generation, is_cron, &volcano_api).await?;
+        }
     }
 
     // Cron jobs go straight to Running — they're perpetual and don't have a "pending" VCJob phase
