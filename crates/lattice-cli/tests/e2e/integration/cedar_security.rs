@@ -171,7 +171,7 @@ async fn test_default_deny(kubeconfig: &str) -> Result<(), String> {
         service_with_cap("svc-no-policy", NS_DEFAULT_DENY, "NET_ADMIN"),
         "Failed",
         Some("security override denied"),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -224,7 +224,7 @@ async fn test_forbid_overrides_permit(kubeconfig: &str) -> Result<(), String> {
         service_with_privileged("svc-priv-denied", NS_FORBID_OVERRIDE),
         "Failed",
         Some("security override denied"),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -248,7 +248,7 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
         service_with_cap("svc-wrong-ns", NS_ISOLATION_B, "NET_ADMIN"),
         "Failed",
         None,
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -343,7 +343,7 @@ async fn test_run_as_root(kubeconfig: &str) -> Result<(), String> {
         service_with_run_as_root("svc-root-denied", NS_RUN_AS_ROOT),
         "Failed",
         Some("security override denied"),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 

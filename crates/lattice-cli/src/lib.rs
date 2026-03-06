@@ -25,8 +25,6 @@ pub enum Commands {
     Install(commands::install::InstallArgs),
     /// Uninstall a self-managing Lattice cluster (reverse pivot and destroy)
     Uninstall(commands::uninstall::UninstallArgs),
-    /// Get a ServiceAccount token (exec credential plugin for kubeconfig)
-    Token(commands::token::TokenArgs),
     /// Clear saved credentials and proxy kubeconfig
     Logout(commands::logout::LogoutArgs),
 }
@@ -38,7 +36,6 @@ impl Cli {
             Commands::Login(args) => commands::login::run(args).await,
             Commands::Install(args) => commands::install::run(args).await,
             Commands::Uninstall(args) => commands::uninstall::run(args).await,
-            Commands::Token(args) => commands::token::run(args).await,
             Commands::Logout(args) => commands::logout::run(args).await,
         }
     }

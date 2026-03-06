@@ -85,18 +85,9 @@ pub struct UserConfig {
 /// Query parameters for kubeconfig endpoint
 #[derive(Debug, Deserialize, Default)]
 pub struct KubeconfigParams {
-    /// Format: "oidc" (default) or "sa" (ServiceAccount with auto-refresh)
+    /// Format: "oidc" (default) or "sa" (ServiceAccount with static bearer token)
     #[serde(default)]
     pub format: Option<String>,
-    /// Kubeconfig path for format=sa (where the ServiceAccount exists)
-    #[serde(default)]
-    pub kubeconfig: Option<String>,
-    /// ServiceAccount namespace (default: lattice-system)
-    #[serde(default)]
-    pub namespace: Option<String>,
-    /// ServiceAccount name (default: lattice-operator)
-    #[serde(default)]
-    pub service_account: Option<String>,
 }
 
 /// Exec credential plugin configuration
@@ -153,6 +144,13 @@ pub async fn kubeconfig_handler(
         return Err(Error::Forbidden("No accessible clusters".into()));
     }
 
+    // Extract bearer token from request for SA format embedding
+    let bearer_token = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
     // Get OIDC config dynamically from auth chain (reloads when OIDCProvider changes)
     let oidc_config = state.auth.oidc_config().await;
 
@@ -164,6 +162,7 @@ pub async fn kubeconfig_handler(
         oidc_config.as_ref(),
         &state.ca_cert_base64,
         &params,
+        bearer_token.as_deref(),
     );
 
     let json = serde_json::to_string_pretty(&kubeconfig)
@@ -196,6 +195,7 @@ fn build_kubeconfig(
     oidc_config: Option<&OidcConfig>,
     ca_cert_base64: &str,
     params: &KubeconfigParams,
+    bearer_token: Option<&str>,
 ) -> Kubeconfig {
     // Build cluster entries - all point to the same entry point but with different paths
     // CA cert is always included to ensure kubeconfigs are self-contained
@@ -225,29 +225,10 @@ fn build_kubeconfig(
     // Build user config based on format parameter
     let user_config = match params.format.as_deref() {
         Some("sa") => {
-            // ServiceAccount format: use lattice token exec plugin for automatic refresh
-            let kubeconfig_path = params.kubeconfig.clone().unwrap_or_default();
-            let namespace = params
-                .namespace
-                .clone()
-                .unwrap_or_else(|| "lattice-system".to_string());
-            let service_account = params
-                .service_account
-                .clone()
-                .unwrap_or_else(|| "lattice-operator".to_string());
-
+            // ServiceAccount format: embed the caller's bearer token directly
             UserConfig {
-                exec: Some(ExecConfig {
-                    api_version: "client.authentication.k8s.io/v1beta1".into(),
-                    command: lattice_common::CLI_BIN_NAME.into(),
-                    args: vec![
-                        "token".into(),
-                        format!("--kubeconfig={}", kubeconfig_path),
-                        format!("--namespace={}", namespace),
-                        format!("--service-account={}", service_account),
-                    ],
-                }),
-                token: None,
+                exec: None,
+                token: bearer_token.map(|t| t.to_string()),
             }
         }
         _ => {
@@ -298,6 +279,7 @@ mod tests {
             None,
             TEST_CA_CERT,
             &params,
+            None,
         );
 
         assert_eq!(config.clusters.len(), 2);
@@ -339,6 +321,7 @@ mod tests {
             Some(&oidc_config),
             TEST_CA_CERT,
             &params,
+            None,
         );
 
         // Verify exec config is set
@@ -358,38 +341,31 @@ mod tests {
         let clusters = vec!["test-cluster".into()];
         let params = KubeconfigParams {
             format: Some("sa".to_string()),
-            kubeconfig: Some("/path/to/kubeconfig".to_string()),
-            namespace: Some("my-namespace".to_string()),
-            service_account: Some("my-sa".to_string()),
         };
 
         let config = build_kubeconfig(
             &clusters,
-            "system:serviceaccount:my-namespace:my-sa",
+            "system:serviceaccount:lattice-system:lattice-admin",
             "https://lattice.example.com",
             None,
             TEST_CA_CERT,
             &params,
+            Some("my-bearer-token"),
         );
 
-        // Verify exec config uses lattice token command
-        let exec = config.users[0].user.exec.as_ref().unwrap();
-        assert_eq!(exec.command, lattice_common::CLI_BIN_NAME);
-        assert!(exec.args.contains(&"token".to_string()));
-        assert!(exec.args.iter().any(|a| a.contains("/path/to/kubeconfig")));
-        assert!(exec.args.iter().any(|a| a.contains("my-namespace")));
-        assert!(exec.args.iter().any(|a| a.contains("my-sa")));
-        assert!(config.users[0].user.token.is_none());
+        // Verify static token is embedded (no exec plugin)
+        assert!(config.users[0].user.exec.is_none());
+        assert_eq!(
+            config.users[0].user.token.as_deref(),
+            Some("my-bearer-token")
+        );
     }
 
     #[test]
-    fn test_build_kubeconfig_sa_format_defaults() {
+    fn test_build_kubeconfig_sa_format_no_token() {
         let clusters = vec!["test-cluster".into()];
         let params = KubeconfigParams {
             format: Some("sa".to_string()),
-            kubeconfig: None,
-            namespace: None,
-            service_account: None,
         };
 
         let config = build_kubeconfig(
@@ -399,15 +375,12 @@ mod tests {
             None,
             TEST_CA_CERT,
             &params,
+            None,
         );
 
-        // Verify defaults are used (lattice-system namespace, lattice-operator SA)
-        let exec = config.users[0].user.exec.as_ref().unwrap();
-        assert!(exec.args.iter().any(|a| a.contains("lattice-system")));
-        assert!(exec
-            .args
-            .iter()
-            .any(|a| a.contains("--service-account=lattice-operator")));
+        // No token provided — field should be None
+        assert!(config.users[0].user.exec.is_none());
+        assert!(config.users[0].user.token.is_none());
     }
 
     #[test]
@@ -421,6 +394,7 @@ mod tests {
             None,
             TEST_CA_CERT,
             &params,
+            None,
         );
 
         assert!(config.clusters.is_empty());

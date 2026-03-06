@@ -24,14 +24,10 @@ const LATTICE_KUBECONFIG_ENV: &str = "LATTICE_KUBECONFIG";
 /// Persistent CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LatticeConfig {
-    /// Path to the management cluster kubeconfig used during login.
-    pub mgmt_kubeconfig: Option<String>,
     /// Discovered proxy server URL.
     pub proxy_server: Option<String>,
     /// Current cluster set by `lattice use`.
     pub current_cluster: Option<String>,
-    /// Whether login used port-forward (Docker/kind).
-    pub uses_port_forward: bool,
     /// ISO 8601 timestamp of last login.
     pub last_login: Option<String>,
 }
@@ -140,30 +136,24 @@ mod tests {
     #[test]
     fn config_serde_roundtrip() {
         let config = LatticeConfig {
-            mgmt_kubeconfig: Some("/tmp/mgmt".to_string()),
             proxy_server: Some("https://proxy:8082".to_string()),
             current_cluster: Some("prod".to_string()),
-            uses_port_forward: true,
             last_login: Some("2025-01-01T00:00:00Z".to_string()),
         };
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: LatticeConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.mgmt_kubeconfig.as_deref(), Some("/tmp/mgmt"));
         assert_eq!(parsed.proxy_server.as_deref(), Some("https://proxy:8082"));
         assert_eq!(parsed.current_cluster.as_deref(), Some("prod"));
-        assert!(parsed.uses_port_forward);
         assert_eq!(parsed.last_login.as_deref(), Some("2025-01-01T00:00:00Z"));
     }
 
     #[test]
     fn config_default_is_empty() {
         let config = LatticeConfig::default();
-        assert!(config.mgmt_kubeconfig.is_none());
         assert!(config.proxy_server.is_none());
         assert!(config.current_cluster.is_none());
-        assert!(!config.uses_port_forward);
         assert!(config.last_login.is_none());
     }
 

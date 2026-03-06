@@ -16,7 +16,6 @@ pub mod login;
 pub mod logout;
 pub mod port_forward;
 pub mod proxy;
-pub mod token;
 pub mod uninstall;
 
 /// Extension trait to convert errors with Display to CLI Error::CommandFailed.
@@ -228,13 +227,6 @@ pub async fn resolve_kube_client(
     Ok((client, pf))
 }
 
-/// Build a kube [`Client`] from a kubeconfig file path (default context).
-pub async fn kube_client_from_path(path: &str) -> Result<Client> {
-    let kubeconfig = Kubeconfig::read_from(path)
-        .map_err(|e| Error::command_failed(format!("failed to read kubeconfig {}: {}", path, e)))?;
-    kube_client_from_kubeconfig(kubeconfig, &KubeConfigOptions::default()).await
-}
-
 /// Build a kube [`Client`] from an already-loaded [`Kubeconfig`] with options.
 pub async fn kube_client_from_kubeconfig(
     kubeconfig: Kubeconfig,
@@ -274,75 +266,3 @@ pub async fn ensure_capi_providers(provider: lattice_common::crd::ProviderType) 
     NativeInstaller::new().ensure(&config).await.cmd_err()
 }
 
-/// Create a ServiceAccount token using the Kubernetes TokenRequest API.
-///
-/// Generates a short-lived token for the given ServiceAccount without
-/// shelling out to kubectl.
-pub async fn create_sa_token_native(
-    client: &Client,
-    namespace: &str,
-    service_account: &str,
-    duration_secs: i64,
-) -> Result<String> {
-    use k8s_openapi::api::authentication::v1::{TokenRequest, TokenRequestSpec};
-    use k8s_openapi::api::core::v1::ServiceAccount;
-    use kube::Api;
-
-    let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), namespace);
-
-    let token_request = TokenRequest {
-        metadata: Default::default(),
-        spec: TokenRequestSpec {
-            audiences: vec![],
-            expiration_seconds: Some(duration_secs),
-            bound_object_ref: None,
-        },
-        status: None,
-    };
-
-    let result = sa_api
-        .create_token_request(service_account, &Default::default(), &token_request)
-        .await
-        .map_err(|e| Error::command_failed(format!("token request failed: {}", e)))?;
-
-    let token = result
-        .status
-        .ok_or_else(|| Error::command_failed("token response missing status"))?
-        .token;
-
-    if token.is_empty() {
-        return Err(Error::command_failed("server returned empty token"));
-    }
-
-    Ok(token)
-}
-
-/// Parse a human-friendly duration string into seconds.
-///
-/// Supports `Nh` (hours), `Nm` (minutes), and `Ns` (seconds).
-/// Examples: "1h" → 3600, "30m" → 1800, "3600s" → 3600.
-pub fn parse_duration(s: &str) -> Result<i64> {
-    let s = s.trim();
-    if let Some(hours) = s.strip_suffix('h') {
-        let n: i64 = hours
-            .parse()
-            .map_err(|_| Error::validation(format!("invalid duration: {}", s)))?;
-        Ok(n * 3600)
-    } else if let Some(minutes) = s.strip_suffix('m') {
-        let n: i64 = minutes
-            .parse()
-            .map_err(|_| Error::validation(format!("invalid duration: {}", s)))?;
-        Ok(n * 60)
-    } else if let Some(secs) = s.strip_suffix('s') {
-        secs.parse()
-            .map_err(|_| Error::validation(format!("invalid duration: {}", s)))
-    } else {
-        // Try parsing as raw seconds
-        s.parse().map_err(|_| {
-            Error::validation(format!(
-                "invalid duration '{}', expected e.g. 1h, 30m, 3600s",
-                s
-            ))
-        })
-    }
-}

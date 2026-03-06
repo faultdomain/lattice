@@ -584,9 +584,8 @@ fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
 /// Detect a proxy kubeconfig and start a port-forward if the proxy is unreachable.
 ///
 /// A proxy kubeconfig has server URLs like `https://127.0.0.1:PORT/clusters/NAME`.
-/// When the port is dead (e.g. the generating process exited), we extract the
-/// management kubeconfig path from the exec credential args, start a new
-/// port-forward, and rewrite the server URLs in place.
+/// When the port is dead (e.g. the generating process exited), we look for a
+/// saved management kubeconfig to start a new port-forward and rewrite the URLs.
 pub(crate) async fn ensure_proxy_reachable(kubeconfig: &mut Kubeconfig) -> Option<PortForward> {
     let proxy_base = find_proxy_base_url(kubeconfig)?;
 
@@ -600,26 +599,12 @@ pub(crate) async fn ensure_proxy_reachable(kubeconfig: &mut Kubeconfig) -> Optio
     }
 
     info!(
-        "Proxy at {} is unreachable, attempting auto port-forward",
+        "Proxy at {} is unreachable, but no auto port-forward available with static tokens. \
+         Re-run `lattice login --server <url> --token <token>` to refresh.",
         proxy_base
     );
 
-    let mgmt_kubeconfig = extract_mgmt_kubeconfig(kubeconfig)?;
-
-    let pf =
-        match PortForward::start(&mgmt_kubeconfig, lattice_common::DEFAULT_AUTH_PROXY_PORT).await {
-            Ok(pf) => pf,
-            Err(e) => {
-                warn!("Failed to auto-start port-forward: {}", e);
-                return None;
-            }
-        };
-
-    let new_base = &pf.url;
-    rewrite_proxy_urls(kubeconfig, &proxy_base, new_base);
-    info!("Rewrote proxy URLs from {} to {}", proxy_base, new_base);
-
-    Some(pf)
+    None
 }
 
 /// Find the common proxy base URL (e.g. `https://127.0.0.1:49284`) from a kubeconfig.
@@ -645,40 +630,30 @@ fn find_proxy_base_url(kubeconfig: &Kubeconfig) -> Option<String> {
     None
 }
 
-/// Extract the management kubeconfig path from exec credential args.
-///
-/// The proxy kubeconfig uses `lattice token --kubeconfig=<path>` as the exec
-/// credential plugin. We parse the `--kubeconfig=` arg to find the management
-/// cluster's kubeconfig.
-fn extract_mgmt_kubeconfig(kubeconfig: &Kubeconfig) -> Option<String> {
-    for auth in &kubeconfig.auth_infos {
-        if let Some(ref info) = auth.auth_info {
-            if let Some(ref exec) = info.exec {
-                if let Some(ref args) = exec.args {
-                    for arg in args {
-                        if let Some(path) = arg.strip_prefix("--kubeconfig=") {
-                            return Some(path.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
+/// Check if a URL contains a Docker-internal IP (172.18.x.x subnet).
+pub(crate) fn is_docker_internal_ip(url: &str) -> bool {
+    let host = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = host.split(':').next().unwrap_or(host);
+    host.starts_with("172.18.")
 }
 
-/// Rewrite proxy server URLs from the old base to the new base.
-///
-/// E.g. `https://127.0.0.1:49284/clusters/foo` -> `https://127.0.0.1:55555/clusters/foo`
-fn rewrite_proxy_urls(kubeconfig: &mut Kubeconfig, old_base: &str, new_base: &str) {
-    for named_cluster in &mut kubeconfig.clusters {
-        if let Some(ref mut cluster) = named_cluster.cluster {
-            if let Some(ref mut server) = cluster.server {
-                if server.starts_with(old_base) {
-                    let path = &server[old_base.len()..];
-                    *server = format!("{}{}", new_base, path);
-                }
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_docker_internal_ip() {
+        assert!(is_docker_internal_ip("https://172.18.255.1:8082"));
+        assert!(is_docker_internal_ip("https://172.18.0.2:8082"));
+        assert!(is_docker_internal_ip("http://172.18.1.1:8082"));
+        assert!(is_docker_internal_ip("172.18.100.5"));
+
+        assert!(!is_docker_internal_ip("https://10.0.0.1:8082"));
+        assert!(!is_docker_internal_ip("https://192.168.1.1:8082"));
+        assert!(!is_docker_internal_ip("https://lattice.example.com:8082"));
+        assert!(!is_docker_internal_ip("https://172.19.0.1:8082"));
     }
 }

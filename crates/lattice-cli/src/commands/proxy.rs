@@ -1,134 +1,11 @@
-//! Proxy connection resolution utilities.
+//! Proxy connection utilities.
 //!
-//! Provides shared logic for discovering the Lattice auth proxy, creating
-//! ServiceAccount tokens, and fetching proxy kubeconfigs. Used by `lattice login`.
+//! Provides shared logic for fetching proxy kubeconfigs. Used by `lattice login`
+//! and `lattice install`.
 
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::{Error, Result};
-
-/// Parameters for resolving a proxy connection.
-///
-/// Used by `lattice login` to discover/connect to the proxy, authenticate,
-/// and fetch a kubeconfig.
-pub(crate) struct ProxyConnectionParams {
-    pub kubeconfig: Option<String>,
-    pub server: Option<String>,
-    pub token: Option<String>,
-    pub namespace: String,
-    pub service_account: String,
-    pub port_forward: bool,
-    pub insecure: bool,
-}
-
-/// Resolve the proxy server URL and bearer token.
-///
-/// Returns `(server_url, token, Option<PortForward>)`. The `PortForward` is kept
-/// alive as long as the caller holds it — dropping it kills the kubectl process.
-///
-/// Priority:
-/// - `server` overrides auto-discovered proxy URL
-/// - `token` overrides auto-generated SA token
-/// - `kubeconfig` provides both via cluster introspection
-/// - `port_forward` forces a kubectl port-forward instead of direct access
-pub(crate) async fn resolve_proxy_connection(
-    params: &ProxyConnectionParams,
-) -> Result<(String, String, Option<super::port_forward::PortForward>)> {
-    if let (Some(server), Some(token)) = (&params.server, &params.token) {
-        return Ok((server.clone(), token.clone(), None));
-    }
-
-    let kubeconfig_path = params.kubeconfig.as_deref().ok_or_else(|| {
-        Error::validation(
-            "--kubeconfig is required (or provide both --server and --token for direct mode)",
-        )
-    })?;
-
-    let (server, port_forward) = match &params.server {
-        Some(s) => (s.clone(), None),
-        None => {
-            debug!("Discovering proxy endpoint from cluster");
-            let endpoint = discover_proxy_endpoint(kubeconfig_path).await?;
-
-            if params.port_forward || is_docker_internal_ip(&endpoint) {
-                if is_docker_internal_ip(&endpoint) {
-                    info!(
-                        "Detected Docker-internal IP in endpoint ({}), using port-forward",
-                        endpoint
-                    );
-                }
-                let pf = super::port_forward::PortForward::start(
-                    kubeconfig_path,
-                    lattice_common::DEFAULT_AUTH_PROXY_PORT,
-                )
-                .await?;
-                let url = pf.url.clone();
-                (url, Some(pf))
-            } else {
-                (endpoint, None)
-            }
-        }
-    };
-
-    let token = match &params.token {
-        Some(t) => t.clone(),
-        None => {
-            debug!(
-                "Creating SA token (namespace={}, sa={})",
-                params.namespace, params.service_account
-            );
-            let client = super::kube_client_from_path(kubeconfig_path).await?;
-            super::create_sa_token_native(&client, &params.namespace, &params.service_account, 3600)
-                .await?
-        }
-    };
-
-    Ok((server, token, port_forward))
-}
-
-/// Discover the auth proxy endpoint from the cell LoadBalancer Service.
-pub(crate) async fn discover_proxy_endpoint(kubeconfig_path: &str) -> Result<String> {
-    use k8s_openapi::api::core::v1::Service;
-    use kube::Api;
-    use lattice_common::{CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE};
-
-    let client = super::kube_client_from_path(kubeconfig_path).await?;
-
-    // Get the cell LoadBalancer Service
-    let services: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let svc = services.get(CELL_SERVICE_NAME).await.map_err(|e| {
-        Error::command_failed(format!(
-            "failed to get {} Service: {}. Use --server to specify the proxy URL manually.",
-            CELL_SERVICE_NAME, e
-        ))
-    })?;
-
-    // Extract LB address from Service status
-    let host = svc
-        .status
-        .and_then(|s| s.load_balancer)
-        .and_then(|lb| lb.ingress)
-        .and_then(|ingress| ingress.into_iter().next())
-        .and_then(|entry| entry.hostname.or(entry.ip))
-        .ok_or_else(|| {
-            Error::command_failed(
-                "cell Service has no LoadBalancer address assigned yet. \
-                 Use --server to specify the proxy URL manually.",
-            )
-        })?;
-
-    Ok(format!("https://{}:{}", host, DEFAULT_AUTH_PROXY_PORT))
-}
-
-/// Check if a URL contains a Docker-internal IP (172.18.x.x subnet).
-pub(crate) fn is_docker_internal_ip(url: &str) -> bool {
-    let host = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    let host = host.split(':').next().unwrap_or(host);
-    host.starts_with("172.18.")
-}
 
 /// Fetch kubeconfig JSON from the proxy's `/kubeconfig` endpoint.
 pub(crate) async fn fetch_kubeconfig(server: &str, token: &str, insecure: bool) -> Result<String> {
@@ -181,22 +58,4 @@ pub(crate) fn extract_cluster_names(kubeconfig_json: &str) -> Result<Vec<String>
         .iter()
         .filter_map(|c| c.name.clone().into())
         .collect())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_docker_internal_ip() {
-        assert!(is_docker_internal_ip("https://172.18.255.1:8082"));
-        assert!(is_docker_internal_ip("https://172.18.0.2:8082"));
-        assert!(is_docker_internal_ip("http://172.18.1.1:8082"));
-        assert!(is_docker_internal_ip("172.18.100.5"));
-
-        assert!(!is_docker_internal_ip("https://10.0.0.1:8082"));
-        assert!(!is_docker_internal_ip("https://192.168.1.1:8082"));
-        assert!(!is_docker_internal_ip("https://lattice.example.com:8082"));
-        assert!(!is_docker_internal_ip("https://172.19.0.1:8082"));
-    }
 }

@@ -177,7 +177,7 @@ async fn test_failed_spec_recovery(kubeconfig: &str) -> Result<(), String> {
         svc,
         "Failed",
         Some("secret access denied"),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -245,7 +245,7 @@ async fn test_failed_sets_observed_generation(kubeconfig: &str) -> Result<(), St
         svc,
         "Failed",
         Some("secret access denied"),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -1124,7 +1124,7 @@ async fn test_job_compile_failure(kubeconfig: &str, namespace: &str) -> Result<(
         namespace,
         "job-cedar-deny",
         "Failed",
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 

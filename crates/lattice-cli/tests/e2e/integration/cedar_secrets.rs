@@ -163,7 +163,7 @@ async fn test_default_deny(kubeconfig: &str) -> Result<(), String> {
         ),
         "Failed",
         Some("secret access denied"),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -223,7 +223,7 @@ async fn test_forbid_overrides_permit(kubeconfig: &str) -> Result<(), String> {
         ),
         "Failed",
         Some("secret access denied"),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -257,7 +257,7 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
         ),
         "Failed",
         None,
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -298,7 +298,7 @@ async fn test_policy_lifecycle(kubeconfig: &str) -> Result<(), String> {
         ),
         "Failed",
         None,
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -352,7 +352,7 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
         ),
         "Failed",
         Some("secret access denied"),
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 

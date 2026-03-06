@@ -260,6 +260,9 @@ impl Installer {
 
         bootstrap_result?;
 
+        info!("Creating lattice-admin service account and fetching proxy kubeconfig...");
+        self.setup_admin_access().await?;
+
         info!("Installation complete in {:?}", start.elapsed());
         info!(
             "Management cluster '{}' is now self-managing.",
@@ -1060,6 +1063,218 @@ impl Installer {
         .map(|_| ())
         .cmd_err()
     }
+
+    /// Create lattice-admin ServiceAccount, long-lived token Secret, and CedarPolicy
+    /// on the management cluster, then fetch and save the proxy kubeconfig.
+    async fn setup_admin_access(&self) -> Result<()> {
+        use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
+        use kube::api::{Api, ObjectMeta, PostParams};
+
+        let mgmt_client = self.management_client().await?;
+
+        // Create lattice-admin ServiceAccount
+        let sa_api: Api<ServiceAccount> =
+            Api::namespaced(mgmt_client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let sa = ServiceAccount {
+            metadata: ObjectMeta {
+                name: Some("lattice-admin".to_string()),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        sa_api
+            .create(&PostParams::default(), &sa)
+            .await
+            .map_err(|e| Error::command_failed(format!("failed to create lattice-admin SA: {}", e)))?;
+        info!("Created lattice-admin ServiceAccount");
+
+        // Create Secret-based long-lived SA token
+        let secret_api: Api<Secret> =
+            Api::namespaced(mgmt_client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let token_secret = Secret {
+            metadata: ObjectMeta {
+                name: Some("lattice-admin-token".to_string()),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+                annotations: Some(
+                    [(
+                        "kubernetes.io/service-account.name".to_string(),
+                        "lattice-admin".to_string(),
+                    )]
+                    .into(),
+                ),
+                ..Default::default()
+            },
+            type_: Some("kubernetes.io/service-account-token".to_string()),
+            ..Default::default()
+        };
+        secret_api
+            .create(&PostParams::default(), &token_secret)
+            .await
+            .map_err(|e| {
+                Error::command_failed(format!("failed to create lattice-admin-token Secret: {}", e))
+            })?;
+        info!("Created lattice-admin-token Secret");
+
+        // Create CedarPolicy granting full admin access
+        let cedar_policy_yaml = serde_json::json!({
+            "apiVersion": "lattice.dev/v1alpha1",
+            "kind": "CedarPolicy",
+            "metadata": {
+                "name": "lattice-admin-access",
+                "namespace": LATTICE_SYSTEM_NAMESPACE
+            },
+            "spec": {
+                "description": "Full admin access for lattice-admin SA",
+                "policies": "permit(\n  principal == Lattice::User::\"system:serviceaccount:lattice-system:lattice-admin\",\n  action,\n  resource\n);\n"
+            }
+        });
+        let cedar_json = serde_json::to_string(&cedar_policy_yaml)
+            .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {}", e)))?;
+        kube_utils::apply_manifests(&mgmt_client, &[&cedar_json], &Default::default())
+            .await
+            .cmd_err()?;
+        info!("Created lattice-admin-access CedarPolicy");
+
+        // Wait for token controller to populate the Secret
+        info!("Waiting for admin token to be populated...");
+        let admin_token = wait_with_timeout(
+            Duration::from_secs(60),
+            Duration::from_secs(2),
+            "admin token to be populated",
+            || {
+                let api = secret_api.clone();
+                async move {
+                    match api.get("lattice-admin-token").await {
+                        Ok(secret) => {
+                            if let Some(data) = &secret.data {
+                                if let Some(token_bytes) = data.get("token") {
+                                    let token =
+                                        String::from_utf8_lossy(&token_bytes.0).to_string();
+                                    if !token.is_empty() {
+                                        return Ok(Some(token));
+                                    }
+                                }
+                            }
+                            Ok(None)
+                        }
+                        Err(e) => {
+                            warn!("Error reading admin token: {}", e);
+                            Ok(None)
+                        }
+                    }
+                }
+            },
+        )
+        .await?;
+
+        info!("Admin token ready");
+
+        // Discover proxy endpoint and fetch kubeconfig
+        let proxy_endpoint = self.discover_proxy_for_install(&mgmt_client).await?;
+        let (_server, _pf, kubeconfig_json) =
+            self.fetch_proxy_kubeconfig(&proxy_endpoint, &admin_token).await?;
+
+        // Save kubeconfig
+        let kc_path = crate::config::save_kubeconfig(&kubeconfig_json)?;
+
+        let cfg = crate::config::LatticeConfig {
+            proxy_server: Some(proxy_endpoint),
+            current_cluster: super::proxy::extract_cluster_names(&kubeconfig_json)?
+                .first()
+                .cloned(),
+            last_login: Some(chrono::Utc::now().to_rfc3339()),
+        };
+        crate::config::save_config(&cfg)?;
+
+        eprintln!();
+        eprintln!("=======================================================");
+        eprintln!("IMPORTANT: Proxy kubeconfig saved to {}", kc_path.display());
+        eprintln!("This kubeconfig contains the lattice-admin token.");
+        eprintln!("Store it securely — it is the root credential and");
+        eprintln!("cannot be recovered without cluster access.");
+        eprintln!();
+        eprintln!("To re-login from another machine:");
+        eprintln!("  lattice login --server <proxy-url> --token <admin-token>");
+        eprintln!("=======================================================");
+
+        Ok(())
+    }
+
+    /// Discover the proxy endpoint from the management cluster's cell Service.
+    /// If the endpoint is a Docker-internal IP, start a port-forward.
+    async fn discover_proxy_for_install(&self, client: &Client) -> Result<String> {
+        use k8s_openapi::api::core::v1::Service;
+        use kube::Api;
+        use lattice_common::{CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT};
+
+        let services: Api<Service> =
+            Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+        // Wait for the cell service to get a LoadBalancer address
+        let endpoint = wait_with_timeout(
+            Duration::from_secs(120),
+            Duration::from_secs(5),
+            "proxy endpoint to be available",
+            || {
+                let svc_api = services.clone();
+                async move {
+                    match svc_api.get(CELL_SERVICE_NAME).await {
+                        Ok(svc) => {
+                            let host = svc
+                                .status
+                                .and_then(|s| s.load_balancer)
+                                .and_then(|lb| lb.ingress)
+                                .and_then(|ingress| ingress.into_iter().next())
+                                .and_then(|entry| entry.hostname.or(entry.ip));
+
+                            match host {
+                                Some(h) => Ok(Some(format!("https://{}:{}", h, DEFAULT_AUTH_PROXY_PORT))),
+                                None => Ok(None),
+                            }
+                        }
+                        Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
+                        Err(e) => {
+                            warn!("Error checking cell service: {}", e);
+                            Ok(None)
+                        }
+                    }
+                }
+            },
+        )
+        .await?;
+
+        Ok(endpoint)
+    }
+
+    /// Fetch the proxy kubeconfig, using port-forward if necessary.
+    /// Returns (effective_server_url, optional_port_forward, kubeconfig_json).
+    async fn fetch_proxy_kubeconfig(
+        &self,
+        endpoint: &str,
+        token: &str,
+    ) -> Result<(String, Option<super::port_forward::PortForward>, String)> {
+        let (server, pf) = if super::port_forward::is_docker_internal_ip(endpoint) {
+            info!(
+                "Detected Docker-internal IP ({}), using port-forward",
+                endpoint
+            );
+            let pf = super::port_forward::PortForward::start(
+                &self.kubeconfig_path().to_string_lossy(),
+                lattice_common::DEFAULT_AUTH_PROXY_PORT,
+            )
+            .await?;
+            let url = pf.url.clone();
+            (url, Some(pf))
+        } else {
+            (endpoint.to_string(), None)
+        };
+
+        let kubeconfig_json =
+            super::proxy::fetch_kubeconfig(&server, token, true).await?;
+
+        Ok((server, pf, kubeconfig_json))
+    }
 }
 
 /// Get LatticeCluster phase using dynamic API
@@ -1296,19 +1511,20 @@ pub async fn run(args: InstallArgs) -> Result<()> {
         info!("6. Apply bootstrap manifests to management cluster");
         info!("7. Pivot CAPI resources to make cluster self-managing");
         info!("8. Delete bootstrap cluster");
+        info!("9. Create lattice-admin SA, CedarPolicy, and fetch proxy kubeconfig");
         if let Some(out) = &args.kubeconfig_out {
-            info!("9. Write kubeconfig to: {}", out.display());
+            info!("10. Write kubeconfig to: {}", out.display());
         }
         return Ok(());
     }
 
     installer.run().await?;
 
-    // Copy kubeconfig to output path if specified
+    // Copy kubeconfig to additional output path if specified
     if let Some(out) = &args.kubeconfig_out {
-        let src = installer.kubeconfig_path();
+        let src = crate::config::kubeconfig_path()?;
         tokio::fs::copy(&src, out).await?;
-        info!("Kubeconfig written to: {}", out.display());
+        info!("Kubeconfig also written to: {}", out.display());
     }
 
     Ok(())
