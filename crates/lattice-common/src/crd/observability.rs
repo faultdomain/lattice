@@ -51,10 +51,6 @@ pub struct MetricsSnapshot {
     /// Well-known key to scalar result from the PromQL query.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, f64>,
-
-    /// When this snapshot was taken (RFC 3339).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scraped_at: Option<String>,
 }
 
 impl MetricsConfig {
@@ -151,7 +147,6 @@ mod tests {
     fn serde_round_trip_snapshot() {
         let snapshot = MetricsSnapshot {
             values: BTreeMap::from([("loss".to_string(), 0.042)]),
-            scraped_at: Some("2026-03-06T12:00:00Z".to_string()),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let deserialized: MetricsSnapshot = serde_json::from_str(&json).unwrap();

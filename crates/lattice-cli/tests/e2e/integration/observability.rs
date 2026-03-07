@@ -293,30 +293,6 @@ async fn verify_status_metrics(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    // Also verify scraped_at timestamp exists
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        &kc,
-        "get",
-        "latticeservice",
-        METRICS_SVC_NAME,
-        "-n",
-        OBSERVABILITY_NAMESPACE,
-        "-o",
-        "jsonpath={.status.metrics.scrapedAt}",
-    ])
-    .await
-    .map_err(|e| format!("Failed to read scrapedAt: {e}"))?;
-
-    if output.is_empty() {
-        return Err("status.metrics.scrapedAt is empty after values were populated".to_string());
-    }
-
-    info!(
-        "[Integration/Observability] status.metrics.scrapedAt = {}",
-        output
-    );
-
     Ok(())
 }
 

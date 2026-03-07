@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use lattice_common::crd::MetricsSnapshot;
 use lattice_infra::bootstrap::prometheus::{query_path, query_port, query_url};
 use tracing::warn;
@@ -124,10 +123,7 @@ impl lattice_common::crd::MetricsScraper for MetricsScraper {
                 }
             }
         }
-        MetricsSnapshot {
-            values,
-            scraped_at: Some(Utc::now().to_rfc3339()),
-        }
+        MetricsSnapshot { values }
     }
 }
 
