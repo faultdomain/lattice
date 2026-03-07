@@ -358,7 +358,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         lattice_cost::ConfigMapCostProvider::new(client.clone()),
     ));
 
-    let metrics_scraper = Arc::new(metrics::MetricsScraper::new(monitoring.ha)?);
+    let metrics_scraper = Arc::new(metrics::VmMetricsScraper::new(monitoring.ha)?);
 
     let (mut controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
@@ -510,7 +510,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
         lattice_cost::ConfigMapCostProvider::new(client.clone()),
     ));
-    let metrics_scraper = Arc::new(metrics::MetricsScraper::new(monitoring.ha)?);
+    let metrics_scraper = Arc::new(metrics::VmMetricsScraper::new(monitoring.ha)?);
     let (service_controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
         cluster_name.clone(),

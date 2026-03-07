@@ -28,7 +28,7 @@ enum MetricsError {
 }
 
 /// Scrapes VictoriaMetrics for metric values defined in CRD mappings.
-pub struct MetricsScraper {
+pub struct VmMetricsScraper {
     client: reqwest::Client,
     base_url: String,
 }
@@ -38,7 +38,7 @@ pub struct MetricsScraper {
 #[error("failed to build HTTPS client: {0}")]
 pub struct ScraperBuildError(#[from] reqwest::Error);
 
-impl MetricsScraper {
+impl VmMetricsScraper {
     /// Create a new scraper pointing at the cluster's VictoriaMetrics instance.
     pub fn new(ha: bool) -> Result<Self, ScraperBuildError> {
         let base_url = format!(
@@ -107,7 +107,7 @@ impl MetricsScraper {
 }
 
 #[async_trait]
-impl lattice_common::crd::MetricsScraper for MetricsScraper {
+impl lattice_common::crd::MetricsScraper for VmMetricsScraper {
     async fn scrape(
         &self,
         mappings: &BTreeMap<String, String>,
@@ -202,11 +202,11 @@ mod tests {
 
     #[test]
     fn scraper_url_construction() {
-        let scraper = MetricsScraper::new(false).unwrap();
+        let scraper = VmMetricsScraper::new(false).unwrap();
         assert!(scraper.base_url.contains("vmsingle"));
         assert!(scraper.base_url.contains("/prometheus"));
 
-        let scraper_ha = MetricsScraper::new(true).unwrap();
+        let scraper_ha = VmMetricsScraper::new(true).unwrap();
         assert!(scraper_ha.base_url.contains("vmselect"));
         assert!(scraper_ha.base_url.contains("/select/0/prometheus"));
     }

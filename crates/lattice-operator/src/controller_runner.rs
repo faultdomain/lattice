@@ -83,7 +83,7 @@ pub async fn build_service_controllers(
     cedar: Arc<PolicyEngine>,
     registry: Arc<CrdRegistry>,
     monitoring: MonitoringConfig,
-    metrics_scraper: Arc<crate::metrics::MetricsScraper>,
+    metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> (
     Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -256,7 +256,7 @@ pub async fn build_job_controllers(
     cedar: Arc<PolicyEngine>,
     graph: Arc<lattice_common::graph::ServiceGraph>,
     registry: Arc<CrdRegistry>,
-    metrics_scraper: Arc<crate::metrics::MetricsScraper>,
+    metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
@@ -305,7 +305,7 @@ pub async fn build_model_controllers(
     cedar: Arc<PolicyEngine>,
     graph: Arc<lattice_common::graph::ServiceGraph>,
     registry: Arc<CrdRegistry>,
-    metrics_scraper: Arc<crate::metrics::MetricsScraper>,
+    metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
