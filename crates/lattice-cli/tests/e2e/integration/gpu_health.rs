@@ -77,6 +77,45 @@ async fn patch_gpu_annotations(
     Ok(())
 }
 
+/// Patch fake GPU capacity onto a node's `status.allocatable` so the operator
+/// recognises it as a GPU node. Uses the status subresource via strategic merge
+/// patch.
+async fn add_fake_gpu_capacity(kubeconfig: &str, node: &str) -> Result<(), String> {
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "patch",
+        "node",
+        node,
+        "--subresource=status",
+        "--type=merge",
+        "-p",
+        r#"{"status":{"allocatable":{"nvidia.com/gpu":"8"},"capacity":{"nvidia.com/gpu":"8"}}}"#,
+    ])
+    .await?;
+    Ok(())
+}
+
+/// Remove fake GPU capacity from a node's `status.allocatable` and
+/// `status.capacity`. Uses a JSON patch to delete the keys.
+async fn remove_fake_gpu_capacity(kubeconfig: &str, node: &str) -> Result<(), String> {
+    // JSON patch to remove the nvidia.com/gpu keys. The ~1 is the JSON Pointer
+    // encoding of `/`.
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "patch",
+        "node",
+        node,
+        "--subresource=status",
+        "--type=json",
+        "-p",
+        r#"[{"op":"remove","path":"/status/allocatable/nvidia.com~1gpu"},{"op":"remove","path":"/status/capacity/nvidia.com~1gpu"}]"#,
+    ])
+    .await;
+    Ok(())
+}
+
 /// Remove all `lattice.dev/gpu-*` annotations from a node.
 async fn clear_gpu_annotations(kubeconfig: &str, node: &str) -> Result<(), String> {
     let keys = [
@@ -544,10 +583,12 @@ pub async fn run_gpu_health_tests(kubeconfig: &str) -> Result<(), String> {
     // Ensure clean state before starting.
     reset_node(kubeconfig, &node).await?;
 
+    // Add fake GPU capacity so the operator recognises this as a GPU node.
+    add_fake_gpu_capacity(kubeconfig, &node).await?;
+
     // Run each test case sequentially, cleaning up between them.
     // On failure, clean up and return the error.
     let result = async {
-        reset_node(kubeconfig, &node).await?;
         test_normal_no_cordon(kubeconfig, &node).await?;
 
         reset_node(kubeconfig, &node).await?;
@@ -566,6 +607,7 @@ pub async fn run_gpu_health_tests(kubeconfig: &str) -> Result<(), String> {
 
     // Always clean up, even on failure.
     reset_node(kubeconfig, &node).await?;
+    remove_fake_gpu_capacity(kubeconfig, &node).await?;
 
     result?;
 

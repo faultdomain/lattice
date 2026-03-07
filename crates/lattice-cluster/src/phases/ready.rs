@@ -487,7 +487,7 @@ async fn reconcile_gpu_health(
             None => continue,
         };
 
-        let has_gpus = node
+        let has_gpu_capacity = node
             .status
             .as_ref()
             .and_then(|s| s.allocatable.as_ref())
@@ -495,11 +495,17 @@ async fn reconcile_gpu_health(
             .map(|q| lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0) > 0)
             .unwrap_or(false);
 
-        if !has_gpus {
+        let annotations = node.metadata.annotations.as_ref();
+        let has_gpu_annotations = annotations
+            .map(|a| a.contains_key(lattice_common::gpu::ANNOTATION_GPU_HEALTH))
+            .unwrap_or(false);
+
+        // Process nodes that either have GPU capacity or GPU health annotations.
+        // During total GPU loss, allocatable drops to 0 but annotations remain —
+        // the operator must still cordon/drain these nodes.
+        if !has_gpu_capacity && !has_gpu_annotations {
             continue;
         }
-
-        let annotations = node.metadata.annotations.as_ref();
         let empty = std::collections::BTreeMap::new();
         let ann = annotations.unwrap_or(&empty);
 
