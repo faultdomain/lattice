@@ -388,11 +388,15 @@ impl WorkloadCompiler {
         let spec = &service.spec;
         let workload = &spec.workload;
 
+        let service_uid = service
+            .uid()
+            .ok_or(CompilationError::missing_metadata("uid"))?;
+
         let owner_ref = OwnerReference {
             api_version: "lattice.dev/v1alpha1".to_string(),
             kind: "LatticeService".to_string(),
             name: name.to_string(),
-            uid: service.uid().unwrap_or_default(),
+            uid: service_uid,
             controller: Some(true),
             block_owner_deletion: Some(true),
         };
@@ -838,6 +842,7 @@ mod tests {
             metadata: kube::api::ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some(namespace.to_string()),
+                uid: Some("test-uid-12345".to_string()),
                 ..Default::default()
             },
             spec: crate::crd::LatticeServiceSpec {

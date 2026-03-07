@@ -63,6 +63,9 @@ pub(crate) async fn handle_deletion(
 ) -> Result<Action, Error> {
     let name = cluster.name_any();
 
+    // Clean up error_counts entry for this cluster (prevent unbounded growth)
+    ctx.error_counts.remove(&name);
+
     // If no finalizer, nothing to do
     if !has_finalizer(cluster) {
         debug!(cluster = %name, "No finalizer, allowing deletion");

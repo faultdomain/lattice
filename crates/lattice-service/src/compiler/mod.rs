@@ -234,14 +234,20 @@ impl<'a> ServiceCompiler<'a> {
 
         // Stamp ownerReferences on the LatticeMeshMember so K8s GC
         // cascade-deletes it when the LatticeService is deleted.
-        let mesh_member = compiled.mesh_member.map(|mut mm| {
+        let service_uid = {
             use kube::ResourceExt;
+            service
+                .uid()
+                .ok_or(CompilationError::missing_metadata("uid"))?
+        };
+
+        let mesh_member = compiled.mesh_member.map(|mut mm| {
             mm.metadata.owner_references = Some(vec![
                 k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
                     api_version: "lattice.dev/v1alpha1".to_string(),
                     kind: "LatticeService".to_string(),
                     name: name.to_string(),
-                    uid: service.uid().unwrap_or_default(),
+                    uid: service_uid.clone(),
                     controller: Some(true),
                     block_owner_deletion: Some(true),
                 },
@@ -365,6 +371,7 @@ mod tests {
             metadata: kube::api::ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some(namespace.to_string()),
+                uid: Some("test-uid-12345".to_string()),
                 ..Default::default()
             },
             spec: crate::crd::LatticeServiceSpec {

@@ -139,13 +139,19 @@ pub fn build_k8s_status_response(
         _ => "Unknown",
     };
 
+    let body = serde_json::json!({
+        "kind": "Status",
+        "apiVersion": "v1",
+        "status": "Failure",
+        "message": message,
+        "reason": reason,
+        "code": status_code,
+    });
+
     KubernetesResponse {
         request_id: request_id.to_string(),
         status_code,
-        body: format!(
-            r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"{}","reason":"{}","code":{}}}"#,
-            message, reason, status_code
-        ).into_bytes(),
+        body: serde_json::to_vec(&body).expect("Status JSON serialization cannot fail"),
         content_type: "application/json".to_string(),
         error: String::new(),
         streaming: false,
@@ -262,6 +268,18 @@ mod tests {
         assert!(resp.body.is_empty());
         assert!(!resp.streaming);
         assert!(!resp.stream_end);
+    }
+
+    #[test]
+    fn test_build_k8s_status_response_escapes_special_chars() {
+        let resp = build_k8s_status_response("req-4", 500, r#"error with "quotes" and \backslash"#);
+        let body = String::from_utf8(resp.body).expect("should be valid UTF-8");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("body must be valid JSON even with special chars");
+        assert_eq!(
+            parsed["message"],
+            r#"error with "quotes" and \backslash"#
+        );
     }
 
     #[test]

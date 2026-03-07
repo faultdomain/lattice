@@ -162,6 +162,24 @@ pub static CEDAR_DECISIONS: Lazy<Counter<u64>> = Lazy::new(|| {
         .build()
 });
 
+/// Counter of Cedar policy engine load failures.
+///
+/// Incremented when the operator falls back to default-deny because Cedar
+/// policies could not be loaded from CRDs. A non-zero value indicates the
+/// operator is running without configured Cedar policies.
+pub static CEDAR_LOAD_FAILURES: Lazy<Counter<u64>> = Lazy::new(|| {
+    METER
+        .u64_counter("lattice_cedar_load_failures_total")
+        .with_description("Total failures loading Cedar policies from CRDs (fallback to default-deny)")
+        .with_unit("{failures}")
+        .build()
+});
+
+/// Record a Cedar policy engine load failure
+pub fn record_cedar_load_failure() {
+    CEDAR_LOAD_FAILURES.add(1, &[]);
+}
+
 // ============================================================================
 // Helper Types
 // ============================================================================

@@ -53,10 +53,8 @@ pub async fn prepare_move_objects(
     graph.filter_by_cluster(cluster_name);
 
     if graph.is_empty() {
-        // Unpause and return error
-        if let Err(e) = unpause_cluster(client, namespace).await {
-            error!("Failed to unpause after discovery error: {}", e);
-        }
+        // Unpause with retries — a paused cluster that stays paused is a silent deadlock
+        retry_unpause(client, namespace).await;
         return Err(MoveError::Discovery("no objects to move".to_string()));
     }
 
@@ -81,6 +79,31 @@ pub async fn prepare_move_objects(
     }
 
     Ok(objects)
+}
+
+/// Unpause with retries to avoid leaving a cluster in a permanently paused state.
+///
+/// A paused CAPI Cluster that isn't being reconciled is a silent deadlock requiring
+/// manual intervention. We retry aggressively to prevent this.
+async fn retry_unpause(client: &Client, namespace: &str) {
+    let retry_config = RetryConfig {
+        max_attempts: 5,
+        initial_delay: Duration::from_secs(2),
+        max_delay: Duration::from_secs(15),
+        backoff_multiplier: 2.0,
+    };
+
+    if let Err(e) = retry_with_backoff(&retry_config, "unpause cluster after error", || async {
+        unpause_cluster(client, namespace).await
+    })
+    .await
+    {
+        error!(
+            namespace = %namespace,
+            error = %e,
+            "CRITICAL: Failed to unpause cluster after 5 retries — cluster may be stuck in paused state, manual intervention required"
+        );
+    }
 }
 
 /// Pause Cluster and ClusterClass resources in a namespace
@@ -489,10 +512,7 @@ impl<S: MoveCommandSender> CellMover<S> {
             .ok_or_else(|| MoveError::Discovery("graph not built".to_string()))?;
 
         if graph.is_empty() {
-            // Unpause before returning error
-            if let Err(e) = unpause_cluster(&self.client, &self.config.source_namespace).await {
-                error!("Failed to unpause after empty graph error: {}", e);
-            }
+            retry_unpause(&self.client, &self.config.source_namespace).await;
             return Err(MoveError::Discovery("no objects to move".to_string()));
         }
 
@@ -505,11 +525,7 @@ impl<S: MoveCommandSender> CellMover<S> {
         // If streaming failed, unpause source and return error
         if let Err(e) = stream_result {
             warn!(error = %e, "Batch streaming failed, unpausing source");
-            if let Err(unpause_err) =
-                unpause_cluster(&self.client, &self.config.source_namespace).await
-            {
-                error!("Failed to unpause after streaming error: {}", unpause_err);
-            }
+            retry_unpause(&self.client, &self.config.source_namespace).await;
             return Err(e);
         }
 
@@ -518,14 +534,7 @@ impl<S: MoveCommandSender> CellMover<S> {
 
         if !complete_result.success {
             warn!(error = %complete_result.error, "Agent finalization failed, unpausing source");
-            if let Err(unpause_err) =
-                unpause_cluster(&self.client, &self.config.source_namespace).await
-            {
-                error!(
-                    "Failed to unpause after finalization error: {}",
-                    unpause_err
-                );
-            }
+            retry_unpause(&self.client, &self.config.source_namespace).await;
             return Err(MoveError::AgentCommunication(complete_result.error));
         }
 

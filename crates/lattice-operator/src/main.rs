@@ -578,7 +578,12 @@ async fn load_cedar_engine(client: &kube::Client) -> Arc<PolicyEngine> {
     match PolicyEngine::from_crds(client).await {
         Ok(engine) => Arc::new(engine),
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to load Cedar policies, using default-deny");
+            tracing::error!(
+                error = %e,
+                "Failed to load Cedar policies — falling back to default-deny. \
+                 All secret access and security override requests will be denied."
+            );
+            lattice_common::metrics::record_cedar_load_failure();
             Arc::new(PolicyEngine::new())
         }
     }

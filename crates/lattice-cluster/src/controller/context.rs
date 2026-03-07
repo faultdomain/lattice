@@ -52,8 +52,31 @@ pub struct Context {
     pub self_cluster_name: Option<String>,
     /// Event publisher for emitting Kubernetes Events
     pub events: Arc<dyn EventPublisher>,
-    /// Per-cluster error counts for exponential backoff in error_policy
+    /// Per-cluster error counts for exponential backoff in error_policy.
+    ///
+    /// Entries are removed on successful reconcile or permanent errors.
+    /// `prune_stale_error_counts()` should be called periodically to evict
+    /// entries for clusters that no longer exist.
     pub error_counts: DashMap<String, u32>,
+}
+
+/// Maximum number of entries before we force a prune (safety valve)
+const ERROR_COUNTS_MAX_ENTRIES: usize = 1000;
+
+impl Context {
+    /// Remove error_counts entries for clusters that no longer exist.
+    ///
+    /// Call this periodically (e.g., every reconcile cycle) to prevent
+    /// unbounded growth from deleted clusters whose entries were never cleaned up.
+    pub fn prune_stale_error_counts(&self, active_clusters: &[String]) {
+        if self.error_counts.len() <= ERROR_COUNTS_MAX_ENTRIES {
+            return;
+        }
+        let active_set: std::collections::HashSet<&str> =
+            active_clusters.iter().map(|s| s.as_str()).collect();
+        self.error_counts
+            .retain(|name, _| active_set.contains(name.as_str()));
+    }
 }
 
 impl Context {

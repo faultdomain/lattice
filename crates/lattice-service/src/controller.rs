@@ -1131,6 +1131,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some("test".to_string()),
+                uid: Some("test-uid-12345".to_string()),
                 ..Default::default()
             },
             spec: sample_service_spec(),
@@ -1154,6 +1155,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some("test".to_string()),
+                uid: Some("test-uid-12345".to_string()),
                 ..Default::default()
             },
             spec,
@@ -1177,6 +1179,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some("test".to_string()),
+                uid: Some("test-uid-12345".to_string()),
                 ..Default::default()
             },
             spec,
