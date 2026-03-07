@@ -77,17 +77,16 @@ pub struct DcgmCollector {
 }
 
 impl DcgmCollector {
-    pub fn new(url: &str) -> Self {
+    pub fn new(url: &str) -> Result<Self, CollectorError> {
         // DCGM exporter is always localhost HTTP — no TLS needed.
         // Build explicitly so we never accidentally pull in a non-FIPS TLS backend.
         let client = reqwest::Client::builder()
             .no_proxy()
-            .build()
-            .expect("failed to build HTTP client");
-        Self {
+            .build()?;
+        Ok(Self {
             url: url.to_string(),
             client,
-        }
+        })
     }
 
     /// Scrape DCGM exporter and parse into a NodeSample.

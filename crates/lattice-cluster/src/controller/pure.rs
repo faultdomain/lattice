@@ -125,6 +125,7 @@ pub fn determine_scaling_action(
 
 /// Action to take based on GPU health annotations on a node.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GpuAction {
     /// No GPU-related action needed.
     NoOp,

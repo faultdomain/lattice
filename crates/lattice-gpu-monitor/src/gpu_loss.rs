@@ -22,6 +22,7 @@ pub enum GpuLossError {
 
 /// GPU loss status for a node.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GpuLossStatus {
     /// GPUs still present (allocatable > 0).
     Normal { allocatable: u32 },
@@ -92,7 +93,8 @@ impl GpuLossChecker {
             .as_ref()
             .and_then(|s| s.allocatable.as_ref())
             .and_then(|a| a.get(GPU_RESOURCE))
-            .map(|q| parse_quantity_int(Some(q)) as u32);
+            .and_then(|q| parse_quantity_int(Some(q)).ok())
+            .map(|v| v.max(0) as u32);
 
         debug!(
             node = %self.node_name,

@@ -566,7 +566,7 @@ impl KubeClient for KubeClientImpl {
                         .as_ref()
                         .and_then(|r| r.requests.as_ref())
                         .and_then(|req| req.get(GPU_RESOURCE))
-                        .map(|q| parse_quantity_int(Some(q)) > 0)
+                        .map(|q| parse_quantity_int(Some(q)).unwrap_or(0) > 0)
                         .unwrap_or(false)
                 })
             }).unwrap_or(false);
@@ -643,7 +643,7 @@ impl KubeClient for KubeClientImpl {
                             .as_ref()
                             .and_then(|r| r.requests.as_ref())
                             .and_then(|req| req.get(GPU_RESOURCE))
-                            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)) > 0)
+                            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0) > 0)
                             .unwrap_or(false)
                     })
                 })

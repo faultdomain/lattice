@@ -116,7 +116,7 @@ pub async fn run(client: kube::Client, node_name: String) -> anyhow::Result<()> 
     let gpu_arch = detect_gpu_architecture(&client, &node_name).await?;
     info!(node = %node_name, gpu_arch = %gpu_arch, "detected GPU architecture");
 
-    let collector = DcgmCollector::new(DEFAULT_DCGM_URL);
+    let collector = DcgmCollector::new(DEFAULT_DCGM_URL)?;
     let mut pipeline = GpuMonitorPipeline::new();
     let mut annotator = NodeAnnotator::new(client.clone(), node_name.clone());
     let mut loss_checker = GpuLossChecker::new(client.clone(), node_name.clone());

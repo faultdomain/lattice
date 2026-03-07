@@ -7,6 +7,7 @@ use crate::config::{EMA_ALPHA, MIN_CONSECUTIVE_UNHEALTHY, UNHEALTHY_THRESHOLD, W
 
 /// GPU health status based on anomaly scores.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum HealthStatus {
     Normal { score: f32 },
     Warning { score: f32 },

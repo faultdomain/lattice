@@ -492,7 +492,7 @@ async fn reconcile_gpu_health(
             .as_ref()
             .and_then(|s| s.allocatable.as_ref())
             .and_then(|a| a.get(GPU_RESOURCE))
-            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)) > 0)
+            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0) > 0)
             .unwrap_or(false);
 
         if !has_gpus {
@@ -614,8 +614,6 @@ async fn reconcile_gpu_health(
 
     Ok(())
 }
-
-/// Check if there are pending pods requesting GPU resources with priority > 0.
 
 /// Update cluster status with node counts, worker pool information, and children health.
 async fn update_node_status(
