@@ -17,8 +17,8 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure,
-    wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT,
+    apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl, wait_for_condition,
+    wait_for_resource_phase, DEFAULT_TIMEOUT,
 };
 
 const COST_NAMESPACE: &str = "cost-test";
@@ -303,7 +303,6 @@ async fn test_cost_without_configmap(kubeconfig: &str) -> Result<(), String> {
 pub async fn run_cost_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Cost] Running cost estimation integration tests on {kubeconfig}");
 
-    setup_regcreds_infrastructure(kubeconfig).await?;
     ensure_rates_configmap(kubeconfig).await?;
 
     test_service_cost_populated(kubeconfig).await?;

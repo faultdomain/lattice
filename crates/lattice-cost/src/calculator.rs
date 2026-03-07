@@ -75,7 +75,7 @@ pub fn estimate_model_cost(
 
 /// Sum CPU millis and memory bytes across all containers in a WorkloadSpec.
 /// Uses requests (not limits) — requests represent the guaranteed allocation.
-fn sum_container_resources(workload: &WorkloadSpec) -> (i64, i64) {
+fn sum_container_resources(workload: &WorkloadSpec) -> Result<(i64, i64), CostError> {
     let mut cpu_millis = 0i64;
     let mut mem_bytes = 0i64;
 
@@ -83,16 +83,16 @@ fn sum_container_resources(workload: &WorkloadSpec) -> (i64, i64) {
         if let Some(ref resources) = container.resources {
             if let Some(ref requests) = resources.requests {
                 if let Some(ref cpu) = requests.cpu {
-                    cpu_millis += parse_cpu_millis_str(cpu);
+                    cpu_millis += parse_cpu_millis_str(cpu)?;
                 }
                 if let Some(ref mem) = requests.memory {
-                    mem_bytes += parse_memory_bytes_str(mem);
+                    mem_bytes += parse_memory_bytes_str(mem)?;
                 }
             }
         }
     }
 
-    (cpu_millis, mem_bytes)
+    Ok((cpu_millis, mem_bytes))
 }
 
 /// Compute CPU, memory, and GPU hourly cost for a single workload × replica count.
@@ -101,7 +101,7 @@ fn workload_cost(
     rates: &CostRates,
     replicas: f64,
 ) -> Result<(f64, f64, f64), CostError> {
-    let (cpu_millis, mem_bytes) = sum_container_resources(workload);
+    let (cpu_millis, mem_bytes) = sum_container_resources(workload)?;
     let gpu_hourly = sum_gpu_cost(workload, rates)?;
 
     let cpu = (cpu_millis as f64 / 1000.0) * rates.cpu * replicas;
@@ -134,19 +134,19 @@ fn sum_gpu_cost(workload: &WorkloadSpec, rates: &CostRates) -> Result<f64, CostE
     Ok(total)
 }
 
-fn format_usd(amount: f64) -> String {
+fn format_rate(amount: f64) -> String {
     format!("{:.4}", amount)
 }
 
 fn build_estimate(cpu: f64, memory: f64, gpu: f64, timestamp: &str) -> CostEstimate {
     let total = cpu + memory + gpu;
     CostEstimate {
-        hourly_cost: format_usd(total),
+        hourly_cost: format_rate(total),
         breakdown: CostBreakdown {
-            cpu: format_usd(cpu),
-            memory: format_usd(memory),
+            cpu: format_rate(cpu),
+            memory: format_rate(memory),
             gpu: if gpu > 0.0 {
-                Some(format_usd(gpu))
+                Some(format_rate(gpu))
             } else {
                 None
             },

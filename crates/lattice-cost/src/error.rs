@@ -1,5 +1,7 @@
 //! Error types for cost estimation.
 
+use lattice_common::resources::QuantityParseError;
+
 /// Errors that can occur during cost estimation.
 #[derive(Debug, thiserror::Error)]
 pub enum CostError {
@@ -18,4 +20,8 @@ pub enum CostError {
     /// A required rate entry is missing.
     #[error("missing rate for resource: {0}")]
     MissingRate(String),
+
+    /// A resource quantity string could not be parsed.
+    #[error(transparent)]
+    InvalidQuantity(#[from] QuantityParseError),
 }

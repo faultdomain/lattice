@@ -332,11 +332,17 @@ pub async fn reconcile(
                 // Transition to Loading so the next reconcile checks
                 // ModelServing readiness after the rolling update.
                 let role_keys: Vec<String> = new_role_keys.into_iter().collect();
+                let model_spec = &model.spec;
+                let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates, ts| {
+                    lattice_cost::estimate_model_cost(model_spec, rates, ts)
+                })
+                .await;
                 StatusUpdate::new(ModelServingPhase::Loading)
                     .message("Spec changed, reloading")
                     .observed_generation(generation)
                     .auto_topology(compiled.auto_topology)
                     .applied_roles(role_keys)
+                    .cost(cost)
                     .apply(&ctx.client, &model, namespace)
                     .await?;
                 return Ok(Action::requeue(REQUEUE_LOADING));
