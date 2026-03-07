@@ -19,6 +19,7 @@
 //! │  ├─ integration/cedar_security.rs- Cedar security overrides     │
 //! │  ├─ integration/secrets.rs       - Local secrets integration    │
 
+//! │  ├─ integration/gpu_health.rs     - GPU health cordon/drain      │
 //! │  ├─ integration/oidc.rs          - OIDC authentication          │
 //! │  ├─ integration/multi_hop.rs     - Multi-hop proxy operations   │
 //! │  └─ integration/pivot.rs         - Unpivot verification         │
@@ -101,6 +102,7 @@ mod cedar_security_e2e;
 mod celery_queue_e2e;
 mod ecommerce_e2e;
 mod gateway_e2e;
+mod gpu_health_e2e;
 mod kubeconfig_e2e;
 mod mesh_e2e;
 mod mesh_onboarding_e2e;

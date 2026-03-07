@@ -36,6 +36,7 @@ pub mod cedar_security;
 pub mod celery_queue;
 pub mod ecommerce;
 pub mod gateway;
+pub mod gpu_health;
 pub mod job;
 pub mod kubeconfig;
 pub mod media;

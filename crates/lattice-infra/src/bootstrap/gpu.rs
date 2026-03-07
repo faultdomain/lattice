@@ -66,6 +66,159 @@ pub fn generate_gpu_mesh_members() -> Vec<LatticeMeshMember> {
     )]
 }
 
+/// Generate DaemonSet YAML for lattice-gpu-monitor.
+///
+/// Creates a DaemonSet that runs on GPU nodes, scraping DCGM metrics and
+/// annotating nodes with GPU health status for the cluster controller.
+///
+/// Includes:
+/// - DaemonSet with GPU node selector
+/// - ServiceAccount + ClusterRole + ClusterRoleBinding
+/// - NODE_NAME env from Downward API
+pub fn generate_gpu_monitor_daemonset(image: &str) -> Vec<String> {
+    let sa = r#"apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lattice-gpu-monitor
+  namespace: lattice-system"#
+        .to_string();
+
+    let cluster_role = r#"apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lattice-gpu-monitor
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "patch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/eviction"]
+  verbs: ["create"]"#
+        .to_string();
+
+    let cluster_role_binding = r#"apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lattice-gpu-monitor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lattice-gpu-monitor
+subjects:
+- kind: ServiceAccount
+  name: lattice-gpu-monitor
+  namespace: lattice-system"#
+        .to_string();
+
+    let daemonset = format!(
+        r#"apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: lattice-gpu-monitor
+  namespace: lattice-system
+  labels:
+    app.kubernetes.io/name: lattice-gpu-monitor
+    app.kubernetes.io/component: gpu-monitor
+    app.kubernetes.io/managed-by: lattice
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lattice-gpu-monitor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lattice-gpu-monitor
+        app.kubernetes.io/component: gpu-monitor
+    spec:
+      serviceAccountName: lattice-gpu-monitor
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      initContainers:
+      - name: init-checkpoint-dir
+        image: busybox:1.37
+        command: ["sh", "-c", "chown 65534:65534 /var/lib/lattice/gpu-monitor"]
+        volumeMounts:
+        - name: checkpoint
+          mountPath: /var/lib/lattice/gpu-monitor
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: gpu-monitor
+        image: {image}
+        command: ["lattice-daemonset", "monitor", "--mode", "gpu"]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - name: health
+          containerPort: 8080
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        securityContext:
+          runAsUser: 65534
+        volumeMounts:
+        - name: checkpoint
+          mountPath: /var/lib/lattice/gpu-monitor
+      volumes:
+      - name: checkpoint
+        hostPath:
+          path: /var/lib/lattice/gpu-monitor
+          type: DirectoryOrCreate"#
+    );
+
+    vec![sa, cluster_role, cluster_role_binding, daemonset]
+}
+
+/// Generate LatticeMeshMember for the GPU monitor DaemonSet.
+pub fn generate_gpu_monitor_mesh_member() -> LatticeMeshMember {
+    lmm(
+        "lattice-gpu-monitor",
+        "lattice-system",
+        LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app.kubernetes.io/name".to_string(),
+                "lattice-gpu-monitor".to_string(),
+            )])),
+            ports: vec![],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![kube_apiserver_egress()],
+            allow_peer_traffic: false,
+            ingress: None,
+            service_account: Some("lattice-gpu-monitor".to_string()),
+            depends_all: false,
+            ambient: true,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +244,31 @@ mod tests {
     fn manifests_are_embedded() {
         let manifests = generate_gpu_stack();
         assert!(!manifests.is_empty());
+    }
+
+    #[test]
+    fn gpu_monitor_daemonset_generated() {
+        let manifests = generate_gpu_monitor_daemonset("ghcr.io/test/lattice:latest");
+        assert_eq!(manifests.len(), 4, "should have SA + ClusterRole + CRB + DaemonSet");
+        assert!(manifests[0].contains("ServiceAccount"));
+        assert!(manifests[1].contains("ClusterRole"));
+        assert!(manifests[2].contains("ClusterRoleBinding"));
+        assert!(manifests[3].contains("DaemonSet"));
+        assert!(manifests[3].contains("nvidia.com/gpu.present"));
+        assert!(manifests[3].contains("NODE_NAME"));
+        assert!(manifests[3].contains("lattice-daemonset"));
+    }
+
+    #[test]
+    fn gpu_monitor_mesh_member_generated() {
+        let member = generate_gpu_monitor_mesh_member();
+        assert_eq!(member.metadata.name.as_deref(), Some("lattice-gpu-monitor"));
+        assert_eq!(
+            member.metadata.namespace.as_deref(),
+            Some("lattice-system")
+        );
+        assert!(member.spec.ambient);
+        assert!(member.spec.ports.is_empty(), "gpu-monitor is egress-only");
     }
 
     #[test]

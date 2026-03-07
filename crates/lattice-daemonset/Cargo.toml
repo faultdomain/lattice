@@ -1,0 +1,21 @@
+[package]
+name = "lattice-daemonset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DaemonSet binary for per-node monitoring slices (GPU health, etc.)"
+
+[[bin]]
+name = "lattice-daemonset"
+path = "src/main.rs"
+
+[dependencies]
+lattice-gpu-monitor.workspace = true
+lattice-common.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+kube.workspace = true
+tracing-subscriber.workspace = true

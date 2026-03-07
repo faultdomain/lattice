@@ -138,6 +138,23 @@ pub trait KubeClient: Send + Sync {
         &self,
         name: &str,
     ) -> Result<Option<lattice_common::crd::InfraProvider>, Error>;
+
+    /// Cordon a node (set spec.unschedulable = true).
+    ///
+    /// Prevents new pods from being scheduled on the node while letting
+    /// existing pods continue running. Used for proactive GPU health warnings.
+    async fn cordon_node(&self, name: &str) -> Result<(), Error>;
+
+    /// Drain a node by evicting all non-DaemonSet pods.
+    ///
+    /// Uses the Eviction API to respect PodDisruptionBudgets. Skips pods
+    /// owned by DaemonSets (mirror pods, monitoring, etc.).
+    async fn drain_node(&self, name: &str) -> Result<(), Error>;
+
+    /// List all nodes in the cluster.
+    ///
+    /// Used by the Ready phase to check GPU annotations on all nodes.
+    async fn list_nodes(&self) -> Result<Vec<k8s_openapi::api::core::v1::Node>, Error>;
 }
 
 /// Real Kubernetes client implementation
@@ -470,5 +487,114 @@ impl KubeClient for KubeClientImpl {
         let api: Api<InfraProvider> =
             Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
         get_optional(&api, name).await
+    }
+
+    async fn cordon_node(&self, name: &str) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::Node;
+
+        let node_api: Api<Node> = Api::all(self.client.clone());
+        let patch = serde_json::json!({
+            "spec": {
+                "unschedulable": true
+            }
+        });
+        node_api
+            .patch(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+            .await?;
+        info!(node = %name, "cordoned node");
+        Ok(())
+    }
+
+    async fn drain_node(&self, name: &str) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{EvictParams, ListParams};
+        use lattice_common::resources::{parse_quantity_int, GPU_RESOURCE};
+
+        let pod_api: Api<Pod> = Api::all(self.client.clone());
+        let lp = ListParams::default().fields(&format!("spec.nodeName={}", name));
+        let pods = pod_api.list(&lp).await?;
+
+        for pod in &pods.items {
+            let pod_name = match pod.metadata.name.as_deref() {
+                Some(n) => n,
+                None => continue,
+            };
+            let namespace = pod
+                .metadata
+                .namespace
+                .as_deref()
+                .unwrap_or("default");
+
+            // Skip pods owned by DaemonSets
+            let is_daemonset = pod
+                .metadata
+                .owner_references
+                .as_ref()
+                .map(|refs| refs.iter().any(|r| r.kind == "DaemonSet"))
+                .unwrap_or(false);
+            if is_daemonset {
+                debug!(pod = %pod_name, "skipping DaemonSet pod during drain");
+                continue;
+            }
+
+            // Skip terminal pods
+            let phase = pod
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                .unwrap_or("");
+            if phase == "Succeeded" || phase == "Failed" {
+                continue;
+            }
+
+            // Only evict pods that request GPU resources — leave CPU-only pods
+            // running on the GPU node (the GPU failure doesn't affect them)
+            let requests_gpu = pod.spec.as_ref().map(|spec| {
+                spec.containers.iter().any(|c| {
+                    c.resources
+                        .as_ref()
+                        .and_then(|r| r.requests.as_ref())
+                        .and_then(|req| req.get(GPU_RESOURCE))
+                        .map(|q| parse_quantity_int(Some(q)) > 0)
+                        .unwrap_or(false)
+                })
+            }).unwrap_or(false);
+
+            if !requests_gpu {
+                debug!(pod = %pod_name, "skipping non-GPU pod during GPU drain");
+                continue;
+            }
+
+            let ns_pod_api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+            match ns_pod_api
+                .evict(pod_name, &EvictParams::default())
+                .await
+            {
+                Ok(_) => {
+                    debug!(pod = %pod_name, namespace, "evicted GPU pod");
+                }
+                Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                    debug!(pod = %pod_name, "pod already gone");
+                }
+                Err(kube::Error::Api(ae)) if ae.code == 429 => {
+                    // PDB violation — skip for now, retry on next reconcile
+                    debug!(pod = %pod_name, "PDB prevented eviction, will retry");
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+        }
+
+        info!(node = %name, "drained node (GPU pods evicted)");
+        Ok(())
+    }
+
+    async fn list_nodes(&self) -> Result<Vec<k8s_openapi::api::core::v1::Node>, Error> {
+        use k8s_openapi::api::core::v1::Node;
+
+        let node_api: Api<Node> = Api::all(self.client.clone());
+        let nodes = node_api.list(&Default::default()).await?;
+        Ok(nodes.items)
     }
 }

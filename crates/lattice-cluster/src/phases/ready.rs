@@ -16,7 +16,8 @@ use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error};
 
 use crate::controller::{
-    autoscaling_warning, determine_scaling_action, Context, NodeCounts, ScalingAction,
+    autoscaling_warning, build_gpu_cordon_plan, determine_gpu_action, determine_scaling_action,
+    Context, GpuNodeState, NodeCounts, ScalingAction,
 };
 use crate::phases::{generate_capi_manifests, reconcile_infrastructure};
 
@@ -218,6 +219,11 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
             pool_resources: vec![],
         }
     });
+
+    // Check GPU health annotations on all nodes and cordon/drain as needed
+    if let Err(e) = reconcile_gpu_health(cluster, ctx).await {
+        warn!(error = %e, "failed to reconcile GPU health, will retry");
+    }
 
     // Collect children health from agent registry (parent clusters only)
     let children_health = if let Some(ref parent_servers) = ctx.parent_servers {
@@ -451,6 +457,232 @@ async fn create_missing_pool_resources(
         )
         .await;
 
+    Ok(())
+}
+
+/// Check GPU health annotations on all nodes and take cordon/drain actions.
+///
+/// Applies a cluster-level cordon budget: if >50% of GPU nodes are already
+/// cordoned, new cordons are suppressed. If pending GPU pods exist and we're
+/// at the threshold, the lowest-confidence warning node is selectively
+/// uncordoned to relieve scheduling pressure.
+///
+/// Drains only happen when GPUs are confirmed lost (dropped to 0), the loss
+/// has persisted for >60s, AND other GPU capacity exists in the cluster.
+/// Drains only evict pods that request GPU resources (not CPU-only pods).
+async fn reconcile_gpu_health(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+) -> Result<(), Error> {
+    use lattice_common::resources::GPU_RESOURCE;
+
+    let nodes = ctx.kube.list_nodes().await?;
+
+    // Build per-node GPU state
+    let mut gpu_node_states: Vec<GpuNodeState> = Vec::new();
+
+    for node in &nodes {
+        let node_name = match node.metadata.name.as_deref() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let has_gpus = node
+            .status
+            .as_ref()
+            .and_then(|s| s.allocatable.as_ref())
+            .and_then(|a| a.get(GPU_RESOURCE))
+            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)) > 0)
+            .unwrap_or(false);
+
+        if !has_gpus {
+            continue;
+        }
+
+        let annotations = node.metadata.annotations.as_ref();
+        let empty = std::collections::BTreeMap::new();
+        let ann = annotations.unwrap_or(&empty);
+
+        let action = determine_gpu_action(
+            ann,
+            lattice_common::gpu::HEARTBEAT_STALENESS_SECS,
+            lattice_common::gpu::GPU_LOSS_DRAIN_DELAY_SECS,
+        );
+        let anomaly_score = ann
+            .get(lattice_common::gpu::ANNOTATION_ANOMALY_SCORE)
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        let is_cordoned = node
+            .spec
+            .as_ref()
+            .and_then(|s| s.unschedulable)
+            .unwrap_or(false);
+
+        gpu_node_states.push(GpuNodeState {
+            node_name: node_name.to_string(),
+            action,
+            anomaly_score,
+            is_cordoned,
+            has_gpu_requests: has_gpus,
+        });
+    }
+
+    if gpu_node_states.is_empty() {
+        return Ok(());
+    }
+
+    // Check for pending pods with GPU requests (priority > 0)
+    let has_pending_gpu_pods = check_pending_gpu_pods(ctx).await;
+
+    // Build the cordon plan with threshold enforcement
+    let plan = build_gpu_cordon_plan(&gpu_node_states, has_pending_gpu_pods);
+
+    if plan.threshold_hit {
+        warn!(
+            "GPU cordon threshold hit (>50% of GPU nodes cordoned), suppressing new cordons"
+        );
+    }
+
+    // Execute uncordons first (relieve pressure before adding more)
+    for node_name in &plan.to_uncordon {
+        info!(node = %node_name, "selectively uncordoning GPU node (lowest confidence, pending pods)");
+        if let Err(e) = uncordon_node(ctx, node_name).await {
+            warn!(node = %node_name, error = %e, "failed to uncordon node");
+        }
+        ctx.events
+            .publish(
+                &cluster.object_ref(&()),
+                EventType::Normal,
+                reasons::GPU_HEALTH_WARNING,
+                actions::CORDON,
+                Some(format!(
+                    "Selectively uncordoning GPU node {} (lowest anomaly, pending pods need capacity)",
+                    node_name
+                )),
+            )
+            .await;
+    }
+
+    // Execute cordons
+    for node_name in &plan.to_cordon {
+        info!(node = %node_name, "cordoning GPU node (anomaly detected)");
+        if let Err(e) = ctx.kube.cordon_node(node_name).await {
+            warn!(node = %node_name, error = %e, "failed to cordon node");
+        }
+        ctx.events
+            .publish(
+                &cluster.object_ref(&()),
+                EventType::Warning,
+                reasons::GPU_HEALTH_WARNING,
+                actions::CORDON,
+                Some(format!(
+                    "GPU anomaly detected on node {}, cordoning",
+                    node_name
+                )),
+            )
+            .await;
+    }
+
+    // Execute drains (cordon + evict GPU pods).
+    // Drains only fire for confirmed total GPU loss (allocatable == 0) that has
+    // persisted for >60s. The workloads are already broken at this point —
+    // draining makes the failure visible and frees pods to reschedule.
+    for node_name in &plan.to_drain {
+        info!(
+            node = %node_name,
+            "draining GPU node (all GPUs lost, persisted >60s)"
+        );
+        if let Err(e) = ctx.kube.cordon_node(node_name).await {
+            warn!(node = %node_name, error = %e, "failed to cordon node");
+        }
+        if let Err(e) = ctx.kube.drain_node(node_name).await {
+            warn!(node = %node_name, error = %e, "failed to drain GPU pods");
+        }
+        ctx.events
+            .publish(
+                &cluster.object_ref(&()),
+                EventType::Warning,
+                reasons::GPU_HEALTH_CRITICAL,
+                actions::DRAIN,
+                Some(format!(
+                    "All GPUs lost on node {} (>60s), draining GPU workloads",
+                    node_name
+                )),
+            )
+            .await;
+    }
+
+    Ok(())
+}
+
+/// Check if there are pending pods requesting GPU resources with priority > 0.
+async fn check_pending_gpu_pods(ctx: &Context) -> bool {
+    use k8s_openapi::api::core::v1::Pod;
+    use kube::api::{Api, ListParams};
+    use lattice_common::resources::GPU_RESOURCE;
+
+    let Some(ref client) = ctx.client else {
+        return false;
+    };
+
+    let pod_api: Api<Pod> = Api::all(client.clone());
+    let lp = ListParams::default().fields("status.phase=Pending");
+    let pods = match pod_api.list(&lp).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            warn!(error = %e, "failed to list pending pods for GPU check");
+            return false;
+        }
+    };
+
+    pods.iter().any(|pod| {
+        let priority = pod
+            .spec
+            .as_ref()
+            .and_then(|s| s.priority)
+            .unwrap_or(0);
+        if priority <= 0 {
+            return false;
+        }
+        pod.spec
+            .as_ref()
+            .map(|spec| {
+                spec.containers.iter().any(|c| {
+                    c.resources
+                        .as_ref()
+                        .and_then(|r| r.requests.as_ref())
+                        .and_then(|req| req.get(GPU_RESOURCE))
+                        .map(|q| lattice_common::resources::parse_quantity_int(Some(q)) > 0)
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Uncordon a node (set spec.unschedulable = false).
+async fn uncordon_node(ctx: &Context, name: &str) -> Result<(), Error> {
+    use k8s_openapi::api::core::v1::Node;
+    use kube::api::{Api, Patch, PatchParams};
+
+    let Some(ref client) = ctx.client else {
+        return Ok(());
+    };
+
+    let node_api: Api<Node> = Api::all(client.clone());
+    let patch = serde_json::json!({
+        "spec": {
+            "unschedulable": false
+        }
+    });
+    node_api
+        .patch(
+            name,
+            &PatchParams::apply("lattice-cluster-controller"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+    info!(node = %name, "uncordoned node");
     Ok(())
 }
 

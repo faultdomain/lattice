@@ -145,6 +145,12 @@ pub mod reasons {
     pub const SECURITY_OVERRIDE_DENIED: &str = "SecurityOverrideDenied";
     /// Volume access denied (owner consent or Cedar policy)
     pub const VOLUME_ACCESS_DENIED: &str = "VolumeAccessDenied";
+
+    // GPU health events
+    /// GPU anomaly warning detected on a node
+    pub const GPU_HEALTH_WARNING: &str = "GpuHealthWarning";
+    /// GPU failure or loss detected on a node
+    pub const GPU_HEALTH_CRITICAL: &str = "GpuHealthCritical";
 }
 
 /// Well-known event action strings.
@@ -165,6 +171,10 @@ pub mod actions {
     pub const UPGRADE: &str = "Upgrade";
     /// Compiling service resources
     pub const COMPILE: &str = "Compile";
+    /// Cordoning a node
+    pub const CORDON: &str = "Cordon";
+    /// Draining a node
+    pub const DRAIN: &str = "Drain";
 }
 
 #[cfg(test)]

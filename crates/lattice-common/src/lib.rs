@@ -9,6 +9,7 @@ pub mod credentials;
 pub mod error;
 pub mod events;
 pub mod fips;
+pub mod gpu;
 pub mod graph;
 pub mod kube_utils;
 pub mod leader_election;
