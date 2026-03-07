@@ -5,7 +5,7 @@
 
 use lattice_common::crd::WorkerPoolSpec;
 use lattice_common::gpu::{
-    ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_GPU_LOSS_AT, ANNOTATION_HEARTBEAT,
+    ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT,
 };
 
 /// Check if the cluster being reconciled is the cluster we're running on.
@@ -129,30 +129,29 @@ pub fn determine_scaling_action(
 pub enum GpuAction {
     /// No GPU-related action needed.
     NoOp,
-    /// High anomaly score — prevent new scheduling but let current jobs finish.
-    /// Better than draining for long-running ML training: the job completes or
-    /// checkpoints naturally while the node is blocked from new work.
+    /// Anomaly detected or GPU loss — prevent new scheduling but let current
+    /// jobs finish. Existing workloads checkpoint/complete naturally while the
+    /// node is blocked from new work. Human operators decide whether to drain.
     Cordon,
-    /// GPU loss confirmed or sustained unhealthy — evict everything.
-    CordonAndDrain,
 }
 
 /// Determine what GPU action to take based on node annotations.
 ///
 /// Reads `lattice.dev/gpu-health`, `lattice.dev/gpu-loss-detected`, and
-/// `lattice.dev/gpu-monitor-heartbeat` to decide whether to cordon or drain.
+/// `lattice.dev/gpu-monitor-heartbeat` to decide whether to cordon.
 ///
-/// Escalation policy:
-/// - Warning or unhealthy anomaly score → Cordon only (let current jobs finish)
-/// - GPU loss detected (GPUs dropped to 0) → CordonAndDrain, but ONLY after the
-///   loss has persisted for `drain_delay_secs` (prevents drain on transient failures)
+/// Policy:
+/// - GPU loss detected → Cordon (prevent new scheduling, existing jobs finish naturally)
+/// - Warning or unhealthy anomaly score → Cordon
+/// - Draining is intentionally not automated — if GPUs are truly gone, workloads
+///   will fail on their own. If our view is wrong, draining would lose work.
+///   Human operators can drain manually after investigating.
 ///
 /// Staleness: if the heartbeat is older than `staleness_threshold_secs`,
 /// returns `NoOp` — don't act on stale data.
 pub fn determine_gpu_action(
     annotations: &std::collections::BTreeMap<String, String>,
     staleness_threshold_secs: i64,
-    drain_delay_secs: i64,
 ) -> GpuAction {
     // Check heartbeat staleness first
     if let Some(heartbeat) = annotations.get(ANNOTATION_HEARTBEAT) {
@@ -170,24 +169,12 @@ pub fn determine_gpu_action(
         return GpuAction::NoOp;
     }
 
-    // GPU loss: only drain if the loss has persisted beyond the delay threshold.
-    // This prevents draining on transient DCGM scrape failures or brief
-    // nvidia-device-plugin hiccups.
+    // GPU loss — cordon to prevent new scheduling
     if annotations.get(ANNOTATION_GPU_LOSS).map(|v| v.as_str()) == Some("true") {
-        if let Some(loss_at) = annotations.get(ANNOTATION_GPU_LOSS_AT) {
-            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(loss_at) {
-                let age = chrono::Utc::now().signed_duration_since(ts);
-                if age.num_seconds() >= drain_delay_secs {
-                    return GpuAction::CordonAndDrain;
-                }
-            }
-        }
-        // Loss detected but delay hasn't passed (or no timestamp) — cordon only
         return GpuAction::Cordon;
     }
 
-    // Health-based escalation: both warning and unhealthy → cordon only.
-    // Anomaly scores indicate degradation risk, not confirmed failure.
+    // Health-based: both warning and unhealthy → cordon.
     // Cordoning prevents new work while letting current jobs checkpoint/finish.
     match annotations
         .get(ANNOTATION_GPU_HEALTH)
@@ -216,8 +203,6 @@ pub struct GpuNodeState {
 pub struct GpuCordonPlan {
     /// Nodes to cordon (may be fewer than requested if threshold exceeded).
     pub to_cordon: Vec<String>,
-    /// Nodes to cordon + drain.
-    pub to_drain: Vec<String>,
     /// Nodes to selectively uncordon (lowest confidence, when pending pods exist).
     pub to_uncordon: Vec<String>,
     /// Whether the cordon threshold was hit.
@@ -226,13 +211,9 @@ pub struct GpuCordonPlan {
 
 /// Build a cluster-level GPU cordon plan respecting the maximum cordon threshold.
 ///
-/// Drains only proceed for confirmed GPU loss (GPUs went to 0) after the drain
-/// delay has elapsed — `determine_gpu_action` handles this timing.
-///
 /// Cordons are subject to the threshold: if >50% of GPU nodes are already cordoned,
-/// new cordons are suppressed. If pods with priority > 0 are pending and we're at
-/// the threshold, we selectively uncordon the lowest-confidence nodes (lowest
-/// anomaly score among cordoned nodes).
+/// new cordons are suppressed. If pending GPU pods exist and we're at the threshold,
+/// we selectively uncordon the lowest-confidence node (lowest anomaly score).
 ///
 /// Nodes that have recovered (action == NoOp but still cordoned) are automatically
 /// uncordoned.
@@ -244,33 +225,18 @@ pub fn build_gpu_cordon_plan(
     if total_gpu_nodes == 0 {
         return GpuCordonPlan {
             to_cordon: vec![],
-            to_drain: vec![],
             to_uncordon: vec![],
             threshold_hit: false,
         };
     }
 
     let already_cordoned = nodes.iter().filter(|n| n.is_cordoned).count();
-
-    // Drains always proceed — broken GPUs must be evacuated
-    let to_drain: Vec<String> = nodes
-        .iter()
-        .filter(|n| n.action == GpuAction::CordonAndDrain)
-        .map(|n| n.node_name.clone())
-        .collect();
-
-    // Count how many will be cordoned after drains (drains also cordon)
-    let cordoned_after_drains = already_cordoned + to_drain.iter().filter(|name| {
-        nodes.iter().any(|n| &n.node_name == *name && !n.is_cordoned)
-    }).count();
-
     let max_cordoned = ((total_gpu_nodes as f64) * MAX_CORDON_FRACTION).ceil() as usize;
 
-    // Cordon candidates (warning nodes not already cordoned, excluding drain targets)
+    // Cordon candidates (nodes not already cordoned that need cordoning)
     let mut cordon_candidates: Vec<&GpuNodeState> = nodes
         .iter()
         .filter(|n| n.action == GpuAction::Cordon && !n.is_cordoned)
-        .filter(|n| !to_drain.contains(&n.node_name))
         .collect();
 
     // Sort by anomaly score descending — cordon highest-confidence problems first
@@ -280,7 +246,7 @@ pub fn build_gpu_cordon_plan(
     );
     cordon_candidates.sort_by(|a, b| b.anomaly_score.partial_cmp(&a.anomaly_score).unwrap_or(std::cmp::Ordering::Equal));
 
-    let budget = max_cordoned.saturating_sub(cordoned_after_drains);
+    let budget = max_cordoned.saturating_sub(already_cordoned);
     let threshold_hit = cordon_candidates.len() > budget;
     let to_cordon: Vec<String> = cordon_candidates
         .iter()
@@ -289,22 +255,19 @@ pub fn build_gpu_cordon_plan(
         .collect();
 
     // Recovery uncordon: nodes that are cordoned but have recovered (NoOp action)
-    // should be uncordoned. The GPU monitor sets health back to "normal" on
-    // recovery, which makes determine_gpu_action return NoOp.
+    // should be uncordoned.
     let mut to_uncordon: Vec<String> = nodes
         .iter()
         .filter(|n| n.is_cordoned && n.action == GpuAction::NoOp)
-        .filter(|n| !to_drain.contains(&n.node_name))
         .map(|n| n.node_name.clone())
         .collect();
 
     // Selective uncordon: if at threshold AND pending GPU pods exist,
-    // also uncordon the lowest-confidence warning nodes (closest to normal).
-    if has_pending_gpu_pods && cordoned_after_drains + to_cordon.len() >= max_cordoned {
+    // uncordon the lowest-confidence warning node (closest to normal).
+    if has_pending_gpu_pods && already_cordoned + to_cordon.len() >= max_cordoned {
         let mut uncordon_candidates: Vec<&GpuNodeState> = nodes
             .iter()
             .filter(|n| n.is_cordoned && n.action == GpuAction::Cordon)
-            .filter(|n| !to_drain.contains(&n.node_name))
             .filter(|n| !to_uncordon.contains(&n.node_name))
             .collect();
         debug_assert!(
@@ -320,7 +283,6 @@ pub fn build_gpu_cordon_plan(
 
     GpuCordonPlan {
         to_cordon,
-        to_drain,
         to_uncordon,
         threshold_hit,
     }
@@ -599,17 +561,6 @@ mod tests {
         ])
     }
 
-    fn gpu_annotations_with_loss_at(
-        health: &str,
-        loss: &str,
-        heartbeat: &str,
-        loss_at: &str,
-    ) -> std::collections::BTreeMap<String, String> {
-        let mut ann = gpu_annotations(health, loss, heartbeat);
-        ann.insert(ANNOTATION_GPU_LOSS_AT.to_string(), loss_at.to_string());
-        ann
-    }
-
     fn fresh_heartbeat() -> String {
         chrono::Utc::now().to_rfc3339()
     }
@@ -617,58 +568,41 @@ mod tests {
     #[test]
     fn gpu_action_normal_is_noop() {
         let ann = gpu_annotations("normal", "false", &fresh_heartbeat());
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::NoOp);
+        assert_eq!(determine_gpu_action(&ann, 120), GpuAction::NoOp);
     }
 
     #[test]
     fn gpu_action_warning_is_cordon() {
         let ann = gpu_annotations("warning", "false", &fresh_heartbeat());
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::Cordon);
+        assert_eq!(determine_gpu_action(&ann, 120), GpuAction::Cordon);
     }
 
     #[test]
     fn gpu_action_unhealthy_is_cordon() {
         // Unhealthy anomaly scores cordon only — never drain based on model output
         let ann = gpu_annotations("unhealthy", "false", &fresh_heartbeat());
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::Cordon);
+        assert_eq!(determine_gpu_action(&ann, 120), GpuAction::Cordon);
     }
 
     #[test]
-    fn gpu_action_loss_recent_is_cordon() {
-        // GPU loss just detected (< drain delay) — cordon only, wait for confirmation
-        let loss_at = chrono::Utc::now().to_rfc3339();
-        let ann = gpu_annotations_with_loss_at("normal", "true", &fresh_heartbeat(), &loss_at);
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::Cordon);
-    }
-
-    #[test]
-    fn gpu_action_loss_persisted_is_drain() {
-        // GPU loss persisted beyond drain delay — drain
-        let loss_at = (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
-        let ann = gpu_annotations_with_loss_at("normal", "true", &fresh_heartbeat(), &loss_at);
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::CordonAndDrain);
-    }
-
-    #[test]
-    fn gpu_action_loss_without_timestamp_is_cordon() {
-        // GPU loss detected but no loss-at timestamp — cordon only (safe default)
+    fn gpu_action_loss_is_cordon() {
+        // GPU loss detected — cordon only, never drain automatically
         let ann = gpu_annotations("normal", "true", &fresh_heartbeat());
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::Cordon);
+        assert_eq!(determine_gpu_action(&ann, 120), GpuAction::Cordon);
     }
 
     #[test]
-    fn gpu_action_loss_overrides_health() {
-        // GPU loss (persisted) takes priority over health status
-        let loss_at = (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
-        let ann = gpu_annotations_with_loss_at("normal", "true", &fresh_heartbeat(), &loss_at);
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::CordonAndDrain);
+    fn gpu_action_loss_overrides_normal_health() {
+        // GPU loss takes priority over "normal" health status
+        let ann = gpu_annotations("normal", "true", &fresh_heartbeat());
+        assert_eq!(determine_gpu_action(&ann, 120), GpuAction::Cordon);
     }
 
     #[test]
     fn gpu_action_stale_heartbeat_is_noop() {
         let old = (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339();
         let ann = gpu_annotations("unhealthy", "true", &old);
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::NoOp);
+        assert_eq!(determine_gpu_action(&ann, 120), GpuAction::NoOp);
     }
 
     #[test]
@@ -676,19 +610,19 @@ mod tests {
         let ann = std::collections::BTreeMap::from([
             (ANNOTATION_GPU_HEALTH.to_string(), "unhealthy".to_string()),
         ]);
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::NoOp);
+        assert_eq!(determine_gpu_action(&ann, 120), GpuAction::NoOp);
     }
 
     #[test]
     fn gpu_action_no_annotations_is_noop() {
         let ann = std::collections::BTreeMap::new();
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::NoOp);
+        assert_eq!(determine_gpu_action(&ann, 120), GpuAction::NoOp);
     }
 
     #[test]
     fn gpu_action_bad_heartbeat_format_is_noop() {
         let ann = gpu_annotations("unhealthy", "true", "not-a-timestamp");
-        assert_eq!(determine_gpu_action(&ann, 120, 60), GpuAction::NoOp);
+        assert_eq!(determine_gpu_action(&ann, 120), GpuAction::NoOp);
     }
 
     // --- build_gpu_cordon_plan tests ---
@@ -706,7 +640,6 @@ mod tests {
     fn cordon_plan_empty_nodes() {
         let plan = build_gpu_cordon_plan(&[], false);
         assert!(plan.to_cordon.is_empty());
-        assert!(plan.to_drain.is_empty());
         assert!(plan.to_uncordon.is_empty());
         assert!(!plan.threshold_hit);
     }
@@ -719,7 +652,6 @@ mod tests {
         ];
         let plan = build_gpu_cordon_plan(&nodes, false);
         assert!(plan.to_cordon.is_empty());
-        assert!(plan.to_drain.is_empty());
     }
 
     #[test]
@@ -734,14 +666,16 @@ mod tests {
     }
 
     #[test]
-    fn cordon_plan_drain_always_proceeds() {
-        // Even when threshold would be exceeded, drains go through
+    fn cordon_plan_gpu_loss_cordons() {
+        // GPU loss nodes get cordoned (within threshold budget)
         let nodes = vec![
-            gpu_node("n1", GpuAction::CordonAndDrain, 0.9, false),
-            gpu_node("n2", GpuAction::CordonAndDrain, 0.95, false),
+            gpu_node("n1", GpuAction::Cordon, 0.9, false),
+            gpu_node("n2", GpuAction::Cordon, 0.95, false),
+            gpu_node("n3", GpuAction::NoOp, 0.1, false),
+            gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];
         let plan = build_gpu_cordon_plan(&nodes, false);
-        assert_eq!(plan.to_drain.len(), 2);
+        assert_eq!(plan.to_cordon.len(), 2);
     }
 
     #[test]
@@ -815,17 +749,16 @@ mod tests {
     }
 
     #[test]
-    fn cordon_plan_drain_does_not_count_against_cordon_budget_if_already_cordoned() {
-        // n1 is being drained but already cordoned — doesn't consume new budget
+    fn cordon_plan_already_cordoned_does_not_consume_budget() {
+        // n1 already cordoned — doesn't consume new budget
         let nodes = vec![
-            gpu_node("n1", GpuAction::CordonAndDrain, 0.9, true),
+            gpu_node("n1", GpuAction::Cordon, 0.9, true),
             gpu_node("n2", GpuAction::Cordon, 0.6, false),
             gpu_node("n3", GpuAction::NoOp, 0.1, false),
             gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];
         let plan = build_gpu_cordon_plan(&nodes, false);
-        assert_eq!(plan.to_drain, vec!["n1"]);
-        // Budget: max=2, already cordoned=1 (n1), drain doesn't add new, budget=1
+        // Budget: max=2, already cordoned=1 (n1), budget=1
         assert_eq!(plan.to_cordon, vec!["n2"]);
     }
 }

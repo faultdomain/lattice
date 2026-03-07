@@ -206,7 +206,7 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
         Ok(VersionStatus::UpToDate) => {}
     }
 
-    // Check GPU health annotations on all nodes and cordon/drain as needed.
+    // Check GPU health annotations on all nodes and cordon as needed.
     // This runs before worker pool reconciliation because it is safety-critical:
     // CAPI errors must not block GPU health responses.
     if let Err(e) = reconcile_gpu_health(cluster, ctx).await {
@@ -462,16 +462,15 @@ async fn create_missing_pool_resources(
     Ok(())
 }
 
-/// Check GPU health annotations on all nodes and take cordon/drain actions.
+/// Check GPU health annotations on all nodes and take cordon actions.
 ///
 /// Applies a cluster-level cordon budget: if >50% of GPU nodes are already
 /// cordoned, new cordons are suppressed. If pending GPU pods exist and we're
 /// at the threshold, the lowest-confidence warning node is selectively
 /// uncordoned to relieve scheduling pressure.
 ///
-/// Drains only happen when GPUs are confirmed lost (dropped to 0) and the loss
-/// has persisted for >60s.
-/// Drains only evict pods that request GPU resources (not CPU-only pods).
+/// Draining is intentionally not automated — human operators should investigate
+/// and decide whether to drain after reviewing GPU metrics.
 async fn reconcile_gpu_health(
     cluster: &LatticeCluster,
     ctx: &Context,
@@ -504,7 +503,7 @@ async fn reconcile_gpu_health(
 
         // Process nodes that either have GPU capacity or GPU health annotations.
         // During total GPU loss, allocatable drops to 0 but annotations remain —
-        // the operator must still cordon/drain these nodes.
+        // the operator must still cordon these nodes.
         if !has_gpu_capacity && !has_gpu_annotations {
             continue;
         }
@@ -514,7 +513,6 @@ async fn reconcile_gpu_health(
         let action = determine_gpu_action(
             ann,
             lattice_common::gpu::HEARTBEAT_STALENESS_SECS,
-            lattice_common::gpu::GPU_LOSS_DRAIN_DELAY_SECS,
         );
         let anomaly_score = ann
             .get(lattice_common::gpu::ANNOTATION_ANOMALY_SCORE)
@@ -584,35 +582,6 @@ async fn reconcile_gpu_health(
                 actions::CORDON,
                 Some(format!(
                     "GPU anomaly detected on node {}, cordoning",
-                    node_name
-                )),
-            )
-            .await;
-    }
-
-    // Execute drains (cordon + evict GPU pods).
-    // Drains only fire for confirmed total GPU loss (allocatable == 0) that has
-    // persisted for >60s. The workloads are already broken at this point —
-    // draining makes the failure visible and frees pods to reschedule.
-    for node_name in &plan.to_drain {
-        info!(
-            node = %node_name,
-            "draining GPU node (all GPUs lost, persisted >60s)"
-        );
-        if let Err(e) = ctx.kube.cordon_node(node_name).await {
-            warn!(node = %node_name, error = %e, "failed to cordon node");
-        }
-        if let Err(e) = ctx.kube.drain_node(node_name).await {
-            warn!(node = %node_name, error = %e, "failed to drain GPU pods");
-        }
-        ctx.events
-            .publish(
-                &cluster.object_ref(&()),
-                EventType::Warning,
-                reasons::GPU_HEALTH_CRITICAL,
-                actions::DRAIN,
-                Some(format!(
-                    "All GPUs lost on node {} (>60s), draining GPU workloads",
                     node_name
                 )),
             )

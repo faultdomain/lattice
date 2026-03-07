@@ -2,7 +2,7 @@
 //!
 //! Tests the operator's end-to-end response to GPU health annotations on real
 //! nodes. No real GPUs are needed — tests patch node annotations directly and
-//! verify that the operator's `reconcile_gpu_health` path cordons, drains, and
+//! verify that the operator's `reconcile_gpu_health` path cordons and
 //! uncordons nodes correctly.
 //!
 //! # Running Standalone
@@ -20,8 +20,8 @@ use chrono::Utc;
 use tracing::info;
 
 use lattice_common::gpu::{
-    ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_GPU_LOSS_AT, ANNOTATION_HEARTBEAT,
-    GPU_LOSS_DRAIN_DELAY_SECS, HEARTBEAT_STALENESS_SECS,
+    ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT,
+    HEARTBEAT_STALENESS_SECS,
 };
 
 use super::super::helpers::{apply_yaml, run_kubectl, wait_for_condition};
@@ -121,7 +121,6 @@ async fn clear_gpu_annotations(kubeconfig: &str, node: &str) -> Result<(), Strin
     let keys = [
         ANNOTATION_GPU_HEALTH,
         ANNOTATION_GPU_LOSS,
-        ANNOTATION_GPU_LOSS_AT,
         ANNOTATION_HEARTBEAT,
         lattice_common::gpu::ANNOTATION_ANOMALY_SCORE,
     ];
@@ -260,127 +259,7 @@ async fn test_unhealthy_triggers_cordon(kubeconfig: &str, node: &str) -> Result<
     Ok(())
 }
 
-/// Test 3: GPU loss with drain delay — cordon immediately, drain after delay.
-async fn test_gpu_loss_drain_delay(kubeconfig: &str, node: &str) -> Result<(), String> {
-    info!("[Integration/GPUHealth] Test: GPU loss drain delay");
-
-    // Phase A: GPU loss just detected — should cordon but NOT drain yet.
-    let now = now_rfc3339();
-    patch_gpu_annotations(
-        kubeconfig,
-        node,
-        &[
-            (ANNOTATION_GPU_HEALTH, "unhealthy"),
-            (ANNOTATION_GPU_LOSS, "true"),
-            (ANNOTATION_GPU_LOSS_AT, &now),
-            (ANNOTATION_HEARTBEAT, &now),
-        ],
-    )
-    .await?;
-
-    wait_for_cordon(kubeconfig, node, true, RECONCILE_TIMEOUT).await?;
-    info!("[Integration/GPUHealth] Phase A: node cordoned (drain delay not yet elapsed)");
-
-    // Phase B: Move gpu-loss-detected-at to >60s ago so drain triggers.
-    let past = seconds_ago_rfc3339(GPU_LOSS_DRAIN_DELAY_SECS + 10);
-    patch_gpu_annotations(
-        kubeconfig,
-        node,
-        &[
-            (ANNOTATION_GPU_LOSS_AT, &past),
-            (ANNOTATION_HEARTBEAT, &now_rfc3339()),
-        ],
-    )
-    .await?;
-
-    // Deploy a pod that requests nvidia.com/gpu to verify it gets evicted.
-    // The pod will be Pending (no real GPUs), which is fine — drain evicts by
-    // pod spec, not pod phase. We use a unique namespace to avoid conflicts.
-    let ns = "gpu-health-drain-test";
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "create",
-        "namespace",
-        ns,
-    ])
-    .await;
-
-    // Create a pod that is node-selected to our test node requesting GPU.
-    let pod_yaml = format!(
-        r#"apiVersion: v1
-kind: Pod
-metadata:
-  name: gpu-drain-canary
-  namespace: {ns}
-spec:
-  nodeName: {node}
-  terminationGracePeriodSeconds: 0
-  containers:
-  - name: sleep
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    resources:
-      limits:
-        nvidia.com/gpu: "1"
-  tolerations:
-  - operator: Exists"#
-    );
-
-    // Apply the canary pod via stdin-piped kubectl.
-    apply_yaml(kubeconfig, &pod_yaml).await?;
-
-    // Wait for the pod to be evicted/deleted (operator drains GPU pods).
-    let kc = kubeconfig.to_string();
-    let ns_owned = ns.to_string();
-    let evicted = wait_for_condition(
-        "GPU-requesting pod evicted",
-        RECONCILE_TIMEOUT,
-        Duration::from_secs(5),
-        || {
-            let kc = kc.clone();
-            let ns_owned = ns_owned.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "pod",
-                    "gpu-drain-canary",
-                    "-n",
-                    &ns_owned,
-                    "-o",
-                    "jsonpath={.status.phase}",
-                ])
-                .await;
-                match output {
-                    // Pod gone or in failed/evicted state → drain worked
-                    Err(_) => Ok(true),
-                    Ok(phase) => Ok(phase.trim() == "Failed" || phase.trim() == "Succeeded"),
-                }
-            }
-        },
-    )
-    .await;
-
-    // Clean up namespace regardless of result.
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "namespace",
-        ns,
-        "--ignore-not-found",
-    ])
-    .await;
-
-    evicted?;
-
-    info!("[Integration/GPUHealth] PASSED: GPU loss → cordon + drain after delay");
-    Ok(())
-}
-
-/// Test 4: GPU loss flapping — operator cordons on loss and uncordons on recovery.
+/// Test 3: GPU loss flapping — operator cordons on loss and uncordons on recovery.
 ///
 /// Simulates: loss → verify cordon → recovery → verify uncordon.
 async fn test_gpu_loss_flap(kubeconfig: &str, node: &str) -> Result<(), String> {
@@ -393,7 +272,6 @@ async fn test_gpu_loss_flap(kubeconfig: &str, node: &str) -> Result<(), String> 
         &[
             (ANNOTATION_GPU_HEALTH, "unhealthy"),
             (ANNOTATION_GPU_LOSS, "true"),
-            (ANNOTATION_GPU_LOSS_AT, &now),
             (ANNOTATION_HEARTBEAT, &now),
         ],
     )
@@ -413,15 +291,6 @@ async fn test_gpu_loss_flap(kubeconfig: &str, node: &str) -> Result<(), String> 
         ],
     )
     .await?;
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "annotate",
-        "node",
-        node,
-        &format!("{ANNOTATION_GPU_LOSS_AT}-"),
-    ])
-    .await;
 
     wait_for_cordon(kubeconfig, node, false, RECONCILE_TIMEOUT).await?;
     info!("[Integration/GPUHealth] PASSED: GPU loss flap — cordon on loss, uncordon on recovery");
@@ -487,9 +356,6 @@ pub async fn run_gpu_health_tests(kubeconfig: &str) -> Result<(), String> {
 
         reset_node(kubeconfig, &node).await?;
         test_unhealthy_triggers_cordon(kubeconfig, &node).await?;
-
-        reset_node(kubeconfig, &node).await?;
-        test_gpu_loss_drain_delay(kubeconfig, &node).await?;
 
         reset_node(kubeconfig, &node).await?;
         test_gpu_loss_flap(kubeconfig, &node).await?;

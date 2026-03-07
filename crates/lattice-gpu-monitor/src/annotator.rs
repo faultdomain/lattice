@@ -11,7 +11,7 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use lattice_common::gpu::{
-    ANNOTATION_ANOMALY_SCORE, ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_GPU_LOSS_AT,
+    ANNOTATION_ANOMALY_SCORE, ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS,
     ANNOTATION_HEARTBEAT,
 };
 use crate::gpu_loss::GpuLossStatus;
@@ -69,25 +69,11 @@ impl NodeAnnotator {
         );
         annotations.insert(ANNOTATION_HEARTBEAT.to_string(), now.clone());
 
-        // Track when GPU loss was first detected so the operator can enforce
-        // a drain delay (don't drain on transient failures).
-        let remove_loss_at = if loss_detected && self.last_loss != Some(true) {
-            // Loss just started — stamp the detection time
-            annotations.insert(ANNOTATION_GPU_LOSS_AT.to_string(), now);
-            false
-        } else {
-            // Loss resolved — remove the detection timestamp via null in merge patch
-            !loss_detected && self.last_loss == Some(true)
-        };
-
-        let mut patch = serde_json::json!({
+        let patch = serde_json::json!({
             "metadata": {
                 "annotations": annotations
             }
         });
-        if remove_loss_at {
-            patch["metadata"]["annotations"][ANNOTATION_GPU_LOSS_AT] = serde_json::Value::Null;
-        }
 
         let node_api: Api<Node> = Api::all(self.client.clone());
         node_api
