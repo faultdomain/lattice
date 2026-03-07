@@ -341,7 +341,161 @@ spec:
     Ok(())
 }
 
-/// Test 4: Stale heartbeat — unhealthy annotation is ignored.
+/// Test 4: GPU loss flapping — recovery clears the timer so re-loss doesn't
+/// drain immediately from a stale timestamp.
+///
+/// Simulates: loss → cordon → recovery (clear annotations) → loss again.
+/// The second loss must restart the 60s drain delay, not inherit the old one.
+async fn test_gpu_loss_flap(kubeconfig: &str, node: &str) -> Result<(), String> {
+    info!("[Integration/GPUHealth] Test: GPU loss flap — timer resets on recovery");
+
+    // Flap 1: GPU loss detected, node gets cordoned.
+    let now = now_rfc3339();
+    patch_gpu_annotations(
+        kubeconfig,
+        node,
+        &[
+            (ANNOTATION_GPU_HEALTH, "unhealthy"),
+            (ANNOTATION_GPU_LOSS, "true"),
+            (ANNOTATION_GPU_LOSS_AT, &now),
+            (ANNOTATION_HEARTBEAT, &now),
+        ],
+    )
+    .await?;
+
+    wait_for_cordon(kubeconfig, node, true, RECONCILE_TIMEOUT).await?;
+    info!("[Integration/GPUHealth] Flap 1: loss detected, node cordoned");
+
+    // Recovery: GPUs come back. DaemonSet clears loss annotations and sets
+    // health back to normal. Simulate exactly what annotator.rs does.
+    patch_gpu_annotations(
+        kubeconfig,
+        node,
+        &[
+            (ANNOTATION_GPU_HEALTH, "normal"),
+            (ANNOTATION_GPU_LOSS, "false"),
+            (ANNOTATION_HEARTBEAT, &now_rfc3339()),
+        ],
+    )
+    .await?;
+    // Remove the loss-at timestamp (DaemonSet sets it to empty string on recovery).
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "annotate",
+        "node",
+        node,
+        &format!("{ANNOTATION_GPU_LOSS_AT}-"),
+    ])
+    .await;
+
+    // Operator should uncordon since health is normal and no loss.
+    wait_for_cordon(kubeconfig, node, false, RECONCILE_TIMEOUT).await?;
+    info!("[Integration/GPUHealth] Recovery: GPUs back, node uncordoned");
+
+    // Flap 2: GPUs disappear again with a FRESH timestamp.
+    let now2 = now_rfc3339();
+    patch_gpu_annotations(
+        kubeconfig,
+        node,
+        &[
+            (ANNOTATION_GPU_HEALTH, "unhealthy"),
+            (ANNOTATION_GPU_LOSS, "true"),
+            (ANNOTATION_GPU_LOSS_AT, &now2),
+            (ANNOTATION_HEARTBEAT, &now2),
+        ],
+    )
+    .await?;
+
+    // Should cordon again (fresh loss).
+    wait_for_cordon(kubeconfig, node, true, RECONCILE_TIMEOUT).await?;
+
+    // The drain delay just started (fresh timestamp). Give the operator a
+    // couple of reconcile cycles — it must NOT drain yet because the new
+    // loss-at is only seconds old, well within the 60s window.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    // Verify the node is cordoned but no drain happened by checking that a
+    // canary pod placed on the node is still present (not evicted).
+    let ns = "gpu-flap-drain-test";
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "create",
+        "namespace",
+        ns,
+    ])
+    .await;
+
+    let pod_yaml = format!(
+        r#"apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-flap-canary
+  namespace: {ns}
+spec:
+  nodeName: {node}
+  terminationGracePeriodSeconds: 0
+  containers:
+  - name: sleep
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+  tolerations:
+  - operator: Exists"#
+    );
+    apply_yaml(kubeconfig, &pod_yaml).await?;
+
+    // Wait a bit — pod should NOT be evicted (delay hasn't expired).
+    tokio::time::sleep(Duration::from_secs(15)).await;
+
+    let phase = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "pod",
+        "gpu-flap-canary",
+        "-n",
+        ns,
+        "-o",
+        "jsonpath={.status.phase}",
+    ])
+    .await;
+
+    // Clean up namespace.
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "namespace",
+        ns,
+        "--ignore-not-found",
+    ])
+    .await;
+
+    // Pod should still exist (Pending because no real GPU, or Running).
+    // If it was evicted (Failed/gone), the timer didn't reset — bug.
+    match phase {
+        Ok(p) if p.trim() == "Failed" => {
+            return Err(
+                "Drain fired immediately on re-loss — timer did not reset after recovery".into(),
+            );
+        }
+        Err(e) if e.contains("NotFound") || e.contains("not found") => {
+            return Err(
+                "Pod evicted on re-loss — timer did not reset after recovery".into(),
+            );
+        }
+        _ => {} // Pending or Running — correct, drain hasn't fired
+    }
+
+    info!("[Integration/GPUHealth] PASSED: GPU loss flap — drain delay restarted on re-loss");
+    Ok(())
+}
+
+/// Test 5: Stale heartbeat — unhealthy annotation is ignored.
 async fn test_stale_heartbeat_ignored(kubeconfig: &str, node: &str) -> Result<(), String> {
     info!("[Integration/GPUHealth] Test: stale heartbeat → no cordon");
 
@@ -401,6 +555,9 @@ pub async fn run_gpu_health_tests(kubeconfig: &str) -> Result<(), String> {
 
         reset_node(kubeconfig, &node).await?;
         test_gpu_loss_drain_delay(kubeconfig, &node).await?;
+
+        reset_node(kubeconfig, &node).await?;
+        test_gpu_loss_flap(kubeconfig, &node).await?;
 
         reset_node(kubeconfig, &node).await?;
         test_stale_heartbeat_ignored(kubeconfig, &node).await
