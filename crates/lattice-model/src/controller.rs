@@ -97,13 +97,14 @@ pub trait ModelKubeClient: Send + Sync {
         namespace: &str,
     ) -> Result<(), ModelError>;
 
-    /// Clean up graph nodes and K8s resources for roles removed from the spec
+    /// Clean up K8s resources and graph nodes for roles removed from the spec
     async fn cleanup_removed_roles(
         &self,
         model_name: &str,
         namespace: &str,
         old_keys: &BTreeSet<String>,
         new_keys: &BTreeSet<String>,
+        graph: &ServiceGraph,
     );
 }
 
@@ -205,7 +206,12 @@ impl ModelKubeClient for ModelKubeClientImpl {
         namespace: &str,
         old_keys: &BTreeSet<String>,
         new_keys: &BTreeSet<String>,
+        graph: &ServiceGraph,
     ) {
+        let removed: Vec<&String> = old_keys.difference(new_keys).collect();
+        for role_key in &removed {
+            graph.delete_service(namespace, role_key);
+        }
         cleanup_removed_roles_impl(
             &self.client,
             &self.registry,
@@ -516,15 +522,10 @@ pub async fn reconcile(
                 };
                 register_graph(&model, &ctx.graph, namespace);
 
-                // Clean up graph nodes and K8s resources for removed roles
+                // Clean up K8s resources and graph nodes for removed roles
                 ctx.kube
-                    .cleanup_removed_roles(&name, namespace, &old_role_keys, &new_role_keys)
+                    .cleanup_removed_roles(&name, namespace, &old_role_keys, &new_role_keys, &ctx.graph)
                     .await;
-                // Also clean graph nodes for removed roles
-                let removed: Vec<&String> = old_role_keys.difference(&new_role_keys).collect();
-                for role_key in &removed {
-                    ctx.graph.delete_service(namespace, role_key);
-                }
 
                 // When roles are added or removed, the gang policy's
                 // minRoleReplicas key set changes. Volcano marks that field
@@ -1229,7 +1230,7 @@ mod tests {
         mock.expect_apply_compiled_model()
             .returning(|_, _, _| Ok(()));
         mock.expect_cleanup_removed_roles()
-            .returning(|_, _, _, _| ());
+            .returning(|_, _, _, _, _| ());
         mock.expect_patch_model_status()
             .returning(|_, _, _| Ok(()));
 
