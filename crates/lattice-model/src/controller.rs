@@ -26,8 +26,10 @@ use tracing::{error, info, warn};
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    LatticeModel, LatticeModelStatus, ModelCondition, ModelServingPhase, ProviderType,
+    CostEstimate, LatticeModel, LatticeModelStatus, ModelCondition,
+    ModelServingPhase, ProviderType,
 };
+use lattice_cost::CostProvider;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::status_check;
@@ -52,6 +54,8 @@ pub struct ModelContext {
     pub provider_type: ProviderType,
     pub cedar: Arc<PolicyEngine>,
     pub registry: Arc<CrdRegistry>,
+    /// Cost provider for estimating workload costs (None = cost estimation disabled)
+    pub cost_provider: Option<Arc<dyn CostProvider>>,
 }
 
 impl ModelContext {
@@ -70,6 +74,7 @@ impl ModelContext {
             provider_type,
             cedar,
             registry,
+            cost_provider: None,
         }
     }
 }
@@ -88,6 +93,13 @@ pub async fn reconcile(
 
     // Validate the model spec (all roles)
     model.spec.validate()?;
+
+    // Compute cost once per reconcile — always fresh, no stale preservation.
+    let model_spec = &model.spec;
+    let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates, ts| {
+        lattice_cost::estimate_model_cost(model_spec, rates, ts)
+    })
+    .await;
 
     // Read previously applied role keys from persisted status (no TOCTOU).
     // On first reconcile applied_roles is None — fall back to spec keys
@@ -129,7 +141,7 @@ pub async fn reconcile(
                     if e.is_retryable() {
                         // Transient — stay in Pending so error_policy retries
                         let msg = format!("Compile failed (will retry): {}", e);
-                        let _ = StatusUpdate::new(ModelServingPhase::Pending)
+                        let _ = StatusUpdate::new(ModelServingPhase::Pending, &cost)
                             .message(&msg)
                             .apply(&ctx.client, &model, namespace)
                             .await;
@@ -137,7 +149,7 @@ pub async fn reconcile(
                         // Permanent — go to Failed
                         cleanup_graph(&model, &ctx.graph, namespace);
                         let msg = format!("Failed to compile: {}", e);
-                        let _ = StatusUpdate::new(ModelServingPhase::Failed)
+                        let _ = StatusUpdate::new(ModelServingPhase::Failed, &cost)
                             .message(&msg)
                             .observed_generation(generation)
                             .apply(&ctx.client, &model, namespace)
@@ -155,7 +167,7 @@ pub async fn reconcile(
                 // API server hiccup). error_policy requeues after 30s.
                 // Don't cleanup the graph: the roles are valid (compilation succeeded),
                 // and register_graph will re-register them on the next reconcile anyway.
-                let _ = StatusUpdate::new(ModelServingPhase::Pending)
+                let _ = StatusUpdate::new(ModelServingPhase::Pending, &cost)
                     .message(&msg)
                     .apply(&ctx.client, &model, namespace)
                     .await;
@@ -164,7 +176,7 @@ pub async fn reconcile(
             let role_keys: Vec<String> = spec_role_keys(&name, &model.spec.roles)
                 .into_iter()
                 .collect();
-            StatusUpdate::new(ModelServingPhase::Loading)
+            StatusUpdate::new(ModelServingPhase::Loading, &cost)
                 .message("Resources applied, waiting for model serving readiness")
                 .observed_generation(generation)
                 .auto_topology(compiled.auto_topology)
@@ -180,7 +192,7 @@ pub async fn reconcile(
             // running resources compiled from the old spec.
             if spec_changed_since_compilation(model.status.as_ref(), generation) {
                 info!(model = %name, "spec changed during Loading, recompiling");
-                StatusUpdate::new(ModelServingPhase::Pending)
+                StatusUpdate::new(ModelServingPhase::Pending, &cost)
                     .message("Spec changed, recompiling")
                     .apply(&ctx.client, &model, namespace)
                     .await?;
@@ -197,7 +209,7 @@ pub async fn reconcile(
             match state {
                 ModelServingState::Available => {
                     info!(model = %name, "model serving is available");
-                    let mut s = StatusUpdate::new(ModelServingPhase::Serving)
+                    let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
                         .message("Model is serving inference requests")
                         .observed_generation(generation);
                     if let Some(c) = conditions {
@@ -209,7 +221,7 @@ pub async fn reconcile(
                 ModelServingState::Failed => {
                     error!(model = %name, "model serving failed");
                     cleanup_graph(&model, &ctx.graph, namespace);
-                    let mut s = StatusUpdate::new(ModelServingPhase::Failed)
+                    let mut s = StatusUpdate::new(ModelServingPhase::Failed, &cost)
                         .message("ModelServing failed")
                         .observed_generation(generation);
                     if let Some(c) = conditions {
@@ -245,7 +257,7 @@ pub async fn reconcile(
                         if e.is_retryable() {
                             // Transient — stay in Serving, let error_policy retry
                             let msg = format!("Recompile failed (will retry): {}", e);
-                            let mut s = StatusUpdate::new(ModelServingPhase::Serving).message(&msg);
+                            let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost).message(&msg);
                             if let Some(gen) = observed {
                                 s = s.observed_generation(gen);
                             }
@@ -254,7 +266,7 @@ pub async fn reconcile(
                             // Permanent — go to Failed
                             cleanup_graph(&model, &ctx.graph, namespace);
                             let msg = format!("Failed to recompile after spec change: {}", e);
-                            let _ = StatusUpdate::new(ModelServingPhase::Failed)
+                            let _ = StatusUpdate::new(ModelServingPhase::Failed, &cost)
                                 .message(&msg)
                                 .observed_generation(generation)
                                 .apply(&ctx.client, &model, namespace)
@@ -296,7 +308,7 @@ pub async fn reconcile(
                     // still triggers the recompile path.
                     let role_keys: Vec<String> = new_role_keys.into_iter().collect();
                     let mut s =
-                        StatusUpdate::new(ModelServingPhase::Serving).applied_roles(role_keys);
+                        StatusUpdate::new(ModelServingPhase::Serving, &cost).applied_roles(role_keys);
                     if let Some(gen) = observed {
                         s = s.observed_generation(gen);
                     }
@@ -311,7 +323,7 @@ pub async fn reconcile(
                     // error_policy retry. Keep the old observed_generation so
                     // the next reconcile re-enters this recompile path.
                     let msg = format!("Apply failed after spec change (will retry): {}", e);
-                    let mut s = StatusUpdate::new(ModelServingPhase::Serving).message(&msg);
+                    let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost).message(&msg);
                     if let Some(gen) = observed {
                         s = s.observed_generation(gen);
                     }
@@ -321,7 +333,7 @@ pub async fn reconcile(
                 // Transition to Loading so the next reconcile checks
                 // ModelServing readiness after the rolling update.
                 let role_keys: Vec<String> = new_role_keys.into_iter().collect();
-                StatusUpdate::new(ModelServingPhase::Loading)
+                StatusUpdate::new(ModelServingPhase::Loading, &cost)
                     .message("Spec changed, reloading")
                     .observed_generation(generation)
                     .auto_topology(compiled.auto_topology)
@@ -344,7 +356,7 @@ pub async fn reconcile(
             let conditions =
                 read_model_serving_conditions(&ctx.client, &serving_name, namespace, &ctx.registry)
                     .await;
-            let mut s = StatusUpdate::new(ModelServingPhase::Serving)
+            let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
                 .message(message)
                 .observed_generation(generation);
             if let Some(c) = conditions {
@@ -360,7 +372,7 @@ pub async fn reconcile(
             let observed = model.status.as_ref().and_then(|s| s.observed_generation);
             if observed != Some(generation) {
                 info!(model = %name, observed = ?observed, current = generation, "spec changed while Failed, retrying");
-                StatusUpdate::new(ModelServingPhase::Pending)
+                StatusUpdate::new(ModelServingPhase::Pending, &cost)
                     .message("Retrying after spec change")
                     .apply(&ctx.client, &model, namespace)
                     .await?;
@@ -780,10 +792,11 @@ struct StatusUpdate<'a> {
     conditions: Option<Vec<ModelCondition>>,
     auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
     applied_roles: Option<Vec<String>>,
+    cost: Option<CostEstimate>,
 }
 
 impl<'a> StatusUpdate<'a> {
-    fn new(phase: ModelServingPhase) -> Self {
+    fn new(phase: ModelServingPhase, cost: &Option<CostEstimate>) -> Self {
         Self {
             phase,
             message: None,
@@ -791,6 +804,7 @@ impl<'a> StatusUpdate<'a> {
             conditions: None,
             auto_topology: None,
             applied_roles: None,
+            cost: cost.clone(),
         }
     }
 
@@ -847,6 +861,7 @@ impl<'a> StatusUpdate<'a> {
         let applied_roles = self
             .applied_roles
             .or_else(|| model.status.as_ref().and_then(|s| s.applied_roles.clone()));
+        let cost = self.cost;
         let status = LatticeModelStatus {
             phase: self.phase,
             message: self.message.map(|m| m.to_string()),
@@ -854,6 +869,7 @@ impl<'a> StatusUpdate<'a> {
             conditions: self.conditions,
             auto_topology,
             applied_roles,
+            cost,
         };
         lattice_common::kube_utils::patch_resource_status::<LatticeModel>(
             client,
@@ -882,6 +898,7 @@ mod tests {
             conditions: None,
             auto_topology: None,
             applied_roles: None,
+            cost: None,
         }
     }
 

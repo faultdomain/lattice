@@ -353,6 +353,9 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     let provider_type = controller_runner::resolve_provider_type_from_env();
     let monitoring = controller_runner::resolve_monitoring_from_env();
     let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
+        lattice_cost::ConfigMapCostProvider::new(client.clone()),
+    ));
 
     let (mut controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
@@ -361,6 +364,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         cedar.clone(),
         registry.clone(),
         monitoring,
+        cost_provider.clone(),
     )
     .await;
 
@@ -373,6 +377,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
             cedar.clone(),
             graph,
             registry.clone(),
+            cost_provider.clone(),
         )
         .await,
     );
@@ -385,6 +390,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
             cedar.clone(),
             graph_for_models,
             registry,
+            cost_provider,
         )
         .await,
     );
@@ -495,6 +501,9 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     let monitoring = controller_runner::resolve_monitoring_from_cluster(client).await;
     let cluster_name = self_cluster_name.unwrap_or_else(|| "default".to_string());
     let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
+        lattice_cost::ConfigMapCostProvider::new(client.clone()),
+    ));
     let (service_controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
         cluster_name.clone(),
@@ -502,6 +511,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         cedar.clone(),
         registry.clone(),
         monitoring,
+        cost_provider.clone(),
     )
     .await;
     controllers.extend(service_controllers);
@@ -515,6 +525,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
             cedar.clone(),
             graph,
             registry.clone(),
+            cost_provider.clone(),
         )
         .await,
     );
@@ -527,6 +538,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
             cedar.clone(),
             graph_for_models,
             registry,
+            cost_provider,
         )
         .await,
     );

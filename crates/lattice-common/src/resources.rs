@@ -12,6 +12,11 @@ use tracing::warn;
 
 use crate::crd::PoolResourceSummary;
 
+/// Error returned when a Kubernetes resource quantity string cannot be parsed.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid resource quantity: {0}")]
+pub struct QuantityParseError(pub String);
+
 /// Label key that identifies which worker pool a node belongs to.
 pub const POOL_LABEL: &str = "lattice.dev/pool";
 
@@ -51,67 +56,86 @@ pub fn is_node_ready(node: &Node) -> bool {
 // Quantity parsing
 // ---------------------------------------------------------------------------
 
-/// Parse a Kubernetes CPU quantity to millicores.
+/// Parse a CPU quantity string to millicores.
 ///
 /// Handles formats: `"1"` (cores), `"500m"` (millicores), `"1.5"` (fractional cores).
-pub fn parse_cpu_millis(quantity: Option<&Quantity>) -> i64 {
-    let s = match quantity {
-        Some(q) => &q.0,
-        None => return 0,
-    };
-
+pub fn parse_cpu_millis_str(s: &str) -> Result<i64, QuantityParseError> {
     if let Some(millis) = s.strip_suffix('m') {
-        millis.parse::<i64>().unwrap_or(0)
-    } else if let Ok(cores) = s.parse::<f64>() {
-        (cores * 1000.0) as i64
+        millis
+            .parse::<i64>()
+            .map_err(|_| QuantityParseError(s.to_string()))
     } else {
-        0
+        s.parse::<f64>()
+            .map(|cores| (cores * 1000.0) as i64)
+            .map_err(|_| QuantityParseError(s.to_string()))
     }
 }
 
-/// Parse a Kubernetes memory quantity to bytes.
+/// Parse a Kubernetes CPU `Quantity` to millicores.
+///
+/// Returns `Ok(0)` for `None` (no request = zero allocation).
+pub fn parse_cpu_millis(quantity: Option<&Quantity>) -> Result<i64, QuantityParseError> {
+    match quantity {
+        Some(q) => parse_cpu_millis_str(&q.0),
+        None => Ok(0),
+    }
+}
+
+/// Parse a memory quantity string to bytes.
 ///
 /// Handles binary suffixes (`Ki`, `Mi`, `Gi`, `Ti`), decimal suffixes
 /// (`k`, `M`, `G`, `T`), and plain byte values.
-pub fn parse_memory_bytes(quantity: Option<&Quantity>) -> i64 {
-    let s = match quantity {
-        Some(q) => &q.0,
-        None => return 0,
-    };
+pub fn parse_memory_bytes_str(s: &str) -> Result<i64, QuantityParseError> {
+    let err = || QuantityParseError(s.to_string());
+    let parse = |v: &str| v.parse::<i64>().map_err(|_| err());
 
     if let Some(v) = s.strip_suffix("Ki") {
-        return v.parse::<i64>().unwrap_or(0) * 1024;
+        return Ok(parse(v)? * 1024);
     }
     if let Some(v) = s.strip_suffix("Mi") {
-        return v.parse::<i64>().unwrap_or(0) * 1024 * 1024;
+        return Ok(parse(v)? * 1024 * 1024);
     }
     if let Some(v) = s.strip_suffix("Gi") {
-        return v.parse::<i64>().unwrap_or(0) * 1024 * 1024 * 1024;
+        return Ok(parse(v)? * 1024 * 1024 * 1024);
     }
     if let Some(v) = s.strip_suffix("Ti") {
-        return v.parse::<i64>().unwrap_or(0) * 1024 * 1024 * 1024 * 1024;
+        return Ok(parse(v)? * 1024 * 1024 * 1024 * 1024);
     }
     if let Some(v) = s.strip_suffix('G') {
-        return v.parse::<i64>().unwrap_or(0) * 1_000_000_000;
+        return Ok(parse(v)? * 1_000_000_000);
     }
     if let Some(v) = s.strip_suffix('M') {
-        return v.parse::<i64>().unwrap_or(0) * 1_000_000;
+        return Ok(parse(v)? * 1_000_000);
     }
     if let Some(v) = s.strip_suffix('k') {
-        return v.parse::<i64>().unwrap_or(0) * 1_000;
+        return Ok(parse(v)? * 1_000);
     }
     if let Some(v) = s.strip_suffix('T') {
-        return v.parse::<i64>().unwrap_or(0) * 1_000_000_000_000;
+        return Ok(parse(v)? * 1_000_000_000_000);
     }
+    parse(s)
+}
 
-    s.parse::<i64>().unwrap_or(0)
+/// Parse a Kubernetes memory `Quantity` to bytes.
+///
+/// Returns `Ok(0)` for `None` (no request = zero allocation).
+pub fn parse_memory_bytes(quantity: Option<&Quantity>) -> Result<i64, QuantityParseError> {
+    match quantity {
+        Some(q) => parse_memory_bytes_str(&q.0),
+        None => Ok(0),
+    }
 }
 
 /// Parse a Kubernetes quantity as a plain integer (for GPU counts).
-pub fn parse_quantity_int(quantity: Option<&Quantity>) -> i64 {
+///
+/// Returns `Ok(0)` for `None`.
+pub fn parse_quantity_int(quantity: Option<&Quantity>) -> Result<i64, QuantityParseError> {
     match quantity {
-        Some(q) => q.0.parse::<i64>().unwrap_or(0),
-        None => 0,
+        Some(q) => q
+            .0
+            .parse::<i64>()
+            .map_err(|_| QuantityParseError(q.0.clone())),
+        None => Ok(0),
     }
 }
 
@@ -157,9 +181,12 @@ pub async fn gather_pool_resources(client: &kube::Client) -> Vec<PoolResourceSum
         // (all nodes in a pool have the same instance type)
         if let Some(allocatable) = node.status.as_ref().and_then(|s| s.allocatable.as_ref()) {
             if pool.node_cpu_millis == 0 {
-                pool.node_cpu_millis = parse_cpu_millis(allocatable.get("cpu"));
-                pool.node_memory_bytes = parse_memory_bytes(allocatable.get("memory"));
-                pool.node_gpu_count = parse_quantity_int(allocatable.get(GPU_RESOURCE)) as u32;
+                pool.node_cpu_millis = parse_cpu_millis(allocatable.get("cpu"))
+                    .unwrap_or_else(|e| { warn!(error = %e, "failed to parse node CPU allocatable"); 0 });
+                pool.node_memory_bytes = parse_memory_bytes(allocatable.get("memory"))
+                    .unwrap_or_else(|e| { warn!(error = %e, "failed to parse node memory allocatable"); 0 });
+                pool.node_gpu_count = parse_quantity_int(allocatable.get(GPU_RESOURCE))
+                    .unwrap_or_else(|e| { warn!(error = %e, "failed to parse node GPU allocatable"); 0 }) as u32;
             }
         }
 
@@ -281,9 +308,12 @@ fn sum_container_requests(
             .as_ref()
             .and_then(|r| r.requests.as_ref())
         {
-            pool.allocated_cpu_millis += parse_cpu_millis(requests.get("cpu"));
-            pool.allocated_memory_bytes += parse_memory_bytes(requests.get("memory"));
-            pool.allocated_gpu_count += parse_quantity_int(requests.get(GPU_RESOURCE)) as u32;
+            pool.allocated_cpu_millis += parse_cpu_millis(requests.get("cpu"))
+                .unwrap_or_else(|e| { warn!(error = %e, "failed to parse pod CPU request"); 0 });
+            pool.allocated_memory_bytes += parse_memory_bytes(requests.get("memory"))
+                .unwrap_or_else(|e| { warn!(error = %e, "failed to parse pod memory request"); 0 });
+            pool.allocated_gpu_count += parse_quantity_int(requests.get(GPU_RESOURCE))
+                .unwrap_or_else(|e| { warn!(error = %e, "failed to parse pod GPU request"); 0 }) as u32;
         }
     }
 }
@@ -294,28 +324,34 @@ mod tests {
 
     #[test]
     fn cpu_whole_cores() {
-        assert_eq!(parse_cpu_millis(Some(&Quantity("4".into()))), 4000);
+        assert_eq!(parse_cpu_millis(Some(&Quantity("4".into()))).unwrap(), 4000);
     }
 
     #[test]
     fn cpu_millicores() {
-        assert_eq!(parse_cpu_millis(Some(&Quantity("500m".into()))), 500);
+        assert_eq!(parse_cpu_millis(Some(&Quantity("500m".into()))).unwrap(), 500);
     }
 
     #[test]
     fn cpu_fractional() {
-        assert_eq!(parse_cpu_millis(Some(&Quantity("1.5".into()))), 1500);
+        assert_eq!(parse_cpu_millis(Some(&Quantity("1.5".into()))).unwrap(), 1500);
     }
 
     #[test]
     fn cpu_none() {
-        assert_eq!(parse_cpu_millis(None), 0);
+        assert_eq!(parse_cpu_millis(None).unwrap(), 0);
+    }
+
+    #[test]
+    fn cpu_invalid() {
+        assert!(parse_cpu_millis_str("abc").is_err());
+        assert!(parse_cpu_millis_str("xm").is_err());
     }
 
     #[test]
     fn memory_gi() {
         assert_eq!(
-            parse_memory_bytes(Some(&Quantity("16Gi".into()))),
+            parse_memory_bytes(Some(&Quantity("16Gi".into()))).unwrap(),
             16 * 1024 * 1024 * 1024
         );
     }
@@ -323,7 +359,7 @@ mod tests {
     #[test]
     fn memory_mi() {
         assert_eq!(
-            parse_memory_bytes(Some(&Quantity("512Mi".into()))),
+            parse_memory_bytes(Some(&Quantity("512Mi".into()))).unwrap(),
             512 * 1024 * 1024
         );
     }
@@ -331,7 +367,7 @@ mod tests {
     #[test]
     fn memory_plain_bytes() {
         assert_eq!(
-            parse_memory_bytes(Some(&Quantity("1073741824".into()))),
+            parse_memory_bytes(Some(&Quantity("1073741824".into()))).unwrap(),
             1073741824
         );
     }
@@ -339,23 +375,34 @@ mod tests {
     #[test]
     fn memory_decimal_g() {
         assert_eq!(
-            parse_memory_bytes(Some(&Quantity("2G".into()))),
+            parse_memory_bytes(Some(&Quantity("2G".into()))).unwrap(),
             2_000_000_000
         );
     }
 
     #[test]
     fn memory_none() {
-        assert_eq!(parse_memory_bytes(None), 0);
+        assert_eq!(parse_memory_bytes(None).unwrap(), 0);
+    }
+
+    #[test]
+    fn memory_invalid() {
+        assert!(parse_memory_bytes_str("abcGi").is_err());
+        assert!(parse_memory_bytes_str("xyz").is_err());
     }
 
     #[test]
     fn gpu_count() {
-        assert_eq!(parse_quantity_int(Some(&Quantity("8".into()))), 8);
+        assert_eq!(parse_quantity_int(Some(&Quantity("8".into()))).unwrap(), 8);
     }
 
     #[test]
     fn gpu_none() {
-        assert_eq!(parse_quantity_int(None), 0);
+        assert_eq!(parse_quantity_int(None).unwrap(), 0);
+    }
+
+    #[test]
+    fn gpu_invalid() {
+        assert!(parse_quantity_int(Some(&Quantity("abc".into()))).is_err());
     }
 }

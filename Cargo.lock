@@ -2494,6 +2494,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-cost"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-infra"
 version = "0.1.0"
 dependencies = [
@@ -2531,6 +2547,7 @@ dependencies = [
  "kube",
  "lattice-cedar",
  "lattice-common",
+ "lattice-cost",
  "lattice-secret-provider",
  "lattice-tetragon",
  "lattice-volcano",
@@ -2570,6 +2587,7 @@ dependencies = [
  "kube",
  "lattice-cedar",
  "lattice-common",
+ "lattice-cost",
  "lattice-secret-provider",
  "lattice-tetragon",
  "lattice-volcano",
@@ -2635,6 +2653,7 @@ dependencies = [
  "lattice-cloud-provider",
  "lattice-cluster",
  "lattice-common",
+ "lattice-cost",
  "lattice-infra",
  "lattice-job",
  "lattice-mesh-member",
@@ -2726,6 +2745,7 @@ dependencies = [
  "kube",
  "lattice-cedar",
  "lattice-common",
+ "lattice-cost",
  "lattice-infra",
  "lattice-secret-provider",
  "lattice-tetragon",

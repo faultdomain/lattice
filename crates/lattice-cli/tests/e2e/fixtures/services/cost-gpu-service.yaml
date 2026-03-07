@@ -1,0 +1,22 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: cost-test-gpu
+  namespace: cost-test
+spec:
+  workload:
+    containers:
+      main:
+        image: busybox:latest
+        command: ["sleep", "3600"]
+        resources:
+          requests:
+            cpu: "4"
+            memory: 32Gi
+    resources:
+      gpu:
+        type: gpu
+        params:
+          count: 8
+          model: H100-SXM
+  replicas: 1

@@ -100,6 +100,7 @@ pub use workload::resources::{
 };
 pub use workload::scaling::{AutoscalingMetric, AutoscalingSpec};
 pub use workload::spec::{RuntimeSpec, WorkloadSpec};
+pub use workload::cost::{CostBreakdown, CostEstimate};
 pub use workload::topology::{TopologyMode, WorkloadNetworkTopology};
 
 // =============================================================================

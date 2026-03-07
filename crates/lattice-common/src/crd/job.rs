@@ -15,6 +15,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::workload::cost::CostEstimate;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 use super::workload::topology::WorkloadNetworkTopology;
 
@@ -450,6 +451,10 @@ pub struct LatticeJobStatus {
     /// Timestamp when the job completed (training jobs only)
     #[serde(default)]
     pub completion_time: Option<String>,
+
+    /// Estimated cost based on resource requests and current rates
+    #[serde(default)]
+    pub cost: Option<CostEstimate>,
 }
 
 // =============================================================================
@@ -729,6 +734,7 @@ mod tests {
             observed_generation: Some(1),
             start_time: Some("2026-02-28T00:00:00Z".to_string()),
             completion_time: None,
+            cost: None,
         };
         assert_eq!(status.phase, JobPhase::Running);
         assert!(status.start_time.is_some());

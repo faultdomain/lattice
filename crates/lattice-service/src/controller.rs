@@ -26,6 +26,7 @@ use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry};
 
 use lattice_cedar::PolicyEngine;
+use lattice_cost::CostProvider;
 use lattice_common::events::{actions, reasons, EventPublisher};
 use lattice_common::KubeEventPublisher;
 #[cfg(test)]
@@ -33,8 +34,8 @@ use lattice_common::NoopEventPublisher;
 
 use crate::compiler::{ApplyLayer, CompiledService, CompilerPhase, ServiceCompiler};
 use crate::crd::{
-    Condition, ConditionStatus, LatticeService, LatticeServiceSpec, LatticeServiceStatus,
-    MonitoringConfig, ProviderType, ServicePhase,
+    Condition, ConditionStatus, CostEstimate, LatticeService, LatticeServiceSpec,
+    LatticeServiceStatus, MonitoringConfig, ProviderType, ServicePhase,
 };
 use crate::graph::ServiceGraph;
 use crate::Error;
@@ -544,6 +545,8 @@ pub struct ServiceContext {
     pub monitoring: MonitoringConfig,
     /// Extension phases that run after core compilation
     pub extension_phases: Vec<Arc<dyn CompilerPhase>>,
+    /// Cost provider for estimating workload costs (None = cost estimation disabled)
+    pub cost_provider: Option<Arc<dyn CostProvider>>,
 }
 
 impl ServiceContext {
@@ -566,6 +569,7 @@ impl ServiceContext {
             events,
             monitoring,
             extension_phases: Vec::new(),
+            cost_provider: None,
         }
     }
 
@@ -591,6 +595,7 @@ impl ServiceContext {
             events,
             monitoring,
             extension_phases: Vec::new(),
+            cost_provider: None,
         }
     }
 
@@ -609,6 +614,7 @@ impl ServiceContext {
             events: Arc::new(NoopEventPublisher),
             monitoring: MonitoringConfig::default(),
             extension_phases: Vec::new(),
+            cost_provider: None,
         }
     }
 }
@@ -912,10 +918,15 @@ async fn compile_and_apply(
         return Ok(Action::requeue(REQUEUE_PENDING));
     }
 
+    let spec = &service.spec;
+    let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates, ts| {
+        lattice_cost::estimate_service_cost(spec, rates, ts)
+    })
+    .await;
     update_service_status(
         service,
         ctx,
-        ServiceStatusUpdate::ready(service.metadata.generation),
+        ServiceStatusUpdate::ready(service.metadata.generation).with_cost(cost),
     )
     .await?;
     record_inputs_hash(ctx, name, namespace, inputs_hash).await;
@@ -968,6 +979,7 @@ struct ServiceStatusUpdate<'a> {
     reason: &'a str,
     set_compiled_at: bool,
     observed_generation: Option<i64>,
+    cost: Option<CostEstimate>,
 }
 
 impl<'a> ServiceStatusUpdate<'a> {
@@ -980,6 +992,7 @@ impl<'a> ServiceStatusUpdate<'a> {
             reason: "DependencyCheck",
             set_compiled_at: false,
             observed_generation: None,
+            cost: None,
         }
     }
 
@@ -992,7 +1005,13 @@ impl<'a> ServiceStatusUpdate<'a> {
             reason: "ServiceReady",
             set_compiled_at: true,
             observed_generation: generation,
+            cost: None,
         }
+    }
+
+    fn with_cost(mut self, cost: Option<CostEstimate>) -> Self {
+        self.cost = cost;
+        self
     }
 
     fn failed(message: &'a str, generation: Option<i64>) -> Self {
@@ -1004,6 +1023,7 @@ impl<'a> ServiceStatusUpdate<'a> {
             reason: "ValidationFailed",
             set_compiled_at: false,
             observed_generation: generation,
+            cost: None,
         }
     }
 }
@@ -1044,6 +1064,8 @@ async fn update_service_status(
     if update.set_compiled_at {
         status = status.compiled_at(Utc::now());
     }
+
+    status = status.cost(update.cost);
 
     ctx.kube
         .patch_service_status(&name, &namespace, &status)

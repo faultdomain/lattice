@@ -1,0 +1,16 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: cost-test-api
+  namespace: cost-test
+spec:
+  workload:
+    containers:
+      main:
+        image: busybox:latest
+        command: ["sleep", "3600"]
+        resources:
+          requests:
+            cpu: "500m"
+            memory: 1Gi
+  replicas: 2

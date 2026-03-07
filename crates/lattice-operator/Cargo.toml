@@ -43,6 +43,7 @@ lattice-mesh-member.workspace = true
 lattice-job.workspace = true
 lattice-model.workspace = true
 lattice-webhook.workspace = true
+lattice-cost.workspace = true
 
 kube.workspace = true
 k8s-openapi.workspace = true

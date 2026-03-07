@@ -30,6 +30,7 @@ pub mod autoscaling;
 pub mod backup;
 pub mod capi;
 pub mod cedar;
+pub mod cost;
 pub mod cedar_secrets;
 pub mod cedar_security;
 pub mod celery_queue;
