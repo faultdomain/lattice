@@ -40,7 +40,10 @@ impl MetricsScraper {
             query_path(ha),
         );
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .use_rustls_tls()
+                .build()
+                .expect("failed to build HTTPS client"),
             base_url,
         }
     }
