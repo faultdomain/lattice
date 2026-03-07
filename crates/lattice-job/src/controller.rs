@@ -25,6 +25,7 @@ use tracing::{error, info, warn};
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{JobPhase, LatticeJob, LatticeJobStatus, ProviderType};
+use lattice_cost::CostProvider;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
@@ -51,6 +52,8 @@ pub struct JobContext {
     pub provider_type: ProviderType,
     pub cedar: Arc<PolicyEngine>,
     pub registry: Arc<CrdRegistry>,
+    /// Cost provider for estimating workload costs (None = cost estimation disabled)
+    pub cost_provider: Option<Arc<dyn CostProvider>>,
 }
 
 impl JobContext {
@@ -69,6 +72,7 @@ impl JobContext {
             provider_type,
             cedar,
             registry,
+            cost_provider: None,
         }
     }
 }
@@ -268,6 +272,11 @@ async fn submit_job(
     if job.spec.training.is_some() {
         status.start_time = Some(chrono::Utc::now().to_rfc3339());
     }
+    let job_spec = &job.spec;
+    status.cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates, ts| {
+        lattice_cost::estimate_job_cost(job_spec, rates, ts)
+    })
+    .await;
     patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await?;
     Ok(())
 }

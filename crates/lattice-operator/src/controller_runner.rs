@@ -33,6 +33,7 @@ use lattice_common::crd::{
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
+use lattice_cost::CostProvider;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
 
@@ -82,6 +83,7 @@ pub async fn build_service_controllers(
     cedar: Arc<PolicyEngine>,
     registry: Arc<CrdRegistry>,
     monitoring: MonitoringConfig,
+    cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> (
     Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
     Arc<lattice_common::graph::ServiceGraph>,
@@ -97,6 +99,7 @@ pub async fn build_service_controllers(
         monitoring,
     );
     service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(registry.clone()))];
+    service_ctx.cost_provider = cost_provider.clone();
 
     // Warm the service graph before controllers start so existing services
     // aren't demoted to Compiling on restart due to missing dependency info.
@@ -241,17 +244,20 @@ pub async fn build_job_controllers(
     cedar: Arc<PolicyEngine>,
     graph: Arc<lattice_common::graph::ServiceGraph>,
     registry: Arc<CrdRegistry>,
+    cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
-    let ctx = Arc::new(lattice_job::controller::JobContext::new(
+    let mut job_ctx = lattice_job::controller::JobContext::new(
         client.clone(),
         graph,
         cluster_name,
         provider_type,
         cedar,
         registry,
-    ));
+    );
+    job_ctx.cost_provider = cost_provider;
+    let ctx = Arc::new(job_ctx);
 
     let jobs: Api<LatticeJob> = Api::all(client);
 
@@ -277,17 +283,20 @@ pub async fn build_model_controllers(
     cedar: Arc<PolicyEngine>,
     graph: Arc<lattice_common::graph::ServiceGraph>,
     registry: Arc<CrdRegistry>,
+    cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
-    let ctx = Arc::new(lattice_model::controller::ModelContext::new(
+    let mut model_ctx = lattice_model::controller::ModelContext::new(
         client.clone(),
         graph,
         cluster_name,
         provider_type,
         cedar,
         registry,
-    ));
+    );
+    model_ctx.cost_provider = cost_provider;
+    let ctx = Arc::new(model_ctx);
 
     let models: Api<LatticeModel> = Api::all(client);
 

@@ -9,6 +9,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::workload::cost::CostEstimate;
 use super::workload::scaling::AutoscalingMetric;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 use super::workload::topology::WorkloadNetworkTopology;
@@ -626,6 +627,10 @@ pub struct LatticeModelStatus {
     /// Used for orphan cleanup when roles are removed from the spec.
     #[serde(default)]
     pub applied_roles: Option<Vec<String>>,
+
+    /// Estimated cost based on resource requests and current rates
+    #[serde(default)]
+    pub cost: Option<CostEstimate>,
 }
 
 /// A condition on a LatticeModel (mirrored from ModelServing status)

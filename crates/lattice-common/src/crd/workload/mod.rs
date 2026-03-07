@@ -5,6 +5,7 @@
 
 pub mod backup;
 pub mod container;
+pub mod cost;
 pub mod deploy;
 pub mod ingress;
 pub mod merge;

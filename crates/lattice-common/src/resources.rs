@@ -51,15 +51,10 @@ pub fn is_node_ready(node: &Node) -> bool {
 // Quantity parsing
 // ---------------------------------------------------------------------------
 
-/// Parse a Kubernetes CPU quantity to millicores.
+/// Parse a CPU quantity string to millicores.
 ///
 /// Handles formats: `"1"` (cores), `"500m"` (millicores), `"1.5"` (fractional cores).
-pub fn parse_cpu_millis(quantity: Option<&Quantity>) -> i64 {
-    let s = match quantity {
-        Some(q) => &q.0,
-        None => return 0,
-    };
-
+pub fn parse_cpu_millis_str(s: &str) -> i64 {
     if let Some(millis) = s.strip_suffix('m') {
         millis.parse::<i64>().unwrap_or(0)
     } else if let Ok(cores) = s.parse::<f64>() {
@@ -69,16 +64,19 @@ pub fn parse_cpu_millis(quantity: Option<&Quantity>) -> i64 {
     }
 }
 
-/// Parse a Kubernetes memory quantity to bytes.
+/// Parse a Kubernetes CPU `Quantity` to millicores.
+pub fn parse_cpu_millis(quantity: Option<&Quantity>) -> i64 {
+    match quantity {
+        Some(q) => parse_cpu_millis_str(&q.0),
+        None => 0,
+    }
+}
+
+/// Parse a memory quantity string to bytes.
 ///
 /// Handles binary suffixes (`Ki`, `Mi`, `Gi`, `Ti`), decimal suffixes
 /// (`k`, `M`, `G`, `T`), and plain byte values.
-pub fn parse_memory_bytes(quantity: Option<&Quantity>) -> i64 {
-    let s = match quantity {
-        Some(q) => &q.0,
-        None => return 0,
-    };
-
+pub fn parse_memory_bytes_str(s: &str) -> i64 {
     if let Some(v) = s.strip_suffix("Ki") {
         return v.parse::<i64>().unwrap_or(0) * 1024;
     }
@@ -103,8 +101,15 @@ pub fn parse_memory_bytes(quantity: Option<&Quantity>) -> i64 {
     if let Some(v) = s.strip_suffix('T') {
         return v.parse::<i64>().unwrap_or(0) * 1_000_000_000_000;
     }
-
     s.parse::<i64>().unwrap_or(0)
+}
+
+/// Parse a Kubernetes memory `Quantity` to bytes.
+pub fn parse_memory_bytes(quantity: Option<&Quantity>) -> i64 {
+    match quantity {
+        Some(q) => parse_memory_bytes_str(&q.0),
+        None => 0,
+    }
 }
 
 /// Parse a Kubernetes quantity as a plain integer (for GPU counts).

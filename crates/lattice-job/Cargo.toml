@@ -16,6 +16,7 @@ lattice-tetragon = { workspace = true }
 lattice-volcano = { workspace = true }
 lattice-cedar = { workspace = true }
 lattice-secret-provider = { workspace = true }
+lattice-cost = { workspace = true }
 
 # Crypto (FIPS)
 aws-lc-rs = { workspace = true }

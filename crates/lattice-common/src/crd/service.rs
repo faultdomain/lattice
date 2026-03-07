@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use kube::CustomResource;
+
+use super::workload::cost::CostEstimate;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -190,6 +192,10 @@ pub struct LatticeServiceStatus {
     /// Resolved dependency URLs
     #[serde(default)]
     pub resolved_dependencies: BTreeMap<String, String>,
+
+    /// Estimated cost based on resource requests and current rates
+    #[serde(default)]
+    pub cost: Option<CostEstimate>,
 }
 
 impl LatticeServiceStatus {
@@ -229,6 +235,12 @@ impl LatticeServiceStatus {
     /// Set the observed generation for change detection
     pub fn observed_generation(mut self, gen: Option<i64>) -> Self {
         self.observed_generation = gen;
+        self
+    }
+
+    /// Set the cost estimate
+    pub fn cost(mut self, cost: Option<CostEstimate>) -> Self {
+        self.cost = cost;
         self
     }
 }

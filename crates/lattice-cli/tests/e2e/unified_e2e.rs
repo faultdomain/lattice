@@ -248,6 +248,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Cost: per-workload cost estimation
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Cost",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::cost::run_cost_tests(&kc).await
+            }),
+        ));
+    }
+
     // Webhook: admission validation
     {
         let kc = ctx.require_workload()?.to_string();
