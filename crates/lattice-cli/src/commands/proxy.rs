@@ -3,11 +3,21 @@
 //! Provides shared logic for fetching proxy kubeconfigs. Used by `lattice login`
 //! and `lattice install`.
 
-use tracing::debug;
+use std::time::Duration;
+
+use tracing::{debug, warn};
 
 use crate::{Error, Result};
 
+/// Maximum number of retry attempts for transient (5xx / connection) errors.
+const MAX_RETRIES: u32 = 5;
+/// Initial backoff delay between retries.
+const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
+
 /// Fetch kubeconfig JSON from the proxy's `/kubeconfig` endpoint.
+///
+/// Retries on transient errors (5xx, connection failures) with exponential
+/// backoff. Fails immediately on 4xx errors (auth/permission problems).
 pub(crate) async fn fetch_kubeconfig(server: &str, token: &str, insecure: bool) -> Result<String> {
     let client = if insecure {
         reqwest::Client::builder()
@@ -19,34 +29,79 @@ pub(crate) async fn fetch_kubeconfig(server: &str, token: &str, insecure: bool) 
     };
 
     let url = format!("{}/kubeconfig", server.trim_end_matches('/'));
-    debug!("Fetching kubeconfig from {}", url);
+    let mut backoff = INITIAL_BACKOFF;
 
-    let response = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", token))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| Error::command_failed(format!("failed to connect to {}: {}", url, e)))?;
+    for attempt in 1..=MAX_RETRIES {
+        debug!("Fetching kubeconfig from {} (attempt {})", url, attempt);
 
-    let status = response.status();
-    if !status.is_success() {
+        let result = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await;
+
+        let response = match result {
+            Ok(r) => r,
+            Err(e) => {
+                if attempt == MAX_RETRIES {
+                    return Err(Error::command_failed(format!(
+                        "failed to connect to {} after {} attempts: {}",
+                        url, MAX_RETRIES, e
+                    )));
+                }
+                warn!(
+                    "Failed to connect to {} (attempt {}/{}): {}, retrying in {:?}",
+                    url, attempt, MAX_RETRIES, e, backoff
+                );
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+                continue;
+            }
+        };
+
+        let status = response.status();
+        if status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|e| {
+                    Error::command_failed(format!("failed to read response body: {}", e))
+                })?;
+
+            serde_json::from_str::<serde_json::Value>(&body).map_err(|e| {
+                Error::command_failed(format!("proxy returned invalid JSON: {}", e))
+            })?;
+
+            return Ok(body);
+        }
+
+        // 4xx errors are not transient — fail immediately
+        if status.is_client_error() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::command_failed(format!(
+                "proxy returned {} from {}: {}",
+                status, url, body
+            )));
+        }
+
+        // 5xx errors are transient — retry
         let body = response.text().await.unwrap_or_default();
-        return Err(Error::command_failed(format!(
-            "proxy returned {} from {}: {}",
-            status, url, body
-        )));
+        if attempt == MAX_RETRIES {
+            return Err(Error::command_failed(format!(
+                "proxy returned {} from {} after {} attempts: {}",
+                status, url, MAX_RETRIES, body
+            )));
+        }
+        warn!(
+            "Proxy returned {} (attempt {}/{}): {}, retrying in {:?}",
+            status, attempt, MAX_RETRIES, body, backoff
+        );
+        tokio::time::sleep(backoff).await;
+        backoff *= 2;
     }
 
-    let body = response
-        .text()
-        .await
-        .map_err(|e| Error::command_failed(format!("failed to read response body: {}", e)))?;
-
-    serde_json::from_str::<serde_json::Value>(&body)
-        .map_err(|e| Error::command_failed(format!("proxy returned invalid JSON: {}", e)))?;
-
-    Ok(body)
+    unreachable!("loop always returns")
 }
 
 /// Extract cluster names (context names) from a proxy kubeconfig JSON string.
