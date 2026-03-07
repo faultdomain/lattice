@@ -378,7 +378,7 @@ async fn test_gpu_loss_flap(kubeconfig: &str, node: &str) -> Result<(), String> 
         ],
     )
     .await?;
-    // Remove the loss-at timestamp (DaemonSet sets it to empty string on recovery).
+    // Remove the loss-at timestamp (DaemonSet uses merge-patch null to delete on recovery).
     let _ = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,

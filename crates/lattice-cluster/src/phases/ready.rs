@@ -467,8 +467,8 @@ async fn create_missing_pool_resources(
 /// at the threshold, the lowest-confidence warning node is selectively
 /// uncordoned to relieve scheduling pressure.
 ///
-/// Drains only happen when GPUs are confirmed lost (dropped to 0), the loss
-/// has persisted for >60s, AND other GPU capacity exists in the cluster.
+/// Drains only happen when GPUs are confirmed lost (dropped to 0) and the loss
+/// has persisted for >60s.
 /// Drains only evict pods that request GPU resources (not CPU-only pods).
 async fn reconcile_gpu_health(
     cluster: &LatticeCluster,
