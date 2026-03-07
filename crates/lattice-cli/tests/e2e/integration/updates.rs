@@ -388,7 +388,8 @@ async fn test_model_loading_detects_spec_change(
     let yaml = load_model_fixture_for_namespace(namespace)?;
     apply_yaml(kubeconfig, &yaml).await?;
 
-    // Wait for Loading (compilation done, resources applied, waiting for readiness)
+    // Wait for Loading (or Serving if the transition was too fast for the poll
+    // interval to catch — phase_reached treats Serving as having passed Loading)
     wait_for_resource_phase(
         kubeconfig,
         "latticemodel",
@@ -399,12 +400,15 @@ async fn test_model_loading_detects_spec_change(
     )
     .await?;
 
-    let gen_at_loading =
-        get_model_observed_generation(kubeconfig, namespace, "llm-serving").await?;
-    info!("[Updates] Model at Loading: observed_generation = {gen_at_loading}");
+    // Record the generation before patching so we can wait for the controller
+    // to finish processing the spec change
+    let gen_before: i64 = get_model_generation(kubeconfig, namespace, "llm-serving")
+        .await?
+        .parse()
+        .unwrap_or(0);
+    info!("[Updates] Model before patch: generation = {gen_before}");
 
-    // Patch decode replicas from 1 → 2 while still Loading
-    // This bumps metadata.generation but the Loading phase won't notice (the gap)
+    // Patch decode replicas from 1 → 2 (bumps metadata.generation)
     let patch_json = serde_json::json!({
         "spec": {
             "roles": {
@@ -423,9 +427,13 @@ async fn test_model_loading_detects_spec_change(
         "merge",
     )
     .await?;
-    info!("[Updates] Patched decode replicas to 2 while Loading");
+    info!("[Updates] Patched decode replicas to 2");
 
-    // Wait for the model to reach Serving (whether or not it recompiled)
+    // Wait for observed_generation to advance past pre-patch generation,
+    // confirming the controller has processed the spec change
+    wait_for_model_generation_advance(kubeconfig, namespace, "llm-serving", gen_before).await?;
+
+    // Now wait for Serving (the controller recompiles and re-enters Loading→Serving)
     wait_for_resource_phase(
         kubeconfig,
         "latticemodel",
@@ -444,10 +452,8 @@ async fn test_model_loading_detects_spec_change(
     if decode_replicas != 2 {
         return Err(format!(
             "ModelServing decode replicas = {decode_replicas}, expected 2. \
-             The Loading phase did not detect the spec change — compiled resources \
-             are stale but observed_generation was stamped with the new generation. \
-             Loading must check spec_changed_since_compilation and go back to Pending \
-             when the generation doesn't match."
+             The controller did not detect the spec change — compiled resources \
+             are stale but observed_generation was stamped with the new generation."
         ));
     }
 

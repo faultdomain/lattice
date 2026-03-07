@@ -174,8 +174,12 @@ fn phase_reached(current: &str, expected: &str) -> bool {
     if current == expected {
         return true;
     }
-    // Terminal phases imply Running was reached
+    // Terminal phases imply Running was reached (LatticeJob)
     if expected == "Running" && matches!(current, "Succeeded" | "Failed") {
+        return true;
+    }
+    // Serving implies Loading was reached (LatticeModel)
+    if expected == "Loading" && current == "Serving" {
         return true;
     }
     false
