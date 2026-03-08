@@ -171,6 +171,7 @@ pub async fn update_status(
         version: current_status.version,
         infrastructure: current_status.infrastructure,
         pool_resources: current_status.pool_resources,
+        lattice_image: current_status.lattice_image,
     };
 
     // Set pivot_complete if requested (persists pivot completion across restarts)

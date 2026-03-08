@@ -161,6 +161,17 @@ pub trait KubeClient: Send + Sync {
     ///
     /// Used by the Ready phase to check GPU annotations on all nodes.
     async fn list_nodes(&self) -> Result<Vec<k8s_openapi::api::core::v1::Node>, Error>;
+
+    /// Get the container image of the lattice-operator Deployment.
+    ///
+    /// Reads the first container's image from the `lattice-operator` Deployment
+    /// in `lattice-system`. Returns None if the Deployment doesn't exist.
+    async fn get_operator_deployment_image(&self) -> Result<Option<String>, Error>;
+
+    /// Patch the container image of the lattice-operator Deployment.
+    ///
+    /// Uses a strategic merge patch to update the first container's image.
+    async fn patch_operator_deployment_image(&self, image: &str) -> Result<(), Error>;
 }
 
 /// Real Kubernetes client implementation
@@ -584,5 +595,49 @@ impl KubeClient for KubeClientImpl {
         let node_api: Api<Node> = Api::all(self.client.clone());
         let nodes = node_api.list(&Default::default()).await?;
         Ok(nodes.items)
+    }
+
+    async fn get_operator_deployment_image(&self) -> Result<Option<String>, Error> {
+        use k8s_openapi::api::apps::v1::Deployment;
+
+        let api: Api<Deployment> =
+            Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let deploy = match get_optional(&api, "lattice-operator").await? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let image = deploy
+            .spec
+            .and_then(|s| s.template.spec)
+            .and_then(|s| s.containers.first().cloned())
+            .and_then(|c| c.image);
+        Ok(image)
+    }
+
+    async fn patch_operator_deployment_image(&self, image: &str) -> Result<(), Error> {
+        use k8s_openapi::api::apps::v1::Deployment;
+
+        let api: Api<Deployment> =
+            Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let patch = serde_json::json!({
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [{
+                            "name": "lattice-operator",
+                            "image": image
+                        }]
+                    }
+                }
+            }
+        });
+        api.patch(
+            "lattice-operator",
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Strategic(&patch),
+        )
+        .await?;
+        info!(image = %image, "Patched lattice-operator Deployment image");
+        Ok(())
     }
 }

@@ -223,6 +223,11 @@ async fn run_controller(
     tracing::info!(pod = %pod_name, "Adding leader label to claim traffic...");
     guard.claim_traffic(&pod_name).await?;
 
+    // Report running operator image in status.latticeImage on startup
+    if let Some(ref self_name) = std::env::var("LATTICE_CLUSTER_NAME").ok() {
+        report_running_image(&client, self_name).await;
+    }
+
     // Dispatch to the appropriate vertical slice
     tracing::info!("Starting Lattice controllers...");
     let handle = match mode {
@@ -1089,4 +1094,65 @@ fn start_oidc_provider_watcher(client: kube::Client, auth_chain: Arc<AuthChain>)
             }
         }
     });
+}
+
+/// Report the currently running operator image in `status.latticeImage`.
+///
+/// Reads the `lattice-operator` Deployment image and patches the self-cluster's
+/// LatticeCluster status so the image is visible immediately on startup,
+/// even before the first reconcile loop.
+async fn report_running_image(client: &kube::Client, cluster_name: &str) {
+    use k8s_openapi::api::apps::v1::Deployment;
+
+    let deploy_api: Api<Deployment> =
+        Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    let image = match deploy_api.get("lattice-operator").await {
+        Ok(deploy) => deploy
+            .spec
+            .and_then(|s| s.template.spec)
+            .and_then(|s| s.containers.first().cloned())
+            .and_then(|c| c.image),
+        Err(e) => {
+            tracing::debug!(error = %e, "Could not read operator Deployment for image reporting");
+            return;
+        }
+    };
+
+    let Some(image) = image else {
+        return;
+    };
+
+    let clusters: Api<LatticeCluster> = Api::all(client.clone());
+    match clusters.get(cluster_name).await {
+        Ok(cluster) => {
+            let needs_update = cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.lattice_image.as_deref())
+                != Some(&image);
+
+            if needs_update {
+                let mut status = cluster.status.unwrap_or_default();
+                status.lattice_image = Some(image.clone());
+
+                let patch = serde_json::json!({ "status": status });
+                if let Err(e) = clusters
+                    .patch_status(
+                        cluster_name,
+                        &kube::api::PatchParams::default(),
+                        &kube::api::Patch::Merge(&patch),
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "Failed to report running image in status");
+                } else {
+                    tracing::info!(image = %image, "Reported running operator image in status");
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "Could not read self-cluster for image reporting");
+        }
+    }
 }

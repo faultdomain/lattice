@@ -378,6 +378,8 @@ mod tests {
                 backups: BackupsConfig::default(),
                 network_topology: None,
                 registry_mirrors: None,
+                lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+                cascade_upgrade: false,
             },
             status: None,
         }

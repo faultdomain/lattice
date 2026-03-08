@@ -94,7 +94,8 @@ mod tests {
                     "workerPools": {
                         "default": { "replicas": 2 }
                     }
-                }
+                },
+                "latticeImage": "ghcr.io/evan-hines-js/lattice:latest"
             }
         })
     }

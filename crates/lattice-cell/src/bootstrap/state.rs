@@ -257,9 +257,16 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         &self,
         info: &ClusterBootstrapInfo,
     ) -> Result<BootstrapResponse, BootstrapError> {
+        // Use the child's latticeImage from its cluster manifest if available,
+        // falling back to the parent's image if not present.
+        let child_image = serde_json::from_str::<serde_json::Value>(&info.cluster_manifest)
+            .ok()
+            .and_then(|v| v["spec"]["latticeImage"].as_str().map(String::from));
+        let bootstrap_image = child_image.as_deref().unwrap_or(&self.image);
+
         // Generate the complete bootstrap bundle (operator, CNI, addons, LatticeCluster)
         let bundle_config = BootstrapBundleConfig {
-            image: &self.image,
+            image: bootstrap_image,
             registry_credentials: self.registry_credentials.as_deref(),
             lb_cidr: info.lb_cidr.as_deref(),
             cluster_name: &info.cluster_id,

@@ -55,6 +55,7 @@ pub mod tetragon;
 pub mod topology;
 pub mod training;
 pub mod updates;
+pub mod upgrade;
 pub mod vault_secrets;
 pub mod webapp_postgres;
 pub mod webhook;

@@ -364,11 +364,15 @@ async fn fetch_operator_graph(kubeconfig: &str) -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("spawn port-forward: {e}"))?;
 
-    // Wait for "Forwarding from 127.0.0.1:PORT" and extract the port
+    // Wait for "Forwarding from 127.0.0.1:PORT" and extract the port.
+    // We read both stdout (for the port) and stderr (for error details).
     let stdout = child.stdout.take().unwrap();
-    let mut reader = tokio::io::BufReader::new(stdout).lines();
+    let stderr = child.stderr.take().unwrap();
+    let mut stdout_reader = tokio::io::BufReader::new(stdout).lines();
+    let mut stderr_reader = tokio::io::BufReader::new(stderr);
+
     let local_port = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        while let Ok(Some(line)) = reader.next_line().await {
+        while let Ok(Some(line)) = stdout_reader.next_line().await {
             // kubectl prints "Forwarding from 127.0.0.1:PORT -> 8080"
             if let Some(rest) = line.strip_prefix("Forwarding from 127.0.0.1:") {
                 if let Some(port_str) = rest.split_whitespace().next() {
@@ -378,7 +382,15 @@ async fn fetch_operator_graph(kubeconfig: &str) -> Result<String, String> {
                 }
             }
         }
-        Err("port-forward stdout ended before ready".to_string())
+        // stdout ended without the "Forwarding from" line — read stderr for the reason
+        let mut stderr_buf = String::new();
+        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr_reader, &mut stderr_buf).await;
+        let detail = stderr_buf.trim();
+        if detail.is_empty() {
+            Err("port-forward stdout ended before ready (no stderr)".to_string())
+        } else {
+            Err(format!("port-forward failed: {detail}"))
+        }
     })
     .await
     .map_err(|_| "port-forward timed out waiting for ready".to_string())?

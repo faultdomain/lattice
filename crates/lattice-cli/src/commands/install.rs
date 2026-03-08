@@ -149,11 +149,20 @@ impl Installer {
             cluster.spec.provider.kubernetes.bootstrap = bootstrap;
         }
 
+        // Set spec.latticeImage from --image flag if not already set in YAML
+        if cluster.spec.lattice_image.is_empty() {
+            cluster.spec.lattice_image = image.clone();
+        }
+
         let cluster_name = cluster
             .metadata
             .name
             .clone()
             .ok_or_else(|| Error::validation("LatticeCluster must have metadata.name"))?;
+
+        // Re-serialize the cluster YAML with any mutations applied
+        let cluster_yaml = serde_json::to_string(&cluster)
+            .map_err(|e| Error::validation(format!("Failed to re-serialize LatticeCluster: {}", e)))?;
 
         Ok(Self {
             cluster_yaml,
@@ -1799,6 +1808,7 @@ spec:
     controlPlane:
       replicas: 1
     workerPools: {}
+  latticeImage: "test:latest"
 "#;
         Installer::new(
             cluster_yaml.to_string(),

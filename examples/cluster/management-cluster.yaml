@@ -8,6 +8,7 @@ metadata:
     lattice.dev/environment: example
     lattice.dev/region: local
 spec:
+  latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
   providerRef: docker
   provider:
     kubernetes:

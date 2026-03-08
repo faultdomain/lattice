@@ -11,6 +11,25 @@ use tracing::{debug, warn};
 use crate::kube_client::KubeClientProvider;
 use lattice_proto::{ClusterHealth, NodeCondition, PoolResources};
 
+/// Read the operator's own Deployment image from the `lattice-operator` Deployment
+/// in `lattice-system`. Returns None if the Deployment can't be read.
+pub async fn get_operator_image(kube_provider: &dyn KubeClientProvider) -> Option<String> {
+    let client = kube_provider.create().await.ok()?;
+
+    let deploy_api: kube::Api<k8s_openapi::api::apps::v1::Deployment> =
+        kube::Api::namespaced(client, lattice_common::LATTICE_SYSTEM_NAMESPACE);
+
+    let deploy = deploy_api.get("lattice-operator").await.ok()?;
+    deploy
+        .spec?
+        .template
+        .spec?
+        .containers
+        .first()?
+        .image
+        .clone()
+}
+
 /// Gather cluster health from the Kubernetes API.
 ///
 /// Lists nodes and counts ready vs total for control-plane and worker nodes.

@@ -380,6 +380,8 @@ mod tests {
                 backups: BackupsConfig::default(),
                 network_topology: None,
                 registry_mirrors: None,
+                lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+                cascade_upgrade: false,
             },
             status: None,
         }
@@ -879,6 +881,205 @@ mod tests {
                 .to_string()
                 .contains("CAPI apply failed"));
         }
+
+        // ===== Operator Image Upgrade Tests =====
+
+        /// Story: When the self-cluster's latticeImage matches the running
+        /// Deployment image, the controller writes status.latticeImage and
+        /// requeues at the normal 60s interval (no Deployment patch).
+        #[tokio::test]
+        async fn self_cluster_image_up_to_date_writes_status() {
+            let image = "ghcr.io/evan-hines-js/lattice:latest";
+            let mut cluster = cluster_with_phase("self-cluster", ClusterPhase::Ready);
+            cluster.spec.lattice_image = image.to_string();
+            let cluster = Arc::new(cluster);
+
+            let mut mock = MockKubeClient::new();
+            mock.expect_get_operator_deployment_image()
+                .returning(|| Ok(Some("ghcr.io/evan-hines-js/lattice:latest".to_string())));
+            mock.expect_patch_status().returning(|_, _| Ok(()));
+            mock.expect_get_ready_node_counts().returning(|| {
+                Ok(NodeCounts {
+                    ready_control_plane: 1,
+                    ready_workers: 2,
+                    pool_resources: vec![],
+                })
+            });
+            mock.expect_list_nodes().returning(|| Ok(vec![]));
+            mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
+            mock.expect_get_cloud_provider()
+                .returning(|_| Ok(Some(sample_docker_provider())));
+
+            let mut capi_mock = MockCAPIClient::new();
+            capi_mock
+                .expect_get_pool_replicas()
+                .returning(|_, _, _| Ok(Some(2)));
+            capi_mock
+                .expect_get_cp_version()
+                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+            capi_mock
+                .expect_is_cluster_stable()
+                .returning(|_, _| Ok(true));
+            capi_mock
+                .expect_get_pool_version()
+                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+
+            let mut ctx = Context::for_testing(
+                Arc::new(mock),
+                Arc::new(capi_mock),
+                mock_capi_installer(),
+            );
+            ctx.self_cluster_name = Some("self-cluster".to_string());
+            let ctx = Arc::new(ctx);
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
+
+            assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        }
+
+        /// Story: When the self-cluster's latticeImage differs from the running
+        /// Deployment image, the controller patches the Deployment and returns
+        /// a 10s requeue (upgrade in progress).
+        #[tokio::test]
+        async fn self_cluster_image_mismatch_triggers_upgrade() {
+            let mut cluster = cluster_with_phase("self-cluster", ClusterPhase::Ready);
+            cluster.spec.lattice_image = "ghcr.io/evan-hines-js/lattice:v2.0.0".to_string();
+            let cluster = Arc::new(cluster);
+
+            let mut mock = MockKubeClient::new();
+            mock.expect_get_operator_deployment_image()
+                .returning(|| Ok(Some("ghcr.io/evan-hines-js/lattice:v1.0.0".to_string())));
+            mock.expect_patch_operator_deployment_image()
+                .withf(|img| img == "ghcr.io/evan-hines-js/lattice:v2.0.0")
+                .returning(|_| Ok(()));
+            mock.expect_patch_status().returning(|_, _| Ok(()));
+            mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
+            mock.expect_get_cloud_provider()
+                .returning(|_| Ok(Some(sample_docker_provider())));
+
+            let capi_mock = MockCAPIClient::new();
+            let mut ctx = Context::for_testing(
+                Arc::new(mock),
+                Arc::new(capi_mock),
+                mock_capi_installer(),
+            );
+            ctx.self_cluster_name = Some("self-cluster".to_string());
+            let ctx = Arc::new(ctx);
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
+
+            assert_eq!(action, Action::requeue(Duration::from_secs(10)));
+        }
+
+        /// Story: Non-self clusters should not attempt to reconcile the
+        /// operator image — only the cluster running the controller does that.
+        #[tokio::test]
+        async fn non_self_cluster_skips_operator_image_reconciliation() {
+            let mut cluster = cluster_with_phase("child-cluster", ClusterPhase::Ready);
+            cluster.spec.lattice_image = "ghcr.io/evan-hines-js/lattice:v2.0.0".to_string();
+            let cluster = Arc::new(cluster);
+
+            let mut mock = MockKubeClient::new();
+            mock.expect_get_operator_deployment_image().never();
+            mock.expect_patch_operator_deployment_image().never();
+            mock.expect_patch_status().returning(|_, _| Ok(()));
+            mock.expect_get_ready_node_counts().returning(|| {
+                Ok(NodeCounts {
+                    ready_control_plane: 1,
+                    ready_workers: 2,
+                    pool_resources: vec![],
+                })
+            });
+            mock.expect_list_nodes().returning(|| Ok(vec![]));
+            mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
+            mock.expect_get_cloud_provider()
+                .returning(|_| Ok(Some(sample_docker_provider())));
+
+            let mut capi_mock = MockCAPIClient::new();
+            capi_mock
+                .expect_get_pool_replicas()
+                .returning(|_, _, _| Ok(Some(2)));
+            capi_mock
+                .expect_get_cp_version()
+                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+            capi_mock
+                .expect_is_cluster_stable()
+                .returning(|_, _| Ok(true));
+            capi_mock
+                .expect_get_pool_version()
+                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+
+            let mut ctx = Context::for_testing(
+                Arc::new(mock),
+                Arc::new(capi_mock),
+                mock_capi_installer(),
+            );
+            ctx.self_cluster_name = Some("mgmt".to_string());
+            let ctx = Arc::new(ctx);
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
+
+            assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        }
+
+        /// Story: If the operator Deployment doesn't exist, the error is
+        /// logged and reconciliation continues (non-blocking). The controller
+        /// still requeues normally so the upgrade can be retried.
+        #[tokio::test]
+        async fn missing_operator_deployment_continues_reconciliation() {
+            let cluster = Arc::new(cluster_with_phase("self-cluster", ClusterPhase::Ready));
+
+            let mut mock = MockKubeClient::new();
+            mock.expect_get_operator_deployment_image()
+                .returning(|| Ok(None));
+            mock.expect_patch_status().returning(|_, _| Ok(()));
+            mock.expect_get_ready_node_counts().returning(|| {
+                Ok(NodeCounts {
+                    ready_control_plane: 1,
+                    ready_workers: 2,
+                    pool_resources: vec![],
+                })
+            });
+            mock.expect_list_nodes().returning(|| Ok(vec![]));
+            mock.expect_add_cluster_finalizer().returning(|_, _| Ok(()));
+            mock.expect_get_cloud_provider()
+                .returning(|_| Ok(Some(sample_docker_provider())));
+
+            let mut capi_mock = MockCAPIClient::new();
+            capi_mock
+                .expect_get_pool_replicas()
+                .returning(|_, _, _| Ok(Some(2)));
+            capi_mock
+                .expect_get_cp_version()
+                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+            capi_mock
+                .expect_is_cluster_stable()
+                .returning(|_, _| Ok(true));
+            capi_mock
+                .expect_get_pool_version()
+                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+
+            let mut ctx = Context::for_testing(
+                Arc::new(mock),
+                Arc::new(capi_mock),
+                mock_capi_installer(),
+            );
+            ctx.self_cluster_name = Some("self-cluster".to_string());
+            let ctx = Arc::new(ctx);
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed despite missing Deployment");
+
+            // Continues with normal reconciliation
+            assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        }
     }
 
     mod error_policy_tests {
@@ -1023,6 +1224,8 @@ mod tests {
                     backups: BackupsConfig::default(),
                     network_topology: None,
                     registry_mirrors: None,
+                    lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+                    cascade_upgrade: false,
                 },
                 status: None,
             }
