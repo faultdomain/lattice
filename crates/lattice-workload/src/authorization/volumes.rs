@@ -36,28 +36,35 @@ pub(crate) async fn authorize_volumes(
     // Layer 1: Owner consent via graph
     let mut denied = Vec::new();
     for (resource_name, vol_ns, volume_id) in &volume_refs {
-        if let Some(ownership) = graph.get_volume_owner(vol_ns, volume_id) {
-            let consumer_key_short = name.to_string();
-            let consumer_key_qualified = format!("{}/{}", namespace, name);
+        let Some(ownership) = graph.get_volume_owner(vol_ns, volume_id) else {
+            denied.push(format!(
+                "'{}': no owner found for volume '{}' in namespace '{}' \
+                 (owner service may not exist or hasn't declared size)",
+                resource_name, volume_id, vol_ns,
+            ));
+            continue;
+        };
 
-            let allowed = ownership
-                .params
-                .allowed_consumers
-                .as_ref()
-                .map(|consumers| {
-                    consumers.iter().any(|c| {
-                        c == &consumer_key_qualified
-                            || (c == &consumer_key_short && namespace == vol_ns)
-                    })
+        let consumer_key_short = name.to_string();
+        let consumer_key_qualified = format!("{}/{}", namespace, name);
+
+        let allowed = ownership
+            .params
+            .allowed_consumers
+            .as_ref()
+            .map(|consumers| {
+                consumers.iter().any(|c| {
+                    c == &consumer_key_qualified
+                        || (c == &consumer_key_short && namespace == vol_ns)
                 })
-                .unwrap_or(false);
+            })
+            .unwrap_or(false);
 
-            if !allowed {
-                denied.push(format!(
-                    "'{}': not in allowedConsumers of volume '{}' owned by '{}/{}'",
-                    resource_name, volume_id, ownership.owner_namespace, ownership.owner_name,
-                ));
-            }
+        if !allowed {
+            denied.push(format!(
+                "'{}': not in allowedConsumers of volume '{}' owned by '{}/{}'",
+                resource_name, volume_id, ownership.owner_namespace, ownership.owner_name,
+            ));
         }
     }
 
