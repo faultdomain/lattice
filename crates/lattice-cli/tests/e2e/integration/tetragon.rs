@@ -823,7 +823,6 @@ async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String
             .unwrap_or_default();
 
             if phase.trim() == "Ready" {
-                delete_namespace(kubeconfig, NS_ALLOWED_BINARIES_CEDAR).await;
                 return Err(format!(
                     "Cedar deny BROKEN: service reached Ready phase instead of Failed. \
                      The OverrideSecurity Cedar policy is not blocking allowedBinaries. Error: {e}"
@@ -977,7 +976,6 @@ async fn test_implicit_wildcard_cedar_deny(kubeconfig: &str) -> Result<(), Strin
             .unwrap_or_default();
 
             if phase.trim() == "Ready" {
-                delete_namespace(kubeconfig, NS_IMPLICIT_CEDAR_DENY).await;
                 return Err(format!(
                     "Cedar deny BROKEN: implicit wildcard service reached Ready instead of Failed. \
                      The OverrideSecurity Cedar policy is not blocking implicit wildcards. Error: {e}"

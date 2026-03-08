@@ -13,6 +13,12 @@ use super::gateway_fixtures::{gateway_traffic_targets, ExpectedStatus};
 use super::helpers::{
     run_kubectl, wait_for_condition, CYCLE_END_MARKER, CYCLE_START_MARKER, DEFAULT_TIMEOUT,
 };
+
+/// Timeout for gateway service/resource discovery (generous for slow CI).
+const GATEWAY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Timeout for gateway resource verification (listeners, routes, certs).
+const GATEWAY_VERIFY_TIMEOUT: Duration = Duration::from_secs(120);
 use super::mesh_helpers::parse_traffic_result;
 
 // =============================================================================
@@ -47,7 +53,7 @@ pub async fn get_gateway_service_ip(kubeconfig: &str, namespace: &str) -> Result
 
     wait_for_condition(
         &format!("gateway service {} to get ClusterIP", svc_name),
-        Duration::from_secs(180),
+        GATEWAY_DISCOVERY_TIMEOUT,
         Duration::from_secs(5),
         || async {
             let output = run_kubectl(&[
@@ -270,7 +276,7 @@ pub async fn wait_for_gateway_ready(kubeconfig: &str, namespace: &str) -> Result
 
     wait_for_condition(
         &format!("Gateway {} to exist", gateway_name),
-        Duration::from_secs(180),
+        GATEWAY_DISCOVERY_TIMEOUT,
         Duration::from_secs(5),
         || async {
             let output = run_kubectl(&[
@@ -299,7 +305,7 @@ pub async fn wait_for_gateway_ready(kubeconfig: &str, namespace: &str) -> Result
     let svc_name = format!("{}-ingress-istio", namespace);
     wait_for_condition(
         &format!("Gateway service {} endpoints", svc_name),
-        Duration::from_secs(180),
+        GATEWAY_DISCOVERY_TIMEOUT,
         Duration::from_secs(5),
         || async {
             let output = run_kubectl(&[
@@ -343,7 +349,7 @@ pub async fn verify_gateway_listeners(
 
     wait_for_condition(
         &format!("Gateway {} to have all listeners", gateway_name),
-        Duration::from_secs(120),
+        GATEWAY_VERIFY_TIMEOUT,
         Duration::from_secs(5),
         || async {
             let output = run_kubectl(&[
@@ -395,7 +401,7 @@ pub async fn verify_httproute(
 
     wait_for_condition(
         &format!("HTTPRoute {} to be correct", route_name),
-        Duration::from_secs(120),
+        GATEWAY_VERIFY_TIMEOUT,
         Duration::from_secs(5),
         || {
             let route_name = route_name.to_string();
@@ -450,7 +456,7 @@ pub async fn verify_certificate(
 ) -> Result<(), String> {
     wait_for_condition(
         &format!("Certificate {} to be correct", cert_name),
-        Duration::from_secs(120),
+        GATEWAY_VERIFY_TIMEOUT,
         Duration::from_secs(5),
         || {
             let cert_name = cert_name.to_string();
@@ -663,7 +669,7 @@ pub async fn verify_httproute_deleted(
 ) -> Result<(), String> {
     wait_for_condition(
         &format!("HTTPRoute {} to be deleted", route_name),
-        Duration::from_secs(120),
+        GATEWAY_VERIFY_TIMEOUT,
         Duration::from_secs(5),
         || {
             let route_name = route_name.to_string();

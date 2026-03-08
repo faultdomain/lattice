@@ -226,12 +226,18 @@ async fn test_normal_no_cordon(kubeconfig: &str, node: &str) -> Result<(), Strin
     )
     .await?;
 
-    // Give the operator two reconcile cycles, then assert still schedulable.
-    tokio::time::sleep(Duration::from_secs(30)).await;
-
-    let cordoned = is_node_cordoned(kubeconfig, node).await?;
-    if cordoned {
-        return Err("Node was cordoned despite normal GPU health".into());
+    // Verify the node stays schedulable across multiple checks (operator should not cordon it).
+    let kc = kubeconfig.to_string();
+    let n = node.to_string();
+    let checks = 6; // 6 checks x 5s = 30s of stability verification
+    for i in 1..=checks {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let cordoned = is_node_cordoned(&kc, &n).await?;
+        if cordoned {
+            return Err(format!(
+                "Node was cordoned despite normal GPU health (detected on check {i}/{checks})"
+            ));
+        }
     }
 
     info!("[Integration/GPUHealth] PASSED: normal annotations → node stayed schedulable");
@@ -311,14 +317,19 @@ async fn test_stale_heartbeat_ignored(kubeconfig: &str, node: &str) -> Result<()
     )
     .await?;
 
-    // Give the operator two reconcile cycles, then assert still schedulable.
-    tokio::time::sleep(Duration::from_secs(30)).await;
-
-    let cordoned = is_node_cordoned(kubeconfig, node).await?;
-    if cordoned {
-        return Err(
-            "Node was cordoned despite stale heartbeat — operator should ignore stale data".into(),
-        );
+    // Verify the node stays schedulable across multiple checks (operator should ignore stale data).
+    let kc = kubeconfig.to_string();
+    let n = node.to_string();
+    let checks = 6; // 6 checks x 5s = 30s of stability verification
+    for i in 1..=checks {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let cordoned = is_node_cordoned(&kc, &n).await?;
+        if cordoned {
+            return Err(format!(
+                "Node was cordoned despite stale heartbeat — operator should ignore stale data \
+                 (detected on check {i}/{checks})"
+            ));
+        }
     }
 
     info!("[Integration/GPUHealth] PASSED: stale heartbeat → node stayed schedulable");

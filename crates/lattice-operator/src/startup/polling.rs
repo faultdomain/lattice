@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 /// Poll for a resource until a condition is met or timeout expires.
 ///
 /// This is a generic helper that consolidates the common pattern of:
-/// 1. Polling in a loop with a delay
-/// 2. Having a timeout to avoid infinite waits
-/// 3. Handling transient errors gracefully
+/// - Polling in a loop with a delay
+/// - Having a timeout to avoid infinite waits
+/// - Handling transient errors gracefully
 ///
 /// # Arguments
 /// * `description` - Human-readable description for logging

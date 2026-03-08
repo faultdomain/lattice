@@ -42,6 +42,37 @@ use lattice_service::controller::{reconcile as service_reconcile, ServiceContext
 /// preventing "body read timed out" errors on idle watches.
 const WATCH_TIMEOUT_SECS: u32 = 25;
 
+/// Build a standard controller future: create a `Controller`, wire shutdown,
+/// run with `default_error_policy`, and log every reconciliation result.
+///
+/// This encapsulates the repeated pattern used by provider/backup controllers
+/// that need no extra watches or custom error policies.
+fn simple_controller<K, Ctx, ReconcileFut, Err>(
+    api: Api<K>,
+    reconcile_fn: impl FnMut(Arc<K>, Arc<Ctx>) -> ReconcileFut + Send + 'static,
+    ctx: Arc<Ctx>,
+    name: &'static str,
+) -> Pin<Box<dyn Future<Output = ()> + Send>>
+where
+    K: kube::Resource<DynamicType = ()>
+        + Clone
+        + std::fmt::Debug
+        + serde::de::DeserializeOwned
+        + Send
+        + Sync
+        + 'static,
+    Ctx: Send + Sync + 'static,
+    ReconcileFut: Future<Output = Result<kube::runtime::controller::Action, Err>> + Send + 'static,
+    Err: std::error::Error + lattice_common::Retryable + Send + 'static,
+{
+    Box::pin(
+        Controller::new(api, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
+            .shutdown_on_signal()
+            .run(reconcile_fn, lattice_common::default_error_policy, ctx)
+            .for_each(log_reconcile_result(name)),
+    )
+}
+
 /// Build cluster controller futures
 pub fn build_cluster_controllers(
     client: Client,
@@ -350,84 +381,6 @@ pub fn build_provider_controllers(
         client: client.clone(),
         cedar,
     });
-    let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
-
-    let cloud_ctrl = Controller::new(Api::<InfraProvider>::all(client.clone()), watcher_config())
-        .shutdown_on_signal()
-        .run(
-            cloud_provider_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx.clone(),
-        )
-        .for_each(log_reconcile_result("InfraProvider"));
-
-    let secrets_ctrl =
-        Controller::new(Api::<SecretProvider>::all(client.clone()), watcher_config())
-            .shutdown_on_signal()
-            .run(
-                secrets_provider_ctrl::reconcile,
-                lattice_common::default_error_policy,
-                ctx.clone(),
-            )
-            .for_each(log_reconcile_result("SecretProvider"));
-
-    let cedar_ctrl = Controller::new(Api::<CedarPolicy>::all(client.clone()), watcher_config())
-        .shutdown_on_signal()
-        .run(
-            cedar_validation_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            cedar_ctx,
-        )
-        .for_each(log_reconcile_result("CedarPolicy"));
-
-    let oidc_ctrl = Controller::new(Api::<OIDCProvider>::all(client.clone()), watcher_config())
-        .shutdown_on_signal()
-        .run(
-            oidc_provider_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx.clone(),
-        )
-        .for_each(log_reconcile_result("OIDCProvider"));
-
-    let store_ctrl = Controller::new(Api::<BackupStore>::all(client.clone()), watcher_config())
-        .shutdown_on_signal()
-        .run(
-            backup_store_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx.clone(),
-        )
-        .for_each(log_reconcile_result("BackupStore"));
-
-    let cluster_backup_ctrl = Controller::new(
-        Api::<LatticeClusterBackup>::all(client.clone()),
-        watcher_config(),
-    )
-    .shutdown_on_signal()
-    .run(
-        cluster_backup_ctrl::reconcile,
-        lattice_common::default_error_policy,
-        ctx.clone(),
-    )
-    .for_each(log_reconcile_result("ClusterBackup"));
-
-    let restore_ctrl =
-        Controller::new(Api::<LatticeRestore>::all(client.clone()), watcher_config())
-            .shutdown_on_signal()
-            .run(
-                restore_ctrl::reconcile,
-                lattice_common::default_error_policy,
-                ctx.clone(),
-            )
-            .for_each(log_reconcile_result("Restore"));
-
-    let svc_backup_ctrl = Controller::new(Api::<LatticeService>::all(client), watcher_config())
-        .shutdown_on_signal()
-        .run(
-            service_backup_ctrl::reconcile,
-            lattice_common::default_error_policy,
-            ctx,
-        )
-        .for_each(log_reconcile_result("ServiceBackup"));
 
     tracing::info!("- InfraProvider controller");
     tracing::info!("- SecretProvider controller");
@@ -439,14 +392,14 @@ pub fn build_provider_controllers(
     tracing::info!("- ServiceBackupSchedule controller");
 
     vec![
-        Box::pin(cloud_ctrl),
-        Box::pin(secrets_ctrl),
-        Box::pin(cedar_ctrl),
-        Box::pin(oidc_ctrl),
-        Box::pin(store_ctrl),
-        Box::pin(cluster_backup_ctrl),
-        Box::pin(restore_ctrl),
-        Box::pin(svc_backup_ctrl),
+        simple_controller(Api::<InfraProvider>::all(client.clone()), cloud_provider_ctrl::reconcile, ctx.clone(), "InfraProvider"),
+        simple_controller(Api::<SecretProvider>::all(client.clone()), secrets_provider_ctrl::reconcile, ctx.clone(), "SecretProvider"),
+        simple_controller(Api::<CedarPolicy>::all(client.clone()), cedar_validation_ctrl::reconcile, cedar_ctx, "CedarPolicy"),
+        simple_controller(Api::<OIDCProvider>::all(client.clone()), oidc_provider_ctrl::reconcile, ctx.clone(), "OIDCProvider"),
+        simple_controller(Api::<BackupStore>::all(client.clone()), backup_store_ctrl::reconcile, ctx.clone(), "BackupStore"),
+        simple_controller(Api::<LatticeClusterBackup>::all(client.clone()), cluster_backup_ctrl::reconcile, ctx.clone(), "ClusterBackup"),
+        simple_controller(Api::<LatticeRestore>::all(client.clone()), restore_ctrl::reconcile, ctx.clone(), "Restore"),
+        simple_controller(Api::<LatticeService>::all(client), service_backup_ctrl::reconcile, ctx, "ServiceBackup"),
     ]
 }
 

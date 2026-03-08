@@ -112,8 +112,8 @@ impl AuthChain {
     /// Validate a token using the authentication chain
     ///
     /// Tries validators in order:
-    /// 1. OIDC (if configured with a valid issuer)
-    /// 2. ServiceAccount TokenReview (if available)
+    /// - OIDC (if configured with a valid issuer)
+    /// - ServiceAccount TokenReview (if available)
     ///
     /// Returns the first successful validation result.
     pub async fn validate(&self, token: &str) -> Result<UserIdentity> {

@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use tracing::{info, warn};
+use tracing::info;
 
 use lattice_common::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements, SecurityContext};
 
@@ -1144,62 +1144,56 @@ async fn test_model_inference(kubeconfig: &str) -> Result<(), String> {
 
     let allowed_pattern = "INFERENCE:VALID";
     let blocked_pattern = "INFERENCE:INVALID";
+    let kc = kubeconfig.to_string();
 
-    let timeout = LONG_TIMEOUT;
-    let start = std::time::Instant::now();
+    wait_for_condition(
+        "inference endpoint to return valid OpenAI-compatible response",
+        LONG_TIMEOUT,
+        Duration::from_secs(10),
+        || {
+            let kc = kc.clone();
+            async move {
+                let label =
+                    format!("{}={}", lattice_common::LABEL_NAME, INFERENCE_TESTER_NAME);
+                let logs = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "logs",
+                    "-l",
+                    &label,
+                    "-c",
+                    "curl",
+                    "-n",
+                    INFERENCE_TESTER_NAMESPACE,
+                    "--tail",
+                    "500",
+                ])
+                .await
+                .unwrap_or_default();
 
-    loop {
-        let label = format!("{}={}", lattice_common::LABEL_NAME, INFERENCE_TESTER_NAME);
-        let logs = run_kubectl(&[
-            "--kubeconfig",
-            kubeconfig,
-            "logs",
-            "-l",
-            &label,
-            "-c",
-            "curl",
-            "-n",
-            INFERENCE_TESTER_NAMESPACE,
-            "--tail",
-            "500",
-        ])
-        .await
-        .unwrap_or_default();
-
-        let cycle_count = logs.matches(CYCLE_END_MARKER).count();
-        if cycle_count > 0 {
-            match parse_traffic_result(&logs, allowed_pattern, blocked_pattern) {
-                Some(true) => {
-                    info!(
-                        "[Model] Inference endpoint verified: valid OpenAI-compatible response ({} cycles)",
-                        cycle_count
-                    );
-                    return Ok(());
+                let cycle_count = logs.matches(CYCLE_END_MARKER).count();
+                if cycle_count > 0 {
+                    if let Some(true) =
+                        parse_traffic_result(&logs, allowed_pattern, blocked_pattern)
+                    {
+                        info!(
+                            "[Model] Inference endpoint verified: valid OpenAI-compatible \
+                             response ({} cycles)",
+                            cycle_count
+                        );
+                        return Ok(true);
+                    }
                 }
-                Some(false) => {
-                    // Latest result is INVALID — keep retrying until timeout
-                }
-                None => {
-                    // No result markers yet
-                }
+                Err(format!(
+                    "inference not yet confirmed (cycles={})",
+                    cycle_count
+                ))
             }
-        }
+        },
+    )
+    .await?;
 
-        if start.elapsed() >= timeout {
-            return Err(format!(
-                "Inference endpoint did not return valid response after {:.0}s (cycles={})",
-                start.elapsed().as_secs_f64(),
-                cycle_count
-            ));
-        }
-
-        warn!(
-            "[Model] Inference not yet confirmed (elapsed: {:.0}s, cycles: {})",
-            start.elapsed().as_secs_f64(),
-            cycle_count
-        );
-        tokio::time::sleep(Duration::from_secs(10)).await;
-    }
+    Ok(())
 }
 
 /// Verify P/D cross-role connectivity via curl sidecar logs.
@@ -1210,86 +1204,82 @@ async fn test_model_inference(kubeconfig: &str) -> Result<(), String> {
 async fn test_pd_cross_role_connectivity(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Verifying P/D cross-role connectivity via sidecar logs...");
 
-    let directions = [
+    let directions: Vec<(&str, &str)> = vec![
         ("prefill", "llm-serving-prefill->llm-serving-decode"),
         ("decode", "llm-serving-decode->llm-serving-prefill"),
     ];
 
-    // Retry verification to handle policy propagation delays
-    let timeout = DEFAULT_TIMEOUT;
-    let start = std::time::Instant::now();
+    let kc = kubeconfig.to_string();
 
-    loop {
-        let mut all_passed = true;
-        let mut failures = Vec::new();
+    wait_for_condition(
+        "P/D cross-role bidirectional traffic to be ALLOWED",
+        DEFAULT_TIMEOUT,
+        Duration::from_secs(10),
+        || {
+            let kc = kc.clone();
+            let directions = directions.clone();
+            async move {
+                let mut failures = Vec::new();
 
-        for (role, expected_pattern) in &directions {
-            let label_selector = format!("app.kubernetes.io/name={}-{}", MODEL_NAME, role);
-            let logs = run_kubectl(&[
-                "--kubeconfig",
-                kubeconfig,
-                "logs",
-                "-n",
-                MODEL_NAMESPACE,
-                "-l",
-                &label_selector,
-                "-c",
-                "connectivity-test",
-                "--tail",
-                "500",
-            ])
-            .await
-            .unwrap_or_default();
+                for (role, expected_pattern) in &directions {
+                    let label_selector =
+                        format!("app.kubernetes.io/name={}-{}", MODEL_NAME, role);
+                    let logs = run_kubectl(&[
+                        "--kubeconfig",
+                        &kc,
+                        "logs",
+                        "-n",
+                        MODEL_NAMESPACE,
+                        "-l",
+                        &label_selector,
+                        "-c",
+                        "connectivity-test",
+                        "--tail",
+                        "500",
+                    ])
+                    .await
+                    .unwrap_or_default();
 
-            // Check we have at least one complete cycle
-            let cycle_count = logs.matches(CYCLE_END_MARKER).count();
-            if cycle_count == 0 {
-                all_passed = false;
-                failures.push(format!("{}: no complete cycles yet", role));
-                continue;
+                    let cycle_count = logs.matches(CYCLE_END_MARKER).count();
+                    if cycle_count == 0 {
+                        failures.push(format!("{}: no complete cycles yet", role));
+                        continue;
+                    }
+
+                    let allowed_pattern = format!("{}:ALLOWED", expected_pattern);
+                    let blocked_pattern = format!("{}:BLOCKED", expected_pattern);
+
+                    match parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern) {
+                        Some(true) => {
+                            info!("[Model] {} cross-role traffic: ALLOWED", role);
+                        }
+                        Some(false) => {
+                            failures.push(format!(
+                                "{}: BLOCKED — mesh policy denying cross-role traffic",
+                                role
+                            ));
+                        }
+                        None => {
+                            failures.push(format!("{}: no traffic result in logs", role));
+                        }
+                    }
+                }
+
+                if failures.is_empty() {
+                    info!(
+                        "[Model] P/D cross-role connectivity verified: \
+                         bidirectional traffic ALLOWED"
+                    );
+                    Ok(true)
+                } else {
+                    Err(failures.join("; "))
+                }
             }
+        },
+    )
+    .await?;
 
-            let allowed_pattern = format!("{}:ALLOWED", expected_pattern);
-            let blocked_pattern = format!("{}:BLOCKED", expected_pattern);
-
-            match parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern) {
-                Some(true) => {
-                    info!("[Model] {} cross-role traffic: ALLOWED", role);
-                }
-                Some(false) => {
-                    all_passed = false;
-                    failures.push(format!(
-                        "{}: BLOCKED — mesh policy denying cross-role traffic",
-                        role
-                    ));
-                }
-                None => {
-                    all_passed = false;
-                    failures.push(format!("{}: no traffic result in logs", role));
-                }
-            }
-        }
-
-        if all_passed {
-            info!("[Model] P/D cross-role connectivity verified: bidirectional traffic ALLOWED");
-            return Ok(());
-        }
-
-        if start.elapsed() >= timeout {
-            return Err(format!(
-                "P/D cross-role connectivity failed after {:.0}s: {}",
-                start.elapsed().as_secs_f64(),
-                failures.join("; ")
-            ));
-        }
-
-        warn!(
-            "[Model] P/D connectivity not yet confirmed (elapsed: {:.0}s): {}",
-            start.elapsed().as_secs_f64(),
-            failures.join("; ")
-        );
-        tokio::time::sleep(Duration::from_secs(10)).await;
-    }
+    Ok(())
 }
 
 /// Verify model pods transition past Init state (init containers completed)

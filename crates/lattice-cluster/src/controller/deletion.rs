@@ -258,9 +258,9 @@ pub(crate) async fn handle_deletion(
     // The agent detects deletion_timestamp on connect and starts an unpivot retry loop
     // that keeps sending ClusterDeleting to parent until parent's CAPI deletes us.
     // We just need to:
-    // 1. Delete cell service (free up the LoadBalancer IP)
-    // 2. Set phase to Unpivoting
-    // 3. Wait - finalizer keeps the resource around until CAPI deletes the infrastructure
+    // - Delete cell service (free up the LoadBalancer IP)
+    // - Set phase to Unpivoting
+    // - Wait — finalizer keeps the resource around until CAPI deletes the infrastructure
 
     let current_phase = cluster
         .status

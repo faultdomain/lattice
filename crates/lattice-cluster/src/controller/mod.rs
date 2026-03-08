@@ -98,8 +98,8 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
     // Ensure finalizer is present for clusters that need cleanup on deletion
     // Two cases:
-    // 1. Self cluster with parent - needs unpivot (export CAPI to parent)
-    // 2. Non-self cluster (child) - needs CAPI cleanup (delete infrastructure)
+    // - Self cluster with parent — needs unpivot (export CAPI to parent)
+    // - Non-self cluster (child) — needs CAPI cleanup (delete infrastructure)
     if !has_finalizer(&cluster) {
         if is_self {
             // Check if parent config secret exists (indicates we have a parent)
@@ -675,10 +675,10 @@ mod tests {
                 .expect("reconcile should succeed");
 
             // Verify observable outcomes:
-            // 1. Status was updated to Provisioning phase
+            // - Status was updated to Provisioning phase
             assert!(capture.was_updated(), "status should be updated");
             assert_eq!(capture.last_phase(), Some(ClusterPhase::Provisioning));
-            // 2. Quick requeue to check provisioning progress
+            // - Quick requeue to check provisioning progress
             assert_eq!(action, Action::requeue(Duration::from_secs(5)));
         }
 

@@ -152,11 +152,11 @@ async fn reconcile_version(
 /// Handle a cluster in the Ready phase.
 ///
 /// Ready is for self-managing clusters. This phase:
-/// 1. Reconciles infrastructure (Cilium policies, Istio, etc.)
-/// 2. Reconciles Kubernetes version (CP first, then workers)
-/// 3. Reconciles worker pools (scaling)
-/// 4. Updates status with worker pool information
-/// 5. Requeues with appropriate interval based on worker readiness
+/// - Reconciles infrastructure (Cilium policies, Istio, etc.)
+/// - Reconciles Kubernetes version (CP first, then workers)
+/// - Reconciles worker pools (scaling)
+/// - Updates status with worker pool information
+/// - Requeues with appropriate interval based on worker readiness
 pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Action, Error> {
     let name = cluster.name_any();
 
@@ -491,9 +491,13 @@ async fn reconcile_gpu_health(cluster: &LatticeCluster, ctx: &Context) -> Result
             .and_then(|s| s.allocatable.as_ref())
             .and_then(|a| a.get(GPU_RESOURCE))
             .map(|q| {
-                lattice_common::resources::parse_quantity_int(Some(q))
-                    .unwrap_or(0)
-                    .max(0) as u32
+                match lattice_common::resources::parse_quantity_int(Some(q)) {
+                    Ok(v) => v.max(0) as u32,
+                    Err(e) => {
+                        warn!(node = %node_name, value = ?q, error = %e, "Failed to parse GPU allocatable quantity, skipping node GPU count");
+                        0
+                    }
+                }
             })
             .unwrap_or(0);
         let has_gpu_capacity = gpu_count > 0;
@@ -537,7 +541,13 @@ async fn reconcile_gpu_health(cluster: &LatticeCluster, ctx: &Context) -> Result
     }
 
     // Find the largest pending GPU request (0 if none)
-    let max_pending_gpu_request = ctx.kube.max_pending_gpu_request().await.unwrap_or(0);
+    let max_pending_gpu_request = match ctx.kube.max_pending_gpu_request().await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "Failed to query max pending GPU request, defaulting to 0");
+            0
+        }
+    };
 
     // Build the cordon plan with threshold enforcement
     let plan = build_gpu_cordon_plan(&gpu_node_states, max_pending_gpu_request);

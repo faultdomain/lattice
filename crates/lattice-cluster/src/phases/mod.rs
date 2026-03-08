@@ -33,8 +33,8 @@ use crate::controller::Context;
 ///
 /// Returns Ok(Action) if transitioned or needs requeue, Err if status update failed.
 /// The cluster should not transition to Ready until:
-/// 1. Cell servers are running (webhook endpoint is listening)
-/// 2. MutatingWebhookConfiguration exists (K8s will route to webhook)
+/// - Cell servers are running (webhook endpoint is listening)
+/// - MutatingWebhookConfiguration exists (K8s will route to webhook)
 pub async fn try_transition_to_ready(
     cluster: &LatticeCluster,
     ctx: &Context,

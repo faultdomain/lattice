@@ -120,11 +120,11 @@ async fn handle_self_cluster(
 /// Handle a child cluster in Pending phase.
 ///
 /// Child clusters need to have their infrastructure provisioned:
-/// 1. Validate InfraProvider exists
-/// 2. Copy provider credentials
-/// 3. Ensure CAPI is installed
-/// 4. Generate and apply CAPI manifests
-/// 5. Transition to Provisioning
+/// - Validate InfraProvider exists
+/// - Copy provider credentials
+/// - Ensure CAPI is installed
+/// - Generate and apply CAPI manifests
+/// - Transition to Provisioning
 async fn handle_child_cluster(
     cluster: &LatticeCluster,
     ctx: &Context,

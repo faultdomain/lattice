@@ -81,22 +81,25 @@ where
     Fut: std::future::Future<Output = Result<String, String>>,
 {
     let tmpfile = format!("/tmp/webhook-test-{}.yaml", sanitize_desc(desc));
+    let kc = kubeconfig.to_string();
+    let desc_owned = desc.to_string();
 
-    for attempt in 1..=10 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
         let yaml = make_yaml().await?;
         tokio::fs::write(&tmpfile, &yaml)
             .await
             .map_err(|e| format!("Failed to write temp file: {e}"))?;
 
         let result = tokio::process::Command::new("kubectl")
-            .args(["--kubeconfig", kubeconfig, "apply", "-f", &tmpfile])
+            .args(["--kubeconfig", &kc, "apply", "-f", &tmpfile])
             .output()
             .await
             .map_err(|e| format!("Failed to spawn kubectl: {e}"))?;
 
         if result.status.success() {
             return Err(format!(
-                "[Webhook] {desc}: was accepted but should have been REJECTED"
+                "[Webhook] {desc_owned}: was accepted but should have been REJECTED"
             ));
         }
 
@@ -105,21 +108,24 @@ where
         // Admission webhook rejections contain "denied the request" — if we see
         // that, the request reached the webhook and was properly rejected.
         if stderr.contains("denied the request") {
-            info!("[Webhook] {desc}: rejected (expected): {stderr}");
+            info!("[Webhook] {desc_owned}: rejected (expected): {stderr}");
             return Ok(stderr);
         }
 
-        // Otherwise this is a transient error (auth, connectivity, etc.) — retry
+        if tokio::time::Instant::now() > deadline {
+            return Err(format!(
+                "[Webhook] {desc_owned}: kubectl never reached the admission webhook \
+                 within timeout"
+            ));
+        }
+
+        // Transient error (auth, connectivity, etc.) — retry
         info!(
-            "[Webhook] {desc}: transient error (attempt {attempt}/10): {}",
+            "[Webhook] {desc_owned}: transient error: {}",
             stderr.lines().next().unwrap_or(&stderr)
         );
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-
-    Err(format!(
-        "[Webhook] {desc}: kubectl never reached the admission webhook after 10 attempts"
-    ))
 }
 
 /// Wait for the admission webhook to be responsive.

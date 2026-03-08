@@ -250,27 +250,37 @@ async fn test_failed_sets_observed_generation(kubeconfig: &str) -> Result<(), St
     )
     .await?;
 
-    // Give the controller time to stabilize (2 requeue cycles)
-    tokio::time::sleep(Duration::from_secs(10)).await;
-
-    // Verify observed_generation is set (not empty/missing)
-    let observed = get_observed_generation(kubeconfig, NS_FAILED_STABLE, "svc-stable-fail").await?;
-    if observed.is_empty() {
-        return Err(
-            "observed_generation is empty on Failed service — controller will tight-loop \
-             recompiling every 30s even when nothing changed. \
-             Failed status must include observed_generation."
-                .to_string(),
-        );
-    }
-
-    let gen = get_generation(kubeconfig, NS_FAILED_STABLE, "svc-stable-fail").await?;
-    if observed != gen {
-        return Err(format!(
-            "observed_generation ({observed}) != metadata.generation ({gen}) — \
-             controller hasn't acknowledged the current spec"
-        ));
-    }
+    // Wait for observed_generation to be set and match metadata.generation
+    let kc = kubeconfig.to_string();
+    let (observed, gen) = wait_for_condition(
+        "Failed service observed_generation to match metadata.generation",
+        Duration::from_secs(30),
+        Duration::from_secs(2),
+        || {
+            let kc = kc.clone();
+            async move {
+                let observed =
+                    get_observed_generation(&kc, NS_FAILED_STABLE, "svc-stable-fail").await?;
+                if observed.is_empty() {
+                    return Err(
+                        "observed_generation is empty on Failed service — controller will \
+                         tight-loop recompiling every 30s even when nothing changed. \
+                         Failed status must include observed_generation."
+                            .to_string(),
+                    );
+                }
+                let gen = get_generation(&kc, NS_FAILED_STABLE, "svc-stable-fail").await?;
+                if observed != gen {
+                    return Err(format!(
+                        "observed_generation ({observed}) != metadata.generation ({gen}) — \
+                         controller hasn't acknowledged the current spec"
+                    ));
+                }
+                Ok(Some((observed, gen)))
+            }
+        },
+    )
+    .await?;
 
     info!("[Updates] observed_generation = {observed} (matches generation = {gen})");
 
@@ -1008,30 +1018,41 @@ async fn test_job_failed_sets_observed_generation(
     )
     .await?;
 
-    // Give the controller time to stabilize
-    tokio::time::sleep(Duration::from_secs(10)).await;
-
-    // Verify observed_generation is set (not empty/missing)
-    let observed =
-        get_resource_observed_generation(kubeconfig, "latticejob", namespace, "job-stable-fail")
-            .await?;
-    if observed.is_empty() {
-        return Err(
-            "observed_generation is empty on Failed job — controller will tight-loop \
-             retrying every 30s even when nothing changed. \
-             Failed status must include observed_generation."
-                .to_string(),
-        );
-    }
-
-    let gen =
-        get_resource_generation(kubeconfig, "latticejob", namespace, "job-stable-fail").await?;
-    if observed != gen {
-        return Err(format!(
-            "observed_generation ({observed}) != metadata.generation ({gen}) — \
-             controller hasn't acknowledged the current spec"
-        ));
-    }
+    // Wait for observed_generation to be set and match metadata.generation
+    let kc = kubeconfig.to_string();
+    let ns = namespace.to_string();
+    let (observed, gen) = wait_for_condition(
+        "Failed job observed_generation to match metadata.generation",
+        Duration::from_secs(30),
+        Duration::from_secs(2),
+        || {
+            let kc = kc.clone();
+            let ns = ns.clone();
+            async move {
+                let observed =
+                    get_resource_observed_generation(&kc, "latticejob", &ns, "job-stable-fail")
+                        .await?;
+                if observed.is_empty() {
+                    return Err(
+                        "observed_generation is empty on Failed job — controller will tight-loop \
+                         retrying every 30s even when nothing changed. \
+                         Failed status must include observed_generation."
+                            .to_string(),
+                    );
+                }
+                let gen =
+                    get_resource_generation(&kc, "latticejob", &ns, "job-stable-fail").await?;
+                if observed != gen {
+                    return Err(format!(
+                        "observed_generation ({observed}) != metadata.generation ({gen}) — \
+                         controller hasn't acknowledged the current spec"
+                    ));
+                }
+                Ok(Some((observed, gen)))
+            }
+        },
+    )
+    .await?;
 
     info!("[Updates] observed_generation = {observed} (matches generation = {gen})");
 

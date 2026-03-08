@@ -455,11 +455,11 @@ impl<S: MoveCommandSender> CellMover<S> {
     /// Execute the full move operation
     ///
     /// This is the main entry point that orchestrates:
-    /// 1. Pausing source resources
-    /// 2. Discovery and graph building
-    /// 3. Streaming batches to agent
-    /// 4. Finalizing (agent unpause)
-    /// 5. Deleting source resources
+    /// - Pausing source resources
+    /// - Discovery and graph building
+    /// - Streaming batches to agent
+    /// - Finalizing (agent unpause)
+    /// - Deleting source resources
     #[instrument(
         skip(self),
         fields(

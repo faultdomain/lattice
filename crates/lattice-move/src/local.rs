@@ -67,10 +67,10 @@ impl MoveCommandSender for LocalMoveSender {
 ///
 /// This performs a local CAPI resource move for CLI operations.
 /// The full flow is:
-/// 1. Create source and target kube clients
-/// 2. Create `AgentMover` targeting the destination
-/// 3. Wrap it in `LocalMoveSender`
-/// 4. Run `CellMover::execute()` which handles discover, pause, graph, sort, batch, delete
+/// - Create source and target kube clients
+/// - Create `AgentMover` targeting the destination
+/// - Wrap it in `LocalMoveSender`
+/// - Run `CellMover::execute()` which handles discover, pause, graph, sort, batch, delete
 pub async fn local_move(
     source_kubeconfig: &Path,
     target_kubeconfig: &Path,

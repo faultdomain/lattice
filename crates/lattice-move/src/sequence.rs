@@ -60,10 +60,10 @@ impl MoveSequence {
     /// Compute the move sequence from an object graph
     ///
     /// Uses Kahn's algorithm for topological sort:
-    /// 1. Find all nodes with no unplaced owners
-    /// 2. Add them to the current group
-    /// 3. Mark them as placed
-    /// 4. Repeat until all nodes are placed
+    /// - Find all nodes with no unplaced owners
+    /// - Add them to the current group
+    /// - Mark them as placed
+    /// - Repeat until all nodes are placed
     pub fn from_graph(graph: &ObjectGraph) -> Result<Self, MoveError> {
         let mut placed: HashSet<String> = HashSet::new();
         let mut groups: Vec<MoveGroup> = Vec::new();

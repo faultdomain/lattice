@@ -8,7 +8,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::{Client, Resource};
 use serde::de::DeserializeOwned;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[cfg(test)]
 use mockall::automock;
@@ -556,8 +556,14 @@ impl KubeClient for KubeClientImpl {
                     .iter()
                     .filter_map(|c| {
                         let q = c.resources.as_ref()?.requests.as_ref()?.get(GPU_RESOURCE)?;
-                        let count =
-                            lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0);
+                        let count = match lattice_common::resources::parse_quantity_int(Some(q)) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let pod_name = pod.metadata.name.as_deref().unwrap_or("<unknown>");
+                                warn!(pod = %pod_name, value = ?q, error = %e, "Failed to parse GPU request quantity, treating as 0");
+                                0
+                            }
+                        };
                         if count > 0 {
                             Some(count as u32)
                         } else {

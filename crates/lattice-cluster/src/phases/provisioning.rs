@@ -27,8 +27,8 @@ const MAX_PROVISIONING_DURATION: Duration = Duration::from_secs(3600);
 /// Handle a cluster in the Provisioning phase.
 ///
 /// This phase waits for CAPI infrastructure to become ready, then:
-/// 1. Patches the kubeconfig to use the K8s API proxy
-/// 2. Transitions to Pivoting phase
+/// - Patches the kubeconfig to use the K8s API proxy
+/// - Transitions to Pivoting phase
 pub async fn handle_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Result<Action, Error> {
     let name = cluster.name_any();
     let capi_namespace = capi_namespace(&name);

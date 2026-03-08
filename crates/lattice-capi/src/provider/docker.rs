@@ -118,9 +118,9 @@ impl DockerProvider {
     /// Generate HAProxy ConfigMap for RKE2 clusters
     ///
     /// RKE2 requires a custom HAProxy configuration because:
-    /// 1. Health checks must use HTTP GET /healthz instead of TCP
-    /// 2. SSL verification must be disabled for backend connections
-    /// 3. An additional frontend on port 9345 is needed for RKE2 supervisor/join
+    /// - Health checks must use HTTP GET /healthz instead of TCP
+    /// - SSL verification must be disabled for backend connections
+    /// - An additional frontend on port 9345 is needed for RKE2 supervisor/join
     fn generate_haproxy_configmap(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
         let name = get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
@@ -266,13 +266,13 @@ impl Provider for DockerProvider {
     /// Generate all CAPI manifests for the Docker provider
     ///
     /// This generates the following resources:
-    /// 1. Cluster
-    /// 2. DockerCluster
-    /// 3. KubeadmControlPlane
-    /// 4. DockerMachineTemplate (control plane)
-    /// 5. MachineDeployment (workers)
-    /// 6. DockerMachineTemplate (workers)
-    /// 7. KubeadmConfigTemplate (workers)
+    /// - Cluster
+    /// - DockerCluster
+    /// - KubeadmControlPlane
+    /// - DockerMachineTemplate (control plane)
+    /// - MachineDeployment (workers)
+    /// - DockerMachineTemplate (workers)
+    /// - KubeadmConfigTemplate (workers)
     async fn generate_capi_manifests(
         &self,
         cluster: &LatticeCluster,
