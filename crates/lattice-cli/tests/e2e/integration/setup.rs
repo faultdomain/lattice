@@ -49,9 +49,9 @@ use super::super::context::InfraContext;
 use super::super::helpers::{
     build_and_push_downloader_image, build_and_push_lattice_image,
     build_and_push_pytorch_test_image, client_from_kubeconfig, create_with_retry,
-    ensure_docker_network, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd, wait_for_operator_ready, watch_cluster_phases,
-    ProxySession,
+    ensure_docker_network, ensure_lattice_debug_enabled, get_docker_kubeconfig, kubeconfig_path,
+    load_cluster_config, load_registry_credentials, run_cmd, wait_for_operator_ready,
+    watch_cluster_phases, ProxySession,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, cedar, scaling};
@@ -377,6 +377,9 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     info!("[Setup] SUCCESS: Management cluster is self-managing!");
 
+    // Enable debug endpoint for diagnostic dumps on test failures
+    ensure_lattice_debug_enabled(&mgmt_kubeconfig_path).await?;
+
     // Add mgmt to chaos targets - tests agent connections during workload provisioning
     if let Some(ref targets) = chaos_targets {
         targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, None);
@@ -431,6 +434,9 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     capi::verify_capi_resources(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME).await?;
 
     info!("[Setup] SUCCESS: Workload cluster pivot verified!");
+
+    // Enable debug endpoint for diagnostic dumps on test failures
+    ensure_lattice_debug_enabled(&workload_proxy_kc).await?;
 
     // Add workload to chaos targets (mgmt stays out - port-forward stability)
     if let Some(ref targets) = chaos_targets {
@@ -632,6 +638,9 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
     capi::verify_capi_resources(&mgmt_kubeconfig_path, MGMT_CLUSTER_NAME).await?;
     watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
 
+    // Enable debug endpoint for diagnostic dumps on test failures
+    ensure_lattice_debug_enabled(&mgmt_kubeconfig_path).await?;
+
     if let Some(ref targets) = chaos_targets {
         targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, None);
     }
@@ -683,6 +692,9 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     // Verify cluster is operational
     capi::verify_capi_resources(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME).await?;
     scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 5).await?;
+
+    // Enable debug endpoint for diagnostic dumps on test failures
+    ensure_lattice_debug_enabled(&workload_proxy_kc).await?;
 
     // Add to chaos targets
     if let Some(ref targets) = result.chaos_targets {

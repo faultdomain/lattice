@@ -485,6 +485,37 @@ pub async fn wait_for_operator_ready(
     .await
 }
 
+/// Ensure LATTICE_DEBUG=true is set on the operator deployment.
+///
+/// Patches the deployment to add the env var if not already present,
+/// then waits for the rollout to complete. This enables the `/debug/graph`
+/// diagnostic endpoint during tests.
+pub async fn ensure_lattice_debug_enabled(kubeconfig: &str) -> Result<(), String> {
+    // Check if already set to avoid unnecessary rollout
+    let output = run_kubectl(&[
+        "--kubeconfig", kubeconfig,
+        "get", "deployment/lattice-operator",
+        "-n", LATTICE_SYSTEM_NAMESPACE,
+        "-o", "jsonpath={.spec.template.spec.containers[0].env[?(@.name=='LATTICE_DEBUG')].value}",
+    ]).await.unwrap_or_default();
+
+    if output.trim() == "true" {
+        info!("[Debug] LATTICE_DEBUG already enabled");
+        return Ok(());
+    }
+
+    info!("[Debug] Setting LATTICE_DEBUG=true on operator deployment...");
+    run_kubectl(&[
+        "--kubeconfig", kubeconfig,
+        "set", "env",
+        "deployment/lattice-operator",
+        "-n", LATTICE_SYSTEM_NAMESPACE,
+        "LATTICE_DEBUG=true",
+    ]).await?;
+
+    wait_for_operator_ready("debug-env", kubeconfig, None).await
+}
+
 /// Load registry credentials from .env file or environment
 pub fn load_registry_credentials() -> Option<String> {
     use base64::Engine;

@@ -556,6 +556,102 @@ impl Default for ServiceGraph {
 }
 
 impl ServiceGraph {
+    /// Dump the graph state as JSON for diagnostic purposes.
+    ///
+    /// Returns vertices (with node summaries), edges_out, edges_in, and
+    /// depends_all_nodes. Skips internal bookkeeping (volume_owners, edge_diffs).
+    pub fn dump_json(&self) -> serde_json::Value {
+        let mut vertices = serde_json::Map::new();
+        for entry in self.vertices.iter() {
+            let (ns, name) = entry.key();
+            let node = entry.value();
+            let key = format!("{}/{}", ns, name);
+
+            let type_str = match &node.type_ {
+                ServiceType::Local => "Local",
+                ServiceType::MeshMember => "MeshMember",
+                ServiceType::Unknown => "Unknown",
+            };
+
+            let deps: Vec<String> = node
+                .dependencies
+                .iter()
+                .map(|(dns, dn)| format!("{}/{}", dns, dn))
+                .collect();
+
+            let callers: Vec<String> = node
+                .allowed_callers
+                .iter()
+                .map(|(cns, cn)| format!("{}/{}", cns, cn))
+                .collect();
+
+            let ports: serde_json::Map<String, serde_json::Value> = node
+                .ports
+                .iter()
+                .map(|(pname, pm)| {
+                    (
+                        pname.clone(),
+                        serde_json::json!({
+                            "service_port": pm.service_port,
+                            "target_port": pm.target_port,
+                        }),
+                    )
+                })
+                .collect();
+
+            vertices.insert(
+                key,
+                serde_json::json!({
+                    "type": type_str,
+                    "dependencies": deps,
+                    "allowed_callers": callers,
+                    "allows_all": node.allows_all,
+                    "depends_all": node.depends_all,
+                    "ports": ports,
+                    "ambient": node.ambient,
+                }),
+            );
+        }
+
+        let mut edges_out = serde_json::Map::new();
+        for entry in self.edges_out.iter() {
+            let (ns, name) = entry.key();
+            let targets: Vec<String> = entry
+                .value()
+                .iter()
+                .map(|(tns, tn)| format!("{}/{}", tns, tn))
+                .collect();
+            edges_out.insert(format!("{}/{}", ns, name), serde_json::json!(targets));
+        }
+
+        let mut edges_in = serde_json::Map::new();
+        for entry in self.edges_in.iter() {
+            let (ns, name) = entry.key();
+            let sources: Vec<String> = entry
+                .value()
+                .iter()
+                .map(|(sns, sn)| format!("{}/{}", sns, sn))
+                .collect();
+            edges_in.insert(format!("{}/{}", ns, name), serde_json::json!(sources));
+        }
+
+        let depends_all: Vec<String> = self
+            .depends_all_nodes
+            .iter()
+            .map(|entry| {
+                let (ns, name) = entry.key();
+                format!("{}/{}", ns, name)
+            })
+            .collect();
+
+        serde_json::json!({
+            "vertices": vertices,
+            "edges_out": edges_out,
+            "edges_in": edges_in,
+            "depends_all_nodes": depends_all,
+        })
+    }
+
     /// Create a new empty service graph
     pub fn new() -> Self {
         Self {

@@ -46,7 +46,7 @@ use super::super::mesh_fixtures::{
 };
 use super::super::mesh_helpers::{
     generate_test_script, parse_traffic_result, retry_verification, wait_for_services_ready,
-    TestTarget,
+    DiagnosticContext, TestTarget,
 };
 
 const NAMESPACE: &str = "ecommerce-test";
@@ -476,7 +476,13 @@ pub async fn run_ecommerce_tests(kubeconfig: &str) -> Result<(), String> {
     verify_databases_ready(kubeconfig).await?;
 
     let kc = kubeconfig.to_string();
-    retry_verification("Ecommerce", || verify_traffic_logs(&kc)).await?;
+    let svc_names: Vec<String> = Vec::new();
+    let diag = DiagnosticContext {
+        kubeconfig,
+        namespace: NAMESPACE,
+        service_names: &svc_names,
+    };
+    retry_verification("Ecommerce", Some(&diag), || verify_traffic_logs(&kc)).await?;
 
     info!("\n========================================");
     info!("E-Commerce Microservices: PASSED");

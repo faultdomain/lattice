@@ -27,7 +27,7 @@ use super::mesh_fixtures::{
 };
 use super::mesh_helpers::{
     generate_test_script, parse_traffic_result, retry_verification, wait_for_pods_running,
-    wait_for_services_ready, TestTarget,
+    wait_for_services_ready, DiagnosticContext, TestTarget,
 };
 
 // =============================================================================
@@ -106,6 +106,10 @@ pub struct RandomMesh {
 impl RandomMesh {
     pub fn service_count(&self) -> usize {
         self.services.len()
+    }
+
+    pub fn service_names(&self) -> Vec<String> {
+        self.services.keys().cloned().collect()
     }
 
     /// Returns true if any service actually has external outbound dependencies,
@@ -763,7 +767,16 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     .await?;
 
     let kc = kubeconfig_path.to_string();
-    retry_verification("Random Mesh", || verify_random_mesh_traffic(&mesh, &kc)).await?;
+    let svc_names = mesh.service_names();
+    let diag = DiagnosticContext {
+        kubeconfig: kubeconfig_path,
+        namespace: RANDOM_MESH_NAMESPACE,
+        service_names: &svc_names,
+    };
+    retry_verification("Random Mesh", Some(&diag), || {
+        verify_random_mesh_traffic(&mesh, &kc)
+    })
+    .await?;
 
     delete_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE).await;
     Ok(())

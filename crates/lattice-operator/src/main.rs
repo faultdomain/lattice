@@ -18,6 +18,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::response::IntoResponse;
@@ -34,6 +35,7 @@ use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
 use lattice_common::crd::{ClusterConfig, LatticeCluster, LatticeService, OIDCProvider};
+use lattice_common::graph::ServiceGraph;
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::telemetry::{init_telemetry, TelemetryConfig};
 use lattice_common::CrdRegistry;
@@ -162,8 +164,14 @@ async fn run_controller(mode: ControllerMode, prom_registry: Option<prometheus::
         format!("lattice-operator-{}", uuid::Uuid::new_v4())
     });
 
+    // Debug mode: expose /debug/graph endpoint when LATTICE_DEBUG=true
+    let debug_enabled = std::env::var("LATTICE_DEBUG")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let graph_holder: Arc<OnceLock<Arc<ServiceGraph>>> = Arc::new(OnceLock::new());
+
     // Start health server (runs on all pods for K8s probes)
-    let health_handle = start_health_server(prom_registry);
+    let health_handle = start_health_server(prom_registry, graph_holder.clone(), debug_enabled);
 
     // Ensure webhook auth credentials exist (all pods load or create on first run).
     // This must happen before starting the webhook so every replica validates the
@@ -214,8 +222,8 @@ async fn run_controller(mode: ControllerMode, prom_registry: Option<prometheus::
     tracing::info!("Starting Lattice controllers...");
     let handle = match mode {
         ControllerMode::Cluster => run_cluster_slice(&client).await?,
-        ControllerMode::Service => run_service_slice(&client).await?,
-        ControllerMode::All => run_all_slices(&client).await?,
+        ControllerMode::Service => run_service_slice(&client, &graph_holder).await?,
+        ControllerMode::All => run_all_slices(&client, &graph_holder).await?,
     };
 
     // Destructure handle so we can move controllers into select_all
@@ -345,7 +353,10 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
 
 /// Service slice: Service CRDs, service infra (Istio, Gateway API, ESO, Cilium),
 /// Cedar, CrdRegistry, service + provider controllers
-async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
+async fn run_service_slice(
+    client: &kube::Client,
+    graph_holder: &Arc<OnceLock<Arc<ServiceGraph>>>,
+) -> anyhow::Result<SliceHandle> {
     ensure_service_crds(client).await?;
 
     // Register admission webhook now that CRDs exist (avoids chicken-and-egg)
@@ -379,6 +390,8 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         cost_provider.clone(),
     )
     .await;
+
+    let _ = graph_holder.set(graph.clone());
 
     let graph_for_models = graph.clone();
     let graph_for_auditor = graph.clone();
@@ -482,7 +495,10 @@ fn spawn_webhook_infrastructure(client: kube::Client) {
 
 /// All slices: union of Cluster + Service + Provider. Same behavior as the
 /// monolithic path, but composed from the individual pieces.
-async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
+async fn run_all_slices(
+    client: &kube::Client,
+    graph_holder: &Arc<OnceLock<Arc<ServiceGraph>>>,
+) -> anyhow::Result<SliceHandle> {
     let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
 
     // 1. Install ALL CRDs (union of cluster + service modes)
@@ -534,6 +550,8 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     )
     .await;
     controllers.extend(service_controllers);
+
+    let _ = graph_holder.set(graph.clone());
 
     let graph_for_models = graph.clone();
     let graph_for_auditor = graph.clone();
@@ -821,11 +839,43 @@ async fn cell_activation_watcher(
 /// - `/healthz` - liveness probe (process alive)
 /// - `/readyz` - readiness probe (ready to become leader or already leading)
 /// - `/metrics` - Prometheus scrape endpoint (all OpenTelemetry metrics)
-fn start_health_server(prom_registry: Option<prometheus::Registry>) -> tokio::task::JoinHandle<()> {
+fn start_health_server(
+    prom_registry: Option<prometheus::Registry>,
+    graph_holder: Arc<OnceLock<Arc<ServiceGraph>>>,
+    debug: bool,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/readyz", get(|| async { "ok" }));
+
+        if debug {
+            app = app.route(
+                "/debug/graph",
+                get(move || {
+                    let holder = graph_holder.clone();
+                    async move {
+                        match holder.get() {
+                            Some(graph) => (
+                                axum::http::StatusCode::OK,
+                                [(
+                                    axum::http::header::CONTENT_TYPE,
+                                    "application/json".to_string(),
+                                )],
+                                graph.dump_json().to_string(),
+                            )
+                                .into_response(),
+                            None => (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                "graph not initialized",
+                            )
+                                .into_response(),
+                        }
+                    }
+                }),
+            );
+            tracing::info!("Debug mode enabled: /debug/graph endpoint active");
+        }
 
         if let Some(registry) = prom_registry {
             app = app.route(

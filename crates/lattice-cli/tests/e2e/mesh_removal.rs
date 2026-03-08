@@ -32,7 +32,7 @@ use super::mesh_fixtures::{
 use super::mesh_helpers::{
     delete_lattice_service, generate_test_script, remove_resources, retry_verification,
     verify_resource_absent, wait_for_edges_denied, wait_for_pods_running, wait_for_services_ready,
-    RemovedEdge, TestTarget,
+    DiagnosticContext, RemovedEdge, TestTarget,
 };
 
 // =============================================================================
@@ -215,7 +215,13 @@ async fn verify_baseline(kubeconfig: &str) -> Result<(), String> {
     // Invert the check: wait for all edges to show ALLOWED (not denied).
     // We reuse retry_verification with a custom check.
     let kc = kubeconfig.to_string();
-    retry_verification("Mesh Removal Baseline", || {
+    let svc_names: Vec<String> = Vec::new();
+    let diag = DiagnosticContext {
+        kubeconfig,
+        namespace: NAMESPACE,
+        service_names: &svc_names,
+    };
+    retry_verification("Mesh Removal Baseline", Some(&diag), || {
         let kc = kc.clone();
         let edges = edges.clone();
         async move {

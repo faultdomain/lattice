@@ -29,7 +29,7 @@ use super::mesh_fixtures::{
 };
 use super::mesh_helpers::{
     check_no_incorrectly_allowed, parse_traffic_result, retry_verification, wait_for_cycles,
-    wait_for_pods_running, wait_for_services_ready,
+    wait_for_pods_running, wait_for_services_ready, DiagnosticContext,
 };
 
 // =============================================================================
@@ -289,7 +289,13 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let _handle = start_mesh_test(kubeconfig_path).await?;
 
     let kc = kubeconfig_path.to_string();
-    retry_verification("Fixed Mesh", || verify_traffic_patterns(&kc)).await?;
+    let svc_names: Vec<String> = Vec::new();
+    let diag = DiagnosticContext {
+        kubeconfig: kubeconfig_path,
+        namespace: TEST_SERVICES_NAMESPACE,
+        service_names: &svc_names,
+    };
+    retry_verification("Fixed Mesh", Some(&diag), || verify_traffic_patterns(&kc)).await?;
 
     delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
     Ok(())

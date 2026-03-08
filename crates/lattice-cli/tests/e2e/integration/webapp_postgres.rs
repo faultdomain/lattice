@@ -40,7 +40,7 @@ use super::super::mesh_fixtures::{
     curl_container, inbound_allow, nginx_container, outbound_dep, postgres_container, postgres_port,
 };
 use super::super::mesh_helpers::{
-    parse_traffic_result, retry_verification, wait_for_services_ready, TestTarget,
+    parse_traffic_result, retry_verification, wait_for_services_ready, DiagnosticContext, TestTarget,
 };
 
 const NAMESPACE: &str = "webapp-postgres-test";
@@ -391,7 +391,13 @@ pub async fn run_webapp_postgres_tests(kubeconfig: &str) -> Result<(), String> {
     verify_env_vars(kubeconfig).await?;
 
     let kc = kubeconfig.to_string();
-    retry_verification("WebApp+PG", || verify_traffic_logs(&kc)).await?;
+    let svc_names: Vec<String> = Vec::new();
+    let diag = DiagnosticContext {
+        kubeconfig,
+        namespace: NAMESPACE,
+        service_names: &svc_names,
+    };
+    retry_verification("WebApp+PG", Some(&diag), || verify_traffic_logs(&kc)).await?;
 
     info!("\n========================================");
     info!("Web App + PostgreSQL: PASSED");

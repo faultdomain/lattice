@@ -13,6 +13,7 @@ use tokio::time::sleep;
 // Submodules
 pub mod cedar;
 pub mod cluster;
+pub mod diagnostics;
 pub mod docker;
 pub mod kubernetes;
 pub mod services;
@@ -22,6 +23,7 @@ pub mod vault;
 // Re-export everything from submodules so existing imports stay unchanged
 pub use cedar::*;
 pub use cluster::*;
+pub use diagnostics::*;
 pub use docker::*;
 pub use kubernetes::*;
 pub use services::*;

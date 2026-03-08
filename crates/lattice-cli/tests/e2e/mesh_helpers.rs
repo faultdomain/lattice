@@ -502,10 +502,23 @@ pub async fn wait_for_services_ready(
 // Verification
 // =============================================================================
 
-/// Retry a verification function every 15s for up to 5 minutes.
+/// Context for capturing diagnostic dumps on test failure.
+pub struct DiagnosticContext<'a> {
+    pub kubeconfig: &'a str,
+    pub namespace: &'a str,
+    pub service_names: &'a [String],
+}
+
+/// Retry a verification function every 8s for up to DEFAULT_TIMEOUT.
 ///
 /// Used by both fixed and random mesh tests to handle slow policy propagation.
-pub async fn retry_verification<F, Fut>(label: &str, verify: F) -> Result<(), String>
+/// When `diag` is `Some`, captures a diagnostic dump on timeout before
+/// returning the error.
+pub async fn retry_verification<F, Fut>(
+    label: &str,
+    diag: Option<&DiagnosticContext<'_>>,
+    verify: F,
+) -> Result<(), String>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<(), String>>,
@@ -540,13 +553,30 @@ where
         }
     }
 
-    Err(format!(
+    let err_msg = format!(
         "[{}] Timed out after {} attempts ({:.0}s): {}",
         label,
         attempt,
         start.elapsed().as_secs_f64(),
         last_err
-    ))
+    );
+
+    if let Some(ctx) = diag {
+        warn!("[{}] {}", label, err_msg);
+        let path = super::helpers::dump_failure_diagnostics(
+            ctx.kubeconfig,
+            ctx.namespace,
+            label,
+            ctx.service_names,
+        )
+        .await;
+        warn!(
+            "[{}] Diagnostic dump: {}",
+            label, path
+        );
+    }
+
+    Err(err_msg)
 }
 
 // =============================================================================

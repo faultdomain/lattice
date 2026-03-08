@@ -54,7 +54,7 @@ use super::super::mesh_fixtures::{
 };
 use super::super::mesh_helpers::{
     generate_test_script, parse_traffic_result, retry_verification, wait_for_services_ready,
-    TestTarget,
+    DiagnosticContext, TestTarget,
 };
 
 const NAMESPACE: &str = "mesh-onboarding-test";
@@ -479,7 +479,13 @@ pub async fn run_mesh_onboarding_tests(kubeconfig: &str) -> Result<(), String> {
     deploy_services(kubeconfig).await?;
 
     let kc = kubeconfig.to_string();
-    retry_verification("MeshOnboard", || verify_traffic_logs(&kc)).await?;
+    let svc_names: Vec<String> = Vec::new();
+    let diag = DiagnosticContext {
+        kubeconfig,
+        namespace: NAMESPACE,
+        service_names: &svc_names,
+    };
+    retry_verification("MeshOnboard", Some(&diag), || verify_traffic_logs(&kc)).await?;
 
     info!("\n========================================");
     info!("Third-Party Mesh Onboarding: PASSED");

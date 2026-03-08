@@ -67,10 +67,10 @@ async fn run_gateway_test_sequence(kubeconfig: &str) -> Result<(), String> {
     verify_gateway_resources(kubeconfig).await?;
 
     let kc = kubeconfig.to_string();
-    retry_verification("Gateway traffic", || verify_traffic_flow(&kc)).await?;
+    retry_verification("Gateway traffic", None, || verify_traffic_flow(&kc)).await?;
 
     let kc = kubeconfig.to_string();
-    retry_verification("Gateway orphan cleanup", || verify_orphan_cleanup(&kc)).await?;
+    retry_verification("Gateway orphan cleanup", None, || verify_orphan_cleanup(&kc)).await?;
 
     info!("\n========================================");
     info!("Gateway API Integration Tests: PASSED");

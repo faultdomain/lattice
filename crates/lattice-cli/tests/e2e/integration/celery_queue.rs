@@ -43,7 +43,7 @@ use super::super::mesh_fixtures::{
     build_lattice_service, curl_container, inbound_allow, outbound_dep, redis_container, redis_port,
 };
 use super::super::mesh_helpers::{
-    parse_traffic_result, retry_verification, wait_for_services_ready, TestTarget,
+    parse_traffic_result, retry_verification, wait_for_services_ready, DiagnosticContext, TestTarget,
 };
 
 const NAMESPACE: &str = "celery-queue-test";
@@ -500,7 +500,13 @@ pub async fn run_celery_queue_tests(kubeconfig: &str) -> Result<(), String> {
     verify_env_vars(kubeconfig).await?;
 
     let kc = kubeconfig.to_string();
-    retry_verification("Celery", || verify_traffic_logs(&kc)).await?;
+    let svc_names: Vec<String> = Vec::new();
+    let diag = DiagnosticContext {
+        kubeconfig,
+        namespace: NAMESPACE,
+        service_names: &svc_names,
+    };
+    retry_verification("Celery", Some(&diag), || verify_traffic_logs(&kc)).await?;
 
     info!("\n========================================");
     info!("Celery Task Queue: PASSED");
