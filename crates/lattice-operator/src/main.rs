@@ -327,7 +327,7 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     // General infra (Istio, ESO, monitoring) runs in background — needs workers first
     let infra_handle = spawn_general_infrastructure(client.clone(), true);
 
-    wait_for_api_ready_for::<LatticeCluster>(client).await?;
+    wait_for_api_ready_for::<LatticeCluster>(client).await;
 
     let cedar = load_cedar_engine(client).await;
 
@@ -370,7 +370,7 @@ async fn run_service_slice(
     // General infra runs in background (no CAPI in service-only mode)
     let infra_handle = spawn_general_infrastructure(client.clone(), false);
 
-    wait_for_api_ready_for::<LatticeService>(client).await?;
+    wait_for_api_ready_for::<LatticeService>(client).await;
 
     let cedar = load_cedar_engine(client).await;
 
@@ -526,7 +526,7 @@ async fn run_all_slices(
     // General infra (Istio, ESO, monitoring) runs in background — needs workers first
     let infra_handle = spawn_general_infrastructure(client.clone(), true);
 
-    wait_for_api_ready_for::<LatticeCluster>(client).await?;
+    wait_for_api_ready_for::<LatticeCluster>(client).await;
 
     let cedar = load_cedar_engine(client).await;
 

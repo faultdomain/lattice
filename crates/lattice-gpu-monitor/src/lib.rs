@@ -20,6 +20,7 @@ pub mod window;
 
 use std::time::Duration;
 
+use thiserror::Error;
 use tracing::{info, warn};
 
 use annotator::NodeAnnotator;
@@ -107,12 +108,21 @@ impl GpuMonitorPipeline {
     }
 }
 
+/// Errors from the GPU monitoring loop.
+#[derive(Debug, Error)]
+pub enum GpuMonitorError {
+    #[error("Kubernetes API error: {0}")]
+    Kube(#[from] kube::Error),
+    #[error("DCGM collector initialization failed: {0}")]
+    Collector(#[from] collector::CollectorError),
+}
+
 /// Run the GPU monitoring loop on this node.
 ///
 /// This is the main entry point called by the daemonset binary's slice runner.
 /// It scrapes DCGM metrics every second, feeds them through the pipeline,
 /// and annotates the node with health status.
-pub async fn run(client: kube::Client, node_name: String) -> anyhow::Result<()> {
+pub async fn run(client: kube::Client, node_name: String) -> Result<(), GpuMonitorError> {
     info!(node = %node_name, "starting GPU monitor slice");
 
     let gpu_arch = detect_gpu_architecture(&client, &node_name).await?;

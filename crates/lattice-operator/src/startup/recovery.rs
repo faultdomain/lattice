@@ -23,7 +23,7 @@ use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL};
 /// This does a health check by listing the given CRD type and verifying the response
 /// time is reasonable. Prevents race conditions where controllers start before
 /// the API server is ready.
-pub async fn wait_for_api_ready_for<K>(client: &Client) -> anyhow::Result<()>
+pub async fn wait_for_api_ready_for<K>(client: &Client)
 where
     K: kube::Resource<DynamicType = ()> + Clone + Debug + DeserializeOwned + 'static,
 {
@@ -86,8 +86,6 @@ where
             "API server still slow after 30s, proceeding anyway"
         );
     }
-
-    Ok(())
 }
 
 /// Re-register clusters that completed bootstrap before operator restart

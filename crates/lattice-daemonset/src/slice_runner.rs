@@ -35,7 +35,7 @@ async fn run_with_shutdown(
         result = gpu_future => {
             if let Err(e) = result {
                 tracing::error!(error = %e, "GPU monitor slice exited with error");
-                return Err(e);
+                return Err(e.into());
             }
         }
         _ = shutdown => {}

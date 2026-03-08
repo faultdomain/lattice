@@ -21,8 +21,6 @@ fips = [
     "lattice-job/fips",
     "lattice-model/fips",
 ]
-e2e = []
-aws-e2e = []
 provider-e2e = []
 
 [dependencies]
