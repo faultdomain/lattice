@@ -590,6 +590,26 @@ async fn reconcile_gpu_health(
             .await;
     }
 
+    // Record GPU health metrics
+    let cordoned_after = gpu_node_states
+        .iter()
+        .filter(|s| {
+            // Nodes that were already cordoned, plus newly cordoned, minus uncordoned
+            let was_cordoned = s.is_cordoned;
+            let newly_cordoned = plan.to_cordon.contains(&s.node_name);
+            let newly_uncordoned = plan.to_uncordon.contains(&s.node_name);
+            (was_cordoned || newly_cordoned) && !newly_uncordoned
+        })
+        .count() as i64;
+    lattice_common::metrics::record_gpu_health(
+        gpu_node_states.len() as i64,
+        cordoned_after,
+        plan.to_cordon.len() as u64,
+        plan.to_uncordon.len() as u64,
+        plan.threshold_hit,
+        max_pending_gpu_request as i64,
+    );
+
     Ok(())
 }
 

@@ -95,7 +95,7 @@ fn init_telemetry_global() {
     };
 
     match init_telemetry(config) {
-        Ok(()) => {
+        Ok(_registry) => {
             tracing::info!("Telemetry initialized");
         }
         Err(e) => {

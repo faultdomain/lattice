@@ -20,6 +20,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use clap::{Parser, Subcommand};
@@ -100,7 +101,7 @@ struct SliceHandle {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_crypto();
-    init_telemetry_global();
+    let prom_registry = init_telemetry_global();
 
     let cli = Cli::parse();
 
@@ -114,8 +115,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Controller { mode }) => run_controller(mode).await,
-        None => run_controller(ControllerMode::All).await,
+        Some(Commands::Controller { mode }) => run_controller(mode, prom_registry).await,
+        None => run_controller(ControllerMode::All, prom_registry).await,
     }
 }
 
@@ -125,15 +126,16 @@ fn init_crypto() {
     eprintln!("FIPS mode: ENABLED");
 }
 
-fn init_telemetry_global() {
+fn init_telemetry_global() -> Option<prometheus::Registry> {
     let config = TelemetryConfig {
         service_name: "lattice-operator".to_string(),
         ..Default::default()
     };
 
     match init_telemetry(config) {
-        Ok(()) => {
+        Ok(registry) => {
             tracing::info!("Telemetry initialized");
+            Some(registry)
         }
         Err(e) => {
             eprintln!("WARNING: Failed to initialize telemetry: {}", e);
@@ -143,11 +145,12 @@ fn init_telemetry_global() {
                 .with(fmt::layer())
                 .with(EnvFilter::from_default_env())
                 .try_init();
+            None
         }
     }
 }
 
-async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
+async fn run_controller(mode: ControllerMode, prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> {
     tracing::info!(?mode, "Starting...");
 
     // Create client with proper timeouts (5s connect, 30s read)
@@ -160,7 +163,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     });
 
     // Start health server (runs on all pods for K8s probes)
-    let health_handle = start_health_server();
+    let health_handle = start_health_server(prom_registry);
 
     // Ensure webhook auth credentials exist (all pods load or create on first run).
     // This must happen before starting the webhook so every replica validates the
@@ -806,11 +809,43 @@ async fn cell_activation_watcher(
 /// Runs on all pods:
 /// - `/healthz` - liveness probe (process alive)
 /// - `/readyz` - readiness probe (ready to become leader or already leading)
-fn start_health_server() -> tokio::task::JoinHandle<()> {
+/// - `/metrics` - Prometheus scrape endpoint (all OpenTelemetry metrics)
+fn start_health_server(prom_registry: Option<prometheus::Registry>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let app = Router::new()
+        let mut app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/readyz", get(|| async { "ok" }));
+
+        if let Some(registry) = prom_registry {
+            app = app.route(
+                "/metrics",
+                get(move || {
+                    let registry = registry.clone();
+                    async move {
+                        use prometheus::Encoder;
+                        let encoder = prometheus::TextEncoder::new();
+                        let metric_families = registry.gather();
+                        let mut buffer = Vec::new();
+                        match encoder.encode(&metric_families, &mut buffer) {
+                            Ok(()) => (
+                                axum::http::StatusCode::OK,
+                                [(
+                                    axum::http::header::CONTENT_TYPE,
+                                    encoder.format_type().to_string(),
+                                )],
+                                buffer,
+                            )
+                                .into_response(),
+                            Err(e) => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("metrics encoding error: {}", e),
+                            )
+                                .into_response(),
+                        }
+                    }
+                }),
+            );
+        }
 
         let addr: SocketAddr = ([0, 0, 0, 0], DEFAULT_HEALTH_PORT).into();
 

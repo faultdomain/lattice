@@ -84,6 +84,7 @@ schemars.workspace = true
 uuid.workspace = true
 rand.workspace = true
 zeroize.workspace = true
+prometheus.workspace = true
 
 [build-dependencies]
 toml.workspace = true

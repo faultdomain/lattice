@@ -1,11 +1,10 @@
 //! Metrics registry for Lattice observability
 //!
 //! Provides OpenTelemetry metrics for:
-//! - Cluster lifecycle (provisioning, pivot, ready)
-//! - Pivot operations (duration, object counts)
-//! - Agent connections (state, heartbeat age)
+//! - Cluster lifecycle (provisioning, ready)
 //! - K8s API proxy (request counts, latency)
 //! - Cedar authorization (decision counts)
+//! - GPU health (node state, cordon operations)
 
 use once_cell::sync::Lazy;
 use opentelemetry::global;
@@ -57,50 +56,8 @@ pub static CLUSTER_RECONCILE_ERRORS: Lazy<Counter<u64>> = Lazy::new(|| {
 });
 
 // ============================================================================
-// Pivot Operation Metrics
-// ============================================================================
-
-/// Histogram of pivot operation duration
-///
-/// Labels:
-/// - `cluster`: cluster name
-/// - `direction`: to_child, from_parent
-pub static PIVOT_DURATION: Lazy<Histogram<f64>> = Lazy::new(|| {
-    METER
-        .f64_histogram("lattice_pivot_duration_seconds")
-        .with_description("Duration of pivot operations in seconds")
-        .with_unit("s")
-        .build()
-});
-
-/// Counter of objects transferred during pivot
-///
-/// Labels:
-/// - `cluster`: cluster name
-/// - `kind`: Cluster, Machine, KubeadmControlPlane, etc.
-pub static PIVOT_OBJECTS: Lazy<Counter<u64>> = Lazy::new(|| {
-    METER
-        .u64_counter("lattice_pivot_objects_total")
-        .with_description("Total number of objects transferred during pivot")
-        .with_unit("{objects}")
-        .build()
-});
-
-// ============================================================================
 // Agent Connection Metrics
 // ============================================================================
-
-/// Gauge of agent connections by state
-///
-/// Labels:
-/// - `state`: connected, disconnected, pending
-pub static AGENT_CONNECTIONS: Lazy<Gauge<i64>> = Lazy::new(|| {
-    METER
-        .i64_gauge("lattice_agent_connections")
-        .with_description("Number of agent connections by state")
-        .with_unit("{connections}")
-        .build()
-});
 
 /// Gauge of agent heartbeat age in seconds
 ///
@@ -178,6 +135,87 @@ pub static CEDAR_LOAD_FAILURES: Lazy<Counter<u64>> = Lazy::new(|| {
 /// Record a Cedar policy engine load failure
 pub fn record_cedar_load_failure() {
     CEDAR_LOAD_FAILURES.add(1, &[]);
+}
+
+// ============================================================================
+// GPU Health Metrics
+// ============================================================================
+
+/// Gauge: total GPU nodes in cluster
+pub static GPU_NODES_TOTAL: Lazy<Gauge<i64>> = Lazy::new(|| {
+    METER
+        .i64_gauge("lattice_gpu_nodes_total")
+        .with_description("Total number of GPU nodes in cluster")
+        .with_unit("{nodes}")
+        .build()
+});
+
+/// Gauge: currently cordoned GPU nodes
+pub static GPU_NODES_CORDONED: Lazy<Gauge<i64>> = Lazy::new(|| {
+    METER
+        .i64_gauge("lattice_gpu_nodes_cordoned")
+        .with_description("Number of currently cordoned GPU nodes")
+        .with_unit("{nodes}")
+        .build()
+});
+
+/// Counter: cordon operations performed
+pub static GPU_CORDONS_TOTAL: Lazy<Counter<u64>> = Lazy::new(|| {
+    METER
+        .u64_counter("lattice_gpu_cordons_total")
+        .with_description("Total cordon operations performed on GPU nodes")
+        .with_unit("{operations}")
+        .build()
+});
+
+/// Counter: uncordon operations performed
+pub static GPU_UNCORDONS_TOTAL: Lazy<Counter<u64>> = Lazy::new(|| {
+    METER
+        .u64_counter("lattice_gpu_uncordons_total")
+        .with_description("Total uncordon operations performed on GPU nodes")
+        .with_unit("{operations}")
+        .build()
+});
+
+/// Counter: cordon threshold hit (suppressed cordons)
+pub static GPU_CORDON_THRESHOLD_HITS: Lazy<Counter<u64>> = Lazy::new(|| {
+    METER
+        .u64_counter("lattice_gpu_cordon_threshold_hits_total")
+        .with_description("Times the GPU cordon threshold was hit (>50% cordoned)")
+        .with_unit("{hits}")
+        .build()
+});
+
+/// Gauge: max pending GPU request (0 if none)
+pub static GPU_PENDING_REQUEST_MAX: Lazy<Gauge<i64>> = Lazy::new(|| {
+    METER
+        .i64_gauge("lattice_gpu_pending_request_max")
+        .with_description("Maximum pending GPU request size (0 if none)")
+        .with_unit("{gpus}")
+        .build()
+});
+
+/// Record GPU health reconciliation results
+pub fn record_gpu_health(
+    total_nodes: i64,
+    cordoned_nodes: i64,
+    cordons: u64,
+    uncordons: u64,
+    threshold_hit: bool,
+    max_pending_request: i64,
+) {
+    GPU_NODES_TOTAL.record(total_nodes, &[]);
+    GPU_NODES_CORDONED.record(cordoned_nodes, &[]);
+    if cordons > 0 {
+        GPU_CORDONS_TOTAL.add(cordons, &[]);
+    }
+    if uncordons > 0 {
+        GPU_UNCORDONS_TOTAL.add(uncordons, &[]);
+    }
+    if threshold_hit {
+        GPU_CORDON_THRESHOLD_HITS.add(1, &[]);
+    }
+    GPU_PENDING_REQUEST_MAX.record(max_pending_request, &[]);
 }
 
 // ============================================================================
@@ -265,28 +303,6 @@ impl ProxyStatus {
     }
 }
 
-/// Labels for agent connection state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentState {
-    /// Agent is connected
-    Connected,
-    /// Agent is disconnected
-    Disconnected,
-    /// Agent connection is pending
-    Pending,
-}
-
-impl AgentState {
-    /// Convert to label value
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Connected => "connected",
-            Self::Disconnected => "disconnected",
-            Self::Pending => "pending",
-        }
-    }
-}
-
 // ============================================================================
 // Metric Recording Helpers
 // ============================================================================
@@ -333,56 +349,6 @@ impl ReconcileTimer {
             &[
                 opentelemetry::KeyValue::new("cluster", self.cluster),
                 opentelemetry::KeyValue::new("error_type", error_type.to_string()),
-            ],
-        );
-    }
-}
-
-/// Record a pivot operation with timing
-pub struct PivotTimer {
-    cluster: String,
-    direction: String,
-    start: std::time::Instant,
-}
-
-impl PivotTimer {
-    /// Start timing a pivot to child
-    pub fn to_child(cluster: impl Into<String>) -> Self {
-        Self {
-            cluster: cluster.into(),
-            direction: "to_child".to_string(),
-            start: std::time::Instant::now(),
-        }
-    }
-
-    /// Start timing a pivot from parent
-    pub fn from_parent(cluster: impl Into<String>) -> Self {
-        Self {
-            cluster: cluster.into(),
-            direction: "from_parent".to_string(),
-            start: std::time::Instant::now(),
-        }
-    }
-
-    /// Record object transfer
-    pub fn record_object(&self, kind: &str) {
-        PIVOT_OBJECTS.add(
-            1,
-            &[
-                opentelemetry::KeyValue::new("cluster", self.cluster.clone()),
-                opentelemetry::KeyValue::new("kind", kind.to_string()),
-            ],
-        );
-    }
-
-    /// Complete the timer and record duration
-    pub fn complete(self) {
-        let duration = self.start.elapsed().as_secs_f64();
-        PIVOT_DURATION.record(
-            duration,
-            &[
-                opentelemetry::KeyValue::new("cluster", self.cluster),
-                opentelemetry::KeyValue::new("direction", self.direction),
             ],
         );
     }
@@ -450,17 +416,6 @@ pub fn set_cluster_phase_count(phase: ClusterPhase, count: i64) {
     );
 }
 
-/// Update agent connection state gauge
-pub fn set_agent_connections(state: AgentState, count: i64) {
-    AGENT_CONNECTIONS.record(
-        count,
-        &[opentelemetry::KeyValue::new(
-            "state",
-            state.as_str().to_string(),
-        )],
-    );
-}
-
 /// Update agent heartbeat age
 pub fn set_agent_heartbeat_age(cluster: &str, age_seconds: f64) {
     AGENT_HEARTBEAT_AGE.record(
@@ -497,21 +452,18 @@ mod tests {
     fn test_reconcile_timer() {
         let timer = ReconcileTimer::start("test-cluster");
         assert_eq!(timer.cluster, "test-cluster");
-        // Just ensure it doesn't panic
         timer.success();
-    }
-
-    #[test]
-    fn test_pivot_timer() {
-        let timer = PivotTimer::to_child("test-cluster");
-        assert_eq!(timer.direction, "to_child");
-        timer.record_object("Machine");
-        timer.complete();
     }
 
     #[test]
     fn test_proxy_timer() {
         let timer = ProxyTimer::start("test-cluster", "GET");
         timer.complete(ProxyStatus::Success);
+    }
+
+    #[test]
+    fn test_record_gpu_health() {
+        record_gpu_health(4, 1, 1, 0, false, 2);
+        record_gpu_health(4, 3, 0, 0, true, 0);
     }
 }

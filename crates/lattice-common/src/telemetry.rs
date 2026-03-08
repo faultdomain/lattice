@@ -3,6 +3,7 @@
 //! Provides unified telemetry setup with:
 //! - W3C TraceContext propagation for distributed tracing
 //! - OTLP export for traces and metrics when `OTEL_EXPORTER_OTLP_ENDPOINT` is set
+//! - Prometheus scrape endpoint via returned `Registry`
 //! - Kubernetes resource detection (pod, namespace, node)
 //! - JSON structured logging with trace context
 
@@ -57,38 +58,58 @@ impl Default for TelemetryConfig {
 ///
 /// Sets up:
 /// - W3C TraceContext propagator for distributed tracing
+/// - Prometheus exporter (always — returned `Registry` serves `/metrics`)
 /// - OTLP exporter for traces and metrics if `otlp_endpoint` is configured
 /// - JSON structured logging with trace context
 /// - Kubernetes resource detection
 ///
-/// # Example
-///
-/// ```ignore
-/// use lattice_common::telemetry::{init_telemetry, TelemetryConfig};
-///
-/// let config = TelemetryConfig {
-///     service_name: "lattice-operator".to_string(),
-///     ..Default::default()
-/// };
-/// init_telemetry(config)?;
-/// ```
-pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
+/// Returns a Prometheus `Registry` that should be served on the `/metrics` HTTP endpoint.
+pub fn init_telemetry(
+    config: TelemetryConfig,
+) -> Result<prometheus::Registry, TelemetryError> {
     // Set W3C TraceContext as global propagator
     global::set_text_map_propagator(TraceContextPropagator::new());
 
     // Build resource with service name and K8s detection
     let resource = build_resource(&config.service_name);
 
+    // Always create Prometheus exporter so metrics are available via /metrics
+    let prom_registry = prometheus::Registry::new();
+    let prom_exporter = opentelemetry_prometheus::exporter()
+        .with_registry(prom_registry.clone())
+        .build()
+        .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
+
+    let mut meter_builder = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_reader(prom_exporter)
+        .with_resource(resource.clone());
+
     // Initialize OTLP tracer and metrics if endpoint is configured
-    // Option<Layer> implements Layer, so we can compose it directly
     let otel_layer = if let Some(endpoint) = &config.otlp_endpoint {
-        init_otlp_metrics(endpoint, resource.clone())?;
+        // Add OTLP periodic reader alongside Prometheus reader
+        let otlp_exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
+
+        let otlp_reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
+            otlp_exporter,
+            runtime::Tokio,
+        )
+        .build();
+        meter_builder = meter_builder.with_reader(otlp_reader);
+
         let provider = init_otlp_tracer(endpoint, resource)?;
         let tracer = provider.tracer(config.service_name.clone());
         Some(tracing_opentelemetry::layer().with_tracer(tracer))
     } else {
         None
     };
+
+    // Build and set the single global meter provider with all readers
+    let meter_provider = meter_builder.build();
+    global::set_meter_provider(meter_provider);
 
     // Build tracing subscriber
     let env_filter = EnvFilter::try_from_default_env()
@@ -111,7 +132,7 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
             TelemetryError::SubscriberInit(e.to_string())
         })?;
 
-    Ok(())
+    Ok(prom_registry)
 }
 
 /// Build OpenTelemetry resource with service info and K8s detection
@@ -163,27 +184,6 @@ fn init_otlp_tracer(endpoint: &str, resource: Resource) -> Result<TracerProvider
     global::set_tracer_provider(provider.clone());
 
     Ok(provider)
-}
-
-/// Initialize OTLP metrics exporter with periodic push
-fn init_otlp_metrics(endpoint: &str, resource: Resource) -> Result<(), TelemetryError> {
-    let exporter = opentelemetry_otlp::MetricExporter::builder()
-        .with_tonic()
-        .with_endpoint(endpoint)
-        .build()
-        .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
-
-    let reader =
-        opentelemetry_sdk::metrics::PeriodicReader::builder(exporter, runtime::Tokio).build();
-
-    let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-        .with_reader(reader)
-        .with_resource(resource)
-        .build();
-
-    global::set_meter_provider(meter_provider);
-
-    Ok(())
 }
 
 #[cfg(test)]
