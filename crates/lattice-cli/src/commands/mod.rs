@@ -197,36 +197,6 @@ pub async fn load_kubeconfig(
     Ok((kc, pf))
 }
 
-/// Build a kube [`Client`] using the Lattice kubeconfig resolution chain.
-///
-/// If `cluster` is provided, selects that context from the resolved kubeconfig.
-///
-/// Returns `(Client, Option<PortForward>)`. The caller must hold the `PortForward`
-/// guard to keep it alive.
-pub async fn resolve_kube_client(
-    explicit_kubeconfig: Option<&str>,
-    cluster: Option<&str>,
-) -> Result<(Client, Option<port_forward::PortForward>)> {
-    // No resolved kubeconfig and no cluster context → use kube defaults directly
-    if crate::config::resolve_kubeconfig(explicit_kubeconfig).is_none() && cluster.is_none() {
-        let client = Client::try_default().await.cmd_err()?;
-        return Ok((client, None));
-    }
-
-    let (kc, pf) = load_kubeconfig(explicit_kubeconfig).await?;
-
-    let opts = match cluster {
-        Some(ctx) => KubeConfigOptions {
-            context: Some(ctx.to_string()),
-            ..Default::default()
-        },
-        None => KubeConfigOptions::default(),
-    };
-
-    let client = kube_client_from_kubeconfig(kc, &opts).await?;
-    Ok((client, pf))
-}
-
 /// Build a kube [`Client`] from an already-loaded [`Kubeconfig`] with options.
 pub async fn kube_client_from_kubeconfig(
     kubeconfig: Kubeconfig,

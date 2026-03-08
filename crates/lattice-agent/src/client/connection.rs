@@ -4,6 +4,7 @@
 //! and URL domain extraction.
 
 use futures::StreamExt;
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 use tokio_stream::wrappers::ReceiverStream;
@@ -150,39 +151,36 @@ impl AgentClient {
     async fn install_capi_with_retries(&self) -> Result<(bool, Vec<String>), ClientError> {
         info!("Installing CAPI on local cluster");
 
-        let capi_install_timeout = CAPI_INSTALL_TIMEOUT;
-        for attempt in 1..=3 {
-            match tokio::time::timeout(capi_install_timeout, self.install_capi()).await {
+        let config = RetryConfig {
+            max_attempts: 3,
+            initial_delay: CAPI_INSTALL_RETRY_DELAY,
+            max_delay: CAPI_INSTALL_RETRY_DELAY,
+            backoff_multiplier: 1.0,
+        };
+
+        retry_with_backoff(&config, "install_capi", || async {
+            match tokio::time::timeout(CAPI_INSTALL_TIMEOUT, self.install_capi()).await {
                 Ok(Ok(provider)) => {
                     info!("CAPI installed, waiting for CRDs");
                     if self.wait_for_capi_crds(120).await {
                         info!("CAPI is ready");
-                        return Ok((true, vec![provider]));
+                        Ok((true, vec![provider]))
                     } else {
-                        warn!(
-                            attempt,
-                            "CAPI CRDs not available after timeout, retrying..."
-                        );
+                        Err(ClientError::CapiInstallFailed(
+                            "CAPI CRDs not available after timeout".to_string(),
+                        ))
                     }
                 }
-                Ok(Err(e)) => {
-                    warn!(attempt, error = %e, "Failed to install CAPI, retrying...");
-                }
-                Err(_) => {
-                    warn!(
-                        attempt,
-                        "CAPI installation timed out after 10 minutes, retrying..."
-                    );
-                }
+                Ok(Err(e)) => Err(ClientError::CapiInstallFailed(format!(
+                    "installation failed: {}",
+                    e
+                ))),
+                Err(_) => Err(ClientError::CapiInstallFailed(
+                    "installation timed out after 10 minutes".to_string(),
+                )),
             }
-            if attempt < 3 {
-                tokio::time::sleep(CAPI_INSTALL_RETRY_DELAY).await;
-            }
-        }
-
-        Err(ClientError::CapiInstallFailed(
-            "failed after 3 attempts - cluster cannot self-manage".to_string(),
-        ))
+        })
+        .await
     }
 
     /// Spawn the periodic heartbeat task that sends cluster health to the cell.

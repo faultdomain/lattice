@@ -5,9 +5,11 @@
 //! stamps a fresh `lastTransitionTime`), so controllers must skip no-op updates.
 
 use crate::crd::{
-    InfraProviderPhase, InfraProviderStatus, JobPhase, LatticeJobStatus, LatticeMeshMemberStatus,
-    LatticeModelStatus, LatticeServiceStatus, MeshMemberPhase, ModelServingPhase,
-    SecretProviderPhase, SecretProviderStatus, ServicePhase,
+    BackupStorePhase, BackupStoreStatus, ClusterBackupPhase, InfraProviderPhase,
+    InfraProviderStatus, JobPhase, LatticeClusterBackupStatus, LatticeJobStatus,
+    LatticeMeshMemberStatus, LatticeModelStatus, LatticeRestoreStatus, LatticeServiceStatus,
+    MeshMemberPhase, ModelServingPhase, RestorePhase, SecretProviderPhase, SecretProviderStatus,
+    ServicePhase,
 };
 
 /// Trait for CRD status structs that carry phase, message, and observed generation.
@@ -113,6 +115,45 @@ impl StatusFields for LatticeJobStatus {
 
 impl StatusFields for LatticeModelStatus {
     type Phase = ModelServingPhase;
+    fn phase(&self) -> &Self::Phase {
+        &self.phase
+    }
+    fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+    fn observed_generation(&self) -> Option<i64> {
+        self.observed_generation
+    }
+}
+
+impl StatusFields for BackupStoreStatus {
+    type Phase = BackupStorePhase;
+    fn phase(&self) -> &Self::Phase {
+        &self.phase
+    }
+    fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+    fn observed_generation(&self) -> Option<i64> {
+        self.observed_generation
+    }
+}
+
+impl StatusFields for LatticeClusterBackupStatus {
+    type Phase = ClusterBackupPhase;
+    fn phase(&self) -> &Self::Phase {
+        &self.phase
+    }
+    fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+    fn observed_generation(&self) -> Option<i64> {
+        self.observed_generation
+    }
+}
+
+impl StatusFields for LatticeRestoreStatus {
+    type Phase = RestorePhase;
     fn phase(&self) -> &Self::Phase {
         &self.phase
     }

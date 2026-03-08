@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 use lattice_common::crd::OIDCProvider;
-use lattice_common::{is_local_resource, INHERITED_LABEL};
+use lattice_common::{is_local_resource, INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE};
 
 /// Validated user identity from OIDC token
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,7 +179,7 @@ impl OidcValidator {
     /// - Inherited providers take precedence by default
     /// - Local providers only used if inherited provider has `allow_child_override: true`
     pub async fn from_crd(client: &Client) -> Result<Self> {
-        let api: Api<OIDCProvider> = Api::namespaced(client.clone(), "lattice-system");
+        let api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         // Fetch inherited providers (from parent clusters)
         let inherited_lp = ListParams::default().labels(&format!("{}=true", INHERITED_LABEL));

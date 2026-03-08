@@ -24,8 +24,9 @@ where
     T: serde::Serialize + HasApiResource,
 {
     let ar = T::api_resource();
-    let value = serde_json::to_value(resource)
-        .map_err(|e| ReconcileError::kube("failed to serialize Velero resource", e))?;
+    let value = serde_json::to_value(resource).map_err(|e| {
+        ReconcileError::Internal(format!("failed to serialize Velero resource: {e}"))
+    })?;
 
     let name = value
         .pointer("/metadata/name")
@@ -39,9 +40,7 @@ where
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
     let params = PatchParams::apply(field_manager).force();
 
-    api.patch(name, &params, &Patch::Apply(&value))
-        .await
-        .map_err(|e| ReconcileError::kube(format!("failed to apply {}/{}", ar.kind, name), e))?;
+    api.patch(name, &params, &Patch::Apply(&value)).await?;
 
     Ok(())
 }

@@ -27,7 +27,7 @@ mod pod_template_json;
 mod authorization;
 mod pipeline;
 
-pub use authorization::{PrincipalFormatter, ServicePrincipal, VolumeAuthorizationMode};
+pub use authorization::VolumeAuthorizationMode;
 pub use compiled::{CompiledConfig, CompiledWorkload};
 pub use compiler::WorkloadCompiler;
 pub use error::CompilationError;

@@ -25,16 +25,7 @@ use lattice_proto::{
 
 use lattice_proto::stream_id;
 
-/// Build a K8s success Status JSON for exec sessions that exit cleanly.
-///
-/// kubectl expects a Status object on channel 3 (error/status channel) at
-/// session end. For successful exits, this is `{"status": "Success"}`.
-fn k8s_success_status() -> serde_json::Value {
-    serde_json::json!({
-        "status": "Success",
-        "metadata": {}
-    })
-}
+use lattice_common::kube_utils::k8s_success_status;
 
 /// Registry for tracking active exec sessions on the agent
 #[derive(Default)]

@@ -111,8 +111,7 @@ pub async fn ensure_webhook_credentials(
         &params,
         &Patch::Apply(&secret_json),
     )
-    .await
-    .map_err(|e| ReconcileError::kube("failed to create webhook auth secret", e))?;
+    .await?;
 
     info!("Generated new webhook auth credentials");
     Ok(WebhookCredentials {
@@ -153,8 +152,7 @@ pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), 
     let params = PatchParams::apply(FIELD_MANAGER).force();
     css_api
         .patch(LOCAL_WEBHOOK_STORE_NAME, &params, &Patch::Apply(&css_obj))
-        .await
-        .map_err(|e| ReconcileError::kube("failed to apply local ClusterSecretStore", e))?;
+        .await?;
 
     info!(
         "Local webhook ClusterSecretStore '{}' ensured",
@@ -357,8 +355,7 @@ async fn ensure_cluster_secret_store(
     let params = PatchParams::apply(FIELD_MANAGER).force();
     css_api
         .patch(&name, &params, &Patch::Apply(&css_obj))
-        .await
-        .map_err(|e| ReconcileError::kube("failed to apply ClusterSecretStore", e))?;
+        .await?;
 
     debug!(secrets_provider = %name, "Applied ClusterSecretStore");
     Ok(())
@@ -435,9 +432,7 @@ async fn ensure_external_egress_lmm(
     ]));
 
     let params = PatchParams::apply(FIELD_MANAGER).force();
-    api.patch(&lmm_name, &params, &Patch::Apply(&lmm))
-        .await
-        .map_err(|e| ReconcileError::kube("failed to apply egress LMM for SecretProvider", e))?;
+    api.patch(&lmm_name, &params, &Patch::Apply(&lmm)).await?;
 
     info!(
         secrets_provider = %sp_name,
@@ -459,9 +454,7 @@ async fn check_cluster_secret_store_ready(
     let api_resource = ClusterSecretStore::api_resource();
     let css_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
 
-    let css = css_api.get(name).await.map_err(|e| {
-        ReconcileError::kube(format!("failed to get ClusterSecretStore '{name}'"), e)
-    })?;
+    let css = css_api.get(name).await?;
 
     let conditions = css
         .data
@@ -499,10 +492,7 @@ async fn force_refresh_failed_external_secrets(
     let api_resource = ExternalSecret::api_resource();
     let es_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
 
-    let es_list = es_api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| ReconcileError::kube("failed to list ExternalSecrets", e))?;
+    let es_list = es_api.list(&ListParams::default()).await?;
 
     let timestamp = chrono::Utc::now().timestamp().to_string();
     let mut refreshed = 0u32;
@@ -657,13 +647,7 @@ async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), Reconcile
     let params = PatchParams::apply(FIELD_MANAGER).force();
     ns_api
         .patch(LOCAL_SECRETS_NAMESPACE, &params, &Patch::Apply(&ns))
-        .await
-        .map_err(|e| {
-            ReconcileError::kube(
-                format!("failed to ensure namespace {LOCAL_SECRETS_NAMESPACE}"),
-                e,
-            )
-        })?;
+        .await?;
 
     debug!("Ensured namespace {}", LOCAL_SECRETS_NAMESPACE);
     Ok(())
@@ -699,13 +683,7 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
     let params = PatchParams::apply(FIELD_MANAGER).force();
     svc_api
         .patch(LOCAL_SECRETS_SERVICE, &params, &Patch::Apply(&svc))
-        .await
-        .map_err(|e| {
-            ReconcileError::kube(
-                format!("failed to ensure webhook service {LOCAL_SECRETS_SERVICE}"),
-                e,
-            )
-        })?;
+        .await?;
 
     debug!("Ensured webhook service {}", LOCAL_SECRETS_SERVICE);
     Ok(())
@@ -750,8 +728,7 @@ async fn update_status(
         &status,
         FIELD_MANAGER,
     )
-    .await
-    .map_err(|e| ReconcileError::kube("failed to update status", e))?;
+    .await?;
 
     Ok(())
 }
@@ -764,28 +741,36 @@ mod tests {
     // Error Detection Tests
     // =========================================================================
 
+    fn kube_api_error(code: u16, message: &str) -> ReconcileError {
+        ReconcileError::Kube(kube::Error::Api(kube::error::ErrorResponse {
+            status: "Failure".to_string(),
+            message: message.to_string(),
+            reason: "".to_string(),
+            code,
+        }))
+    }
+
     #[test]
     fn is_crd_not_found_detects_404() {
-        let err = ReconcileError::Kube("404 Not Found".to_string());
+        let err = kube_api_error(404, "404 Not Found");
         assert!(err.is_crd_not_found());
     }
 
     #[test]
     fn is_crd_not_found_detects_not_found() {
-        let err = ReconcileError::Kube("resource not found".to_string());
+        let err = kube_api_error(404, "resource not found");
         assert!(err.is_crd_not_found());
     }
 
     #[test]
     fn is_crd_not_found_detects_server_message() {
-        let err =
-            ReconcileError::Kube("the server could not find the requested resource".to_string());
+        let err = kube_api_error(404, "the server could not find the requested resource");
         assert!(err.is_crd_not_found());
     }
 
     #[test]
     fn is_crd_not_found_returns_false_for_other_errors() {
-        let err = ReconcileError::Kube("connection refused".to_string());
+        let err = kube_api_error(503, "connection refused");
         assert!(!err.is_crd_not_found());
 
         let err = ReconcileError::Validation("invalid spec".to_string());
@@ -815,23 +800,22 @@ mod tests {
 
     #[test]
     fn reconcile_crd_not_found_requeues_with_30s() {
-        let action =
-            compute_expected_action(Err(ReconcileError::Kube("404 Not Found".to_string())));
+        let action = compute_expected_action(Err(kube_api_error(404, "404 Not Found")));
         assert_eq!(action, Action::requeue(Duration::from_secs(30)));
     }
 
     #[test]
     fn reconcile_crd_not_found_message_requeues_with_30s() {
-        let action = compute_expected_action(Err(ReconcileError::Kube(
-            "the server could not find the requested resource".to_string(),
+        let action = compute_expected_action(Err(kube_api_error(
+            404,
+            "the server could not find the requested resource",
         )));
         assert_eq!(action, Action::requeue(Duration::from_secs(30)));
     }
 
     #[test]
     fn reconcile_other_error_requeues_with_60s() {
-        let action =
-            compute_expected_action(Err(ReconcileError::Kube("connection refused".to_string())));
+        let action = compute_expected_action(Err(kube_api_error(503, "connection refused")));
         assert_eq!(action, Action::requeue(Duration::from_secs(60)));
     }
 

@@ -38,16 +38,6 @@ impl ProvisionOutput {
         result
     }
 
-    /// Add outputs for a resource
-    pub fn add_outputs(&mut self, resource_name: impl Into<String>, outputs: ResourceOutputs) {
-        self.outputs.insert(resource_name.into(), outputs);
-    }
-
-    /// Add a manifest to apply
-    pub fn add_manifest(&mut self, manifest: DynamicObject) {
-        self.manifests.push(manifest);
-    }
-
     /// Check if this output is empty
     pub fn is_empty(&self) -> bool {
         self.outputs.is_empty() && self.manifests.is_empty()

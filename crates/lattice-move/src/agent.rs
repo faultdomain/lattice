@@ -4,11 +4,13 @@
 //! Receives batches from the cell and creates objects with UID remapping.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{Api, DynamicObject, ListParams, PostParams};
 use kube::Client;
 use lattice_common::kube_utils::build_api_resource;
+use lattice_common::retry::{retry_with_backoff_bail, RetryConfig};
 use serde_json::Value;
 use tracing::{debug, info, instrument, warn};
 
@@ -312,33 +314,33 @@ impl AgentMover {
             Api::namespaced_with(self.client.clone(), &self.namespace, &api_resource);
 
         // Try to create with retry for transient errors (webhooks not ready, etc.)
-        let mut retries = 0;
-        let max_retries = 5;
-        let created = loop {
-            match api.create(&PostParams::default(), &dyn_obj).await {
-                Ok(created) => break created,
-                Err(kube::Error::Api(e)) if e.code == 409 => {
-                    // Already exists - get it to retrieve UID
-                    debug!(kind = %kind, name = %name, "Object already exists, getting existing UID");
-                    break api.get(&name).await.map_err(MoveError::Kube)?;
-                }
-                Err(kube::Error::Api(e)) if e.code >= 500 && retries < max_retries => {
-                    // 5xx error (webhook not ready, etc.) - retry
-                    retries += 1;
-                    warn!(
-                        kind = %kind,
-                        name = %name,
-                        error = %e.message,
-                        retry = retries,
-                        "Transient error, retrying"
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500 * retries as u64))
-                        .await;
-                    continue;
-                }
-                Err(e) => return Err(MoveError::Kube(e)),
-            }
+        let retry_config = RetryConfig {
+            max_attempts: 6, // 1 initial + 5 retries
+            initial_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(5),
+            backoff_multiplier: 1.0,
         };
+
+        let created = retry_with_backoff_bail(
+            &retry_config,
+            &format!("create_{}/{}", kind, name),
+            || async {
+                match api.create(&PostParams::default(), &dyn_obj).await {
+                    Ok(created) => Ok(created),
+                    Err(kube::Error::Api(e)) if e.code == 409 => {
+                        // Already exists - get it to retrieve UID
+                        debug!(kind = %kind, name = %name, "Object already exists, getting existing UID");
+                        api.get(&name).await.map_err(MoveError::Kube)
+                    }
+                    Err(e) => Err(MoveError::Kube(e)),
+                }
+            },
+            |e| {
+                // Only 5xx errors are transient; everything else is fatal
+                !matches!(e, MoveError::Kube(kube::Error::Api(ref ae)) if ae.code >= 500)
+            },
+        )
+        .await?;
 
         let target_uid = created
             .metadata

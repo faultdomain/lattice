@@ -149,8 +149,7 @@ async fn delete_if_discovered(
     };
 
     lattice_common::kube_utils::delete_resource_if_exists(client, namespace, &ar, name, kind)
-        .await
-        .map_err(|e| ReconcileError::kube(format!("delete orphaned {kind} {name}"), e))?;
+        .await?;
     Ok(())
 }
 
@@ -519,8 +518,7 @@ async fn ensure_namespace_ambient(
         mesh::DATAPLANE_MODE_AMBIENT.to_string(),
     )]);
     lattice_common::kube_utils::ensure_namespace(client, namespace, Some(&labels), FIELD_MANAGER)
-        .await
-        .map_err(|e| ReconcileError::kube("ensure namespace ambient", e))?;
+        .await?;
 
     debug!(namespace = %namespace, "ensured namespace ambient mode");
     Ok(())
@@ -600,9 +598,7 @@ async fn apply_resource(
     }
 
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
-    api.patch(name, params, &Patch::Apply(&json))
-        .await
-        .map_err(|e| ReconcileError::kube(format!("apply {kind} {name}"), e))?;
+    api.patch(name, params, &Patch::Apply(&json)).await?;
 
     debug!(name = %name, kind = %kind, "applied resource");
     Ok(())
@@ -714,9 +710,7 @@ async fn apply_policies(
         let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
         let params = params.clone();
         async move {
-            api.patch(&name, &params, &Patch::Apply(&json))
-                .await
-                .map_err(|e| ReconcileError::kube(format!("apply {kind} {name}"), e))?;
+            api.patch(&name, &params, &Patch::Apply(&json)).await?;
             debug!(name = %name, kind = kind, "applied resource");
             Ok::<(), ReconcileError>(())
         }
@@ -826,9 +820,7 @@ async fn apply_ingress(
         let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
         let params = params.clone();
         async move {
-            api.patch(&name, &params, &Patch::Apply(&json))
-                .await
-                .map_err(|e| ReconcileError::kube(format!("apply {kind} {name}"), e))?;
+            api.patch(&name, &params, &Patch::Apply(&json)).await?;
             debug!(name = %name, kind = kind, "applied resource");
             Ok::<(), ReconcileError>(())
         }
@@ -873,8 +865,7 @@ async fn release_gateway_listeners(
     });
 
     api.patch(&gateway_name, params, &Patch::Apply(empty_listeners))
-        .await
-        .map_err(|e| ReconcileError::kube("release gateway listeners", e))?;
+        .await?;
 
     info!("released gateway listeners for removed ingress");
     Ok(())
@@ -1052,16 +1043,14 @@ async fn patch_status_with_hash(
             "metadata": { "annotations": { GRAPH_HASH_ANNOTATION: graph_hash } },
         });
         api.patch(&name, &params, &Patch::Merge(&annotation_patch))
-            .await
-            .map_err(|e| ReconcileError::kube("patch annotation", e))?;
+            .await?;
     }
 
     // Status (phase, scope, message, applied resources)
     if !status_unchanged || applied_resources_changed {
         let status_patch = serde_json::json!({ "status": new_status });
         api.patch_status(&name, &params, &Patch::Merge(&status_patch))
-            .await
-            .map_err(|e| ReconcileError::kube("patch status", e))?;
+            .await?;
     }
 
     Ok(())

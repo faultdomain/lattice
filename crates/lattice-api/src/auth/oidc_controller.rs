@@ -85,8 +85,7 @@ pub async fn reconcile(
         &PatchParams::apply("lattice-oidc-validation"),
         &Patch::Merge(&patch),
     )
-    .await
-    .map_err(|e| ReconcileError::kube("failed to update OIDCProvider status", e))?;
+    .await?;
 
     let requeue = if new_status.phase == OIDCProviderPhase::Ready {
         REQUEUE_SUCCESS_SECS
@@ -167,9 +166,7 @@ async fn ensure_oidc_egress_lmm(
     )]));
 
     let params = PatchParams::apply(FIELD_MANAGER).force();
-    api.patch(&lmm_name, &params, &Patch::Apply(&lmm))
-        .await
-        .map_err(|e| ReconcileError::kube("failed to apply egress LMM for OIDCProvider", e))?;
+    api.patch(&lmm_name, &params, &Patch::Apply(&lmm)).await?;
 
     info!(
         oidc_provider = %provider_name,

@@ -55,18 +55,6 @@ pub fn kubeconfig_path() -> Result<PathBuf> {
     Ok(lattice_dir()?.join(KUBECONFIG_FILE_NAME))
 }
 
-/// Load config from `~/.lattice/config.json`, returning default if missing.
-pub fn load_config() -> Result<LatticeConfig> {
-    let path = config_path()?;
-    if !path.exists() {
-        return Ok(LatticeConfig::default());
-    }
-    let data = std::fs::read_to_string(&path)
-        .map_err(|e| Error::command_failed(format!("failed to read {}: {}", path.display(), e)))?;
-    serde_json::from_str(&data)
-        .map_err(|e| Error::command_failed(format!("failed to parse {}: {}", path.display(), e)))
-}
-
 /// Save config to `~/.lattice/config.json`.
 pub fn save_config(config: &LatticeConfig) -> Result<()> {
     let path = config_path()?;

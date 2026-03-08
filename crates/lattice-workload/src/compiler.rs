@@ -203,7 +203,6 @@ impl<'a> WorkloadCompiler<'a> {
         if let Some(cedar) = self.cedar {
             crate::authorization::secrets::authorize_secrets(
                 cedar,
-                &crate::authorization::ServicePrincipal,
                 self.name,
                 self.namespace,
                 self.workload,

@@ -66,3 +66,21 @@ pub use dynamic::{
 
 // hash.rs
 pub use hash::{deterministic_hash, sha256};
+
+/// Build a K8s success Status JSON for exec sessions that exit cleanly.
+///
+/// kubectl expects a Status object on channel 3 (error/status channel) at
+/// session end. For successful exits, this is `{"status": "Success"}`.
+pub fn k8s_success_status() -> serde_json::Value {
+    serde_json::json!({
+        "status": "Success",
+        "metadata": {}
+    })
+}
+
+/// Return the namespace of a Kubernetes resource, defaulting to `lattice-system`.
+pub fn effective_namespace<T: kube::ResourceExt>(resource: &T) -> String {
+    resource
+        .namespace()
+        .unwrap_or_else(|| crate::LATTICE_SYSTEM_NAMESPACE.to_string())
+}

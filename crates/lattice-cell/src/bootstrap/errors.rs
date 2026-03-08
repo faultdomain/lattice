@@ -33,6 +33,10 @@ pub enum BootstrapError {
     #[error("cluster not bootstrapped: {0}")]
     ClusterNotBootstrapped(String),
 
+    /// Manifest generation failed
+    #[error("manifest generation failed: {0}")]
+    ManifestGeneration(String),
+
     /// Internal error
     #[error("internal error: {0}")]
     Internal(String),
@@ -49,6 +53,10 @@ impl IntoResponse for BootstrapError {
             BootstrapError::ClusterNotBootstrapped(_) => {
                 (StatusCode::PRECONDITION_FAILED, self.to_string())
             }
+            BootstrapError::ManifestGeneration(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "manifest generation failed".to_string(),
+            ),
             BootstrapError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_string(),

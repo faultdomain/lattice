@@ -96,7 +96,7 @@ impl OnlineTrainer {
         let score = self.cached_score(window_data, device);
 
         // Train if it's time
-        if self.scrape_count % TRAIN_EVERY_N_SCRAPES == 0 {
+        if self.scrape_count.is_multiple_of(TRAIN_EVERY_N_SCRAPES) {
             self.train_step(window_data, score, device);
         }
 
@@ -166,12 +166,12 @@ impl OnlineTrainer {
         self.inference_model = Some(self.model.valid());
 
         // LR decay
-        if self.step_count % DECAY_EVERY_N_STEPS == 0 && self.step_count > 0 {
+        if self.step_count.is_multiple_of(DECAY_EVERY_N_STEPS) && self.step_count > 0 {
             self.current_lr = (self.current_lr * LR_DECAY_FACTOR).max(MIN_LEARNING_RATE);
         }
 
         // Checkpoint (weights only — optimizer state is not persisted)
-        if self.step_count % CHECKPOINT_EVERY_N_STEPS == 0 && self.step_count > 0 {
+        if self.step_count.is_multiple_of(CHECKPOINT_EVERY_N_STEPS) && self.step_count > 0 {
             if let Err(e) = self.save_checkpoint() {
                 warn!(error = %e, "failed to save model checkpoint");
             }

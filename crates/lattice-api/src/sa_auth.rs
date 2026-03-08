@@ -38,14 +38,6 @@ impl SaValidator {
         }
     }
 
-    /// Create a validator with specific audiences
-    pub fn with_audiences(client: Client, audiences: Vec<String>) -> Self {
-        Self {
-            client,
-            audiences: Some(audiences),
-        }
-    }
-
     /// Validate a ServiceAccount token using TokenReview API
     ///
     /// Submits the token to the Kubernetes TokenReview API and returns

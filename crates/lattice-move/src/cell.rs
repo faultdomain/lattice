@@ -409,12 +409,6 @@ impl CellMoverConfig {
         self.oidc_providers = resources.oidc_providers.clone();
         self
     }
-
-    /// Set additional manifests to apply post-pivot
-    pub fn with_manifests(mut self, manifests: Vec<Vec<u8>>) -> Self {
-        self.manifests = manifests;
-        self
-    }
 }
 
 /// Result of a move operation

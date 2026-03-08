@@ -377,26 +377,6 @@ impl ProvisionerRegistry {
 
         Ok(outputs)
     }
-
-    /// Provision all resources from a workload spec
-    ///
-    /// Returns a combined ProvisionOutput with all manifests and outputs.
-    pub fn provision_all(
-        &self,
-        spec: &WorkloadSpec,
-        ctx: &ProvisionerContext<'_>,
-    ) -> Result<ProvisionOutput, TemplateError> {
-        let mut combined = ProvisionOutput::default();
-
-        for (name, resource) in provisionable_resources(spec) {
-            if let Some(provisioner) = self.get_for_resource(resource) {
-                let output = provisioner.provision(name, resource, ctx)?;
-                combined.merge(output);
-            }
-        }
-
-        Ok(combined)
-    }
 }
 
 /// Resources that produce template outputs (excludes inbound and wildcard mesh declarations).

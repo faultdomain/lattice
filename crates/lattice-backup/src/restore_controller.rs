@@ -10,6 +10,7 @@ use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{LatticeRestore, LatticeRestoreStatus, RestorePhase};
+use lattice_common::status_check::is_status_unchanged;
 use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::velero::{self, VELERO_NAMESPACE};
@@ -97,11 +98,14 @@ async fn update_status(
     phase: RestorePhase,
     message: Option<String>,
 ) -> Result<(), ReconcileError> {
-    if let Some(ref current) = restore.status {
-        if current.phase == phase && current.message == message {
-            debug!(restore = %restore.name_any(), "status unchanged, skipping update");
-            return Ok(());
-        }
+    if is_status_unchanged(
+        restore.status.as_ref(),
+        &phase,
+        message.as_deref(),
+        restore.metadata.generation,
+    ) {
+        debug!(restore = %restore.name_any(), "status unchanged, skipping update");
+        return Ok(());
     }
 
     let name = restore.name_any();
@@ -124,8 +128,7 @@ async fn update_status(
         &status,
         FIELD_MANAGER,
     )
-    .await
-    .map_err(|e| ReconcileError::kube("status update failed", e))?;
+    .await?;
 
     Ok(())
 }

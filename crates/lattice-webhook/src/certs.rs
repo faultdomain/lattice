@@ -17,7 +17,7 @@ use crate::error::Error;
 pub const WEBHOOK_TLS_SECRET_NAME: &str = "lattice-webhook-tls";
 
 /// Namespace for webhook TLS credentials
-pub const WEBHOOK_NAMESPACE: &str = "lattice-system";
+pub const WEBHOOK_NAMESPACE: &str = lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 /// SAN for the webhook service (short DNS)
 const WEBHOOK_SAN_SHORT: &str = "lattice-operator.lattice-system.svc";

@@ -13,13 +13,7 @@ use tracing::debug;
 use super::io::{ExecIo, ExecOutput};
 use super::websocket::channel;
 
-/// Build a K8s success Status JSON for exec sessions that exit cleanly.
-fn k8s_success_status() -> serde_json::Value {
-    serde_json::json!({
-        "status": "Success",
-        "metadata": {}
-    })
-}
+use lattice_common::kube_utils::k8s_success_status;
 
 /// Local exec I/O backed by kube-rs AttachedProcess
 pub struct LocalExecIo {

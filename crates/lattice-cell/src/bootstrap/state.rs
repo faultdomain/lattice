@@ -407,8 +407,8 @@ mod tests {
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
             _provider: Option<ProviderType>,
-        ) -> Vec<String> {
-            vec![format!("# Test manifest with image {}", image)]
+        ) -> Result<Vec<String>, super::errors::BootstrapError> {
+            Ok(vec![format!("# Test manifest with image {}", image)])
         }
     }
 

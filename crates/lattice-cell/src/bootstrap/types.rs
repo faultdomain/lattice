@@ -62,7 +62,7 @@ pub trait ManifestGenerator: Send + Sync {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
-    ) -> Vec<String>;
+    ) -> Result<Vec<String>, super::errors::BootstrapError>;
 }
 
 /// Configuration for generating a complete bootstrap bundle

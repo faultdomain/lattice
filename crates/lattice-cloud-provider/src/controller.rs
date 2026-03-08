@@ -235,8 +235,7 @@ async fn update_status(
         &status,
         FIELD_MANAGER,
     )
-    .await
-    .map_err(|e| ReconcileError::kube("failed to update status", e))?;
+    .await?;
 
     Ok(())
 }

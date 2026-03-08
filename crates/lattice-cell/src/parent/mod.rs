@@ -868,8 +868,8 @@ mod tests {
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
             _provider: Option<ProviderType>,
-        ) -> Vec<String> {
-            vec!["mock-manifest".to_string()]
+        ) -> Result<Vec<String>, crate::bootstrap::errors::BootstrapError> {
+            Ok(vec!["mock-manifest".to_string()])
         }
     }
 

@@ -33,7 +33,7 @@ pub async fn reconcile(
     ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
     let name = service.name_any();
-    let namespace = service.namespace().unwrap_or_else(|| "default".to_string());
+    let namespace = lattice_common::kube_utils::effective_namespace(service.as_ref());
 
     let (backup, cron) = match &service.spec.backup {
         Some(b) => match b.schedule.as_deref() {

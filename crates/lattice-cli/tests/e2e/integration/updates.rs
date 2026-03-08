@@ -1532,12 +1532,6 @@ pub async fn run_model_update_tests(kubeconfig: &str) -> Result<(), String> {
         harness.run("Model role removal orphan cleanup", || {
             test_model_role_removal_orphan_cleanup(kubeconfig, NS_MODEL_ROLE_ORPHAN)
         }),
-        // TODO: Kthena downloader bug — snapshot_download silently returns existing
-        // local_dir on auth/404 errors instead of raising, so init container exits 0.
-        // Fork downloader and add post-download validation, then re-enable.
-        // harness.run("Model download failure", || {
-        //     test_model_download_failure(kubeconfig, NS_MODEL_DOWNLOAD_FAIL)
-        // }),
     );
 
     harness.finish()

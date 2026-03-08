@@ -77,8 +77,7 @@ pub async fn reconcile(
         &PatchParams::apply("lattice-cedar-validation"),
         &Patch::Merge(&patch),
     )
-    .await
-    .map_err(|e| ReconcileError::kube("failed to update CedarPolicy status", e))?;
+    .await?;
 
     let requeue = if new_status.phase == CedarPolicyPhase::Valid {
         REQUEUE_SUCCESS_SECS

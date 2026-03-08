@@ -12,7 +12,6 @@ use super::context::TemplateContext;
 use super::engine::TemplateEngine;
 use super::error::TemplateError;
 use super::provisioner::{ProvisionerContext, ProvisionerRegistry};
-use super::types::TemplateString;
 
 /// Configuration for template rendering
 pub struct RenderConfig<'a> {
@@ -44,12 +43,6 @@ impl<'a> RenderConfig<'a> {
             env_config: BTreeMap::new(),
             service_config: BTreeMap::new(),
         }
-    }
-
-    /// Set custom cluster domain
-    pub fn with_cluster_domain(mut self, domain: &'a str) -> Self {
-        self.cluster_domain = domain;
-        self
     }
 
     /// Add cluster context value
@@ -646,15 +639,6 @@ impl TemplateRenderer {
             rendered.insert(path.clone(), r);
         }
         Ok(rendered)
-    }
-
-    /// Render a single template string
-    pub fn render_string(
-        &self,
-        template: &TemplateString,
-        ctx: &TemplateContext,
-    ) -> Result<String, TemplateError> {
-        self.engine.render(template.as_str(), ctx)
     }
 }
 

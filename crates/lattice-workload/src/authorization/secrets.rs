@@ -3,7 +3,6 @@
 use lattice_cedar::{PolicyEngine, SecretAuthzRequest};
 use lattice_common::crd::WorkloadSpec;
 
-use crate::authorization::PrincipalFormatter;
 use crate::error::CompilationError;
 
 /// Authorize secret access via Cedar policies (default-deny).
@@ -12,7 +11,6 @@ use crate::error::CompilationError;
 /// and evaluates it. Returns an error if any path is denied.
 pub(crate) async fn authorize_secrets(
     cedar: &PolicyEngine,
-    principal: &dyn PrincipalFormatter,
     name: &str,
     namespace: &str,
     workload: &WorkloadSpec,
@@ -31,8 +29,6 @@ pub(crate) async fn authorize_secrets(
     if secret_paths.is_empty() {
         return Ok(());
     }
-
-    let _ = principal; // Principal format used by Cedar engine internally
 
     let result = cedar
         .authorize_secrets(&SecretAuthzRequest {

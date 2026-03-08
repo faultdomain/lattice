@@ -508,14 +508,6 @@ impl LeaderGuard {
         Ok(())
     }
 
-    /// Remove leader label from this pod (call before shutdown)
-    ///
-    /// This stops traffic to this pod immediately. Call this during graceful
-    /// shutdown before dropping the guard.
-    pub async fn release_traffic(&self) -> Result<(), LeaderElectionError> {
-        self.elector.remove_leader_label().await
-    }
-
     /// Release leadership by clearing the lease holder
     ///
     /// Call this during graceful shutdown to allow the standby to immediately

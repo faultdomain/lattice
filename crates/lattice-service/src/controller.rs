@@ -1076,7 +1076,7 @@ impl<'a> ServiceStatusUpdate<'a> {
         }
 
         let name = service.name_any();
-        let namespace = service.namespace().unwrap_or_default();
+        let namespace = lattice_common::kube_utils::effective_namespace(service);
         kube.patch_service_status(&name, &namespace, &status).await
     }
 }

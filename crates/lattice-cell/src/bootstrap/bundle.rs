@@ -30,7 +30,7 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
             Some(config.cluster_name),
             Some(config.provider),
         )
-        .await;
+        .await?;
 
     // Add Cilium LB-IPAM resources (on-prem providers only)
     if let Some(cidr) = config.lb_cidr {

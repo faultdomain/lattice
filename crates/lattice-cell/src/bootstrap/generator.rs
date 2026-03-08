@@ -302,19 +302,6 @@ impl DefaultManifestGenerator {
     }
 }
 
-/// Error type for manifest generation failures
-#[derive(Debug, thiserror::Error)]
-enum ManifestError {
-    /// Serialization failed
-    #[error("failed to serialize {resource}: {message}")]
-    Serialization {
-        /// Resource being serialized
-        resource: String,
-        /// Error message
-        message: String,
-    },
-}
-
 #[async_trait::async_trait]
 impl ManifestGenerator for DefaultManifestGenerator {
     async fn generate(
@@ -323,31 +310,7 @@ impl ManifestGenerator for DefaultManifestGenerator {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
-    ) -> Vec<String> {
-        match self
-            .try_generate(image, registry_credentials, cluster_name, provider)
-            .await
-        {
-            Ok(manifests) => manifests,
-            Err(e) => {
-                // Log the error but return empty manifests - callers will detect the failure
-                // when the cluster doesn't come up properly
-                tracing::error!(error = %e, "Failed to generate manifests");
-                Vec::new()
-            }
-        }
-    }
-}
-
-impl DefaultManifestGenerator {
-    /// Try to generate manifests, returning errors instead of panicking
-    async fn try_generate(
-        &self,
-        image: &str,
-        registry_credentials: Option<&str>,
-        cluster_name: Option<&str>,
-        provider: Option<ProviderType>,
-    ) -> Result<Vec<String>, ManifestError> {
+    ) -> Result<Vec<String>, super::errors::BootstrapError> {
         let mut manifests = Vec::new();
 
         // CNI manifests first (Cilium) - embedded at build time
@@ -360,9 +323,10 @@ impl DefaultManifestGenerator {
         // Then operator manifests
         let operator_manifests = self
             .generate_operator_manifests(image, registry_credentials, cluster_name, provider)
-            .map_err(|e| ManifestError::Serialization {
-                resource: "operator manifests".to_string(),
-                message: e.to_string(),
+            .map_err(|e| {
+                super::errors::BootstrapError::ManifestGeneration(format!(
+                    "failed to serialize operator manifests: {e}"
+                ))
             })?;
         manifests.extend(operator_manifests);
 
@@ -378,7 +342,10 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None)
+            .await
+            .unwrap();
 
         // Operator manifests are JSON, check for JSON format
         let has_namespace = manifests.iter().any(|m: &String| {
@@ -390,7 +357,10 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_operator_deployment() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None)
+            .await
+            .unwrap();
 
         // Operator manifests are JSON, check for JSON format
         let has_deployment = manifests.iter().any(|m: &String| {
@@ -402,7 +372,10 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_service_account() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None)
+            .await
+            .unwrap();
 
         // Should have ServiceAccount for operator
         let has_sa = manifests.iter().any(|m: &String| {
@@ -414,7 +387,10 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None)
+            .await
+            .unwrap();
 
         // Should include Cilium DaemonSet (rendered from helm template)
         let has_cilium_daemonset = manifests
@@ -437,7 +413,10 @@ mod tests {
     #[tokio::test]
     async fn manifest_generation() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None).await;
+        let manifests = generator
+            .generate("test:latest", None, None, None)
+            .await
+            .unwrap();
 
         // CRD must be first so it's applied before any CR instances
         let has_crd = manifests.iter().any(|m: &String| {

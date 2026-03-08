@@ -29,7 +29,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
 use lattice_common::crd::CedarPolicy;
-use lattice_common::{is_local_resource, INHERITED_LABEL};
+use lattice_common::{is_local_resource, INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE};
 
 // ============================================================================
 // Error types
@@ -428,7 +428,7 @@ impl PolicyEngine {
     /// assigns globally unique auto-IDs (policy0, policy1, ...) across CRDs.
     /// Inherited policies come first so parent policies take precedence.
     async fn load_policies_from_crds(client: &Client) -> Result<PolicySet> {
-        let api: Api<CedarPolicy> = Api::namespaced(client.clone(), "lattice-system");
+        let api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         let all = api.list(&Default::default()).await?;
         let inherited_lp = ListParams::default().labels(&format!("{}=true", INHERITED_LABEL));

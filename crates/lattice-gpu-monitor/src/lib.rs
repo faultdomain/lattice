@@ -149,7 +149,7 @@ pub async fn run(client: kube::Client, node_name: String) -> anyhow::Result<()> 
         // Retain last known status between checks and on errors — never
         // silently default to Normal as that would clear a real detection.
         loss_check_counter += 1;
-        if loss_check_counter % GPU_LOSS_CHECK_INTERVAL_SECS == 0 {
+        if loss_check_counter.is_multiple_of(GPU_LOSS_CHECK_INTERVAL_SECS) {
             match loss_checker.check().await {
                 Ok(status) => last_gpu_loss = status,
                 Err(e) => warn!(error = %e, "GPU loss check failed, retaining last status"),

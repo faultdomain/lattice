@@ -197,7 +197,7 @@ spec:
 pub fn generate_gpu_monitor_mesh_member() -> LatticeMeshMember {
     lmm(
         "lattice-gpu-monitor",
-        "lattice-system",
+        lattice_common::LATTICE_SYSTEM_NAMESPACE,
         LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
                 "app.kubernetes.io/name".to_string(),

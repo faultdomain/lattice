@@ -30,7 +30,7 @@ pub trait Retryable {
 pub enum ReconcileError {
     /// Kubernetes API error
     #[error("kubernetes error: {0}")]
-    Kube(String),
+    Kube(#[from] kube::Error),
 
     /// Validation error
     #[error("validation error: {0}")]
@@ -42,26 +42,9 @@ pub enum ReconcileError {
 }
 
 impl ReconcileError {
-    /// Create a Kube error with context describing what operation failed.
-    ///
-    /// Replaces the verbose `.map_err(|e| ReconcileError::Kube(format!("...: {e}")))` pattern.
-    /// Usage: `.map_err(|e| ReconcileError::kube("apply Deployment", e))?`
-    pub fn kube(context: impl std::fmt::Display, error: impl std::fmt::Display) -> Self {
-        Self::Kube(format!("{context}: {error}"))
-    }
-
     /// Check if this error indicates a CRD is not installed (404/not found)
     pub fn is_crd_not_found(&self) -> bool {
-        let msg = self.to_string();
-        msg.contains("404")
-            || msg.contains("not found")
-            || msg.contains("the server could not find the requested resource")
-    }
-}
-
-impl From<kube::Error> for ReconcileError {
-    fn from(e: kube::Error) -> Self {
-        Self::Kube(e.to_string())
+        matches!(self, Self::Kube(kube::Error::Api(ae)) if ae.code == 404)
     }
 }
 
@@ -736,14 +719,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_error_kube_helper_formats_context() {
-        let err = ReconcileError::kube("failed to apply Deployment", "connection refused");
-        assert!(err
-            .to_string()
-            .contains("failed to apply Deployment: connection refused"));
-    }
-
-    #[test]
     fn reconcile_error_from_kube_error() {
         let kube_err = kube::Error::Api(kube::error::ErrorResponse {
             status: "Failure".to_string(),
@@ -755,13 +730,31 @@ mod tests {
         assert!(err.is_crd_not_found());
     }
 
+    #[test]
+    fn reconcile_error_is_crd_not_found_false_for_non_404() {
+        let kube_err = kube::Error::Api(kube::error::ErrorResponse {
+            status: "Failure".to_string(),
+            message: "connection refused".to_string(),
+            reason: "ServiceUnavailable".to_string(),
+            code: 503,
+        });
+        let err: ReconcileError = kube_err.into();
+        assert!(!err.is_crd_not_found());
+    }
+
     // ==========================================================================
     // Retryable trait tests
     // ==========================================================================
 
     #[test]
     fn reconcile_error_retryable_kube() {
-        let err = ReconcileError::Kube("connection refused".into());
+        let kube_err = kube::Error::Api(kube::error::ErrorResponse {
+            status: "Failure".to_string(),
+            message: "connection refused".to_string(),
+            reason: "ServiceUnavailable".to_string(),
+            code: 503,
+        });
+        let err: ReconcileError = kube_err.into();
         assert!(Retryable::is_retryable(&err));
     }
 
@@ -798,7 +791,12 @@ mod tests {
             ..Default::default()
         });
         let ctx: Arc<()> = Arc::new(());
-        let err = ReconcileError::Kube("transient".into());
+        let err = ReconcileError::Kube(kube::Error::Api(kube::error::ErrorResponse {
+            status: "Failure".to_string(),
+            message: "transient".to_string(),
+            reason: "ServiceUnavailable".to_string(),
+            code: 503,
+        }));
 
         let action = default_error_policy(resource, &err, ctx);
         assert_eq!(action, Action::requeue(Duration::from_secs(30)));

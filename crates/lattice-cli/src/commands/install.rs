@@ -385,7 +385,10 @@ impl Installer {
                 Some("lattice-installer"),
                 None,
             )
-            .await;
+            .await
+            .map_err(|e| {
+                crate::Error::command_failed(format!("manifest generation failed: {e}"))
+            })?;
 
         let provider_str = self.provider().to_string();
         let provider_ref = &self.cluster.spec.provider_ref;

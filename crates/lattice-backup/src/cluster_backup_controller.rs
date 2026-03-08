@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{
     BackupStore, ClusterBackupPhase, LatticeClusterBackup, LatticeClusterBackupStatus,
 };
+use lattice_common::status_check::is_status_unchanged;
 use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::velero::{self, BackupTemplate, Schedule, ScheduleSpec, VELERO_NAMESPACE};
@@ -186,11 +187,14 @@ async fn update_status(
     velero_schedule_name: Option<String>,
     resolved_store: Option<String>,
 ) -> Result<(), ReconcileError> {
-    if let Some(ref current) = backup.status {
-        if current.phase == phase && current.message == message {
-            debug!(cluster_backup = %backup.name_any(), "status unchanged, skipping update");
-            return Ok(());
-        }
+    if is_status_unchanged(
+        backup.status.as_ref(),
+        &phase,
+        message.as_deref(),
+        backup.metadata.generation,
+    ) {
+        debug!(cluster_backup = %backup.name_any(), "status unchanged, skipping update");
+        return Ok(());
     }
 
     let name = backup.name_any();
@@ -214,8 +218,7 @@ async fn update_status(
         &status,
         FIELD_MANAGER,
     )
-    .await
-    .map_err(|e| ReconcileError::kube("status update failed", e))?;
+    .await?;
 
     Ok(())
 }

@@ -556,16 +556,7 @@ pub async fn apply_external_secret(
             &params,
             &Patch::Apply(&es_obj),
         )
-        .await
-        .map_err(|e| {
-            lattice_common::ReconcileError::kube(
-                format!(
-                    "failed to apply ExternalSecret '{}'",
-                    external_secret.metadata.name
-                ),
-                e,
-            )
-        })?;
+        .await?;
 
     Ok(())
 }
