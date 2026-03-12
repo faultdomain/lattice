@@ -10,7 +10,7 @@
 //! 2. Create workload cluster off management cluster
 //! 3. Verify workload cluster is self-managing (has own CAPI resources)
 //! 4. Delete management cluster (force delete via Docker)
-//! 5. Scale workload cluster workers 1 -> 2
+//! 5. Scale workload cluster workers by +1
 //! 6. Verify workload cluster scaled successfully without parent
 //! 7. Cleanup workload cluster (force delete via Docker)
 //!
@@ -134,6 +134,7 @@ async fn run_independence_test(
     let (_, workload_cluster) =
         load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml")?;
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
+    let initial_workers = workload_cluster.spec.nodes.total_workers();
 
     let mgmt_config = serde_json::to_string(&mgmt_cluster)
         .map_err(|e| format!("Failed to serialize mgmt cluster: {}", e))?;
@@ -205,7 +206,7 @@ async fn run_independence_test(
 
     info!("Workload cluster has its own CAPI resources!");
 
-    watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 5).await?;
+    watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, initial_workers).await?;
 
     // =========================================================================
     // Phase 4: Delete Management Cluster
@@ -224,8 +225,18 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 5: Scale Workload Cluster
     // =========================================================================
-    info!("[Phase 5] Scaling workload cluster workers 5 -> 6...");
+    let scaled_workers = initial_workers + 1;
+    info!("[Phase 5] Scaling workload cluster workers {} -> {}...", initial_workers, scaled_workers);
     info!("If this works, the cluster is truly self-managing");
+
+    // Scale up the first pool by 1 replica
+    let (first_pool_id, first_pool_spec) = workload_cluster.spec.nodes.worker_pools.iter().next()
+        .ok_or("Workload cluster has no worker pools")?;
+    let new_replicas = first_pool_spec.replicas + 1;
+    let patch = format!(
+        r#"{{"spec":{{"nodes":{{"workerPools":{{"{}":{{"replicas":{}}}}}}}}}}}"#,
+        first_pool_id, new_replicas
+    );
 
     run_kubectl(&[
         "--kubeconfig",
@@ -235,7 +246,7 @@ async fn run_independence_test(
         &workload_cluster_name,
         "--type=merge",
         "-p",
-        r#"{"spec":{"nodes":{"workerPools":{"zone-a-rack-1":{"replicas":2}}}}}"#,
+        &patch,
     ])
     .await?;
 
@@ -244,11 +255,11 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 6: Verify Scaling Succeeded
     // =========================================================================
-    info!("[Phase 6] Verifying workload cluster scaled to 6 workers...");
+    info!("[Phase 6] Verifying workload cluster scaled to {} workers...", scaled_workers);
 
-    watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 6).await?;
+    watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, scaled_workers).await?;
 
-    info!("SUCCESS: Workload cluster scaled from 5 to 6 workers");
+    info!("SUCCESS: Workload cluster scaled from {} to {} workers", initial_workers, scaled_workers);
     info!("SUCCESS: Cluster is fully operational without parent!");
 
     Ok(())

@@ -12,14 +12,12 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use base64::{engine::general_purpose::STANDARD, Engine};
 use tracing::info;
-
-use lattice_common::{capi_namespace, kubeconfig_secret_name};
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
-    get_workload_cluster_name, run_kubectl, with_diagnostics, DiagnosticContext,
+    decode_kubeconfig_b64, fetch_capi_kubeconfig_b64, get_workload_cluster_name, run_kubectl,
+    with_diagnostics, DiagnosticContext,
 };
 
 // ============================================================================
@@ -43,52 +41,26 @@ pub async fn verify_kubeconfig_patched(
         cluster_name
     );
 
-    let namespace = capi_namespace(cluster_name);
-    let secret_name = kubeconfig_secret_name(cluster_name);
-
     // Try to get the kubeconfig secret from the parent cluster (pre-pivot location)
-    let kubeconfig_b64 = match run_kubectl(&[
-        "--kubeconfig",
-        parent_kubeconfig,
-        "get",
-        "secret",
-        &secret_name,
-        "-n",
-        &namespace,
-        "-o",
-        "jsonpath={.data.value}",
-    ])
-    .await
-    {
-        Ok(data) if !data.trim().is_empty() => data,
-        Ok(_) | Err(_) => {
+    match fetch_capi_kubeconfig_b64(parent_kubeconfig, cluster_name).await {
+        Ok(b64) => validate_proxy_kubeconfig(&b64, cluster_name),
+        Err(_) => {
             // Secret not on parent — expected after pivot. Check child if we have access.
             info!(
-                "[Integration/Kubeconfig] Kubeconfig secret {}/{} not on parent, checking child...",
-                namespace, secret_name
+                "[Integration/Kubeconfig] Kubeconfig not on parent, checking child...",
             );
-            return verify_kubeconfig_on_child(
-                cluster_name,
-                &namespace,
-                &secret_name,
-                child_kubeconfig,
-            )
-            .await;
+            verify_kubeconfig_on_child(cluster_name, child_kubeconfig).await
         }
-    };
-
-    validate_kubeconfig_content(&kubeconfig_b64, cluster_name)
+    }
 }
 
 /// Verify the kubeconfig secret exists on the child cluster after pivot.
 async fn verify_kubeconfig_on_child(
     cluster_name: &str,
-    namespace: &str,
-    secret_name: &str,
     child_kubeconfig: Option<&str>,
 ) -> Result<(), String> {
     let child_kc = match child_kubeconfig {
-        Some(kc) => kc.to_string(),
+        Some(kc) => kc,
         None => {
             // No child kubeconfig available — the secret moved to the child during pivot,
             // which is expected. We can't verify the content without access.
@@ -100,31 +72,13 @@ async fn verify_kubeconfig_on_child(
         }
     };
 
-    let child_data = run_kubectl(&[
-        "--kubeconfig",
-        &child_kc,
-        "get",
-        "secret",
-        secret_name,
-        "-n",
-        namespace,
-        "-o",
-        "jsonpath={.data.value}",
-    ])
-    .await
-    .map_err(|e| {
+    // Fetch from child — the secret lives there post-pivot
+    fetch_capi_kubeconfig_b64(child_kc, cluster_name).await.map_err(|e| {
         format!(
-            "Kubeconfig secret {namespace}/{secret_name} not found on parent or child cluster \
-             for {cluster_name}. This means kubeconfig patching is broken. Child error: {e}"
+            "Kubeconfig secret not found on parent or child cluster for {cluster_name}. \
+             This means kubeconfig patching is broken. Child error: {e}"
         )
     })?;
-
-    if child_data.trim().is_empty() {
-        return Err(format!(
-            "Kubeconfig secret {namespace}/{secret_name} exists on child but has empty value \
-             for {cluster_name}"
-        ));
-    }
 
     // The CAPI kubeconfig on the child has the direct API endpoint — the /clusters/
     // proxy path only exists in the parent's patched copy. Existence + non-empty is
@@ -137,13 +91,8 @@ async fn verify_kubeconfig_on_child(
 }
 
 /// Validate that a base64-encoded kubeconfig contains the proxy path.
-fn validate_kubeconfig_content(kubeconfig_b64: &str, cluster_name: &str) -> Result<(), String> {
-    let kubeconfig = String::from_utf8(
-        STANDARD
-            .decode(kubeconfig_b64.trim())
-            .map_err(|e| format!("Failed to decode kubeconfig: {}", e))?,
-    )
-    .map_err(|e| format!("Invalid UTF-8 in kubeconfig: {}", e))?;
+fn validate_proxy_kubeconfig(b64: &str, cluster_name: &str) -> Result<(), String> {
+    let kubeconfig = decode_kubeconfig_b64(b64)?;
 
     if !kubeconfig.contains("/clusters/") {
         return Err(format!(

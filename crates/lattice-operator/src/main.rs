@@ -645,15 +645,11 @@ async fn load_cedar_engine(client: &kube::Client) -> Arc<PolicyEngine> {
 /// Check whether the self-cluster CRD has `parent_config` set.
 ///
 /// Returns `false` on 404 or any error (safe default for leaf clusters).
-async fn has_parent_config(client: &kube::Client, cluster_name: &Option<String>) -> bool {
-    let Some(name) = cluster_name else {
-        return false;
-    };
-    let clusters: Api<LatticeCluster> = Api::all(client.clone());
-    match clusters.get(name).await {
-        Ok(c) => c.spec.parent_config.is_some(),
-        Err(_) => false,
-    }
+async fn has_parent_config(client: &kube::Client) -> bool {
+    matches!(
+        lattice_common::ParentConnectionConfig::read(client).await,
+        Ok(Some(_))
+    )
 }
 
 /// Set up cell infrastructure (gRPC servers, agent connection, auth proxy)
@@ -703,7 +699,7 @@ async fn setup_cell_infra(
         });
     }
 
-    let is_cell = is_bootstrap || has_parent_config(client, self_cluster_name).await;
+    let is_cell = is_bootstrap || has_parent_config(client).await;
 
     let auth_proxy_handle = if is_cell {
         let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;

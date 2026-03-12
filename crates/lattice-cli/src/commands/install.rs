@@ -1304,7 +1304,7 @@ impl Installer {
         };
 
         let kubeconfig_json =
-            super::proxy::fetch_kubeconfig(&server, token, true, Some("sa"), 0).await?;
+            super::proxy::fetch_kubeconfig(&server, token, true, Some("sa"), 0, true).await?;
 
         Ok((server, pf, kubeconfig_json))
     }
@@ -1364,13 +1364,17 @@ async fn is_capi_cluster_control_plane_ready(
         Ok(cluster) => {
             let status = cluster.data.get("status");
 
-            // CAPI v1beta2: check conditions array for ControlPlaneAvailable
+            // CAPI v1beta2: check conditions array for ControlPlaneInitialized.
+            // We use Initialized (not Available) because Available requires all
+            // machines to be Ready, which needs a CNI. When bootstrap=rke2 with
+            // cni=none, the installer must reach the cluster to install the CNI —
+            // Initialized confirms the API server is up, which is sufficient.
             if let Some(conditions) = status
                 .and_then(|s| s.get("conditions"))
                 .and_then(|c| c.as_array())
             {
                 return conditions.iter().any(|c| {
-                    c.get("type").and_then(|t| t.as_str()) == Some("ControlPlaneAvailable")
+                    c.get("type").and_then(|t| t.as_str()) == Some("ControlPlaneInitialized")
                         && c.get("status").and_then(|s| s.as_str()) == Some("True")
                 });
             }

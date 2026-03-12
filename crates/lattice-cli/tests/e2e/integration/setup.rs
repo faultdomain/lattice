@@ -37,9 +37,10 @@
 #![cfg(feature = "provider-e2e")]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use kube::api::Api;
-use tracing::info;
+use tracing::{info, warn};
 
 use lattice_cli::commands::install::Installer;
 use lattice_common::crd::LatticeCluster;
@@ -50,8 +51,8 @@ use super::super::helpers::{
     build_and_push_downloader_image, build_and_push_lattice_image,
     build_and_push_pytorch_test_image, client_from_kubeconfig, create_with_retry,
     ensure_docker_network, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd, wait_for_operator_ready, watch_cluster_phases,
-    ProxySession,
+    extract_capi_kubeconfig, load_registry_credentials, run_cmd, wait_for_operator_ready,
+    watch_cluster_phases, ProxySession,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, cedar, scaling};
@@ -268,6 +269,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
     let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
+    let workload_expected_workers = workload_cluster.spec.nodes.total_workers();
 
     let (mut workload2_cluster, workload2_bootstrap) = if config.skip_workload2 {
         (None, None)
@@ -392,8 +394,27 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     info!("[Setup] Workload LatticeCluster created, waiting for Ready...");
 
+    // Extract the CAPI kubeconfig in parallel with phase watching.
+    // This gives us direct cluster access for debugging if the proxy/agent breaks.
+    let mgmt_kc_clone = mgmt_kubeconfig_path.clone();
+    let capi_kc_task = tokio::spawn(async move {
+        // Poll until the CAPI kubeconfig secret appears (created during provisioning)
+        for _ in 0..60 {
+            match extract_capi_kubeconfig(&mgmt_kc_clone, WORKLOAD_CLUSTER_NAME).await {
+                Ok(path) => return Some(path),
+                Err(_) => tokio::time::sleep(Duration::from_secs(10)).await,
+            }
+        }
+        warn!("[Setup] Could not extract CAPI kubeconfig (secret may have moved during pivot)");
+        None
+    });
+
     // Watch for Ready state, then set up proxy access
     watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME, None).await?;
+
+    if let Ok(Some(path)) = capi_kc_task.await {
+        info!("[Setup] Direct CAPI kubeconfig available at: {}", path);
+    }
 
     info!("[Setup] SUCCESS: Workload cluster is Ready!");
 
@@ -456,7 +477,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
         // Run workload worker verification in parallel with workload2 provisioning
         let (worker_result, phase_result) = tokio::join!(
-            scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 5),
+            scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, workload_expected_workers),
             watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None)
         );
         worker_result?;
@@ -506,7 +527,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         info!("[Setup/Phase 5] Skipping workload2 cluster (disabled)");
 
         // Just verify workload workers without parallel workload2 provisioning
-        scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 5).await?;
+        scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, workload_expected_workers).await?;
 
         ctx
     };
@@ -658,6 +679,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 
     let (_, workload_cluster) =
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
+    let workload_expected_workers = workload_cluster.spec.nodes.total_workers();
 
     info!("[Setup] Creating workload cluster...");
 
@@ -682,7 +704,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 
     // Verify cluster is operational
     capi::verify_capi_resources(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME).await?;
-    scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 5).await?;
+    scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, workload_expected_workers).await?;
 
     // Add to chaos targets
     if let Some(ref targets) = result.chaos_targets {

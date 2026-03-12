@@ -11,6 +11,8 @@ use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use tracing::{info, warn};
 
+use base64::Engine;
+
 use super::docker::{docker_containers_deleted, run_cmd, run_kubectl};
 use super::{run_id, wait_for_condition, DEFAULT_TIMEOUT, OPERATOR_LABEL};
 use crate::providers::InfraProvider;
@@ -147,6 +149,73 @@ pub async fn http_get_with_retry(
 // =============================================================================
 // Cluster Status Watching
 // =============================================================================
+
+/// Fetch the CAPI kubeconfig secret (base64-encoded) from a cluster.
+///
+/// Returns the raw base64 string from the `value` key of the
+/// `{cluster_name}-kubeconfig` secret in namespace `capi-{cluster_name}`.
+/// Returns `Err` if the secret doesn't exist or is empty.
+pub async fn fetch_capi_kubeconfig_b64(
+    kubeconfig: &str,
+    cluster_name: &str,
+) -> Result<String, String> {
+    let namespace = lattice_common::capi_namespace(cluster_name);
+    let secret_name = lattice_common::kubeconfig_secret_name(cluster_name);
+
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "secret",
+        &secret_name,
+        "-n",
+        &namespace,
+        "-o",
+        "jsonpath={.data.value}",
+    ])
+    .await?;
+
+    let trimmed = output.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "CAPI kubeconfig secret {}/{} is empty or not found",
+            namespace, secret_name
+        ));
+    }
+
+    Ok(trimmed)
+}
+
+/// Decode a base64-encoded kubeconfig string.
+pub fn decode_kubeconfig_b64(b64: &str) -> Result<String, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("Failed to decode kubeconfig: {}", e))?;
+    String::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8 in kubeconfig: {}", e))
+}
+
+/// Fetch the CAPI kubeconfig from a cluster, decode it, and save to /tmp.
+///
+/// Provides direct admin access to a child cluster's API server, bypassing the
+/// proxy. Useful for debugging when the proxy/agent connection is down.
+/// Best called before pivot moves the secret to the child cluster.
+pub async fn extract_capi_kubeconfig(
+    parent_kubeconfig: &str,
+    cluster_name: &str,
+) -> Result<String, String> {
+    let b64 = fetch_capi_kubeconfig_b64(parent_kubeconfig, cluster_name).await?;
+    let decoded = decode_kubeconfig_b64(&b64)?;
+
+    let path = format!("/tmp/{}-capi-kubeconfig-{}", cluster_name, run_id());
+    std::fs::write(&path, &decoded)
+        .map_err(|e| format!("Failed to write kubeconfig to {}: {}", path, e))?;
+
+    info!(
+        "[Setup] Extracted CAPI kubeconfig for {} to {}",
+        cluster_name, path
+    );
+    Ok(path)
+}
 
 /// Watch LatticeCluster phase transitions until Ready or Failed
 ///
