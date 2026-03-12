@@ -64,7 +64,7 @@ fn provider_namespace(name: &str, provider_type: CapiProviderType) -> Option<&'s
         ("proxmox", CapiProviderType::Infrastructure) => Some(CAPMOX_NAMESPACE),
         ("aws", CapiProviderType::Infrastructure) => Some(CAPA_NAMESPACE),
         ("openstack", CapiProviderType::Infrastructure) => Some(CAPO_NAMESPACE),
-        ("in-cluster", _) => Some("caip-in-cluster-system"),
+        ("in-cluster", _) => Some("capi-ipam-in-cluster-system"),
         _ => None,
     }
 }

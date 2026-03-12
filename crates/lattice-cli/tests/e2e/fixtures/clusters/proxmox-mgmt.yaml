@@ -4,6 +4,7 @@ kind: LatticeCluster
 metadata:
   name: e2e-mgmt
 spec:
+  latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
   monitoring:
     enabled: false
   backups:

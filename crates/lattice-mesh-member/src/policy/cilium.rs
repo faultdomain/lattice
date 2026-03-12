@@ -154,7 +154,8 @@ impl<'a> PolicyCompiler<'a> {
         // Direct TCP ingress for webhook ports.
         // kube-apiserver webhook calls go through kube-proxy DNAT, so Cilium sees
         // the source identity as remote-node (cross-node) or host (same-node),
-        // not kube-apiserver. All three entities are needed for reliable delivery.
+        // not kube-apiserver. "world" is needed for child cluster nodes connecting
+        // over real networks (Proxmox, AWS, OpenStack).
         let webhook_ports = service.webhook_port_numbers();
         if !webhook_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
@@ -162,6 +163,7 @@ impl<'a> PolicyCompiler<'a> {
                     "remote-node".to_string(),
                     "kube-apiserver".to_string(),
                     "host".to_string(),
+                    "world".to_string(),
                 ],
                 to_ports: build_tcp_port_rules(&webhook_ports),
                 ..Default::default()
@@ -315,7 +317,7 @@ impl<'a> PolicyCompiler<'a> {
             });
         }
 
-        // Direct TCP ingress for webhook ports (kube-apiserver, remote-node, host)
+        // Direct TCP ingress for webhook ports (kube-apiserver, remote-node, host, world)
         let webhook_ports = service.webhook_port_numbers();
         if !webhook_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
@@ -323,6 +325,7 @@ impl<'a> PolicyCompiler<'a> {
                     "remote-node".to_string(),
                     "kube-apiserver".to_string(),
                     "host".to_string(),
+                    "world".to_string(),
                 ],
                 to_ports: build_tcp_port_rules(&webhook_ports),
                 ..Default::default()

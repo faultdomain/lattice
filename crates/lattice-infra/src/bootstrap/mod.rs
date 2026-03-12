@@ -36,7 +36,8 @@ use lattice_common::crd::{
     MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth, ProviderType, ServiceRef,
 };
 use lattice_common::{
-    DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT,
+    DEFAULT_AUTH_PROXY_PORT, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT,
+    LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT,
     MONITORING_NAMESPACE, VMAGENT_SA_NAME,
 };
 
@@ -627,6 +628,18 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
                     peer_auth: PeerAuth::Webhook,
                 },
                 MeshMemberPort {
+                    port: DEFAULT_PROXY_PORT,
+                    service_port: None,
+                    name: "proxy".to_string(),
+                    peer_auth: PeerAuth::Webhook,
+                },
+                MeshMemberPort {
+                    port: DEFAULT_AUTH_PROXY_PORT,
+                    service_port: None,
+                    name: "auth-proxy".to_string(),
+                    peer_auth: PeerAuth::Webhook,
+                },
+                MeshMemberPort {
                     port: LOCAL_SECRETS_PORT,
                     service_port: None,
                     name: "local-secrets".to_string(),
@@ -969,8 +982,8 @@ mod tests {
         assert!(member.spec.validate().is_ok());
         assert!(member.spec.ambient);
 
-        // 3 ports: webhook (8443), grpc (50051), local-secrets (8787)
-        assert_eq!(member.spec.ports.len(), 3);
+        // 5 ports: webhook (8443), grpc (50051), proxy (8081), auth-proxy (8082), local-secrets (8787)
+        assert_eq!(member.spec.ports.len(), 5);
 
         let webhook = member
             .spec
@@ -989,6 +1002,24 @@ mod tests {
             .expect("grpc port");
         assert_eq!(grpc.port, DEFAULT_GRPC_PORT);
         assert_eq!(grpc.peer_auth, PeerAuth::Webhook);
+
+        let proxy = member
+            .spec
+            .ports
+            .iter()
+            .find(|p| p.name == "proxy")
+            .expect("proxy port");
+        assert_eq!(proxy.port, DEFAULT_PROXY_PORT);
+        assert_eq!(proxy.peer_auth, PeerAuth::Webhook);
+
+        let auth_proxy = member
+            .spec
+            .ports
+            .iter()
+            .find(|p| p.name == "auth-proxy")
+            .expect("auth-proxy port");
+        assert_eq!(auth_proxy.port, DEFAULT_AUTH_PROXY_PORT);
+        assert_eq!(auth_proxy.peer_auth, PeerAuth::Webhook);
 
         let secrets = member
             .spec

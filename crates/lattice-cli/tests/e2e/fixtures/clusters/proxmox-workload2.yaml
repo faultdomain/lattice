@@ -8,6 +8,7 @@ metadata:
     lattice.dev/environment: e2e-test
     lattice.dev/region: proxmox
 spec:
+  latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
   monitoring:
     enabled: true
     ha: false
