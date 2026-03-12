@@ -43,12 +43,16 @@ impl From<FetchError> for Error {
 ///
 /// Use `max_attempts = 0` for infinite retries (e.g. during install when the
 /// operator may need time to become ready).
+///
+/// Set `retry_forbidden = true` to treat 403 as transient (e.g. during install
+/// when the CedarPolicy may not have been loaded by the controller yet).
 pub(crate) async fn fetch_kubeconfig(
     server: &str,
     token: &str,
     insecure: bool,
     format: Option<&str>,
     max_attempts: u32,
+    retry_forbidden: bool,
 ) -> Result<String> {
     let client = if insecure {
         reqwest::Client::builder()
@@ -103,6 +107,12 @@ pub(crate) async fn fetch_kubeconfig(
             let body = response.text().await.unwrap_or_default();
 
             if status.is_client_error() {
+                if retry_forbidden && status == reqwest::StatusCode::FORBIDDEN {
+                    return Err(FetchError::Transient(format!(
+                        "proxy returned {} from {}: {}",
+                        status, url, body
+                    )));
+                }
                 return Err(FetchError::Fatal(format!(
                     "proxy returned {} from {}: {}",
                     status, url, body
