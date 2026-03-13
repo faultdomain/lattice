@@ -37,18 +37,18 @@ pub async fn handle(command_id: &str, complete: &MoveComplete, ctx: &CommandCont
         "Processing move complete"
     );
 
-    // Check if pivot already completed (handles re-sends after parent crash)
-    if check_local_pivot_complete(&capi_cluster_name, ctx.kube_provider.as_ref()).await {
-        info!(request_id = %request_id, "Pivot already complete, sending immediate ack");
-        *ctx.agent_state.write().await = AgentState::Ready;
-        send_complete_ack(&message_tx, &agent_cluster_name, &request_id, true, "", 0).await;
-        return;
-    }
-
     let provider = ctx.kube_provider.clone();
     let agent_state = ctx.agent_state.clone();
 
     tokio::spawn(async move {
+        // Check if pivot already completed (handles re-sends after parent crash)
+        if check_local_pivot_complete(&capi_cluster_name, provider.as_ref()).await {
+            info!(request_id = %request_id, "Pivot already complete, sending immediate ack");
+            *agent_state.write().await = AgentState::Ready;
+            send_complete_ack(&message_tx, &agent_cluster_name, &request_id, true, "", 0).await;
+            return;
+        }
+
         let client = match provider.create().await {
             Ok(c) => c,
             Err(e) => {

@@ -17,53 +17,57 @@ pub async fn handle(cmd: &ApplyManifestsCommand, ctx: &CommandContext) {
         return;
     }
 
-    let Some(client) =
-        crate::kube_client::create_client_logged(ctx.kube_provider.as_ref(), "apply manifests")
-            .await
-    else {
-        return;
-    };
+    let manifests = cmd.manifests.clone();
+    let provider = ctx.kube_provider.clone();
 
-    let manifests_count = cmd.manifests.len();
-    let mut applied = 0;
-    let mut errors = Vec::new();
+    tokio::spawn(async move {
+        let Some(client) =
+            crate::kube_client::create_client_logged(provider.as_ref(), "apply manifests").await
+        else {
+            return;
+        };
 
-    for (i, manifest) in cmd.manifests.iter().enumerate() {
-        match String::from_utf8(manifest.clone()) {
-            Ok(yaml) => {
-                let (kind, name) = extract_manifest_info(&yaml);
-                if let Err(e) = lattice_common::kube_utils::apply_manifests(
-                    &client,
-                    &[&yaml],
-                    &Default::default(),
-                )
-                .await
-                {
-                    error!(
-                        error = %e,
-                        manifest_index = i,
-                        kind = kind,
-                        name = name,
-                        "Failed to apply manifest"
-                    );
-                    errors.push(format!("{}/{}: {}", kind, name, e));
-                } else {
-                    applied += 1;
+        let manifests_count = manifests.len();
+        let mut applied = 0;
+        let mut errors = Vec::new();
+
+        for (i, manifest) in manifests.iter().enumerate() {
+            match String::from_utf8(manifest.clone()) {
+                Ok(yaml) => {
+                    let (kind, name) = extract_manifest_info(&yaml);
+                    if let Err(e) = lattice_common::kube_utils::apply_manifests(
+                        &client,
+                        &[&yaml],
+                        &Default::default(),
+                    )
+                    .await
+                    {
+                        error!(
+                            error = %e,
+                            manifest_index = i,
+                            kind = kind,
+                            name = name,
+                            "Failed to apply manifest"
+                        );
+                        errors.push(format!("{}/{}: {}", kind, name, e));
+                    } else {
+                        applied += 1;
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, manifest_index = i, "Invalid UTF-8 in manifest");
+                    errors.push(format!("manifest {}: invalid UTF-8: {}", i, e));
                 }
             }
-            Err(e) => {
-                error!(error = %e, manifest_index = i, "Invalid UTF-8 in manifest");
-                errors.push(format!("manifest {}: invalid UTF-8: {}", i, e));
-            }
         }
-    }
 
-    info!(
-        total = manifests_count,
-        applied = applied,
-        errors = errors.len(),
-        "Manifests applied"
-    );
+        info!(
+            total = manifests_count,
+            applied = applied,
+            errors = errors.len(),
+            "Manifests applied"
+        );
+    });
 }
 
 /// Extract kind and name from a YAML/JSON manifest string for logging.

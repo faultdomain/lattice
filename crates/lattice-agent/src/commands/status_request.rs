@@ -10,19 +10,25 @@ pub async fn handle(command_id: &str, ctx: &CommandContext) {
     debug!("Received status request");
 
     let current_state = *ctx.agent_state.read().await;
-    let msg = AgentMessage {
-        cluster_name: ctx.cluster_name.clone(),
-        payload: Some(Payload::StatusResponse(StatusResponse {
-            request_id: command_id.to_string(),
-            state: current_state.into(),
-            health: None,
-            capi_status: None,
-        })),
-    };
+    let cluster_name = ctx.cluster_name.clone();
+    let message_tx = ctx.message_tx.clone();
+    let command_id = command_id.to_string();
 
-    if let Err(e) = ctx.message_tx.send(msg).await {
-        error!(error = %e, "Failed to send status response");
-    }
+    tokio::spawn(async move {
+        let msg = AgentMessage {
+            cluster_name,
+            payload: Some(Payload::StatusResponse(StatusResponse {
+                request_id: command_id,
+                state: current_state.into(),
+                health: None,
+                capi_status: None,
+            })),
+        };
+
+        if let Err(e) = message_tx.send(msg).await {
+            error!(error = %e, "Failed to send status response");
+        }
+    });
 }
 
 #[cfg(test)]
