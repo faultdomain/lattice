@@ -235,6 +235,9 @@ impl OidcValidator {
 
         let spec = &provider.spec;
 
+        // Validate issuer URL to prevent SSRF via CRD manipulation
+        validate_issuer_url(&spec.issuer_url)?;
+
         let audiences = if spec.audiences.is_empty() {
             vec![spec.client_id.clone()]
         } else {
@@ -620,6 +623,70 @@ impl OidcValidator {
     }
 }
 
+/// Validate that an OIDC issuer URL is safe to fetch from.
+///
+/// Prevents SSRF by requiring HTTPS and rejecting IP-literal URLs pointing to
+/// private/reserved ranges (RFC 1918, loopback, link-local, cloud metadata).
+/// Hostnames are allowed since we can't reliably pre-resolve them, but blocking
+/// IP literals covers the direct SSRF vector.
+fn validate_issuer_url(url: &str) -> Result<()> {
+    if !url.starts_with("https://") {
+        return Err(Error::Config(format!(
+            "OIDC issuer URL must use HTTPS: {}",
+            url
+        )));
+    }
+
+    let host = extract_host(url).ok_or_else(|| {
+        Error::Config(format!("Failed to parse host from issuer URL: {}", url))
+    })?;
+
+    // If the host is an IP literal, check it's not a private/reserved address
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_private_ip(&ip) {
+            return Err(Error::Config(format!(
+                "OIDC issuer URL must not point to a private/reserved IP address: {}",
+                url
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract the host portion from a URL (without port).
+fn extract_host(url: &str) -> Option<String> {
+    let after_scheme = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let host_port = after_scheme.split('/').next()?;
+    // Strip port if present
+    let host = if host_port.starts_with('[') {
+        // IPv6: [::1]:443
+        host_port.split(']').next().map(|h| &h[1..])?
+    } else {
+        host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)
+    };
+    Some(host.to_string())
+}
+
+/// Check if an IP address is private, loopback, link-local, or otherwise reserved.
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()              // 127.0.0.0/8
+                || v4.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || v4.is_link_local()     // 169.254.0.0/16 (includes cloud metadata)
+                || v4.is_broadcast()      // 255.255.255.255
+                || v4.is_unspecified()    // 0.0.0.0
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()              // ::1
+                || v6.is_unspecified()    // ::
+                // fc00::/7 (unique local)
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
 /// Validate that the JWKS URI shares the same origin (scheme + host) as the issuer URL.
 ///
 /// Prevents MITM attacks where a compromised discovery document redirects JWKS
@@ -700,5 +767,63 @@ mod tests {
         let result = validator.validate("some-token").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not configured"));
+    }
+
+    #[test]
+    fn test_validate_issuer_url_accepts_https() {
+        assert!(validate_issuer_url("https://accounts.google.com").is_ok());
+        assert!(validate_issuer_url("https://idp.example.com/realms/lattice").is_ok());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_http() {
+        let result = validate_issuer_url("http://accounts.google.com");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_private_ips() {
+        assert!(validate_issuer_url("https://10.0.0.1").is_err());
+        assert!(validate_issuer_url("https://172.16.0.1").is_err());
+        assert!(validate_issuer_url("https://192.168.1.1").is_err());
+        assert!(validate_issuer_url("https://127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_link_local() {
+        // Cloud metadata endpoint
+        assert!(validate_issuer_url("https://169.254.169.254").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_accepts_public_ip() {
+        assert!(validate_issuer_url("https://8.8.8.8").is_ok());
+    }
+
+    #[test]
+    fn test_validate_issuer_url_accepts_hostname() {
+        // Hostnames can't be pre-resolved so they're allowed
+        assert!(validate_issuer_url("https://internal.corp.example.com").is_ok());
+    }
+
+    #[test]
+    fn test_extract_host_various_formats() {
+        assert_eq!(extract_host("https://example.com"), Some("example.com".to_string()));
+        assert_eq!(extract_host("https://example.com:443"), Some("example.com".to_string()));
+        assert_eq!(extract_host("https://example.com/path"), Some("example.com".to_string()));
+        assert_eq!(extract_host("https://10.0.0.1:8443/path"), Some("10.0.0.1".to_string()));
+    }
+
+    #[test]
+    fn test_is_private_ip() {
+        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"192.168.1.1".parse().unwrap()));
+        assert!(is_private_ip(&"169.254.169.254".parse().unwrap()));
+        assert!(is_private_ip(&"::1".parse().unwrap()));
+        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
+        assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()));
     }
 }

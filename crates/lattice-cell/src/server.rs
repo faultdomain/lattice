@@ -716,30 +716,42 @@ impl AgentServer {
 /// The certificate CN is in the format "lattice-agent-{cluster_id}".
 /// This is the cryptographic source of truth for agent identity — it cannot be spoofed
 /// because the certificate was signed by our CA during bootstrap.
+/// Errors from mTLS client certificate extraction.
+///
+/// Kept small (single pointer) so `Result<String, MtlsAuthError>` doesn't
+/// trigger `clippy::result_large_err` the way `Result<String, Status>` would.
+#[derive(Debug, thiserror::Error)]
+enum MtlsAuthError {
+    #[error("No TLS connection info — mTLS is required")]
+    NoTls,
+    #[error("No client certificate presented — mTLS is required")]
+    NoCert,
+    #[error("Empty client certificate chain")]
+    EmptyChain,
+    #[error("Failed to extract cluster ID from certificate: {0}")]
+    InvalidCert(String),
+}
+
+impl From<MtlsAuthError> for Status {
+    fn from(e: MtlsAuthError) -> Self {
+        Status::unauthenticated(e.to_string())
+    }
+}
+
 fn extract_cluster_id_from_request<T>(
     request: &Request<T>,
-) -> Result<String, Status> {
+) -> Result<String, MtlsAuthError> {
     let tls_info = request
         .extensions()
         .get::<TlsConnectInfo<tonic::transport::server::TcpConnectInfo>>()
-        .ok_or_else(|| {
-            Status::unauthenticated("No TLS connection info — mTLS is required")
-        })?;
+        .ok_or(MtlsAuthError::NoTls)?;
 
-    let certs = tls_info.peer_certs().ok_or_else(|| {
-        Status::unauthenticated("No client certificate presented — mTLS is required")
-    })?;
+    let certs = tls_info.peer_certs().ok_or(MtlsAuthError::NoCert)?;
 
-    let cert_der = certs.first().ok_or_else(|| {
-        Status::unauthenticated("Empty client certificate chain")
-    })?;
+    let cert_der = certs.first().ok_or(MtlsAuthError::EmptyChain)?;
 
-    extract_cluster_id_from_cert(cert_der).map_err(|e| {
-        Status::unauthenticated(format!(
-            "Failed to extract cluster ID from certificate: {}",
-            e
-        ))
-    })
+    extract_cluster_id_from_cert(cert_der)
+        .map_err(|e| MtlsAuthError::InvalidCert(e.to_string()))
 }
 
 #[tonic::async_trait]

@@ -73,9 +73,9 @@ pub async fn start_webhook_server(
         .route("/secret/{name}", get(handle_all_keys))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state);
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], LOCAL_SECRETS_PORT));
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], LOCAL_SECRETS_PORT));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(addr = %addr, "Local secrets webhook started (Basic auth enabled)");
+    info!(addr = %addr, "Local secrets webhook started (loopback-only, Basic auth enabled)");
     axum::serve(listener, app).await
 }
 

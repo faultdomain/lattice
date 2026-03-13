@@ -167,10 +167,15 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             if self.clusters.len() >= MAX_CLUSTER_REGISTRATIONS {
                 warn!(
                     capacity = MAX_CLUSTER_REGISTRATIONS,
-                    "Bootstrap cluster registrations at capacity, evicting oldest unused"
+                    "Bootstrap cluster registrations at capacity, evicting oldest by creation time"
                 );
-                if let Some(entry) = self.clusters.iter().next() {
-                    self.clusters.remove(entry.key());
+                let oldest = self
+                    .clusters
+                    .iter()
+                    .min_by_key(|e| e.token_created)
+                    .map(|e| e.key().clone());
+                if let Some(key) = oldest {
+                    self.clusters.remove(&key);
                 }
             }
         }

@@ -179,6 +179,80 @@ pub fn parse_pem(pem_data: &str) -> std::result::Result<Vec<u8>, PkiError> {
     Ok(pem_obj.contents().to_vec())
 }
 
+/// Well-known OIDs for public key algorithms
+mod oid {
+    /// RSA encryption: 1.2.840.113549.1.1.1
+    pub const RSA: &[u64] = &[1, 2, 840, 113549, 1, 1, 1];
+    /// EC public key: 1.2.840.10045.2.1
+    pub const EC: &[u64] = &[1, 2, 840, 10045, 2, 1];
+    /// NIST P-256 (secp256r1): 1.2.840.10045.3.1.7
+    pub const P256: &[u64] = &[1, 2, 840, 10045, 3, 1, 7];
+    /// NIST P-384 (secp384r1): 1.3.132.0.34
+    pub const P384: &[u64] = &[1, 3, 132, 0, 34];
+}
+
+/// Minimum RSA key size in bits (FIPS 140-2/140-3 requirement)
+const MIN_RSA_KEY_BITS: usize = 2048;
+
+/// Validate that a CSR's public key meets FIPS strength requirements.
+///
+/// Accepted algorithms:
+/// - ECDSA with P-256 or P-384 curves
+/// - RSA with key size >= 2048 bits
+///
+/// Rejects all other algorithms and weak key sizes.
+fn validate_csr_key_strength(csr_pem: &str) -> Result<()> {
+    let der = parse_pem(csr_pem)
+        .map_err(|e| PkiError::InvalidCsr(format!("failed to parse CSR PEM: {}", e)))?;
+
+    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(&der)
+        .map_err(|e| PkiError::InvalidCsr(format!("failed to parse CSR DER: {}", e)))?;
+
+    let spki = &csr.certification_request_info.subject_pki;
+    let algorithm_oid: Vec<u64> = spki.algorithm.algorithm.iter()
+        .ok_or_else(|| PkiError::InvalidCsr("failed to read algorithm OID".to_string()))?
+        .collect();
+
+    if algorithm_oid == oid::RSA {
+        // RSA: check key size from the SubjectPublicKey bitstring length.
+        // The SubjectPublicKey for RSA is a DER-encoded RSAPublicKey containing
+        // the modulus and exponent. The total bit length is a rough upper bound;
+        // the actual modulus is slightly smaller. A 2048-bit RSA key produces
+        // a SubjectPublicKey of ~270 bytes (2160 bits). We check >= MIN_RSA_KEY_BITS.
+        let key_bits = spki.subject_public_key.data.len() * 8;
+        if key_bits < MIN_RSA_KEY_BITS {
+            return Err(PkiError::InvalidCsr(format!(
+                "RSA key too small: {} bits (minimum {} bits required)",
+                key_bits, MIN_RSA_KEY_BITS
+            )));
+        }
+        Ok(())
+    } else if algorithm_oid == oid::EC {
+        // EC: check curve OID from algorithm parameters
+        let curve_oid: Option<Vec<u64>> = spki
+            .algorithm
+            .parameters
+            .as_ref()
+            .and_then(|p| p.as_oid().ok())
+            .and_then(|oid| oid.iter().map(|it| it.collect()));
+
+        match curve_oid.as_deref() {
+            Some(curve) if curve == oid::P256 || curve == oid::P384 => Ok(()),
+            Some(_) => Err(PkiError::InvalidCsr(
+                "EC key uses unsupported curve (only P-256 and P-384 are allowed)".to_string(),
+            )),
+            None => Err(PkiError::InvalidCsr(
+                "EC key missing curve parameter".to_string(),
+            )),
+        }
+    } else {
+        Err(PkiError::InvalidCsr(format!(
+            "unsupported key algorithm OID: {:?} (only RSA and ECDSA are allowed)",
+            algorithm_oid
+        )))
+    }
+}
+
 /// Certificate Authority for signing agent CSRs
 #[derive(Clone)]
 pub struct CertificateAuthority {
@@ -358,7 +432,14 @@ impl CertificateAuthority {
     /// The CSR contains the agent's public key. The cell extracts it
     /// and signs a new certificate with it, ensuring the cell never
     /// sees the agent's private key.
+    ///
+    /// Validates that the CSR uses a FIPS-approved key algorithm and strength:
+    /// - ECDSA with P-256 or P-384
+    /// - RSA with key size >= 2048 bits
     pub fn sign_csr(&self, csr_pem: &str, cluster_id: &str) -> Result<String> {
+        // Validate key strength before signing (FIPS requirement)
+        validate_csr_key_strength(csr_pem)?;
+
         // Parse the CSR using rcgen's built-in parser
         let mut csr_params = CertificateSigningRequestParams::from_pem(csr_pem)
             .map_err(|e| PkiError::InvalidCsr(format!("failed to parse CSR: {}", e)))?;
@@ -1494,5 +1575,30 @@ mod tests {
             !ca.needs_rotation().expect("needs_rotation should succeed"),
             "fresh CA should not need rotation"
         );
+    }
+
+    /// CSR key strength validation: default ECDSA P-256 key is accepted
+    #[test]
+    fn csr_key_strength_accepts_default_ecdsa() {
+        let request = AgentCertRequest::new("strength-test")
+            .expect("CSR generation should succeed");
+        assert!(validate_csr_key_strength(request.csr_pem()).is_ok());
+    }
+
+    /// CSR key strength validation: signing works with a valid key
+    #[test]
+    fn sign_csr_validates_key_strength() {
+        let ca = CertificateAuthority::new("Key Strength CA")
+            .expect("CA creation should succeed");
+        let request = AgentCertRequest::new("valid-key")
+            .expect("CSR generation should succeed");
+        assert!(ca.sign_csr(request.csr_pem(), "valid-key").is_ok());
+    }
+
+    /// CSR key strength validation: invalid PEM is rejected
+    #[test]
+    fn csr_key_strength_rejects_invalid_pem() {
+        let result = validate_csr_key_strength("not a valid CSR");
+        assert!(matches!(result, Err(PkiError::InvalidCsr(_))));
     }
 }

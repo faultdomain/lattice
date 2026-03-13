@@ -54,6 +54,9 @@ tracing = { workspace = true }
 base64.workspace = true
 uuid = { workspace = true }
 
+# Middleware
+tower = { workspace = true }
+
 # Security
 zeroize = { workspace = true }
 

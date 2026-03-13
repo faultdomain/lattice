@@ -6,6 +6,7 @@ use std::sync::Arc;
 use axum::routing::{any, get};
 use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
+use tower::limit::ConcurrencyLimitLayer;
 use tracing::info;
 
 use crate::auth_chain::AuthChain;
@@ -15,6 +16,15 @@ use crate::kubeconfig::kubeconfig_handler;
 use crate::portforward::portforward_handler;
 use crate::proxy::{exec_handler, proxy_handler};
 use lattice_cedar::PolicyEngine;
+
+/// Maximum number of concurrent proxy requests (K8s API forwarding).
+/// Prevents resource exhaustion from brute-force or flood attacks.
+const MAX_CONCURRENT_PROXY_REQUESTS: usize = 100;
+
+/// Maximum number of concurrent exec/attach/portforward sessions.
+/// These are long-lived WebSocket connections that each hold a gRPC stream,
+/// so a lower limit than general proxy requests is appropriate.
+const MAX_CONCURRENT_EXEC_SESSIONS: usize = 20;
 
 /// Server configuration
 #[derive(Clone)]
@@ -76,14 +86,9 @@ pub async fn start_server(
         ca_cert_base64,
     };
 
-    let app = Router::new()
-        // Kubeconfig generation
-        .route("/kubeconfig", get(kubeconfig_handler))
-        // Health check
-        .route("/healthz", get(|| async { "ok" }))
-        // Exec/attach/portforward - WebSocket upgrade routes (must be before generic proxy)
-        // These match paths like /clusters/{cluster}/api/v1/namespaces/{ns}/pods/{pod}/exec
-        // Note: kubectl sends POST (not GET) for exec/attach with WebSocket upgrade headers
+    // Exec/attach/portforward routes with a separate, lower concurrency limit
+    // (these are long-lived WebSocket sessions that hold gRPC streams)
+    let exec_routes = Router::new()
         .route(
             "/clusters/{cluster_name}/api/v1/namespaces/{ns}/pods/{pod}/exec",
             any(exec_handler),
@@ -96,10 +101,21 @@ pub async fn start_server(
             "/clusters/{cluster_name}/api/v1/namespaces/{ns}/pods/{pod}/portforward",
             any(portforward_handler),
         )
+        .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_EXEC_SESSIONS));
+
+    let app = Router::new()
+        // Kubeconfig generation
+        .route("/kubeconfig", get(kubeconfig_handler))
+        // Health check (no rate limit — must always respond for liveness probes)
+        .route("/healthz", get(|| async { "ok" }))
+        // Exec/attach/portforward with dedicated concurrency limit
+        .merge(exec_routes)
         // K8s API proxy - route all cluster paths to the proxy handler
         .route("/clusters/{cluster_name}", any(proxy_handler))
         .route("/clusters/{cluster_name}/{*path}", any(proxy_handler))
-        .with_state(state);
+        .with_state(state)
+        // Global concurrency limit on all routes (except healthz which is matched first)
+        .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_PROXY_REQUESTS));
 
     let tls_config = RustlsConfig::from_pem(
         config.cert_pem.into_bytes(),
