@@ -93,13 +93,13 @@ impl GeneratedVolumes {
 /// Convert a mount path to a valid K8s volume name.
 ///
 /// E.g., `/var/cache/nginx` → `emptydir-var-cache-nginx`
-fn sanitize_volume_name(mount_path: &str) -> String {
-    let label = crate::helpers::sanitize_dns_label(mount_path);
+fn sanitize_volume_name(mount_path: &str) -> Result<String, CompilationError> {
+    let label = crate::helpers::sanitize_dns_label(mount_path)?;
     let name = format!("emptydir-{}", label);
     if name.len() > 63 {
-        name[..63].trim_end_matches('-').to_string()
+        Ok(name[..63].trim_end_matches('-').to_string())
     } else {
-        name
+        Ok(name)
     }
 }
 
@@ -170,7 +170,7 @@ impl VolumeCompiler {
         // Container volume mounts
         for (container_name, container_spec) in &workload.containers {
             let (mounts, extra_vols) =
-                Self::resolve_mounts(&container_spec.volumes, &volume_resources);
+                Self::resolve_mounts(&container_spec.volumes, &volume_resources)?;
             if !mounts.is_empty() {
                 output.volume_mounts.insert(container_name.clone(), mounts);
             }
@@ -180,7 +180,7 @@ impl VolumeCompiler {
         // Sidecar volume mounts
         for (sidecar_name, sidecar_spec) in sidecars {
             let (mounts, extra_vols) =
-                Self::resolve_mounts(&sidecar_spec.volumes, &volume_resources);
+                Self::resolve_mounts(&sidecar_spec.volumes, &volume_resources)?;
             if !mounts.is_empty() {
                 output.volume_mounts.insert(sidecar_name.clone(), mounts);
             }
@@ -238,7 +238,7 @@ impl VolumeCompiler {
     fn resolve_mounts(
         volumes: &BTreeMap<String, lattice_common::crd::VolumeMount>,
         mountable_resources: &[(&String, &lattice_common::crd::ResourceSpec)],
-    ) -> (Vec<crate::k8s::VolumeMount>, Vec<crate::k8s::Volume>) {
+    ) -> Result<(Vec<crate::k8s::VolumeMount>, Vec<crate::k8s::Volume>), CompilationError> {
         let mut mounts = Vec::new();
         let mut extra_volumes = Vec::new();
 
@@ -260,7 +260,7 @@ impl VolumeCompiler {
                     }
                 }
                 None => {
-                    let vol_name = sanitize_volume_name(mount_path);
+                    let vol_name = sanitize_volume_name(mount_path)?;
                     extra_volumes.push(crate::k8s::Volume::from_empty_dir(
                         &vol_name,
                         volume_mount.medium.clone(),
@@ -276,7 +276,7 @@ impl VolumeCompiler {
             }
         }
 
-        (mounts, extra_volumes)
+        Ok((mounts, extra_volumes))
     }
 
     /// Extend volumes, skipping entries whose name already exists.

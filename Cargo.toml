@@ -184,5 +184,5 @@ tokio-test = "0.4"
 insta = "1.41"
 fake = { version = "3.0", features = ["derive"] }
 tempfile = "3.14"
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "0.5", features = ["util", "limit"] }
 criterion = { version = "0.5", features = ["html_reports"] }

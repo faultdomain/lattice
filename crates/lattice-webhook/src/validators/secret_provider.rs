@@ -26,7 +26,10 @@ impl Validator for SecretProviderValidator {
             None => return response.deny("no object in admission request"),
         };
 
-        let raw = serde_json::to_value(obj).unwrap_or_default();
+        let raw = match serde_json::to_value(obj) {
+            Ok(v) => v,
+            Err(e) => return response.deny(format!("failed to serialize admission object: {e}")),
+        };
         let provider: SecretProvider = match serde_json::from_value(raw) {
             Ok(p) => p,
             Err(e) => return response.deny(format!("failed to deserialize SecretProvider: {e}")),

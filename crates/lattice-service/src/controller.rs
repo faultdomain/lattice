@@ -357,6 +357,15 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
     ) -> Result<(), Error> {
         use lattice_common::crd_registry::CrdKind;
 
+        // Validate service name to prevent label selector injection
+        // (e.g., names containing ',' or '=' could alter selector semantics)
+        if lattice_common::crd::validate_dns_label(service_name, "service name").is_err() {
+            return Err(Error::validation(format!(
+                "invalid service name for label selector: {}",
+                service_name
+            )));
+        }
+
         let Some(ar) = self.registry.resolve(CrdKind::ExternalSecret).await? else {
             return Ok(());
         };

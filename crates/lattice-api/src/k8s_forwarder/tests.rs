@@ -185,7 +185,7 @@ async fn test_forward_to_k8s_api_token_failure() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/v1/pods")
+        .uri("/clusters/my-cluster/api/v1/pods")
         .body(Body::empty())
         .unwrap();
 
@@ -222,7 +222,7 @@ async fn test_forward_to_k8s_api_http_error() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/v1/pods")
+        .uri("/clusters/my-cluster/api/v1/pods")
         .body(Body::empty())
         .unwrap();
 
@@ -266,7 +266,7 @@ async fn test_forward_to_k8s_api_with_query_params() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/v1/pods?labelSelector=app%3Dnginx")
+        .uri("/clusters/my-cluster/api/v1/pods?labelSelector=app%3Dnginx")
         .body(Body::empty())
         .unwrap();
 
@@ -312,7 +312,7 @@ async fn test_forward_to_k8s_api_with_body() {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/api/v1/namespaces/default/pods")
+        .uri("/clusters/my-cluster/api/v1/namespaces/default/pods")
         .header("Content-Type", "application/json")
         .body(Body::from(r#"{"metadata":{"name":"my-pod"}}"#))
         .unwrap();
@@ -354,7 +354,7 @@ async fn test_forward_to_k8s_api_403_forbidden() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/v1/secrets")
+        .uri("/clusters/my-cluster/api/v1/secrets")
         .body(Body::empty())
         .unwrap();
 

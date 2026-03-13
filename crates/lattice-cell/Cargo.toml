@@ -42,6 +42,7 @@ tonic = { workspace = true }
 # HTTP
 axum = { workspace = true }
 axum-server = { workspace = true }
+tower = { workspace = true }
 
 # Crypto
 rustls = { workspace = true }

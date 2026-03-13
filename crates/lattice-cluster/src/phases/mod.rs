@@ -165,7 +165,13 @@ pub async fn update_status(
         bootstrap_complete: current_status.bootstrap_complete,
         unpivot_import_complete: current_status.unpivot_import_complete,
         observed_generation: current_status.observed_generation,
-        bootstrap_token: current_status.bootstrap_token,
+        // Clear raw token once consumed to limit exposure window.
+        // After bootstrap_complete, only the hash is needed (in csr_token_hash).
+        bootstrap_token: if current_status.bootstrap_complete {
+            None
+        } else {
+            current_status.bootstrap_token
+        },
         children_health: current_status.children_health,
         last_heartbeat: current_status.last_heartbeat,
         version: current_status.version,

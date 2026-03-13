@@ -52,11 +52,17 @@ impl BootstrapToken {
         Ok(Self { raw, string })
     }
 
+    /// Minimum raw bytes for a valid token (128 bits of entropy)
+    const MIN_TOKEN_BYTES: usize = 16;
+
     /// Create a token from an existing string (for validation)
     ///
-    /// Returns an error if the string is not valid base64.
+    /// Returns an error if the string is not valid base64 or has insufficient entropy.
     pub fn from_string(s: &str) -> Result<Self, TokenParseError> {
         let raw = URL_SAFE_NO_PAD.decode(s).map_err(|_| TokenParseError)?;
+        if raw.len() < Self::MIN_TOKEN_BYTES {
+            return Err(TokenParseError);
+        }
         Ok(Self {
             raw,
             string: s.to_string(),
@@ -332,8 +338,14 @@ mod tests {
 
     #[test]
     fn invalid_base64_fails_explicitly() {
-        let valid = BootstrapToken::from_string("dGVzdA");
-        assert!(valid.is_ok(), "Valid base64 should parse");
+        // Valid base64 with sufficient entropy (32 bytes)
+        let token = BootstrapToken::generate();
+        let valid = BootstrapToken::from_string(token.as_str());
+        assert!(valid.is_ok(), "Valid base64 with sufficient entropy should parse");
+
+        // Too short (4 bytes < MIN_TOKEN_BYTES)
+        let short = BootstrapToken::from_string("dGVzdA");
+        assert!(short.is_err(), "Short token should be rejected");
 
         let invalid = BootstrapToken::from_string("not!valid@base64#");
         assert!(invalid.is_err(), "Invalid base64 should fail");

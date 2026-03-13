@@ -59,7 +59,8 @@ pub(crate) async fn portforward_handler(
 
     let uri = request.uri().clone();
     let path = uri.path();
-    let api_path = strip_cluster_prefix(path, cluster_name);
+    let api_path = strip_cluster_prefix(path, cluster_name)
+        .ok_or_else(|| Error::Internal(format!("path missing expected /clusters/{} prefix", cluster_name)))?;
     let query = uri.query().unwrap_or("");
 
     // Check if this is a local or remote cluster
@@ -94,9 +95,9 @@ async fn proxy_upgrade_to_k8s(
     // Get the incoming upgrade handle — this takes ownership of the connection
     let incoming_upgrade = hyper::upgrade::on(request);
 
-    // Read SA token for upstream auth
+    // Read SA token for upstream auth (zeroized on drop)
     let token_reader = FileTokenReader;
-    let sa_token = token_reader.read_token().await?;
+    let sa_token = zeroize::Zeroizing::new(token_reader.read_token().await?);
 
     // Build upstream URL
     let upstream_url = if query.is_empty() {
@@ -113,7 +114,7 @@ async fn proxy_upgrade_to_k8s(
     // Start with SA token + impersonation
     let mut upstream_builder = upgrade_client
         .get(&upstream_url)
-        .header("Authorization", format!("Bearer {}", sa_token))
+        .header("Authorization", format!("Bearer {}", &*sa_token))
         .header("Impersonate-User", &identity.username);
 
     for group in &identity.groups {

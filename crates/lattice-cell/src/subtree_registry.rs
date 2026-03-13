@@ -122,21 +122,67 @@ impl SubtreeRegistry {
     /// # Arguments
     /// * `agent_id` - ID of the agent sending this state
     /// * `clusters` - Full list of clusters in the agent's subtree
+    ///
+    /// # Security
+    /// Applies the same guards as `handle_delta`: rejects attempts to overwrite
+    /// the self route or routes owned by other connected agents.
     pub async fn handle_full_sync(&self, agent_id: &str, clusters: Vec<ClusterInfo>) {
         let mut routes = self.routes.write().await;
 
         // Remove all clusters previously routed via this agent
         routes.retain(|_, info| info.agent_id.as_deref() != Some(agent_id));
 
-        // Add new clusters
+        // Add new clusters (with same guards as handle_delta)
         for cluster in clusters {
+            let cluster_name = cluster.name.clone();
+
+            // Reject attempts to overwrite the self route
+            if cluster_name == self.cluster_name {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    cluster = %cluster_name,
+                    "Agent full_sync attempted to register a route for the cell itself — rejected"
+                );
+                continue;
+            }
+
+            // Reject attempts to overwrite routes owned by other agents.
+            // Even for disconnected routes, verify the claiming agent's cluster
+            // is the parent of the route being claimed.
+            if let Some(existing) = routes.get(&cluster_name) {
+                if let Some(ref existing_agent) = existing.agent_id {
+                    if existing_agent != agent_id {
+                        if existing.connected {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                existing_agent = %existing_agent,
+                                cluster = %cluster_name,
+                                "Agent full_sync attempted to hijack route owned by another agent — rejected"
+                            );
+                            continue;
+                        }
+                        if cluster.parent != existing.cluster.parent {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                existing_agent = %existing_agent,
+                                cluster = %cluster_name,
+                                claimed_parent = %cluster.parent,
+                                existing_parent = %existing.cluster.parent,
+                                "Agent full_sync attempted to take over disconnected route with mismatched parent — rejected"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+
             let route = RouteInfo {
                 agent_id: Some(agent_id.to_string()),
                 is_self: false,
                 connected: true,
                 cluster,
             };
-            routes.insert(route.cluster.name.clone(), route);
+            routes.insert(cluster_name, route);
         }
     }
 
@@ -183,17 +229,35 @@ impl SubtreeRegistry {
                 continue;
             }
 
-            // Reject attempts to overwrite routes owned by other agents
+            // Reject attempts to overwrite routes owned by other agents.
+            // Even for disconnected routes, verify the claiming agent's cluster
+            // is the parent of the route being claimed to prevent a compromised
+            // agent from hijacking arbitrary disconnected routes.
             if let Some(existing) = routes.get(&cluster_name) {
                 if let Some(ref existing_agent) = existing.agent_id {
-                    if existing_agent != agent_id && existing.connected {
-                        tracing::warn!(
-                            agent_id = %agent_id,
-                            existing_agent = %existing_agent,
-                            cluster = %cluster_name,
-                            "Agent attempted to hijack route owned by another agent — rejected"
-                        );
-                        continue;
+                    if existing_agent != agent_id {
+                        if existing.connected {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                existing_agent = %existing_agent,
+                                cluster = %cluster_name,
+                                "Agent attempted to hijack route owned by another agent — rejected"
+                            );
+                            continue;
+                        }
+                        // Disconnected route — allow takeover only if the new
+                        // cluster claims the same parent as the existing route.
+                        if cluster.parent != existing.cluster.parent {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                existing_agent = %existing_agent,
+                                cluster = %cluster_name,
+                                claimed_parent = %cluster.parent,
+                                existing_parent = %existing.cluster.parent,
+                                "Agent attempted to take over disconnected route with mismatched parent — rejected"
+                            );
+                            continue;
+                        }
                     }
                 }
             }
@@ -451,6 +515,52 @@ mod tests {
         let route = registry.get_route("child-1").await.unwrap();
         assert_eq!(route.agent_id, Some("agent-2".to_string()));
         assert!(route.connected);
+    }
+
+    #[tokio::test]
+    async fn test_full_sync_rejects_self_route_hijack() {
+        let registry = SubtreeRegistry::new("parent".to_string());
+
+        // Try to hijack the self route via full_sync
+        let clusters = vec![ClusterInfo {
+            name: "parent".to_string(),
+            parent: "".to_string(),
+            phase: "Ready".to_string(),
+            labels: HashMap::new(),
+        }];
+        registry.handle_full_sync("agent-1", clusters).await;
+
+        // Self route should be unchanged
+        let route = registry.get_route("parent").await.unwrap();
+        assert!(route.is_self);
+        assert!(route.agent_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_full_sync_rejects_cross_agent_route_hijack() {
+        let registry = SubtreeRegistry::new("parent".to_string());
+
+        // Agent-1 registers a cluster
+        let clusters1 = vec![ClusterInfo {
+            name: "child-1".to_string(),
+            parent: "parent".to_string(),
+            phase: "Ready".to_string(),
+            labels: HashMap::new(),
+        }];
+        registry.handle_full_sync("agent-1", clusters1).await;
+
+        // Agent-2 tries to hijack child-1 via full_sync
+        let clusters2 = vec![ClusterInfo {
+            name: "child-1".to_string(),
+            parent: "parent".to_string(),
+            phase: "Ready".to_string(),
+            labels: HashMap::new(),
+        }];
+        registry.handle_full_sync("agent-2", clusters2).await;
+
+        // Route should still belong to agent-1
+        let route = registry.get_route("child-1").await.unwrap();
+        assert_eq!(route.agent_id, Some("agent-1".to_string()));
     }
 
     #[tokio::test]

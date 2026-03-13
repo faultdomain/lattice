@@ -148,6 +148,11 @@ struct JwkKey {
     y: Option<String>,
 }
 
+/// Maximum number of force-refresh attempts from unknown `kid` values per
+/// refresh interval. Prevents unauthenticated users from triggering unbounded
+/// outbound HTTP requests to the OIDC provider (SSRF amplification).
+const MAX_UNKNOWN_KID_REFRESHES: u32 = 3;
+
 /// OIDC token validator
 pub struct OidcValidator {
     /// OIDC configuration
@@ -158,6 +163,9 @@ pub struct OidcValidator {
     refresh_lock: tokio::sync::Mutex<()>,
     /// HTTP client for fetching JWKS
     http_client: reqwest::Client,
+    /// Counter for force-refresh attempts triggered by unknown `kid` values.
+    /// Reset on each successful scheduled refresh.
+    unknown_kid_refresh_count: std::sync::atomic::AtomicU32,
 }
 
 impl OidcValidator {
@@ -168,6 +176,7 @@ impl OidcValidator {
             jwks_cache: Arc::new(RwLock::new(None)),
             refresh_lock: tokio::sync::Mutex::new(()),
             http_client: reqwest::Client::new(),
+            unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -258,6 +267,7 @@ impl OidcValidator {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| Error::Config(format!("Failed to create HTTP client: {}", e)))?,
+            unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
@@ -268,6 +278,7 @@ impl OidcValidator {
             jwks_cache: Arc::new(RwLock::new(None)),
             refresh_lock: tokio::sync::Mutex::new(()),
             http_client: reqwest::Client::new(),
+            unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -411,7 +422,13 @@ impl OidcValidator {
         }
 
         // Key not found — could be a legitimate key rotation. Force refresh
-        // once and retry, unless we just refreshed (prevents refresh storms).
+        // once and retry, but rate-limit to prevent unauthenticated users from
+        // triggering unbounded outbound requests (SSRF amplification).
+        let attempts = self.unknown_kid_refresh_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if attempts >= MAX_UNKNOWN_KID_REFRESHES {
+            warn!(kid = ?kid, attempts, max = MAX_UNKNOWN_KID_REFRESHES, "Rate-limiting JWKS refresh for unknown kid");
+            return Err(Error::Unauthorized(format!("No matching key found in JWKS for kid: {:?}", kid)));
+        }
         debug!(kid = ?kid, "Key not found in JWKS cache, forcing refresh for possible key rotation");
         self.force_refresh_jwks().await?;
 
@@ -421,12 +438,25 @@ impl OidcValidator {
     }
 
     /// Look up a key in the current JWKS cache
+    ///
+    /// When `kid` is None, requires exactly one key in the JWKS to avoid
+    /// non-deterministic key selection from HashMap iteration order.
     async fn lookup_key(&self, kid: Option<&str>) -> Option<DecodingKey> {
         let cache = self.jwks_cache.read().await;
         let cache = cache.as_ref()?;
         match kid {
             Some(kid) => cache.keys.get(kid).cloned(),
-            None => cache.keys.values().next().cloned(),
+            None => {
+                if cache.keys.len() == 1 {
+                    cache.keys.values().next().cloned()
+                } else {
+                    warn!(
+                        key_count = cache.keys.len(),
+                        "JWT has no kid and JWKS has multiple keys — rejecting"
+                    );
+                    None
+                }
+            }
         }
     }
 
@@ -442,6 +472,10 @@ impl OidcValidator {
 
         if needs_refresh {
             self.force_refresh_jwks().await?;
+            // Reset the unknown-kid refresh counter on scheduled refresh,
+            // since the cache is now fresh and any previous unknown kids
+            // may now be present after key rotation.
+            self.unknown_kid_refresh_count.store(0, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
@@ -491,6 +525,10 @@ impl OidcValidator {
                 self.config.issuer_url, discovery.issuer
             )));
         }
+
+        // Validate jwks_uri shares the same origin as the issuer to prevent
+        // MITM redirection of JWKS fetches to attacker-controlled servers
+        validate_jwks_uri_origin(&self.config.issuer_url, &discovery.jwks_uri)?;
 
         // Fetch JWKS
         debug!(url = %discovery.jwks_uri, "Fetching JWKS");
@@ -580,6 +618,38 @@ impl OidcValidator {
             }
         }
     }
+}
+
+/// Validate that the JWKS URI shares the same origin (scheme + host) as the issuer URL.
+///
+/// Prevents MITM attacks where a compromised discovery document redirects JWKS
+/// fetches to an attacker-controlled server while keeping the issuer field correct.
+fn validate_jwks_uri_origin(issuer_url: &str, jwks_uri: &str) -> Result<()> {
+    let issuer_origin = extract_origin(issuer_url);
+    let jwks_origin = extract_origin(jwks_uri);
+
+    match (issuer_origin, jwks_origin) {
+        (Some(issuer), Some(jwks)) if issuer == jwks => Ok(()),
+        (Some(issuer), Some(jwks)) => Err(Error::Config(format!(
+            "JWKS URI origin mismatch: issuer is '{}' but jwks_uri points to '{}'",
+            issuer, jwks
+        ))),
+        _ => Err(Error::Config(format!(
+            "Failed to parse origin from issuer '{}' or jwks_uri '{}'",
+            issuer_url, jwks_uri
+        ))),
+    }
+}
+
+/// Extract "scheme://host[:port]" from a URL
+fn extract_origin(url: &str) -> Option<String> {
+    let scheme_end = url.find("://")?;
+    let scheme = &url[..scheme_end];
+    let after_scheme = &url[scheme_end + 3..];
+    // Host ends at first '/' or end of string
+    let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let host = &after_scheme[..host_end];
+    Some(format!("{}://{}", scheme, host))
 }
 
 impl Default for OidcValidator {

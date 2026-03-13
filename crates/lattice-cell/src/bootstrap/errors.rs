@@ -56,8 +56,13 @@ impl IntoResponse for BootstrapError {
             BootstrapError::InvalidToken | BootstrapError::MissingAuth => {
                 (StatusCode::UNAUTHORIZED, "authentication failed")
             }
-            BootstrapError::TokenAlreadyUsed => (StatusCode::GONE, "token already used"),
-            BootstrapError::ClusterNotFound(_) => (StatusCode::NOT_FOUND, "cluster not found"),
+            BootstrapError::TokenAlreadyUsed => {
+                (StatusCode::UNAUTHORIZED, "authentication failed")
+            }
+            // Return 401 (not 404) to prevent cluster existence enumeration
+            BootstrapError::ClusterNotFound(_) => {
+                (StatusCode::UNAUTHORIZED, "authentication failed")
+            }
             BootstrapError::CsrSigningFailed(_) => (StatusCode::BAD_REQUEST, "CSR signing failed"),
             BootstrapError::ClusterNotBootstrapped(_) => {
                 (StatusCode::PRECONDITION_FAILED, "cluster not bootstrapped")
@@ -66,7 +71,7 @@ impl IntoResponse for BootstrapError {
                 (StatusCode::UNAUTHORIZED, "authentication failed")
             }
             BootstrapError::CsrTokenAlreadyUsed => {
-                (StatusCode::GONE, "CSR token already used")
+                (StatusCode::UNAUTHORIZED, "authentication failed")
             }
             BootstrapError::ManifestGeneration(_) | BootstrapError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -129,14 +134,15 @@ mod tests {
 
         assert_status_response(
             BootstrapError::TokenAlreadyUsed.into_response(),
-            StatusCode::GONE,
-            "token already used",
+            StatusCode::UNAUTHORIZED,
+            "authentication failed",
         ).await;
 
+        // ClusterNotFound returns 401 (not 404) to prevent cluster enumeration
         assert_status_response(
             BootstrapError::ClusterNotFound("x".to_string()).into_response(),
-            StatusCode::NOT_FOUND,
-            "cluster not found",
+            StatusCode::UNAUTHORIZED,
+            "authentication failed",
         ).await;
 
         assert_status_response(
@@ -170,10 +176,11 @@ mod tests {
             "authentication failed",
         ).await;
 
+        // CsrTokenAlreadyUsed returns 401 (not 410) to prevent token state enumeration
         assert_status_response(
             BootstrapError::CsrTokenAlreadyUsed.into_response(),
-            StatusCode::GONE,
-            "CSR token already used",
+            StatusCode::UNAUTHORIZED,
+            "authentication failed",
         ).await;
     }
 

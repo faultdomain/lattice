@@ -169,7 +169,14 @@ impl VolumeEvalContext<'_> {
                     );
                     Err(self.denial(DenialReason::NoPermitPolicy))
                 } else {
-                    // No policies matched, permissive mode — allow
+                    // No policies matched, permissive mode — allow.
+                    // Log at warn level: if this appears in production it means
+                    // Cedar is providing zero protection for this volume access.
+                    tracing::warn!(
+                        principal = %format!("{}/{}", self.namespace, self.service_name),
+                        resource = %format!("{}/{}", self.vol_ns, self.volume_id),
+                        "Volume access allowed in permissive mode with no Cedar policies — Cedar provides no protection"
+                    );
                     Ok(())
                 }
             }
@@ -194,7 +201,7 @@ fn deny_all(request: &VolumeAuthzRequest, error: Error) -> VolumeAuthzResult {
         .map(|(resource_name, _, volume_id)| VolumeDenial {
             resource_name: resource_name.clone(),
             volume_id: volume_id.clone(),
-            reason: DenialReason::NoPermitPolicy,
+            reason: DenialReason::InternalError(format!("Cedar entity construction: {}", error)),
         })
         .collect();
     VolumeAuthzResult { denied }

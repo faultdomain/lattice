@@ -52,7 +52,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use lattice_common::CsrRequest;
 
@@ -127,28 +127,30 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     // Include InfraProvider, SecretProvider, CedarPolicy, OIDCProvider and their referenced secrets
     // This ensures credentials and policies are available when the operator starts, before the gRPC connection
     if let Some(ref client) = state.kube_client {
-        let parent_cluster_name =
-            std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "unknown".to_string());
-        match fetch_distributable_resources(client, &parent_cluster_name).await {
-            Ok(resources) => {
-                let count = resources.total_count();
-                all_manifests.extend(resources.into_json_strings());
+        let parent_cluster_name = std::env::var("CLUSTER_NAME").map_err(|_| {
+            BootstrapError::Internal(
+                "CLUSTER_NAME environment variable not set — cannot fetch distributable resources"
+                    .to_string(),
+            )
+        })?;
+        let resources =
+            fetch_distributable_resources(client, &parent_cluster_name)
+                .await
+                .map_err(|e| {
+                    BootstrapError::Internal(format!(
+                        "failed to fetch distributable resources: {}",
+                        e
+                    ))
+                })?;
 
-                info!(
-                    cluster_id = %cluster_id,
-                    count,
-                    "included distributed resources in bootstrap"
-                );
-            }
-            Err(e) => {
-                // Log but don't fail - operator can still sync later via gRPC
-                warn!(
-                    cluster_id = %cluster_id,
-                    error = %e,
-                    "failed to fetch distributed resources, credentials may be delayed"
-                );
-            }
-        }
+        let count = resources.total_count();
+        all_manifests.extend(resources.into_json_strings());
+
+        info!(
+            cluster_id = %cluster_id,
+            count,
+            "included distributed resources in bootstrap"
+        );
     }
 
     // Join with YAML document separator
@@ -176,6 +178,10 @@ pub fn bootstrap_router<G: ManifestGenerator + 'static>(
         )
         .route("/api/clusters/{cluster_id}/csr", post(csr_handler::<G>))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)) // 64 KiB — CSR payloads are small
+        // Limit concurrent bootstrap requests to prevent CPU exhaustion via
+        // rapid token-hashing attempts. 10 concurrent requests is generous for
+        // legitimate bootstrap traffic (clusters bootstrap one at a time).
+        .layer(tower::limit::ConcurrencyLimitLayer::new(10))
         .with_state(state)
 }
 
@@ -345,7 +351,8 @@ mod tests {
             .oneshot(request)
             .await
             .expect("request should succeed");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // Returns 401 (not 404) to prevent cluster enumeration
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Helper: extract raw CSR token from bootstrap state for a cluster
@@ -485,7 +492,8 @@ mod tests {
             .oneshot(request)
             .await
             .expect("request should succeed");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // Returns 401 (not 404) to prevent cluster enumeration
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Integration test: Full HTTP bootstrap flow (manifests + CSR)

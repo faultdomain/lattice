@@ -177,7 +177,7 @@ fn compile_secret_files(
 
         let es_name = format!("{}-file-{}", base_name, key);
         // Volume names must be DNS labels (no dots/underscores/etc).
-        let vol_name = crate::helpers::sanitize_dns_label(&es_name);
+        let vol_name = crate::helpers::sanitize_dns_label(&es_name)?;
 
         let eso_data = resolve_eso_data(file_refs, secret_refs, &format!("file '{}'", key))?;
 

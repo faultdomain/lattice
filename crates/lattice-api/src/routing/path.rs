@@ -5,6 +5,9 @@
 
 /// Strip /clusters/{cluster_name} prefix from a path to get the K8s API path.
 ///
+/// Returns `None` if the path doesn't start with the expected prefix,
+/// preventing path injection when a mismatch occurs.
+///
 /// # Examples
 ///
 /// ```
@@ -12,12 +15,16 @@
 ///
 /// assert_eq!(
 ///     strip_cluster_prefix("/clusters/my-cluster/api/v1/pods", "my-cluster"),
-///     "/api/v1/pods"
+///     Some("/api/v1/pods")
+/// );
+/// assert_eq!(
+///     strip_cluster_prefix("/api/v1/pods", "my-cluster"),
+///     None
 /// );
 /// ```
-pub fn strip_cluster_prefix<'a>(full_path: &'a str, cluster_name: &str) -> &'a str {
+pub fn strip_cluster_prefix<'a>(full_path: &'a str, cluster_name: &str) -> Option<&'a str> {
     let prefix = format!("/clusters/{}", cluster_name);
-    full_path.strip_prefix(&prefix).unwrap_or(full_path)
+    full_path.strip_prefix(&prefix)
 }
 
 /// Parse a URL path with nested `/clusters/{name}` segments into a routing
@@ -47,6 +54,13 @@ pub fn strip_cluster_prefix<'a>(full_path: &'a str, cluster_name: &str) -> &'a s
 /// // No clusters prefix
 /// assert_eq!(parse_cluster_path("/api/v1/pods"), None);
 /// ```
+/// Parse a cluster-prefixed URL path into (cluster_name, remaining_path).
+///
+/// Handles nested cluster paths like `/clusters/a/clusters/b/api/v1/pods`
+/// by recursively stripping cluster prefixes. Returns the innermost cluster
+/// and the remaining K8s API path.
+///
+/// Returns `None` if the path doesn't start with `/clusters/`.
 pub fn parse_cluster_path(url_path: &str) -> Option<(String, String)> {
     let mut remaining = url_path;
     let mut segments = Vec::new();
@@ -88,7 +102,7 @@ mod tests {
     fn test_strip_cluster_prefix() {
         assert_eq!(
             strip_cluster_prefix("/clusters/my-cluster/api/v1/pods", "my-cluster"),
-            "/api/v1/pods"
+            Some("/api/v1/pods")
         );
     }
 
@@ -96,7 +110,7 @@ mod tests {
     fn test_strip_cluster_prefix_apis() {
         assert_eq!(
             strip_cluster_prefix("/clusters/e2e-mgmt/apis/apps/v1/deployments", "e2e-mgmt"),
-            "/apis/apps/v1/deployments"
+            Some("/apis/apps/v1/deployments")
         );
     }
 
@@ -107,15 +121,15 @@ mod tests {
                 "/clusters/workload-1/api/v1/namespaces/default/pods/nginx/exec",
                 "workload-1"
             ),
-            "/api/v1/namespaces/default/pods/nginx/exec"
+            Some("/api/v1/namespaces/default/pods/nginx/exec")
         );
     }
 
     #[test]
-    fn test_strip_cluster_prefix_no_match() {
+    fn test_strip_cluster_prefix_no_match_returns_none() {
         assert_eq!(
             strip_cluster_prefix("/api/v1/pods", "my-cluster"),
-            "/api/v1/pods"
+            None
         );
     }
 
@@ -123,7 +137,7 @@ mod tests {
     fn test_strip_cluster_prefix_root_path() {
         assert_eq!(
             strip_cluster_prefix("/clusters/test-cluster", "test-cluster"),
-            ""
+            Some("")
         );
     }
 

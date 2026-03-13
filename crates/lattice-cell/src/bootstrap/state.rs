@@ -32,6 +32,10 @@ use super::types::{
 /// CSR token TTL — CSR must be signed within this window after bootstrap
 const CSR_TOKEN_TTL: Duration = Duration::from_secs(600);
 
+/// Maximum number of cluster registrations to prevent unbounded memory growth.
+/// A single cell managing 10k clusters would be extreme — this is a safety net.
+const MAX_CLUSTER_REGISTRATIONS: usize = 10_000;
+
 /// Cluster info stored in bootstrap state
 #[derive(Clone, Debug)]
 pub struct ClusterBootstrapInfo {
@@ -149,6 +153,28 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     ) -> BootstrapToken {
         let cluster_id = registration.cluster_id.clone();
 
+        // Evict fully-consumed registrations when approaching capacity
+        if self.clusters.len() >= MAX_CLUSTER_REGISTRATIONS {
+            let to_evict: Vec<String> = self
+                .clusters
+                .iter()
+                .filter(|e| e.token_used && e.csr_token_used)
+                .map(|e| e.key().clone())
+                .collect();
+            for key in to_evict {
+                self.clusters.remove(&key);
+            }
+            if self.clusters.len() >= MAX_CLUSTER_REGISTRATIONS {
+                warn!(
+                    capacity = MAX_CLUSTER_REGISTRATIONS,
+                    "Bootstrap cluster registrations at capacity, evicting oldest unused"
+                );
+                if let Some(entry) = self.clusters.iter().next() {
+                    self.clusters.remove(entry.key());
+                }
+            }
+        }
+
         // Atomic check-and-insert using entry API — holds write lock for the
         // duration, preventing concurrent removal between check and insert.
         let entry = self.clusters.entry(cluster_id.clone());
@@ -252,7 +278,11 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
             // Constant-time hash comparison to prevent timing side-channel attacks.
             // We compare hashes (not raw tokens) because raw tokens are never stored.
-            if provided_hash.as_bytes().ct_eq(info.token_hash.as_bytes()).unwrap_u8() != 1 {
+            // Both hashes are SHA-256 → base64url-no-pad (always 43 bytes). Assert
+            // equal length to guarantee ct_eq doesn't short-circuit on length mismatch.
+            if provided_hash.len() != info.token_hash.len()
+                || provided_hash.as_bytes().ct_eq(info.token_hash.as_bytes()).unwrap_u8() != 1
+            {
                 return Err(BootstrapError::InvalidToken);
             }
 
@@ -297,6 +327,10 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         let mut status = cluster.status.unwrap_or_default();
         status.bootstrap_complete = true;
         status.csr_token_hash = Some(csr_token_hash.to_string());
+        // Clear the raw bootstrap token now that it's been consumed.
+        // This minimizes the exposure window — the token was only needed
+        // in CRD status for operator restart recovery before consumption.
+        status.bootstrap_token = None;
 
         let patch = serde_json::json!({
             "status": status
@@ -438,12 +472,13 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 .map_err(|_| BootstrapError::InvalidCsrToken)?;
             let provided_hash = provided_token.hash();
 
-            // Constant-time hash comparison
-            if provided_hash
-                .as_bytes()
-                .ct_eq(expected_hash.as_bytes())
-                .unwrap_u8()
-                != 1
+            // Constant-time hash comparison with explicit length check
+            if provided_hash.len() != expected_hash.len()
+                || provided_hash
+                    .as_bytes()
+                    .ct_eq(expected_hash.as_bytes())
+                    .unwrap_u8()
+                    != 1
             {
                 return Err(BootstrapError::InvalidCsrToken);
             }

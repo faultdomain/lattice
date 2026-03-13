@@ -160,11 +160,27 @@ impl CellEndpoint {
     pub fn parse(endpoint: &str) -> Option<Self> {
         let parts: Vec<&str> = endpoint.split(':').collect();
         match parts.as_slice() {
-            [host, http_port, grpc_port] => Some(Self {
-                host: (*host).to_string(),
-                http_port: http_port.parse().ok()?,
-                grpc_port: grpc_port.parse().ok()?,
-            }),
+            [host, http_port, grpc_port] => {
+                // Validate host is not empty and contains only valid hostname/IP characters
+                let host = *host;
+                if host.is_empty()
+                    || !host
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                {
+                    return None;
+                }
+                let http_port: u16 = http_port.parse().ok()?;
+                let grpc_port: u16 = grpc_port.parse().ok()?;
+                if http_port == 0 || grpc_port == 0 {
+                    return None;
+                }
+                Some(Self {
+                    host: host.to_string(),
+                    http_port,
+                    grpc_port,
+                })
+            }
             _ => None,
         }
     }

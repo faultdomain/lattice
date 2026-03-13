@@ -204,6 +204,12 @@ impl<'a> WorkloadCompiler<'a> {
         )
         .await?;
 
+        let has_volume_refs = !self.workload.referenced_volume_ids().is_empty();
+        if has_volume_refs && self.volume_auth.is_none() {
+            return Err(CompilationError::missing_metadata(
+                "volume authorization mode must be set for workloads with volume references",
+            ));
+        }
         if let Some(ref volume_auth) = self.volume_auth {
             match volume_auth {
                 VolumeAuthorizationMode::Full { graph } => {

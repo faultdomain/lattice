@@ -164,14 +164,15 @@ pub(crate) async fn exec_handler(
     let identity = authorize_request(&state, cluster_name, request.headers()).await?;
 
     // Authorize any additional hops in the path (consistent with proxy_handler)
-    if let Some((target_path, _)) = parse_cluster_path(path) {
-        for hop in target_path.split('/').skip(1) {
-            authorize_request(&state, hop, request.headers()).await?;
-        }
+    let (target_path, _) = parse_cluster_path(path)
+        .ok_or_else(|| Error::ClusterNotFound("missing cluster path".to_string()))?;
+    for hop in target_path.split('/').skip(1) {
+        authorize_request(&state, hop, request.headers()).await?;
     }
 
     // Strip the /clusters/{cluster_name} prefix from the path
-    let api_path = strip_cluster_prefix(path, cluster_name);
+    let api_path = strip_cluster_prefix(path, cluster_name)
+        .ok_or_else(|| Error::Internal(format!("path missing expected /clusters/{} prefix", cluster_name)))?;
 
     // Handle WebSocket upgrade and bridge to gRPC
     Ok(handle_exec_websocket(
