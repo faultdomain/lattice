@@ -44,26 +44,33 @@ pub enum BootstrapError {
 
 impl IntoResponse for BootstrapError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            BootstrapError::InvalidToken => (StatusCode::UNAUTHORIZED, self.to_string()),
-            BootstrapError::TokenAlreadyUsed => (StatusCode::GONE, self.to_string()),
-            BootstrapError::ClusterNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
-            BootstrapError::MissingAuth => (StatusCode::UNAUTHORIZED, self.to_string()),
-            BootstrapError::CsrSigningFailed(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            BootstrapError::ClusterNotBootstrapped(_) => {
-                (StatusCode::PRECONDITION_FAILED, self.to_string())
+        let (status, client_message) = match &self {
+            BootstrapError::InvalidToken | BootstrapError::MissingAuth => {
+                (StatusCode::UNAUTHORIZED, "authentication failed")
             }
-            BootstrapError::ManifestGeneration(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "manifest generation failed".to_string(),
-            ),
-            BootstrapError::Internal(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error".to_string(),
-            ),
+            BootstrapError::TokenAlreadyUsed => (StatusCode::GONE, "token already used"),
+            BootstrapError::ClusterNotFound(_) => (StatusCode::NOT_FOUND, "cluster not found"),
+            BootstrapError::CsrSigningFailed(_) => (StatusCode::BAD_REQUEST, "CSR signing failed"),
+            BootstrapError::ClusterNotBootstrapped(_) => {
+                (StatusCode::PRECONDITION_FAILED, "cluster not bootstrapped")
+            }
+            BootstrapError::ManifestGeneration(_) | BootstrapError::Internal(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
         };
 
-        (status, Json(serde_json::json!({"error": message}))).into_response()
+        // Log the full error detail server-side, return generic message to client
+        tracing::warn!(error = %self, status = %status, "Bootstrap error response");
+
+        let body = serde_json::json!({
+            "kind": "Status",
+            "apiVersion": "v1",
+            "status": "Failure",
+            "message": client_message,
+            "code": status.as_u16()
+        });
+
+        (status, Json(body)).into_response()
     }
 }
 
@@ -77,40 +84,71 @@ impl From<PkiError> for BootstrapError {
 mod tests {
     use super::*;
 
-    /// Story: HTTP error responses map to correct status codes
-    ///
-    /// Different error types return appropriate HTTP status codes
-    /// for proper client error handling.
+    async fn assert_status_response(resp: Response, expected_status: StatusCode, expected_msg: &str) {
+        use axum::body::to_bytes;
+
+        assert_eq!(resp.status(), expected_status);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["kind"], "Status");
+        assert_eq!(json["apiVersion"], "v1");
+        assert_eq!(json["status"], "Failure");
+        assert_eq!(json["message"], expected_msg);
+        assert_eq!(json["code"], expected_status.as_u16());
+    }
+
+    /// HTTP error responses map to correct status codes and use K8s Status format
+    /// with generic client messages (no detail leakage).
     #[tokio::test]
     async fn error_http_responses() {
-        use axum::http::StatusCode;
+        assert_status_response(
+            BootstrapError::InvalidToken.into_response(),
+            StatusCode::UNAUTHORIZED,
+            "authentication failed",
+        ).await;
 
-        // Authentication errors -> 401 Unauthorized
-        let auth_err = BootstrapError::InvalidToken.into_response();
-        assert_eq!(auth_err.status(), StatusCode::UNAUTHORIZED);
+        assert_status_response(
+            BootstrapError::MissingAuth.into_response(),
+            StatusCode::UNAUTHORIZED,
+            "authentication failed",
+        ).await;
 
-        let missing_auth = BootstrapError::MissingAuth.into_response();
-        assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
+        assert_status_response(
+            BootstrapError::TokenAlreadyUsed.into_response(),
+            StatusCode::GONE,
+            "token already used",
+        ).await;
 
-        // Token already used -> 410 Gone (resource no longer available)
-        let used_err = BootstrapError::TokenAlreadyUsed.into_response();
-        assert_eq!(used_err.status(), StatusCode::GONE);
+        assert_status_response(
+            BootstrapError::ClusterNotFound("x".to_string()).into_response(),
+            StatusCode::NOT_FOUND,
+            "cluster not found",
+        ).await;
 
-        // Unknown cluster -> 404 Not Found
-        let not_found = BootstrapError::ClusterNotFound("x".to_string()).into_response();
-        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        assert_status_response(
+            BootstrapError::ClusterNotBootstrapped("x".to_string()).into_response(),
+            StatusCode::PRECONDITION_FAILED,
+            "cluster not bootstrapped",
+        ).await;
 
-        // CSR before bootstrap -> 412 Precondition Failed
-        let precondition = BootstrapError::ClusterNotBootstrapped("x".to_string()).into_response();
-        assert_eq!(precondition.status(), StatusCode::PRECONDITION_FAILED);
+        assert_status_response(
+            BootstrapError::CsrSigningFailed("error".to_string()).into_response(),
+            StatusCode::BAD_REQUEST,
+            "CSR signing failed",
+        ).await;
 
-        // Bad CSR -> 400 Bad Request
-        let bad_csr = BootstrapError::CsrSigningFailed("error".to_string()).into_response();
-        assert_eq!(bad_csr.status(), StatusCode::BAD_REQUEST);
+        // Internal errors hide details
+        assert_status_response(
+            BootstrapError::Internal("secret details".to_string()).into_response(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+        ).await;
 
-        // Internal errors -> 500 (and message hidden for security)
-        let internal = BootstrapError::Internal("secret details".to_string()).into_response();
-        assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_status_response(
+            BootstrapError::ManifestGeneration("oops".to_string()).into_response(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+        ).await;
     }
 
     /// Story: PkiError converts to BootstrapError correctly

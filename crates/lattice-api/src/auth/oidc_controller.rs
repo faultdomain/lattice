@@ -39,6 +39,26 @@ struct JwksDocument {
     keys: Vec<serde_json::Value>,
 }
 
+fn requeue_for_phase(phase: &OIDCProviderPhase) -> Duration {
+    let secs = if *phase == OIDCProviderPhase::Ready {
+        REQUEUE_SUCCESS_SECS
+    } else {
+        OIDC_REQUEUE_ERROR_SECS
+    };
+    Duration::from_secs(secs)
+}
+
+/// Build the appropriate EgressTarget for a host string.
+/// IPs use CIDR/32 (Istio rejects bare IPs as ServiceEntry hosts),
+/// hostnames use FQDN.
+fn egress_target_for_host(host: &str) -> EgressTarget {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        EgressTarget::Cidr(format!("{}/32", host))
+    } else {
+        EgressTarget::Fqdn(host.to_string())
+    }
+}
+
 /// Reconcile an OIDCProvider — validate connectivity and update status
 pub async fn reconcile(
     provider: Arc<OIDCProvider>,
@@ -61,12 +81,7 @@ pub async fn reconcile(
             && current_status.message == new_status.message
         {
             debug!(oidc_provider = %name, "Status unchanged, skipping update");
-            let requeue = if new_status.phase == OIDCProviderPhase::Ready {
-                REQUEUE_SUCCESS_SECS
-            } else {
-                OIDC_REQUEUE_ERROR_SECS
-            };
-            return Ok(Action::requeue(Duration::from_secs(requeue)));
+            return Ok(Action::requeue(requeue_for_phase(&new_status.phase)));
         }
     }
 
@@ -87,12 +102,6 @@ pub async fn reconcile(
     )
     .await?;
 
-    let requeue = if new_status.phase == OIDCProviderPhase::Ready {
-        REQUEUE_SUCCESS_SECS
-    } else {
-        OIDC_REQUEUE_ERROR_SECS
-    };
-
     info!(
         oidc_provider = %name,
         phase = ?new_status.phase,
@@ -100,7 +109,7 @@ pub async fn reconcile(
         "OIDCProvider status updated"
     );
 
-    Ok(Action::requeue(Duration::from_secs(requeue)))
+    Ok(Action::requeue(requeue_for_phase(&new_status.phase)))
 }
 
 const FIELD_MANAGER: &str = "lattice-oidc-provider-controller";
@@ -149,11 +158,7 @@ async fn ensure_oidc_egress_lmm(
             allowed_callers: vec![],
             dependencies: vec![],
             egress: vec![EgressRule {
-                target: if ep.host.parse::<std::net::IpAddr>().is_ok() {
-                    EgressTarget::Cidr(format!("{}/32", ep.host))
-                } else {
-                    EgressTarget::Fqdn(ep.host.clone())
-                },
+                target: egress_target_for_host(&ep.host),
                 ports: vec![ep.port],
             }],
             allow_peer_traffic: false,
@@ -256,17 +261,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requeue_constants() {
-        assert_eq!(REQUEUE_SUCCESS_SECS, 300);
-        assert_eq!(OIDC_REQUEUE_ERROR_SECS, 15);
-    }
-
-    #[test]
-    fn field_manager_constant() {
-        assert_eq!(FIELD_MANAGER, "lattice-oidc-provider-controller");
-    }
-
-    #[test]
     fn external_issuer_parsed_correctly() {
         let ep = ParsedEndpoint::parse("https://keycloak.example.com:8080").expect("should parse");
         assert_eq!(ep.host, "keycloak.example.com");
@@ -282,32 +276,17 @@ mod tests {
     }
 
     #[test]
-    fn egress_lmm_name_format() {
-        let name = format!("egress-oidc-{}", "corporate-idp");
-        assert_eq!(name, "egress-oidc-corporate-idp");
-    }
-
-    #[test]
-    fn egress_lmm_spec_for_ip_issuer_uses_cidr() {
-        let ep = ParsedEndpoint::parse("http://172.18.0.11:8080").expect("should parse");
-        let target = if ep.host.parse::<std::net::IpAddr>().is_ok() {
-            EgressTarget::Cidr(format!("{}/32", ep.host))
-        } else {
-            EgressTarget::Fqdn(ep.host.clone())
-        };
-        assert_eq!(target, EgressTarget::Cidr("172.18.0.11/32".to_string()));
-    }
-
-    #[test]
-    fn egress_lmm_spec_for_fqdn_issuer_uses_fqdn() {
-        let ep = ParsedEndpoint::parse("https://keycloak.example.com:8080").expect("should parse");
-        let target = if ep.host.parse::<std::net::IpAddr>().is_ok() {
-            EgressTarget::Cidr(format!("{}/32", ep.host))
-        } else {
-            EgressTarget::Fqdn(ep.host.clone())
-        };
+    fn egress_target_ip_uses_cidr() {
         assert_eq!(
-            target,
+            egress_target_for_host("172.18.0.11"),
+            EgressTarget::Cidr("172.18.0.11/32".to_string())
+        );
+    }
+
+    #[test]
+    fn egress_target_fqdn_uses_fqdn() {
+        assert_eq!(
+            egress_target_for_host("keycloak.example.com"),
             EgressTarget::Fqdn("keycloak.example.com".to_string())
         );
     }
