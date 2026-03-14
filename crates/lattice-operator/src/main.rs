@@ -392,7 +392,10 @@ async fn run_service_slice(
     let cedar = load_cedar_engine(client).await;
 
     let cluster = ClusterConfig {
-        cluster_name: config.cluster_name_required().map_err(|e| anyhow::anyhow!(e))?.to_string(),
+        cluster_name: config
+            .cluster_name_required()
+            .map_err(|e| anyhow::anyhow!(e))?
+            .to_string(),
         provider_type: config.provider,
         monitoring: MonitoringConfig {
             enabled: config.monitoring_enabled,
@@ -563,7 +566,10 @@ async fn run_all_slices(
 
     // Service controllers need provider type + monitoring from the LatticeCluster CRD
     let cluster = ClusterConfig {
-        cluster_name: config.cluster_name_required().map_err(|e| anyhow::anyhow!(e))?.to_string(),
+        cluster_name: config
+            .cluster_name_required()
+            .map_err(|e| anyhow::anyhow!(e))?
+            .to_string(),
         provider_type: controller_runner::resolve_provider_type_from_cluster(client).await,
         monitoring: controller_runner::resolve_monitoring_from_cluster(client).await,
     };

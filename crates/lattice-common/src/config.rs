@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-
 use crate::crd::ProviderType;
 
 /// Default Lattice container image
@@ -73,12 +72,7 @@ impl LatticeConfig {
         let grpc_max_message_size = match std::env::var("LATTICE_GRPC_MAX_MESSAGE_SIZE") {
             Ok(v) => v
                 .parse::<usize>()
-                .map_err(|e| {
-                    format!(
-                        "invalid LATTICE_GRPC_MAX_MESSAGE_SIZE '{}': {}",
-                        v, e
-                    )
-                })?
+                .map_err(|e| format!("invalid LATTICE_GRPC_MAX_MESSAGE_SIZE '{}': {}", v, e))?
                 .min(MAX_GRPC_MESSAGE_SIZE),
             Err(_) => DEFAULT_GRPC_MAX_MESSAGE_SIZE,
         };
@@ -107,7 +101,6 @@ impl LatticeConfig {
             .as_deref()
             .ok_or_else(|| "LATTICE_CLUSTER_NAME environment variable not set".to_string())
     }
-
 }
 
 /// Parse a boolean environment variable with a default value.

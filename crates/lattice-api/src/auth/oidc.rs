@@ -666,10 +666,7 @@ struct ValidatedIssuer {
 ///
 /// Set `allow_insecure_http` to true (via `LATTICE_OIDC_ALLOW_INSECURE_HTTP`)
 /// to permit HTTP issuer URLs for development/testing.
-async fn validate_issuer_url(
-    url: &str,
-    allow_insecure_http: bool,
-) -> Result<ValidatedIssuer> {
+async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<ValidatedIssuer> {
     if !url.starts_with("https://") {
         if url.starts_with("http://") && allow_insecure_http {
             warn!(
@@ -724,7 +721,8 @@ async fn validate_issuer_url(
             if is_private_ip(&addr.ip()) {
                 return Err(Error::Config(format!(
                     "OIDC issuer hostname '{}' resolves to private/reserved IP {}",
-                    host, addr.ip()
+                    host,
+                    addr.ip()
                 )));
             }
         }
@@ -1008,11 +1006,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_issuer_url_rejects_ipv6_link_local() {
-        assert!(
-            validate_issuer_url("https://[fe80::1]", false)
-                .await
-                .is_err()
-        );
+        assert!(validate_issuer_url("https://[fe80::1]", false)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

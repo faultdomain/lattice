@@ -596,13 +596,11 @@ mod tests {
             validate_move_object_kind("bootstrap.cluster.x-k8s.io/v1beta1", "KubeadmConfig")
                 .is_ok()
         );
-        assert!(
-            validate_move_object_kind(
-                "controlplane.cluster.x-k8s.io/v1beta1",
-                "KubeadmControlPlane"
-            )
-            .is_ok()
-        );
+        assert!(validate_move_object_kind(
+            "controlplane.cluster.x-k8s.io/v1beta1",
+            "KubeadmControlPlane"
+        )
+        .is_ok());
         assert!(
             validate_move_object_kind("addon.cluster.x-k8s.io/v1alpha1", "ClusterResourceSet")
                 .is_ok()
