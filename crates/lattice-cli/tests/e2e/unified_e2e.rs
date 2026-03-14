@@ -285,6 +285,27 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Route Discovery: cross-cluster route pipeline + restricted advertise
+    {
+        let mgmt_kc = ctx.mgmt_kubeconfig.clone();
+        let workload_kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Route discovery",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::route_discovery::run_route_discovery_tests(
+                    &mgmt_kc,
+                    &workload_kc,
+                    WORKLOAD_CLUSTER_NAME,
+                )
+                .await?;
+                integration::route_discovery::run_restricted_advertise_tests(&workload_kc).await?;
+                Ok(())
+            }),
+        ));
+    }
+
     // Backup: controller verification
     {
         let kc = ctx.require_workload()?.to_string();
