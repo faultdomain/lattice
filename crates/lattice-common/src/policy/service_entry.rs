@@ -47,15 +47,22 @@ impl ServiceEntry {
 pub struct ServiceEntrySpec {
     /// Hosts (DNS names)
     pub hosts: Vec<String>,
-    /// Addresses (IPs for STATIC resolution)
+    /// Endpoints for STATIC resolution
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub addresses: Vec<String>,
+    pub endpoints: Vec<ServiceEntryEndpoint>,
     /// Ports
     pub ports: Vec<ServiceEntryPort>,
     /// Location: MESH_EXTERNAL or MESH_INTERNAL
     pub location: String,
     /// Resolution: DNS, STATIC, NONE
     pub resolution: String,
+}
+
+/// ServiceEntry endpoint for STATIC resolution
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ServiceEntryEndpoint {
+    /// IP address of the endpoint
+    pub address: String,
 }
 
 /// ServiceEntry port

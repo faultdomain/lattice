@@ -17,7 +17,9 @@ use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
-use lattice_common::policy::service_entry::{ServiceEntry, ServiceEntryPort, ServiceEntrySpec};
+use lattice_common::policy::service_entry::{
+    ServiceEntry, ServiceEntryEndpoint, ServiceEntryPort, ServiceEntrySpec,
+};
 
 // =============================================================================
 // Generated Policies Container
@@ -268,11 +270,13 @@ impl<'a> PolicyCompiler<'a> {
                 se_metadata,
                 ServiceEntrySpec {
                     hosts: vec![hostname.clone()],
-                    addresses: vec![address.clone()],
+                    endpoints: vec![ServiceEntryEndpoint {
+                        address: address.clone(),
+                    }],
                     ports: vec![ServiceEntryPort {
                         number: port,
-                        name: "https".to_string(),
-                        protocol: "HTTPS".to_string(),
+                        name: "http".to_string(),
+                        protocol: "HTTP".to_string(),
                     }],
                     location: "MESH_EXTERNAL".to_string(),
                     resolution: "STATIC".to_string(),

@@ -76,7 +76,7 @@ fn build_advertised_service(
     ports.insert(
         "http".to_string(),
         PortSpec {
-            port: 80,
+            port: 8080,
             target_port: None,
             protocol: None,
         },
@@ -355,7 +355,7 @@ pub async fn verify_route_status(kubeconfig: &str, cluster_name: &str) -> Result
 // ServiceEntry Verification
 // =============================================================================
 
-/// Verify remote ServiceEntries use HTTPS + STATIC with addresses
+/// Verify remote ServiceEntries use HTTP + STATIC with endpoints
 pub async fn verify_remote_service_entries(
     kubeconfig: &str,
     namespace: &str,
@@ -392,7 +392,7 @@ pub async fn verify_remote_service_entries(
 
         let resolution = item["spec"]["resolution"].as_str().unwrap_or("");
         let protocol = item["spec"]["ports"][0]["protocol"].as_str().unwrap_or("");
-        let addresses = item["spec"]["addresses"].as_array();
+        let endpoints = item["spec"]["endpoints"].as_array();
 
         if resolution != "STATIC" {
             return Err(format!(
@@ -400,15 +400,15 @@ pub async fn verify_remote_service_entries(
                 name, resolution
             ));
         }
-        if protocol != "HTTPS" {
+        if protocol != "HTTP" {
             return Err(format!(
-                "ServiceEntry '{}': expected HTTPS, got {}",
+                "ServiceEntry '{}': expected HTTP, got {}",
                 name, protocol
             ));
         }
-        if addresses.map(|a| a.is_empty()).unwrap_or(true) {
+        if endpoints.map(|a| a.is_empty()).unwrap_or(true) {
             return Err(format!(
-                "ServiceEntry '{}': missing addresses for STATIC",
+                "ServiceEntry '{}': missing endpoints for STATIC",
                 name
             ));
         }

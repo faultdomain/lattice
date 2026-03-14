@@ -182,7 +182,7 @@ impl<'a> PolicyCompiler<'a> {
             metadata,
             ServiceEntrySpec {
                 hosts: vec![fqdn.to_string()],
-                addresses: vec![],
+                endpoints: vec![],
                 ports: se_ports,
                 location: "MESH_EXTERNAL".to_string(),
                 resolution: "DNS".to_string(),
