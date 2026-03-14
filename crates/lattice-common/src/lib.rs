@@ -26,6 +26,7 @@ pub mod status_check;
 pub mod system_namespaces;
 pub mod telemetry;
 pub mod template;
+pub mod watcher;
 pub mod yaml;
 
 pub use config::{LatticeConfig, SharedConfig};

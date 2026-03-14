@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use kube::api::{Api, DynamicObject, GroupVersionKind, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::watcher::{self, Event};
@@ -19,6 +19,8 @@ use kube::Client;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+use lattice_common::watcher::resilient_watcher;
 
 use lattice_common::crd::{
     ClusterRoute, LatticeClusterRoutes, LatticeClusterRoutesSpec, LatticeService,
@@ -111,36 +113,18 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
 
     info!(cluster = %cluster_name, "Route reconciler started");
 
-    // Watch local LatticeServices for changes.
-    // The stream is recreated on error since kube watcher streams are terminal after failure.
     let svc_api: Api<LatticeService> = Api::all(client.clone());
-    let new_svc_watcher = || watcher::watcher(svc_api.clone(), watcher::Config::default()).boxed();
-    let mut svc_stream = new_svc_watcher();
+    let mut svc_stream =
+        std::pin::pin!(resilient_watcher(svc_api, watcher::Config::default()));
 
     loop {
         let mut should_reconcile = false;
 
         tokio::select! {
-            // Local LatticeService changes
-            event = svc_stream.try_next() => {
-                match event {
-                    Ok(Some(event)) => {
-                        if matches!(event, Event::Apply(_) | Event::Delete(_) | Event::InitDone) {
-                            local_routes = discover_local_routes(&client).await;
-                            should_reconcile = true;
-                        }
-                    }
-                    // Stream ended or errored — both are terminal; restart after backoff
-                    Ok(None) | Err(_) => {
-                        if let Err(ref e) = event {
-                            warn!(cluster = %cluster_name, error = %e, "LatticeService watcher error, restarting");
-                        } else {
-                            warn!(cluster = %cluster_name, "LatticeService watcher ended, restarting");
-                        }
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        svc_stream = new_svc_watcher();
-                        continue;
-                    }
+            Some(event) = svc_stream.next() => {
+                if matches!(event, Event::Apply(_) | Event::Delete(_) | Event::InitDone) {
+                    local_routes = discover_local_routes(&client).await;
+                    should_reconcile = true;
                 }
             }
             // Child route updates from heartbeats

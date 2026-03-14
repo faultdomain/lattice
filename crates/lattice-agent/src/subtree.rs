@@ -6,13 +6,14 @@
 
 use std::collections::HashMap;
 
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{LatticeCluster, LatticeClusterRoutes};
+use lattice_common::watcher::resilient_watcher;
 use lattice_proto::{
     agent_message::Payload, AgentMessage, SubtreeCluster, SubtreeService, SubtreeState,
 };
@@ -160,72 +161,42 @@ impl SubtreeSender {
 
     /// Watch for LatticeCluster and LatticeClusterRoutes changes and send deltas.
     ///
-    /// Restarts watchers on error or stream end (with backoff). Only exits
-    /// when the message channel is closed (agent shutting down).
+    /// Uses resilient_watcher for auto-restart on error. Only exits when the
+    /// message channel is closed (agent shutting down).
     async fn watch_and_send_deltas(&self, message_tx: mpsc::Sender<AgentMessage>) {
         info!(cluster = %self.cluster_name, "Starting subtree watcher (clusters + routes)");
 
-        let new_cluster_watcher = || {
-            let api: Api<LatticeCluster> = Api::all(self.client.clone());
-            watcher::watcher(api, watcher::Config::default()).boxed()
-        };
-        let new_routes_watcher = || {
-            let api: Api<LatticeClusterRoutes> = Api::all(self.client.clone());
-            watcher::watcher(api, watcher::Config::default()).boxed()
-        };
+        let cluster_api: Api<LatticeCluster> = Api::all(self.client.clone());
+        let routes_api: Api<LatticeClusterRoutes> = Api::all(self.client.clone());
 
-        let mut cluster_stream = new_cluster_watcher();
-        let mut routes_stream = new_routes_watcher();
+        let mut cluster_stream =
+            std::pin::pin!(resilient_watcher(cluster_api, watcher::Config::default()));
+        let mut routes_stream =
+            std::pin::pin!(resilient_watcher(routes_api, watcher::Config::default()));
 
         loop {
             tokio::select! {
-                event = cluster_stream.try_next() => {
-                    match event {
-                        Ok(Some(event)) => {
-                            if let Some(msg) = self.handle_cluster_event(event) {
-                                if message_tx.send(msg).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(None) | Err(_) => {
-                            if let Err(ref e) = event {
-                                warn!(error = %e, "Cluster watcher error, restarting");
-                            } else {
-                                warn!("Cluster watcher stream ended, restarting");
-                            }
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            cluster_stream = new_cluster_watcher();
+                Some(event) = cluster_stream.next() => {
+                    if let Some(msg) = self.handle_cluster_event(event) {
+                        if message_tx.send(msg).await.is_err() {
+                            break;
                         }
                     }
                 }
-                event = routes_stream.try_next() => {
-                    match event {
-                        Ok(Some(event)) => {
-                            if matches!(event, Event::Apply(_) | Event::InitDone) {
-                                let services = self.read_cluster_routes().await;
-                                let delta = SubtreeState {
-                                    clusters: vec![],
-                                    services,
-                                    is_full_sync: false,
-                                };
-                                let msg = AgentMessage {
-                                    cluster_name: self.cluster_name.clone(),
-                                    payload: Some(Payload::SubtreeState(delta)),
-                                };
-                                if message_tx.send(msg).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(None) | Err(_) => {
-                            if let Err(ref e) = event {
-                                warn!(error = %e, "Routes watcher error, restarting");
-                            } else {
-                                warn!("Routes watcher stream ended, restarting");
-                            }
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            routes_stream = new_routes_watcher();
+                Some(event) = routes_stream.next() => {
+                    if matches!(event, Event::Apply(_) | Event::InitDone) {
+                        let services = self.read_cluster_routes().await;
+                        let delta = SubtreeState {
+                            clusters: vec![],
+                            services,
+                            is_full_sync: false,
+                        };
+                        let msg = AgentMessage {
+                            cluster_name: self.cluster_name.clone(),
+                            payload: Some(Payload::SubtreeState(delta)),
+                        };
+                        if message_tx.send(msg).await.is_err() {
+                            break;
                         }
                     }
                 }

@@ -2839,6 +2839,7 @@ name = "lattice-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "aws-lc-rs",
  "base64",
