@@ -28,7 +28,7 @@ use lattice_common::crd::{
 use super::super::helpers::{
     apply_advertise_wildcard_policy, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
-    wait_for_service_phase, DEFAULT_TIMEOUT,
+    wait_for_service_phase, CURL_IMAGE, DEFAULT_TIMEOUT, NGINX_IMAGE,
 };
 
 const ROUTE_TEST_NS: &str = "route-discovery-test";
@@ -51,7 +51,7 @@ fn build_advertised_service(
     containers.insert(
         "main".to_string(),
         ContainerSpec {
-            image: "nginx:1-alpine".to_string(),
+            image: NGINX_IMAGE.clone(),
             resources: Some(ResourceRequirements {
                 requests: Some(ResourceQuantity {
                     cpu: Some("50m".to_string()),
@@ -117,19 +117,21 @@ fn build_advertised_service(
 ///
 /// The consumer declares an outbound dependency to the remote service. The compiler
 /// resolves it via the graph's Remote node and generates a ServiceEntry. The consumer
-/// pod curls the remote hostname in a loop and writes "CROSS_CLUSTER_OK" to logs on success.
+/// pod curls the remote's **advertised hostname** (resolved via ServiceEntry), not the
+/// K8s internal DNS (which only exists on the remote cluster).
 fn build_cross_cluster_consumer(
     name: &str,
     namespace: &str,
     remote_name: &str,
     remote_namespace: &str,
+    advertised_hostname: &str,
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{DependencyDirection, ResourceSpec, ResourceType, ResourceQuantity, ResourceRequirements};
 
     let script = format!(
         r#"while true; do
-  if wget -q -O- http://{remote_name}.{remote_namespace}.svc.cluster.local 2>/dev/null | grep -q .; then
+  if curl -sf http://{advertised_hostname} 2>/dev/null | grep -q .; then
     echo "CROSS_CLUSTER_OK"
   else
     echo "CROSS_CLUSTER_FAIL"
@@ -142,7 +144,7 @@ done"#
     containers.insert(
         "main".to_string(),
         ContainerSpec {
-            image: "busybox:1.37".to_string(),
+            image: CURL_IMAGE.clone(),
             command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), script]),
             resources: Some(ResourceRequirements {
                 requests: Some(ResourceQuantity {
@@ -506,6 +508,7 @@ pub async fn run_route_discovery_tests(
         consumer_ns,
         "route-target",
         ROUTE_TEST_NS,
+        "route-target.test.local",
     );
 
     let mgmt_client = client_from_kubeconfig(mgmt_kubeconfig).await?;
