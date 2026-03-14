@@ -28,7 +28,7 @@ use lattice_common::crd::{
 use super::super::helpers::{
     apply_advertise_wildcard_policy, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
-    wait_for_service_phase, CURL_IMAGE, DEFAULT_TIMEOUT, NGINX_IMAGE,
+    wait_for_service_phase, DEFAULT_TIMEOUT, NGINX_IMAGE,
 };
 
 const ROUTE_TEST_NS: &str = "route-discovery-test";
@@ -132,9 +132,7 @@ fn build_cross_cluster_consumer(
     advertised_hostname: &str,
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_common::crd::{
-        DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
-    };
+    use lattice_common::crd::{DependencyDirection, ResourceSpec, ResourceType};
 
     let script = format!(
         r#"while true; do
@@ -150,21 +148,7 @@ done"#
     let mut containers = BTreeMap::new();
     containers.insert(
         "main".to_string(),
-        ContainerSpec {
-            image: CURL_IMAGE.clone(),
-            command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), script]),
-            resources: Some(ResourceRequirements {
-                requests: Some(ResourceQuantity {
-                    cpu: Some("50m".to_string()),
-                    memory: Some("32Mi".to_string()),
-                }),
-                limits: Some(ResourceQuantity {
-                    cpu: Some("200m".to_string()),
-                    memory: Some("128Mi".to_string()),
-                }),
-            }),
-            ..Default::default()
-        },
+        super::super::mesh_fixtures::curl_container(script),
     );
 
     let mut resources = BTreeMap::new();
