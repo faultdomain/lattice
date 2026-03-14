@@ -1,0 +1,50 @@
+# Backend cluster - runs all workloads behind the edge firewall (Child)
+# Proxmox node 2 - storage-focused, runs webapp + media stacks
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: backend
+  labels:
+    lattice.dev/environment: homelab
+    lattice.dev/role: backend
+spec:
+  latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
+  monitoring:
+    enabled: false
+  backups:
+    enabled: false
+  providerRef: proxmox
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm
+    config:
+      proxmox:
+        sshAuthorizedKeys:
+          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1f8eVKp5YCAtis77YO/oHhWvzAiimDzlDqhtD+85YR evan.hines.dev@gmail.com"
+        sourceNode: "poweredge-lg"
+        templateId: 9000
+        controlPlaneEndpoint: "10.0.0.110"
+        bridge: "vmbr0"
+        ipv4Pool:
+          range: "10.0.0.111-115/24"
+          gateway: "10.0.0.1"
+        dnsServers:
+          - "10.0.0.1"
+        virtualIpNetworkInterface: "ens18"
+        lbCidr: "10.0.0.216/28"
+  nodes:
+    controlPlane:
+      replicas: 1
+      instanceType:
+        cores: 4
+        memoryGib: 16
+        diskGib: 50
+    workerPools:
+      default:
+        replicas: 3
+        instanceType:
+          cores: 8
+          memoryGib: 32
+          diskGib: 500
+  services: true

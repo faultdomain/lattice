@@ -1,0 +1,72 @@
+# HAProxy firewall - single entry point for all traffic into the backend cluster
+#
+# The route-adapter sidecar watches LatticeClusterRoutes CRDs, renders
+# haproxy.cfg when routes change, and sends SIGUSR2 to reload HAProxy.
+# No manual IP management needed — routes are discovered from heartbeats.
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: haproxy-fw
+  namespace: edge
+spec:
+  replicas: 2
+  workload:
+    containers:
+      main:
+        image: haproxy:lts-alpine
+        command: ["haproxy", "-W", "-f", "/config/haproxy.cfg"]
+        volumes:
+          /config:
+            source: ${resources.haproxy-config}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8405
+          initialDelaySeconds: 5
+          periodSeconds: 10
+    service:
+      ports:
+        http:
+          port: 80
+          protocol: TCP
+        stats:
+          port: 8405
+          protocol: TCP
+    resources:
+      haproxy-config:
+        type: volume
+        params:
+          size: 50Mi
+  sidecars:
+    route-adapter:
+      image: "ghcr.io/evan-hines-js/lattice-route-adapter:latest"
+      variables:
+        CONFIG_PATH: "/config/haproxy.cfg"
+        HAPROXY_PROCESS_NAME: "haproxy"
+      volumes:
+        /config:
+          source: ${resources.haproxy-config}
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      security:
+        allowedBinaries: ["*"]
+  shareProcessNamespace: true
+  ingress:
+    routes:
+      http:
+        kind: HTTPRoute
+        port: http
+        hosts:
+          - "*.home.arpa"

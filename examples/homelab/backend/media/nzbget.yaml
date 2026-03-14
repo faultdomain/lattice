@@ -1,0 +1,68 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: nzbget
+  namespace: media
+spec:
+  workload:
+    containers:
+      main:
+        image: docker.io/linuxserver/nzbget:latest
+        security:
+          runAsUser: 0
+          readOnlyRootFilesystem: false
+          apparmorProfile: Unconfined
+          capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETUID, SETGID]
+          allowedBinaries: ["*"]
+        variables:
+          PUID: "1000"
+          PGID: "1000"
+          TZ: "America/New_York"
+        volumes:
+          /config:
+            source: ${resources.config}
+          /downloads:
+            source: ${resources.media-storage}
+            path: downloads
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        readinessProbe:
+          exec:
+            command: ["nc", "-z", "127.0.0.1", "6789"]
+    service:
+      ports:
+        http:
+          port: 6789
+          protocol: TCP
+    resources:
+      config:
+        type: volume
+        params:
+          size: 1Gi
+      # Shared media storage (REFERENCE - no size, authorized via jellyfin's allowedConsumers)
+      media-storage:
+        type: volume
+        id: media-storage
+      # Service dependencies (bilateral agreement)
+      sonarr:
+        type: service
+        direction: inbound
+      egress-vpn:
+        type: service
+        direction: outbound
+  replicas: 1
+  ingress:
+    gateway_class: istio
+    routes:
+      public:
+        hosts:
+          - nzbget.home.arpa
+        advertise: true
+        tls:
+          issuerRef:
+            name: e2e-selfsigned

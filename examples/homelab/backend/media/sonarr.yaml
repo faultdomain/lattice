@@ -1,0 +1,73 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: sonarr
+  namespace: media
+spec:
+  workload:
+    containers:
+      main:
+        image: docker.io/linuxserver/sonarr:latest
+        security:
+          runAsUser: 0
+          apparmorProfile: Unconfined
+          capabilities: [SETUID, SETGID]
+          allowedBinaries: ["*"]
+        variables:
+          PUID: "1000"
+          PGID: "1000"
+          TZ: "America/New_York"
+        volumes:
+          /config:
+            source: ${resources.config}
+          /downloads:
+            source: ${resources.media-storage}
+            path: downloads
+          /tv:
+            source: ${resources.media-storage}
+            path: library
+          /tmp: {}
+          /run: {}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: 8989
+    service:
+      ports:
+        http:
+          port: 8989
+          protocol: TCP
+    resources:
+      config:
+        type: volume
+        params:
+          size: 5Gi
+      # Shared media storage (REFERENCE - no size, authorized via jellyfin's allowedConsumers)
+      media-storage:
+        type: volume
+        id: media-storage
+      # Service dependencies (bilateral agreements)
+      nzbget:
+        type: service
+        direction: outbound
+      jellyfin:
+        type: service
+        direction: outbound
+  replicas: 1
+  ingress:
+    gateway_class: istio
+    routes:
+      public:
+        hosts:
+          - sonarr.home.arpa
+        advertise: true
+        tls:
+          issuerRef:
+            name: e2e-selfsigned

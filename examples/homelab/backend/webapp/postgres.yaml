@@ -1,0 +1,56 @@
+# PostgreSQL 16 database
+# Inbound from: api, worker
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: postgres
+  namespace: webapp
+spec:
+  replicas: 1
+  workload:
+    containers:
+      main:
+        image: postgres:16-alpine
+        variables:
+          POSTGRES_DB: webapp
+          POSTGRES_USER: webapp
+          POSTGRES_PASSWORD: "${secret.db-credentials.password}"
+          PGDATA: /var/lib/postgresql/data/pgdata
+        volumes:
+          /var/lib/postgresql/data:
+            source: ${resources.data}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "webapp"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+    service:
+      ports:
+        tcp:
+          port: 5432
+          protocol: TCP
+    resources:
+      db-credentials:
+        type: secret
+        id: webapp/db-credentials
+        params:
+          provider: lattice-local
+          keys:
+            - password
+      data:
+        type: volume
+        params:
+          size: 10Gi
+      api:
+        type: service
+        direction: inbound
+      worker:
+        type: service
+        direction: inbound

@@ -1,0 +1,55 @@
+# Edge cluster - HAProxy firewall/DMZ layer (Parent)
+# Proxmox node 1 - lightweight, runs only the haproxy-fw LatticeService
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: edge
+  labels:
+    lattice.dev/environment: homelab
+    lattice.dev/role: edge
+spec:
+  latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
+  monitoring:
+    enabled: false
+  backups:
+    enabled: false
+  providerRef: proxmox
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm
+    config:
+      proxmox:
+        sshAuthorizedKeys:
+          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1f8eVKp5YCAtis77YO/oHhWvzAiimDzlDqhtD+85YR evan.hines.dev@gmail.com"
+        sourceNode: "poweredge-lg"
+        templateId: 9000
+        controlPlaneEndpoint: "10.0.0.100"
+        bridge: "vmbr0"
+        ipv4Pool:
+          range: "10.0.0.101-103/24"
+          gateway: "10.0.0.1"
+        dnsServers:
+          - "10.0.0.1"
+        virtualIpNetworkInterface: "ens18"
+        lbCidr: "10.0.0.200/28"
+  nodes:
+    controlPlane:
+      replicas: 1
+      instanceType:
+        cores: 4
+        memoryGib: 16
+        diskGib: 50
+    workerPools:
+      default:
+        replicas: 2
+        instanceType:
+          cores: 4
+          memoryGib: 16
+          diskGib: 50
+  services: true
+  parentConfig:
+    grpcPort: 50051
+    bootstrapPort: 8443
+    service:
+      type: LoadBalancer

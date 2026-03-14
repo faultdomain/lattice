@@ -1,0 +1,54 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: egress-vpn
+  namespace: media
+spec:
+  workload:
+    containers:
+      main:
+        image: docker.io/alpine/socat:latest
+        command: ["socat", "TCP-LISTEN:1080,fork,reuseaddr", "TCP:usenet-provider.example.com:563"]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+    service:
+      ports:
+        usenet:
+          port: 1080
+          protocol: TCP
+    resources:
+      # Bilateral agreements — only authorized services can egress through this gateway
+      nzbget:
+        type: service
+        direction: inbound
+  sidecars:
+    wireguard:
+      image: docker.io/linuxserver/wireguard:latest
+      variables:
+        PUID: "1000"
+        PGID: "1000"
+      files:
+        /config/wg_confs/wg0.conf:
+          content: |
+            [Interface]
+            PrivateKey = <YOUR_PRIVATE_KEY>
+            Address = 10.0.0.2/32
+
+            [Peer]
+            PublicKey = <SERVER_PUBLIC_KEY>
+            Endpoint = <VPN_SERVER>:51820
+            AllowedIPs = 0.0.0.0/0
+      volumes:
+        /tmp: {}
+        /run: {}
+      security:
+        runAsUser: 0
+        capabilities: [NET_ADMIN, SYS_MODULE]
+        apparmorProfile: Unconfined
+        allowedBinaries: ["*"]
+  replicas: 1
