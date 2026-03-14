@@ -306,7 +306,7 @@ pub async fn verify_cross_cluster_auth_policy(
     namespace: &str,
     service_name: &str,
 ) -> Result<(), String> {
-    let policy_name = format!("{}-cross-cluster", service_name);
+    let policy_name = format!("{}-cross-cluster-deny", service_name);
     info!("[RouteDiscovery] Checking AuthorizationPolicy '{}'...", policy_name);
 
     let output = run_kubectl(&[
