@@ -79,8 +79,9 @@ pub fn build_cluster_controllers(
     self_cluster_name: Option<String>,
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     capi_installer: Arc<dyn CapiInstaller>,
+    config: lattice_common::SharedConfig,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let mut ctx_builder = Context::builder(client.clone()).capi_installer(capi_installer);
+    let mut ctx_builder = Context::builder(client.clone(), config).capi_installer(capi_installer);
     if let Some(servers) = parent_servers {
         ctx_builder = ctx_builder.parent_servers(servers);
     }
@@ -375,8 +376,9 @@ pub async fn build_model_controllers(
 pub fn build_provider_controllers(
     client: Client,
     cedar: Arc<PolicyEngine>,
+    config: lattice_common::SharedConfig,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let ctx = Arc::new(ControllerContext::new(client.clone()));
+    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
     let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
         client: client.clone(),
         cedar,
@@ -443,34 +445,12 @@ pub fn build_provider_controllers(
     ]
 }
 
-/// Resolve provider type from env var (for Service mode, which has no LatticeCluster)
-pub fn resolve_provider_type_from_env() -> ProviderType {
-    std::env::var("LATTICE_PROVIDER")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(ProviderType::Docker)
-}
-
 /// Resolve provider type from the first LatticeCluster CRD
 pub async fn resolve_provider_type_from_cluster(client: &Client) -> ProviderType {
     match read_first_cluster(client).await {
         Some(cluster) => cluster.spec.provider.provider_type(),
         None => ProviderType::Docker,
     }
-}
-
-/// Resolve monitoring config from env var (for Service mode, which has no LatticeCluster).
-/// Defaults to enabled + HA.
-pub fn resolve_monitoring_from_env() -> MonitoringConfig {
-    let enabled = std::env::var("LATTICE_MONITORING")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(true);
-    let ha = std::env::var("LATTICE_MONITORING_HA")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(true);
-    MonitoringConfig { enabled, ha }
 }
 
 /// Resolve monitoring config from the first LatticeCluster CRD

@@ -565,8 +565,14 @@ mod tests {
     #[test]
     fn test_validate_move_object_kind_allows_capi_and_core() {
         assert!(validate_move_object_kind("cluster.x-k8s.io/v1beta1", "Cluster").is_ok());
-        assert!(validate_move_object_kind("infrastructure.cluster.x-k8s.io/v1beta2", "AWSCluster").is_ok());
-        assert!(validate_move_object_kind("bootstrap.cluster.x-k8s.io/v1beta1", "KubeadmConfig").is_ok());
+        assert!(
+            validate_move_object_kind("infrastructure.cluster.x-k8s.io/v1beta2", "AWSCluster")
+                .is_ok()
+        );
+        assert!(
+            validate_move_object_kind("bootstrap.cluster.x-k8s.io/v1beta1", "KubeadmConfig")
+                .is_ok()
+        );
         assert!(validate_move_object_kind("v1", "Secret").is_ok());
         assert!(validate_move_object_kind("v1", "ConfigMap").is_ok());
         assert!(validate_move_object_kind("apps/v1", "Deployment").is_ok());
@@ -575,7 +581,10 @@ mod tests {
     #[test]
     fn test_validate_move_object_kind_rejects_rbac() {
         assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "ClusterRole").is_err());
-        assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "ClusterRoleBinding").is_err());
+        assert!(
+            validate_move_object_kind("rbac.authorization.k8s.io/v1", "ClusterRoleBinding")
+                .is_err()
+        );
         assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "Role").is_err());
         assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "RoleBinding").is_err());
     }

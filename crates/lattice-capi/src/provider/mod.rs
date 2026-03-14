@@ -123,7 +123,7 @@ impl CAPIManifest {
 ///
 /// This struct contains the information needed for a workload cluster to
 /// bootstrap and connect to its parent cell.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct BootstrapInfo {
     /// The parent cell's bootstrap endpoint URL (HTTPS)
     pub bootstrap_endpoint: Option<String>,
@@ -133,16 +133,36 @@ pub struct BootstrapInfo {
     pub ca_cert_pem: Option<String>,
     /// Pre-resolved registry mirrors with credentials content
     pub registry_mirrors: Vec<registry::ResolvedMirror>,
+    /// Directory containing bootstrap scripts
+    pub scripts_dir: String,
+}
+
+impl Default for BootstrapInfo {
+    fn default() -> Self {
+        Self {
+            bootstrap_endpoint: None,
+            bootstrap_token: None,
+            ca_cert_pem: None,
+            registry_mirrors: Vec::new(),
+            scripts_dir: "/scripts".to_string(),
+        }
+    }
 }
 
 impl BootstrapInfo {
     /// Create new bootstrap info for a workload cluster
-    pub fn new(bootstrap_endpoint: String, token: String, ca_cert_pem: String) -> Self {
+    pub fn new(
+        bootstrap_endpoint: String,
+        token: String,
+        ca_cert_pem: String,
+        scripts_dir: String,
+    ) -> Self {
         Self {
             bootstrap_endpoint: Some(bootstrap_endpoint),
             bootstrap_token: Some(zeroize::Zeroizing::new(token)),
             ca_cert_pem: Some(ca_cert_pem),
             registry_mirrors: Vec::new(),
+            scripts_dir,
         }
     }
 
@@ -1174,28 +1194,14 @@ fn generate_rke2_control_plane(
     .with_spec(spec))
 }
 
-/// Default scripts directory (set by LATTICE_SCRIPTS_DIR env var in container)
-const DEFAULT_SCRIPTS_DIR: &str = "/scripts";
-
-/// Get scripts directory - checks runtime env var first, then compile-time, then default
-fn get_scripts_dir() -> String {
-    if let Ok(dir) = std::env::var("LATTICE_SCRIPTS_DIR") {
-        return dir;
-    }
-    if let Some(dir) = option_env!("LATTICE_SCRIPTS_DIR") {
-        return dir.to_string();
-    }
-    DEFAULT_SCRIPTS_DIR.to_string()
-}
-
 /// Load and render the bootstrap script template using minijinja
 fn render_bootstrap_script(
     endpoint: &str,
     cluster_name: &str,
     token: &str,
     ca_cert_path: &str,
+    scripts_dir: &str,
 ) -> Result<String> {
-    let scripts_dir = get_scripts_dir();
     let script_path = format!("{}/bootstrap-cluster.sh", scripts_dir);
     let template = std::fs::read_to_string(&script_path).map_err(|e| {
         Error::bootstrap(format!(
@@ -1248,7 +1254,13 @@ CACERT"#
         ));
 
         // Render script template with variables
-        let script = render_bootstrap_script(endpoint, cluster_name, token, "/tmp/cell-ca.crt")?;
+        let script = render_bootstrap_script(
+            endpoint,
+            cluster_name,
+            token,
+            "/tmp/cell-ca.crt",
+            &bootstrap.scripts_dir,
+        )?;
 
         // Embed the script as a heredoc and execute it
         commands.push(format!(
@@ -2313,6 +2325,7 @@ mod tests {
                 "https://cell:8080".to_string(),
                 "token123".to_string(),
                 "-----BEGIN CERTIFICATE-----".to_string(),
+                env!("LATTICE_SCRIPTS_DIR").to_string(),
             );
             assert_eq!(
                 info.bootstrap_endpoint,

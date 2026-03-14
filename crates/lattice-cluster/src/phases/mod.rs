@@ -384,7 +384,12 @@ async fn build_bootstrap_info(
     )
     .await?;
 
-    Ok(BootstrapInfo::new(bootstrap_endpoint, token, ca_cert))
+    Ok(BootstrapInfo::new(
+        bootstrap_endpoint,
+        token,
+        ca_cert,
+        ctx.config.scripts_dir.clone(),
+    ))
 }
 
 /// Get existing bootstrap token or create a new one.
@@ -431,7 +436,9 @@ async fn get_or_create_bootstrap_token(
         k8s_version: cluster.spec.provider.kubernetes.version.clone(),
         autoscaling_enabled,
     };
-    let new_token = bootstrap_state.register_cluster(registration, None, None).await;
+    let new_token = bootstrap_state
+        .register_cluster(registration, None, None)
+        .await;
     let token_str = new_token.as_str().to_string();
 
     // Persist the token to LatticeCluster status immediately

@@ -58,19 +58,21 @@ impl Retryable for ReconcileError {
     }
 }
 
-/// Standard controller context with a Kubernetes client.
+/// Standard controller context with a Kubernetes client and operator config.
 ///
 /// This is the common context type used by all Lattice controllers.
 /// Controllers that need additional context should wrap this type.
 pub struct ControllerContext {
     /// Kubernetes client
     pub client: Client,
+    /// Operator configuration
+    pub config: crate::SharedConfig,
 }
 
 impl ControllerContext {
     /// Create a new controller context
-    pub fn new(client: Client) -> Self {
-        Self { client }
+    pub fn new(client: Client, config: crate::SharedConfig) -> Self {
+        Self { client, config }
     }
 }
 

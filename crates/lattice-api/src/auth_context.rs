@@ -152,7 +152,10 @@ fn weekday_str(day: chrono::Weekday) -> String {
 /// Falls back to "unknown" if ConnectInfo is not available (e.g., in tests).
 fn extract_client_ip(req: &Request<Body>) -> String {
     // Use the TCP peer address from axum's ConnectInfo — this cannot be spoofed
-    if let Some(connect_info) = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
+    if let Some(connect_info) = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    {
         return connect_info.0.ip().to_string();
     }
 
@@ -204,9 +207,11 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(axum::extract::ConnectInfo(
-            std::net::SocketAddr::from(([10, 0, 1, 100], 12345)),
-        ));
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [10, 0, 1, 100],
+                12345,
+            ))));
         assert_eq!(extract_client_ip(&req), "10.0.1.100");
     }
 
@@ -234,9 +239,11 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(axum::extract::ConnectInfo(
-            std::net::SocketAddr::from(([10, 0, 1, 100], 12345)),
-        ));
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [10, 0, 1, 100],
+                12345,
+            ))));
         let ctx = AuthContext::from_request(&req);
 
         assert!(!ctx.now.is_empty());
@@ -260,9 +267,18 @@ mod tests {
         ]);
         let ctx = AuthContext::from_request(&req);
 
-        assert!(!ctx.break_glass, "break_glass should not be extracted from client headers");
-        assert!(ctx.break_glass_expires.is_none(), "break_glass_expires should not be extracted from client headers");
-        assert!(ctx.incident_id.is_none(), "incident_id should not be extracted from client headers");
+        assert!(
+            !ctx.break_glass,
+            "break_glass should not be extracted from client headers"
+        );
+        assert!(
+            ctx.break_glass_expires.is_none(),
+            "break_glass_expires should not be extracted from client headers"
+        );
+        assert!(
+            ctx.incident_id.is_none(),
+            "incident_id should not be extracted from client headers"
+        );
     }
 
     #[test]

@@ -151,8 +151,7 @@ impl VolumeEvalContext<'_> {
                 Ok(())
             }
             Decision::Deny => {
-                let has_determining_policies =
-                    response.diagnostics().reason().next().is_some();
+                let has_determining_policies = response.diagnostics().reason().next().is_some();
 
                 if has_determining_policies {
                     // Explicit forbid policy matched — always deny

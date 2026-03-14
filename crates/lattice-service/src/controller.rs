@@ -373,11 +373,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let api: Api<kube::api::DynamicObject> =
             Api::namespaced_with(self.client.clone(), namespace, &ar);
 
-        let label_selector = format!(
-            "{}={}",
-            lattice_common::LABEL_SERVICE_OWNER,
-            service_name
-        );
+        let label_selector = format!("{}={}", lattice_common::LABEL_SERVICE_OWNER, service_name);
         let lp = kube::api::ListParams::default().labels(&label_selector);
 
         let list = api.list(&lp).await.map_err(|e| {

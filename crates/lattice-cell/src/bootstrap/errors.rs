@@ -56,9 +56,7 @@ impl IntoResponse for BootstrapError {
             BootstrapError::InvalidToken | BootstrapError::MissingAuth => {
                 (StatusCode::UNAUTHORIZED, "authentication failed")
             }
-            BootstrapError::TokenAlreadyUsed => {
-                (StatusCode::UNAUTHORIZED, "authentication failed")
-            }
+            BootstrapError::TokenAlreadyUsed => (StatusCode::UNAUTHORIZED, "authentication failed"),
             // Return 401 (not 404) to prevent cluster existence enumeration
             BootstrapError::ClusterNotFound(_) => {
                 (StatusCode::UNAUTHORIZED, "authentication failed")
@@ -67,9 +65,7 @@ impl IntoResponse for BootstrapError {
             BootstrapError::ClusterNotBootstrapped(_) => {
                 (StatusCode::PRECONDITION_FAILED, "cluster not bootstrapped")
             }
-            BootstrapError::InvalidCsrToken => {
-                (StatusCode::UNAUTHORIZED, "authentication failed")
-            }
+            BootstrapError::InvalidCsrToken => (StatusCode::UNAUTHORIZED, "authentication failed"),
             BootstrapError::CsrTokenAlreadyUsed => {
                 (StatusCode::UNAUTHORIZED, "authentication failed")
             }
@@ -103,7 +99,11 @@ impl From<PkiError> for BootstrapError {
 mod tests {
     use super::*;
 
-    async fn assert_status_response(resp: Response, expected_status: StatusCode, expected_msg: &str) {
+    async fn assert_status_response(
+        resp: Response,
+        expected_status: StatusCode,
+        expected_msg: &str,
+    ) {
         use axum::body::to_bytes;
 
         assert_eq!(resp.status(), expected_status);
@@ -124,64 +124,74 @@ mod tests {
             BootstrapError::InvalidToken.into_response(),
             StatusCode::UNAUTHORIZED,
             "authentication failed",
-        ).await;
+        )
+        .await;
 
         assert_status_response(
             BootstrapError::MissingAuth.into_response(),
             StatusCode::UNAUTHORIZED,
             "authentication failed",
-        ).await;
+        )
+        .await;
 
         assert_status_response(
             BootstrapError::TokenAlreadyUsed.into_response(),
             StatusCode::UNAUTHORIZED,
             "authentication failed",
-        ).await;
+        )
+        .await;
 
         // ClusterNotFound returns 401 (not 404) to prevent cluster enumeration
         assert_status_response(
             BootstrapError::ClusterNotFound("x".to_string()).into_response(),
             StatusCode::UNAUTHORIZED,
             "authentication failed",
-        ).await;
+        )
+        .await;
 
         assert_status_response(
             BootstrapError::ClusterNotBootstrapped("x".to_string()).into_response(),
             StatusCode::PRECONDITION_FAILED,
             "cluster not bootstrapped",
-        ).await;
+        )
+        .await;
 
         assert_status_response(
             BootstrapError::CsrSigningFailed("error".to_string()).into_response(),
             StatusCode::BAD_REQUEST,
             "CSR signing failed",
-        ).await;
+        )
+        .await;
 
         // Internal errors hide details
         assert_status_response(
             BootstrapError::Internal("secret details".to_string()).into_response(),
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal error",
-        ).await;
+        )
+        .await;
 
         assert_status_response(
             BootstrapError::ManifestGeneration("oops".to_string()).into_response(),
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal error",
-        ).await;
+        )
+        .await;
 
         assert_status_response(
             BootstrapError::InvalidCsrToken.into_response(),
             StatusCode::UNAUTHORIZED,
             "authentication failed",
-        ).await;
+        )
+        .await;
 
         // CsrTokenAlreadyUsed returns 401 (not 410) to prevent token state enumeration
         assert_status_response(
             BootstrapError::CsrTokenAlreadyUsed.into_response(),
             StatusCode::UNAUTHORIZED,
             "authentication failed",
-        ).await;
+        )
+        .await;
     }
 
     /// Story: PkiError converts to BootstrapError correctly

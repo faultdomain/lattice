@@ -1009,6 +1009,7 @@ mod tests {
                 "https://mgmt.example.com:8080".to_string(),
                 "test-token-123".to_string(),
                 "-----BEGIN CERTIFICATE-----\nTEST_CA_CERT\n-----END CERTIFICATE-----".to_string(),
+                env!("LATTICE_SCRIPTS_DIR").to_string(),
             );
 
             let commands = build_post_kubeadm_commands("workload-1", &bootstrap).unwrap();

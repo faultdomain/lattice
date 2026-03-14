@@ -59,8 +59,12 @@ pub(crate) async fn portforward_handler(
 
     let uri = request.uri().clone();
     let path = uri.path();
-    let api_path = strip_cluster_prefix(path, cluster_name)
-        .ok_or_else(|| Error::Internal(format!("path missing expected /clusters/{} prefix", cluster_name)))?;
+    let api_path = strip_cluster_prefix(path, cluster_name).ok_or_else(|| {
+        Error::Internal(format!(
+            "path missing expected /clusters/{} prefix",
+            cluster_name
+        ))
+    })?;
     let query = uri.query().unwrap_or("");
 
     // Check if this is a local or remote cluster
@@ -191,7 +195,10 @@ async fn proxy_upgrade_to_k8s(
                         debug!(error = %e, "Portforward bridge error");
                     }
                     Err(_) => {
-                        info!("Portforward session timed out after {:?} idle", PORTFORWARD_IDLE_TIMEOUT);
+                        info!(
+                            "Portforward session timed out after {:?} idle",
+                            PORTFORWARD_IDLE_TIMEOUT
+                        );
                     }
                 }
             }

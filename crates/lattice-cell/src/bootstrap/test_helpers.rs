@@ -40,6 +40,7 @@ pub fn test_state() -> BootstrapState<TestManifestGenerator> {
         "test:latest".to_string(),
         None,
         None,
+        None,
     )
 }
 
@@ -49,6 +50,7 @@ pub fn test_state_with_ttl(ttl: Duration) -> BootstrapState<TestManifestGenerato
         ttl,
         test_ca_bundle(),
         "test:latest".to_string(),
+        None,
         None,
         None,
     )

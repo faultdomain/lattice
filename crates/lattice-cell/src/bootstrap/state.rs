@@ -89,6 +89,8 @@ pub struct BootstrapState<G: ManifestGenerator = super::generator::DefaultManife
     ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
     /// Kubernetes client for updating CRD status and fetching distributed resources (None in tests)
     pub(crate) kube_client: Option<Client>,
+    /// Parent cluster name (for fetching distributable resources during bootstrap)
+    pub(crate) cluster_name: Option<String>,
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
@@ -100,6 +102,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         image: String,
         registry_credentials: Option<String>,
         kube_client: Option<Client>,
+        cluster_name: Option<String>,
     ) -> Self {
         Self {
             clusters: DashMap::new(),
@@ -109,6 +112,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             token_ttl,
             ca_bundle,
             kube_client,
+            cluster_name,
         }
     }
 
@@ -229,7 +233,11 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                     k8s_version: registration.k8s_version,
                     autoscaling_enabled: registration.autoscaling_enabled,
                     csr_token_hash: recovery_csr_hash,
-                    csr_token_created: if token_used { Some(Instant::now()) } else { None },
+                    csr_token_created: if token_used {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    },
                     csr_token_used: false,
                     csr_token_raw: None,
                 };
@@ -277,8 +285,8 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             }
 
             // Parse the provided token and compute its hash for comparison
-            let provided_token = BootstrapToken::from_string(token)
-                .map_err(|_| BootstrapError::InvalidToken)?;
+            let provided_token =
+                BootstrapToken::from_string(token).map_err(|_| BootstrapError::InvalidToken)?;
             let provided_hash = provided_token.hash();
 
             // Constant-time hash comparison to prevent timing side-channel attacks.
@@ -286,7 +294,11 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             // Both hashes are SHA-256 → base64url-no-pad (always 43 bytes). Assert
             // equal length to guarantee ct_eq doesn't short-circuit on length mismatch.
             if provided_hash.len() != info.token_hash.len()
-                || provided_hash.as_bytes().ct_eq(info.token_hash.as_bytes()).unwrap_u8() != 1
+                || provided_hash
+                    .as_bytes()
+                    .ct_eq(info.token_hash.as_bytes())
+                    .unwrap_u8()
+                    != 1
             {
                 return Err(BootstrapError::InvalidToken);
             }
@@ -308,7 +320,10 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // Persist bootstrap_complete AND csr_token_hash to CRD status.
         // This ensures the CSR token survives operator restarts (H4) and
         // makes consumption atomic with persistence (L1).
-        if let Err(e) = self.persist_bootstrap_status(cluster_id, &csr_token_hash).await {
+        if let Err(e) = self
+            .persist_bootstrap_status(cluster_id, &csr_token_hash)
+            .await
+        {
             warn!(cluster_id = %cluster_id, error = %e, "Failed to persist bootstrap status to CRD");
         }
 
@@ -319,7 +334,11 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     ///
     /// Persisting the CSR token hash ensures it survives operator restarts (H4)
     /// and makes token consumption atomic with persistence (L1).
-    async fn persist_bootstrap_status(&self, cluster_id: &str, csr_token_hash: &str) -> Result<(), kube::Error> {
+    async fn persist_bootstrap_status(
+        &self,
+        cluster_id: &str,
+        csr_token_hash: &str,
+    ) -> Result<(), kube::Error> {
         let Some(ref client) = self.kube_client else {
             // No client (tests) - skip CRD update
             return Ok(());
@@ -506,7 +525,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     pub fn is_cluster_registered(&self, cluster_id: &str) -> bool {
         self.clusters.contains_key(cluster_id)
     }
-
 }
 
 #[cfg(test)]
@@ -1105,7 +1123,11 @@ mod tests {
         let agent_req = AgentCertRequest::new("wrong-csr-tok")
             .expect("agent cert request creation should succeed");
         let result = state
-            .sign_csr("wrong-csr-tok", agent_req.csr_pem(), "attacker-guessed-token")
+            .sign_csr(
+                "wrong-csr-tok",
+                agent_req.csr_pem(),
+                "attacker-guessed-token",
+            )
             .await;
         assert!(matches!(result, Err(BootstrapError::InvalidCsrToken)));
     }
@@ -1153,6 +1175,7 @@ mod tests {
             Duration::from_secs(3600),
             test_ca_bundle(),
             "test:latest".to_string(),
+            None,
             None,
             None,
         );
@@ -1222,6 +1245,7 @@ mod tests {
             Duration::from_secs(3600),
             test_ca_bundle(),
             "test:latest".to_string(),
+            None,
             None,
             None,
         );

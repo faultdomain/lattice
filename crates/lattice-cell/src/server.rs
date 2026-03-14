@@ -738,9 +738,7 @@ impl From<MtlsAuthError> for Status {
     }
 }
 
-fn extract_cluster_id_from_request<T>(
-    request: &Request<T>,
-) -> Result<String, MtlsAuthError> {
+fn extract_cluster_id_from_request<T>(request: &Request<T>) -> Result<String, MtlsAuthError> {
     let tls_info = request
         .extensions()
         .get::<TlsConnectInfo<tonic::transport::server::TcpConnectInfo>>()
@@ -750,8 +748,7 @@ fn extract_cluster_id_from_request<T>(
 
     let cert_der = certs.first().ok_or(MtlsAuthError::EmptyChain)?;
 
-    extract_cluster_id_from_cert(cert_der)
-        .map_err(|e| MtlsAuthError::InvalidCert(e.to_string()))
+    extract_cluster_id_from_cert(cert_der).map_err(|e| MtlsAuthError::InvalidCert(e.to_string()))
 }
 
 #[tonic::async_trait]

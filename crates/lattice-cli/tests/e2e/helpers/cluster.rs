@@ -595,7 +595,12 @@ pub async fn ensure_operator_env(kubeconfig: &str, var_name: &str) -> Result<(),
     ])
     .await?;
 
-    wait_for_operator_ready(&format!("{}-env", var_name.to_lowercase()), kubeconfig, None).await
+    wait_for_operator_ready(
+        &format!("{}-env", var_name.to_lowercase()),
+        kubeconfig,
+        None,
+    )
+    .await
 }
 
 /// Ensure LATTICE_DEBUG=true is set on the operator deployment.

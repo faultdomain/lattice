@@ -127,10 +127,7 @@ mod tests {
 
     #[test]
     fn test_strip_cluster_prefix_no_match_returns_none() {
-        assert_eq!(
-            strip_cluster_prefix("/api/v1/pods", "my-cluster"),
-            None
-        );
+        assert_eq!(strip_cluster_prefix("/api/v1/pods", "my-cluster"), None);
     }
 
     #[test]

@@ -186,7 +186,7 @@ impl OidcValidator {
     /// respecting inheritance rules:
     /// - Inherited providers take precedence by default
     /// - Local providers only used if inherited provider has `allow_child_override: true`
-    pub async fn from_crd(client: &Client) -> Result<Self> {
+    pub async fn from_crd(client: &Client, allow_insecure_http: bool) -> Result<Self> {
         let api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         // Fetch all providers in one call, partition into inherited and local
@@ -236,7 +236,7 @@ impl OidcValidator {
         let spec = &provider.spec;
 
         // Validate issuer URL to prevent SSRF via CRD manipulation
-        validate_issuer_url(&spec.issuer_url)?;
+        validate_issuer_url(&spec.issuer_url, allow_insecure_http)?;
 
         let audiences = if spec.audiences.is_empty() {
             vec![spec.client_id.clone()]
@@ -427,10 +427,15 @@ impl OidcValidator {
         // Key not found — could be a legitimate key rotation. Force refresh
         // once and retry, but rate-limit to prevent unauthenticated users from
         // triggering unbounded outbound requests (SSRF amplification).
-        let attempts = self.unknown_kid_refresh_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let attempts = self
+            .unknown_kid_refresh_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if attempts >= MAX_UNKNOWN_KID_REFRESHES {
             warn!(kid = ?kid, attempts, max = MAX_UNKNOWN_KID_REFRESHES, "Rate-limiting JWKS refresh for unknown kid");
-            return Err(Error::Unauthorized(format!("No matching key found in JWKS for kid: {:?}", kid)));
+            return Err(Error::Unauthorized(format!(
+                "No matching key found in JWKS for kid: {:?}",
+                kid
+            )));
         }
         debug!(kid = ?kid, "Key not found in JWKS cache, forcing refresh for possible key rotation");
         self.force_refresh_jwks().await?;
@@ -478,7 +483,8 @@ impl OidcValidator {
             // Reset the unknown-kid refresh counter on scheduled refresh,
             // since the cache is now fresh and any previous unknown kids
             // may now be present after key rotation.
-            self.unknown_kid_refresh_count.store(0, std::sync::atomic::Ordering::Relaxed);
+            self.unknown_kid_refresh_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
@@ -630,16 +636,15 @@ impl OidcValidator {
 /// Hostnames are allowed since we can't reliably pre-resolve them, but blocking
 /// IP literals covers the direct SSRF vector.
 ///
-/// Set `LATTICE_OIDC_ALLOW_INSECURE_HTTP=true` to permit HTTP issuer URLs
-/// (for development/testing with local identity providers like Keycloak).
-fn validate_issuer_url(url: &str) -> Result<()> {
-    let allow_http = std::env::var("LATTICE_OIDC_ALLOW_INSECURE_HTTP")
-        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false);
-
+/// Set `allow_insecure_http` to true (via `LATTICE_OIDC_ALLOW_INSECURE_HTTP`)
+/// to permit HTTP issuer URLs for development/testing.
+fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<()> {
     if !url.starts_with("https://") {
-        if url.starts_with("http://") && allow_http {
-            warn!("OIDC issuer URL uses HTTP (allowed via LATTICE_OIDC_ALLOW_INSECURE_HTTP): {}", url);
+        if url.starts_with("http://") && allow_insecure_http {
+            warn!(
+                "OIDC issuer URL uses HTTP (allowed via LATTICE_OIDC_ALLOW_INSECURE_HTTP): {}",
+                url
+            );
         } else {
             return Err(Error::Config(format!(
                 "OIDC issuer URL must use HTTPS: {}",
@@ -648,9 +653,8 @@ fn validate_issuer_url(url: &str) -> Result<()> {
         }
     }
 
-    let host = extract_host(url).ok_or_else(|| {
-        Error::Config(format!("Failed to parse host from issuer URL: {}", url))
-    })?;
+    let host = extract_host(url)
+        .ok_or_else(|| Error::Config(format!("Failed to parse host from issuer URL: {}", url)))?;
 
     // If the host is an IP literal, check it's not a private/reserved address
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
@@ -667,14 +671,19 @@ fn validate_issuer_url(url: &str) -> Result<()> {
 
 /// Extract the host portion from a URL (without port).
 fn extract_host(url: &str) -> Option<String> {
-    let after_scheme = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
     let host_port = after_scheme.split('/').next()?;
     // Strip port if present
     let host = if host_port.starts_with('[') {
         // IPv6: [::1]:443
         host_port.split(']').next().map(|h| &h[1..])?
     } else {
-        host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)
+        host_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port)
     };
     Some(host.to_string())
 }
@@ -687,7 +696,7 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || v4.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                 || v4.is_link_local()     // 169.254.0.0/16 (includes cloud metadata)
                 || v4.is_broadcast()      // 255.255.255.255
-                || v4.is_unspecified()    // 0.0.0.0
+                || v4.is_unspecified() // 0.0.0.0
         }
         std::net::IpAddr::V6(v6) => {
             v6.is_loopback()              // ::1
@@ -784,59 +793,67 @@ mod tests {
 
     #[test]
     fn test_validate_issuer_url_accepts_https() {
-        assert!(validate_issuer_url("https://accounts.google.com").is_ok());
-        assert!(validate_issuer_url("https://idp.example.com/realms/lattice").is_ok());
+        assert!(validate_issuer_url("https://accounts.google.com", false).is_ok());
+        assert!(validate_issuer_url("https://idp.example.com/realms/lattice", false).is_ok());
     }
 
     #[test]
     fn test_validate_issuer_url_rejects_http() {
-        // Ensure the env var is NOT set for this test
-        std::env::remove_var("LATTICE_OIDC_ALLOW_INSECURE_HTTP");
-        let result = validate_issuer_url("http://accounts.google.com");
+        let result = validate_issuer_url("http://accounts.google.com", false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("HTTPS"));
     }
 
     #[test]
     fn test_validate_issuer_url_allows_http_when_configured() {
-        std::env::set_var("LATTICE_OIDC_ALLOW_INSECURE_HTTP", "true");
-        assert!(validate_issuer_url("http://keycloak.local:8080/realms/test").is_ok());
+        assert!(validate_issuer_url("http://keycloak.local:8080/realms/test", true).is_ok());
         // Still rejects non-http/https schemes
-        assert!(validate_issuer_url("ftp://keycloak.local:8080").is_err());
-        std::env::remove_var("LATTICE_OIDC_ALLOW_INSECURE_HTTP");
+        assert!(validate_issuer_url("ftp://keycloak.local:8080", true).is_err());
     }
 
     #[test]
     fn test_validate_issuer_url_rejects_private_ips() {
-        assert!(validate_issuer_url("https://10.0.0.1").is_err());
-        assert!(validate_issuer_url("https://172.16.0.1").is_err());
-        assert!(validate_issuer_url("https://192.168.1.1").is_err());
-        assert!(validate_issuer_url("https://127.0.0.1").is_err());
+        assert!(validate_issuer_url("https://10.0.0.1", false).is_err());
+        assert!(validate_issuer_url("https://172.16.0.1", false).is_err());
+        assert!(validate_issuer_url("https://192.168.1.1", false).is_err());
+        assert!(validate_issuer_url("https://127.0.0.1", false).is_err());
     }
 
     #[test]
     fn test_validate_issuer_url_rejects_link_local() {
         // Cloud metadata endpoint
-        assert!(validate_issuer_url("https://169.254.169.254").is_err());
+        assert!(validate_issuer_url("https://169.254.169.254", false).is_err());
     }
 
     #[test]
     fn test_validate_issuer_url_accepts_public_ip() {
-        assert!(validate_issuer_url("https://8.8.8.8").is_ok());
+        assert!(validate_issuer_url("https://8.8.8.8", false).is_ok());
     }
 
     #[test]
     fn test_validate_issuer_url_accepts_hostname() {
         // Hostnames can't be pre-resolved so they're allowed
-        assert!(validate_issuer_url("https://internal.corp.example.com").is_ok());
+        assert!(validate_issuer_url("https://internal.corp.example.com", false).is_ok());
     }
 
     #[test]
     fn test_extract_host_various_formats() {
-        assert_eq!(extract_host("https://example.com"), Some("example.com".to_string()));
-        assert_eq!(extract_host("https://example.com:443"), Some("example.com".to_string()));
-        assert_eq!(extract_host("https://example.com/path"), Some("example.com".to_string()));
-        assert_eq!(extract_host("https://10.0.0.1:8443/path"), Some("10.0.0.1".to_string()));
+        assert_eq!(
+            extract_host("https://example.com"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            extract_host("https://example.com:443"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            extract_host("https://example.com/path"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            extract_host("https://10.0.0.1:8443/path"),
+            Some("10.0.0.1".to_string())
+        );
     }
 
     #[test]
@@ -863,8 +880,8 @@ mod tests {
 
     #[test]
     fn test_validate_issuer_url_rejects_ipv4_mapped_ipv6() {
-        assert!(validate_issuer_url("https://[::ffff:169.254.169.254]").is_err());
-        assert!(validate_issuer_url("https://[::ffff:10.0.0.1]").is_err());
-        assert!(validate_issuer_url("https://[::ffff:127.0.0.1]").is_err());
+        assert!(validate_issuer_url("https://[::ffff:169.254.169.254]", false).is_err());
+        assert!(validate_issuer_url("https://[::ffff:10.0.0.1]", false).is_err());
+        assert!(validate_issuer_url("https://[::ffff:127.0.0.1]", false).is_err());
     }
 }

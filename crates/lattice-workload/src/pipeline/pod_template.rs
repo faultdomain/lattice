@@ -414,9 +414,8 @@ impl PodTemplateCompiler {
             Some(s.run_as_non_root.unwrap_or(true))
         };
 
-        let allow_privilege_escalation = Some(
-            s.allow_privilege_escalation.unwrap_or(is_privileged),
-        );
+        let allow_privilege_escalation =
+            Some(s.allow_privilege_escalation.unwrap_or(is_privileged));
 
         let seccomp_profile = Some(SeccompProfile {
             type_: s

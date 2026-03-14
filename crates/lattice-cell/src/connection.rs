@@ -702,7 +702,9 @@ impl AgentRegistry {
         &self,
         request_id: &str,
     ) -> Option<oneshot::Sender<CompleteAck>> {
-        self.pending_complete_acks.remove(request_id).map(|(_, v)| v)
+        self.pending_complete_acks
+            .remove(request_id)
+            .map(|(_, v)| v)
     }
 
     // =========================================================================

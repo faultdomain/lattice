@@ -46,7 +46,9 @@ impl Validator for SecretProviderValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validators::tests_common::{make_admission_request, make_admission_request_in_namespace};
+    use crate::validators::tests_common::{
+        make_admission_request, make_admission_request_in_namespace,
+    };
 
     fn valid_secret_provider_json() -> serde_json::Value {
         serde_json::json!({

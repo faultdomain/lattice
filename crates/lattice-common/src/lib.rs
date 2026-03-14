@@ -3,6 +3,7 @@
 #![deny(missing_docs)]
 
 pub mod capi_lifecycle;
+pub mod config;
 pub mod crd;
 pub mod crd_registry;
 pub mod credentials;
@@ -27,6 +28,7 @@ pub mod telemetry;
 pub mod template;
 pub mod yaml;
 
+pub use config::{LatticeConfig, SharedConfig};
 pub use crd_registry::{CrdKind, CrdRegistry};
 pub use error::{default_error_policy, ControllerContext, Error, ReconcileError, Retryable};
 pub use events::{EventPublisher, KubeEventPublisher, NoopEventPublisher};
@@ -121,14 +123,13 @@ pub fn lattice_svc_dns_fqdn(service: &str) -> String {
 /// Environment variable to indicate this is a bootstrap cluster
 pub const BOOTSTRAP_CLUSTER_ENV: &str = "LATTICE_BOOTSTRAP_CLUSTER";
 
-/// Check if the current operator is running on a bootstrap cluster
+/// Check if the current operator is running on a bootstrap cluster.
 ///
-/// Returns true if LATTICE_BOOTSTRAP_CLUSTER is set to "true" or "1".
-/// Bootstrap clusters are temporary clusters used during initial installation
-/// that don't need the full proxy/pivot setup.
+/// Prefer `LatticeConfig::is_bootstrap_cluster` when config is available.
+/// This function exists for call sites that don't yet have access to the config.
 pub fn is_bootstrap_cluster() -> bool {
     std::env::var(BOOTSTRAP_CLUSTER_ENV)
-        .map(|v| v == "true" || v == "1")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false)
 }
 

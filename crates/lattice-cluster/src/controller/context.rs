@@ -50,6 +50,8 @@ pub struct Context {
     /// Name of the cluster this controller is running on (from LATTICE_CLUSTER_NAME env var)
     /// When reconciling this cluster, we skip provisioning since we ARE this cluster
     pub self_cluster_name: Option<String>,
+    /// Centralized operator configuration
+    pub config: lattice_common::SharedConfig,
     /// Event publisher for emitting Kubernetes Events
     pub events: Arc<dyn EventPublisher>,
     /// Per-cluster error counts for exponential backoff in error_policy.
@@ -81,8 +83,8 @@ impl Context {
 
 impl Context {
     /// Create a builder for constructing a Context
-    pub fn builder(client: Client) -> ContextBuilder {
-        ContextBuilder::new(client)
+    pub fn builder(client: Client, config: lattice_common::SharedConfig) -> ContextBuilder {
+        ContextBuilder::new(client, config)
     }
 
     /// Create a context for testing with custom mock clients
@@ -95,6 +97,8 @@ impl Context {
         capi: Arc<dyn CAPIClient>,
         capi_installer: Arc<dyn CapiInstaller>,
     ) -> Self {
+        use lattice_common::config::LatticeConfig;
+        use lattice_common::crd::ProviderType;
         Self {
             kube,
             client: None, // Tests use mocks, not real client
@@ -102,6 +106,19 @@ impl Context {
             capi_installer,
             parent_servers: None,
             self_cluster_name: None,
+            config: std::sync::Arc::new(LatticeConfig {
+                cluster_name: None,
+                provider: ProviderType::Docker,
+                provider_ref: "docker".to_string(),
+                debug: false,
+                image: lattice_common::config::DEFAULT_IMAGE.to_string(),
+                monitoring_enabled: false,
+                monitoring_ha: false,
+                scripts_dir: "/scripts".to_string(),
+                oidc_allow_insecure_http: false,
+                is_bootstrap_cluster: false,
+                grpc_max_message_size: 16 * 1024 * 1024,
+            }),
             events: Arc::new(NoopEventPublisher),
             error_counts: DashMap::new(),
         }
@@ -133,6 +150,7 @@ impl Context {
 /// ```
 pub struct ContextBuilder {
     client: Client,
+    config: lattice_common::SharedConfig,
     kube: Option<Arc<dyn KubeClient>>,
     capi: Option<Arc<dyn CAPIClient>>,
     capi_installer: Option<Arc<dyn CapiInstaller>>,
@@ -142,10 +160,11 @@ pub struct ContextBuilder {
 }
 
 impl ContextBuilder {
-    /// Create a new builder with the given Kubernetes client
-    fn new(client: Client) -> Self {
+    /// Create a new builder with the given Kubernetes client and config
+    fn new(client: Client, config: lattice_common::SharedConfig) -> Self {
         Self {
             client,
+            config,
             kube: None,
             capi: None,
             capi_installer: None,
@@ -212,6 +231,7 @@ impl ContextBuilder {
                 .unwrap_or_else(|| Arc::new(NativeInstaller::new())),
             parent_servers: self.parent_servers,
             self_cluster_name: self.self_cluster_name,
+            config: self.config,
             events,
             error_counts: DashMap::new(),
         }

@@ -341,7 +341,10 @@ mod tests {
         // Valid base64 with sufficient entropy (32 bytes)
         let token = BootstrapToken::generate();
         let valid = BootstrapToken::from_string(token.as_str());
-        assert!(valid.is_ok(), "Valid base64 with sufficient entropy should parse");
+        assert!(
+            valid.is_ok(),
+            "Valid base64 with sufficient entropy should parse"
+        );
 
         // Too short (4 bytes < MIN_TOKEN_BYTES)
         let short = BootstrapToken::from_string("dGVzdA");

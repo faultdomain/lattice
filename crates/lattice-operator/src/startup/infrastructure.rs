@@ -10,7 +10,7 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::{ParentConnectionConfig, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{ParentConnectionConfig, SharedConfig, LATTICE_SYSTEM_NAMESPACE};
 
 use lattice_capi::installer::{
     copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
@@ -31,12 +31,11 @@ use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_
 pub async fn ensure_capi_infrastructure(
     client: &Client,
     capi_installer: Option<&dyn CapiInstaller>,
+    config: &SharedConfig,
 ) -> anyhow::Result<()> {
-    let is_bootstrap = lattice_common::is_bootstrap_cluster();
-
-    if is_bootstrap {
+    if config.is_bootstrap_cluster {
         if let Some(installer) = capi_installer {
-            ensure_capi_on_bootstrap(client, installer).await?;
+            ensure_capi_on_bootstrap(client, installer, config).await?;
         }
     } else {
         let cluster = find_lattice_cluster(client, capi_installer.is_some()).await?;
@@ -63,8 +62,9 @@ pub async fn ensure_capi_infrastructure(
 pub fn spawn_general_infrastructure(
     client: Client,
     cluster_mode: bool,
+    config: SharedConfig,
 ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
-    tokio::spawn(async move { ensure_general_infrastructure(&client, cluster_mode).await })
+    tokio::spawn(async move { ensure_general_infrastructure(&client, cluster_mode, &config).await })
 }
 
 /// Delay before starting background infrastructure to avoid competing with
@@ -73,17 +73,21 @@ pub fn spawn_general_infrastructure(
 const INFRA_STAGGER_DELAY: Duration = Duration::from_secs(5);
 
 /// Internal: resolve config and apply infrastructure phases.
-async fn ensure_general_infrastructure(client: &Client, cluster_mode: bool) -> anyhow::Result<()> {
+async fn ensure_general_infrastructure(
+    client: &Client,
+    cluster_mode: bool,
+    config: &SharedConfig,
+) -> anyhow::Result<()> {
     // Stagger to avoid competing with controller watch setup for API server capacity.
     // Controllers are starting concurrently and need to establish ~16 watches.
     tokio::time::sleep(INFRA_STAGGER_DELAY).await;
 
-    let is_bootstrap = lattice_common::is_bootstrap_cluster();
+    let is_bootstrap = config.is_bootstrap_cluster;
 
     tracing::info!(is_bootstrap, "Installing general infrastructure...");
 
-    let config = resolve_infra_config(client, is_bootstrap, cluster_mode).await?;
-    let phases = bootstrap::generate_phases(&config)
+    let infra_config = resolve_infra_config(client, is_bootstrap, cluster_mode, config).await?;
+    let phases = bootstrap::generate_phases(&infra_config)
         .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
 
     tracing::info!(
@@ -103,6 +107,7 @@ async fn resolve_infra_config(
     client: &Client,
     is_bootstrap: bool,
     cluster_mode: bool,
+    config: &SharedConfig,
 ) -> anyhow::Result<InfrastructureConfig> {
     if is_bootstrap {
         return Ok(InfrastructureConfig {
@@ -139,8 +144,7 @@ async fn resolve_infra_config(
             Ok(cfg)
         }
         None => {
-            let cluster_name =
-                std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
+            let cluster_name = config.cluster_name_or_default().to_string();
             tracing::info!(cluster = %cluster_name, "no LatticeCluster CRD, using env config");
             Ok(InfrastructureConfig {
                 cluster_name,
@@ -226,14 +230,10 @@ async fn find_lattice_cluster(
 async fn ensure_capi_on_bootstrap(
     client: &Client,
     installer: &dyn CapiInstaller,
+    config: &SharedConfig,
 ) -> anyhow::Result<()> {
-    let provider_str = std::env::var("LATTICE_PROVIDER").unwrap_or_else(|_| "docker".to_string());
-    let provider_ref =
-        std::env::var("LATTICE_PROVIDER_REF").unwrap_or_else(|_| provider_str.clone());
-
-    let infrastructure: ProviderType = provider_str
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid LATTICE_PROVIDER '{}': {}", provider_str, e))?;
+    let provider_ref = config.provider_ref.clone();
+    let infrastructure = config.provider;
 
     let cloud_providers: Api<InfraProvider> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);

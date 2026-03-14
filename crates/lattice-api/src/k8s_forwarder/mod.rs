@@ -387,8 +387,12 @@ async fn forward_to_k8s_api(
 ) -> Result<Response<Body>, Error> {
     let method = request.method().to_string();
     let uri = request.uri().clone();
-    let path = strip_cluster_prefix(uri.path(), cluster_name)
-        .ok_or_else(|| Error::Internal(format!("path missing expected /clusters/{} prefix", cluster_name)))?;
+    let path = strip_cluster_prefix(uri.path(), cluster_name).ok_or_else(|| {
+        Error::Internal(format!(
+            "path missing expected /clusters/{} prefix",
+            cluster_name
+        ))
+    })?;
     let query = uri.query();
     let query_str = query.unwrap_or("");
 

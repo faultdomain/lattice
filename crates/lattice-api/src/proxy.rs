@@ -171,8 +171,12 @@ pub(crate) async fn exec_handler(
     }
 
     // Strip the /clusters/{cluster_name} prefix from the path
-    let api_path = strip_cluster_prefix(path, cluster_name)
-        .ok_or_else(|| Error::Internal(format!("path missing expected /clusters/{} prefix", cluster_name)))?;
+    let api_path = strip_cluster_prefix(path, cluster_name).ok_or_else(|| {
+        Error::Internal(format!(
+            "path missing expected /clusters/{} prefix",
+            cluster_name
+        ))
+    })?;
 
     // Handle WebSocket upgrade and bridge to gRPC
     Ok(handle_exec_websocket(

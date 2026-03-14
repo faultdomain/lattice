@@ -67,11 +67,14 @@ pub struct ParentConfig {
     pub registry_credentials: Option<String>,
 }
 
-impl Default for ParentConfig {
-    fn default() -> Self {
+impl ParentConfig {
+    /// Create a `ParentConfig` from the centralized `LatticeConfig`.
+    pub fn from_config(config: &lattice_common::LatticeConfig) -> Self {
         Self {
-            cluster_name: std::env::var("LATTICE_CLUSTER_NAME")
-                .unwrap_or_else(|_| "unknown".to_string()),
+            cluster_name: config
+                .cluster_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
             bootstrap_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_BOOTSTRAP_PORT)
                 .parse()
                 .expect("hardcoded socket address is valid"),
@@ -96,8 +99,7 @@ impl Default for ParentConfig {
                 // Cell service DNS name for proxy access
                 lattice_svc_dns(CELL_SERVICE_NAME),
             ],
-            image: std::env::var("LATTICE_IMAGE")
-                .unwrap_or_else(|_| "ghcr.io/evan-hines-js/lattice:latest".to_string()),
+            image: config.image.clone(),
             registry_credentials: load_registry_credentials(),
         }
     }
@@ -701,6 +703,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             self.config.image.clone(),
             self.config.registry_credentials.clone(),
             Some(kube_client.clone()),
+            Some(self.config.cluster_name.clone()),
         ));
 
         // Store bootstrap state
@@ -879,24 +882,42 @@ mod tests {
         Client::try_default().await.ok()
     }
 
+    fn test_lattice_config() -> lattice_common::LatticeConfig {
+        lattice_common::LatticeConfig {
+            cluster_name: Some("test-cluster".to_string()),
+            provider: ProviderType::Docker,
+            provider_ref: "docker".to_string(),
+            debug: false,
+            image: "test:latest".to_string(),
+            monitoring_enabled: false,
+            monitoring_ha: false,
+            scripts_dir: "/scripts".to_string(),
+            oidc_allow_insecure_http: false,
+            is_bootstrap_cluster: false,
+            grpc_max_message_size: 16 * 1024 * 1024,
+        }
+    }
+
+    fn test_parent_config() -> ParentConfig {
+        let mut config = ParentConfig::from_config(&test_lattice_config());
+        config.bootstrap_addr = "127.0.0.1:0".parse().expect("valid address");
+        config.grpc_addr = "127.0.0.1:0".parse().expect("valid address");
+        config
+    }
+
     async fn test_parent_servers() -> Option<ParentServers<MockManifestGenerator>> {
         // Install crypto provider (ok if already installed)
         lattice_common::fips::install_crypto_provider();
 
         let client = try_test_client().await?;
-        let config = ParentConfig {
-            cluster_name: "test-cluster".to_string(),
-            bootstrap_addr: "127.0.0.1:0".parse().expect("valid address"),
-            grpc_addr: "127.0.0.1:0".parse().expect("valid address"),
-            ..Default::default()
-        };
+        let config = test_parent_config();
         let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
         Some(ParentServers::with_ca(config, ca, client))
     }
 
     #[test]
-    fn test_default_config() {
-        let config = ParentConfig::default();
+    fn test_from_config() {
+        let config = ParentConfig::from_config(&test_lattice_config());
         assert_eq!(
             config.bootstrap_addr,
             format!("0.0.0.0:{}", lattice_common::DEFAULT_BOOTSTRAP_PORT)
@@ -919,7 +940,7 @@ mod tests {
         let Some(client) = try_test_client().await else {
             return; // Skip if no kubeconfig available
         };
-        let config = ParentConfig::default();
+        let config = ParentConfig::from_config(&test_lattice_config());
         let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
         let servers: ParentServers<MockManifestGenerator> =
             ParentServers::with_ca(config, ca, client);

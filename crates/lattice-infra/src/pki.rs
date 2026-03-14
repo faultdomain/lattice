@@ -209,7 +209,10 @@ fn validate_csr_key_strength(csr_pem: &str) -> Result<()> {
         .map_err(|e| PkiError::InvalidCsr(format!("failed to parse CSR DER: {}", e)))?;
 
     let spki = &csr.certification_request_info.subject_pki;
-    let algorithm_oid: Vec<u64> = spki.algorithm.algorithm.iter()
+    let algorithm_oid: Vec<u64> = spki
+        .algorithm
+        .algorithm
+        .iter()
         .ok_or_else(|| PkiError::InvalidCsr("failed to read algorithm OID".to_string()))?
         .collect();
 
@@ -1580,18 +1583,16 @@ mod tests {
     /// CSR key strength validation: default ECDSA P-256 key is accepted
     #[test]
     fn csr_key_strength_accepts_default_ecdsa() {
-        let request = AgentCertRequest::new("strength-test")
-            .expect("CSR generation should succeed");
+        let request =
+            AgentCertRequest::new("strength-test").expect("CSR generation should succeed");
         assert!(validate_csr_key_strength(request.csr_pem()).is_ok());
     }
 
     /// CSR key strength validation: signing works with a valid key
     #[test]
     fn sign_csr_validates_key_strength() {
-        let ca = CertificateAuthority::new("Key Strength CA")
-            .expect("CA creation should succeed");
-        let request = AgentCertRequest::new("valid-key")
-            .expect("CSR generation should succeed");
+        let ca = CertificateAuthority::new("Key Strength CA").expect("CA creation should succeed");
+        let request = AgentCertRequest::new("valid-key").expect("CSR generation should succeed");
         assert!(ca.sign_csr(request.csr_pem(), "valid-key").is_ok());
     }
 

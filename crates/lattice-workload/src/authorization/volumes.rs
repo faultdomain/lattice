@@ -9,10 +9,7 @@ use crate::error::CompilationError;
 /// Collect volume references from a workload spec.
 ///
 /// Returns `(resource_name, volume_namespace, volume_id)` tuples.
-fn collect_volume_refs(
-    namespace: &str,
-    workload: &WorkloadSpec,
-) -> Vec<(String, String, String)> {
+fn collect_volume_refs(namespace: &str, workload: &WorkloadSpec) -> Vec<(String, String, String)> {
     workload
         .resources
         .iter()

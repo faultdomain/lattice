@@ -48,7 +48,6 @@ fn requeue_for_phase(phase: &OIDCProviderPhase) -> Duration {
     Duration::from_secs(secs)
 }
 
-
 /// Reconcile an OIDCProvider — validate connectivity and update status
 pub async fn reconcile(
     provider: Arc<OIDCProvider>,
@@ -264,5 +263,4 @@ mod tests {
             ParsedEndpoint::parse("https://keycloak.auth-system.svc:8443").expect("should parse");
         assert!(ep.is_cluster_local());
     }
-
 }

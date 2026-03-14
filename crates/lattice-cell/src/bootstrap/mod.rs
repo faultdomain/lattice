@@ -126,14 +126,10 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
 
     // Include InfraProvider, SecretProvider, CedarPolicy, OIDCProvider and their referenced secrets
     // This ensures credentials and policies are available when the operator starts, before the gRPC connection
-    if let Some(ref client) = state.kube_client {
-        let parent_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").map_err(|_| {
-            BootstrapError::Internal(
-                "LATTICE_CLUSTER_NAME environment variable not set — cannot fetch distributable resources"
-                    .to_string(),
-            )
-        })?;
-        match fetch_distributable_resources(client, &parent_cluster_name).await {
+    if let (Some(ref client), Some(ref parent_cluster_name)) =
+        (&state.kube_client, &state.cluster_name)
+    {
+        match fetch_distributable_resources(client, parent_cluster_name).await {
             Ok(resources) => {
                 let count = resources.total_count();
                 all_manifests.extend(resources.into_json_strings());
@@ -361,7 +357,10 @@ mod tests {
     }
 
     /// Helper: extract raw CSR token from bootstrap state for a cluster
-    fn get_csr_token(state: &Arc<BootstrapState<test_helpers::TestManifestGenerator>>, cluster_id: &str) -> String {
+    fn get_csr_token(
+        state: &Arc<BootstrapState<test_helpers::TestManifestGenerator>>,
+        cluster_id: &str,
+    ) -> String {
         state
             .clusters
             .get(cluster_id)
