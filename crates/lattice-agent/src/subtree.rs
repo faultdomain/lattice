@@ -158,17 +158,24 @@ impl SubtreeSender {
         })
     }
 
-    /// Watch for LatticeCluster and LatticeClusterRoutes changes and send deltas
+    /// Watch for LatticeCluster and LatticeClusterRoutes changes and send deltas.
+    ///
+    /// Restarts watchers on error or stream end (with backoff). Only exits
+    /// when the message channel is closed (agent shutting down).
     async fn watch_and_send_deltas(&self, message_tx: mpsc::Sender<AgentMessage>) {
-        let cluster_api: Api<LatticeCluster> = Api::all(self.client.clone());
-        let routes_api: Api<LatticeClusterRoutes> = Api::all(self.client.clone());
-
         info!(cluster = %self.cluster_name, "Starting subtree watcher (clusters + routes)");
 
-        let mut cluster_stream =
-            watcher::watcher(cluster_api, watcher::Config::default()).boxed();
-        let mut routes_stream =
-            watcher::watcher(routes_api, watcher::Config::default()).boxed();
+        let new_cluster_watcher = || {
+            let api: Api<LatticeCluster> = Api::all(self.client.clone());
+            watcher::watcher(api, watcher::Config::default()).boxed()
+        };
+        let new_routes_watcher = || {
+            let api: Api<LatticeClusterRoutes> = Api::all(self.client.clone());
+            watcher::watcher(api, watcher::Config::default()).boxed()
+        };
+
+        let mut cluster_stream = new_cluster_watcher();
+        let mut routes_stream = new_routes_watcher();
 
         loop {
             tokio::select! {
@@ -177,25 +184,24 @@ impl SubtreeSender {
                         Ok(Some(event)) => {
                             if let Some(msg) = self.handle_cluster_event(event) {
                                 if message_tx.send(msg).await.is_err() {
-                                    debug!("Message channel closed, stopping subtree watcher");
                                     break;
                                 }
                             }
                         }
-                        Ok(None) => {
-                            warn!("Cluster watcher stream ended");
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Cluster watcher error");
+                        Ok(None) | Err(_) => {
+                            if let Err(ref e) = event {
+                                warn!(error = %e, "Cluster watcher error, restarting");
+                            } else {
+                                warn!("Cluster watcher stream ended, restarting");
+                            }
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            cluster_stream = new_cluster_watcher();
                         }
                     }
                 }
                 event = routes_stream.try_next() => {
                     match event {
                         Ok(Some(event)) => {
-                            // LatticeClusterRoutes changed — re-read and send to parent
                             if matches!(event, Event::Apply(_) | Event::InitDone) {
                                 let services = self.read_cluster_routes().await;
                                 let delta = SubtreeState {
@@ -208,18 +214,18 @@ impl SubtreeSender {
                                     payload: Some(Payload::SubtreeState(delta)),
                                 };
                                 if message_tx.send(msg).await.is_err() {
-                                    debug!("Message channel closed, stopping subtree watcher");
                                     break;
                                 }
                             }
                         }
-                        Ok(None) => {
-                            warn!("Routes watcher stream ended");
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Routes watcher error");
+                        Ok(None) | Err(_) => {
+                            if let Err(ref e) = event {
+                                warn!(error = %e, "Routes watcher error, restarting");
+                            } else {
+                                warn!("Routes watcher stream ended, restarting");
+                            }
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            routes_stream = new_routes_watcher();
                         }
                     }
                 }
