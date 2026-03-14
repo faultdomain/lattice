@@ -219,12 +219,21 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                 continue;
             }
 
-            let (address, port) = resolve_gateway_address(svc_ns, &gateways);
-            if address.is_empty() {
-                debug!(
+            if route.hosts.is_empty() {
+                warn!(
                     service = svc_name,
                     namespace = svc_ns,
-                    "no Gateway address found, skipping advertised route"
+                    "advertised route has no hostnames — cannot be discovered"
+                );
+                continue;
+            }
+
+            let (address, port) = resolve_gateway_address(svc_ns, &gateways);
+            if address.is_empty() {
+                warn!(
+                    service = svc_name,
+                    namespace = svc_ns,
+                    "advertised route has no Gateway address — route will not be discoverable until Gateway gets an IP"
                 );
                 continue;
             }

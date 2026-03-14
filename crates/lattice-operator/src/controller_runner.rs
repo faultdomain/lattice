@@ -380,8 +380,113 @@ pub async fn build_model_controllers(
     vec![Box::pin(model_ctrl)]
 }
 
-/// Build provider controller futures (InfraProvider, SecretProvider, CedarPolicy, OIDCProvider)
-pub fn build_provider_controllers(
+/// Build cluster-slice provider controllers (InfraProvider, SecretProvider, CedarPolicy, OIDCProvider)
+///
+/// These manage infrastructure-level provider configuration (cloud credentials,
+/// secret backends, OIDC endpoints). CRDs are registered in `cluster_crds()`.
+pub fn build_cluster_provider_controllers(
+    client: Client,
+    cedar: Arc<PolicyEngine>,
+    config: lattice_common::SharedConfig,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
+    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
+        client: client.clone(),
+        cedar,
+    });
+
+    tracing::info!("- InfraProvider controller");
+    tracing::info!("- SecretProvider controller");
+    tracing::info!("- CedarPolicy controller");
+    tracing::info!("- OIDCProvider controller");
+
+    vec![
+        simple_controller(
+            Api::<InfraProvider>::all(client.clone()),
+            cloud_provider_ctrl::reconcile,
+            ctx.clone(),
+            "InfraProvider",
+        ),
+        simple_controller(
+            Api::<SecretProvider>::all(client.clone()),
+            secrets_provider_ctrl::reconcile,
+            ctx.clone(),
+            "SecretProvider",
+        ),
+        simple_controller(
+            Api::<CedarPolicy>::all(client.clone()),
+            cedar_validation_ctrl::reconcile,
+            cedar_ctx,
+            "CedarPolicy",
+        ),
+        simple_controller(
+            Api::<OIDCProvider>::all(client),
+            oidc_provider_ctrl::reconcile,
+            ctx,
+            "OIDCProvider",
+        ),
+    ]
+}
+
+/// Build service-slice provider controllers (BackupStore, ClusterBackup, Restore, ServiceBackup, CedarPolicy)
+///
+/// These manage application-level backup/restore and Cedar policy validation.
+/// CRDs are registered in `service_crds()`.
+pub fn build_service_provider_controllers(
+    client: Client,
+    cedar: Arc<PolicyEngine>,
+    config: lattice_common::SharedConfig,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
+    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
+        client: client.clone(),
+        cedar,
+    });
+
+    tracing::info!("- CedarPolicy controller");
+    tracing::info!("- BackupStore controller");
+    tracing::info!("- LatticeClusterBackup controller");
+    tracing::info!("- LatticeRestore controller");
+    tracing::info!("- ServiceBackupSchedule controller");
+
+    vec![
+        simple_controller(
+            Api::<CedarPolicy>::all(client.clone()),
+            cedar_validation_ctrl::reconcile,
+            cedar_ctx,
+            "CedarPolicy",
+        ),
+        simple_controller(
+            Api::<BackupStore>::all(client.clone()),
+            backup_store_ctrl::reconcile,
+            ctx.clone(),
+            "BackupStore",
+        ),
+        simple_controller(
+            Api::<LatticeClusterBackup>::all(client.clone()),
+            cluster_backup_ctrl::reconcile,
+            ctx.clone(),
+            "ClusterBackup",
+        ),
+        simple_controller(
+            Api::<LatticeRestore>::all(client.clone()),
+            restore_ctrl::reconcile,
+            ctx.clone(),
+            "Restore",
+        ),
+        simple_controller(
+            Api::<LatticeService>::all(client),
+            service_backup_ctrl::reconcile,
+            ctx,
+            "ServiceBackup",
+        ),
+    ]
+}
+
+/// Build ALL provider controllers (union of cluster + service slices, CedarPolicy deduplicated)
+///
+/// Used by `run_all_slices()` to avoid running the CedarPolicy controller twice.
+pub fn build_all_provider_controllers(
     client: Client,
     cedar: Arc<PolicyEngine>,
     config: lattice_common::SharedConfig,
@@ -561,14 +666,7 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
     warmup_list::<LatticeClusterRoutes>(client, "LatticeClusterRoutes", |item| {
         let source_cluster = item.metadata.name.as_deref().unwrap_or("unknown");
         for route in &item.spec.routes {
-            graph.put_remote_service(
-                &route.service_namespace,
-                &route.service_name,
-                source_cluster,
-                &route.address,
-                route.port,
-                &route.hostname,
-            );
+            graph.put_remote_service(source_cluster, route);
         }
     })
     .await;

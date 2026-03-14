@@ -356,7 +356,7 @@ async fn run_cluster_slice(
         capi_installer,
         config.clone(),
     );
-    controllers.extend(controller_runner::build_provider_controllers(
+    controllers.extend(controller_runner::build_cluster_provider_controllers(
         client.clone(),
         cedar,
         config.clone(),
@@ -449,7 +449,7 @@ async fn run_service_slice(
         .await,
     );
 
-    controllers.extend(controller_runner::build_provider_controllers(
+    controllers.extend(controller_runner::build_service_provider_controllers(
         client.clone(),
         cedar,
         config.clone(),
@@ -619,7 +619,7 @@ async fn run_all_slices(
         .await,
     );
 
-    controllers.extend(controller_runner::build_provider_controllers(
+    controllers.extend(controller_runner::build_all_provider_controllers(
         client.clone(),
         cedar,
         config.clone(),
