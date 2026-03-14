@@ -271,6 +271,16 @@ pub async fn build_service_controllers(
 
             refs
         })
+        .watches(
+            Api::<LatticeClusterRoutes>::all(client.clone()),
+            watcher_config(),
+            {
+                let graph = service_ctx.graph.clone();
+                move |_routes| {
+                    all_mesh_member_refs(&graph)
+                }
+            },
+        )
         .shutdown_on_signal()
         .run(
             mesh_member_ctrl::reconcile,
@@ -868,6 +878,20 @@ fn all_service_refs(graph: &lattice_common::graph::ServiceGraph) -> Vec<ObjectRe
     for ns in graph.list_namespaces() {
         for svc in graph.list_services(&ns) {
             refs.push(ObjectRef::<LatticeService>::new(&svc.name).within(&ns));
+        }
+    }
+    refs
+}
+
+fn all_mesh_member_refs(
+    graph: &lattice_common::graph::ServiceGraph,
+) -> Vec<ObjectRef<LatticeMeshMember>> {
+    let mut refs = Vec::new();
+    for ns in graph.list_namespaces() {
+        for svc in graph.list_services(&ns) {
+            if svc.type_.is_mesh_member() || svc.type_.is_local() {
+                refs.push(ObjectRef::<LatticeMeshMember>::new(&svc.name).within(&ns));
+            }
         }
     }
     refs
