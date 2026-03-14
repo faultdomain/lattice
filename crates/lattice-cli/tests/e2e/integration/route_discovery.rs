@@ -45,11 +45,23 @@ fn build_advertised_service(
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
+    use lattice_common::crd::{ResourceQuantity, ResourceRequirements};
+
     let mut containers = BTreeMap::new();
     containers.insert(
         "main".to_string(),
         ContainerSpec {
             image: "nginx:1-alpine".to_string(),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("32Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
             ..Default::default()
         },
     );
