@@ -7,46 +7,15 @@
 use std::collections::HashMap;
 
 use futures::{StreamExt, TryStreamExt};
-use kube::api::{DynamicObject, GroupVersionKind};
-use kube::discovery::ApiResource;
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
-use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{LatticeCluster, LatticeService};
+use lattice_common::crd::{LatticeCluster, LatticeClusterRoutes, LatticeService};
 use lattice_proto::{
     agent_message::Payload, AgentMessage, SubtreeCluster, SubtreeService, SubtreeState,
 };
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewayStatus {
-    #[serde(default)]
-    addresses: Vec<GatewayAddress>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewayAddress {
-    #[serde(default)]
-    value: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewaySpec {
-    #[serde(default)]
-    listeners: Vec<GatewayListener>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewayListener {
-    #[serde(default)]
-    port: u16,
-}
 
 /// Builds and sends subtree state to the parent cell
 pub struct SubtreeSender {
@@ -110,8 +79,9 @@ impl SubtreeSender {
             }
         }
 
-        // Discover local services with ingress routes
-        let services = self.discover_services().await;
+        // Read services from the local LatticeClusterRoutes CRD
+        // (written by the route reconciler, which merges own + children's routes)
+        let services = self.read_cluster_routes().await;
 
         info!(
             cluster = %self.cluster_name,
@@ -127,98 +97,38 @@ impl SubtreeSender {
         }
     }
 
-    /// Discover local LatticeService resources with ingress routes and resolve
-    /// their Gateway addresses to build SubtreeService entries.
-    async fn discover_services(&self) -> Vec<SubtreeService> {
-        let mut services = Vec::new();
+    /// Read routes from the local `LatticeClusterRoutes` CRD and convert to `SubtreeService`
+    async fn read_cluster_routes(&self) -> Vec<SubtreeService> {
+        let api: Api<LatticeClusterRoutes> = Api::all(self.client.clone());
 
-        // List LatticeService CRDs with ingress specs
-        let svc_api: Api<LatticeService> = Api::all(self.client.clone());
-        let lattice_services = match svc_api.list(&Default::default()).await {
-            Ok(list) => list.items,
+        let routes_crd = match api.get(&self.cluster_name).await {
+            Ok(crd) => crd,
             Err(e) => {
-                warn!(error = %e, "failed to list LatticeService CRDs for service discovery");
-                return services;
+                debug!(
+                    cluster = %self.cluster_name,
+                    error = %e,
+                    "LatticeClusterRoutes not found, no routes to advertise"
+                );
+                return Vec::new();
             }
         };
 
-        // List Gateway objects to resolve LB addresses
-        let gw_gvk = GroupVersionKind::gvk("gateway.networking.k8s.io", "v1", "Gateway");
-        let gw_ar = ApiResource::from_gvk(&gw_gvk);
-        let gw_api: Api<DynamicObject> = Api::all_with(self.client.clone(), &gw_ar);
-        let gateways: HashMap<String, DynamicObject> = match gw_api.list(&Default::default()).await
-        {
-            Ok(list) => list
-                .items
-                .into_iter()
-                .filter_map(|gw| {
-                    let ns = gw.metadata.namespace.as_deref().unwrap_or("default");
-                    let name = gw.metadata.name.as_deref()?;
-                    Some((format!("{ns}/{name}"), gw))
-                })
-                .collect(),
-            Err(e) => {
-                debug!(error = %e, "Gateway API not available, skipping service discovery");
-                return services;
-            }
-        };
-
-        for ls in &lattice_services {
-            let svc_name = match ls.metadata.name.as_deref() {
-                Some(n) => n,
-                None => continue,
-            };
-            let svc_ns = ls.metadata.namespace.as_deref().unwrap_or("default");
-
-            let ingress = match &ls.spec.ingress {
-                Some(i) => i,
-                None => continue,
-            };
-
-            let labels: HashMap<String, String> = ls
-                .metadata
-                .labels
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-
-            for route in ingress.routes.values() {
-                if !route.advertise {
-                    continue;
-                }
-
-                for host in &route.hosts {
-                    // Resolve the Gateway address for this route's gateway class
-                    let (address, port) =
-                        resolve_gateway_address(svc_ns, &gateways);
-
-                    if address.is_empty() {
-                        debug!(
-                            service = svc_name,
-                            namespace = svc_ns,
-                            host,
-                            "no Gateway address found, skipping route"
-                        );
-                        continue;
-                    }
-
-                    services.push(SubtreeService {
-                        name: svc_name.to_string(),
-                        namespace: svc_ns.to_string(),
-                        cluster: self.cluster_name.clone(),
-                        removed: false,
-                        hostname: host.clone(),
-                        address: address.clone(),
-                        port,
-                        protocol: "HTTP".to_string(),
-                        labels: labels.clone(),
-                    });
-                }
-            }
-        }
-
-        services
+        routes_crd
+            .spec
+            .routes
+            .iter()
+            .map(|r| SubtreeService {
+                name: r.service_name.clone(),
+                namespace: r.service_namespace.clone(),
+                cluster: self.cluster_name.clone(),
+                removed: false,
+                hostname: r.hostname.clone(),
+                address: r.address.clone(),
+                port: r.port as u32,
+                protocol: r.protocol.clone(),
+                labels: HashMap::new(),
+            })
+            .collect()
     }
 
     /// Send full subtree state to parent
@@ -284,10 +194,10 @@ impl SubtreeSender {
                 event = service_stream.try_next() => {
                     match event {
                         Ok(Some(event)) => {
-                            // On any LatticeService change, re-discover all services
-                            // and send a full service update (services only, not clusters)
+                            // On any LatticeService change, re-read routes from the CRD
+                            // (route reconciler updates it from LatticeService changes)
                             if self.is_service_change(&event) {
-                                let services = self.discover_services().await;
+                                let services = self.read_cluster_routes().await;
                                 let delta = SubtreeState {
                                     clusters: vec![],
                                     services,
@@ -386,49 +296,6 @@ impl SubtreeSender {
     }
 }
 
-/// Resolve a Gateway LoadBalancer address in a given namespace.
-///
-/// Looks for any Gateway in the namespace and returns its first assigned address
-/// and listener port. Returns ("", 0) if no Gateway is found or has no address yet.
-fn resolve_gateway_address(
-    namespace: &str,
-    gateways: &HashMap<String, DynamicObject>,
-) -> (String, u32) {
-    for (key, gw) in gateways {
-        if !key.starts_with(&format!("{namespace}/")) {
-            continue;
-        }
-
-        let status: Option<GatewayStatus> = gw
-            .data
-            .get("status")
-            .and_then(|s| serde_json::from_value(s.clone()).ok());
-
-        let address = status
-            .as_ref()
-            .and_then(|s| s.addresses.first())
-            .map(|a| a.value.clone())
-            .unwrap_or_default();
-
-        if address.is_empty() {
-            continue;
-        }
-
-        let spec: Option<GatewaySpec> = gw
-            .data
-            .get("spec")
-            .and_then(|s| serde_json::from_value(s.clone()).ok());
-
-        let port = spec
-            .and_then(|s| s.listeners.first().map(|l| l.port as u32))
-            .unwrap_or(80);
-
-        return (address, port);
-    }
-
-    (String::new(), 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,74 +349,6 @@ mod tests {
 
         assert!(!state.is_full_sync);
         assert!(state.clusters[0].removed);
-    }
-
-    fn make_gateway_object(ns: &str, name: &str, address: &str, port: u16) -> DynamicObject {
-        let mut obj = DynamicObject::new(name, &ApiResource::from_gvk(
-            &GroupVersionKind::gvk("gateway.networking.k8s.io", "v1", "Gateway"),
-        ));
-        obj.metadata.namespace = Some(ns.to_string());
-        obj.data = serde_json::json!({
-            "spec": {
-                "listeners": [{ "port": port }]
-            },
-            "status": {
-                "addresses": [{ "value": address }]
-            }
-        });
-        obj
-    }
-
-    #[test]
-    fn resolve_gateway_finds_address_in_namespace() {
-        let mut gateways = HashMap::new();
-        let gw = make_gateway_object("media", "istio-gateway", "10.0.0.217", 80);
-        gateways.insert("media/istio-gateway".to_string(), gw);
-
-        let (addr, port) = resolve_gateway_address("media", &gateways);
-        assert_eq!(addr, "10.0.0.217");
-        assert_eq!(port, 80);
-    }
-
-    #[test]
-    fn resolve_gateway_ignores_other_namespaces() {
-        let mut gateways = HashMap::new();
-        let gw = make_gateway_object("webapp", "istio-gateway", "10.0.0.218", 8080);
-        gateways.insert("webapp/istio-gateway".to_string(), gw);
-
-        let (addr, port) = resolve_gateway_address("media", &gateways);
-        assert_eq!(addr, "");
-        assert_eq!(port, 0);
-    }
-
-    #[test]
-    fn resolve_gateway_returns_empty_when_no_address() {
-        let mut gateways = HashMap::new();
-        let mut gw = make_gateway_object("media", "istio-gateway", "", 80);
-        gw.data = serde_json::json!({
-            "spec": { "listeners": [{ "port": 80 }] },
-            "status": { "addresses": [] }
-        });
-        gateways.insert("media/istio-gateway".to_string(), gw);
-
-        let (addr, port) = resolve_gateway_address("media", &gateways);
-        assert_eq!(addr, "");
-        assert_eq!(port, 0);
-    }
-
-    #[test]
-    fn resolve_gateway_defaults_port_to_80() {
-        let mut gateways = HashMap::new();
-        let mut gw = make_gateway_object("media", "gw", "10.0.0.1", 80);
-        gw.data = serde_json::json!({
-            "spec": { "listeners": [] },
-            "status": { "addresses": [{ "value": "10.0.0.1" }] }
-        });
-        gateways.insert("media/gw".to_string(), gw);
-
-        let (addr, port) = resolve_gateway_address("media", &gateways);
-        assert_eq!(addr, "10.0.0.1");
-        assert_eq!(port, 80);
     }
 
     #[test]

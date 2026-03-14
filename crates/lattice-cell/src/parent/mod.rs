@@ -804,8 +804,11 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             })?;
 
         // Start the route reconciler (single writer for LatticeClusterRoutes CRDs)
-        let route_update_tx =
-            crate::route_reconciler::spawn_route_reconciler(grpc_kube_client.clone());
+        // Watches local LatticeServices with advertise: true and merges with child routes
+        let route_update_tx = crate::route_reconciler::spawn_route_reconciler(
+            self.config.cluster_name.clone(),
+            grpc_kube_client.clone(),
+        );
 
         info!(addr = %grpc_addr, "Starting gRPC server");
         let grpc_handle = tokio::spawn(async move {
