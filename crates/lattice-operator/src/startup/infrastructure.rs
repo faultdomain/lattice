@@ -144,7 +144,9 @@ async fn resolve_infra_config(
             Ok(cfg)
         }
         None => {
-            let cluster_name = config.cluster_name_or_default().to_string();
+            let cluster_name = config.cluster_name_required()
+                .map_err(|e| anyhow::anyhow!("{} (required for infrastructure generation)", e))?
+                .to_string();
             tracing::info!(cluster = %cluster_name, "no LatticeCluster CRD, using env config");
             Ok(InfrastructureConfig {
                 cluster_name,

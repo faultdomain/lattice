@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use tracing::warn;
 
 use crate::crd::ProviderType;
 
@@ -71,11 +70,18 @@ impl LatticeConfig {
         let scripts_dir = std::env::var("LATTICE_SCRIPTS_DIR")
             .unwrap_or_else(|_| DEFAULT_SCRIPTS_DIR.to_string());
 
-        let grpc_max_message_size = std::env::var("LATTICE_GRPC_MAX_MESSAGE_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_GRPC_MAX_MESSAGE_SIZE)
-            .min(MAX_GRPC_MESSAGE_SIZE);
+        let grpc_max_message_size = match std::env::var("LATTICE_GRPC_MAX_MESSAGE_SIZE") {
+            Ok(v) => v
+                .parse::<usize>()
+                .map_err(|e| {
+                    format!(
+                        "invalid LATTICE_GRPC_MAX_MESSAGE_SIZE '{}': {}",
+                        v, e
+                    )
+                })?
+                .min(MAX_GRPC_MESSAGE_SIZE),
+            Err(_) => DEFAULT_GRPC_MAX_MESSAGE_SIZE,
+        };
 
         Ok(Self {
             cluster_name: std::env::var("LATTICE_CLUSTER_NAME").ok(),
@@ -102,19 +108,6 @@ impl LatticeConfig {
             .ok_or_else(|| "LATTICE_CLUSTER_NAME environment variable not set".to_string())
     }
 
-    /// Get the cluster name with a fallback for non-critical contexts.
-    ///
-    /// Logs a warning when falling back. Use `cluster_name_required()` in
-    /// contexts where the cluster name is essential.
-    pub fn cluster_name_or_default(&self) -> &str {
-        match &self.cluster_name {
-            Some(name) => name,
-            None => {
-                warn!("LATTICE_CLUSTER_NAME not set, using 'default'");
-                "default"
-            }
-        }
-    }
 }
 
 /// Parse a boolean environment variable with a default value.

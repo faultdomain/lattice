@@ -103,19 +103,22 @@ pub async fn start_server(
         )
         .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_EXEC_SESSIONS));
 
-    let app = Router::new()
+    // Health check lives outside the concurrency-limited router so that
+    // Kubernetes liveness probes always succeed, even under full load.
+    let healthz = Router::new().route("/healthz", get(|| async { "ok" }));
+
+    let limited_routes = Router::new()
         // Kubeconfig generation
         .route("/kubeconfig", get(kubeconfig_handler))
-        // Health check (no rate limit — must always respond for liveness probes)
-        .route("/healthz", get(|| async { "ok" }))
         // Exec/attach/portforward with dedicated concurrency limit
         .merge(exec_routes)
         // K8s API proxy - route all cluster paths to the proxy handler
         .route("/clusters/{cluster_name}", any(proxy_handler))
         .route("/clusters/{cluster_name}/{*path}", any(proxy_handler))
         .with_state(state)
-        // Global concurrency limit on all routes (except healthz which is matched first)
         .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_PROXY_REQUESTS));
+
+    let app = healthz.merge(limited_routes);
 
     let tls_config = RustlsConfig::from_pem(
         config.cert_pem.into_bytes(),

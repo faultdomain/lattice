@@ -452,34 +452,48 @@ pub struct MoveObjectError {
     pub retryable: bool,
 }
 
-/// API groups that must never be created during move operations.
-/// Prevents a compromised agent from injecting privilege-escalation
-/// resources into the target cluster during move.
-const BLOCKED_MOVE_API_GROUPS: &[&str] = &[
-    "rbac.authorization.k8s.io",
-    "admissionregistration.k8s.io",
-    "networking.k8s.io",
-    "storage.k8s.io",
-    "policy",
-    "certificates.k8s.io",
+/// API groups explicitly allowed during move operations.
+/// Only CAPI provider groups and their dependencies are permitted.
+/// Any group not on this list is rejected, preventing a compromised source
+/// from injecting privilege-escalation resources (RBAC, webhooks, etc.).
+const ALLOWED_MOVE_API_GROUPS: &[&str] = &[
+    "cluster.x-k8s.io",
+    "infrastructure.cluster.x-k8s.io",
+    "bootstrap.cluster.x-k8s.io",
+    "controlplane.cluster.x-k8s.io",
+    "addon.cluster.x-k8s.io",
+    "addons.cluster.x-k8s.io",
+    "ipam.cluster.x-k8s.io",
+    "runtime.cluster.x-k8s.io",
 ];
 
-/// Validate that an object kind is not a blocked type during move operations.
-///
-/// Rejects resources from API groups that could escalate privileges or
-/// compromise cluster security (RBAC, admission webhooks, network policies,
-/// storage classes, pod security policies, certificate signing requests).
-fn validate_move_object_kind(api_version: &str, kind: &str) -> Result<(), MoveError> {
-    let group = api_version.split('/').next().unwrap_or("");
+/// Core API kinds (apiVersion "v1", no group) allowed during move.
+/// These carry CAPI configuration and kubeconfig data needed post-pivot.
+const ALLOWED_CORE_KINDS: &[&str] = &["Secret", "ConfigMap"];
 
-    if BLOCKED_MOVE_API_GROUPS.contains(&group) {
-        return Err(MoveError::Serialization(format!(
-            "object '{}' (group '{}') is not allowed during move operations",
-            kind, group
-        )));
+/// Validate that an object is allowed during move operations.
+///
+/// Uses an allowlist approach: only CAPI groups and specific core types
+/// are permitted. All other API groups are rejected regardless of kind.
+fn validate_move_object_kind(api_version: &str, kind: &str) -> Result<(), MoveError> {
+    if api_version.contains('/') {
+        // Grouped resource (e.g., "cluster.x-k8s.io/v1beta1")
+        let group = api_version.split('/').next().unwrap_or("");
+        if ALLOWED_MOVE_API_GROUPS.contains(&group) {
+            return Ok(());
+        }
+    } else {
+        // Core API resource (e.g., "v1")
+        if ALLOWED_CORE_KINDS.contains(&kind) {
+            return Ok(());
+        }
     }
 
-    Ok(())
+    Err(MoveError::Serialization(format!(
+        "object '{}' (apiVersion '{}') is not allowed during move operations — \
+         only CAPI groups and core Secret/ConfigMap are permitted",
+        kind, api_version
+    )))
 }
 
 /// Strip transient fields that shouldn't be copied to target
@@ -572,6 +586,7 @@ mod tests {
 
     #[test]
     fn test_validate_move_object_kind_allows_capi_and_core() {
+        // CAPI groups
         assert!(validate_move_object_kind("cluster.x-k8s.io/v1beta1", "Cluster").is_ok());
         assert!(
             validate_move_object_kind("infrastructure.cluster.x-k8s.io/v1beta2", "AWSCluster")
@@ -581,25 +596,51 @@ mod tests {
             validate_move_object_kind("bootstrap.cluster.x-k8s.io/v1beta1", "KubeadmConfig")
                 .is_ok()
         );
+        assert!(
+            validate_move_object_kind(
+                "controlplane.cluster.x-k8s.io/v1beta1",
+                "KubeadmControlPlane"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_move_object_kind("addon.cluster.x-k8s.io/v1alpha1", "ClusterResourceSet")
+                .is_ok()
+        );
+        // Core types needed for CAPI
         assert!(validate_move_object_kind("v1", "Secret").is_ok());
         assert!(validate_move_object_kind("v1", "ConfigMap").is_ok());
-        assert!(validate_move_object_kind("apps/v1", "Deployment").is_ok());
     }
 
     #[test]
-    fn test_validate_move_object_kind_rejects_privileged_groups() {
+    fn test_validate_move_object_kind_rejects_non_capi_groups() {
+        // Non-CAPI groups are rejected by allowlist (not just security-sensitive ones)
+        assert!(validate_move_object_kind("apps/v1", "Deployment").is_err());
         assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "ClusterRole").is_err());
         assert!(
             validate_move_object_kind("rbac.authorization.k8s.io/v1", "ClusterRoleBinding")
                 .is_err()
         );
-        assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "Role").is_err());
-        assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "RoleBinding").is_err());
         assert!(validate_move_object_kind("networking.k8s.io/v1", "NetworkPolicy").is_err());
-        assert!(validate_move_object_kind("admissionregistration.k8s.io/v1", "ValidatingWebhookConfiguration").is_err());
+        assert!(validate_move_object_kind(
+            "admissionregistration.k8s.io/v1",
+            "ValidatingWebhookConfiguration"
+        )
+        .is_err());
         assert!(validate_move_object_kind("storage.k8s.io/v1", "StorageClass").is_err());
         assert!(validate_move_object_kind("policy/v1", "PodDisruptionBudget").is_err());
-        assert!(validate_move_object_kind("certificates.k8s.io/v1", "CertificateSigningRequest").is_err());
+        assert!(
+            validate_move_object_kind("certificates.k8s.io/v1", "CertificateSigningRequest")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_move_object_kind_rejects_non_allowed_core_kinds() {
+        // Core API kinds not in the allowlist
+        assert!(validate_move_object_kind("v1", "ServiceAccount").is_err());
+        assert!(validate_move_object_kind("v1", "Pod").is_err());
+        assert!(validate_move_object_kind("v1", "Service").is_err());
     }
 
     #[test]

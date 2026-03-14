@@ -161,8 +161,6 @@ pub struct OidcValidator {
     jwks_cache: Arc<RwLock<Option<JwksCache>>>,
     /// Serializes JWKS refresh attempts to prevent thundering herd
     refresh_lock: tokio::sync::Mutex<()>,
-    /// HTTP client for fetching JWKS
-    http_client: reqwest::Client,
     /// Counter for force-refresh attempts triggered by unknown `kid` values.
     /// Reset on each successful scheduled refresh.
     unknown_kid_refresh_count: std::sync::atomic::AtomicU32,
@@ -177,7 +175,6 @@ impl OidcValidator {
             config: OidcConfig::default(),
             jwks_cache: Arc::new(RwLock::new(None)),
             refresh_lock: tokio::sync::Mutex::new(()),
-            http_client: reqwest::Client::new(),
             unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
             allow_insecure_http: false,
         }
@@ -238,7 +235,9 @@ impl OidcValidator {
 
         let spec = &provider.spec;
 
-        // Validate issuer URL to prevent SSRF via CRD manipulation
+        // Validate issuer URL to prevent SSRF via CRD manipulation.
+        // We discard the resolved IPs here — they'll be re-resolved and pinned
+        // on each JWKS refresh to avoid stale DNS.
         validate_issuer_url(&spec.issuer_url, allow_insecure_http).await?;
 
         let audiences = if spec.audiences.is_empty() {
@@ -269,10 +268,6 @@ impl OidcValidator {
             config,
             jwks_cache: Arc::new(RwLock::new(None)),
             refresh_lock: tokio::sync::Mutex::new(()),
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .map_err(|e| Error::Config(format!("Failed to create HTTP client: {}", e)))?,
             unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
             allow_insecure_http,
         })
@@ -284,7 +279,6 @@ impl OidcValidator {
             config,
             jwks_cache: Arc::new(RwLock::new(None)),
             refresh_lock: tokio::sync::Mutex::new(()),
-            http_client: reqwest::Client::new(),
             unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
             allow_insecure_http: false,
         }
@@ -514,10 +508,20 @@ impl OidcValidator {
 
     /// Refresh JWKS from the issuer
     async fn refresh_jwks(&self) -> Result<()> {
-        // Re-validate issuer DNS resolution before fetching to prevent DNS rebinding.
-        // The issuer URL was validated at CRD creation time, but DNS could have been
-        // rebound to a private/reserved IP since then.
-        validate_issuer_url(&self.config.issuer_url, self.allow_insecure_http).await?;
+        // Re-validate issuer DNS and pin the resolved IPs for this fetch cycle.
+        // This closes the DNS rebinding TOCTOU window: we resolve once, validate,
+        // then force the HTTP client to connect to exactly those IPs.
+        let validated =
+            validate_issuer_url(&self.config.issuer_url, self.allow_insecure_http).await?;
+
+        // Build a pinned HTTP client that connects to the validated IPs only
+        let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
+        for addr in &validated.resolved_ips {
+            client_builder = client_builder.resolve(&validated.host, *addr);
+        }
+        let pinned_client = client_builder
+            .build()
+            .map_err(|e| Error::Config(format!("Failed to create pinned HTTP client: {}", e)))?;
 
         // Fetch OIDC discovery document
         let discovery_url = format!(
@@ -527,8 +531,7 @@ impl OidcValidator {
 
         debug!(url = %discovery_url, "Fetching OIDC discovery document");
 
-        let discovery: OidcDiscovery = self
-            .http_client
+        let discovery: OidcDiscovery = pinned_client
             .get(&discovery_url)
             .send()
             .await
@@ -552,8 +555,7 @@ impl OidcValidator {
         // Fetch JWKS
         debug!(url = %discovery.jwks_uri, "Fetching JWKS");
 
-        let jwks: JwksDocument = self
-            .http_client
+        let jwks: JwksDocument = pinned_client
             .get(&discovery.jwks_uri)
             .send()
             .await
@@ -639,6 +641,19 @@ impl OidcValidator {
     }
 }
 
+/// Resolved OIDC issuer URL with pinned IP addresses.
+///
+/// Returned by `validate_issuer_url` so callers can build an HTTP client
+/// that connects to the exact IPs that passed validation, closing the
+/// DNS rebinding TOCTOU window.
+#[derive(Debug)]
+struct ValidatedIssuer {
+    /// The host portion of the issuer URL
+    host: String,
+    /// Validated IP addresses (pinned from DNS resolution)
+    resolved_ips: Vec<std::net::SocketAddr>,
+}
+
 /// Validate that an OIDC issuer URL is safe to fetch from.
 ///
 /// Prevents SSRF by requiring HTTPS and rejecting URLs pointing to
@@ -646,9 +661,15 @@ impl OidcValidator {
 /// Both IP literals and hostnames are checked — hostnames are resolved via DNS
 /// and all resulting IPs are validated against the private range blocklist.
 ///
+/// Returns the resolved IPs so callers can pin them in the HTTP client,
+/// preventing DNS rebinding between validation and fetch.
+///
 /// Set `allow_insecure_http` to true (via `LATTICE_OIDC_ALLOW_INSECURE_HTTP`)
 /// to permit HTTP issuer URLs for development/testing.
-async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<()> {
+async fn validate_issuer_url(
+    url: &str,
+    allow_insecure_http: bool,
+) -> Result<ValidatedIssuer> {
     if !url.starts_with("https://") {
         if url.starts_with("http://") && allow_insecure_http {
             warn!(
@@ -674,9 +695,15 @@ async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<()>
                 url
             )));
         }
+        let port = extract_port(url).unwrap_or(443);
+        Ok(ValidatedIssuer {
+            host: host.clone(),
+            resolved_ips: vec![std::net::SocketAddr::new(ip, port)],
+        })
     } else {
         // Hostname — resolve via DNS and check all resulting IPs
-        let addrs = tokio::net::lookup_host(format!("{}:0", host))
+        let port = extract_port(url).unwrap_or(443);
+        let addrs = tokio::net::lookup_host(format!("{}:{}", host, port))
             .await
             .map_err(|e| {
                 Error::Config(format!(
@@ -685,7 +712,7 @@ async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<()>
                 ))
             })?;
 
-        let resolved: Vec<std::net::IpAddr> = addrs.map(|a| a.ip()).collect();
+        let resolved: Vec<std::net::SocketAddr> = addrs.collect();
         if resolved.is_empty() {
             return Err(Error::Config(format!(
                 "OIDC issuer hostname '{}' did not resolve to any addresses",
@@ -693,17 +720,35 @@ async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<()>
             )));
         }
 
-        for ip in &resolved {
-            if is_private_ip(ip) {
+        for addr in &resolved {
+            if is_private_ip(&addr.ip()) {
                 return Err(Error::Config(format!(
                     "OIDC issuer hostname '{}' resolves to private/reserved IP {}",
-                    host, ip
+                    host, addr.ip()
                 )));
             }
         }
-    }
 
-    Ok(())
+        Ok(ValidatedIssuer {
+            host,
+            resolved_ips: resolved,
+        })
+    }
+}
+
+/// Extract the port from a URL, if present.
+fn extract_port(url: &str) -> Option<u16> {
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host_port = after_scheme.split('/').next()?;
+    if host_port.starts_with('[') {
+        // IPv6: [::1]:443
+        let after_bracket = host_port.split(']').nth(1)?;
+        after_bracket.strip_prefix(':')?.parse().ok()
+    } else {
+        host_port.rsplit_once(':').and_then(|(_, p)| p.parse().ok())
+    }
 }
 
 /// Extract the host portion from a URL (without port).
@@ -740,6 +785,8 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || v6.is_unspecified()    // ::
                 // fc00::/7 (unique local)
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // fe80::/10 (link-local — cloud metadata on some providers)
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
                 // IPv4-mapped IPv6 (::ffff:x.x.x.x) — check the embedded v4 address
                 || v6.to_ipv4_mapped().is_some_and(|v4| is_private_ip(&std::net::IpAddr::V4(v4)))
         }
@@ -845,23 +892,37 @@ mod tests {
     #[tokio::test]
     async fn test_validate_issuer_url_allows_http_when_configured() {
         // IP literal with HTTP allowed — no DNS resolution needed
-        assert!(validate_issuer_url("http://8.8.8.8:8080/realms/test", true).await.is_ok());
+        assert!(validate_issuer_url("http://8.8.8.8:8080/realms/test", true)
+            .await
+            .is_ok());
         // Still rejects non-http/https schemes
-        assert!(validate_issuer_url("ftp://8.8.8.8:8080", true).await.is_err());
+        assert!(validate_issuer_url("ftp://8.8.8.8:8080", true)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn test_validate_issuer_url_rejects_private_ips() {
-        assert!(validate_issuer_url("https://10.0.0.1", false).await.is_err());
-        assert!(validate_issuer_url("https://172.16.0.1", false).await.is_err());
-        assert!(validate_issuer_url("https://192.168.1.1", false).await.is_err());
-        assert!(validate_issuer_url("https://127.0.0.1", false).await.is_err());
+        assert!(validate_issuer_url("https://10.0.0.1", false)
+            .await
+            .is_err());
+        assert!(validate_issuer_url("https://172.16.0.1", false)
+            .await
+            .is_err());
+        assert!(validate_issuer_url("https://192.168.1.1", false)
+            .await
+            .is_err());
+        assert!(validate_issuer_url("https://127.0.0.1", false)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn test_validate_issuer_url_rejects_link_local() {
         // Cloud metadata endpoint
-        assert!(validate_issuer_url("https://169.254.169.254", false).await.is_err());
+        assert!(validate_issuer_url("https://169.254.169.254", false)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -884,7 +945,8 @@ mod tests {
     #[tokio::test]
     async fn test_validate_issuer_url_rejects_unresolvable_hostname() {
         // Non-existent hostname — DNS resolution must fail, not silently pass
-        let result = validate_issuer_url("https://this-hostname-does-not-exist.invalid", false).await;
+        let result =
+            validate_issuer_url("https://this-hostname-does-not-exist.invalid", false).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -926,6 +988,15 @@ mod tests {
     }
 
     #[test]
+    fn test_is_private_ip_ipv6_link_local() {
+        // fe80::/10 link-local — cloud metadata reachable on some providers
+        assert!(is_private_ip(&"fe80::1".parse().unwrap()));
+        assert!(is_private_ip(&"fe80::a1:b2:c3:d4".parse().unwrap()));
+        // febf:: is still within fe80::/10 (top 10 bits = 1111111010)
+        assert!(is_private_ip(&"febf::1".parse().unwrap()));
+    }
+
+    #[test]
     fn test_is_private_ip_ipv4_mapped_ipv6() {
         // IPv4-mapped IPv6 addresses must be checked against their embedded v4 address
         assert!(is_private_ip(&"::ffff:127.0.0.1".parse().unwrap()));
@@ -936,9 +1007,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_issuer_url_rejects_ipv6_link_local() {
+        assert!(
+            validate_issuer_url("https://[fe80::1]", false)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn test_validate_issuer_url_rejects_ipv4_mapped_ipv6() {
-        assert!(validate_issuer_url("https://[::ffff:169.254.169.254]", false).await.is_err());
-        assert!(validate_issuer_url("https://[::ffff:10.0.0.1]", false).await.is_err());
-        assert!(validate_issuer_url("https://[::ffff:127.0.0.1]", false).await.is_err());
+        assert!(
+            validate_issuer_url("https://[::ffff:169.254.169.254]", false)
+                .await
+                .is_err()
+        );
+        assert!(validate_issuer_url("https://[::ffff:10.0.0.1]", false)
+            .await
+            .is_err());
+        assert!(validate_issuer_url("https://[::ffff:127.0.0.1]", false)
+            .await
+            .is_err());
     }
 }
