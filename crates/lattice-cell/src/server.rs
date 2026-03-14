@@ -164,23 +164,47 @@ async fn handle_service_lookup(
 /// Skips services with invalid ports (> 65535) or empty addresses rather
 /// than silently truncating or propagating invalid routes.
 fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> {
+    // System namespaces that children must not advertise services in
+    const BLOCKED_NAMESPACES: &[&str] = &[
+        "kube-system",
+        "kube-public",
+        "kube-node-lease",
+        "istio-system",
+        "cilium-system",
+        "cert-manager",
+        "lattice-system",
+    ];
+
     state
         .services
         .iter()
         .filter(|s| !s.removed)
         .filter(|s| {
             if s.port > u16::MAX as u32 {
-                warn!(
-                    service = %s.name,
-                    port = s.port,
-                    "skipping service with port > 65535"
-                );
+                warn!(service = %s.name, port = s.port, "rejecting: port > 65535");
                 return false;
             }
             if s.address.is_empty() {
+                warn!(service = %s.name, "rejecting: empty address");
+                return false;
+            }
+            if s.hostname.is_empty() {
+                warn!(service = %s.name, "rejecting: empty hostname");
+                return false;
+            }
+            // Block loopback/link-local addresses
+            if let Ok(ip) = s.address.parse::<std::net::IpAddr>() {
+                if ip.is_loopback() || ip.is_unspecified() {
+                    warn!(service = %s.name, address = %s.address, "rejecting: loopback/unspecified address");
+                    return false;
+                }
+            }
+            // Block system namespace hijacking
+            if BLOCKED_NAMESPACES.contains(&s.namespace.as_str()) {
                 warn!(
                     service = %s.name,
-                    "skipping service with empty address"
+                    namespace = %s.namespace,
+                    "rejecting: cannot advertise services in system namespaces"
                 );
                 return false;
             }
@@ -1020,12 +1044,27 @@ impl LatticeAgent for AgentServer {
                 }
             }
 
-            // Cleanup on disconnect
+            // Cleanup on disconnect — purge routes so stale entries don't persist
             info!(cluster = %cert_cluster_id, "Agent disconnected");
             registry.unregister(&cert_cluster_id);
             subtree_registry
                 .handle_agent_disconnect(&cert_cluster_id)
                 .await;
+
+            // Send empty route update to purge this child's routes from the
+            // reconciler. Without this, a disconnected child's routes would
+            // persist in the LatticeClusterRoutes CRD indefinitely.
+            let cleanup = crate::route_reconciler::RouteUpdate {
+                cluster_name: cert_cluster_id.to_string(),
+                routes: vec![],
+            };
+            if let Err(e) = route_update_tx.send(cleanup).await {
+                warn!(
+                    cluster = %cert_cluster_id,
+                    error = %e,
+                    "failed to send route cleanup on disconnect"
+                );
+            }
         });
 
         // Return stream of commands to send to agent

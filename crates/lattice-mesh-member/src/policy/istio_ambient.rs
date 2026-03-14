@@ -132,6 +132,7 @@ impl<'a> PolicyCompiler<'a> {
                                 &self.cluster_name,
                                 namespace,
                             )],
+                            not_principals: vec![],
                         },
                     }],
                     to: vec![AuthorizationOperation {
@@ -221,6 +222,7 @@ impl<'a> PolicyCompiler<'a> {
                                 namespace,
                                 service.sa_name(),
                             )],
+                            not_principals: vec![],
                         },
                     }],
                     to: if port_strings.is_empty() {

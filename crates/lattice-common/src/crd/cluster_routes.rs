@@ -56,7 +56,7 @@ pub struct ClusterRoute {
     pub protocol: String,
 
     /// Allowed callers (cluster/namespace/name) from the advertise config.
-    /// Empty = open to all. Used for compile-time bilateral agreement enforcement.
+    /// Empty = fail-closed (nobody allowed). Use ["*"] for open access.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_services: Vec<String>,
 }

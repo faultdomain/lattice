@@ -255,20 +255,20 @@ impl<'a> PolicyCompiler<'a> {
 
             let se_name = format!("remote-{}-{}", dep.namespace, dep.name);
 
-            // ServiceEntry with STATIC resolution — maps hostname to the remote
-            // gateway LB IP. HTTPS protocol ensures TLS encryption. The backend
-            // Gateway terminates TLS with a cert from the shared CA.
+            // ServiceEntry with waypoint label so Istio ambient routes through
+            // the waypoint proxy for L7 AuthorizationPolicy enforcement.
+            let se_metadata = ObjectMeta::new(&se_name, namespace)
+                .with_label(
+                    "lattice.dev/managed-by",
+                    "lattice-mesh-member",
+                )
+                .with_label(
+                    lattice_common::mesh::USE_WAYPOINT_LABEL,
+                    lattice_common::mesh::waypoint_name(namespace),
+                );
+
             output.service_entries.push(ServiceEntry::new(
-                ObjectMeta {
-                    name: se_name,
-                    namespace: namespace.to_string(),
-                    labels: std::collections::BTreeMap::from([(
-                        "lattice.dev/managed-by".to_string(),
-                        "lattice-mesh-member".to_string(),
-                    )]),
-                    annotations: std::collections::BTreeMap::new(),
-                    owner_references: Vec::new(),
-                },
+                se_metadata,
                 ServiceEntrySpec {
                     hosts: vec![hostname.clone()],
                     addresses: vec![address.clone()],
@@ -281,6 +281,23 @@ impl<'a> PolicyCompiler<'a> {
                     resolution: "STATIC".to_string(),
                 },
             ));
+
+            // AuthorizationPolicy restricting which local services can use this
+            // remote ServiceEntry (caller-side bilateral agreement enforcement).
+            let caller_principal = lattice_common::mesh::trust_domain::principal(
+                &self.cluster_name,
+                &edge.caller_namespace,
+                &edge.caller_name,
+            );
+            output.authorization_policies.push(
+                AuthorizationPolicy::allow_to_service(
+                    format!("allow-remote-{}-{}", dep.namespace, dep.name),
+                    namespace,
+                    se_name,
+                    vec![caller_principal],
+                    vec![port.to_string()],
+                ),
+            );
         }
     }
 }

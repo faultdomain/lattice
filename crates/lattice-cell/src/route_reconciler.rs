@@ -323,9 +323,16 @@ fn resolve_gateway_address(
             .get("spec")
             .and_then(|s| serde_json::from_value(s.clone()).ok());
 
-        let port = spec
-            .and_then(|s| s.listeners.first().map(|l| l.port))
-            .unwrap_or(80);
+        let port = match spec.and_then(|s| s.listeners.first().map(|l| l.port)) {
+            Some(p) => p,
+            None => {
+                warn!(
+                    namespace,
+                    "Gateway has no listeners, skipping"
+                );
+                continue;
+            }
+        };
 
         return (address, port);
     }

@@ -17,7 +17,7 @@ use lattice_common::policy::cilium::{
 };
 use lattice_common::policy::istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
-    AuthorizationSource, OperationSpec, SourceSpec, TargetRef, WorkloadSelector,
+    OperationSpec, WorkloadSelector,
 };
 
 use crate::policy::cilium::{
@@ -304,9 +304,16 @@ impl IngressCompiler {
                 },
             ));
 
-            // Generate AuthorizationPolicy for cross-cluster SPIFFE identity enforcement.
-            // Collects all non-wildcard allowedServices from advertised routes and builds
-            // an ALLOW policy with their SPIFFE principals targeting the Gateway.
+            // Generate DENY AuthorizationPolicy for cross-cluster SPIFFE identity enforcement.
+            //
+            // When advertised routes have restricted allowedServices, we need to deny
+            // traffic from identities NOT in the allowed list. Using DENY (evaluated
+            // before ALLOW in Istio) ensures this works even with the permissive
+            // gateway_auth_policy that allows all sources on listener ports.
+            //
+            // The policy uses notPrincipals: traffic from any principal NOT in the
+            // allowed list is denied. Traffic from allowed principals passes through
+            // to the normal ALLOW evaluation.
             let principals: Vec<String> = ingress
                 .routes
                 .values()
@@ -316,29 +323,13 @@ impl IngressCompiler {
                 .collect();
 
             if !principals.is_empty() {
-                output.cross_cluster_auth_policy = Some(AuthorizationPolicy::new(
-                    ObjectMeta::new(
-                        format!("{}-cross-cluster", service_name),
+                output.cross_cluster_auth_policy =
+                    Some(AuthorizationPolicy::new_deny_not_principals(
+                        &format!("{}-cross-cluster-deny", service_name),
                         namespace,
-                    ),
-                    AuthorizationPolicySpec {
-                        target_refs: vec![TargetRef {
-                            group: "gateway.networking.k8s.io".to_string(),
-                            kind: "Gateway".to_string(),
-                            name: gateway_name.clone(),
-                        }],
-                        selector: None,
-                        action: "ALLOW".to_string(),
-                        rules: vec![AuthorizationRule {
-                            from: vec![AuthorizationSource {
-                                source: SourceSpec {
-                                    principals: principals.clone(),
-                                },
-                            }],
-                            to: vec![],
-                        }],
-                    },
-                ));
+                        &gateway_name,
+                        &principals,
+                    ));
             }
 
             output.gateway_graph_registration = Some(GraphRegistration {

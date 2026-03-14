@@ -74,7 +74,7 @@ impl AuthorizationPolicy {
                 action: "ALLOW".to_string(),
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
-                        source: SourceSpec { principals },
+                        source: SourceSpec { principals, not_principals: vec![] },
                     }],
                     to: vec![AuthorizationOperation {
                         operation: OperationSpec {
@@ -91,6 +91,41 @@ impl AuthorizationPolicy {
     ///
     /// The waypoint proxy evaluates this policy. Use this only for services that
     /// need L7 enforcement (external dependencies, rate limiting, header matching).
+    /// DENY policy that blocks traffic from identities NOT in the allowed list.
+    ///
+    /// Uses `notPrincipals` on a DENY action targeting a Gateway. Istio evaluates
+    /// DENY before ALLOW, so this blocks unauthorized callers even if a permissive
+    /// ALLOW policy exists on the same Gateway.
+    pub fn new_deny_not_principals(
+        name: &str,
+        namespace: &str,
+        gateway_name: &str,
+        allowed_principals: &[String],
+    ) -> Self {
+        Self::new(
+            ObjectMeta::new(name, namespace),
+            AuthorizationPolicySpec {
+                target_refs: vec![TargetRef {
+                    group: "gateway.networking.k8s.io".to_string(),
+                    kind: "Gateway".to_string(),
+                    name: gateway_name.to_string(),
+                }],
+                selector: None,
+                action: "DENY".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![AuthorizationSource {
+                        source: SourceSpec {
+                            principals: vec![],
+                            not_principals: allowed_principals.to_vec(),
+                        },
+                    }],
+                    to: vec![],
+                }],
+            },
+        )
+    }
+
+    /// Waypoint-enforced ALLOW policy targeting a K8s Service via targetRefs.
     pub fn allow_to_service(
         name: impl Into<String>,
         namespace: impl Into<String>,
@@ -110,7 +145,7 @@ impl AuthorizationPolicy {
                 action: "ALLOW".to_string(),
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
-                        source: SourceSpec { principals },
+                        source: SourceSpec { principals, not_principals: vec![] },
                     }],
                     to: vec![AuthorizationOperation {
                         operation: OperationSpec {
@@ -186,10 +221,14 @@ pub struct AuthorizationSource {
 
 /// Source specification
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceSpec {
-    /// SPIFFE principals
+    /// SPIFFE principals (match any of these)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub principals: Vec<String>,
+    /// Negated principals (match anything NOT in this list)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_principals: Vec<String>,
 }
 
 /// Authorization operation (what's being accessed)
