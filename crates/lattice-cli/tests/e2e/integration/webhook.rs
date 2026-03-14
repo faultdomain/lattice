@@ -512,20 +512,17 @@ async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String>
         ));
     }
 
-    // Removal: try to strip parent_config → should be rejected
-    // Re-fetch before each attempt because operator reconciliation can modify
-    // the resource (annotations, status), causing Conflict errors with stale YAML.
-    let err = try_apply_expecting_rejection(
+    // Removal: try to null out parent_config → should be rejected
+    //
+    // Use `kubectl patch --type=merge` to directly send a null parentConfig
+    // instead of relying on `kubectl apply` three-way merge with stripped YAML.
+    // The apply approach is fragile: if the operator reconciles and removes the
+    // test-injected parentConfig between promotion and this test, the strip is
+    // a no-op and kubectl accepts unchanged YAML without hitting the webhook.
+    let err = try_patch_expecting_rejection(
         kubeconfig,
-        || {
-            let kc = kubeconfig.to_string();
-            let cn = cluster_name.clone();
-            async move {
-                let yaml = get_cluster_yaml(&kc, &cn).await?;
-                let yaml = strip_status_section(&yaml);
-                Ok(strip_parent_config(&yaml))
-            }
-        },
+        &cluster_name,
+        r#"{"spec":{"parentConfig":null}}"#,
         "remove parent_config",
     )
     .await?;
@@ -536,6 +533,63 @@ async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String>
     }
 
     Ok(())
+}
+
+/// Patch a LatticeCluster and expect the admission webhook to reject it.
+///
+/// Uses `kubectl patch --type=merge` which sends a direct merge patch to the
+/// API server, bypassing the three-way merge logic of `kubectl apply`. This is
+/// more reliable for testing field removal (setting to null) because it doesn't
+/// depend on last-applied-configuration annotation state.
+async fn try_patch_expecting_rejection(
+    kubeconfig: &str,
+    cluster_name: &str,
+    patch_json: &str,
+    desc: &str,
+) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let result = tokio::process::Command::new("kubectl")
+            .args([
+                "--kubeconfig",
+                kubeconfig,
+                "patch",
+                "latticecluster",
+                cluster_name,
+                "--type=merge",
+                "-p",
+                patch_json,
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to spawn kubectl: {e}"))?;
+
+        if result.status.success() {
+            return Err(format!(
+                "[Webhook] {desc}: was accepted but should have been REJECTED"
+            ));
+        }
+
+        let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+
+        if stderr.contains("denied the request") {
+            info!("[Webhook] {desc}: rejected (expected): {stderr}");
+            return Ok(stderr);
+        }
+
+        if tokio::time::Instant::now() > deadline {
+            return Err(format!(
+                "[Webhook] {desc}: kubectl never reached the admission webhook \
+                 within timeout"
+            ));
+        }
+
+        info!(
+            "[Webhook] {desc}: transient error: {}",
+            stderr.lines().next().unwrap_or(&stderr)
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 /// Inject a parentConfig block into a LatticeCluster YAML that doesn't have one.
@@ -561,48 +615,6 @@ fn inject_parent_config(yaml: &str) -> String {
     } else {
         format!("{}\n{}\n", yaml.trim_end(), parent_config_block)
     }
-}
-
-/// Strip everything from `status:` onward from a `kubectl get -o yaml` dump.
-///
-/// `kubectl apply` should only send spec fields. Including the status section
-/// can interfere with server-side apply's three-way merge, causing it to miss
-/// field removals (e.g., parentConfig stripped from spec).
-fn strip_status_section(yaml: &str) -> String {
-    yaml.lines()
-        .take_while(|line| !line.starts_with("status:"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Strip the parentConfig block from a LatticeCluster YAML.
-///
-/// Removes lines from `  parentConfig:` through the end of its nested content.
-fn strip_parent_config(yaml: &str) -> String {
-    let mut result = String::new();
-    let mut skipping = false;
-
-    for line in yaml.lines() {
-        if line.starts_with("  parentConfig:") {
-            skipping = true;
-            continue;
-        }
-        if skipping {
-            // Stop skipping when we hit a line at spec level (2-space indent or less)
-            // that isn't blank and isn't deeper-indented content
-            let trimmed = line.trim_start();
-            let indent = line.len() - trimmed.len();
-            if !trimmed.is_empty() && indent <= 2 {
-                skipping = false;
-            } else {
-                continue;
-            }
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    result
 }
 
 // =============================================================================

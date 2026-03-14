@@ -629,12 +629,23 @@ impl OidcValidator {
 /// private/reserved ranges (RFC 1918, loopback, link-local, cloud metadata).
 /// Hostnames are allowed since we can't reliably pre-resolve them, but blocking
 /// IP literals covers the direct SSRF vector.
+///
+/// Set `LATTICE_OIDC_ALLOW_INSECURE_HTTP=true` to permit HTTP issuer URLs
+/// (for development/testing with local identity providers like Keycloak).
 fn validate_issuer_url(url: &str) -> Result<()> {
+    let allow_http = std::env::var("LATTICE_OIDC_ALLOW_INSECURE_HTTP")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
     if !url.starts_with("https://") {
-        return Err(Error::Config(format!(
-            "OIDC issuer URL must use HTTPS: {}",
-            url
-        )));
+        if url.starts_with("http://") && allow_http {
+            warn!("OIDC issuer URL uses HTTP (allowed via LATTICE_OIDC_ALLOW_INSECURE_HTTP): {}", url);
+        } else {
+            return Err(Error::Config(format!(
+                "OIDC issuer URL must use HTTPS: {}",
+                url
+            )));
+        }
     }
 
     let host = extract_host(url).ok_or_else(|| {
@@ -779,9 +790,20 @@ mod tests {
 
     #[test]
     fn test_validate_issuer_url_rejects_http() {
+        // Ensure the env var is NOT set for this test
+        std::env::remove_var("LATTICE_OIDC_ALLOW_INSECURE_HTTP");
         let result = validate_issuer_url("http://accounts.google.com");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_issuer_url_allows_http_when_configured() {
+        std::env::set_var("LATTICE_OIDC_ALLOW_INSECURE_HTTP", "true");
+        assert!(validate_issuer_url("http://keycloak.local:8080/realms/test").is_ok());
+        // Still rejects non-http/https schemes
+        assert!(validate_issuer_url("ftp://keycloak.local:8080").is_err());
+        std::env::remove_var("LATTICE_OIDC_ALLOW_INSECURE_HTTP");
     }
 
     #[test]
