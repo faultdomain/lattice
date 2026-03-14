@@ -113,6 +113,111 @@ fn build_advertised_service(
 }
 
 
+/// Build a consumer service on the mgmt cluster that curls a remote (cross-cluster) service.
+///
+/// The consumer declares an outbound dependency to the remote service. The compiler
+/// resolves it via the graph's Remote node and generates a ServiceEntry. The consumer
+/// pod curls the remote hostname in a loop and writes "CROSS_CLUSTER_OK" to logs on success.
+fn build_cross_cluster_consumer(
+    name: &str,
+    namespace: &str,
+    remote_name: &str,
+    remote_namespace: &str,
+) -> LatticeService {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use lattice_common::crd::{DependencyDirection, ResourceSpec, ResourceType, ResourceQuantity, ResourceRequirements};
+
+    let script = format!(
+        r#"while true; do
+  if wget -q -O- http://{remote_name}.{remote_namespace}.svc.cluster.local 2>/dev/null | grep -q .; then
+    echo "CROSS_CLUSTER_OK"
+  else
+    echo "CROSS_CLUSTER_FAIL"
+  fi
+  sleep 5
+done"#
+    );
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: "busybox:1.37".to_string(),
+            command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), script]),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("32Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
+            ..Default::default()
+        },
+    );
+
+    let mut resources = BTreeMap::new();
+    resources.insert(
+        remote_name.to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            namespace: Some(remote_namespace.to_string()),
+            ..Default::default()
+        },
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: None,
+            },
+            ..Default::default()
+        },
+        status: None,
+    }
+}
+
+/// Verify cross-cluster traffic by checking consumer pod logs for "CROSS_CLUSTER_OK".
+///
+/// Uses the same retry pattern as mesh tests — polls logs until the marker appears
+/// or DEFAULT_TIMEOUT is reached.
+async fn verify_cross_cluster_traffic(
+    kubeconfig: &str,
+    namespace: &str,
+    service_name: &str,
+) -> Result<(), String> {
+    wait_for_condition(
+        "cross-cluster traffic",
+        DEFAULT_TIMEOUT,
+        Duration::from_secs(10),
+        || {
+            let kc = kubeconfig.to_string();
+            let ns = namespace.to_string();
+            let name = service_name.to_string();
+            async move {
+                let output = run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "logs", "-n", &ns,
+                    "-l", &format!("lattice.dev/service={name}"),
+                    "--tail=20",
+                ]).await.unwrap_or_default();
+
+                Ok(output.contains("CROSS_CLUSTER_OK"))
+            }
+        },
+    ).await
+}
+
 // =============================================================================
 // Route Table Verification
 // =============================================================================
@@ -388,8 +493,34 @@ pub async fn run_route_discovery_tests(
     // Verify Gateway has frontend mTLS on workload cluster
     verify_gateway_frontend_mtls(workload_kubeconfig, ROUTE_TEST_NS).await?;
 
-    // Cleanup
+    // Deploy a consumer on the mgmt cluster that curls the workload's advertised service.
+    // This verifies the full cross-cluster traffic path:
+    // consumer → ServiceEntry → workload Gateway → route-target pod
+    info!("[RouteDiscovery] Deploying cross-cluster consumer on mgmt cluster...");
+    let consumer_ns = "route-consumer-test";
+    ensure_fresh_namespace(mgmt_kubeconfig, consumer_ns).await?;
+    setup_regcreds_infrastructure(mgmt_kubeconfig).await?;
+
+    let consumer = build_cross_cluster_consumer(
+        "consumer",
+        consumer_ns,
+        "route-target",
+        ROUTE_TEST_NS,
+    );
+
+    let mgmt_client = client_from_kubeconfig(mgmt_kubeconfig).await?;
+    let consumer_api: Api<LatticeService> = Api::namespaced(mgmt_client, consumer_ns);
+    create_with_retry(&consumer_api, &consumer, "consumer").await?;
+    wait_for_service_phase(mgmt_kubeconfig, consumer_ns, "consumer", "Ready", None, DEFAULT_TIMEOUT).await?;
+    info!("[RouteDiscovery] Consumer deployed, waiting for curl to succeed...");
+
+    // Wait for the consumer pod to successfully curl the remote service
+    verify_cross_cluster_traffic(mgmt_kubeconfig, consumer_ns, "consumer").await?;
+    info!("[RouteDiscovery] Cross-cluster traffic verified!");
+
+    // Cleanup both clusters
     delete_namespace(workload_kubeconfig, ROUTE_TEST_NS).await;
+    delete_namespace(mgmt_kubeconfig, consumer_ns).await;
     info!("[RouteDiscovery] Route discovery tests passed!");
     Ok(())
 }
