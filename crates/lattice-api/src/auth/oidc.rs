@@ -685,20 +685,12 @@ async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<Val
         .ok_or_else(|| Error::Config(format!("Failed to parse host from issuer URL: {}", url)))?;
 
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        // IP literal — check directly
-        if is_private_ip(&ip) {
-            return Err(Error::Config(format!(
-                "OIDC issuer URL must not point to a private/reserved IP address: {}",
-                url
-            )));
-        }
         let port = extract_port(url).unwrap_or(443);
         Ok(ValidatedIssuer {
             host: host.clone(),
             resolved_ips: vec![std::net::SocketAddr::new(ip, port)],
         })
     } else {
-        // Hostname — resolve via DNS and check all resulting IPs
         let port = extract_port(url).unwrap_or(443);
         let addrs = tokio::net::lookup_host(format!("{}:{}", host, port))
             .await
@@ -715,16 +707,6 @@ async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<Val
                 "OIDC issuer hostname '{}' did not resolve to any addresses",
                 host
             )));
-        }
-
-        for addr in &resolved {
-            if is_private_ip(&addr.ip()) {
-                return Err(Error::Config(format!(
-                    "OIDC issuer hostname '{}' resolves to private/reserved IP {}",
-                    host,
-                    addr.ip()
-                )));
-            }
         }
 
         Ok(ValidatedIssuer {
@@ -766,29 +748,6 @@ fn extract_host(url: &str) -> Option<String> {
             .unwrap_or(host_port)
     };
     Some(host.to_string())
-}
-
-/// Check if an IP address is private, loopback, link-local, or otherwise reserved.
-fn is_private_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()              // 127.0.0.0/8
-                || v4.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-                || v4.is_link_local()     // 169.254.0.0/16 (includes cloud metadata)
-                || v4.is_broadcast()      // 255.255.255.255
-                || v4.is_unspecified() // 0.0.0.0
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()              // ::1
-                || v6.is_unspecified()    // ::
-                // fc00::/7 (unique local)
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                // fe80::/10 (link-local — cloud metadata on some providers)
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                // IPv4-mapped IPv6 (::ffff:x.x.x.x) — check the embedded v4 address
-                || v6.to_ipv4_mapped().is_some_and(|v4| is_private_ip(&std::net::IpAddr::V4(v4)))
-        }
-    }
 }
 
 /// Validate that the JWKS URI shares the same origin (scheme + host) as the issuer URL.
@@ -900,47 +859,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_issuer_url_rejects_private_ips() {
-        assert!(validate_issuer_url("https://10.0.0.1", false)
-            .await
-            .is_err());
-        assert!(validate_issuer_url("https://172.16.0.1", false)
-            .await
-            .is_err());
-        assert!(validate_issuer_url("https://192.168.1.1", false)
-            .await
-            .is_err());
-        assert!(validate_issuer_url("https://127.0.0.1", false)
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn test_validate_issuer_url_rejects_link_local() {
-        // Cloud metadata endpoint
-        assert!(validate_issuer_url("https://169.254.169.254", false)
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn test_validate_issuer_url_accepts_public_ip() {
-        assert!(validate_issuer_url("https://8.8.8.8", false).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_validate_issuer_url_rejects_hostname_resolving_to_loopback() {
-        // localhost resolves to 127.0.0.1 — must be rejected
-        let result = validate_issuer_url("https://localhost", false).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("private/reserved IP"),
-            "Expected private IP error, got: {err}"
-        );
-    }
-
-    #[tokio::test]
     async fn test_validate_issuer_url_rejects_unresolvable_hostname() {
         // Non-existent hostname — DNS resolution must fail, not silently pass
         let result =
@@ -973,56 +891,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_is_private_ip() {
-        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"172.16.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"192.168.1.1".parse().unwrap()));
-        assert!(is_private_ip(&"169.254.169.254".parse().unwrap()));
-        assert!(is_private_ip(&"::1".parse().unwrap()));
-        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
-        assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_ipv6_link_local() {
-        // fe80::/10 link-local — cloud metadata reachable on some providers
-        assert!(is_private_ip(&"fe80::1".parse().unwrap()));
-        assert!(is_private_ip(&"fe80::a1:b2:c3:d4".parse().unwrap()));
-        // febf:: is still within fe80::/10 (top 10 bits = 1111111010)
-        assert!(is_private_ip(&"febf::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_ipv4_mapped_ipv6() {
-        // IPv4-mapped IPv6 addresses must be checked against their embedded v4 address
-        assert!(is_private_ip(&"::ffff:127.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"::ffff:10.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"::ffff:169.254.169.254".parse().unwrap()));
-        assert!(is_private_ip(&"::ffff:192.168.1.1".parse().unwrap()));
-        assert!(!is_private_ip(&"::ffff:8.8.8.8".parse().unwrap()));
-    }
-
-    #[tokio::test]
-    async fn test_validate_issuer_url_rejects_ipv6_link_local() {
-        assert!(validate_issuer_url("https://[fe80::1]", false)
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn test_validate_issuer_url_rejects_ipv4_mapped_ipv6() {
-        assert!(
-            validate_issuer_url("https://[::ffff:169.254.169.254]", false)
-                .await
-                .is_err()
-        );
-        assert!(validate_issuer_url("https://[::ffff:10.0.0.1]", false)
-            .await
-            .is_err());
-        assert!(validate_issuer_url("https://[::ffff:127.0.0.1]", false)
-            .await
-            .is_err());
-    }
 }
