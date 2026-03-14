@@ -731,6 +731,7 @@ mod tests {
                     listen_port: None,
                     rules: None,
                     tls,
+                    advertise: false,
                 },
             )]),
         }
@@ -843,6 +844,7 @@ mod tests {
                         ],
                     }]),
                     tls: None,
+                    advertise: false,
                 },
             )]),
         };
@@ -889,6 +891,7 @@ mod tests {
                         }],
                     }]),
                     tls: None,
+                    advertise: false,
                 },
             )]),
         };
@@ -937,6 +940,7 @@ mod tests {
                         secret_name: Some("my-custom-cert".to_string()),
                         issuer_ref: None,
                     }),
+                    advertise: false,
                 },
             )]),
         };
@@ -963,6 +967,7 @@ mod tests {
                     listen_port: None,
                     rules: None,
                     tls: None,
+                    advertise: false,
                 },
             )]),
         };
@@ -991,6 +996,7 @@ mod tests {
                     listen_port: Some(9090),
                     rules: None,
                     tls: None,
+                    advertise: false,
                 },
             )]),
         };
@@ -1023,6 +1029,7 @@ mod tests {
                         listen_port: None,
                         rules: None,
                         tls: None,
+                    advertise: false,
                     },
                 ),
                 (
@@ -1034,6 +1041,7 @@ mod tests {
                         listen_port: None,
                         rules: None,
                         tls: None,
+                    advertise: false,
                     },
                 ),
                 (
@@ -1045,6 +1053,7 @@ mod tests {
                         listen_port: Some(9090),
                         rules: None,
                         tls: None,
+                    advertise: false,
                     },
                 ),
             ]),

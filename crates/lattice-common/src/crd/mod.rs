@@ -6,6 +6,7 @@ mod backup_store;
 mod cedar_policy;
 mod cluster;
 mod cluster_backup;
+mod cluster_routes;
 mod external_endpoint;
 mod infra_provider;
 mod job;
@@ -36,6 +37,10 @@ pub use cluster_backup::{
     LatticeClusterBackupSpec, LatticeClusterBackupStatus,
 };
 pub use cluster_backup::{LabelSelectorOperator, LabelSelectorRequirement, NamespaceSelector};
+pub use cluster_routes::{
+    ClusterRoute, ClusterRoutesPhase, LatticeClusterRoutes, LatticeClusterRoutesSpec,
+    LatticeClusterRoutesStatus,
+};
 pub use external_endpoint::{ParsedEndpoint, Resolution};
 pub use infra_provider::{
     AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,

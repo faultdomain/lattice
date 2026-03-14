@@ -9,6 +9,9 @@
 //! - On connect: Agent sends full subtree state
 //! - On change: Agent sends delta (add/remove)
 //! - Parent aggregates and bubbles up to its own parent
+//!
+//! Service routes are NOT stored here — they go directly to the
+//! `LatticeClusterRoutes` CRD which is the sole source of truth.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -551,18 +551,30 @@ message SubtreeCluster {
   map<string, string> labels = 5;
 }
 
-// Information about a service in the subtree (future use)
+// A service advertised by a cluster in the subtree
+//
+// Populated from LatticeService resources that have ingress routes.
+// Enables multi-cluster service discovery: siblings can resolve
+// dependencies across clusters by asking their parent.
 message SubtreeService {
-  // Service name
+  // LatticeService name
   string name = 1;
-  // Namespace
+  // LatticeService namespace
   string namespace = 2;
   // Cluster hosting this service
   string cluster = 3;
-  // True if this service is being removed
+  // True if this service is being removed (delta only)
   bool removed = 4;
-  // Labels for policy matching
-  map<string, string> labels = 5;
+  // Ingress hostname (from LatticeService ingress route spec)
+  string hostname = 5;
+  // Gateway address (LoadBalancer IP serving this hostname)
+  string address = 6;
+  // Gateway port
+  uint32 port = 7;
+  // Protocol (HTTP, HTTPS, TCP, GRPC)
+  string protocol = 8;
+  // Labels for policy matching and filtering (e.g., lattice.dev/edge-proxy: "true")
+  map<string, string> labels = 9;
 }
 
 // =============================================================================

@@ -7,13 +7,46 @@
 use std::collections::HashMap;
 
 use futures::{StreamExt, TryStreamExt};
+use kube::api::{DynamicObject, GroupVersionKind};
+use kube::discovery::ApiResource;
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::LatticeCluster;
-use lattice_proto::{agent_message::Payload, AgentMessage, SubtreeCluster, SubtreeState};
+use lattice_common::crd::{LatticeCluster, LatticeService};
+use lattice_proto::{
+    agent_message::Payload, AgentMessage, SubtreeCluster, SubtreeService, SubtreeState,
+};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayStatus {
+    #[serde(default)]
+    addresses: Vec<GatewayAddress>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayAddress {
+    #[serde(default)]
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewaySpec {
+    #[serde(default)]
+    listeners: Vec<GatewayListener>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayListener {
+    #[serde(default)]
+    port: u16,
+}
 
 /// Builds and sends subtree state to the parent cell
 pub struct SubtreeSender {
@@ -77,17 +110,115 @@ impl SubtreeSender {
             }
         }
 
+        // Discover local services with ingress routes
+        let services = self.discover_services().await;
+
         info!(
             cluster = %self.cluster_name,
             child_count = clusters.len() - 1,
+            services = services.len(),
             "Built full subtree state"
         );
 
         SubtreeState {
             clusters,
-            services: vec![], // Future: service mesh routing
+            services,
             is_full_sync: true,
         }
+    }
+
+    /// Discover local LatticeService resources with ingress routes and resolve
+    /// their Gateway addresses to build SubtreeService entries.
+    async fn discover_services(&self) -> Vec<SubtreeService> {
+        let mut services = Vec::new();
+
+        // List LatticeService CRDs with ingress specs
+        let svc_api: Api<LatticeService> = Api::all(self.client.clone());
+        let lattice_services = match svc_api.list(&Default::default()).await {
+            Ok(list) => list.items,
+            Err(e) => {
+                warn!(error = %e, "failed to list LatticeService CRDs for service discovery");
+                return services;
+            }
+        };
+
+        // List Gateway objects to resolve LB addresses
+        let gw_gvk = GroupVersionKind::gvk("gateway.networking.k8s.io", "v1", "Gateway");
+        let gw_ar = ApiResource::from_gvk(&gw_gvk);
+        let gw_api: Api<DynamicObject> = Api::all_with(self.client.clone(), &gw_ar);
+        let gateways: HashMap<String, DynamicObject> = match gw_api.list(&Default::default()).await
+        {
+            Ok(list) => list
+                .items
+                .into_iter()
+                .filter_map(|gw| {
+                    let ns = gw.metadata.namespace.as_deref().unwrap_or("default");
+                    let name = gw.metadata.name.as_deref()?;
+                    Some((format!("{ns}/{name}"), gw))
+                })
+                .collect(),
+            Err(e) => {
+                debug!(error = %e, "Gateway API not available, skipping service discovery");
+                return services;
+            }
+        };
+
+        for ls in &lattice_services {
+            let svc_name = match ls.metadata.name.as_deref() {
+                Some(n) => n,
+                None => continue,
+            };
+            let svc_ns = ls.metadata.namespace.as_deref().unwrap_or("default");
+
+            let ingress = match &ls.spec.ingress {
+                Some(i) => i,
+                None => continue,
+            };
+
+            let labels: HashMap<String, String> = ls
+                .metadata
+                .labels
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+
+            for route in ingress.routes.values() {
+                if !route.advertise {
+                    continue;
+                }
+
+                for host in &route.hosts {
+                    // Resolve the Gateway address for this route's gateway class
+                    let (address, port) =
+                        resolve_gateway_address(svc_ns, &gateways);
+
+                    if address.is_empty() {
+                        debug!(
+                            service = svc_name,
+                            namespace = svc_ns,
+                            host,
+                            "no Gateway address found, skipping route"
+                        );
+                        continue;
+                    }
+
+                    services.push(SubtreeService {
+                        name: svc_name.to_string(),
+                        namespace: svc_ns.to_string(),
+                        cluster: self.cluster_name.clone(),
+                        removed: false,
+                        hostname: host.clone(),
+                        address: address.clone(),
+                        port,
+                        protocol: "HTTP".to_string(),
+                        labels: labels.clone(),
+                    });
+                }
+            }
+        }
+
+        services
     }
 
     /// Send full subtree state to parent
@@ -116,92 +247,186 @@ impl SubtreeSender {
         })
     }
 
-    /// Watch for LatticeCluster changes and send deltas
+    /// Watch for LatticeCluster and LatticeService changes and send deltas
     async fn watch_and_send_deltas(&self, message_tx: mpsc::Sender<AgentMessage>) {
-        let api: Api<LatticeCluster> = Api::all(self.client.clone());
-        let config = watcher::Config::default();
+        let cluster_api: Api<LatticeCluster> = Api::all(self.client.clone());
+        let service_api: Api<LatticeService> = Api::all(self.client.clone());
 
-        info!(cluster = %self.cluster_name, "Starting subtree watcher");
+        info!(cluster = %self.cluster_name, "Starting subtree watcher (clusters + services)");
 
-        // Use watcher to get events
-        let mut stream = watcher::watcher(api, config).boxed();
+        let mut cluster_stream =
+            watcher::watcher(cluster_api, watcher::Config::default()).boxed();
+        let mut service_stream =
+            watcher::watcher(service_api, watcher::Config::default()).boxed();
 
-        while let Ok(Some(event)) = stream.try_next().await {
-            match event {
-                Event::Apply(lc) => {
-                    if let Some(name) = lc.metadata.name.as_ref() {
-                        debug!(cluster = %name, "LatticeCluster added/modified");
-
-                        let phase = lc
-                            .status
-                            .as_ref()
-                            .map(|s| format!("{:?}", s.phase))
-                            .unwrap_or_else(|| "Pending".to_string());
-
-                        let delta = SubtreeState {
-                            clusters: vec![SubtreeCluster {
-                                name: name.to_string(),
-                                parent: self.cluster_name.clone(),
-                                removed: false,
-                                phase,
-                                labels: lc
-                                    .metadata
-                                    .labels
-                                    .clone()
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .collect(),
-                            }],
-                            services: vec![],
-                            is_full_sync: false,
-                        };
-
-                        let msg = AgentMessage {
-                            cluster_name: self.cluster_name.clone(),
-                            payload: Some(Payload::SubtreeState(delta)),
-                        };
-
-                        if message_tx.send(msg).await.is_err() {
-                            debug!("Message channel closed, stopping subtree watcher");
+        loop {
+            tokio::select! {
+                event = cluster_stream.try_next() => {
+                    match event {
+                        Ok(Some(event)) => {
+                            if let Some(msg) = self.handle_cluster_event(event) {
+                                if message_tx.send(msg).await.is_err() {
+                                    debug!("Message channel closed, stopping subtree watcher");
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            warn!("Cluster watcher stream ended");
                             break;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Cluster watcher error");
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
                     }
                 }
-                Event::Delete(lc) => {
-                    if let Some(name) = lc.metadata.name.as_ref() {
-                        debug!(cluster = %name, "LatticeCluster deleted");
-
-                        let delta = SubtreeState {
-                            clusters: vec![SubtreeCluster {
-                                name: name.to_string(),
-                                parent: self.cluster_name.clone(),
-                                removed: true,
-                                phase: String::new(),
-                                labels: HashMap::new(),
-                            }],
-                            services: vec![],
-                            is_full_sync: false,
-                        };
-
-                        let msg = AgentMessage {
-                            cluster_name: self.cluster_name.clone(),
-                            payload: Some(Payload::SubtreeState(delta)),
-                        };
-
-                        if message_tx.send(msg).await.is_err() {
-                            debug!("Message channel closed, stopping subtree watcher");
+                event = service_stream.try_next() => {
+                    match event {
+                        Ok(Some(event)) => {
+                            // On any LatticeService change, re-discover all services
+                            // and send a full service update (services only, not clusters)
+                            if self.is_service_change(&event) {
+                                let services = self.discover_services().await;
+                                let delta = SubtreeState {
+                                    clusters: vec![],
+                                    services,
+                                    is_full_sync: false,
+                                };
+                                let msg = AgentMessage {
+                                    cluster_name: self.cluster_name.clone(),
+                                    payload: Some(Payload::SubtreeState(delta)),
+                                };
+                                if message_tx.send(msg).await.is_err() {
+                                    debug!("Message channel closed, stopping subtree watcher");
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            warn!("Service watcher stream ended");
                             break;
                         }
+                        Err(e) => {
+                            warn!(error = %e, "Service watcher error");
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        }
                     }
-                }
-                Event::Init | Event::InitApply(_) | Event::InitDone => {
-                    // Initial sync events - we already sent full state on connect
                 }
             }
         }
 
         info!(cluster = %self.cluster_name, "Subtree watcher stopped");
     }
+
+    /// Handle a LatticeCluster watcher event, returning a delta message if applicable
+    fn handle_cluster_event(&self, event: Event<LatticeCluster>) -> Option<AgentMessage> {
+        match event {
+            Event::Apply(lc) => {
+                let name = lc.metadata.name.as_ref()?;
+                debug!(cluster = %name, "LatticeCluster added/modified");
+
+                let phase = lc
+                    .status
+                    .as_ref()
+                    .map(|s| format!("{:?}", s.phase))
+                    .unwrap_or_else(|| "Pending".to_string());
+
+                let delta = SubtreeState {
+                    clusters: vec![SubtreeCluster {
+                        name: name.to_string(),
+                        parent: self.cluster_name.clone(),
+                        removed: false,
+                        phase,
+                        labels: lc
+                            .metadata
+                            .labels
+                            .clone()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect(),
+                    }],
+                    services: vec![],
+                    is_full_sync: false,
+                };
+
+                Some(AgentMessage {
+                    cluster_name: self.cluster_name.clone(),
+                    payload: Some(Payload::SubtreeState(delta)),
+                })
+            }
+            Event::Delete(lc) => {
+                let name = lc.metadata.name.as_ref()?;
+                debug!(cluster = %name, "LatticeCluster deleted");
+
+                let delta = SubtreeState {
+                    clusters: vec![SubtreeCluster {
+                        name: name.to_string(),
+                        parent: self.cluster_name.clone(),
+                        removed: true,
+                        phase: String::new(),
+                        labels: HashMap::new(),
+                    }],
+                    services: vec![],
+                    is_full_sync: false,
+                };
+
+                Some(AgentMessage {
+                    cluster_name: self.cluster_name.clone(),
+                    payload: Some(Payload::SubtreeState(delta)),
+                })
+            }
+            Event::Init | Event::InitApply(_) | Event::InitDone => None,
+        }
+    }
+
+    /// Check if a LatticeService watcher event represents a meaningful change
+    fn is_service_change(&self, event: &Event<LatticeService>) -> bool {
+        matches!(event, Event::Apply(_) | Event::Delete(_) | Event::InitDone)
+    }
+}
+
+/// Resolve a Gateway LoadBalancer address in a given namespace.
+///
+/// Looks for any Gateway in the namespace and returns its first assigned address
+/// and listener port. Returns ("", 0) if no Gateway is found or has no address yet.
+fn resolve_gateway_address(
+    namespace: &str,
+    gateways: &HashMap<String, DynamicObject>,
+) -> (String, u32) {
+    for (key, gw) in gateways {
+        if !key.starts_with(&format!("{namespace}/")) {
+            continue;
+        }
+
+        let status: Option<GatewayStatus> = gw
+            .data
+            .get("status")
+            .and_then(|s| serde_json::from_value(s.clone()).ok());
+
+        let address = status
+            .as_ref()
+            .and_then(|s| s.addresses.first())
+            .map(|a| a.value.clone())
+            .unwrap_or_default();
+
+        if address.is_empty() {
+            continue;
+        }
+
+        let spec: Option<GatewaySpec> = gw
+            .data
+            .get("spec")
+            .and_then(|s| serde_json::from_value(s.clone()).ok());
+
+        let port = spec
+            .and_then(|s| s.listeners.first().map(|l| l.port as u32))
+            .unwrap_or(80);
+
+        return (address, port);
+    }
+
+    (String::new(), 0)
 }
 
 #[cfg(test)]

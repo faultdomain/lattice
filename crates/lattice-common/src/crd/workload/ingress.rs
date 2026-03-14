@@ -62,6 +62,13 @@ pub struct RouteSpec {
     /// TLS configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<IngressTls>,
+
+    /// Advertise this route to parent clusters for multi-cluster discovery.
+    /// When true, the route's hostname and gateway address are included in
+    /// the agent's subtree state heartbeat, making it visible to the parent
+    /// for DMZ proxy routing or cross-cluster service resolution.
+    #[serde(default)]
+    pub advertise: bool,
 }
 
 /// TLS configuration for ingress — mode is inferred from which fields are set.
@@ -404,6 +411,7 @@ mod tests {
             listen_port: None,
             rules: None,
             tls: None,
+            advertise: false,
         }
     }
 
@@ -447,6 +455,7 @@ mod tests {
                     listen_port: None,
                     rules: None,
                     tls: None,
+                    advertise: false,
                 },
             )]),
         };
@@ -466,6 +475,7 @@ mod tests {
                     listen_port: Some(9090),
                     rules: None,
                     tls: None,
+                    advertise: false,
                 },
             )]),
         };
@@ -485,6 +495,7 @@ mod tests {
                     listen_port: Some(9090),
                     rules: None,
                     tls: None,
+                    advertise: false,
                 },
             )]),
         };
@@ -556,6 +567,7 @@ mod tests {
                             kind: None,
                         }),
                     }),
+                    advertise: false,
                 },
             )]),
         };
@@ -606,6 +618,7 @@ mod tests {
                         }],
                     }]),
                     tls: None,
+                    advertise: false,
                 },
             )]),
         };

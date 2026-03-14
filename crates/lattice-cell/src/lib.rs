@@ -12,6 +12,8 @@
 
 pub mod blocklist;
 pub mod bootstrap;
+// must be declared before server (server uses it)
+pub mod route_reconciler;
 pub mod capi_proxy;
 pub mod cilium;
 pub mod connection;

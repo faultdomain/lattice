@@ -22,7 +22,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::{Api, Client};
-use lattice_common::crd::LatticeCluster;
+use lattice_common::crd::{ClusterRoute, LatticeCluster};
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use lattice_proto::{
@@ -102,6 +102,24 @@ fn extract_delta_changes(state: &SubtreeState) -> (Vec<ClusterInfo>, Vec<String>
         .collect();
     (added, removed)
 }
+
+/// Convert SubtreeState services to ClusterRoute CRD entries
+fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> {
+    state
+        .services
+        .iter()
+        .filter(|s| !s.removed)
+        .map(|s| ClusterRoute {
+            service_name: s.name.clone(),
+            service_namespace: s.namespace.clone(),
+            hostname: s.hostname.clone(),
+            address: s.address.clone(),
+            port: s.port as u16,
+            protocol: s.protocol.clone(),
+        })
+        .collect()
+}
+
 
 /// Handle cluster deletion (unpivot flow)
 ///
@@ -325,6 +343,8 @@ pub struct GrpcServerConfig {
     pub kube_client: Client,
     /// Certificate blocklist for immediate revocation
     pub blocklist: crate::blocklist::CertificateBlocklist,
+    /// Channel for sending route updates to the reconciler
+    pub route_update_tx: crate::route_reconciler::RouteUpdateSender,
 }
 
 /// gRPC server for agent communication
@@ -336,6 +356,8 @@ pub struct AgentServer {
     kube_client: Client,
     /// Certificate blocklist for immediate revocation
     blocklist: crate::blocklist::CertificateBlocklist,
+    /// Channel for sending route updates to the reconciler
+    route_update_tx: crate::route_reconciler::RouteUpdateSender,
 }
 
 /// Process an agent message (standalone function to avoid temporary object creation)
@@ -345,6 +367,7 @@ async fn process_agent_message(
     msg: &AgentMessage,
     command_tx: &mpsc::Sender<CellCommand>,
     kube_client: &Client,
+    route_update_tx: &crate::route_reconciler::RouteUpdateSender,
 ) {
     let cluster_name = &msg.cluster_name;
 
@@ -602,10 +625,9 @@ async fn process_agent_message(
                 "Subtree state received"
             );
 
+            // Update cluster routing in the subtree registry
             if state.is_full_sync {
-                // Full sync: replace all clusters from this agent
                 let clusters = convert_subtree_to_cluster_infos(state);
-
                 info!(
                     cluster = %cluster_name,
                     subtree_clusters = clusters.len(),
@@ -615,9 +637,7 @@ async fn process_agent_message(
                     .handle_full_sync(cluster_name, clusters)
                     .await;
             } else {
-                // Delta: add/remove specific clusters
                 let (added, removed) = extract_delta_changes(state);
-
                 if !added.is_empty() || !removed.is_empty() {
                     debug!(
                         cluster = %cluster_name,
@@ -629,6 +649,22 @@ async fn process_agent_message(
                 subtree_registry
                     .handle_delta(cluster_name, added, removed)
                     .await;
+            }
+
+            // Send service routes to the reconciler via channel
+            if !state.services.is_empty() || state.is_full_sync {
+                let routes = convert_subtree_to_cluster_routes(state);
+                let update = crate::route_reconciler::RouteUpdate {
+                    cluster_name: cluster_name.to_string(),
+                    routes,
+                };
+                if let Err(e) = route_update_tx.send(update).await {
+                    warn!(
+                        cluster = %cluster_name,
+                        error = %e,
+                        "failed to send route update to reconciler"
+                    );
+                }
             }
         }
         Some(Payload::ExecData(data)) => {
@@ -703,12 +739,14 @@ impl AgentServer {
         subtree_registry: SharedSubtreeRegistry,
         kube_client: Client,
         blocklist: crate::blocklist::CertificateBlocklist,
+        route_update_tx: crate::route_reconciler::RouteUpdateSender,
     ) -> Self {
         Self {
             registry,
             subtree_registry,
             kube_client,
             blocklist,
+            route_update_tx,
         }
     }
 
@@ -733,6 +771,7 @@ impl AgentServer {
             config.subtree_registry,
             config.kube_client,
             config.blocklist,
+            config.route_update_tx,
         );
         let tls_config = config.mtls_config.to_tonic_config()?;
         let addr = config.addr;
@@ -843,6 +882,7 @@ impl LatticeAgent for AgentServer {
         let registry = self.registry.clone();
         let subtree_registry = self.subtree_registry.clone();
         let kube_client = self.kube_client.clone();
+        let route_update_tx = self.route_update_tx.clone();
         let command_tx_clone = command_tx.clone();
 
         // Spawn task to handle incoming messages
@@ -868,6 +908,7 @@ impl LatticeAgent for AgentServer {
                             &msg,
                             &command_tx_clone,
                             &kube_client,
+                            &route_update_tx,
                         )
                         .await;
                     }
@@ -954,6 +995,8 @@ mod tests {
                         .handle_delta(cluster_name, added, removed)
                         .await;
                 }
+                // Note: service routes (LatticeClusterRoutes CRD) not tested here
+                // since test_handle_message doesn't have a kube client
             }
             Some(Payload::ExecData(_)) => {}
             Some(Payload::Event(_)) => {}
