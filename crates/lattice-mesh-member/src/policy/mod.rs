@@ -17,9 +17,7 @@ use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
-use lattice_common::policy::service_entry::{
-    ServiceEntry, ServiceEntryEndpoint, ServiceEntryPort, ServiceEntrySpec,
-};
+use lattice_common::policy::service_entry::ServiceEntry;
 
 // =============================================================================
 // Generated Policies Container
@@ -173,7 +171,7 @@ impl<'a> PolicyCompiler<'a> {
         self.compile_egress(&service_node, namespace, &mut output);
 
         // Cross-cluster egress: ServiceEntry for remote dependencies
-        self.compile_remote_egress(&outbound_edges, namespace, &mut output);
+        self.compile_remote_egress(&service_node, &outbound_edges, namespace, &mut output);
 
         // Stamp owner references for crash-safe K8s GC
         output.stamp_owner_refs(&self.owner_refs);
@@ -228,14 +226,18 @@ impl<'a> PolicyCompiler<'a> {
     ///
     /// For each outbound edge that resolves to a `ServiceType::Remote` node,
     /// creates a ServiceEntry so the mesh routes traffic to the remote gateway.
+    /// Generate ServiceEntry + AuthorizationPolicy for remote (cross-cluster) dependencies.
+    ///
+    /// Reuses the same FQDN egress compilation path that works for external services.
+    /// The remote hostname is treated as an FQDN egress target with DNS resolution.
     fn compile_remote_egress(
         &self,
+        service_node: &lattice_common::graph::ServiceNode,
         outbound_edges: &[lattice_common::graph::ActiveEdge],
         namespace: &str,
         output: &mut GeneratedPolicies,
     ) {
         use lattice_common::graph::ServiceType;
-        use lattice_common::kube_utils::ObjectMeta;
 
         for edge in outbound_edges {
             let Some(dep) = self
@@ -246,7 +248,6 @@ impl<'a> PolicyCompiler<'a> {
             };
 
             let ServiceType::Remote {
-                ref address,
                 port,
                 ref hostname,
                 ..
@@ -255,49 +256,21 @@ impl<'a> PolicyCompiler<'a> {
                 continue;
             };
 
-            let se_name = format!("remote-{}-{}", dep.namespace, dep.name);
-
-            // ServiceEntry with waypoint label so Istio ambient routes through
-            // the waypoint proxy for L7 AuthorizationPolicy enforcement.
-            let se_metadata = ObjectMeta::new(&se_name, namespace)
-                .with_label("lattice.dev/managed-by", "lattice-mesh-member")
-                .with_label(
-                    lattice_common::mesh::USE_WAYPOINT_LABEL,
-                    lattice_common::mesh::waypoint_name(namespace),
-                );
-
-            output.service_entries.push(ServiceEntry::new(
-                se_metadata,
-                ServiceEntrySpec {
-                    hosts: vec![hostname.clone()],
-                    endpoints: vec![ServiceEntryEndpoint {
-                        address: address.clone(),
-                    }],
-                    ports: vec![ServiceEntryPort {
-                        number: port,
-                        name: "http".to_string(),
-                        protocol: "HTTP".to_string(),
-                    }],
-                    location: "MESH_EXTERNAL".to_string(),
-                    resolution: "STATIC".to_string(),
-                },
-            ));
-
-            // AuthorizationPolicy restricting which local services can use this
-            // remote ServiceEntry (caller-side bilateral agreement enforcement).
-            let caller_principal = lattice_common::mesh::trust_domain::principal(
-                &self.cluster_name,
-                &edge.caller_namespace,
-                &edge.caller_name,
-            );
+            output
+                .service_entries
+                .push(self.compile_fqdn_egress_service_entry(
+                    &service_node.name,
+                    namespace,
+                    hostname,
+                    &[port],
+                ));
             output
                 .authorization_policies
-                .push(AuthorizationPolicy::allow_to_service(
-                    format!("allow-remote-{}-{}", dep.namespace, dep.name),
+                .push(self.compile_fqdn_egress_access_policy(
+                    service_node,
                     namespace,
-                    se_name,
-                    vec![caller_principal],
-                    vec![port.to_string()],
+                    hostname,
+                    &[port],
                 ));
         }
     }
