@@ -17,7 +17,7 @@ use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
-use lattice_common::policy::service_entry::ServiceEntry;
+use lattice_common::policy::service_entry::{ServiceEntry, ServiceEntryPort, ServiceEntrySpec};
 
 // =============================================================================
 // Generated Policies Container
@@ -170,6 +170,9 @@ impl<'a> PolicyCompiler<'a> {
         // Handles inline external endpoints and FQDN egress rules.
         self.compile_egress(&service_node, namespace, &mut output);
 
+        // Cross-cluster egress: ServiceEntry for remote dependencies
+        self.compile_remote_egress(&outbound_edges, namespace, &mut output);
+
         // Stamp owner references for crash-safe K8s GC
         output.stamp_owner_refs(&self.owner_refs);
 
@@ -216,6 +219,67 @@ impl<'a> PolicyCompiler<'a> {
             {
                 output.authorization_policies.push(waypoint_policy);
             }
+        }
+    }
+
+    /// Generate ServiceEntry objects for remote (cross-cluster) outbound dependencies.
+    ///
+    /// For each outbound edge that resolves to a `ServiceType::Remote` node,
+    /// creates a ServiceEntry so the mesh routes traffic to the remote gateway.
+    fn compile_remote_egress(
+        &self,
+        outbound_edges: &[lattice_common::graph::ActiveEdge],
+        namespace: &str,
+        output: &mut GeneratedPolicies,
+    ) {
+        use lattice_common::graph::ServiceType;
+        use lattice_common::kube_utils::ObjectMeta;
+
+        for edge in outbound_edges {
+            let Some(dep) = self
+                .graph
+                .get_service(&edge.callee_namespace, &edge.callee_name)
+            else {
+                continue;
+            };
+
+            let ServiceType::Remote {
+                ref address,
+                port,
+                ref hostname,
+            } = dep.type_
+            else {
+                continue;
+            };
+
+            let se_name = format!("remote-{}-{}", dep.namespace, dep.name);
+
+            // ServiceEntry with STATIC resolution — maps hostname to the remote
+            // gateway LB IP. HTTPS protocol ensures TLS encryption. The backend
+            // Gateway terminates TLS with a cert from the shared CA.
+            output.service_entries.push(ServiceEntry::new(
+                ObjectMeta {
+                    name: se_name,
+                    namespace: namespace.to_string(),
+                    labels: std::collections::BTreeMap::from([(
+                        "lattice.dev/managed-by".to_string(),
+                        "lattice-mesh-member".to_string(),
+                    )]),
+                    annotations: std::collections::BTreeMap::new(),
+                    owner_references: Vec::new(),
+                },
+                ServiceEntrySpec {
+                    hosts: vec![hostname.clone()],
+                    addresses: vec![address.clone()],
+                    ports: vec![ServiceEntryPort {
+                        number: port,
+                        name: "https".to_string(),
+                        protocol: "HTTPS".to_string(),
+                    }],
+                    location: "MESH_EXTERNAL".to_string(),
+                    resolution: "STATIC".to_string(),
+                },
+            ));
         }
     }
 }

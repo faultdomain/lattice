@@ -155,6 +155,8 @@ pub async fn build_service_controllers(
     let cedar_policies: Api<CedarPolicy> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let mesh_members_for_svc: Api<LatticeMeshMember> = Api::all(client.clone());
+    let cluster_routes_for_svc: Api<LatticeClusterRoutes> = Api::all(client.clone());
+    let graph_for_route_watch = service_ctx.graph.clone();
 
     let svc_ctrl = Controller::new(services, watcher_config())
         .watches(services_for_watch, watcher_config(), move |service| {
@@ -194,6 +196,13 @@ pub async fn build_service_controllers(
                 .into_iter()
                 .map(|dep| ObjectRef::<LatticeService>::new(&dep).within(&ns))
                 .collect()
+        })
+        .watches(cluster_routes_for_svc, watcher_config(), move |routes| {
+            let graph = graph_for_route_watch.clone();
+            // Sync all remote services from all LatticeClusterRoutes CRDs
+            graph.sync_remote_services(&routes.spec.routes);
+            // Re-reconcile all services since any of them might have cross-cluster deps
+            all_service_refs(&graph)
         })
         .shutdown_on_signal()
         .run(

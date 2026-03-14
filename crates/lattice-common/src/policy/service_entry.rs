@@ -47,6 +47,9 @@ impl ServiceEntry {
 pub struct ServiceEntrySpec {
     /// Hosts (DNS names)
     pub hosts: Vec<String>,
+    /// Addresses (IPs for STATIC resolution)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
     /// Ports
     pub ports: Vec<ServiceEntryPort>,
     /// Location: MESH_EXTERNAL or MESH_INTERNAL
