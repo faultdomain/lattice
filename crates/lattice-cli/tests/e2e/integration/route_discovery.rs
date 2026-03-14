@@ -350,7 +350,6 @@ pub async fn verify_cross_cluster_auth_policy(
 pub async fn run_route_discovery_tests(
     mgmt_kubeconfig: &str,
     workload_kubeconfig: &str,
-    workload_cluster_name: &str,
 ) -> Result<(), String> {
     info!("[RouteDiscovery] Starting cross-cluster route discovery tests...");
 
@@ -374,13 +373,16 @@ pub async fn run_route_discovery_tests(
     wait_for_service_phase(workload_kubeconfig, ROUTE_TEST_NS, "route-target", "Ready", None, DEFAULT_TIMEOUT).await?;
     info!("[RouteDiscovery] Advertised service deployed on workload cluster");
 
-    // Verify routes propagate to parent
+    // Verify routes propagate to parent's LatticeClusterRoutes CRD.
+    // The parent's CRD is named after itself (e.g., "e2e-mgmt") and contains
+    // the union of its own routes + all children's routes.
+    let mgmt_cluster_name = super::super::helpers::MGMT_CLUSTER_NAME;
     verify_child_routes(
         mgmt_kubeconfig,
-        workload_cluster_name,
+        mgmt_cluster_name,
         &["route-target.test.local"],
     ).await?;
-    verify_route_status(mgmt_kubeconfig, workload_cluster_name).await?;
+    verify_route_status(mgmt_kubeconfig, mgmt_cluster_name).await?;
     info!("[RouteDiscovery] Routes propagated to parent cluster");
 
     // Verify Gateway has frontend mTLS on workload cluster
@@ -441,12 +443,10 @@ async fn test_route_discovery_standalone() {
 
     let workload_kc = session.ctx.workload_kubeconfig.as_deref()
         .expect("requires workload kubeconfig");
-    let workload_name = super::super::helpers::WORKLOAD_CLUSTER_NAME;
 
     run_route_discovery_tests(
         &session.ctx.mgmt_kubeconfig,
         workload_kc,
-        workload_name,
     ).await.unwrap();
 }
 

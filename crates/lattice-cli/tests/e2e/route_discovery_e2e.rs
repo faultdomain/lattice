@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use super::context::run_per_integration_e2e;
-use super::helpers::WORKLOAD_CLUSTER_NAME;
 use super::integration;
 
 #[tokio::test]
@@ -19,15 +18,12 @@ async fn test_route_discovery_e2e() {
         |ctx| async move {
             let workload_kc = ctx.require_workload()?;
 
-            // Full route discovery pipeline
             integration::route_discovery::run_route_discovery_tests(
                 &ctx.mgmt_kubeconfig,
                 workload_kc,
-                WORKLOAD_CLUSTER_NAME,
             )
             .await?;
 
-            // Fail-closed: restricted allowedServices generates AuthorizationPolicy
             integration::route_discovery::run_restricted_advertise_tests(workload_kc).await?;
 
             Ok(())

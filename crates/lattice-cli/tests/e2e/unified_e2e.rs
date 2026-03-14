@@ -297,7 +297,6 @@ async fn run_full_e2e() -> Result<(), String> {
                 integration::route_discovery::run_route_discovery_tests(
                     &mgmt_kc,
                     &workload_kc,
-                    WORKLOAD_CLUSTER_NAME,
                 )
                 .await?;
                 integration::route_discovery::run_restricted_advertise_tests(&workload_kc).await?;
