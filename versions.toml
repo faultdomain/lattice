@@ -24,25 +24,25 @@ chart = "cilium/cilium"
 filename = "cilium-{version}.tgz"
 
 [charts.istio-base]
-version = "1.29.0"
+version = "1.29.1"
 repo = "https://istio-release.storage.googleapis.com/charts"
 chart = "istio/base"
 filename = "base-{version}.tgz"
 
 [charts.istiod]
-version = "1.29.0"
+version = "1.29.1"
 repo = "https://istio-release.storage.googleapis.com/charts"
 chart = "istio/istiod"
 filename = "istiod-{version}.tgz"
 
 [charts.istio-cni]
-version = "1.29.0"
+version = "1.29.1"
 repo = "https://istio-release.storage.googleapis.com/charts"
 chart = "istio/cni"
 filename = "cni-{version}.tgz"
 
 [charts.ztunnel]
-version = "1.29.0"
+version = "1.29.1"
 repo = "https://istio-release.storage.googleapis.com/charts"
 chart = "istio/ztunnel"
 filename = "ztunnel-{version}.tgz"
