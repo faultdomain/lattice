@@ -248,6 +248,7 @@ impl<'a> PolicyCompiler<'a> {
             };
 
             let ServiceType::Remote {
+                ref address,
                 port,
                 ref hostname,
                 ..
@@ -256,14 +257,20 @@ impl<'a> PolicyCompiler<'a> {
                 continue;
             };
 
-            output
-                .service_entries
-                .push(self.compile_fqdn_egress_service_entry(
-                    &service_node.name,
-                    namespace,
-                    hostname,
-                    &[port],
-                ));
+            // Build the same ServiceEntry as FQDN egress, then add the
+            // endpoint IP so ztunnel can route without external DNS.
+            let mut se = self.compile_fqdn_egress_service_entry(
+                &service_node.name,
+                namespace,
+                hostname,
+                &[port],
+            );
+            se.spec.endpoints.push(
+                lattice_common::policy::service_entry::ServiceEntryEndpoint {
+                    address: address.clone(),
+                },
+            );
+            output.service_entries.push(se);
             output
                 .authorization_policies
                 .push(self.compile_fqdn_egress_access_policy(
