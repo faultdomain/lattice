@@ -157,13 +157,12 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
         }
 
         // Write local routes to self-named CRD only (no merging)
-        if local_routes != last_written_local {
-            if write_cluster_routes(&api, &cluster_name, &local_routes)
+        if local_routes != last_written_local
+            && write_cluster_routes(&api, &cluster_name, &local_routes)
                 .await
                 .is_ok()
-            {
-                last_written_local = local_routes.clone();
-            }
+        {
+            last_written_local = local_routes.clone();
         }
 
         // Write each child's routes to a per-child CRD

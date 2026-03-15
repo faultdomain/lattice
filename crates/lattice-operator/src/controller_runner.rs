@@ -310,7 +310,7 @@ pub fn spawn_remote_secret_controller(
     client: Client,
     proxy_base_url: String,
     ca_cert_pem: String,
-) {
+) -> tokio::task::JoinHandle<()> {
     let ctx = Arc::new(remote_secret::RemoteSecretContext {
         client: client.clone(),
         proxy_base_url,
@@ -319,7 +319,7 @@ pub fn spawn_remote_secret_controller(
 
     tracing::info!("- RemoteSecret controller");
 
-    tokio::spawn(
+    tokio::spawn(async move {
         Controller::new(
             Api::<LatticeClusterRoutes>::all(client),
             WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
@@ -330,8 +330,11 @@ pub fn spawn_remote_secret_controller(
             lattice_common::default_error_policy,
             ctx,
         )
-        .for_each(log_reconcile_result("RemoteSecret")),
-    );
+        .for_each(log_reconcile_result("RemoteSecret"))
+        .await;
+
+        tracing::error!("RemoteSecret controller exited — multi-cluster discovery will stop");
+    })
 }
 
 /// Build job controller futures (LatticeJob)

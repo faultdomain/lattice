@@ -462,22 +462,38 @@ pub async fn verify_eastwest_gateway(kubeconfig: &str) -> Result<(), String> {
 pub async fn verify_cacerts(kubeconfig: &str) -> Result<(), String> {
     info!("[RouteDiscovery] Checking for cacerts Secret...");
 
-    let output = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "secret", "cacerts", "-n", "istio-system", "-o", "json",
-    ]).await?;
+    wait_for_condition(
+        "cacerts Secret",
+        DEFAULT_TIMEOUT,
+        Duration::from_secs(10),
+        || {
+            let kc = kubeconfig.to_string();
+            async move {
+                let output = match run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "get", "secret", "cacerts", "-n", "istio-system", "-o", "json",
+                ]).await {
+                    Ok(o) => o,
+                    Err(_) => return Ok(false),
+                };
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
+                let parsed: serde_json::Value = match serde_json::from_str(&output) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(false),
+                };
 
-    let data = parsed["data"].as_object()
-        .ok_or("cacerts Secret has no data")?;
+                let has_all_keys = parsed["data"].as_object()
+                    .map(|data| {
+                        ["ca-cert.pem", "ca-key.pem", "root-cert.pem", "cert-chain.pem"]
+                            .iter()
+                            .all(|k| data.contains_key(*k))
+                    })
+                    .unwrap_or(false);
 
-    for key in &["ca-cert.pem", "ca-key.pem", "root-cert.pem", "cert-chain.pem"] {
-        if !data.contains_key(*key) {
-            return Err(format!("cacerts Secret missing key '{}'", key));
-        }
-    }
+                Ok(has_all_keys)
+            }
+        },
+    ).await?;
 
     info!("[RouteDiscovery] cacerts Secret verified with all required keys");
     Ok(())

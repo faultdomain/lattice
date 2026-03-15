@@ -128,16 +128,15 @@ impl AgentConnection {
         self.pivot_complete = complete;
     }
 
-    /// Check if agent is ready for pivot
+    /// Check if agent is ready for pivot.
     ///
-    /// Agent must be in a valid state AND have CAPI installed.
+    /// Agent must be in a healthy state AND have CAPI installed.
+    /// Failed clusters are excluded — pivoting CAPI resources to a broken
+    /// cluster risks making them unrecoverable.
     pub fn is_ready_for_pivot(&self) -> bool {
         let valid_state = matches!(
             self.state,
-            AgentState::Provisioning
-                | AgentState::Ready
-                | AgentState::Degraded
-                | AgentState::Failed
+            AgentState::Provisioning | AgentState::Ready | AgentState::Degraded
         );
         valid_state && self.capi_ready
     }
@@ -292,17 +291,23 @@ impl AgentRegistry {
     pub fn register(&self, mut connection: AgentConnection) {
         let cluster_name = connection.cluster_name.clone();
         let command_tx = connection.command_tx.clone();
-        let is_reconnect = self.agents.contains_key(&cluster_name);
-
-        // Preserve pivot_complete status across reconnections
-        if let Some(existing) = self.agents.get(&cluster_name) {
-            if existing.pivot_complete {
-                connection.pivot_complete = true;
-            }
-        }
-
         connection.connected = true;
-        self.agents.insert(cluster_name.clone(), connection);
+
+        // Atomic read-modify-write: preserve pivot_complete from any existing
+        // entry and detect reconnect in a single DashMap lock acquisition.
+        let is_reconnect = match self.agents.entry(cluster_name.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if entry.get().pivot_complete {
+                    connection.pivot_complete = true;
+                }
+                entry.insert(connection);
+                true
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(connection);
+                false
+            }
+        };
 
         if is_reconnect {
             info!(cluster = %cluster_name, "Agent reconnected");
@@ -328,8 +333,10 @@ impl AgentRegistry {
         if let Some(mut agent) = self.agents.get_mut(cluster_name) {
             agent.connected = false;
             agent.disconnected_at = Some(Instant::now());
-            // Clear teardown guard when agent disconnects
-            self.teardown_in_progress.remove(cluster_name);
+            // Teardown guard is NOT cleared on disconnect — it's cleared by
+            // finish_teardown() on completion or evicted by TEARDOWN_GUARD_TTL
+            // if the background task crashes. Clearing here would allow a
+            // reconnecting agent to trigger duplicate CAPI imports.
             info!(cluster = %cluster_name, "Agent disconnected");
         }
     }
@@ -524,13 +531,14 @@ impl AgentRegistry {
             .filter(|r| r.connected)
             .map(|r| {
                 let agent = r.value();
+                let clamp = |v: i32| v.max(0) as u32;
                 let (ready_nodes, total_nodes, ready_cp, total_cp) =
                     if let Some(ref h) = agent.health {
                         (
-                            h.ready_nodes as u32,
-                            h.total_nodes as u32,
-                            h.ready_control_plane as u32,
-                            h.total_control_plane as u32,
+                            clamp(h.ready_nodes),
+                            clamp(h.total_nodes),
+                            clamp(h.ready_control_plane),
+                            clamp(h.total_control_plane),
                         )
                     } else {
                         (0, 0, 0, 0)

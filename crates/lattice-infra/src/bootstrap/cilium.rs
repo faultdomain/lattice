@@ -263,7 +263,11 @@ pub fn generate_eastwest_gateway_policy() -> CiliumClusterwideNetworkPolicy {
                 "Allow east-west gateway to receive cross-cluster HBONE traffic from external networks"
                     .to_string(),
             ),
-            enable_default_deny: None,
+            // Purely additive — egress is covered by mesh-proxy-egress policy
+            enable_default_deny: Some(EnableDefaultDeny {
+                egress: false,
+                ingress: false,
+            }),
             endpoint_selector: EndpointSelector::from_labels(BTreeMap::from([
                 (
                     "k8s:io.kubernetes.pod.namespace".to_string(),

@@ -77,18 +77,23 @@ pub enum ImportError {
     UnpauseResources(#[source] lattice_move::MoveError),
 }
 
-/// Convert SubtreeState clusters to ClusterInfo, filtering out removed clusters
-fn convert_subtree_to_cluster_infos(state: &SubtreeState) -> Vec<ClusterInfo> {
+/// Convert SubtreeState clusters to ClusterInfo, filtering out removed clusters.
+///
+/// Returns an error if the payload exceeds size limits — callers must handle
+/// this explicitly rather than proceeding with empty state.
+fn convert_subtree_to_cluster_infos(
+    state: &SubtreeState,
+) -> Result<Vec<ClusterInfo>, &'static str> {
     if state.clusters.len() > *MAX_CLUSTERS_PER_SUBTREE {
         warn!(
             count = state.clusters.len(),
             max = *MAX_CLUSTERS_PER_SUBTREE,
             "rejecting SubtreeState: too many cluster entries"
         );
-        return Vec::new();
+        return Err("SubtreeState exceeds MAX_CLUSTERS_PER_SUBTREE");
     }
 
-    state
+    Ok(state
         .clusters
         .iter()
         .filter(|c| !c.removed)
@@ -98,19 +103,21 @@ fn convert_subtree_to_cluster_infos(state: &SubtreeState) -> Vec<ClusterInfo> {
             phase: c.phase.clone(),
             labels: c.labels.clone(),
         })
-        .collect()
+        .collect())
 }
 
 /// Extract delta changes from SubtreeState (added and removed cluster names)
-fn extract_delta_changes(state: &SubtreeState) -> (Vec<ClusterInfo>, Vec<String>) {
-    let added = convert_subtree_to_cluster_infos(state);
+fn extract_delta_changes(
+    state: &SubtreeState,
+) -> Result<(Vec<ClusterInfo>, Vec<String>), &'static str> {
+    let added = convert_subtree_to_cluster_infos(state)?;
     let removed = state
         .clusters
         .iter()
         .filter(|c| c.removed)
         .map(|c| c.name.clone())
         .collect();
-    (added, removed)
+    Ok((added, removed))
 }
 
 /// Handle a cross-cluster service lookup by checking local LatticeClusterRoutes CRDs.
@@ -134,10 +141,13 @@ async fn handle_service_lookup(
                     {
                         // Check that the requesting cluster is authorized to
                         // discover this route (bilateral agreement check).
-                        let allowed = route
-                            .allowed_services
-                            .iter()
-                            .any(|s| s == "*" || s.starts_with(&format!("{requesting_cluster}/")));
+                        let allowed = route.allowed_services.iter().any(|s| {
+                            s == "*"
+                                || s.split('/')
+                                    .next()
+                                    .map(|cluster| cluster == requesting_cluster)
+                                    .unwrap_or(false)
+                        });
                         if !allowed {
                             debug!(
                                 service = %req.service_name,
@@ -214,14 +224,14 @@ static MAX_CLUSTERS_PER_SUBTREE: LazyLock<usize> = LazyLock::new(|| {
 fn group_subtree_routes_by_cluster(
     state: &SubtreeState,
     sender_cluster: &str,
-) -> std::collections::HashMap<String, Vec<ClusterRoute>> {
+) -> Result<std::collections::HashMap<String, Vec<ClusterRoute>>, &'static str> {
     if state.services.len() > *MAX_ROUTES_PER_CLUSTER {
         warn!(
             count = state.services.len(),
             max = *MAX_ROUTES_PER_CLUSTER,
             "rejecting SubtreeState: too many service routes"
         );
-        return std::collections::HashMap::new();
+        return Err("SubtreeState exceeds MAX_ROUTES_PER_CLUSTER");
     }
 
     let mut grouped: std::collections::HashMap<String, Vec<ClusterRoute>> =
@@ -256,7 +266,7 @@ fn group_subtree_routes_by_cluster(
         grouped.entry(origin).or_default().push(route);
     }
 
-    grouped
+    Ok(grouped)
 }
 
 /// Handle cluster deletion (unpivot flow)
@@ -765,35 +775,55 @@ async fn process_agent_message(
 
             // Update cluster routing in the subtree registry
             if state.is_full_sync {
-                let clusters = convert_subtree_to_cluster_infos(state);
-                info!(
-                    cluster = %cluster_name,
-                    subtree_clusters = clusters.len(),
-                    "Full sync: updating subtree registry"
-                );
-                subtree_registry
-                    .handle_full_sync(cluster_name, clusters)
-                    .await;
-            } else {
-                let (added, removed) = extract_delta_changes(state);
-                if !added.is_empty() || !removed.is_empty() {
-                    debug!(
-                        cluster = %cluster_name,
-                        added = added.len(),
-                        removed = removed.len(),
-                        "Delta: updating subtree registry"
-                    );
+                match convert_subtree_to_cluster_infos(state) {
+                    Ok(clusters) => {
+                        info!(
+                            cluster = %cluster_name,
+                            subtree_clusters = clusters.len(),
+                            "Full sync: updating subtree registry"
+                        );
+                        subtree_registry
+                            .handle_full_sync(cluster_name, clusters)
+                            .await;
+                    }
+                    Err(e) => {
+                        error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
+                        return;
+                    }
                 }
-                subtree_registry
-                    .handle_delta(cluster_name, added, removed)
-                    .await;
+            } else {
+                match extract_delta_changes(state) {
+                    Ok((added, removed)) => {
+                        if !added.is_empty() || !removed.is_empty() {
+                            debug!(
+                                cluster = %cluster_name,
+                                added = added.len(),
+                                removed = removed.len(),
+                                "Delta: updating subtree registry"
+                            );
+                        }
+                        subtree_registry
+                            .handle_delta(cluster_name, added, removed)
+                            .await;
+                    }
+                    Err(e) => {
+                        error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
+                        return;
+                    }
+                }
             }
 
             // Send service routes to the reconciler, grouped by originating cluster.
             // Each SubtreeService carries the cluster name of its origin so routes
             // propagate up the hierarchy without losing provenance.
             if !state.services.is_empty() || state.is_full_sync {
-                let grouped = group_subtree_routes_by_cluster(state, cluster_name);
+                let grouped = match group_subtree_routes_by_cluster(state, cluster_name) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        error!(cluster = %cluster_name, error = %e, "rejecting oversized route state");
+                        return;
+                    }
+                };
                 for (origin, origin_routes) in grouped {
                     let update = crate::route_reconciler::RouteUpdate {
                         cluster_name: origin,
@@ -1168,12 +1198,12 @@ mod tests {
             Some(Payload::MoveCompleteAck(_)) => {}
             Some(Payload::SubtreeState(state)) => {
                 if state.is_full_sync {
-                    let clusters = convert_subtree_to_cluster_infos(state);
-                    subtree_registry
-                        .handle_full_sync(cluster_name, clusters)
-                        .await;
-                } else {
-                    let (added, removed) = extract_delta_changes(state);
+                    if let Ok(clusters) = convert_subtree_to_cluster_infos(state) {
+                        subtree_registry
+                            .handle_full_sync(cluster_name, clusters)
+                            .await;
+                    }
+                } else if let Ok((added, removed)) = extract_delta_changes(state) {
                     subtree_registry
                         .handle_delta(cluster_name, added, removed)
                         .await;
@@ -1586,7 +1616,7 @@ mod tests {
             is_full_sync: true,
         };
 
-        let grouped = group_subtree_routes_by_cluster(&state, "child");
+        let grouped = group_subtree_routes_by_cluster(&state, "child").unwrap();
         let routes = &grouped["backend"];
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].service_name, "jellyfin");
@@ -1600,7 +1630,7 @@ mod tests {
             is_full_sync: true,
         };
 
-        let grouped = group_subtree_routes_by_cluster(&state, "child");
+        let grouped = group_subtree_routes_by_cluster(&state, "child").unwrap();
         assert!(grouped.is_empty());
     }
 
@@ -1623,7 +1653,7 @@ mod tests {
             is_full_sync: false,
         };
 
-        let grouped = group_subtree_routes_by_cluster(&state, "child");
+        let grouped = group_subtree_routes_by_cluster(&state, "child").unwrap();
         let routes = &grouped["backend"];
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].service_name, "api");
@@ -1667,7 +1697,7 @@ mod tests {
             is_full_sync: false,
         };
 
-        let grouped = group_subtree_routes_by_cluster(&state, "parent");
+        let grouped = group_subtree_routes_by_cluster(&state, "parent").unwrap();
         assert_eq!(grouped.len(), 2);
         assert_eq!(grouped["cluster-a"].len(), 1);
         assert_eq!(grouped["cluster-a"][0].service_name, "api");
@@ -1694,7 +1724,7 @@ mod tests {
             is_full_sync: false,
         };
 
-        let grouped = group_subtree_routes_by_cluster(&state, "sender-cluster");
+        let grouped = group_subtree_routes_by_cluster(&state, "sender-cluster").unwrap();
         assert_eq!(grouped.len(), 1);
         assert!(grouped.contains_key("sender-cluster"));
     }

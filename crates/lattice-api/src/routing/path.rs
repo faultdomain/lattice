@@ -76,6 +76,12 @@ pub fn parse_cluster_path(url_path: &str) -> Option<(String, String)> {
             break;
         }
 
+        // Reject segments that aren't valid DNS labels (prevents URL-encoded
+        // injection and extremely long segments from reaching downstream systems)
+        if lattice_common::crd::validate_dns_label(name, "cluster path segment").is_err() {
+            return None;
+        }
+
         segments.push(name.to_string());
         remaining = tail;
     }

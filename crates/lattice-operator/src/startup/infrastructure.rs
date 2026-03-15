@@ -164,6 +164,7 @@ async fn resolve_infra_config(
             tracing::info!(cluster = %cluster_name, "no LatticeCluster CRD, using env config");
             Ok(InfrastructureConfig {
                 cluster_name,
+                root_ca,
                 monitoring: MonitoringConfig {
                     enabled: false,
                     ha: false,

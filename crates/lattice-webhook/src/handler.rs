@@ -57,13 +57,16 @@ pub async fn validate_handler(
             validator.validate(&request)
         }
         None => {
-            tracing::warn!(
+            tracing::error!(
                 group = group,
                 version = version,
                 resource = resource_name,
-                "No validator found, allowing request"
+                "No validator registered — denying request (fail-closed)"
             );
-            AdmissionResponse::from(&request)
+            AdmissionResponse::invalid(format!(
+                "no validator registered for {}/{} {}",
+                group, version, resource_name
+            ))
         }
     };
 

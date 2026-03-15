@@ -6,9 +6,9 @@
 //! in `istio-system`.
 //!
 //! Tokens are requested per-reconcile via the TokenRequest API against a
-//! dedicated `lattice-istiod-proxy` ServiceAccount with read-only RBAC,
-//! scoped to the `lattice-proxy` audience. Tokens expire after 1 hour;
-//! reconcile requeues at half that interval to keep them fresh.
+//! dedicated `lattice-istiod-proxy` ServiceAccount with read-only RBAC.
+//! Tokens expire after 1 hour; reconcile requeues at half that interval
+//! to keep them fresh.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -116,7 +116,9 @@ async fn request_proxy_token(client: &Client) -> Result<String, kube::Error> {
 
     let token_request = TokenRequest {
         spec: k8s_openapi::api::authentication::v1::TokenRequestSpec {
-            audiences: vec!["lattice-proxy".to_string()],
+            // No custom audience — the proxy's SaValidator uses the default
+            // API server audience for TokenReview validation.
+            audiences: vec![],
             expiration_seconds: Some(TOKEN_EXPIRATION_SECS),
             ..Default::default()
         },

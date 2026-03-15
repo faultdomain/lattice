@@ -264,12 +264,12 @@ fn validate_csr_key_strength(csr_pem: &str) -> Result<()> {
     }
 }
 
-/// Certificate Authority for signing agent CSRs
-#[derive(Clone)]
 /// Per-cluster intermediate CA materials for Istio's `cacerts` Secret.
 ///
 /// Istio expects these four PEM files in the Secret. The intermediate CA
 /// is signed by the Lattice root CA, enabling cross-cluster mTLS.
+///
+/// Not `Clone` — the private key should not be casually duplicated.
 pub struct IstioIntermediateCa {
     /// Intermediate CA certificate (signed by root)
     pub ca_cert_pem: String,
@@ -281,13 +281,33 @@ pub struct IstioIntermediateCa {
     pub cert_chain_pem: String,
 }
 
-#[derive(Clone, Debug)]
+impl std::fmt::Debug for IstioIntermediateCa {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IstioIntermediateCa")
+            .field("ca_cert_pem", &self.ca_cert_pem)
+            .field("ca_key_pem", &"<redacted>")
+            .field("root_cert_pem", &"...")
+            .field("cert_chain_pem", &"...")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct CertificateAuthority {
     /// CA key pair serialized as PEM (we need to deserialize each time since KeyPair isn't Clone).
     /// Wrapped in `Zeroizing` so memory is wiped on drop.
     ca_key_pem: Zeroizing<String>,
     /// PEM-encoded CA certificate for distribution
     ca_cert_pem: String,
+}
+
+impl std::fmt::Debug for CertificateAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertificateAuthority")
+            .field("ca_cert_pem", &self.ca_cert_pem)
+            .field("ca_key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 impl CertificateAuthority {
