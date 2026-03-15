@@ -98,37 +98,46 @@ impl SubtreeSender {
         }
     }
 
-    /// Read routes from the local `LatticeClusterRoutes` CRD and convert to `SubtreeService`
+    /// Read all `LatticeClusterRoutes` CRDs and convert to `SubtreeService`.
+    ///
+    /// Each CRD is named after the originating cluster, so the `cluster` field
+    /// on each `SubtreeService` preserves the original source. This ensures
+    /// routes propagate up the hierarchy without losing provenance.
     async fn read_cluster_routes(&self) -> Vec<SubtreeService> {
         let api: Api<LatticeClusterRoutes> = Api::all(self.client.clone());
 
-        let routes_crd = match api.get(&self.cluster_name).await {
-            Ok(crd) => crd,
+        let list = match api.list(&Default::default()).await {
+            Ok(list) => list,
             Err(e) => {
                 debug!(
                     cluster = %self.cluster_name,
                     error = %e,
-                    "LatticeClusterRoutes not found, no routes to advertise"
+                    "failed to list LatticeClusterRoutes"
                 );
                 return Vec::new();
             }
         };
 
-        routes_crd
-            .spec
-            .routes
+        list.items
             .iter()
-            .map(|r| SubtreeService {
-                name: r.service_name.clone(),
-                namespace: r.service_namespace.clone(),
-                cluster: self.cluster_name.clone(),
-                removed: false,
-                hostname: r.hostname.clone(),
-                address: r.address.clone(),
-                port: r.port as u32,
-                protocol: r.protocol.clone(),
-                labels: HashMap::new(),
-                allowed_services: r.allowed_services.clone(),
+            .flat_map(|crd| {
+                let source_cluster = crd
+                    .metadata
+                    .name
+                    .as_deref()
+                    .unwrap_or(&self.cluster_name);
+                crd.spec.routes.iter().map(move |r| SubtreeService {
+                    name: r.service_name.clone(),
+                    namespace: r.service_namespace.clone(),
+                    cluster: source_cluster.to_string(),
+                    removed: false,
+                    hostname: r.hostname.clone(),
+                    address: r.address.clone(),
+                    port: r.port as u32,
+                    protocol: r.protocol.clone(),
+                    labels: HashMap::new(),
+                    allowed_services: r.allowed_services.clone(),
+                })
             })
             .collect()
     }

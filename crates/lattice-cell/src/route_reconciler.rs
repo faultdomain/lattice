@@ -106,7 +106,8 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
     // Child routes keyed by child cluster name
     let mut child_routes: HashMap<String, Vec<ClusterRoute>> = HashMap::new();
     // Last written state to skip no-op writes
-    let mut last_written: Vec<ClusterRoute> = Vec::new();
+    let mut last_written_local: Vec<ClusterRoute> = Vec::new();
+    let mut last_written_children: HashMap<String, Vec<ClusterRoute>> = HashMap::new();
 
     info!(cluster = %cluster_name, "Route reconciler started");
 
@@ -153,22 +154,40 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
             continue;
         }
 
-        // Merge local + all children
-        let mut merged: Vec<ClusterRoute> = local_routes.clone();
-        for routes in child_routes.values() {
-            merged.extend(routes.iter().cloned());
+        // Write local routes to self-named CRD only (no merging)
+        if local_routes != last_written_local {
+            if write_cluster_routes(&api, &cluster_name, &local_routes)
+                .await
+                .is_ok()
+            {
+                last_written_local = local_routes.clone();
+            }
         }
 
-        // Skip if unchanged
-        if merged == last_written {
-            continue;
+        // Write each child's routes to a per-child CRD
+        for (child_name, routes) in &child_routes {
+            let prev = last_written_children.get(child_name);
+            if prev.map(|p: &Vec<ClusterRoute>| p == routes).unwrap_or(false) {
+                continue;
+            }
+            if write_cluster_routes(&api, child_name, routes)
+                .await
+                .is_ok()
+            {
+                last_written_children.insert(child_name.clone(), routes.clone());
+            }
         }
 
-        if write_cluster_routes(&api, &cluster_name, &merged)
-            .await
-            .is_ok()
-        {
-            last_written = merged;
+        // Clean up CRDs for children that disconnected (empty routes removed them from map)
+        let stale: Vec<String> = last_written_children
+            .keys()
+            .filter(|k| !child_routes.contains_key(*k))
+            .cloned()
+            .collect();
+        for child_name in stale {
+            if delete_cluster_routes(&api, &child_name).await.is_ok() {
+                last_written_children.remove(&child_name);
+            }
         }
     }
 
@@ -391,6 +410,24 @@ async fn write_cluster_routes(
 
     info!(cluster = %cluster_name, routes = route_count, "reconciled LatticeClusterRoutes");
     Ok(())
+}
+
+/// Delete a LatticeClusterRoutes CRD (used when a child disconnects).
+async fn delete_cluster_routes(
+    api: &Api<LatticeClusterRoutes>,
+    cluster_name: &str,
+) -> Result<(), kube::Error> {
+    match api.delete(cluster_name, &Default::default()).await {
+        Ok(_) => {
+            info!(cluster = %cluster_name, "deleted LatticeClusterRoutes for disconnected child");
+            Ok(())
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
+        Err(e) => {
+            warn!(cluster = %cluster_name, error = %e, "failed to delete LatticeClusterRoutes");
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

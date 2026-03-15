@@ -206,49 +206,57 @@ static MAX_CLUSTERS_PER_SUBTREE: LazyLock<usize> = LazyLock::new(|| {
         .clamp(1, 5_000)
 });
 
-/// Convert SubtreeState services to ClusterRoute CRD entries.
+/// Group SubtreeService entries by originating cluster and convert to ClusterRoutes.
 ///
-/// Rejects the entire batch if it exceeds size limits (fail-closed).
-fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> {
+/// Preserves the `cluster` field from each SubtreeService so that routes from
+/// different origin clusters get written to separate LatticeClusterRoutes CRDs.
+/// Falls back to `sender_cluster` when a service has no cluster field set.
+fn group_subtree_routes_by_cluster(
+    state: &SubtreeState,
+    sender_cluster: &str,
+) -> std::collections::HashMap<String, Vec<ClusterRoute>> {
     if state.services.len() > *MAX_ROUTES_PER_CLUSTER {
         warn!(
             count = state.services.len(),
             max = *MAX_ROUTES_PER_CLUSTER,
             "rejecting SubtreeState: too many service routes"
         );
-        return Vec::new();
+        return std::collections::HashMap::new();
     }
 
-    state
-        .services
-        .iter()
-        .filter(|s| !s.removed)
-        .filter(|s| {
-            if s.port > u16::MAX as u32 {
-                warn!(service = %s.name, port = s.port, "rejecting: port > 65535");
-                return false;
-            }
-            true
-        })
-        .filter_map(|s| {
-            let route = ClusterRoute {
-                service_name: s.name.clone(),
-                service_namespace: s.namespace.clone(),
-                hostname: s.hostname.clone(),
-                address: s.address.clone(),
-                port: s.port as u16,
-                protocol: s.protocol.clone(),
-                allowed_services: s.allowed_services.clone(),
-            };
-            match route.validate() {
-                Ok(()) => Some(route),
-                Err(reason) => {
-                    warn!(service = %s.name, reason = %reason, "rejecting route");
-                    None
-                }
-            }
-        })
-        .collect()
+    let mut grouped: std::collections::HashMap<String, Vec<ClusterRoute>> =
+        std::collections::HashMap::new();
+
+    for s in &state.services {
+        if s.removed {
+            continue;
+        }
+        if s.port > u16::MAX as u32 {
+            warn!(service = %s.name, port = s.port, "rejecting: port > 65535");
+            continue;
+        }
+        let route = ClusterRoute {
+            service_name: s.name.clone(),
+            service_namespace: s.namespace.clone(),
+            hostname: s.hostname.clone(),
+            address: s.address.clone(),
+            port: s.port as u16,
+            protocol: s.protocol.clone(),
+            allowed_services: s.allowed_services.clone(),
+        };
+        if let Err(reason) = route.validate() {
+            warn!(service = %s.name, reason = %reason, "rejecting route");
+            continue;
+        }
+        let origin = if s.cluster.is_empty() {
+            sender_cluster.to_string()
+        } else {
+            s.cluster.clone()
+        };
+        grouped.entry(origin).or_default().push(route);
+    }
+
+    grouped
 }
 
 /// Handle cluster deletion (unpivot flow)
@@ -781,19 +789,23 @@ async fn process_agent_message(
                     .await;
             }
 
-            // Send service routes to the reconciler via channel
+            // Send service routes to the reconciler, grouped by originating cluster.
+            // Each SubtreeService carries the cluster name of its origin so routes
+            // propagate up the hierarchy without losing provenance.
             if !state.services.is_empty() || state.is_full_sync {
-                let routes = convert_subtree_to_cluster_routes(state);
-                let update = crate::route_reconciler::RouteUpdate {
-                    cluster_name: cluster_name.to_string(),
-                    routes,
-                };
-                if let Err(e) = route_update_tx.send(update).await {
-                    warn!(
-                        cluster = %cluster_name,
-                        error = %e,
-                        "failed to send route update to reconciler"
-                    );
+                let grouped = group_subtree_routes_by_cluster(state, cluster_name);
+                for (origin, origin_routes) in grouped {
+                    let update = crate::route_reconciler::RouteUpdate {
+                        cluster_name: origin,
+                        routes: origin_routes,
+                    };
+                    if let Err(e) = route_update_tx.send(update).await {
+                        warn!(
+                            cluster = %cluster_name,
+                            error = %e,
+                            "failed to send route update to reconciler"
+                        );
+                    }
                 }
             }
         }
@@ -1542,7 +1554,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_convert_subtree_to_cluster_routes_filters_removed() {
+    fn test_group_routes_filters_removed() {
         let state = SubtreeState {
             clusters: vec![],
             services: vec![
@@ -1574,28 +1586,26 @@ mod tests {
             is_full_sync: true,
         };
 
-        let routes = convert_subtree_to_cluster_routes(&state);
+        let grouped = group_subtree_routes_by_cluster(&state, "child");
+        let routes = &grouped["backend"];
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].service_name, "jellyfin");
-        assert_eq!(routes[0].hostname, "jellyfin.home.arpa");
-        assert_eq!(routes[0].address, "10.0.0.217");
-        assert_eq!(routes[0].port, 80);
     }
 
     #[test]
-    fn test_convert_subtree_to_cluster_routes_empty() {
+    fn test_group_routes_empty() {
         let state = SubtreeState {
             clusters: vec![],
             services: vec![],
             is_full_sync: true,
         };
 
-        let routes = convert_subtree_to_cluster_routes(&state);
-        assert!(routes.is_empty());
+        let grouped = group_subtree_routes_by_cluster(&state, "child");
+        assert!(grouped.is_empty());
     }
 
     #[test]
-    fn test_convert_subtree_to_cluster_routes_preserves_fields() {
+    fn test_group_routes_preserves_fields() {
         let state = SubtreeState {
             clusters: vec![],
             services: vec![lattice_proto::SubtreeService {
@@ -1613,7 +1623,8 @@ mod tests {
             is_full_sync: false,
         };
 
-        let routes = convert_subtree_to_cluster_routes(&state);
+        let grouped = group_subtree_routes_by_cluster(&state, "child");
+        let routes = &grouped["backend"];
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].service_name, "api");
         assert_eq!(routes[0].service_namespace, "webapp");
@@ -1621,5 +1632,70 @@ mod tests {
         assert_eq!(routes[0].address, "192.168.1.100");
         assert_eq!(routes[0].port, 8443);
         assert_eq!(routes[0].protocol, "HTTPS");
+    }
+
+    #[test]
+    fn test_group_routes_by_cluster_separates_origins() {
+        let state = SubtreeState {
+            clusters: vec![],
+            services: vec![
+                lattice_proto::SubtreeService {
+                    name: "api".to_string(),
+                    namespace: "webapp".to_string(),
+                    cluster: "cluster-a".to_string(),
+                    removed: false,
+                    hostname: "api.example.com".to_string(),
+                    address: "10.0.0.1".to_string(),
+                    port: 443,
+                    protocol: "HTTPS".to_string(),
+                    labels: std::collections::HashMap::new(),
+                    allowed_services: vec![],
+                },
+                lattice_proto::SubtreeService {
+                    name: "db".to_string(),
+                    namespace: "data".to_string(),
+                    cluster: "cluster-b".to_string(),
+                    removed: false,
+                    hostname: "db.example.com".to_string(),
+                    address: "10.0.0.2".to_string(),
+                    port: 5432,
+                    protocol: "TCP".to_string(),
+                    labels: std::collections::HashMap::new(),
+                    allowed_services: vec![],
+                },
+            ],
+            is_full_sync: false,
+        };
+
+        let grouped = group_subtree_routes_by_cluster(&state, "parent");
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped["cluster-a"].len(), 1);
+        assert_eq!(grouped["cluster-a"][0].service_name, "api");
+        assert_eq!(grouped["cluster-b"].len(), 1);
+        assert_eq!(grouped["cluster-b"][0].service_name, "db");
+    }
+
+    #[test]
+    fn test_group_routes_empty_cluster_falls_back_to_sender() {
+        let state = SubtreeState {
+            clusters: vec![],
+            services: vec![lattice_proto::SubtreeService {
+                name: "svc".to_string(),
+                namespace: "ns".to_string(),
+                cluster: String::new(),
+                removed: false,
+                hostname: "svc.example.com".to_string(),
+                address: "10.0.0.1".to_string(),
+                port: 80,
+                protocol: "HTTP".to_string(),
+                labels: std::collections::HashMap::new(),
+                allowed_services: vec![],
+            }],
+            is_full_sync: false,
+        };
+
+        let grouped = group_subtree_routes_by_cluster(&state, "sender-cluster");
+        assert_eq!(grouped.len(), 1);
+        assert!(grouped.contains_key("sender-cluster"));
     }
 }
