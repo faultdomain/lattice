@@ -320,13 +320,12 @@ pub async fn verify_child_routes(
 }
 
 /// Verify route status has Ready phase and matching observedGeneration
-pub async fn verify_route_status(kubeconfig: &str, cluster_name: &str) -> Result<(), String> {
+pub async fn verify_route_status(kubeconfig: &str, _cluster_name: &str) -> Result<(), String> {
     let output = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
         "get",
         "latticeclusterroutes",
-        cluster_name,
         "-o",
         "json",
     ])
@@ -335,18 +334,28 @@ pub async fn verify_route_status(kubeconfig: &str, cluster_name: &str) -> Result
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
 
-    let phase = parsed["status"]["phase"].as_str().ok_or("missing phase")?;
-    if phase != "Ready" {
-        return Err(format!("phase is '{}', expected 'Ready'", phase));
+    let items = parsed["items"]
+        .as_array()
+        .ok_or("no LatticeClusterRoutes found")?;
+
+    if items.is_empty() {
+        return Err("no LatticeClusterRoutes CRDs exist".to_string());
     }
 
-    let gen = parsed["metadata"]["generation"].as_i64();
-    let observed = parsed["status"]["observedGeneration"].as_i64();
-    if gen != observed {
-        return Err(format!(
-            "generation mismatch: spec={:?}, observed={:?}",
-            gen, observed
-        ));
+    for item in items {
+        let name = item["metadata"]["name"].as_str().unwrap_or("unknown");
+        let phase = item["status"]["phase"].as_str().unwrap_or("unknown");
+        if phase != "Ready" {
+            return Err(format!("CRD '{}' phase is '{}', expected 'Ready'", name, phase));
+        }
+        let gen = item["metadata"]["generation"].as_i64();
+        let observed = item["status"]["observedGeneration"].as_i64();
+        if gen != observed {
+            return Err(format!(
+                "CRD '{}' generation mismatch: spec={:?}, observed={:?}",
+                name, gen, observed
+            ));
+        }
     }
 
     Ok(())
