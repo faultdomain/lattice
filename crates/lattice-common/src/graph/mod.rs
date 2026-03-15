@@ -1076,7 +1076,9 @@ impl ServiceGraph {
             }
         }
 
-        // depends_all nodes: any service with depends_all that this service allows
+        // depends_all nodes: any local service with depends_all that this service allows.
+        // Skip if the callee (this service) is remote — depends_all is local-only.
+        if !service.type_.is_remote() {
         for entry in self.depends_all_nodes.iter() {
             let (da_ns, da_name) = entry.key();
             // Skip self
@@ -1101,6 +1103,7 @@ impl ServiceGraph {
                 callee_namespace: namespace.to_string(),
                 callee_name: name.to_string(),
             });
+        }
         }
 
         edges
@@ -1152,7 +1155,9 @@ impl ServiceGraph {
             }
         }
 
-        // depends_all: check all services that allow this caller
+        // depends_all: check all local services that allow this caller
+        // Remote (cross-cluster) services are excluded — depends_all is for
+        // local cluster dependencies only (e.g. metrics scraping, routing).
         if service.depends_all {
             for entry in self.vertices.iter() {
                 let node = entry.value();
@@ -1163,7 +1168,7 @@ impl ServiceGraph {
                 if seen.contains(&callee_key) {
                     continue;
                 }
-                if node.type_.is_unknown() {
+                if node.type_.is_unknown() || node.type_.is_remote() {
                     continue;
                 }
                 if !node.allows(namespace, name) {
@@ -2174,6 +2179,47 @@ mod tests {
 
         // api should no longer see inbound from scraper
         assert!(graph.get_active_inbound_edges("prod", "api").is_empty());
+    }
+
+    #[test]
+    fn test_depends_all_excludes_remote_services() {
+        use crate::crd::ClusterRoute;
+
+        let graph = ServiceGraph::new().with_cluster_name("mgmt");
+
+        // scraper has depends_all
+        let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
+        spec.depends_all = true;
+        graph.put_mesh_member("prod", "scraper", &spec);
+
+        // local api allows scraper
+        let api_spec = make_service_spec(vec![], vec!["scraper"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        // remote service allows scraper (via wildcard)
+        let route = ClusterRoute {
+            service_name: "remote-svc".to_string(),
+            service_namespace: "prod".to_string(),
+            hostname: "remote-svc.example.local".to_string(),
+            address: "10.0.0.100".to_string(),
+            port: 80,
+            protocol: "HTTP".to_string(),
+            allowed_services: vec!["*".to_string()],
+        };
+        graph.put_remote_service("child-cluster", &route);
+
+        // scraper should have outbound edge to local api but NOT remote-svc
+        let outbound = graph.get_active_outbound_edges("prod", "scraper");
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].callee_name, "api");
+
+        // remote-svc should NOT have inbound from scraper via depends_all
+        let remote_inbound = graph.get_active_inbound_edges("prod", "remote-svc");
+        assert!(
+            remote_inbound.is_empty(),
+            "depends_all should not create edges to remote services"
+        );
     }
 
     // =========================================================================
