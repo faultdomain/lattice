@@ -17,7 +17,7 @@ use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
-use lattice_common::policy::service_entry::ServiceEntry;
+use lattice_common::policy::service_entry::{ServiceEntry, ServiceEntryEndpoint};
 
 // =============================================================================
 // Generated Policies Container
@@ -166,12 +166,41 @@ impl<'a> PolicyCompiler<'a> {
         output.peer_authentications.extend(peer_auths);
         output.authorization_policies.extend(auth_policies);
 
-        // External egress: ServiceEntry + AuthorizationPolicy + waypoint
-        // Handles inline external endpoints and FQDN egress rules.
-        self.compile_egress(&service_node, namespace, &mut output);
+        // External + cross-cluster egress: ServiceEntry + AuthorizationPolicy + waypoint
+        // Handles inline external endpoints, FQDN egress rules, and remote dependencies.
+        // Remote dependencies are injected as egress rules so they use the same
+        // proven FQDN egress path that works with Istio ambient.
+        let mut node_with_remote_egress = service_node.clone();
+        for edge in &outbound_edges {
+            if let Some(dep) = self.graph.get_service(&edge.callee_namespace, &edge.callee_name) {
+                if let lattice_common::graph::ServiceType::Remote { port, ref hostname, .. } = dep.type_ {
+                    node_with_remote_egress.egress_rules.push(lattice_common::crd::EgressRule {
+                        target: lattice_common::crd::EgressTarget::Fqdn(hostname.clone()),
+                        ports: vec![port],
+                    });
+                }
+            }
+        }
+        self.compile_egress(&node_with_remote_egress, namespace, &mut output);
 
-        // Cross-cluster egress: ServiceEntry for remote dependencies
-        self.compile_remote_egress(&service_node, &outbound_edges, namespace, &mut output);
+        // For cross-cluster ServiceEntries, add the endpoint IP so ztunnel can
+        // route without external DNS. The FQDN egress path uses resolution: DNS
+        // which needs either real DNS or an endpoint to resolve the hostname.
+        for se in &mut output.service_entries {
+            for host in &se.spec.hosts {
+                for edge in &outbound_edges {
+                    if let Some(dep) = self.graph.get_service(&edge.callee_namespace, &edge.callee_name) {
+                        if let lattice_common::graph::ServiceType::Remote { ref address, ref hostname, .. } = dep.type_ {
+                            if host == hostname && se.spec.endpoints.is_empty() {
+                                se.spec.endpoints.push(ServiceEntryEndpoint {
+                                    address: address.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Stamp owner references for crash-safe K8s GC
         output.stamp_owner_refs(&self.owner_refs);
@@ -222,65 +251,6 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Generate ServiceEntry objects for remote (cross-cluster) outbound dependencies.
-    ///
-    /// For each outbound edge that resolves to a `ServiceType::Remote` node,
-    /// creates a ServiceEntry so the mesh routes traffic to the remote gateway.
-    /// Generate ServiceEntry + AuthorizationPolicy for remote (cross-cluster) dependencies.
-    ///
-    /// Reuses the same FQDN egress compilation path that works for external services.
-    /// The remote hostname is treated as an FQDN egress target with DNS resolution.
-    fn compile_remote_egress(
-        &self,
-        service_node: &lattice_common::graph::ServiceNode,
-        outbound_edges: &[lattice_common::graph::ActiveEdge],
-        namespace: &str,
-        output: &mut GeneratedPolicies,
-    ) {
-        use lattice_common::graph::ServiceType;
-
-        for edge in outbound_edges {
-            let Some(dep) = self
-                .graph
-                .get_service(&edge.callee_namespace, &edge.callee_name)
-            else {
-                continue;
-            };
-
-            let ServiceType::Remote {
-                ref address,
-                port,
-                ref hostname,
-                ..
-            } = dep.type_
-            else {
-                continue;
-            };
-
-            // Build the same ServiceEntry as FQDN egress, then add the
-            // endpoint IP so ztunnel can route without external DNS.
-            let mut se = self.compile_fqdn_egress_service_entry(
-                &service_node.name,
-                namespace,
-                hostname,
-                &[port],
-            );
-            se.spec.endpoints.push(
-                lattice_common::policy::service_entry::ServiceEntryEndpoint {
-                    address: address.clone(),
-                },
-            );
-            output.service_entries.push(se);
-            output
-                .authorization_policies
-                .push(self.compile_fqdn_egress_access_policy(
-                    service_node,
-                    namespace,
-                    hostname,
-                    &[port],
-                ));
-        }
-    }
 }
 
 // =============================================================================
