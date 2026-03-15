@@ -660,16 +660,18 @@ const INPUTS_HASH_ANNOTATION: &str = "lattice.dev/inputs-hash";
 
 /// Check if reconciliation can be skipped because nothing has changed.
 ///
-/// Returns true when the service is Ready AND:
+/// Returns true when the service is Ready or Failed AND:
 /// - observed_generation matches metadata.generation (spec unchanged)
 /// - stored inputs hash matches the current graph + policy state
 ///
-/// Failed services are NOT skipped — they always re-enter the compile
-/// path so transient errors (e.g. webhook down) self-heal without
-/// waiting for a spec change. The error_policy controls retry backoff.
+/// For Failed services, this prevents a tight reconcile loop: if the
+/// spec and inputs haven't changed, the same compilation error will
+/// recur. The 30-second requeue timer handles retries for transient
+/// errors without needing to re-enter the compile path on every
+/// watch event.
 fn is_reconcile_current(service: &LatticeService, current_inputs_hash: &str) -> bool {
     let status = match service.status.as_ref() {
-        Some(s) if s.phase == ServicePhase::Ready => s,
+        Some(s) if s.phase == ServicePhase::Ready || s.phase == ServicePhase::Failed => s,
         _ => return false,
     };
 
@@ -840,41 +842,19 @@ async fn compile_and_apply(
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {
-            let msg = e.to_string();
-
-            // Skip redundant events when status hasn't changed.
-            if !status_check::is_status_unchanged(
-                service.status.as_ref(),
-                &ServicePhase::Failed,
-                Some(&msg),
-                service.metadata.generation,
-            ) {
-                let event_reason = if e.is_policy_denied() {
-                    match &e {
-                        lattice_workload::CompilationError::SecurityOverrideDenied { .. } => {
-                            reasons::SECURITY_OVERRIDE_DENIED
-                        }
-                        lattice_workload::CompilationError::VolumeAccessDenied { .. } => {
-                            reasons::VOLUME_ACCESS_DENIED
-                        }
-                        _ => reasons::SECRET_ACCESS_DENIED,
+            let event_reason = if e.is_policy_denied() {
+                match &e {
+                    lattice_workload::CompilationError::SecurityOverrideDenied { .. } => {
+                        reasons::SECURITY_OVERRIDE_DENIED
                     }
-                } else {
-                    reasons::COMPILATION_FAILED
-                };
-                ctx.events
-                    .publish(
-                        &service.object_ref(&()),
-                        EventType::Warning,
-                        event_reason,
-                        actions::COMPILE,
-                        Some(msg.clone()),
-                    )
-                    .await;
-                warn!(error = %msg, "compilation failed");
+                    lattice_workload::CompilationError::VolumeAccessDenied { .. } => {
+                        reasons::VOLUME_ACCESS_DENIED
+                    }
+                    _ => reasons::SECRET_ACCESS_DENIED,
+                }
             } else {
-                debug!(error = %msg, "compilation still failing");
-            }
+                reasons::COMPILATION_FAILED
+            };
 
             // When a Cedar policy revokes secret access, delete ExternalSecrets
             // that were previously applied. Without this, ESO continues syncing
@@ -889,9 +869,7 @@ async fn compile_and_apply(
                 }
             }
 
-            ServiceStatusUpdate::failed(&msg, service.metadata.generation)
-                .apply(ctx.kube.as_ref(), service)
-                .await?;
+            transition_to_failed(service, ctx, &e.to_string(), event_reason).await?;
             record_inputs_hash(ctx, name, namespace, inputs_hash).await;
             return Ok(Action::requeue(Duration::from_secs(30)));
         }
@@ -908,29 +886,7 @@ async fn compile_and_apply(
         .apply_compiled_service(name, namespace, &compiled)
         .await
     {
-        let msg = e.to_string();
-        if !status_check::is_status_unchanged(
-            service.status.as_ref(),
-            &ServicePhase::Failed,
-            Some(&msg),
-            service.metadata.generation,
-        ) {
-            ctx.events
-                .publish(
-                    &service.object_ref(&()),
-                    EventType::Warning,
-                    reasons::COMPILATION_FAILED,
-                    actions::COMPILE,
-                    Some(msg.clone()),
-                )
-                .await;
-            error!(error = %msg, "failed to apply compiled resources");
-        } else {
-            debug!(error = %msg, "apply still failing");
-        }
-        ServiceStatusUpdate::failed(&msg, service.metadata.generation)
-            .apply(ctx.kube.as_ref(), service)
-            .await?;
+        transition_to_failed(service, ctx, &e.to_string(), reasons::COMPILATION_FAILED).await?;
         // Don't record the inputs hash for apply failures — these are often
         // transient (broken webhook, API server blip, network timeout) and
         // should retry on the next requeue even if inputs are unchanged.
@@ -982,6 +938,41 @@ async fn compile_and_apply(
         .await?;
     record_inputs_hash(ctx, name, namespace, inputs_hash).await;
     Ok(Action::requeue(REQUEUE_READY))
+}
+
+/// Transition a service to Failed, skipping both the status write and the
+/// K8s event when the status is already identical. Skipping the write
+/// prevents a tight reconcile loop (status patch → watch event → reconcile).
+async fn transition_to_failed(
+    service: &LatticeService,
+    ctx: &ServiceContext,
+    message: &str,
+    event_reason: &str,
+) -> Result<(), Error> {
+    if status_check::is_status_unchanged(
+        service.status.as_ref(),
+        &ServicePhase::Failed,
+        Some(message),
+        service.metadata.generation,
+    ) {
+        debug!(error = %message, "failure unchanged, skipping status write");
+        return Ok(());
+    }
+
+    ctx.events
+        .publish(
+            &service.object_ref(&()),
+            EventType::Warning,
+            event_reason,
+            actions::COMPILE,
+            Some(message.to_string()),
+        )
+        .await;
+    warn!(error = %message, "service failed");
+    ServiceStatusUpdate::failed(message, service.metadata.generation)
+        .apply(ctx.kube.as_ref(), service)
+        .await?;
+    Ok(())
 }
 
 /// Best-effort metrics scrape on steady-state requeues.
@@ -1584,15 +1575,16 @@ mod tests {
         assert!(!is_reconcile_current(&svc, "hash-NEW"));
     }
 
-    /// Failed services always retry — they are never skipped by the guard.
-    /// Transient errors (webhook down, API blip) self-heal without needing
-    /// a spec change. The error_policy controls retry backoff.
+    /// Failed services with matching inputs are skipped — recompiling with
+    /// the same spec and graph state produces the same error. The 30-second
+    /// requeue timer handles retries for transient failures without needing
+    /// to re-enter the compile path on every watch event.
     #[test]
-    fn reconcile_guard_retries_failed_even_with_matching_inputs() {
+    fn reconcile_guard_skips_failed_with_matching_inputs() {
         let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), Some("hash-abc"));
         assert!(
-            !is_reconcile_current(&svc, "hash-abc"),
-            "Failed service should always retry, even with matching generation + hash"
+            is_reconcile_current(&svc, "hash-abc"),
+            "Failed service with unchanged inputs should be skipped"
         );
     }
 

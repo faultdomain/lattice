@@ -796,28 +796,41 @@ fn validate_duration_string(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Maximum GPU memory in MiB (1 PiB — no real GPU exceeds this).
+const MAX_GPU_MEMORY_MIB: u64 = 1024 * 1024 * 1024; // 1 PiB
+
 /// Parse a GPU memory string into MiB.
 ///
 /// Accepts "20Gi" -> 20480, "512Mi" -> 512, bare number -> MiB.
 fn parse_gpu_memory_mib(memory: &str) -> Result<u64, String> {
     let memory = memory.trim();
-    if memory.ends_with("Gi") {
+    let mib = if memory.ends_with("Gi") {
         let num = memory
             .trim_end_matches("Gi")
             .parse::<u64>()
             .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))?;
-        Ok(num * 1024)
+        num.checked_mul(1024).ok_or_else(|| {
+            format!("gpu memory overflow: {memory} exceeds maximum representable value")
+        })?
     } else if memory.ends_with("Mi") {
         memory
             .trim_end_matches("Mi")
             .parse::<u64>()
-            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))
+            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))?
     } else {
         // Bare number treated as MiB
         memory
             .parse::<u64>()
-            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))
+            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))?
+    };
+
+    if mib > MAX_GPU_MEMORY_MIB {
+        return Err(format!(
+            "gpu memory {memory} ({mib} MiB) exceeds maximum ({MAX_GPU_MEMORY_MIB} MiB)"
+        ));
     }
+
+    Ok(mib)
 }
 
 // =============================================================================
@@ -1273,6 +1286,18 @@ mod tests {
         assert!(parse_gpu_memory_mib("abc").is_err());
         assert!(parse_gpu_memory_mib("").is_err());
         assert!(parse_gpu_memory_mib("10Xi").is_err());
+    }
+
+    #[test]
+    fn test_parse_gpu_memory_overflow_rejected() {
+        // This would overflow u64 when multiplied by 1024
+        assert!(parse_gpu_memory_mib("18014398509481984Gi").is_err());
+    }
+
+    #[test]
+    fn test_parse_gpu_memory_exceeds_max_rejected() {
+        // Valid multiplication but exceeds MAX_GPU_MEMORY_MIB
+        assert!(parse_gpu_memory_mib("9999999999Gi").is_err());
     }
 
     // =========================================================================

@@ -352,12 +352,15 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
         }
     }
 
-    // Reconcile infrastructure (Cilium policies, Istio, etc.)
-    // Failures are non-blocking — worker pool scaling must proceed even if
-    // infrastructure components aren't ready yet (they may need workers to schedule).
-    if let Some(client) = &ctx.client {
-        if let Err(e) = reconcile_infrastructure(client, cluster).await {
-            warn!(error = %e, "failed to reconcile infrastructure, will retry");
+    // Reconcile infrastructure (Cilium policies, Istio, etc.) — self-cluster only.
+    // Child clusters manage their own infrastructure after pivot via their own operator.
+    // Applying here would overwrite the local istiod config (trust domain, mesh ID)
+    // with the child cluster's values, causing waypoint proxy churn.
+    if is_self {
+        if let Some(client) = &ctx.client {
+            if let Err(e) = reconcile_infrastructure(client, cluster).await {
+                warn!(error = %e, "failed to reconcile infrastructure, will retry");
+            }
         }
     }
 
