@@ -247,6 +247,51 @@ pub fn generate_mesh_proxy_egress_policy() -> CiliumClusterwideNetworkPolicy {
     )
 }
 
+/// Generate a CiliumClusterwideNetworkPolicy for east-west gateway ingress.
+///
+/// The east-west gateway accepts cross-network HBONE on port 15008 from
+/// other clusters. Egress (xDS, HBONE forwarding) is already covered by
+/// `generate_mesh_proxy_egress_policy()` since the gateway pods carry the
+/// `gateway.networking.k8s.io/gateway-name` label.
+///
+/// Matches pods with `gateway-name: istio-eastwestgateway` in `istio-system`.
+pub fn generate_eastwest_gateway_policy() -> CiliumClusterwideNetworkPolicy {
+    CiliumClusterwideNetworkPolicy::new(
+        ClusterwideMetadata::new("eastwest-gateway-ingress"),
+        CiliumClusterwideSpec {
+            description: Some(
+                "Allow east-west gateway to receive cross-cluster HBONE traffic from external networks"
+                    .to_string(),
+            ),
+            enable_default_deny: None,
+            endpoint_selector: EndpointSelector::from_labels(BTreeMap::from([
+                (
+                    "k8s:io.kubernetes.pod.namespace".to_string(),
+                    "istio-system".to_string(),
+                ),
+                (
+                    CILIUM_GATEWAY_NAME_LABEL.to_string(),
+                    "istio-eastwestgateway".to_string(),
+                ),
+            ])),
+            ingress: vec![
+                ClusterwideIngressRule {
+                    from_cidr: vec!["0.0.0.0/0".to_string()],
+                    from_endpoints: vec![],
+                    to_ports: vec![CiliumPortRule {
+                        ports: vec![CiliumPort {
+                            port: HBONE_PORT.to_string(),
+                            protocol: "TCP".to_string(),
+                        }],
+                        rules: None,
+                    }],
+                },
+            ],
+            egress: vec![],
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

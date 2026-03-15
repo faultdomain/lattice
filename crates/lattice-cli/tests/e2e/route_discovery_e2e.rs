@@ -1,7 +1,7 @@
 //! Per-integration E2E: Route discovery and cross-cluster connectivity
 //!
 //! Sets up mgmt + workload, deploys advertised services, verifies the full
-//! pipeline: heartbeat → LatticeClusterRoutes → ServiceEntry → AuthorizationPolicy.
+//! pipeline: heartbeat → LatticeClusterRoutes → Istio remote secret → native discovery.
 
 #![cfg(feature = "provider-e2e")]
 

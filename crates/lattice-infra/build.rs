@@ -390,6 +390,16 @@ fn main() {
             "--set",
             "meshConfig.trustDomain=lattice.__LATTICE_CLUSTER_NAME__.local",
             "--set",
+            "global.meshID=lattice-mesh",
+            "--set",
+            "global.multiCluster.clusterName=__LATTICE_CLUSTER_NAME__",
+            "--set",
+            "global.network=__LATTICE_CLUSTER_NAME__",
+            "--set",
+            "env.AMBIENT_ENABLE_MULTI_NETWORK=true",
+            "--set",
+            "env.AMBIENT_ENABLE_BAGGAGE=true",
+            "--set",
             "pilot.resources.requests.cpu=100m",
             "--set",
             "pilot.resources.requests.memory=128Mi",
@@ -403,12 +413,17 @@ fn main() {
     );
     std::fs::write(out_dir.join("istiod.yaml"), yaml).expect("write istiod.yaml");
 
-    // 5. Ztunnel
+    // 5. Ztunnel (uses placeholder for cluster name and network)
     let yaml = run_helm_template(
         "ztunnel",
         &chart(&format!("ztunnel-{}.tgz", istio_ver)),
         "istio-system",
-        &[],
+        &[
+            "--set",
+            "multiCluster.clusterName=__LATTICE_CLUSTER_NAME__",
+            "--set",
+            "global.network=__LATTICE_CLUSTER_NAME__",
+        ],
     );
     std::fs::write(out_dir.join("ztunnel.yaml"), yaml).expect("write ztunnel.yaml");
 

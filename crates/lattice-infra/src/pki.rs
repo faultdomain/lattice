@@ -266,6 +266,22 @@ fn validate_csr_key_strength(csr_pem: &str) -> Result<()> {
 
 /// Certificate Authority for signing agent CSRs
 #[derive(Clone)]
+/// Per-cluster intermediate CA materials for Istio's `cacerts` Secret.
+///
+/// Istio expects these four PEM files in the Secret. The intermediate CA
+/// is signed by the Lattice root CA, enabling cross-cluster mTLS.
+pub struct IstioIntermediateCa {
+    /// Intermediate CA certificate (signed by root)
+    pub ca_cert_pem: String,
+    /// Intermediate CA private key
+    pub ca_key_pem: Zeroizing<String>,
+    /// Root CA certificate (shared across all clusters)
+    pub root_cert_pem: String,
+    /// Certificate chain: intermediate + root concatenated
+    pub cert_chain_pem: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct CertificateAuthority {
     /// CA key pair serialized as PEM (we need to deserialize each time since KeyPair isn't Clone).
     /// Wrapped in `Zeroizing` so memory is wiped on drop.
@@ -291,8 +307,9 @@ impl CertificateAuthority {
         );
         params.distinguished_name = dn;
 
-        // CA settings
-        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        // CA settings — unconstrained path length because the cluster hierarchy
+        // is an unbounded tree (any cluster can parent children that parent more).
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![
             KeyUsagePurpose::KeyCertSign,
             KeyUsagePurpose::CrlSign,
@@ -436,6 +453,78 @@ impl CertificateAuthority {
         })?;
 
         Ok((server_cert.pem(), server_key_pem))
+    }
+
+    /// Generate a per-cluster intermediate CA for Istio's `cacerts` Secret.
+    ///
+    /// Istio expects a `cacerts` Secret in `istio-system` containing:
+    /// - `ca-cert.pem`: intermediate CA cert (signed by root)
+    /// - `ca-key.pem`: intermediate CA private key
+    /// - `root-cert.pem`: root CA cert (shared across all clusters)
+    /// - `cert-chain.pem`: intermediate + root concatenated
+    ///
+    /// This intermediate CA is what istiod uses to sign workload certs.
+    /// All clusters sharing the same root CA enables cross-cluster mTLS
+    /// even with different trust domains.
+    pub fn generate_istio_intermediate_ca(
+        &self,
+        cluster_name: &str,
+    ) -> Result<IstioIntermediateCa> {
+        let mut params = CertificateParams::default();
+
+        let mut dn = DistinguishedName::new();
+        dn.push(
+            DnType::CommonName,
+            DnValue::Utf8String(format!("Lattice Intermediate CA - {}", cluster_name)),
+        );
+        dn.push(
+            DnType::OrganizationName,
+            DnValue::Utf8String("Lattice".to_string()),
+        );
+        params.distinguished_name = dn;
+
+        // Intermediate CA: unconstrained because child clusters can also
+        // parent their own children (unbounded hierarchy depth).
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+
+        // 5 year validity (shorter than root CA)
+        let (not_before, not_after) = compute_validity(5 * 365 * 24);
+        params.not_before = not_before;
+        params.not_after = not_after;
+
+        let intermediate_key = KeyPair::generate().map_err(|e| {
+            PkiError::KeyGenerationFailed(format!(
+                "failed to generate intermediate CA key: {}",
+                e
+            ))
+        })?;
+        let intermediate_key_pem = Zeroizing::new(intermediate_key.serialize_pem());
+
+        let ca_key = self.load_key_pair()?;
+        let issuer = Issuer::from_ca_cert_pem(&self.ca_cert_pem, &ca_key)
+            .map_err(|e| PkiError::ParseError(format!("failed to create issuer: {}", e)))?;
+
+        let intermediate_cert = params.signed_by(&intermediate_key, &issuer).map_err(|e| {
+            PkiError::CertificateGenerationFailed(format!(
+                "failed to sign intermediate CA cert: {}",
+                e
+            ))
+        })?;
+
+        let cert_pem = intermediate_cert.pem();
+        let cert_chain = format!("{}{}", cert_pem, self.ca_cert_pem);
+
+        Ok(IstioIntermediateCa {
+            ca_cert_pem: cert_pem,
+            ca_key_pem: intermediate_key_pem,
+            root_cert_pem: self.ca_cert_pem.clone(),
+            cert_chain_pem: cert_chain,
+        })
     }
 
     /// Sign a CSR and return the signed certificate in PEM format

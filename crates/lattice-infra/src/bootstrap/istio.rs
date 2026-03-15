@@ -16,7 +16,7 @@ use lattice_common::{LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME};
 
 use super::split_yaml_documents;
 
-/// Pre-rendered static Istio manifests (base, cni, ztunnel) — no dynamic values.
+/// Pre-rendered static Istio manifests (base, cni) — no dynamic values.
 static ISTIO_STATIC_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = Vec::new();
     manifests.extend(split_yaml_documents(include_str!(concat!(
@@ -27,15 +27,14 @@ static ISTIO_STATIC_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
         env!("OUT_DIR"),
         "/istio-cni.yaml"
     ))));
-    manifests.extend(split_yaml_documents(include_str!(concat!(
-        env!("OUT_DIR"),
-        "/ztunnel.yaml"
-    ))));
     manifests
 });
 
 /// Pre-rendered istiod template with __LATTICE_CLUSTER_NAME__ placeholder.
 static ISTIOD_TEMPLATE: &str = include_str!(concat!(env!("OUT_DIR"), "/istiod.yaml"));
+
+/// Pre-rendered ztunnel template with __LATTICE_CLUSTER_NAME__ placeholder.
+static ZTUNNEL_TEMPLATE: &str = include_str!(concat!(env!("OUT_DIR"), "/ztunnel.yaml"));
 
 /// Istio configuration
 #[derive(Debug, Clone)]
@@ -47,7 +46,6 @@ pub struct IstioConfig {
 }
 
 impl IstioConfig {
-    /// Create a new config with the given cluster name
     pub fn new(cluster_name: impl Into<String>) -> Self {
         Self {
             version: env!("ISTIO_VERSION"),
@@ -63,7 +61,6 @@ pub struct IstioReconciler {
 }
 
 impl IstioReconciler {
-    /// Create with the given cluster name
     pub fn new(cluster_name: impl Into<String>) -> Self {
         Self {
             config: IstioConfig::new(cluster_name),
@@ -81,13 +78,18 @@ impl IstioReconciler {
         self.manifests.get_or_init(|| {
             let mut all = Vec::new();
 
-            // Static charts (base, cni, ztunnel)
+            // Static charts (base, cni)
             all.extend(ISTIO_STATIC_MANIFESTS.iter().cloned());
 
-            // Istiod with cluster-specific trust domain
+            // Istiod with cluster-specific values (trust domain, meshID, network)
             let istiod_yaml =
                 ISTIOD_TEMPLATE.replace("__LATTICE_CLUSTER_NAME__", &self.config.cluster_name);
             all.extend(split_yaml_documents(&istiod_yaml));
+
+            // Ztunnel with cluster-specific values (clusterName, network)
+            let ztunnel_yaml =
+                ZTUNNEL_TEMPLATE.replace("__LATTICE_CLUSTER_NAME__", &self.config.cluster_name);
+            all.extend(split_yaml_documents(&ztunnel_yaml));
 
             all
         })

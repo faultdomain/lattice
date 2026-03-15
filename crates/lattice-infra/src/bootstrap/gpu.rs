@@ -77,39 +77,10 @@ pub fn generate_gpu_mesh_members() -> Vec<LatticeMeshMember> {
 /// - ServiceAccount + ClusterRole + ClusterRoleBinding
 /// - NODE_NAME env from Downward API
 pub fn generate_gpu_monitor_daemonset(image: &str) -> Vec<String> {
-    let sa = r#"apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: lattice-gpu-monitor
-  namespace: lattice-system"#
-        .to_string();
-
-    let cluster_role = r#"apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: lattice-gpu-monitor
-rules:
-- apiGroups: [""]
-  resources: ["nodes"]
-  verbs: ["get", "list", "patch"]
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list"]"#
-        .to_string();
-
-    let cluster_role_binding = r#"apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: lattice-gpu-monitor
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: lattice-gpu-monitor
-subjects:
-- kind: ServiceAccount
-  name: lattice-gpu-monitor
-  namespace: lattice-system"#
-        .to_string();
+    let mut rbac = super::split_yaml_documents(include_str!("../../manifests/gpu-monitor-sa.yaml"));
+    rbac.extend(super::split_yaml_documents(include_str!(
+        "../../manifests/gpu-monitor-rbac.yaml"
+    )));
 
     let daemonset = format!(
         r#"apiVersion: apps/v1
@@ -191,7 +162,8 @@ spec:
           type: DirectoryOrCreate"#
     );
 
-    vec![sa, cluster_role, cluster_role_binding, daemonset]
+    rbac.push(daemonset);
+    rbac
 }
 
 /// Generate LatticeMeshMember for the GPU monitor DaemonSet.

@@ -33,7 +33,7 @@ use lattice_common::crd::{
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_cost::CostProvider;
 use lattice_mesh_member::controller as mesh_member_ctrl;
-use lattice_mesh_member::route_lmm;
+use lattice_mesh_member::remote_secret;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
@@ -290,30 +290,48 @@ pub async fn build_service_controllers(
         )
         .for_each(log_reconcile_result("MeshMember"));
 
-    // ── Route LMM controller ──
-    // Auto-creates LatticeMeshMember resources from LatticeClusterRoutes so
-    // that cross-cluster ServiceEntries and waypoints are deployed even in
-    // namespaces with no user-defined LatticeService or LMM (e.g., DMZ clusters).
-    let route_lmm_ctx = Arc::new(route_lmm::RouteLmmContext {
-        client: client.clone(),
-    });
-    let route_lmm_ctrl = simple_controller(
-        Api::<LatticeClusterRoutes>::all(client.clone()),
-        route_lmm::reconcile,
-        route_lmm_ctx,
-        "RouteLMM",
-    );
-
     tracing::info!("- LatticeService controller");
     tracing::info!("- LatticeMeshMember controller");
-    tracing::info!("- RouteLMM controller");
 
     let graph = service_ctx.graph.clone();
 
     (
-        vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl), route_lmm_ctrl],
+        vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)],
         graph,
     )
+}
+
+/// Spawn the remote secret controller for Istio multi-cluster discovery.
+///
+/// Called after the auth proxy is running, since we need the proxy URL, CA cert,
+/// and token. The controller watches `LatticeClusterRoutes` and creates Istio
+/// remote secrets so istiod can natively discover services on remote clusters.
+pub fn spawn_remote_secret_controller(
+    client: Client,
+    proxy_base_url: String,
+    ca_cert_pem: String,
+) {
+    let ctx = Arc::new(remote_secret::RemoteSecretContext {
+        client: client.clone(),
+        proxy_base_url,
+        ca_cert_pem,
+    });
+
+    tracing::info!("- RemoteSecret controller");
+
+    tokio::spawn(
+        Controller::new(
+            Api::<LatticeClusterRoutes>::all(client),
+            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        )
+        .shutdown_on_signal()
+        .run(
+            remote_secret::reconcile,
+            lattice_common::default_error_policy,
+            ctx,
+        )
+        .for_each(log_reconcile_result("RemoteSecret")),
+    );
 }
 
 /// Build job controller futures (LatticeJob)

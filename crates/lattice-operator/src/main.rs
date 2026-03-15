@@ -1088,6 +1088,10 @@ async fn start_auth_proxy(
     let base_host = extra_sans.first().map(|s| s.as_str()).unwrap_or(&cell_dns);
     let base_url = format!("https://{}:{}", base_host, DEFAULT_AUTH_PROXY_PORT);
 
+    // Clone values needed for the remote secret controller before they move into config
+    let proxy_base_url = base_url.clone();
+    let proxy_ca_cert = ca_cert_pem.clone();
+
     let config = AuthProxyConfig {
         addr,
         cert_pem,
@@ -1104,6 +1108,15 @@ async fn start_auth_proxy(
     let backend = Arc::new(CellProxyBackend::new(subtree, agent_registry));
 
     tracing::info!(addr = %addr, cluster = %cluster_name, "Starting auth proxy server");
+
+    // Start remote secret controller for Istio multi-cluster discovery.
+    // Tokens are requested per-reconcile via TokenRequest API against the
+    // dedicated lattice-istiod-proxy SA — no static token embedding.
+    controller_runner::spawn_remote_secret_controller(
+        client.clone(),
+        proxy_base_url,
+        proxy_ca_cert,
+    );
 
     // Start OIDCProvider watcher to reload OIDC config when CRDs change
     start_oidc_provider_watcher(client.clone(), auth_chain.clone(), oidc_allow_insecure_http);

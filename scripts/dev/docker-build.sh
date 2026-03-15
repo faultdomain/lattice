@@ -56,7 +56,7 @@ DOCKER_BUILDKIT=1 docker build \
     --build-arg CAPO_VERSION="$CAPO_VERSION" \
     --build-arg IPAM_VERSION="$IPAM_VERSION" \
     --build-arg CERTMANAGER_VERSION="$CERTMANAGER_VERSION" \
-    --platform linux/amd64,linux/arm64 \
+    --platform linux/amd64 \
     --build-arg FIPS=true \
     "$@" \
     "$PROJECT_ROOT"

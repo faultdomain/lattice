@@ -14,4 +14,4 @@
 pub mod controller;
 pub mod ingress;
 pub mod policy;
-pub mod route_lmm;
+pub mod remote_secret;

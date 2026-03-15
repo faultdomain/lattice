@@ -132,6 +132,9 @@ else
     echo "clusterctl already installed: $(clusterctl version -o short 2>/dev/null || echo 'installed')"
 fi
 
+curl -fsSL https://claude.ai/install.sh | bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
 # ---- Summary ----
 echo
 echo "=== Setup complete ==="
@@ -144,6 +147,7 @@ kubectl version --client 2>/dev/null || true
 helm version --short 2>/dev/null || true
 kind version 2>/dev/null || true
 clusterctl version 2>/dev/null || true
+claude --version || true
 echo
 echo ">>> Log out and back in (or run 'newgrp docker') for docker group to take effect."
 echo ">>> Then run: ./scripts/dev/test-docker.sh"

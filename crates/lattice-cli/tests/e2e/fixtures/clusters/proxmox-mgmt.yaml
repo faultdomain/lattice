@@ -33,9 +33,9 @@ spec:
         lbCidr: "10.0.0.200/28"
   registryMirrors:
     - upstream: docker.io
-      mirror: "http://10.0.0.176:5555"
+      mirror: "http://10.0.0.131:5555"
     - upstream: ghcr.io
-      mirror: "http://10.0.0.176:5556"
+      mirror: "http://10.0.0.131:5556"
   nodes:
     controlPlane:
       replicas: 1

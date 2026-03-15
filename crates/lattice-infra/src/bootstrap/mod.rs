@@ -13,6 +13,7 @@
 
 pub mod cert_manager;
 pub mod cilium;
+pub mod eastwest;
 pub mod eso;
 pub mod gpu;
 pub mod istio;
@@ -126,6 +127,10 @@ pub struct InfrastructureConfig {
     pub backups: BackupsConfig,
     /// Network topology configuration for topology-aware scheduling.
     pub network_topology: Option<NetworkTopologyConfig>,
+    /// Lattice root CA for generating Istio intermediate CA (cacerts Secret).
+    /// When set, a per-cluster intermediate CA is generated and installed as
+    /// the `cacerts` Secret before istiod starts, enabling cross-cluster mTLS.
+    pub root_ca: Option<crate::pki::CertificateAuthority>,
 }
 
 impl Default for InfrastructureConfig {
@@ -142,6 +147,7 @@ impl Default for InfrastructureConfig {
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
             network_topology: None,
+            root_ca: None,
         }
     }
 }
@@ -166,6 +172,7 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             monitoring: cluster.spec.monitoring.clone(),
             backups: cluster.spec.backups.clone(),
             network_topology: cluster.spec.network_topology.clone(),
+            root_ca: None, // Set by caller when CA is available
         }
     }
 }
@@ -215,6 +222,16 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
             version: env!("ISTIO_VERSION"),
             manifests: generate_istio_manifests(config)?,
             health_namespace: Some("istio-system"),
+        });
+
+        // East-west gateway + istiod proxy RBAC for multi-cluster
+        let mut ew_manifests = vec![eastwest::generate_eastwest_gateway(&config.cluster_name)];
+        ew_manifests.extend(eastwest::generate_istiod_proxy_rbac());
+        components.push(InfraComponent {
+            name: "eastwest-gateway",
+            version: env!("ISTIO_VERSION"),
+            manifests: ew_manifests,
+            health_namespace: None, // Gateway controller creates deployment async
         });
 
         // Cilium network policies
@@ -517,9 +534,26 @@ pub async fn apply_all_phases(
 
 // ---- Internal manifest generators ----
 
-/// Generate Istio manifests (namespace + charts + policies).
+/// Generate Istio manifests (namespace + charts + cacerts + policies).
+///
+/// The cacerts Secret MUST be created before istiod starts. When istiod finds
+/// a `cacerts` Secret in `istio-system`, it uses the intermediate CA from that
+/// Secret to sign workload certificates instead of generating a self-signed CA.
+/// This enables cross-cluster mTLS when all clusters share the same root CA.
 fn generate_istio_manifests(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
-    let mut manifests = vec![namespace_yaml("istio-system")];
+    // istio-system needs topology.istio.io/network label for multi-cluster
+    let mut manifests = vec![namespace_yaml_with_network("istio-system", &config.cluster_name)];
+
+    // cacerts Secret with per-cluster intermediate CA (must be before istiod).
+    // Only included when root_ca is Some — the caller is responsible for
+    // checking whether cacerts already exists to avoid regenerating the
+    // intermediate CA on every reconcile (which would break in-flight mTLS).
+    if let Some(ref root_ca) = config.root_ca {
+        manifests.push(
+            generate_cacerts_manifest(root_ca, &config.cluster_name)
+                .map_err(|e| format!("Failed to generate cacerts: {e}"))?,
+        );
+    }
 
     let reconciler = istio::IstioReconciler::new(&config.cluster_name);
     manifests.extend(reconciler.manifests().iter().cloned());
@@ -536,6 +570,43 @@ fn generate_istio_manifests(config: &InfrastructureConfig) -> Result<Vec<String>
     Ok(manifests)
 }
 
+/// Generate the `cacerts` Secret for Istio's intermediate CA.
+///
+/// Istio expects four PEM files in a `cacerts` Secret in `istio-system`:
+/// - `ca-cert.pem`: per-cluster intermediate CA (signed by root)
+/// - `ca-key.pem`: intermediate CA private key
+/// - `root-cert.pem`: shared root CA
+/// - `cert-chain.pem`: intermediate + root concatenated
+fn generate_cacerts_manifest(
+    root_ca: &crate::pki::CertificateAuthority,
+    cluster_name: &str,
+) -> Result<String, crate::pki::PkiError> {
+    use base64::Engine;
+
+    let intermediate = root_ca.generate_istio_intermediate_ca(cluster_name)?;
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
+
+    let secret = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "cacerts",
+            "namespace": "istio-system",
+            "labels": {
+                "app.kubernetes.io/managed-by": "lattice"
+            }
+        },
+        "data": {
+            "ca-cert.pem": b64(&intermediate.ca_cert_pem),
+            "ca-key.pem": b64(&intermediate.ca_key_pem),
+            "root-cert.pem": b64(&intermediate.root_cert_pem),
+            "cert-chain.pem": b64(&intermediate.cert_chain_pem)
+        }
+    });
+
+    Ok(serde_json::to_string_pretty(&secret).expect("serialize cacerts"))
+}
+
 /// Generate Cilium network policy manifests.
 fn generate_cilium_policy_manifests() -> Result<Vec<String>, String> {
     let mut manifests = Vec::new();
@@ -544,6 +615,7 @@ fn generate_cilium_policy_manifests() -> Result<Vec<String>, String> {
         serde_json::to_string_pretty(&cilium::generate_ztunnel_allowlist()),
         serde_json::to_string_pretty(&cilium::generate_default_deny()),
         serde_json::to_string_pretty(&cilium::generate_mesh_proxy_egress_policy()),
+        serde_json::to_string_pretty(&cilium::generate_eastwest_gateway_policy()),
     ] {
         manifests
             .push(policy.map_err(|e| format!("Failed to serialize CiliumNetworkPolicy: {e}"))?);
@@ -584,6 +656,17 @@ pub(crate) fn namespace_yaml(name: &str) -> String {
     format!(
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}",
         name
+    )
+}
+
+/// Create a namespace YAML with Istio multi-cluster network label.
+///
+/// The `topology.istio.io/network` label tells istiod which network this
+/// namespace belongs to, required for cross-network traffic routing.
+pub(crate) fn namespace_yaml_with_network(name: &str, network: &str) -> String {
+    format!(
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}\n  labels:\n    topology.istio.io/network: {}",
+        name, network
     )
 }
 

@@ -17,7 +17,7 @@ use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
-use lattice_common::policy::service_entry::{ServiceEntry, ServiceEntryEndpoint};
+use lattice_common::policy::service_entry::ServiceEntry;
 
 // =============================================================================
 // Generated Policies Container
@@ -166,38 +166,12 @@ impl<'a> PolicyCompiler<'a> {
         output.peer_authentications.extend(peer_auths);
         output.authorization_policies.extend(auth_policies);
 
-        // External + cross-cluster egress: ServiceEntry + AuthorizationPolicy + waypoint
-        // Handles inline external endpoints, FQDN egress rules, and remote dependencies.
-        // Remote dependencies are injected as egress rules so they use the same
-        // proven FQDN egress path that works with Istio ambient.
-        let mut node_with_remote_egress = service_node.clone();
-        for edge in &outbound_edges {
-            if let Some(dep) = self.graph.get_service(&edge.callee_namespace, &edge.callee_name) {
-                if let lattice_common::graph::ServiceType::Remote { port, ref hostname, .. } = dep.type_ {
-                    node_with_remote_egress.egress_rules.push(lattice_common::crd::EgressRule {
-                        target: lattice_common::crd::EgressTarget::Fqdn(hostname.clone()),
-                        ports: vec![port],
-                    });
-                }
-            }
-        }
-        self.compile_egress(&node_with_remote_egress, namespace, &mut output);
-
-        // For cross-cluster ServiceEntries, add the endpoint IP so ztunnel can
-        // route without external DNS. Looks up Remote nodes in the graph by
-        // hostname, which works for both dependency-based edges and auto-created
-        // route LMMs with FQDN egress rules.
-        for se in &mut output.service_entries {
-            if !se.spec.endpoints.is_empty() {
-                continue;
-            }
-            for host in &se.spec.hosts {
-                if let Some(address) = self.graph.remote_address_for_hostname(host) {
-                    se.spec.endpoints.push(ServiceEntryEndpoint { address });
-                    break;
-                }
-            }
-        }
+        // External egress: ServiceEntry + AuthorizationPolicy + waypoint
+        // Handles inline external endpoints and FQDN egress rules for actual
+        // external services (e.g., api.stripe.com). Cross-cluster routing is
+        // now handled natively by Istio multi-cluster via remote secrets —
+        // no more ServiceEntry injection for Remote dependencies.
+        self.compile_egress(&service_node, namespace, &mut output);
 
         // Stamp owner references for crash-safe K8s GC
         output.stamp_owner_refs(&self.owner_refs);

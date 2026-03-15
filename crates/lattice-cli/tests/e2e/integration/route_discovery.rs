@@ -1,7 +1,7 @@
 //! Multi-cluster route discovery and cross-cluster connectivity integration tests
 //!
 //! Verifies the full pipeline: advertise config → heartbeat → LatticeClusterRoutes
-//! → ServiceEntry → AuthorizationPolicy → traffic flows (or is denied).
+//! → Istio remote secret → istiod native discovery → traffic flows (or is denied).
 //!
 //! # Running Standalone (requires 2-cluster hierarchy)
 //!
@@ -120,23 +120,28 @@ fn build_advertised_service(
 
 /// Build a consumer service on the mgmt cluster that curls a remote (cross-cluster) service.
 ///
-/// The consumer declares an outbound dependency to the remote service. The compiler
-/// resolves it via the graph's Remote node and generates a ServiceEntry. The consumer
-/// pod curls the remote's **advertised hostname** (resolved via ServiceEntry), not the
-/// K8s internal DNS (which only exists on the remote cluster).
+/// The consumer declares an outbound dependency to the remote service for
+/// bilateral agreement (AuthorizationPolicy). Istiod discovers the remote
+/// service natively via the remote secret and routes traffic through the
+/// east-west gateway. The consumer curls the K8s Service DNS name — with
+/// native multi-cluster, istiod resolves remote services by their real
+/// cluster-local DNS, not custom advertised hostnames.
 fn build_cross_cluster_consumer(
     name: &str,
     namespace: &str,
     remote_name: &str,
     remote_namespace: &str,
-    advertised_hostname: &str,
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{DependencyDirection, ResourceSpec, ResourceType};
 
+    // Use the K8s Service DNS name — istiod discovers remote services under
+    // their real names, not custom hostnames.
+    let remote_dns = format!("{remote_name}.{remote_namespace}.svc.cluster.local");
+
     let script = format!(
         r#"while true; do
-  if curl -sf http://{advertised_hostname} 2>/dev/null | grep -q .; then
+  if curl -sf http://{remote_dns} 2>/dev/null | grep -q .; then
     echo "CROSS_CLUSTER_OK"
   else
     echo "CROSS_CLUSTER_FAIL"
@@ -362,56 +367,121 @@ pub async fn verify_route_status(kubeconfig: &str, _cluster_name: &str) -> Resul
 }
 
 // =============================================================================
-// ServiceEntry Verification
+// Remote Secret Verification
 // =============================================================================
 
-/// Verify that a ServiceEntry exists for the cross-cluster hostname.
+/// Verify that an Istio remote secret exists for the source cluster.
 ///
-/// Cross-cluster dependencies compile through the same FQDN egress path
-/// as external services. The ServiceEntry uses DNS resolution with an
-/// endpoint for the gateway IP.
-pub async fn verify_cross_cluster_service_entry(
+/// Cross-cluster routing uses Istio native multi-cluster discovery via remote
+/// secrets. Each source cluster with advertised routes gets a remote secret
+/// in `istio-system` that tells istiod how to discover services on that cluster.
+pub async fn verify_remote_secret(
     kubeconfig: &str,
-    namespace: &str,
-    hostname: &str,
+    source_cluster: &str,
 ) -> Result<(), String> {
+    let secret_name = format!("istio-remote-secret-{}", source_cluster);
     info!(
-        "[RouteDiscovery] Checking for ServiceEntry with host '{}'...",
-        hostname
+        "[RouteDiscovery] Checking for remote secret '{}'...",
+        secret_name
     );
 
-    let output = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "serviceentries", "-n", namespace, "-o", "json",
-    ])
-    .await?;
+    wait_for_condition(
+        &format!("remote secret {}", secret_name),
+        DEFAULT_TIMEOUT,
+        Duration::from_secs(10),
+        || {
+            let kc = kubeconfig.to_string();
+            let name = secret_name.clone();
+            async move {
+                let output = match run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "get", "secret", &name, "-n", "istio-system", "-o", "json",
+                ]).await {
+                    Ok(o) => o,
+                    Err(_) => return Ok(false),
+                };
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
+                let parsed: serde_json::Value = match serde_json::from_str(&output) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(false),
+                };
 
-    let items = parsed["items"].as_array().ok_or("expected items array")?;
+                // Verify it has the istio multiCluster label
+                let has_label = parsed["metadata"]["labels"]["istio/multiCluster"]
+                    .as_str() == Some("true");
 
-    let found = items.iter().any(|item| {
-        item["spec"]["hosts"]
-            .as_array()
-            .map(|hosts| hosts.iter().any(|h| h.as_str() == Some(hostname)))
-            .unwrap_or(false)
-    });
+                Ok(has_label)
+            }
+        },
+    ).await?;
 
-    if !found {
-        return Err(format!(
-            "no ServiceEntry found with host '{}' in namespace '{}'",
-            hostname, namespace
-        ));
-    }
-
-    info!("[RouteDiscovery] ServiceEntry for '{}' verified", hostname);
+    info!("[RouteDiscovery] Remote secret '{}' verified", secret_name);
     Ok(())
 }
 
 // =============================================================================
-// Gateway mTLS Verification
+// Infrastructure Verification
 // =============================================================================
+
+/// Verify the east-west gateway exists in istio-system.
+pub async fn verify_eastwest_gateway(kubeconfig: &str) -> Result<(), String> {
+    info!("[RouteDiscovery] Checking for east-west gateway...");
+
+    wait_for_condition(
+        "east-west gateway",
+        DEFAULT_TIMEOUT,
+        Duration::from_secs(10),
+        || {
+            let kc = kubeconfig.to_string();
+            async move {
+                let output = match run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "get", "gateways.gateway.networking.k8s.io",
+                    "istio-eastwestgateway", "-n", "istio-system", "-o", "json",
+                ]).await {
+                    Ok(o) => o,
+                    Err(_) => return Ok(false),
+                };
+
+                let parsed: serde_json::Value = match serde_json::from_str(&output) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(false),
+                };
+
+                let class = parsed["spec"]["gatewayClassName"].as_str();
+                Ok(class == Some("istio-east-west"))
+            }
+        },
+    ).await?;
+
+    info!("[RouteDiscovery] East-west gateway verified");
+    Ok(())
+}
+
+/// Verify the cacerts Secret exists in istio-system with the expected keys.
+pub async fn verify_cacerts(kubeconfig: &str) -> Result<(), String> {
+    info!("[RouteDiscovery] Checking for cacerts Secret...");
+
+    let output = run_kubectl(&[
+        "--kubeconfig", kubeconfig,
+        "get", "secret", "cacerts", "-n", "istio-system", "-o", "json",
+    ]).await?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
+
+    let data = parsed["data"].as_object()
+        .ok_or("cacerts Secret has no data")?;
+
+    for key in &["ca-cert.pem", "ca-key.pem", "root-cert.pem", "cert-chain.pem"] {
+        if !data.contains_key(*key) {
+            return Err(format!("cacerts Secret missing key '{}'", key));
+        }
+    }
+
+    info!("[RouteDiscovery] cacerts Secret verified with all required keys");
+    Ok(())
+}
 
 /// Verify Gateway has frontend mTLS when routes are advertised
 pub async fn verify_gateway_frontend_mtls(kubeconfig: &str, namespace: &str) -> Result<(), String> {
@@ -518,6 +588,13 @@ pub async fn run_route_discovery_tests(
 ) -> Result<(), String> {
     info!("[RouteDiscovery] Starting cross-cluster route discovery tests...");
 
+    // Verify multi-cluster infrastructure on both clusters
+    verify_cacerts(mgmt_kubeconfig).await?;
+    verify_cacerts(workload_kubeconfig).await?;
+    verify_eastwest_gateway(mgmt_kubeconfig).await?;
+    verify_eastwest_gateway(workload_kubeconfig).await?;
+    info!("[RouteDiscovery] Multi-cluster infrastructure verified on both clusters");
+
     // Setup namespace on workload cluster
     ensure_fresh_namespace(workload_kubeconfig, ROUTE_TEST_NS).await?;
     setup_regcreds_infrastructure(workload_kubeconfig).await?;
@@ -560,9 +637,15 @@ pub async fn run_route_discovery_tests(
     // Verify Gateway has frontend mTLS on workload cluster
     verify_gateway_frontend_mtls(workload_kubeconfig, ROUTE_TEST_NS).await?;
 
-    // Deploy a consumer on the mgmt cluster that curls the workload's advertised service.
-    // This verifies the full cross-cluster traffic path:
-    // consumer → ServiceEntry → workload Gateway → route-target pod
+    // Verify remote secret was created for istiod multi-cluster discovery
+    let workload_cluster_name = super::super::helpers::WORKLOAD_CLUSTER_NAME;
+    verify_remote_secret(mgmt_kubeconfig, workload_cluster_name).await?;
+    info!("[RouteDiscovery] Remote secret verified on parent cluster");
+
+    // Deploy a consumer on the mgmt cluster that curls the remote service by its
+    // K8s Service DNS name. With Istio native multi-cluster, istiod discovers
+    // remote services under their real names via the remote secret, and ztunnel
+    // routes through the east-west gateway with HBONE mTLS end-to-end.
     info!("[RouteDiscovery] Deploying cross-cluster consumer on mgmt cluster...");
     let consumer_ns = "route-consumer-test";
     ensure_fresh_namespace(mgmt_kubeconfig, consumer_ns).await?;
@@ -573,7 +656,6 @@ pub async fn run_route_discovery_tests(
         consumer_ns,
         "route-target",
         ROUTE_TEST_NS,
-        "route-target.test.local",
     );
 
     let mgmt_client = client_from_kubeconfig(mgmt_kubeconfig).await?;

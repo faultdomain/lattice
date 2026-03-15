@@ -10,7 +10,10 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::{ParentConnectionConfig, SharedConfig, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    ParentConnectionConfig, SharedConfig, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET,
+    LATTICE_SYSTEM_NAMESPACE,
+};
 
 use lattice_capi::installer::{
     copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
@@ -125,9 +128,19 @@ async fn resolve_infra_config(
 
     let cluster = find_lattice_cluster(client, cluster_mode).await?;
 
+    // Only provide root_ca if cacerts doesn't already exist — regenerating
+    // the intermediate CA on every startup would break in-flight mTLS.
+    let root_ca = if cacerts_exists(client).await {
+        tracing::info!("cacerts Secret already exists, skipping intermediate CA generation");
+        None
+    } else {
+        read_root_ca(client).await
+    };
+
     match &cluster {
         Some(c) => {
             let mut cfg = InfrastructureConfig::from(c);
+            cfg.root_ca = root_ca;
             if let Ok(Some(parent)) = ParentConnectionConfig::read(client).await {
                 cfg.parent_host = Some(parent.endpoint.host);
                 cfg.parent_grpc_port = parent.endpoint.grpc_port;
@@ -180,6 +193,41 @@ async fn apply_cert_manager_phase(client: &Client) -> anyhow::Result<()> {
 
     bootstrap::apply_phase(client, cert_manager_phase).await?;
     Ok(())
+}
+
+/// Check if the `cacerts` Secret already exists in `istio-system`.
+async fn cacerts_exists(client: &Client) -> bool {
+    let secrets: Api<k8s_openapi::api::core::v1::Secret> =
+        Api::namespaced(client.clone(), "istio-system");
+    secrets.get("cacerts").await.is_ok()
+}
+
+/// Read the Lattice root CA from the `lattice-ca` Secret in `lattice-system`.
+///
+/// Returns `None` if the Secret doesn't exist yet (bootstrap cluster before CA init)
+/// or if the PEM data is invalid. This is not an error — the cacerts Secret for Istio
+/// will simply be skipped, and istiod will use a self-signed CA.
+async fn read_root_ca(
+    client: &Client,
+) -> Option<lattice_infra::pki::CertificateAuthority> {
+    let secrets: Api<k8s_openapi::api::core::v1::Secret> =
+        Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let secret = secrets.get(CA_SECRET).await.ok()?;
+    let data = secret.data?;
+
+    let cert_pem = data.get(CA_CERT_KEY).and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+    let key_pem = data.get(CA_KEY_KEY).and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+
+    match lattice_infra::pki::CertificateAuthority::from_pem(&cert_pem, &key_pem) {
+        Ok(ca) => {
+            tracing::info!("Loaded root CA for Istio cacerts generation");
+            Some(ca)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load root CA, Istio cacerts will not be generated");
+            None
+        }
+    }
 }
 
 /// Find the LatticeCluster instance.
