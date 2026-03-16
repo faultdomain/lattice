@@ -248,6 +248,19 @@ const MAX_PENDING_ACKS: usize = 1000;
 /// from unmatched request/response pairs.
 const PENDING_RESPONSE_TTL: Duration = Duration::from_secs(300);
 
+/// Register a pending ack in a capacity-bounded DashMap.
+/// Evicts one entry if at capacity to prevent unbounded memory growth.
+fn register_pending<T>(map: &DashMap<String, T>, request_id: &str, sender: T, label: &str) {
+    if map.len() >= MAX_PENDING_ACKS {
+        warn!(request_id = %request_id, "Pending {} map at capacity ({}), evicting one entry", label, MAX_PENDING_ACKS);
+        if let Some(entry) = map.iter().next() {
+            map.remove(entry.key());
+        }
+    }
+    map.insert(request_id.to_string(), sender);
+    debug!(request_id = %request_id, "Registered pending {}", label);
+}
+
 impl Default for AgentRegistry {
     fn default() -> Self {
         let (connection_tx, _) = broadcast::channel(CONNECTION_CHANNEL_CAPACITY);
@@ -679,45 +692,32 @@ impl AgentRegistry {
     // Pending acknowledgment tracking (request-response correlation)
     // =========================================================================
 
-    /// Register a pending batch ack channel
-    ///
+    /// Register a pending batch ack channel.
     /// The request_id should be the CellCommand.command_id.
     pub fn register_pending_batch_ack(&self, request_id: &str, sender: oneshot::Sender<BatchAck>) {
-        if self.pending_batch_acks.len() >= MAX_PENDING_ACKS {
-            warn!(request_id = %request_id, "Pending batch ack map at capacity ({}), dropping oldest", MAX_PENDING_ACKS);
-            // Drop a random entry to make room
-            if let Some(entry) = self.pending_batch_acks.iter().next() {
-                self.pending_batch_acks.remove(entry.key());
-            }
-        }
-        self.pending_batch_acks
-            .insert(request_id.to_string(), sender);
-        debug!(request_id = %request_id, "Registered pending batch ack");
+        register_pending(&self.pending_batch_acks, request_id, sender, "batch ack");
     }
 
-    /// Take the pending batch ack sender
+    /// Take the pending batch ack sender.
     pub fn take_pending_batch_ack(&self, request_id: &str) -> Option<oneshot::Sender<BatchAck>> {
         self.pending_batch_acks.remove(request_id).map(|(_, v)| v)
     }
 
-    /// Register a pending complete ack channel
+    /// Register a pending complete ack channel.
     pub fn register_pending_complete_ack(
         &self,
         request_id: &str,
         sender: oneshot::Sender<CompleteAck>,
     ) {
-        if self.pending_complete_acks.len() >= MAX_PENDING_ACKS {
-            warn!(request_id = %request_id, "Pending complete ack map at capacity ({}), dropping oldest", MAX_PENDING_ACKS);
-            if let Some(entry) = self.pending_complete_acks.iter().next() {
-                self.pending_complete_acks.remove(entry.key());
-            }
-        }
-        self.pending_complete_acks
-            .insert(request_id.to_string(), sender);
-        debug!(request_id = %request_id, "Registered pending complete ack");
+        register_pending(
+            &self.pending_complete_acks,
+            request_id,
+            sender,
+            "complete ack",
+        );
     }
 
-    /// Take the pending complete ack sender
+    /// Take the pending complete ack sender.
     pub fn take_pending_complete_ack(
         &self,
         request_id: &str,

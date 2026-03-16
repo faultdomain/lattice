@@ -17,129 +17,126 @@ use super::apply_manifests::apply_manifests;
 use super::CommandContext;
 
 /// Handle a move complete command from the cell.
+///
+/// Runs inline (not spawned) for consistency with move_batch — the cell waits
+/// for the ack before proceeding, so there's no benefit to spawning.
 pub async fn handle(command_id: &str, complete: &MoveComplete, ctx: &CommandContext) {
     let request_id = command_id.to_string();
-    let agent_cluster_name = ctx.cluster_name.clone();
-    let message_tx = ctx.message_tx.clone();
-    let capi_cluster_name = complete.cluster_name.clone();
-    let target_namespace = complete.target_namespace.clone();
+    let capi_cluster_name = &complete.cluster_name;
+    let target_namespace = &complete.target_namespace;
     let resources =
         distributable_resources_from_proto(complete.resources.clone().unwrap_or_default());
-    let manifests = complete.manifests.clone();
 
     info!(
         request_id = %request_id,
         cluster = %capi_cluster_name,
         namespace = %target_namespace,
-        manifests = manifests.len(),
+        manifests = complete.manifests.len(),
         cedar_policies = resources.cedar_policies.len(),
         oidc_providers = resources.oidc_providers.len(),
         "Processing move complete"
     );
 
-    let provider = ctx.kube_provider.clone();
-    let agent_state = ctx.agent_state.clone();
+    // Check if pivot already completed (handles re-sends after parent crash)
+    if check_local_pivot_complete(capi_cluster_name, ctx.kube_provider.as_ref()).await {
+        info!(request_id = %request_id, "Pivot already complete, sending immediate ack");
+        *ctx.agent_state.write().await = AgentState::Ready;
+        send_complete_ack(&ctx.message_tx, &ctx.cluster_name, &request_id, true, "", 0).await;
+        return;
+    }
 
-    tokio::spawn(async move {
-        // Check if pivot already completed (handles re-sends after parent crash)
-        if check_local_pivot_complete(&capi_cluster_name, provider.as_ref()).await {
-            info!(request_id = %request_id, "Pivot already complete, sending immediate ack");
-            *agent_state.write().await = AgentState::Ready;
-            send_complete_ack(&message_tx, &agent_cluster_name, &request_id, true, "", 0).await;
-            return;
-        }
-
-        let client = match provider.create().await {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = %e, "Failed to create K8s client for move complete");
-                send_complete_ack(
-                    &message_tx,
-                    &agent_cluster_name,
-                    &request_id,
-                    false,
-                    &format!("Failed to create K8s client: {}", e),
-                    0,
-                )
-                .await;
-                return;
-            }
-        };
-
-        // Patch kubeconfig to use kubernetes.default.svc (avoids hairpinning)
-        if let Err(e) = patch_kubeconfig_for_self_management(
-            &capi_cluster_name,
-            &target_namespace,
-            provider.as_ref(),
-        )
-        .await
-        {
-            warn!(error = %e, "Failed to patch kubeconfig for self-management");
-        }
-
-        let mover = lattice_move::AgentMover::new(client.clone(), &target_namespace);
-
-        // Unpause resources
-        if let Err(e) = mover.unpause_resources().await {
-            warn!(error = ?e, "Failed to unpause resources");
-        }
-
-        let resources_created = mover.resources_created() as i32;
-
-        // Apply distributed resources - fail pivot if this fails
-        if let Err(e) = apply_distributed_resources(&client, &resources).await {
-            error!(error = %e, "Failed to apply distributed resources");
+    let client = match ctx.kube_provider.create().await {
+        Ok(c) => c,
+        Err(e) => {
+            error!(error = %e, "Failed to create K8s client for move complete");
             send_complete_ack(
-                &message_tx,
-                &agent_cluster_name,
+                &ctx.message_tx,
+                &ctx.cluster_name,
                 &request_id,
                 false,
-                &format!("failed to apply distributed resources: {}", e),
+                &format!("Failed to create K8s client: {}", e),
                 0,
             )
             .await;
             return;
         }
+    };
 
-        // Apply additional manifests (e.g., CiliumNetworkPolicy) - fail pivot if this fails
-        if !manifests.is_empty() {
-            if let Err(e) = apply_manifests(&client, &manifests).await {
-                error!(error = %e, manifests = manifests.len(), "Failed to apply manifests");
-                send_complete_ack(
-                    &message_tx,
-                    &agent_cluster_name,
-                    &request_id,
-                    false,
-                    &format!("failed to apply manifests: {}", e),
-                    0,
-                )
-                .await;
-                return;
-            }
-            info!(manifests = manifests.len(), "Applied post-pivot manifests");
-        }
+    // Patch kubeconfig to use kubernetes.default.svc (avoids hairpinning)
+    if let Err(e) = patch_kubeconfig_for_self_management(
+        capi_cluster_name,
+        target_namespace,
+        ctx.kube_provider.as_ref(),
+    )
+    .await
+    {
+        warn!(error = %e, "Failed to patch kubeconfig for self-management");
+    }
 
-        // Set local pivot_complete AFTER all resources are confirmed in etcd
-        if let Err(e) = set_local_pivot_complete(&capi_cluster_name, &provider).await {
-            warn!(error = %e, "Failed to set local pivot_complete");
-            // Continue anyway - all resources are applied successfully
-        }
+    let mover = lattice_move::AgentMover::new(client.clone(), target_namespace);
 
-        // Transition agent state to Ready so heartbeats report correct state
-        *agent_state.write().await = AgentState::Ready;
-        info!("Agent state transitioned to Ready after successful pivot");
+    // Unpause resources
+    if let Err(e) = mover.unpause_resources().await {
+        warn!(error = ?e, "Failed to unpause resources");
+    }
 
-        // Send success ack
+    let resources_created = mover.resources_created() as i32;
+
+    // Apply distributed resources - fail pivot if this fails
+    if let Err(e) = apply_distributed_resources(&client, &resources).await {
+        error!(error = %e, "Failed to apply distributed resources");
         send_complete_ack(
-            &message_tx,
-            &agent_cluster_name,
+            &ctx.message_tx,
+            &ctx.cluster_name,
             &request_id,
-            true,
-            "",
-            resources_created,
+            false,
+            &format!("failed to apply distributed resources: {}", e),
+            0,
         )
         .await;
-    });
+        return;
+    }
+
+    // Apply additional manifests (e.g., CiliumNetworkPolicy) - fail pivot if this fails
+    if !complete.manifests.is_empty() {
+        if let Err(e) = apply_manifests(&client, &complete.manifests).await {
+            error!(error = %e, manifests = complete.manifests.len(), "Failed to apply manifests");
+            send_complete_ack(
+                &ctx.message_tx,
+                &ctx.cluster_name,
+                &request_id,
+                false,
+                &format!("failed to apply manifests: {}", e),
+                0,
+            )
+            .await;
+            return;
+        }
+        info!(
+            manifests = complete.manifests.len(),
+            "Applied post-pivot manifests"
+        );
+    }
+
+    // Set local pivot_complete AFTER all resources are confirmed in etcd
+    if let Err(e) = set_local_pivot_complete(capi_cluster_name, &ctx.kube_provider).await {
+        warn!(error = %e, "Failed to set local pivot_complete");
+    }
+
+    // Transition agent state to Ready so heartbeats report correct state
+    *ctx.agent_state.write().await = AgentState::Ready;
+    info!("Agent state transitioned to Ready after successful pivot");
+
+    // Send success ack
+    send_complete_ack(
+        &ctx.message_tx,
+        &ctx.cluster_name,
+        &request_id,
+        true,
+        "",
+        resources_created,
+    )
+    .await;
 }
 
 /// Check if the local LatticeCluster has pivot_complete=true.
