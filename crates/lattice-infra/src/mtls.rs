@@ -179,7 +179,7 @@ mod tests {
             agent_cert,
             agent_key,
             ca.ca_cert_pem().to_string(),
-            "cell.lattice.local".to_string(),
+            "cell.UNSET-TRUST-DOMAIN".to_string(),
         );
 
         assert!(config.to_tonic_config().is_ok());

@@ -1662,6 +1662,7 @@ mod tests {
                 skip_cloud_init_status: None,
                 skip_qemu_guest_agent: None,
                 lb_cidr: Some("10.0.0.200/28".to_string()),
+                additional_networks: None,
             };
             let config = ProviderConfig::proxmox(proxmox);
             assert!(config.proxmox.is_some());

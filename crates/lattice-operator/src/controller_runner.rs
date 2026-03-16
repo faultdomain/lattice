@@ -131,10 +131,14 @@ pub async fn build_service_controllers(
         client.clone(),
         "lattice-service-controller",
     ));
+    // Compute trust domain from the root CA for SPIFFE principal generation.
+    // Falls back to "UNSET-TRUST-DOMAIN" if the CA secret doesn't exist yet.
+    let trust_domain = lattice_infra::bootstrap::read_trust_domain(&client).await;
+
     let mut service_ctx = ServiceContext::new(
         svc_kube_client,
         Arc::new(
-            lattice_common::graph::ServiceGraph::new()
+            lattice_common::graph::ServiceGraph::new(&trust_domain)
                 .with_cluster_name(cluster.cluster_name.clone()),
         ),
         cluster,

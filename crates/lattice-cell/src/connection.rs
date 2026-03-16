@@ -85,6 +85,12 @@ pub struct AgentConnection {
     pub lattice_image: Option<String>,
     /// When the agent last disconnected (None if never disconnected or currently connected)
     pub disconnected_at: Option<Instant>,
+    /// Connection generation — incremented on each register(). Used by unregister()
+    /// to avoid stomping a newer connection's state when a zombie task cleans up.
+    pub generation: u64,
+    /// When the last PeerRouteSync was sent to this child.
+    /// Used to force periodic token refresh even when route hashes match.
+    pub last_peer_sync: Option<Instant>,
 }
 
 impl AgentConnection {
@@ -110,6 +116,8 @@ impl AgentConnection {
             status_hash: vec![],
             lattice_image: None,
             disconnected_at: None,
+            generation: 0,
+            last_peer_sync: None,
         }
     }
 
@@ -301,24 +309,31 @@ impl AgentRegistry {
     ///
     /// Always notifies waiting requests via the connection broadcast channel,
     /// so both the resilient tunnel and SubtreeForwarder can pick up new agents.
-    pub fn register(&self, mut connection: AgentConnection) {
+    /// Register an agent connection. Returns the generation number for this
+    /// connection — pass it to `unregister()` so stale tasks don't stomp
+    /// newer connections.
+    pub fn register(&self, mut connection: AgentConnection) -> u64 {
         let cluster_name = connection.cluster_name.clone();
         let command_tx = connection.command_tx.clone();
         connection.connected = true;
 
         // Atomic read-modify-write: preserve pivot_complete from any existing
-        // entry and detect reconnect in a single DashMap lock acquisition.
-        let is_reconnect = match self.agents.entry(cluster_name.clone()) {
+        // entry, detect reconnect, and capture generation — all within a single
+        // DashMap shard lock to prevent TOCTOU races.
+        let (is_reconnect, generation) = match self.agents.entry(cluster_name.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 if entry.get().pivot_complete {
                     connection.pivot_complete = true;
                 }
+                connection.generation = entry.get().generation + 1;
+                let gen = connection.generation;
                 entry.insert(connection);
-                true
+                (true, gen)
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let gen = connection.generation; // 0 for new connections
                 entry.insert(connection);
-                false
+                (false, gen)
             }
         };
 
@@ -334,22 +349,29 @@ impl AgentRegistry {
             cluster_name,
             command_tx,
         });
+
+        generation
     }
 
-    /// Mark an agent as disconnected
+    /// Mark an agent as disconnected, but only if the generation matches.
     ///
-    /// The agent stays in the registry (with connected=false) so that:
-    /// - Reconnections can be detected
-    /// - State like pivot_complete is preserved
-    /// - Resilient tunnels can wait for known agents to reconnect
-    pub fn unregister(&self, cluster_name: &str) {
+    /// When an agent reconnects, the old connection's task eventually cleans up
+    /// and calls unregister. Without the generation check, it would stomp the
+    /// new connection's state. The generation ensures only the task that owns
+    /// the current connection can mark it disconnected.
+    pub fn unregister(&self, cluster_name: &str, generation: u64) {
         if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+            if agent.generation != generation {
+                debug!(
+                    cluster = %cluster_name,
+                    current_gen = agent.generation,
+                    cleanup_gen = generation,
+                    "Ignoring unregister from stale connection"
+                );
+                return;
+            }
             agent.connected = false;
             agent.disconnected_at = Some(Instant::now());
-            // Teardown guard is NOT cleared on disconnect — it's cleared by
-            // finish_teardown() on completion or evicted by TEARDOWN_GUARD_TTL
-            // if the background task crashes. Clearing here would allow a
-            // reconnecting agent to trigger duplicate CAPI imports.
             info!(cluster = %cluster_name, "Agent disconnected");
         }
     }
@@ -820,6 +842,26 @@ impl AgentRegistry {
             .collect()
     }
 
+    /// Check if a peer route sync is needed for token refresh.
+    /// Returns true if no sync has been sent, or the last sync is older than the threshold.
+    pub fn needs_peer_sync(&self, cluster_name: &str, max_age: Duration) -> bool {
+        self.agents
+            .get(cluster_name)
+            .map(|a| {
+                a.last_peer_sync
+                    .map(|t| t.elapsed() > max_age)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Record that a PeerRouteSync was sent to a child.
+    pub fn mark_peer_sync(&self, cluster_name: &str) {
+        if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+            agent.last_peer_sync = Some(Instant::now());
+        }
+    }
+
     pub fn detect_stale_agents(&self, threshold: Duration) -> Vec<String> {
         self.agents
             .iter()
@@ -901,7 +943,7 @@ mod tests {
         let (conn, _rx) = create_test_connection("test-cluster");
 
         registry.register(conn);
-        registry.unregister("test-cluster");
+        registry.unregister("test-cluster", 0);
 
         // Agent is still known but not connected
         assert!(!registry.is_connected("test-cluster"));
@@ -1363,7 +1405,7 @@ mod tests {
         assert!(registry.is_known("test-cluster"));
 
         // Disconnect
-        registry.unregister("test-cluster");
+        registry.unregister("test-cluster", 0);
         assert!(!registry.is_connected("test-cluster"));
         assert!(registry.is_known("test-cluster"));
 
@@ -1454,7 +1496,7 @@ mod tests {
         }
 
         // Disconnect
-        registry.unregister("test-cluster");
+        registry.unregister("test-cluster", 0);
 
         // Reconnect with new connection (would normally have pivot_complete=false)
         let (conn2, _rx2) = create_test_connection("test-cluster");
@@ -1514,7 +1556,7 @@ mod tests {
         if let Some(mut agent) = registry.get_mut("cluster-a") {
             agent.last_heartbeat = Some(Instant::now() - Duration::from_secs(200));
         }
-        registry.unregister("cluster-a");
+        registry.unregister("cluster-a", 0);
 
         // Disconnected agents should NOT appear in stale list
         let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
@@ -1632,7 +1674,7 @@ mod tests {
         let registry = AgentRegistry::new();
         let (conn, _rx) = create_test_connection("stale-cluster");
         registry.register(conn);
-        registry.unregister("stale-cluster");
+        registry.unregister("stale-cluster", 0);
 
         // Backdate disconnected_at past the threshold
         if let Some(mut agent) = registry.get_mut("stale-cluster") {
@@ -1649,7 +1691,7 @@ mod tests {
         let registry = AgentRegistry::new();
         let (conn, _rx) = create_test_connection("recent-cluster");
         registry.register(conn);
-        registry.unregister("recent-cluster");
+        registry.unregister("recent-cluster", 0);
 
         let removed = registry.cleanup_stale_disconnected(Duration::from_secs(3600));
         assert_eq!(removed, 0);
@@ -1688,7 +1730,7 @@ mod tests {
             },
         );
 
-        registry.unregister("manifest-cluster");
+        registry.unregister("manifest-cluster", 0);
         if let Some(mut agent) = registry.get_mut("manifest-cluster") {
             agent.disconnected_at = Some(Instant::now() - Duration::from_secs(7200));
         }
@@ -1712,7 +1754,7 @@ mod tests {
             assert!(agent.disconnected_at.is_none());
         }
 
-        registry.unregister("cluster-a");
+        registry.unregister("cluster-a", 0);
 
         let agent = registry.get("cluster-a").unwrap();
         assert!(agent.disconnected_at.is_some());

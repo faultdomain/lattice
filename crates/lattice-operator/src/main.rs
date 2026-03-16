@@ -1067,8 +1067,15 @@ async fn start_auth_proxy(
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Create SA validator for ServiceAccount token authentication
-    let sa_validator = Arc::new(SaValidator::new(client.clone()));
+    // Accept both the custom "lattice-proxy" audience (used by TokenRequest
+    // tokens like istiod's) and the default K8s API audience (used by
+    // Secret-based admin tokens). The audiences list is passed in the
+    // TokenReview spec so the API server validates against these instead
+    // of its own default audience.
+    let sa_validator = Arc::new(SaValidator::new(client.clone()).with_audiences(vec![
+        lattice_common::kube_utils::PROXY_TOKEN_AUDIENCE.to_string(),
+        "https://kubernetes.default.svc.cluster.local".to_string(),
+    ]));
 
     // Try to load OIDC provider from CRD
     let oidc_validator = match OidcValidator::from_crd(client, oidc_allow_insecure_http).await {

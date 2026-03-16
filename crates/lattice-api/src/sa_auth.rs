@@ -23,9 +23,12 @@ use crate::error::{Error, Result};
 
 /// ServiceAccount token validator using Kubernetes TokenReview API
 pub struct SaValidator {
-    /// Kubernetes client
     client: Client,
-    /// Optional audiences to validate
+    /// Audiences to include in the TokenReview request.
+    /// When set, the K8s API validates that the token was issued for one of
+    /// these audiences. Without this, the API server checks against its own
+    /// default audience, which rejects tokens issued with custom audiences
+    /// (like "lattice-proxy").
     audiences: Option<Vec<String>>,
 }
 
@@ -38,28 +41,26 @@ impl SaValidator {
         }
     }
 
+    /// Set the audiences to include in the TokenReview request.
+    ///
+    /// The K8s API server will accept tokens issued for any of these audiences.
+    /// This is required when validating tokens created via TokenRequest with
+    /// custom audiences (e.g., "lattice-proxy").
+    pub fn with_audiences(mut self, audiences: Vec<String>) -> Self {
+        self.audiences = Some(audiences);
+        self
+    }
+
     /// Validate a ServiceAccount token using TokenReview API
-    ///
-    /// Submits the token to the Kubernetes TokenReview API and returns
-    /// the authenticated user identity if valid.
-    ///
-    /// # Arguments
-    /// * `token` - The ServiceAccount token to validate
-    ///
-    /// # Returns
-    /// * `Ok(UserIdentity)` - The authenticated identity with username and groups
-    /// * `Err(Error::Unauthorized)` - If the token is invalid or expired
     pub async fn validate(&self, token: &str) -> Result<UserIdentity> {
         let api: Api<TokenReview> = Api::all(self.client.clone());
 
-        // Build TokenReview request
         let token_review = TokenReview {
-            metadata: Default::default(),
             spec: TokenReviewSpec {
                 token: Some(token.to_string()),
                 audiences: self.audiences.clone(),
             },
-            status: None,
+            ..Default::default()
         };
 
         // Submit for review

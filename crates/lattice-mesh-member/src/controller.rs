@@ -216,7 +216,13 @@ pub async fn reconcile(
     // The ingress compiler produces a graph registration for the gateway proxy
     // (managed by Istio) so bilateral agreement edges form before policy compilation.
     if let Some(ingress_spec) = &member.spec.ingress {
-        match IngressCompiler::compile(&name, namespace, ingress_spec, &member.spec.ports) {
+        match IngressCompiler::compile(
+            &name,
+            namespace,
+            ingress_spec,
+            &member.spec.ports,
+            ctx.graph.trust_domain(),
+        ) {
             Ok(ingress) => {
                 if let Some(reg) = &ingress.gateway_graph_registration {
                     ctx.graph.put_mesh_member(namespace, &reg.name, &reg.spec);
@@ -400,15 +406,21 @@ async fn do_reconcile(
         block_owner_deletion: Some(true),
     }];
 
-    let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name, owner_refs.clone())
-        .compile(name, namespace);
+    let policies = PolicyCompiler::new(&ctx.graph, owner_refs.clone()).compile(name, namespace);
 
+    let trust_domain = ctx.graph.trust_domain().to_string();
     let ingress = member
         .spec
         .ingress
         .as_ref()
         .map(|ingress_spec| {
-            IngressCompiler::compile(name, namespace, ingress_spec, &member.spec.ports)
+            IngressCompiler::compile(
+                name,
+                namespace,
+                ingress_spec,
+                &member.spec.ports,
+                &trust_domain,
+            )
         })
         .transpose()
         .map_err(|e| ReconcileError::Validation(format!("ingress compilation: {e}")))?
@@ -1138,14 +1150,13 @@ mod tests {
 
     #[test]
     fn collect_resource_refs_extracts_auth_and_peer_auth() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "test-ns";
 
         graph.put_service(ns, "api", &make_service_spec(vec![], vec!["gateway"]));
         graph.put_service(ns, "gateway", &make_service_spec(vec!["api"], vec![]));
 
-        let policies =
-            crate::policy::PolicyCompiler::new(&graph, "test-cluster", vec![]).compile("api", ns);
+        let policies = crate::policy::PolicyCompiler::new(&graph, vec![]).compile("api", ns);
 
         let refs = collect_resource_refs(&policies);
 

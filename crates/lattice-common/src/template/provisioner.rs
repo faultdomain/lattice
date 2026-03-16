@@ -396,7 +396,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn make_graph_with_service(env: &str, name: &str, port: u16) -> ServiceGraph {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         let mut containers = BTreeMap::new();
         containers.insert(
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn test_service_provisioner_missing_service() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ServiceProvisioner;
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_external_provisioner_resolves_endpoint() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_external_provisioner_missing_params() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_external_provisioner_explicit_port() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_external_provisioner_default_port_https() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn test_external_provisioner_default_port_http() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn test_external_provisioner_named_endpoint() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_external_provisioner_empty_endpoints() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
@@ -771,7 +771,7 @@ mod tests {
 
     #[test]
     fn test_volume_provisioner_resolves_claim_name() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "myapp", "cluster.local");
 
         let provisioner = VolumeProvisioner;
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_volume_provisioner_resolves_claim_name_with_id() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "myapp", "cluster.local");
 
         let provisioner = VolumeProvisioner;
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn test_context_builds_fqdn() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "my-namespace", "cluster.local");
 
         assert_eq!(
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn test_context_custom_cluster_domain() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ctx = ProvisionerContext::new(&graph, "prod", "ns", "my-cluster.internal");
 
         assert_eq!(ctx.service_fqdn("svc"), "svc.ns.svc.my-cluster.internal");

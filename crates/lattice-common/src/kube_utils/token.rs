@@ -3,11 +3,18 @@
 use kube::api::Api;
 use kube::Client;
 
+/// Token lifetime in seconds (1 hour).
+pub const PROXY_TOKEN_EXPIRATION_SECS: i64 = 3600;
+
+/// Audience for proxy tokens. The auth proxy validates this audience
+/// via TokenReview, preventing token reuse against the K8s API directly.
+pub const PROXY_TOKEN_AUDIENCE: &str = "lattice-proxy";
+
 /// Request a short-lived token for the `lattice-istiod-proxy` ServiceAccount.
 ///
 /// This SA has read-only RBAC (get/list/watch on services, endpoints, pods,
 /// endpointslices) — the minimum required for Istio multi-cluster service
-/// discovery. Token expires after 1 hour.
+/// discovery. Token is audience-bound to `lattice-proxy` and expires after 1 hour.
 pub async fn request_istiod_proxy_token(client: &Client) -> Result<String, kube::Error> {
     use k8s_openapi::api::authentication::v1::{TokenRequest, TokenRequestSpec};
     use k8s_openapi::api::core::v1::ServiceAccount;
@@ -15,13 +22,12 @@ pub async fn request_istiod_proxy_token(client: &Client) -> Result<String, kube:
 
     const SA_NAME: &str = "lattice-istiod-proxy";
     const SA_NAMESPACE: &str = "istio-system";
-    const TOKEN_EXPIRATION_SECS: i64 = 3600;
 
     let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), SA_NAMESPACE);
     let token_request = TokenRequest {
         spec: TokenRequestSpec {
-            audiences: vec![],
-            expiration_seconds: Some(TOKEN_EXPIRATION_SECS),
+            audiences: vec![PROXY_TOKEN_AUDIENCE.to_string()],
+            expiration_seconds: Some(PROXY_TOKEN_EXPIRATION_SECS),
             ..Default::default()
         },
         ..Default::default()

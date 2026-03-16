@@ -141,11 +141,15 @@ impl<'a> PolicyCompiler<'a> {
 
         let mut ingress_rules = Vec::new();
 
-        // Direct TCP ingress for broadly permissive ports (any source)
+        // Direct TCP ingress for broadly permissive ports (any source).
+        // Uses `fromEntities: [cluster]` instead of `fromEndpoints: [{}]` because
+        // empty endpoint selectors in namespaced CNPs only match same-namespace pods.
+        // Permissive ports accept traffic from non-mesh callers in other namespaces
+        // (e.g., CAPI controllers in capi-system reaching the proxy on port 8081).
         let broad_ports = service.permissive_port_numbers();
         if !broad_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
-                from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
+                from_entities: vec!["cluster".to_string()],
                 to_ports: build_tcp_port_rules(&broad_ports),
                 ..Default::default()
             });
@@ -156,22 +160,19 @@ impl<'a> PolicyCompiler<'a> {
         // the source identity as remote-node (cross-node) or host (same-node),
         // not kube-apiserver. "world" is needed for child cluster nodes connecting
         // over real networks (Proxmox, AWS, OpenStack).
-        // In-cluster access is also needed (e.g., istiod reaching the auth proxy
-        // for multi-cluster service discovery).
+        // "cluster" covers in-cluster cross-namespace callers (e.g., CAPI controllers
+        // in capi-system reaching the proxy on port 8081, istiod reaching the auth
+        // proxy for multi-cluster service discovery).
         let webhook_ports = service.webhook_port_numbers();
         if !webhook_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
                 from_entities: vec![
+                    "cluster".to_string(),
                     "remote-node".to_string(),
                     "kube-apiserver".to_string(),
                     "host".to_string(),
                     "world".to_string(),
                 ],
-                to_ports: build_tcp_port_rules(&webhook_ports),
-                ..Default::default()
-            });
-            ingress_rules.push(CiliumIngressRule {
-                from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
                 to_ports: build_tcp_port_rules(&webhook_ports),
                 ..Default::default()
             });
@@ -212,8 +213,29 @@ impl<'a> PolicyCompiler<'a> {
                 .get_service(&e.callee_namespace, &e.callee_name)
                 .is_some_and(|c| c.ambient)
         });
+        let has_remote_outbound = outbound_edges.iter().any(|e| {
+            self.graph
+                .get_service(&e.callee_namespace, &e.callee_name)
+                .is_some_and(|c| c.type_.is_remote())
+        });
         if has_ambient_outbound || has_fqdn_egress || service.allow_peer_traffic {
             egress_rules.push(hbone_egress_rule());
+        }
+        // Cross-cluster dependencies route via the east-west gateway's external IP.
+        // The gateway is outside the "cluster" entity, so we need "world" egress
+        // on the HBONE port. Istio mTLS protects the connection.
+        if has_remote_outbound {
+            egress_rules.push(CiliumEgressRule {
+                to_entities: vec!["world".to_string()],
+                to_ports: vec![CiliumPortRule {
+                    ports: vec![CiliumPort {
+                        port: mesh::HBONE_PORT.to_string(),
+                        protocol: "TCP".to_string(),
+                    }],
+                    rules: None,
+                }],
+                ..Default::default()
+            });
         }
 
         // Direct egress for outbound edges to non-ambient callees.
@@ -314,31 +336,32 @@ impl<'a> PolicyCompiler<'a> {
             });
         }
 
-        // Direct TCP ingress for broadly permissive ports (any source)
+        // Direct TCP ingress for broadly permissive ports (any source).
+        // Uses `fromEntities: [cluster]` instead of `fromEndpoints: [{}]` because
+        // empty endpoint selectors in namespaced CNPs only match same-namespace pods.
+        // Permissive ports accept traffic from non-mesh callers in other namespaces
+        // (e.g., CAPI controllers in capi-system reaching the proxy on port 8081).
         let broad_ports = service.permissive_port_numbers();
         if !broad_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
-                from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
+                from_entities: vec!["cluster".to_string()],
                 to_ports: build_tcp_port_rules(&broad_ports),
                 ..Default::default()
             });
         }
 
-        // Direct TCP ingress for webhook ports (external + in-cluster)
+        // Direct TCP ingress for webhook ports (external + in-cluster).
+        // Single rule with all entities — "cluster" for cross-namespace in-cluster callers.
         let webhook_ports = service.webhook_port_numbers();
         if !webhook_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
                 from_entities: vec![
+                    "cluster".to_string(),
                     "remote-node".to_string(),
                     "kube-apiserver".to_string(),
                     "host".to_string(),
                     "world".to_string(),
                 ],
-                to_ports: build_tcp_port_rules(&webhook_ports),
-                ..Default::default()
-            });
-            ingress_rules.push(CiliumIngressRule {
-                from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
                 to_ports: build_tcp_port_rules(&webhook_ports),
                 ..Default::default()
             });

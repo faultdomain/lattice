@@ -213,6 +213,31 @@ impl ProxmoxProvider {
             spec["checks"] = serde_json::Value::Object(checks);
         }
 
+        // Attach additional network bridges for direct L2 reachability.
+        // Each entry becomes a CAPMOX additionalDevice with its own IP pool.
+        if let Some(networks) = &cfg.additional_networks {
+            if !networks.is_empty() {
+                let devices: Vec<serde_json::Value> = networks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, net)| {
+                        let pool_name = format!("{}-{}-net{}", name, suffix, i + 1);
+                        serde_json::json!({
+                            "name": format!("net{}", i + 1),
+                            "bridge": &net.bridge,
+                            "model": "virtio",
+                            "ipv4PoolRef": {
+                                "apiGroup": "ipam.cluster.x-k8s.io",
+                                "kind": "InClusterIPPool",
+                                "name": pool_name
+                            }
+                        })
+                    })
+                    .collect();
+                spec["network"]["additionalDevices"] = serde_json::Value::Array(devices);
+            }
+        }
+
         CAPIManifest::new(
             PROXMOX_API_VERSION,
             "ProxmoxMachineTemplate",
@@ -220,6 +245,54 @@ impl ProxmoxProvider {
             &self.namespace,
         )
         .with_spec(serde_json::json!({ "template": { "spec": spec } }))
+    }
+
+    /// Generate InClusterIPPool resources for additional networks on a machine template.
+    fn generate_additional_network_pools(
+        &self,
+        name: &str,
+        cfg: &ProxmoxConfig,
+        suffix: &str,
+        manifests: &mut Vec<CAPIManifest>,
+    ) -> Result<()> {
+        let networks = match &cfg.additional_networks {
+            Some(nets) if !nets.is_empty() => nets,
+            _ => return Ok(()),
+        };
+
+        for (i, net) in networks.iter().enumerate() {
+            let pool_name = format!("{}-{}-net{}", name, suffix, i + 1);
+            let (ip_range, prefix) = net
+                .ipv4_pool
+                .parse_range()
+                .map(|(start, end, prefix)| (format!("{}-{}", start, end), prefix))
+                .ok_or_else(|| {
+                    Error::validation(format!(
+                        "invalid additionalNetwork ipv4Pool range: '{}'",
+                        net.ipv4_pool.range
+                    ))
+                })?;
+
+            manifests.push(
+                CAPIManifest::new(
+                    "ipam.cluster.x-k8s.io/v1alpha2",
+                    "InClusterIPPool",
+                    &pool_name,
+                    &self.namespace,
+                )
+                .with_labels(std::collections::BTreeMap::from([(
+                    "cluster.x-k8s.io/cluster-name".to_string(),
+                    name.to_string(),
+                )]))
+                .with_spec(serde_json::json!({
+                    "addresses": [ip_range],
+                    "prefix": prefix,
+                    "gateway": &net.ipv4_pool.gateway
+                })),
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -302,6 +375,9 @@ impl Provider for ProxmoxProvider {
             self.generate_machine_template(name, cfg, cp_sizing, "control-plane"),
         ];
 
+        // Generate InClusterIPPool resources for additional networks (CP)
+        self.generate_additional_network_pools(name, cfg, "control-plane", &mut manifests)?;
+
         // Generate worker pool resources
         for (pool_id, pool_spec) in &spec.nodes.worker_pools {
             let pool_config = WorkerPoolConfig {
@@ -335,6 +411,7 @@ impl Provider for ProxmoxProvider {
                 &pool_config,
             ));
             manifests.push(self.generate_machine_template(name, cfg, worker_sizing, &suffix));
+            self.generate_additional_network_pools(name, cfg, &suffix, &mut manifests)?;
             manifests.push(generate_bootstrap_config_template_for_pool(
                 &config,
                 &pool_config,
@@ -357,11 +434,11 @@ impl Provider for ProxmoxProvider {
 mod tests {
     use super::*;
     use kube::api::ObjectMeta;
+    use lattice_common::crd::{AdditionalNetwork, Ipv4PoolConfig, LatticeClusterSpec};
     use lattice_common::crd::{
         BackupsConfig, BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec,
         MonitoringConfig, NodeResourceSpec, NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
     };
-    use lattice_common::crd::{Ipv4PoolConfig, LatticeClusterSpec};
 
     fn test_proxmox_config() -> ProxmoxConfig {
         ProxmoxConfig {
@@ -393,6 +470,7 @@ mod tests {
             skip_cloud_init_status: None,
             skip_qemu_guest_agent: None,
             lb_cidr: None,
+            additional_networks: None,
         }
     }
 
@@ -550,5 +628,48 @@ mod tests {
             .find(|m| m.kind.contains("ControlPlane"))
             .expect("ControlPlane should exist");
         assert!(cp.kind.contains("RKE2"));
+    }
+
+    #[tokio::test]
+    async fn additional_networks_generate_pools_for_cp_and_workers() {
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let mut cluster = test_cluster("e2e-mgmt");
+        // Add additional networks
+        cluster
+            .spec
+            .provider
+            .config
+            .proxmox
+            .as_mut()
+            .unwrap()
+            .additional_networks = Some(vec![AdditionalNetwork {
+            bridge: "vmbr1".to_string(),
+            ipv4_pool: Ipv4PoolConfig {
+                range: "10.0.1.201-210/24".to_string(),
+                gateway: "10.0.1.1".to_string(),
+            },
+        }]);
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &BootstrapInfo::default())
+            .await
+            .expect("manifest generation should succeed");
+
+        let pool_names: Vec<_> = manifests
+            .iter()
+            .filter(|m| m.kind == "InClusterIPPool")
+            .map(|m| m.metadata.name.as_str())
+            .collect();
+
+        assert!(
+            pool_names.contains(&"e2e-mgmt-control-plane-net1"),
+            "should have CP pool, got: {:?}",
+            pool_names
+        );
+        assert!(
+            pool_names.contains(&"e2e-mgmt-pool-default-net1"),
+            "should have worker pool, got: {:?}",
+            pool_names
+        );
     }
 }

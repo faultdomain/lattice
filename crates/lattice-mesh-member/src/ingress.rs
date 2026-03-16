@@ -240,6 +240,7 @@ impl IngressCompiler {
         namespace: &str,
         ingress: &IngressSpec,
         ports: &[MeshMemberPort],
+        trust_domain: &str,
     ) -> Result<GeneratedIngress, String> {
         let mut output = GeneratedIngress::default();
         let mut all_listeners = Vec::new();
@@ -377,7 +378,7 @@ impl IngressCompiler {
                     .values()
                     .filter_map(|r| r.advertise.as_ref())
                     .filter(|a| !a.is_open())
-                    .flat_map(|a| a.to_spiffe_principals())
+                    .flat_map(|a| a.to_spiffe_principals(trust_domain))
                     .collect();
 
                 output.cross_cluster_auth_policy =
@@ -856,7 +857,14 @@ mod tests {
     #[test]
     fn generates_gateway_with_http_listener() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
         assert_eq!(gateway.metadata.name, "prod-ingress");
@@ -875,7 +883,14 @@ mod tests {
     #[test]
     fn generates_gateway_with_https_listener() {
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
         assert_eq!(gateway.spec.listeners.len(), 2);
@@ -893,7 +908,14 @@ mod tests {
     #[test]
     fn generates_http_route() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         assert_eq!(output.http_routes.len(), 1);
         let route = &output.http_routes[0];
@@ -916,7 +938,14 @@ mod tests {
     #[test]
     fn generates_certificate_for_auto_tls() {
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         assert_eq!(output.certificates.len(), 1);
         let cert = &output.certificates[0];
@@ -965,7 +994,14 @@ mod tests {
             )]),
         };
 
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
         let route = &output.http_routes[0];
         let matches = &route.spec.rules[0].matches;
 
@@ -1012,7 +1048,14 @@ mod tests {
             )]),
         };
 
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
         let route = &output.http_routes[0];
         let m = &route.spec.rules[0].matches[0];
 
@@ -1027,7 +1070,14 @@ mod tests {
     #[test]
     fn multi_host_generates_per_host_listeners() {
         let ingress = make_ingress_spec(vec!["api.example.com", "api.internal.example.com"], true);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
         assert_eq!(gateway.spec.listeners.len(), 4);
@@ -1060,7 +1110,14 @@ mod tests {
                 },
             )]),
         };
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
         let https_listener = &gateway.spec.listeners[1];
@@ -1087,7 +1144,14 @@ mod tests {
                 },
             )]),
         };
-        let output = IngressCompiler::compile("model", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "model",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         assert!(output.http_routes.is_empty());
         assert_eq!(output.grpc_routes.len(), 1);
@@ -1116,7 +1180,9 @@ mod tests {
                 },
             )]),
         };
-        let output = IngressCompiler::compile("db", "prod", &ingress, &single_port()).unwrap();
+        let output =
+            IngressCompiler::compile("db", "prod", &ingress, &single_port(), "UNSET-TRUST-DOMAIN")
+                .unwrap();
 
         assert!(output.http_routes.is_empty());
         assert!(output.grpc_routes.is_empty());
@@ -1175,7 +1241,14 @@ mod tests {
             ]),
         };
 
-        let output = IngressCompiler::compile("svc", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "svc",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         assert_eq!(output.http_routes.len(), 1);
         assert_eq!(output.grpc_routes.len(), 1);
@@ -1193,7 +1266,14 @@ mod tests {
         assert_eq!(empty.total_count(), 0);
 
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         assert!(!output.is_empty());
         // gateway + gateway_policy + gateway_auth_policy + http_route + certificate = 5
@@ -1328,7 +1408,14 @@ mod tests {
     #[test]
     fn gateway_generates_cnp_with_correct_selector() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         let cnp = output.gateway_policy.expect("should have gateway CNP");
         assert_eq!(cnp.metadata.namespace, "prod");
@@ -1344,7 +1431,14 @@ mod tests {
     #[test]
     fn gateway_cnp_has_listener_port_ingress() {
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         let cnp = output.gateway_policy.expect("should have gateway CNP");
 
@@ -1368,7 +1462,14 @@ mod tests {
     #[test]
     fn gateway_cnp_has_hbone_ingress_and_egress() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         let cnp = output.gateway_policy.expect("should have gateway CNP");
         let hbone_port = mesh::HBONE_PORT.to_string();
@@ -1406,7 +1507,14 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::new(),
         };
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         assert!(output.gateway.is_none());
         assert!(output.gateway_policy.is_none());
@@ -1417,8 +1525,22 @@ mod tests {
         let ingress_a = make_ingress_spec(vec!["a.example.com"], false);
         let ingress_b = make_ingress_spec(vec!["b.example.com"], true);
 
-        let out_a = IngressCompiler::compile("svc-a", "prod", &ingress_a, &single_port()).unwrap();
-        let out_b = IngressCompiler::compile("svc-b", "prod", &ingress_b, &single_port()).unwrap();
+        let out_a = IngressCompiler::compile(
+            "svc-a",
+            "prod",
+            &ingress_a,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
+        let out_b = IngressCompiler::compile(
+            "svc-b",
+            "prod",
+            &ingress_b,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         let cnp_a = out_a.gateway_policy.unwrap();
         let cnp_b = out_b.gateway_policy.unwrap();
@@ -1432,7 +1554,14 @@ mod tests {
     #[test]
     fn produces_gateway_graph_registration() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
-        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+        let output = IngressCompiler::compile(
+            "api",
+            "prod",
+            &ingress,
+            &single_port(),
+            "UNSET-TRUST-DOMAIN",
+        )
+        .unwrap();
 
         let reg = output
             .gateway_graph_registration

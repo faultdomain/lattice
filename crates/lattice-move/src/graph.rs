@@ -106,6 +106,16 @@ impl GraphNode {
         })
     }
 
+    /// Check if this object has a specific label with a specific value.
+    pub fn has_label(&self, key: &str, value: &str) -> bool {
+        self.object
+            .get("metadata")
+            .and_then(|m| m.get("labels"))
+            .and_then(|l| l.get(key))
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v == value)
+    }
+
     /// Get the source UID
     pub fn uid(&self) -> &str {
         &self.identity.uid
@@ -395,6 +405,14 @@ impl ObjectGraph {
             }
         }
         keep.extend(additional_keep);
+
+        // Include objects labeled with the cluster name (e.g., InClusterIPPool).
+        // These have no owner references but belong to the cluster by convention.
+        for (uid, node) in &self.nodes {
+            if node.has_label("cluster.x-k8s.io/cluster-name", cluster_name) {
+                keep.insert(uid.clone());
+            }
+        }
 
         // Remove nodes not in keep set
         let before = self.nodes.len();

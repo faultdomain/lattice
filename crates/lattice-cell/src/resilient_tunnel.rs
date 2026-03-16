@@ -124,6 +124,10 @@ async fn tunnel_watch_resilient(
     let (body_tx, body_rx) =
         mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(RESPONSE_CHANNEL_SIZE);
 
+    // The spawned task sends back the content type from the first response chunk
+    // so we can set the correct Content-Type header (may be protobuf, not JSON).
+    let (ct_tx, ct_rx) = tokio::sync::oneshot::channel::<String>();
+
     let registry = registry.clone();
     let cluster_name = cluster_name.to_string();
     let reconnect_timeout = config.reconnect_timeout;
@@ -131,6 +135,7 @@ async fn tunnel_watch_resilient(
 
     tokio::spawn(async move {
         let mut current_params = params;
+        let mut ct_tx = Some(ct_tx);
 
         loop {
             // Get command channel (waits for agent if not yet connected)
@@ -166,9 +171,11 @@ async fn tunnel_watch_resilient(
                 }
             };
 
-            // Stream responses to client, tracking resourceVersion
+            // Stream responses to client, tracking resourceVersion.
+            // On the first chunk, send the content type back to the caller.
             let disconnected =
-                stream_watch_responses(response_rx, &body_tx, &mut current_params).await;
+                stream_watch_responses(response_rx, &body_tx, &mut current_params, &mut ct_tx)
+                    .await;
 
             // Clean up the stale pending_k8s_responses entry for this watch.
             // When the agent disconnects mid-watch, the entry is orphaned — the
@@ -189,12 +196,16 @@ async fn tunnel_watch_resilient(
         }
     });
 
+    // Wait for the content type from the first response chunk
+    let content_type = ct_rx
+        .await
+        .unwrap_or_else(|_| "application/json".to_string());
+
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx));
 
     Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .header("Transfer-Encoding", "chunked")
+        .header("Content-Type", content_type)
         .body(body)
         .map_err(|e| TunnelError::ResponseBuild(e.to_string()))
 }
@@ -221,15 +232,28 @@ fn is_retryable(e: &TunnelError) -> bool {
     matches!(e, TunnelError::ChannelClosed | TunnelError::SendFailed(_))
 }
 
-/// Stream watch responses to client, tracking resourceVersion
+/// Stream watch responses to client, tracking resourceVersion.
 ///
-/// Returns true if disconnected (should retry), false if stream ended normally
+/// On the first chunk, sends the content type through `ct_tx` so the
+/// caller can set the correct Content-Type header.
+///
+/// Returns true if disconnected (should retry), false if stream ended normally.
 async fn stream_watch_responses(
     mut response_rx: mpsc::Receiver<KubernetesResponse>,
     body_tx: &mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
     params: &mut K8sRequestParams,
+    ct_tx: &mut Option<tokio::sync::oneshot::Sender<String>>,
 ) -> bool {
     while let Some(response) = response_rx.recv().await {
+        // Send content type from the first chunk (only once)
+        if let Some(tx) = ct_tx.take() {
+            let ct = if response.content_type.is_empty() {
+                "application/json".to_string()
+            } else {
+                response.content_type.clone()
+            };
+            let _ = tx.send(ct);
+        }
         // Extract resourceVersion from watch events for resume
         if let Some(rv) = extract_resource_version(&response.body) {
             update_resource_version_in_query(&mut params.query, &rv);

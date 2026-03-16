@@ -93,28 +93,16 @@ impl GeneratedPolicies {
 /// caller declares dependency AND callee allows caller.
 pub struct PolicyCompiler<'a> {
     graph: &'a ServiceGraph,
-    cluster_name: String,
     owner_refs: Vec<OwnerReference>,
 }
 
 impl<'a> PolicyCompiler<'a> {
-    /// Create a new policy compiler
+    /// Create a new policy compiler.
     ///
-    /// # Arguments
-    /// * `graph` - The service graph for bilateral agreement checks
-    /// * `cluster_name` - Cluster name used in trust domain (lattice.{cluster}.local)
-    /// * `owner_refs` - Owner references stamped onto generated AuthorizationPolicy
-    ///   and PeerAuthentication resources for crash-safe GC
-    pub fn new(
-        graph: &'a ServiceGraph,
-        cluster_name: impl Into<String>,
-        owner_refs: Vec<OwnerReference>,
-    ) -> Self {
-        Self {
-            graph,
-            cluster_name: cluster_name.into(),
-            owner_refs,
-        }
+    /// The trust domain for SPIFFE principals comes from the graph's
+    /// `trust_domain` field — set once from the root CA fingerprint.
+    pub fn new(graph: &'a ServiceGraph, owner_refs: Vec<OwnerReference>) -> Self {
+        Self { graph, owner_refs }
     }
 
     /// Compile all mesh policies for a member.
@@ -305,14 +293,14 @@ pub(crate) mod tests {
 
     #[test]
     fn owner_refs_stamped_on_auth_and_peer_auth() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "test-ns";
 
         graph.put_service(ns, "api", &make_service_spec(vec![], vec!["gateway"]));
         graph.put_service(ns, "gateway", &make_service_spec(vec!["api"], vec![]));
 
         let refs = test_owner_refs();
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", refs.clone());
+        let compiler = PolicyCompiler::new(&graph, refs.clone());
         let output = compiler.compile("api", ns);
 
         for ap in &output.authorization_policies {
@@ -337,13 +325,13 @@ pub(crate) mod tests {
 
     #[test]
     fn owner_refs_empty_when_none_provided() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "test-ns";
 
         graph.put_service(ns, "api", &make_service_spec(vec![], vec!["gateway"]));
         graph.put_service(ns, "gateway", &make_service_spec(vec!["api"], vec![]));
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", ns);
 
         for ap in &output.authorization_policies {
@@ -353,7 +341,7 @@ pub(crate) mod tests {
 
     #[test]
     fn bilateral_agreement_generates_policy() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -362,7 +350,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", "prod-ns");
 
         assert!(!output.authorization_policies.is_empty());
@@ -379,7 +367,7 @@ pub(crate) mod tests {
 
     #[test]
     fn no_policy_without_bilateral_agreement() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -388,7 +376,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec![], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", "prod-ns");
 
         assert!(output.authorization_policies.is_empty());
@@ -396,15 +384,15 @@ pub(crate) mod tests {
 
     #[test]
     fn no_policies_when_not_in_graph() {
-        let graph = ServiceGraph::new();
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let graph = ServiceGraph::new("lattice.test");
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("nonexistent", "default");
         assert!(output.is_empty());
     }
 
     #[test]
     fn spiffe_uses_trust_domain() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.cafebabe.local");
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -413,28 +401,27 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "my-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", "prod-ns");
 
         let principals = &output.authorization_policies[0].spec.rules[0].from[0]
             .source
             .principals;
-        assert!(principals[0].starts_with("lattice.my-cluster.local/ns/prod-ns/sa/"));
         assert_eq!(
             principals[0],
-            "lattice.my-cluster.local/ns/prod-ns/sa/gateway"
+            "lattice.cafebabe.local/ns/prod-ns/sa/gateway"
         );
     }
 
     #[test]
     fn cilium_policy_always_generated() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "default";
 
         let spec = make_service_spec(vec![], vec![]);
         graph.put_service(ns, "my-app", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("my-app", ns);
 
         assert_eq!(output.cilium_policies.len(), 1);
@@ -454,7 +441,7 @@ pub(crate) mod tests {
 
     #[test]
     fn fqdn_egress_generates_service_entry() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
@@ -465,7 +452,7 @@ pub(crate) mod tests {
         }];
         graph.put_mesh_member(ns, "api", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", ns);
 
         assert_eq!(output.service_entries.len(), 1);
@@ -476,7 +463,7 @@ pub(crate) mod tests {
 
     #[test]
     fn total_count() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
@@ -495,7 +482,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", ns);
 
         assert_eq!(output.cilium_policies.len(), 1);
@@ -533,7 +520,7 @@ pub(crate) mod tests {
 
     #[test]
     fn wildcard_inbound_generates_policy() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["*"]);
@@ -542,7 +529,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", ns);
 
         assert!(!output.authorization_policies.is_empty());
@@ -555,7 +542,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cilium_hbone_ingress_and_egress_for_mesh_service() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -564,7 +551,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
 
         // Check api (has inbound callers, no outbound)
         let api_cnp = &compiler.compile("api", ns).cilium_policies[0];
@@ -606,7 +593,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cilium_hbone_with_fqdn_egress() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
@@ -625,7 +612,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", ns);
 
         let cnp = &output.cilium_policies[0];
@@ -688,7 +675,7 @@ pub(crate) mod tests {
     fn permissive_port_generates_peer_auth_and_authz() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "webhook-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "webhook".to_string())]);
@@ -706,7 +693,7 @@ pub(crate) mod tests {
         let api_spec = make_service_spec(vec!["webhook-handler"], vec![]);
         graph.put_service(ns, "api", &api_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("webhook-handler", ns);
 
         // Should have PeerAuthentication with permissive override on port 9443
@@ -747,7 +734,7 @@ pub(crate) mod tests {
     fn webhook_port_generates_peer_auth_and_authz() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "webhook-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "admission".to_string())]);
@@ -759,7 +746,7 @@ pub(crate) mod tests {
         );
         graph.put_mesh_member(ns, "admission-webhook", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("admission-webhook", ns);
 
         // PeerAuthentication: port 9443 is PERMISSIVE (both Webhook and Permissive need this)
@@ -784,7 +771,7 @@ pub(crate) mod tests {
     fn webhook_port_cilium_restricts_to_kube_apiserver() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "webhook-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "admission".to_string())]);
@@ -796,7 +783,7 @@ pub(crate) mod tests {
         );
         graph.put_mesh_member(ns, "admission-webhook", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("admission-webhook", ns);
 
         let cnp = &output.cilium_policies[0];
@@ -814,45 +801,32 @@ pub(crate) mod tests {
             .expect("webhook-only service should have HBONE ingress for ztunnel delivery");
         assert!(hbone_rule.from_entities.contains(&"cluster".to_string()));
 
-        // Should have an ingress rule with fromEntities on port 9443
-        // Needs remote-node, kube-apiserver, and host for cross-node DNAT delivery
+        // Should have a single ingress rule with fromEntities on port 9443
+        // Includes cluster (cross-namespace in-cluster callers like CAPI controllers),
+        // remote-node, kube-apiserver, host (cross-node DNAT delivery), and world
         let webhook_rule = cnp
             .spec
             .ingress
             .iter()
             .find(|r| r.from_entities.contains(&"remote-node".to_string()))
-            .expect("should have remote-node ingress rule for webhook");
+            .expect("should have webhook ingress rule");
+        assert!(webhook_rule.from_entities.contains(&"cluster".to_string()));
         assert!(webhook_rule
             .from_entities
             .contains(&"kube-apiserver".to_string()));
         assert!(webhook_rule.from_entities.contains(&"host".to_string()));
+        assert!(webhook_rule.from_entities.contains(&"world".to_string()));
         assert!(webhook_rule.to_ports[0]
             .ports
             .iter()
             .any(|p| p.port == "9443"));
-
-        // Should also have an in-cluster ingress rule for webhook ports
-        // (istiod and other in-cluster services need to reach webhook ports)
-        let cluster_rule = cnp
-            .spec
-            .ingress
-            .iter()
-            .find(|r| {
-                !r.from_endpoints.is_empty()
-                    && r.from_endpoints[0].match_labels.is_empty()
-                    && r.to_ports
-                        .iter()
-                        .any(|tp| tp.ports.iter().any(|p| p.port == "9443"))
-            })
-            .expect("should have in-cluster ingress rule for webhook ports");
-        assert!(cluster_rule.from_endpoints[0].match_labels.is_empty());
     }
 
     #[test]
     fn permissive_port_cilium_allows_any_source() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "webhook-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "svc".to_string())]);
@@ -864,32 +838,31 @@ pub(crate) mod tests {
         );
         graph.put_mesh_member(ns, "metrics-svc", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("metrics-svc", ns);
 
         let cnp = &output.cilium_policies[0];
 
-        // Should have an ingress rule with empty endpoint selector (any source), NOT fromEntities
+        // Should have an ingress rule with fromEntities: [cluster] for cross-namespace access
         let broad_rule = cnp
             .spec
             .ingress
             .iter()
             .find(|r| {
-                r.from_entities.is_empty()
-                    && !r.from_endpoints.is_empty()
+                r.from_entities.contains(&"cluster".to_string())
                     && r.to_ports
                         .iter()
                         .any(|pr| pr.ports.iter().any(|p| p.port == "9090"))
             })
             .expect("should have broad ingress rule for permissive port");
-        assert!(broad_rule.from_endpoints[0].match_labels.is_empty());
+        assert!(broad_rule.from_endpoints.is_empty());
     }
 
     #[test]
     fn mixed_permissive_and_webhook_ports() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "mixed-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "mixed".to_string())]);
@@ -905,7 +878,7 @@ pub(crate) mod tests {
         );
         graph.put_mesh_member(ns, "mixed-svc", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("mixed-svc", ns);
 
         // PeerAuthentication should have PERMISSIVE on both 9090 and 9443
@@ -932,7 +905,7 @@ pub(crate) mod tests {
         // Cilium: separate ingress rules for permissive (any) and webhook (kube-apiserver)
         let cnp = &output.cilium_policies[0];
         let has_broad = cnp.spec.ingress.iter().any(|r| {
-            r.from_entities.is_empty()
+            r.from_entities.contains(&"cluster".to_string())
                 && r.to_ports
                     .iter()
                     .any(|pr| pr.ports.iter().any(|p| p.port == "9090"))
@@ -952,7 +925,7 @@ pub(crate) mod tests {
 
     #[test]
     fn strict_only_ports_generate_no_permissive_policies() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "strict-ns";
 
         let spec = make_service_spec(vec![], vec!["gateway"]);
@@ -961,7 +934,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", ns);
 
         assert!(
@@ -985,7 +958,7 @@ pub(crate) mod tests {
     fn fqdn_egress_generates_service_entry_and_authz() {
         use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         // Put a mesh member with an FQDN egress rule
@@ -1014,7 +987,7 @@ pub(crate) mod tests {
         };
         graph.put_mesh_member(ns, "api", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("api", ns);
 
         // Should have a ServiceEntry for api.stripe.com
@@ -1057,7 +1030,7 @@ pub(crate) mod tests {
     fn fqdn_egress_without_ports_generates_no_to_block() {
         use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "test-ns";
 
         let spec = lattice_common::crd::LatticeMeshMemberSpec {
@@ -1085,7 +1058,7 @@ pub(crate) mod tests {
         };
         graph.put_mesh_member(ns, "svc", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("svc", ns);
 
         let fqdn_authz = output
@@ -1103,7 +1076,7 @@ pub(crate) mod tests {
     fn fqdn_egress_cilium_gets_fqdn_rule() {
         use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "test-ns";
 
         let spec = lattice_common::crd::LatticeMeshMemberSpec {
@@ -1131,7 +1104,7 @@ pub(crate) mod tests {
         };
         graph.put_mesh_member(ns, "svc", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("svc", ns);
 
         // Cilium policy should have FQDN egress rule
@@ -1147,7 +1120,7 @@ pub(crate) mod tests {
 
     #[test]
     fn peer_traffic_generates_hbone_ingress_and_egress() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "training-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "worker".to_string())]);
@@ -1160,7 +1133,7 @@ pub(crate) mod tests {
         spec.allow_peer_traffic = true;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("worker", ns);
 
         let cnp = &output.cilium_policies[0];
@@ -1200,7 +1173,7 @@ pub(crate) mod tests {
     fn ambient_to_non_ambient_produces_direct_egress_no_hbone() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "kthena-system";
 
         // Router: ambient, depends on serving
@@ -1228,7 +1201,7 @@ pub(crate) mod tests {
         serving_spec.ambient = false;
         graph.put_mesh_member(ns, "serving", &serving_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("kthena-router", ns).cilium_policies[0];
 
         let hbone_port = mesh::HBONE_PORT.to_string();
@@ -1269,7 +1242,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ambient_to_ambient_produces_hbone_egress_no_direct() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         // Gateway: ambient, depends on api
@@ -1280,7 +1253,7 @@ pub(crate) mod tests {
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
         graph.put_service(ns, "api", &api_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("gateway", ns).cilium_policies[0];
 
         let hbone_port = mesh::HBONE_PORT.to_string();
@@ -1315,7 +1288,7 @@ pub(crate) mod tests {
     fn mixed_ambient_and_non_ambient_callees_produce_both_rules() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         // Router: ambient, depends on both api (ambient) and serving (non-ambient)
@@ -1344,7 +1317,7 @@ pub(crate) mod tests {
         serving_spec.ambient = false;
         graph.put_mesh_member(ns, "serving", &serving_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("router", ns).cilium_policies[0];
 
         let hbone_port = mesh::HBONE_PORT.to_string();
@@ -1387,7 +1360,7 @@ pub(crate) mod tests {
     fn cross_namespace_non_ambient_callee_includes_namespace_label() {
         use lattice_common::crd::{PeerAuth, ServiceRef};
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Router in kthena-system, depends on serving in model-ns
         let router_labels = BTreeMap::from([(
@@ -1416,7 +1389,7 @@ pub(crate) mod tests {
         serving_spec.allowed_callers = vec![ServiceRef::new("kthena-system", "kthena-router")];
         graph.put_mesh_member("model-ns", "serving", &serving_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler
             .compile("kthena-router", "kthena-system")
             .cilium_policies[0];
@@ -1460,7 +1433,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_produces_only_cilium_policy() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "training-ns";
 
         let labels =
@@ -1475,7 +1448,7 @@ pub(crate) mod tests {
         spec.allow_peer_traffic = true;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("worker", ns);
 
         assert_eq!(output.cilium_policies.len(), 1, "should have one CNP");
@@ -1495,7 +1468,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_has_no_hbone_rules() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "training-ns";
 
         let labels =
@@ -1510,7 +1483,7 @@ pub(crate) mod tests {
         spec.allow_peer_traffic = true;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         let hbone_port = mesh::HBONE_PORT.to_string();
@@ -1538,7 +1511,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_peer_traffic_uses_label_selector() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "training-ns";
 
         let labels =
@@ -1553,7 +1526,7 @@ pub(crate) mod tests {
         spec.allow_peer_traffic = true;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         // Endpoint selector matches the group label
@@ -1601,7 +1574,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_always_has_dns_egress() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "training-ns";
 
         let labels =
@@ -1610,7 +1583,7 @@ pub(crate) mod tests {
         spec.ambient = false;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         let has_dns = cnp.spec.egress.iter().any(|e| {
@@ -1625,7 +1598,7 @@ pub(crate) mod tests {
     fn out_of_ambient_bilateral_caller_cross_namespace() {
         use lattice_common::crd::{PeerAuth, ServiceRef};
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "model-ns";
 
         let labels = BTreeMap::from([("lattice.dev/model".to_string(), "my-model".to_string())]);
@@ -1649,7 +1622,7 @@ pub(crate) mod tests {
         router_spec.depends_all = true;
         graph.put_mesh_member("kthena-system", "kthena-router", &router_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("serving", ns).cilium_policies[0];
 
         // Should have an ingress rule with the caller's labels and port restriction
@@ -1689,7 +1662,7 @@ pub(crate) mod tests {
     fn out_of_ambient_bilateral_caller_ingress() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "model-ns";
 
         // Model serving node (out of ambient)
@@ -1707,7 +1680,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["serving"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("serving", ns).cilium_policies[0];
 
         // Should have an ingress rule from the gateway's labels
@@ -1736,7 +1709,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_vmagent_ingress_on_metrics_port() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "training-ns";
 
         let labels =
@@ -1770,7 +1743,7 @@ pub(crate) mod tests {
             &vmagent_spec,
         );
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         // vmagent should appear via bilateral agreement (depends_all + auto-injected allowed_caller)
@@ -1797,7 +1770,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_no_peer_traffic_means_no_peer_rules() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "job-ns";
 
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "etl-job".to_string())]);
@@ -1811,7 +1784,7 @@ pub(crate) mod tests {
         // allow_peer_traffic is false by default
         graph.put_mesh_member(ns, "etl-job", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("etl-job", ns).cilium_policies[0];
 
         // No peer ingress
@@ -1836,7 +1809,7 @@ pub(crate) mod tests {
     fn out_of_ambient_egress_rules_propagate() {
         use lattice_common::crd::EgressRule;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let ns = "training-ns";
 
         let labels =
@@ -1855,7 +1828,7 @@ pub(crate) mod tests {
         ];
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         // CIDR egress

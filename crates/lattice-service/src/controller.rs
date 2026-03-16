@@ -638,7 +638,7 @@ impl ServiceContext {
     pub fn for_testing(kube: Arc<dyn ServiceKubeClient>) -> Self {
         Self {
             kube,
-            graph: Arc::new(ServiceGraph::new()),
+            graph: Arc::new(ServiceGraph::new("lattice.test")),
             cluster_name: "test-cluster".to_string(),
             provider_type: ProviderType::Docker,
             cedar: Arc::new(PolicyEngine::new()),
@@ -1454,7 +1454,7 @@ mod tests {
     /// Story: Detect missing internal dependencies
     #[test]
     fn detect_missing_dependencies() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let spec = service_with_deps("frontend", vec!["backend", "cache"]).spec;
 
         // Nothing in graph - all deps missing
@@ -1509,7 +1509,7 @@ mod tests {
     fn shared_graph_across_contexts() {
         let mock_kube1 = Arc::new(mock_kube());
         let mock_kube2 = Arc::new(mock_kube());
-        let shared_graph = Arc::new(ServiceGraph::new());
+        let shared_graph = Arc::new(ServiceGraph::new("lattice.test"));
         let cedar = Arc::new(PolicyEngine::new());
 
         let cluster = ClusterConfig {

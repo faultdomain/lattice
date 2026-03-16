@@ -82,7 +82,7 @@ pub async fn tunnel_request(
         send_request(registry, cluster_name, command_tx, params, is_watch).await?;
 
     let result = if is_watch {
-        build_streaming_http_response(response_rx)
+        build_streaming_http_response(response_rx).await
     } else {
         receive_single_response(cluster_name, response_rx).await
     };
@@ -215,41 +215,64 @@ async fn receive_single_response(
     }
 }
 
-/// Build streaming HTTP response from response channel
-fn build_streaming_http_response(
+/// Build streaming HTTP response from response channel.
+///
+/// Peeks at the first chunk to extract the Content-Type from the actual
+/// K8s API response (may be `application/json` or `application/vnd.kubernetes.protobuf`).
+async fn build_streaming_http_response(
     mut response_rx: mpsc::Receiver<KubernetesResponse>,
 ) -> Result<Response<Body>, TunnelError> {
+    // Wait for the first chunk to determine content type and status
+    let first = response_rx.recv().await.ok_or(TunnelError::ChannelClosed)?;
+
+    let content_type = if first.content_type.is_empty() {
+        "application/json".to_string()
+    } else {
+        first.content_type.clone()
+    };
+    let status = if first.status_code != 0 {
+        first.status_code as u16
+    } else {
+        200
+    };
+
     let (body_tx, body_rx) =
         mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(RESPONSE_CHANNEL_SIZE);
 
-    tokio::spawn(async move {
-        while let Some(response) = response_rx.recv().await {
-            // K8s watch responses are already NDJSON - don't add extra newlines
-            if !response.body.is_empty()
-                && body_tx
-                    .send(Ok(axum::body::Bytes::from(response.body)))
-                    .await
-                    .is_err()
-            {
-                break;
-            }
+    // Forward the first chunk
+    if !first.body.is_empty() {
+        let _ = body_tx.send(Ok(axum::body::Bytes::from(first.body))).await;
+    }
 
-            if !response.error.is_empty() {
-                warn!(error = %response.error, "Watch error from agent");
-            }
+    let done = first.stream_end;
+    if !done {
+        tokio::spawn(async move {
+            while let Some(response) = response_rx.recv().await {
+                if !response.body.is_empty()
+                    && body_tx
+                        .send(Ok(axum::body::Bytes::from(response.body)))
+                        .await
+                        .is_err()
+                {
+                    break;
+                }
 
-            if response.stream_end {
-                break;
+                if !response.error.is_empty() {
+                    warn!(error = %response.error, "Watch error from agent");
+                }
+
+                if response.stream_end {
+                    break;
+                }
             }
-        }
-    });
+        });
+    }
 
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx));
 
     Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .header("Transfer-Encoding", "chunked")
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
+        .header("Content-Type", content_type)
         .body(body)
         .map_err(|e| TunnelError::ResponseBuild(e.to_string()))
 }

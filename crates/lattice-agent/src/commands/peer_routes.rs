@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use lattice_common::crd::{ClusterRoute, LatticeClusterRoutes};
 use lattice_common::PEER_ROUTES_LABEL;
@@ -48,6 +48,9 @@ fn hash_routes(routes: &[ClusterRoute]) -> Vec<u8> {
         buf.extend_from_slice(r.address.as_bytes());
         buf.extend_from_slice(&r.port.to_le_bytes());
         buf.extend_from_slice(r.protocol.as_bytes());
+        for allowed in &r.allowed_services {
+            buf.extend_from_slice(allowed.as_bytes());
+        }
     }
     lattice_common::kube_utils::sha256(&buf)
 }
@@ -103,9 +106,22 @@ pub async fn handle(sync: &PeerRouteSync, ctx: &CommandContext) {
         return;
     }
 
-    // Group peer routes by source cluster
+    // Group peer routes by source cluster, validating names to prevent injection
     let mut by_cluster: HashMap<String, Vec<ClusterRoute>> = HashMap::new();
     for svc in &sync.peer_routes {
+        if let Err(e) = lattice_common::crd::validate_dns_label(&svc.cluster, "cluster") {
+            warn!(error = %e, "Skipping peer route with invalid cluster name");
+            continue;
+        }
+        if let Err(e) = lattice_common::crd::validate_dns_label(&svc.name, "service name") {
+            warn!(error = %e, "Skipping peer route with invalid service name");
+            continue;
+        }
+        // Namespace can contain dots (e.g., kube-system) but must be valid K8s name
+        if svc.namespace.is_empty() || svc.namespace.len() > 253 {
+            warn!(namespace = %svc.namespace, "Skipping peer route with invalid namespace");
+            continue;
+        }
         by_cluster
             .entry(svc.cluster.clone())
             .or_default()

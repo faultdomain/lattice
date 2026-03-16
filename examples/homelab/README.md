@@ -6,34 +6,36 @@ automatically via heartbeats — no manual IP management.
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    Client[LAN Clients] --> LB[Cilium LB\n10.0.0.200/28\nvmbr0]
+
+    subgraph Edge["Edge Cluster — vmbr0 VLAN 100 (10.0.100.0/24)"]
+        LB --> HAProxy[haproxy-fw]
+        HAProxy --> RA[route-adapter sidecar]
+        RA -->|watches| CRD[LatticeClusterRoutes]
+    end
+
+    subgraph Backend["Backend Cluster — vmbr1 (10.0.1.0/24)"]
+        Agent[Lattice Agent]
+        EW[East-West Gateway\n:15008 HBONE mTLS]
+        Webapp[webapp]
+        Media[media]
+    end
+
+    HAProxy -->|HBONE mTLS| EW
+    EW --> Webapp
+    EW --> Media
+    Agent -->|outbound gRPC\nheartbeats + routes| Edge
 ```
-Internet / Home Network
-         |
-+--------+------------------------------------------+
-|  Edge Cluster (Parent, Proxmox node 1)             |
-|                                                    |
-|  haproxy-fw (LatticeService, 2 replicas)           |
-|  +----------------------------------------------+ |
-|  | main: haproxy        (reads /config)          | |
-|  | sidecar: route-adapter (watches CRD, renders) | |
-|  | shareProcessNamespace: true (SIGUSR2 reload)  | |
-|  +----------------------------------------------+ |
-|                                                    |
-|  LatticeClusterRoutes CRD                          |
-|  (populated from backend heartbeats)               |
-+--------+------------------------------------------+
-         | outbound gRPC (agent)
-+--------+------------------------------------------+
-|  Backend Cluster (Child, Proxmox node 2)           |
-|  Self-managing after pivot                         |
-|                                                    |
-|  webapp: frontend, api, postgres, redis, worker    |
-|  media:  jellyfin, sonarr, nzbget, egress-vpn      |
-|                                                    |
-|  Services with advertise set push routes           |
-|  to parent via heartbeat                           |
-+----------------------------------------------------+
-```
+
+**Network layout** (configured by `scripts/infra/proxmox-network-setup.sh`):
+
+| Network | Subnet | Purpose | LAN-reachable |
+|---------|--------|---------|---------------|
+| vmbr0 | 10.0.0.0/24 | LB VIPs, kube-vip | Yes |
+| vmbr0 VLAN 100 | 10.0.100.0/24 | Edge cluster nodes | No |
+| vmbr1 | 10.0.1.0/24 | Backend cluster | No |
 
 ## How it works
 
@@ -68,16 +70,18 @@ Edit these values in `edge-cluster.yaml` and `backend-cluster.yaml` to match you
 | `dnsServers` | Your DNS server |
 | `lbCidr` | Free IP range for LoadBalancer services |
 
-Default IP allocation (10.0.0.0/24 network):
+Default IP allocation:
 
-| Resource | IP |
-|----------|-----|
-| Edge VIP | 10.0.0.100 |
-| Edge nodes | 10.0.0.101-103 |
-| Edge LB | 10.0.0.200/28 |
-| Backend VIP | 10.0.0.110 |
-| Backend nodes | 10.0.0.111-115 |
-| Backend LB | 10.0.0.216/28 |
+| Resource | Network | IP |
+|----------|---------|-----|
+| Edge VIP (kube-vip) | vmbr0 (LAN) | 10.0.0.100 |
+| Edge nodes | vmbr0 VLAN 100 | 10.0.100.101-103 |
+| Edge LB (Cilium) | vmbr0 (LAN) | 10.0.0.200/28 |
+| Backend VIP (kube-vip) | vmbr1 | 10.0.1.110 |
+| Backend nodes | vmbr1 | 10.0.1.111-115 |
+| Backend LB (Cilium) | vmbr1 | 10.0.1.216/28 |
+
+Run `scripts/infra/proxmox-network-setup.sh` on the Proxmox host first to create the bridges and VLANs.
 
 ## Step 1: Create the InfraProvider
 

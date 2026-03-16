@@ -72,7 +72,8 @@ pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
 };
 pub use providers::{
-    AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
+    AdditionalNetwork, AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig,
+    ProxmoxConfig,
 };
 pub use restore::{LatticeRestore, LatticeRestoreSpec, LatticeRestoreStatus, RestorePhase};
 pub use secrets_provider::{

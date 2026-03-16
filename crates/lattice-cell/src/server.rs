@@ -524,16 +524,28 @@ pub struct PeerRouteConfig {
 /// Shared reference to peer route config, populated after auth proxy starts
 pub type SharedPeerRouteConfig = std::sync::Arc<tokio::sync::RwLock<Option<PeerRouteConfig>>>;
 
-/// Process an agent message (standalone function to avoid temporary object creation)
-async fn process_agent_message(
+/// Shared context for processing agent messages within a connection.
+struct MessageContext {
     registry: SharedAgentRegistry,
     subtree_registry: SharedSubtreeRegistry,
+    command_tx: mpsc::Sender<CellCommand>,
+    kube_client: Client,
+    route_update_tx: crate::route_reconciler::RouteUpdateSender,
+    connection_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Process an agent message
+async fn process_agent_message(
+    ctx: &MessageContext,
     msg: &AgentMessage,
-    command_tx: &mpsc::Sender<CellCommand>,
-    kube_client: &Client,
-    route_update_tx: &crate::route_reconciler::RouteUpdateSender,
     peer_config: Option<&PeerRouteConfig>,
 ) {
+    let registry = &ctx.registry;
+    let subtree_registry = &ctx.subtree_registry;
+    let command_tx = &ctx.command_tx;
+    let kube_client = &ctx.kube_client;
+    let route_update_tx = &ctx.route_update_tx;
+    let connection_generation = &ctx.connection_generation;
     let cluster_name = &msg.cluster_name;
 
     match &msg.payload {
@@ -553,7 +565,8 @@ async fn process_agent_message(
                 ready.kubernetes_version.clone(),
                 command_tx.clone(),
             );
-            registry.register(conn);
+            let gen = registry.register(conn);
+            connection_generation.store(gen, std::sync::atomic::Ordering::Relaxed);
             registry.update_state(cluster_name, ready.state());
 
             // Mark cluster as connected in subtree registry (restores connectivity after disconnect)
@@ -624,7 +637,7 @@ async fn process_agent_message(
             // we'd send it, push a full PeerRouteSync
             if let Some(pc) = peer_config {
                 crate::peer_routes::check_and_sync_peer_routes(
-                    &registry,
+                    registry,
                     cluster_name,
                     &hb.peer_routes_hash,
                     pc,
@@ -1117,14 +1130,24 @@ impl LatticeAgent for AgentServer {
         let command_tx_clone = command_tx.clone();
         let peer_config_lock = self.peer_config.clone();
 
+        // Track the connection generation so cleanup doesn't stomp newer connections
+        let connection_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cleanup_generation = connection_generation.clone();
+
+        let msg_ctx = MessageContext {
+            registry,
+            subtree_registry,
+            command_tx: command_tx_clone,
+            kube_client,
+            route_update_tx,
+            connection_generation,
+        };
+
         // Spawn task to handle incoming messages
         tokio::spawn(async move {
             while let Some(result) = inbound.next().await {
                 match result {
                     Ok(msg) => {
-                        // Enforce that every message's cluster_name matches the
-                        // mTLS certificate CN. A compromised agent cannot claim
-                        // to be a different cluster.
                         if msg.cluster_name != cert_cluster_id {
                             error!(
                                 cert_cluster_id = %cert_cluster_id,
@@ -1135,16 +1158,7 @@ impl LatticeAgent for AgentServer {
                         }
 
                         let peer_config = peer_config_lock.read().await.clone();
-                        process_agent_message(
-                            registry.clone(),
-                            subtree_registry.clone(),
-                            &msg,
-                            &command_tx_clone,
-                            &kube_client,
-                            &route_update_tx,
-                            peer_config.as_ref(),
-                        )
-                        .await;
+                        process_agent_message(&msg_ctx, &msg, peer_config.as_ref()).await;
                     }
                     Err(e) => {
                         error!(error = %e, "Error receiving agent message");
@@ -1153,10 +1167,12 @@ impl LatticeAgent for AgentServer {
                 }
             }
 
-            // Cleanup on disconnect — purge routes so stale entries don't persist
-            info!(cluster = %cert_cluster_id, "Agent disconnected");
-            registry.unregister(&cert_cluster_id);
-            subtree_registry
+            // Cleanup on disconnect — only if this is still the current connection.
+            // A stale task from a previous connection must not stomp the new one.
+            let gen = cleanup_generation.load(std::sync::atomic::Ordering::Relaxed);
+            msg_ctx.registry.unregister(&cert_cluster_id, gen);
+            msg_ctx
+                .subtree_registry
                 .handle_agent_disconnect(&cert_cluster_id)
                 .await;
 
@@ -1167,7 +1183,7 @@ impl LatticeAgent for AgentServer {
                 cluster_name: cert_cluster_id.to_string(),
                 routes: vec![],
             };
-            if let Err(e) = route_update_tx.send(cleanup).await {
+            if let Err(e) = msg_ctx.route_update_tx.send(cleanup).await {
                 warn!(
                     cluster = %cert_cluster_id,
                     error = %e,

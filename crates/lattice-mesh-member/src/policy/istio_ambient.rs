@@ -55,7 +55,7 @@ impl<'a> PolicyCompiler<'a> {
                     .graph
                     .get_service(&edge.caller_namespace, &edge.caller_name)?;
                 Some(mesh::trust_domain::principal(
-                    &self.cluster_name,
+                    self.graph.trust_domain(),
                     &edge.caller_namespace,
                     caller.sa_name(),
                 ))
@@ -65,7 +65,7 @@ impl<'a> PolicyCompiler<'a> {
         // If allow_peer_traffic, add own principal so pods can talk to each other
         if service.allow_peer_traffic {
             principals.push(mesh::trust_domain::principal(
-                &self.cluster_name,
+                self.graph.trust_domain(),
                 namespace,
                 service.sa_name(),
             ));
@@ -129,7 +129,7 @@ impl<'a> PolicyCompiler<'a> {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
                             principals: vec![mesh::trust_domain::waypoint_principal(
-                                &self.cluster_name,
+                                self.graph.trust_domain(),
                                 namespace,
                             )],
                             not_principals: vec![],
@@ -218,7 +218,7 @@ impl<'a> PolicyCompiler<'a> {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
                             principals: vec![mesh::trust_domain::principal(
-                                &self.cluster_name,
+                                self.graph.trust_domain(),
                                 namespace,
                                 service.sa_name(),
                             )],

@@ -105,41 +105,35 @@ pub fn ingress_gateway_sa_name(namespace: &str) -> String {
 /// Lattice uses per-cluster trust domains: `lattice.{cluster}.local`
 /// This provides multi-cluster isolation while maintaining a consistent format.
 pub mod trust_domain {
-    /// Build the trust domain for a cluster.
-    ///
-    /// Format: `lattice.{cluster_name}.local`
-    pub fn cluster_domain(cluster_name: &str) -> String {
-        format!("lattice.{}.local", cluster_name)
-    }
-
     /// Build a SPIFFE principal for a service account.
     ///
-    /// Format: `lattice.{cluster}.local/ns/{namespace}/sa/{service_account}`
+    /// Format: `{trust_domain}/ns/{namespace}/sa/{service_account}`
+    ///
+    /// The trust domain is derived from the root CA fingerprint
+    /// (e.g., `lattice.{sha256}.local`). All clusters sharing the
+    /// same root CA use the same trust domain.
     ///
     /// Note: The principal does NOT include the `spiffe://` prefix.
     /// Istio adds it internally.
-    pub fn principal(cluster_name: &str, namespace: &str, service_account: &str) -> String {
-        format!(
-            "lattice.{}.local/ns/{}/sa/{}",
-            cluster_name, namespace, service_account
-        )
+    pub fn principal(trust_domain: &str, namespace: &str, service_account: &str) -> String {
+        format!("{}/ns/{}/sa/{}", trust_domain, namespace, service_account)
     }
 
     /// Build a SPIFFE principal for a namespace's waypoint proxy.
     ///
     /// Waypoint service accounts follow the pattern: `{namespace}-waypoint`
-    pub fn waypoint_principal(cluster_name: &str, namespace: &str) -> String {
-        principal(cluster_name, namespace, &super::waypoint_name(namespace))
+    pub fn waypoint_principal(trust_domain: &str, namespace: &str) -> String {
+        principal(trust_domain, namespace, &super::waypoint_name(namespace))
     }
 
     /// Build a SPIFFE principal for the namespace's shared ingress gateway proxy.
     ///
     /// The gateway name is derived deterministically from the namespace
-    /// (`{namespace}-ingress`), so only cluster_name and namespace are needed.
+    /// (`{namespace}-ingress`), so only trust_domain and namespace are needed.
     /// Istio creates a service account `{gateway_name}-istio` for the proxy.
-    pub fn gateway_principal(cluster_name: &str, namespace: &str) -> String {
+    pub fn gateway_principal(trust_domain: &str, namespace: &str) -> String {
         principal(
-            cluster_name,
+            trust_domain,
             namespace,
             &super::ingress_gateway_sa_name(namespace),
         )
@@ -161,29 +155,24 @@ mod tests {
     }
 
     #[test]
-    fn cluster_domain_format() {
-        assert_eq!(trust_domain::cluster_domain("prod"), "lattice.prod.local");
-    }
-
-    #[test]
     fn principal_format_no_spiffe_prefix() {
-        let principal = trust_domain::principal("prod", "default", "api");
-        assert_eq!(principal, "lattice.prod.local/ns/default/sa/api");
+        let principal = trust_domain::principal("lattice.abcd1234.local", "default", "api");
+        assert_eq!(principal, "lattice.abcd1234.local/ns/default/sa/api");
         assert!(!principal.starts_with("spiffe://"));
     }
 
     #[test]
     fn waypoint_principal_format() {
-        let principal = trust_domain::waypoint_principal("prod", "myns");
-        assert_eq!(principal, "lattice.prod.local/ns/myns/sa/myns-waypoint");
+        let principal = trust_domain::waypoint_principal("lattice.abcd1234.local", "myns");
+        assert_eq!(principal, "lattice.abcd1234.local/ns/myns/sa/myns-waypoint");
     }
 
     #[test]
     fn gateway_principal_format() {
-        let principal = trust_domain::gateway_principal("prod", "my-ns");
+        let principal = trust_domain::gateway_principal("lattice.abcd1234.local", "my-ns");
         assert_eq!(
             principal,
-            "lattice.prod.local/ns/my-ns/sa/my-ns-ingress-istio"
+            "lattice.abcd1234.local/ns/my-ns/sa/my-ns-ingress-istio"
         );
     }
 

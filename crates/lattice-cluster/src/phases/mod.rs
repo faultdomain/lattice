@@ -225,6 +225,21 @@ pub async fn reconcile_infrastructure(
         config.parent_grpc_port = parent.endpoint.grpc_port;
     }
 
+    // Compute trust domain from root CA fingerprint
+    config.trust_domain = lattice_infra::bootstrap::read_trust_domain(client).await;
+
+    // Populate remote networks for Istio meshNetworks.
+    // If CRDs can't be listed, skip the entire reconcile — applying manifests
+    // with stale data could overwrite meshNetworks and break cross-cluster routing.
+    config.remote_networks = match lattice_infra::bootstrap::discover_remote_networks(client).await
+    {
+        Some(networks) => Some(networks),
+        None => {
+            debug!("Skipping infrastructure reconcile — LatticeClusterRoutes not available");
+            return Ok(());
+        }
+    };
+
     // Generate infrastructure manifests (flat list for reconciliation — infra already exists)
     let manifests = lattice_infra::bootstrap::generate_all_manifests(&config)
         .map_err(|e| Error::internal(format!("failed to generate infrastructure: {}", e)))?;

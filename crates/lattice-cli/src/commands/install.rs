@@ -1098,8 +1098,11 @@ impl Installer {
         .cmd_err()
     }
 
-    /// Create lattice-admin ServiceAccount, long-lived token Secret, and CedarPolicy
-    /// on the management cluster, then fetch and save the proxy kubeconfig.
+    /// Create lattice-admin ServiceAccount, break-glass token, CedarPolicies,
+    /// and fetch proxy kubeconfig.
+    ///
+    /// The break-glass token is a long-lived Secret-based SA token — no expiration,
+    /// full admin access. Store it securely as the root recovery credential.
     async fn setup_admin_access(&self) -> Result<()> {
         use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
         use kube::api::{Api, ObjectMeta, PostParams};
@@ -1125,7 +1128,7 @@ impl Installer {
             })?;
         info!("Created lattice-admin ServiceAccount");
 
-        // Create Secret-based long-lived SA token
+        // Create break-glass long-lived SA token (no expiration)
         let secret_api: Api<Secret> =
             Api::namespaced(mgmt_client.clone(), LATTICE_SYSTEM_NAMESPACE);
         let token_secret = Secret {
@@ -1168,7 +1171,7 @@ impl Installer {
             &mgmt_client,
             "istiod-proxy-cluster-access",
             "Cluster access for istiod remote secret proxy",
-            "permit(\n  principal == Lattice::User::\"system:serviceaccount:lattice-system:lattice-istiod-proxy\",\n  action == Lattice::Action::\"AccessCluster\",\n  resource\n);\n",
+            "permit(\n  principal == Lattice::User::\"system:serviceaccount:istio-system:lattice-istiod-proxy\",\n  action == Lattice::Action::\"AccessCluster\",\n  resource\n);\n",
         )
         .await?;
 
@@ -1203,7 +1206,7 @@ impl Installer {
         )
         .await?;
 
-        info!("Admin token ready");
+        info!("Admin token ready (break-glass)");
 
         // Discover proxy endpoint and fetch kubeconfig
         let proxy_endpoint = self.discover_proxy_for_install(&mgmt_client).await?;

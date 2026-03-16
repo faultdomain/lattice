@@ -107,7 +107,11 @@ pub(crate) async fn fetch_kubeconfig(
             let body = response.text().await.unwrap_or_default();
 
             if status.is_client_error() {
-                if retry_forbidden && status == reqwest::StatusCode::FORBIDDEN {
+                // 401/403 are transient during startup — the auth proxy or Cedar
+                // policies may not be fully initialized yet. Retry instead of failing.
+                if status == reqwest::StatusCode::UNAUTHORIZED
+                    || (retry_forbidden && status == reqwest::StatusCode::FORBIDDEN)
+                {
                     return Err(FetchError::Transient(format!(
                         "proxy returned {} from {}: {}",
                         status, url, body

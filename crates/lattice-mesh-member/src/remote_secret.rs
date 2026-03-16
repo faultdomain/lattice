@@ -9,6 +9,9 @@
 //! route so CoreDNS can resolve the remote service's DNS name. Istiod matches
 //! these stubs to remote endpoints discovered via the remote secret.
 //!
+//! Updates the `meshNetworks` field in the `istio` ConfigMap so istiod knows
+//! how to reach endpoints on each remote network via the east-west gateway.
+//!
 //! Tokens are requested per-reconcile via the TokenRequest API against a
 //! dedicated `lattice-istiod-proxy` ServiceAccount with read-only RBAC.
 //! Tokens expire after 1 hour; reconcile requeues at half that interval
@@ -18,11 +21,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use lattice_common::crd::{validate_dns_label, ClusterRoute, LatticeClusterRoutes};
 use lattice_common::Error;
@@ -57,6 +60,7 @@ pub async fn reconcile(
     if routes.spec.routes.is_empty() {
         cleanup_remote_secret(&ctx.client, &source_cluster).await;
         cleanup_service_stubs(&ctx.client, &source_cluster).await;
+        cleanup_mesh_network(&ctx.client, &source_cluster).await;
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
@@ -112,14 +116,17 @@ pub async fn reconcile(
         .await
         .map_err(|e| Error::internal(format!("failed to apply remote secret: {e}")))?;
 
-    // 2. Ensure Service stubs for DNS resolution on this cluster
+    // 2. Update meshNetworks so istiod knows how to route to this remote network
+    ensure_mesh_network(&ctx.client, &source_cluster).await;
+
+    // 3. Ensure Service stubs for DNS resolution on this cluster
     ensure_service_stubs(&ctx.client, &source_cluster, &routes.spec.routes).await;
 
     info!(
         secret = %secret_name,
         source_cluster = %source_cluster,
         routes = routes.spec.routes.len(),
-        "ensured remote secret and service stubs"
+        "ensured remote secret, mesh network, and service stubs"
     );
 
     // Requeue at half the token lifetime to refresh before expiry
@@ -145,7 +152,8 @@ async fn ensure_service_stubs(client: &Client, source_cluster: &str, routes: &[C
             "metadata": {
                 "name": route.service_namespace,
                 "labels": {
-                    "app.kubernetes.io/managed-by": "lattice"
+                    "app.kubernetes.io/managed-by": "lattice",
+                    "istio.io/dataplane-mode": "ambient"
                 }
             }
         });
@@ -173,7 +181,8 @@ async fn ensure_service_stubs(client: &Client, source_cluster: &str, routes: &[C
                 "namespace": route.service_namespace,
                 "labels": {
                     SERVICE_STUB_LABEL: source_cluster,
-                    "app.kubernetes.io/managed-by": "lattice"
+                    "app.kubernetes.io/managed-by": "lattice",
+                    "istio.io/global": "true"
                 }
             },
             "spec": {
@@ -313,6 +322,109 @@ async fn cleanup_remote_secret(client: &Client, source_cluster: &str) {
             warn!(secret = %secret_name, error = %e, "failed to delete remote secret")
         }
     }
+}
+
+/// Read-modify-write the `meshNetworks` field in the `istio` ConfigMap.
+///
+/// Uses optimistic concurrency (resourceVersion). On 409 Conflict,
+/// the next reconcile will retry. The `modify` closure receives the
+/// parsed networks document and returns whether a write is needed.
+async fn update_mesh_networks(
+    client: &Client,
+    operation: &str,
+    modify: impl FnOnce(&mut serde_json::Value) -> bool,
+) {
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), "istio-system");
+
+    let cm = match cm_api.get("istio").await {
+        Ok(cm) => cm,
+        Err(e) => {
+            error!(error = %e, "failed to read istio ConfigMap for meshNetworks {}", operation);
+            return;
+        }
+    };
+
+    let resource_version = cm
+        .metadata
+        .resource_version
+        .as_deref()
+        .unwrap_or_default()
+        .to_string();
+
+    let data = cm.data.unwrap_or_default();
+    let current_str = data
+        .get("meshNetworks")
+        .cloned()
+        .unwrap_or_else(|| r#"{"networks":{}}"#.to_string());
+
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&current_str).unwrap_or_else(|_| serde_json::json!({"networks": {}}));
+
+    if !modify(&mut doc) {
+        return; // no change needed
+    }
+
+    let updated_str = serde_json::to_string(&doc).expect("serialize meshNetworks");
+    let mut updated_data = data.clone();
+    updated_data.insert("meshNetworks".to_string(), updated_str);
+
+    let patch = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "istio",
+            "namespace": "istio-system",
+            "resourceVersion": resource_version
+        },
+        "data": updated_data
+    });
+
+    match cm_api
+        .replace(
+            "istio",
+            &Default::default(),
+            &serde_json::from_value(patch).expect("valid ConfigMap"),
+        )
+        .await
+    {
+        Ok(_) => info!("meshNetworks {operation} succeeded"),
+        Err(kube::Error::Api(e)) if e.code == 409 => {
+            warn!("meshNetworks {operation} conflict, will retry on next reconcile");
+        }
+        Err(e) => error!(error = %e, "failed to {operation} meshNetworks"),
+    }
+}
+
+/// Add a remote cluster's network entry to meshNetworks.
+async fn ensure_mesh_network(client: &Client, source_cluster: &str) {
+    let cluster = source_cluster.to_string();
+    update_mesh_networks(client, &format!("add {cluster}"), |doc| {
+        let entry = serde_json::json!({
+            "endpoints": [{"fromRegistry": &cluster}],
+            "gateways": [{
+                "registryServiceName": "istio-eastwestgateway.istio-system",
+                "port": 15008
+            }]
+        });
+        if doc["networks"].get(&cluster) == Some(&entry) {
+            return false; // already up to date
+        }
+        doc["networks"][&cluster] = entry;
+        true
+    })
+    .await;
+}
+
+/// Remove a remote cluster's network entry from meshNetworks.
+async fn cleanup_mesh_network(client: &Client, source_cluster: &str) {
+    let cluster = source_cluster.to_string();
+    update_mesh_networks(client, &format!("remove {cluster}"), |doc| {
+        doc["networks"]
+            .as_object_mut()
+            .map(|obj| obj.remove(&cluster).is_some())
+            .unwrap_or(false)
+    })
+    .await;
 }
 
 fn base64_encode(s: &str) -> String {

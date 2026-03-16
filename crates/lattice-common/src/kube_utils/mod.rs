@@ -69,7 +69,7 @@ pub use dynamic::{
 pub use hash::{deterministic_hash, sha256};
 
 // token.rs
-pub use token::request_istiod_proxy_token;
+pub use token::{request_istiod_proxy_token, PROXY_TOKEN_AUDIENCE, PROXY_TOKEN_EXPIRATION_SECS};
 
 /// Build a K8s success Status JSON for exec sessions that exit cleanly.
 ///

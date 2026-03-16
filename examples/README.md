@@ -2,6 +2,36 @@
 
 Production-ready examples for provisioning clusters and deploying services with bilateral mesh agreements.
 
+## Proxmox Multi-Cluster Network Setup
+
+For bare-metal Proxmox deployments, run the network setup script on the Proxmox host before provisioning clusters:
+
+```bash
+scp scripts/infra/proxmox-network-setup.sh root@<proxmox-host>:
+ssh root@<proxmox-host> bash proxmox-network-setup.sh
+ssh root@<proxmox-host> ifreload -a
+```
+
+This creates the network layout for a DMZ + workload architecture:
+
+```
+LAN (home network)
+ |
+ +-- vmbr0 (10.0.0.0/24) -- LB VIPs, kube-vip (LAN-reachable)
+ |    |
+ |    +-- VLAN 100 (10.0.100.0/24) -- Mgmt cluster nodes (NOT LAN-reachable)
+ |
+ +-- vmbr1 (10.0.1.0/24) -- Workload cluster 1 (isolated, NAT only)
+ |
+ +-- vmbr2 (10.0.2.0/24) -- Workload cluster 2 (isolated, NAT only)
+```
+
+Management cluster nodes sit on VLAN 100 so kubelets and other node ports aren't exposed to the home network. LoadBalancer VIPs (kube-vip for the K8s API, Cilium LB-IPAM for services) remain on the untagged vmbr0 network so they're reachable from the LAN.
+
+Workload clusters are fully isolated on their own bridges. They reach the internet via NAT through the Proxmox host. Cross-cluster traffic flows through Lattice's gRPC tunnel and Istio's east-west gateway.
+
+See `cluster/proxmox-cluster.yaml` (DMZ/management) and `cluster/proxmox-workload.yaml` (isolated workload) for example LatticeCluster manifests using this layout.
+
 ## Cluster Provisioning
 
 The `cluster/` directory contains a LatticeCluster manifest for local development using Docker:

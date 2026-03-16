@@ -15,4 +15,4 @@ mod proxmox;
 pub use aws::AwsConfig;
 pub use docker::DockerConfig;
 pub use openstack::OpenStackConfig;
-pub use proxmox::{Ipv4PoolConfig, Ipv6PoolConfig, ProxmoxConfig};
+pub use proxmox::{AdditionalNetwork, Ipv4PoolConfig, Ipv6PoolConfig, ProxmoxConfig};

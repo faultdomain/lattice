@@ -90,6 +90,14 @@ async fn ensure_general_infrastructure(
     tracing::info!(is_bootstrap, "Installing general infrastructure...");
 
     let infra_config = resolve_infra_config(client, is_bootstrap, cluster_mode, config).await?;
+
+    // If we couldn't determine remote networks (CRD list error), skip infra apply
+    // to avoid overwriting existing meshNetworks with stale data.
+    if infra_config.remote_networks.is_none() {
+        tracing::warn!("Skipping infrastructure apply — LatticeClusterRoutes not available");
+        return Ok(());
+    }
+
     let phases = bootstrap::generate_phases(&infra_config)
         .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
 
@@ -140,11 +148,18 @@ async fn resolve_infra_config(
     match &cluster {
         Some(c) => {
             let mut cfg = InfrastructureConfig::from(c);
+            if let Some(ref ca) = root_ca {
+                cfg.trust_domain = lattice_infra::bootstrap::trust_domain_from_ca(ca.ca_cert_pem());
+            }
             cfg.root_ca = root_ca;
             if let Ok(Some(parent)) = ParentConnectionConfig::read(client).await {
                 cfg.parent_host = Some(parent.endpoint.host);
                 cfg.parent_grpc_port = parent.endpoint.grpc_port;
             }
+            // Populate remote networks for Istio meshNetworks.
+            // None = error listing CRDs (skip apply to avoid clobbering).
+            // Some(vec![]) = no routes exist yet (valid, apply empty networks).
+            cfg.remote_networks = lattice_infra::bootstrap::discover_remote_networks(client).await;
             tracing::info!(
                 provider = ?cfg.provider,
                 bootstrap = ?cfg.bootstrap,

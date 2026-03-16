@@ -522,7 +522,6 @@ fn build_streaming_response(response: StreamingHttpResponse) -> Result<Response<
     let bounded_stream = response.stream.take_until(deadline);
 
     build_response_base(response.status, response.content_type)
-        .header("Transfer-Encoding", "chunked")
         .body(Body::from_stream(bounded_stream))
         .map_err(|e| Error::Internal(format!("Failed to build streaming response: {}", e)))
 }

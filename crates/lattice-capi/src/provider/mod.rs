@@ -963,8 +963,15 @@ fn generate_kubeadm_control_plane(
 
     // Build extra args based on provider type
     let kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
-    let api_server_extra_args = build_api_server_extra_args(config.provider_type);
+    let mut api_server_extra_args = build_api_server_extra_args(config.provider_type);
     let controller_manager_extra_args = build_controller_manager_extra_args(config.provider_type);
+
+    // When VIP is configured (multi-NIC environments like Proxmox), explicitly set
+    // advertise-address to the VIP so kubeadm doesn't auto-detect from the wrong interface
+    if let Some(ref vip) = cp_config.vip {
+        api_server_extra_args
+            .push(serde_json::json!({"name": "advertise-address", "value": &vip.address}));
+    }
 
     // Build nodeRegistration with optional name field for cloud providers
     let node_registration = build_node_registration(&kubelet_extra_args, config.provider_type);
@@ -1129,9 +1136,15 @@ fn generate_rke2_control_plane(
 
     // Build extra args using the shared functions
     let kubelet_extra_args = build_rke2_kubelet_extra_args(config.provider_type);
-    let api_server_extra_args = build_rke2_api_server_extra_args(config.provider_type);
+    let mut api_server_extra_args = build_rke2_api_server_extra_args(config.provider_type);
     let controller_manager_extra_args =
         build_rke2_controller_manager_extra_args(config.provider_type);
+
+    // When VIP is configured (multi-NIC environments like Proxmox), explicitly set
+    // advertise-address to the VIP so the API server doesn't auto-detect from the wrong interface
+    if let Some(ref vip) = cp_config.vip {
+        api_server_extra_args.push(format!("advertise-address={}", vip.address));
+    }
 
     let mut spec = serde_json::json!({
         "replicas": cp_config.replicas,
@@ -1814,6 +1827,23 @@ mod tests {
                 cmd.contains("eth0"),
                 "should use VIP interface for IP detection"
             );
+
+            // Verify API server advertise-address is set to VIP for multi-NIC environments
+            let api_args = spec
+                .pointer("/kubeadmConfigSpec/clusterConfiguration/apiServer/extraArgs")
+                .expect("should have apiServer extraArgs");
+            let has_advertise = api_args
+                .as_array()
+                .expect("extraArgs should be array")
+                .iter()
+                .any(|a| {
+                    a["name"].as_str() == Some("advertise-address")
+                        && a["value"].as_str() == Some("10.0.0.100")
+                });
+            assert!(
+                has_advertise,
+                "should set advertise-address to VIP for multi-NIC environments"
+            );
         }
 
         #[test]
@@ -1917,6 +1947,20 @@ mod tests {
             assert!(
                 cmd.contains("eth0"),
                 "should use VIP interface for IP detection"
+            );
+
+            // Verify API server advertise-address is set to VIP for multi-NIC environments
+            let api_args = spec
+                .pointer("/serverConfig/kubeAPIServer/extraArgs")
+                .expect("should have kubeAPIServer extraArgs");
+            let has_advertise = api_args
+                .as_array()
+                .expect("extraArgs should be array")
+                .iter()
+                .any(|a| a.as_str() == Some("advertise-address=10.0.0.100"));
+            assert!(
+                has_advertise,
+                "should set advertise-address to VIP for multi-NIC environments"
             );
         }
 

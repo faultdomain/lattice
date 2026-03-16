@@ -253,6 +253,31 @@ pub struct ProxmoxConfig {
     /// Must not overlap with the node `ipv4_pool` range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lb_cidr: Option<String>,
+
+    // ==========================================================================
+    // Additional Networks (Optional)
+    // ==========================================================================
+    /// Additional Proxmox bridges to attach to cluster nodes.
+    ///
+    /// Gives nodes direct L2 reachability to other networks without NAT.
+    /// Required for Istio multi-cluster east-west gateway traffic when
+    /// clusters are on different Proxmox bridges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_networks: Option<Vec<AdditionalNetwork>>,
+}
+
+/// An additional network bridge to attach to cluster nodes.
+///
+/// Creates a CAPMOX `additionalDevices` entry with its own IP pool
+/// and a route to the bridge's subnet.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdditionalNetwork {
+    /// Proxmox bridge name (e.g., "vmbr1")
+    pub bridge: String,
+    /// IP pool for this network in compact CIDR notation (e.g., "10.0.1.201-210/24").
+    /// CAPMOX requires each additional device to have an IP pool.
+    pub ipv4_pool: Ipv4PoolConfig,
 }
 
 #[cfg(test)]

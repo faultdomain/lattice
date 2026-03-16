@@ -108,6 +108,10 @@ pub async fn fetch_distributable_resources(
         }
     }
 
+    // Always include the root CA so children share the same trust root.
+    // This enables cross-cluster mTLS via Istio's cacerts intermediate CA chain.
+    secret_names.insert(lattice_common::CA_SECRET.to_string());
+
     // Fetch referenced secrets
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let mut secrets = Vec::new();

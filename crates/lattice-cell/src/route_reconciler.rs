@@ -79,10 +79,14 @@ struct GatewayListener {
     port: u16,
 }
 
+/// A route tagged with its source cluster name.
+pub type TaggedRoute = (String, ClusterRoute);
+
 /// Watch channel for the combined route state (local + all children).
+/// Each route is tagged with the cluster name it belongs to.
 /// Updated whenever any route changes. Read by the peer route broadcaster.
-pub type AllRoutesSender = tokio::sync::watch::Sender<Vec<ClusterRoute>>;
-pub type AllRoutesReceiver = tokio::sync::watch::Receiver<Vec<ClusterRoute>>;
+pub type AllRoutesSender = tokio::sync::watch::Sender<Vec<TaggedRoute>>;
+pub type AllRoutesReceiver = tokio::sync::watch::Receiver<Vec<TaggedRoute>>;
 
 /// Spawn the route reconciler task.
 ///
@@ -129,7 +133,11 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
     // Seed local routes on startup so peer route sync has data immediately
     let mut local_routes = discover_local_routes(&client).await;
     if !local_routes.is_empty() {
-        let _ = all_routes_tx.send(local_routes.clone());
+        let tagged: Vec<TaggedRoute> = local_routes
+            .iter()
+            .map(|r| (cluster_name.clone(), r.clone()))
+            .collect();
+        let _ = all_routes_tx.send(tagged);
     }
 
     let svc_api: Api<LatticeService> = Api::all(client.clone());
@@ -215,10 +223,17 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
             }
         }
 
-        // Publish combined route state for peer route sync
+        // Publish combined route state tagged with source cluster names
         if any_changed {
-            let mut all: Vec<ClusterRoute> = local_routes.clone();
-            all.extend(child_routes.values().flatten().cloned());
+            let mut all: Vec<TaggedRoute> = local_routes
+                .iter()
+                .map(|r| (cluster_name.clone(), r.clone()))
+                .collect();
+            for (child_name, routes) in &child_routes {
+                for r in routes {
+                    all.push((child_name.clone(), r.clone()));
+                }
+            }
             let _ = all_routes_tx.send(all);
         }
     }
