@@ -7,7 +7,8 @@ pub mod apply_manifests;
 mod exec;
 mod kubernetes;
 mod move_batch;
-mod move_complete;
+pub(crate) mod move_complete;
+pub mod peer_routes;
 mod state_sync;
 mod status_request;
 mod sync_resources;
@@ -175,6 +176,9 @@ pub async fn handle_command(command: &CellCommand, ctx: &CommandContext) {
         }
         Some(Command::StateSyncRequest(_)) => {
             state_sync::handle(&command.command_id, ctx).await;
+        }
+        Some(Command::PeerRouteSync(sync)) => {
+            peer_routes::handle(sync, ctx).await;
         }
         Some(Command::ServiceLookupResponse(resp)) => {
             tracing::debug!(

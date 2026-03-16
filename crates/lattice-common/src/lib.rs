@@ -389,6 +389,8 @@ pub const ORIGIN_CLUSTER_LABEL: &str = "lattice.dev/origin-cluster";
 pub const ORIGINAL_NAME_LABEL: &str = "lattice.dev/original-name";
 /// Label indicating this resource was inherited from a parent cluster
 pub const INHERITED_LABEL: &str = "lattice.dev/inherited";
+/// Label on LatticeClusterRoutes indicating these are peer routes from the parent
+pub const PEER_ROUTES_LABEL: &str = "lattice.dev/peer-routes";
 
 /// Check if a Kubernetes resource is inherited from a parent cluster.
 ///

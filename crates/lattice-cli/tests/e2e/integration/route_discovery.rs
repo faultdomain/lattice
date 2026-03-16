@@ -577,7 +577,9 @@ pub async fn verify_service_stub(
                 };
 
                 // Service stub should have a ClusterIP (not headless) for DNS resolution
-                let has_cluster_ip = parsed["spec"]["clusterIP"].as_str().is_some_and(|ip| ip != "None");
+                let has_cluster_ip = parsed["spec"]["clusterIP"]
+                    .as_str()
+                    .is_some_and(|ip| ip != "None");
                 let has_label = parsed["metadata"]["labels"]["lattice.dev/service-stub"]
                     .as_str()
                     .is_some();

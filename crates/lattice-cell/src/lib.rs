@@ -21,6 +21,7 @@ pub mod k8s_tunnel;
 pub mod kubeconfig;
 pub mod move_sender;
 pub mod parent;
+pub mod peer_routes;
 pub mod resilient_tunnel;
 pub mod resources;
 pub mod route_reconciler;

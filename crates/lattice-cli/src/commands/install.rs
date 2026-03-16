@@ -1336,9 +1336,8 @@ async fn apply_cedar_policy(
             "policies": policies
         }
     });
-    let json = serde_json::to_string(&yaml).map_err(|e| {
-        Error::command_failed(format!("failed to serialize CedarPolicy: {}", e))
-    })?;
+    let json = serde_json::to_string(&yaml)
+        .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {}", e)))?;
     kube_utils::apply_manifests(client, &[&json], &Default::default())
         .await
         .cmd_err()?;

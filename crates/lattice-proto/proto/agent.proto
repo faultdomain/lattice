@@ -288,6 +288,8 @@ message CellCommand {
     RequestStateSync state_sync_request = 12;
     // Response to a child's service lookup request
     ServiceLookupResponse service_lookup_response = 13;
+    // Push parent/sibling routes and proxy credentials to child for multi-cluster Istio
+    PeerRouteSync peer_route_sync = 14;
   }
 }
 
@@ -585,6 +587,28 @@ message SubtreeService {
   // Empty = fail-closed (nobody allowed). Use "*" for wildcard.
   // Propagated up the hierarchy for bilateral agreement enforcement.
   repeated string allowed_services = 10;
+}
+
+// Cell → Agent: Push peer (parent + sibling) service routes for multi-cluster Istio
+//
+// Enables cross-cluster service discovery: children discover parent and sibling
+// services via istiod remote secrets pointing to the parent's auth proxy.
+// The parent relays K8s API requests to its own API (for parent services) or
+// through gRPC tunnels to siblings.
+//
+// proxy_token is a short-lived ServiceAccount token from the parent's
+// lattice-istiod-proxy SA (read-only: get/list/watch services, endpoints, pods).
+message PeerRouteSync {
+  // Parent's external auth proxy URL (e.g., "https://172.18.0.5:8082")
+  string proxy_url = 1;
+  // CA certificate PEM for verifying the auth proxy TLS
+  string ca_cert_pem = 2;
+  // Short-lived ServiceAccount token for the parent's lattice-istiod-proxy SA
+  string proxy_token = 3;
+  // Routes from parent and sibling clusters (excludes the receiving child's own)
+  repeated SubtreeService peer_routes = 4;
+  // True if this is a full sync (replace all), false for incremental
+  bool is_full_sync = 5;
 }
 
 // =============================================================================

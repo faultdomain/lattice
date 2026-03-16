@@ -14,6 +14,7 @@ mod metadata;
 mod namespace;
 mod service;
 mod status;
+mod token;
 mod waiting;
 
 // Re-export everything so `use lattice_common::kube_utils::*` continues to work.
@@ -66,6 +67,9 @@ pub use dynamic::{
 
 // hash.rs
 pub use hash::{deterministic_hash, sha256};
+
+// token.rs
+pub use token::request_istiod_proxy_token;
 
 /// Build a K8s success Status JSON for exec sessions that exit cleanly.
 ///

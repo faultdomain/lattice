@@ -811,6 +811,15 @@ impl AgentRegistry {
     /// Returns cluster names of agents that are marked connected but haven't sent
     /// a heartbeat within `threshold`. Agents that have never sent a heartbeat
     /// (e.g. still in initial handshake) are excluded.
+    /// Get the names of all currently connected agents.
+    pub fn connected_cluster_names(&self) -> Vec<String> {
+        self.agents
+            .iter()
+            .filter(|r| r.value().connected)
+            .map(|r| r.key().clone())
+            .collect()
+    }
+
     pub fn detect_stale_agents(&self, threshold: Duration) -> Vec<String> {
         self.agents
             .iter()

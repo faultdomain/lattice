@@ -35,8 +35,6 @@ const MANAGED_LABEL: &str = "lattice.dev/remote-secret-managed";
 const SERVICE_STUB_LABEL: &str = "lattice.dev/service-stub";
 
 /// ServiceAccount dedicated to istiod proxy access (read-only, scoped).
-pub const PROXY_SA_NAME: &str = "lattice-istiod-proxy";
-pub const PROXY_SA_NAMESPACE: &str = "istio-system";
 const TOKEN_EXPIRATION_SECS: i64 = 3600;
 
 /// Context for the remote secret reconciler.
@@ -62,18 +60,27 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
-    // 1. Ensure remote secret for istiod endpoint discovery
-    let token = request_proxy_token(&ctx.client)
-        .await
-        .map_err(|e| Error::internal(format!("failed to request proxy token: {e}")))?;
+    // Determine proxy credentials: peer routes (from parent) use parent's proxy,
+    // local child routes use this cluster's own proxy.
+    let is_peer = routes
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(lattice_common::PEER_ROUTES_LABEL))
+        .is_some_and(|v| v == "true");
 
+    let (proxy_url, ca_cert, token) = if is_peer {
+        load_peer_proxy_credentials(&ctx.client).await?
+    } else {
+        let token = request_proxy_token(&ctx.client)
+            .await
+            .map_err(|e| Error::internal(format!("failed to request proxy token: {e}")))?;
+        (ctx.proxy_base_url.clone(), ctx.ca_cert_pem.clone(), token)
+    };
+
+    // 1. Ensure remote secret for istiod endpoint discovery
     let secret_name = format!("istio-remote-secret-{}", source_cluster);
-    let kubeconfig = build_remote_kubeconfig(
-        &source_cluster,
-        &ctx.proxy_base_url,
-        &ctx.ca_cert_pem,
-        &token,
-    );
+    let kubeconfig = build_remote_kubeconfig(&source_cluster, &proxy_url, &ca_cert, &token);
 
     let mut labels = BTreeMap::new();
     labels.insert(ISTIO_MULTICLUSTER_LABEL.to_string(), "true".to_string());
@@ -231,36 +238,43 @@ async fn cleanup_service_stubs(client: &Client, source_cluster: &str) {
 }
 
 async fn request_proxy_token(client: &Client) -> Result<String, kube::Error> {
-    use k8s_openapi::api::authentication::v1::TokenRequest;
-    use k8s_openapi::api::core::v1::ServiceAccount;
-    use kube::api::PostParams;
+    lattice_common::kube_utils::request_istiod_proxy_token(client).await
+}
 
-    let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), PROXY_SA_NAMESPACE);
+/// Load peer proxy credentials stored by the agent's PeerRouteSync handler.
+///
+/// Returns (proxy_url, ca_cert_pem, proxy_token) from the Secret written by
+/// the agent when it receives peer routes from the parent.
+async fn load_peer_proxy_credentials(client: &Client) -> Result<(String, String, String), Error> {
+    use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
-    let token_request = TokenRequest {
-        spec: k8s_openapi::api::authentication::v1::TokenRequestSpec {
-            // No custom audience — the proxy's SaValidator uses the default
-            // API server audience for TokenReview validation.
-            audiences: vec![],
-            expiration_seconds: Some(TOKEN_EXPIRATION_SECS),
-            ..Default::default()
-        },
-        ..Default::default()
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let secret = secrets
+        .get("lattice-peer-proxy-credentials")
+        .await
+        .map_err(|e| {
+            Error::internal(format!(
+                "peer proxy credentials not found (parent may not have sent PeerRouteSync yet): {e}"
+            ))
+        })?;
+
+    let data = secret
+        .data
+        .ok_or_else(|| Error::internal("peer proxy credentials secret has no data".to_string()))?;
+
+    let get_field = |key: &str| -> Result<String, Error> {
+        let bytes = data
+            .get(key)
+            .ok_or_else(|| Error::internal(format!("missing '{key}' in peer proxy credentials")))?;
+        String::from_utf8(bytes.0.clone())
+            .map_err(|e| Error::internal(format!("invalid UTF-8 in '{key}': {e}")))
     };
 
-    let response = sa_api
-        .create_token_request(PROXY_SA_NAME, &PostParams::default(), &token_request)
-        .await?;
-
-    let status = response.status.ok_or_else(|| {
-        kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
-            message: "TokenRequest response missing status".to_string(),
-            reason: "MissingStatus".to_string(),
-            code: 500,
-        })
-    })?;
-    Ok(status.token)
+    Ok((
+        get_field("proxy_url")?,
+        get_field("ca_cert_pem")?,
+        get_field("proxy_token")?,
+    ))
 }
 
 /// Build kubeconfig as JSON (not string interpolation) to prevent injection.

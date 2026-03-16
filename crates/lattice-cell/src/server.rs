@@ -493,6 +493,10 @@ pub struct GrpcServerConfig {
     pub blocklist: crate::blocklist::CertificateBlocklist,
     /// Channel for sending route updates to the reconciler
     pub route_update_tx: crate::route_reconciler::RouteUpdateSender,
+    /// Parent's external auth proxy URL for peer route sync (e.g., "https://172.18.0.5:8082")
+    pub peer_proxy_url: Option<String>,
+    /// CA cert PEM for the auth proxy (used in peer route sync)
+    pub peer_ca_cert_pem: Option<String>,
 }
 
 /// gRPC server for agent communication
@@ -506,6 +510,15 @@ pub struct AgentServer {
     blocklist: crate::blocklist::CertificateBlocklist,
     /// Channel for sending route updates to the reconciler
     route_update_tx: crate::route_reconciler::RouteUpdateSender,
+    /// Peer route sync config (None on child clusters that don't relay)
+    peer_proxy_url: Option<String>,
+    peer_ca_cert_pem: Option<String>,
+}
+
+/// Peer route sync configuration (None on child clusters)
+struct PeerRouteConfig {
+    proxy_url: String,
+    ca_cert_pem: String,
 }
 
 /// Process an agent message (standalone function to avoid temporary object creation)
@@ -516,6 +529,7 @@ async fn process_agent_message(
     command_tx: &mpsc::Sender<CellCommand>,
     kube_client: &Client,
     route_update_tx: &crate::route_reconciler::RouteUpdateSender,
+    peer_config: Option<&PeerRouteConfig>,
 ) {
     let cluster_name = &msg.cluster_name;
 
@@ -837,6 +851,20 @@ async fn process_agent_message(
                         );
                     }
                 }
+
+                // Push peer routes to all connected children so they can
+                // discover each other's (and parent's) services via Istio
+                if let Some(pc) = peer_config {
+                    let all_routes: Vec<_> = state.services.to_vec();
+                    crate::peer_routes::broadcast_peer_routes(
+                        &registry,
+                        &all_routes,
+                        &pc.proxy_url,
+                        &pc.ca_cert_pem,
+                        kube_client,
+                    )
+                    .await;
+                }
             }
         }
         Some(Payload::ExecData(data)) => {
@@ -937,6 +965,8 @@ impl AgentServer {
         kube_client: Client,
         blocklist: crate::blocklist::CertificateBlocklist,
         route_update_tx: crate::route_reconciler::RouteUpdateSender,
+        peer_proxy_url: Option<String>,
+        peer_ca_cert_pem: Option<String>,
     ) -> Self {
         Self {
             registry,
@@ -944,6 +974,8 @@ impl AgentServer {
             kube_client,
             blocklist,
             route_update_tx,
+            peer_proxy_url,
+            peer_ca_cert_pem,
         }
     }
 
@@ -969,6 +1001,8 @@ impl AgentServer {
             config.kube_client,
             config.blocklist,
             config.route_update_tx,
+            config.peer_proxy_url,
+            config.peer_ca_cert_pem,
         );
         let tls_config = config.mtls_config.to_tonic_config()?;
         let addr = config.addr;
@@ -1082,6 +1116,13 @@ impl LatticeAgent for AgentServer {
         let kube_client = self.kube_client.clone();
         let route_update_tx = self.route_update_tx.clone();
         let command_tx_clone = command_tx.clone();
+        let peer_config = match (&self.peer_proxy_url, &self.peer_ca_cert_pem) {
+            (Some(url), Some(ca)) => Some(PeerRouteConfig {
+                proxy_url: url.clone(),
+                ca_cert_pem: ca.clone(),
+            }),
+            _ => None,
+        };
 
         // Spawn task to handle incoming messages
         tokio::spawn(async move {
@@ -1107,6 +1148,7 @@ impl LatticeAgent for AgentServer {
                             &command_tx_clone,
                             &kube_client,
                             &route_update_tx,
+                            peer_config.as_ref(),
                         )
                         .await;
                     }

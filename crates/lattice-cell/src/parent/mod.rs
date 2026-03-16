@@ -815,6 +815,8 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
                 kube_client: grpc_kube_client,
                 blocklist,
                 route_update_tx,
+                peer_proxy_url: None, // Set by operator after auth proxy starts
+                peer_ca_cert_pem: None,
             })
             .await
             {
