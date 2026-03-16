@@ -1089,7 +1089,7 @@ async fn start_auth_proxy(
     let base_url = format!("https://{}:{}", base_host, DEFAULT_AUTH_PROXY_PORT);
 
     // Clone values needed for the remote secret controller before they move into config
-    let proxy_base_url = base_url.clone();
+    let proxy_base_url = format!("https://{}:{}", cell_dns, DEFAULT_AUTH_PROXY_PORT);
     let proxy_ca_cert = ca_cert_pem.clone();
 
     let config = AuthProxyConfig {

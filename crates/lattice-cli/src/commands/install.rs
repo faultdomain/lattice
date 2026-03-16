@@ -1148,26 +1148,22 @@ impl Installer {
             })?;
         info!("Created lattice-admin-token Secret");
 
-        // Create CedarPolicy granting full admin access
-        let cedar_policy_yaml = serde_json::json!({
-            "apiVersion": "lattice.dev/v1alpha1",
-            "kind": "CedarPolicy",
-            "metadata": {
-                "name": "lattice-admin-access",
-                "namespace": LATTICE_SYSTEM_NAMESPACE
-            },
-            "spec": {
-                "description": "Full admin access for lattice-admin SA",
-                "policies": "permit(\n  principal == Lattice::User::\"system:serviceaccount:lattice-system:lattice-admin\",\n  action,\n  resource\n);\n"
-            }
-        });
-        let cedar_json = serde_json::to_string(&cedar_policy_yaml).map_err(|e| {
-            Error::command_failed(format!("failed to serialize CedarPolicy: {}", e))
-        })?;
-        kube_utils::apply_manifests(&mgmt_client, &[&cedar_json], &Default::default())
-            .await
-            .cmd_err()?;
-        info!("Created lattice-admin-access CedarPolicy");
+        // Create Cedar policies for admin and istiod proxy access
+        apply_cedar_policy(
+            &mgmt_client,
+            "lattice-admin-access",
+            "Full admin access for lattice-admin SA",
+            "permit(\n  principal == Lattice::User::\"system:serviceaccount:lattice-system:lattice-admin\",\n  action,\n  resource\n);\n",
+        )
+        .await?;
+
+        apply_cedar_policy(
+            &mgmt_client,
+            "istiod-proxy-cluster-access",
+            "Cluster access for istiod remote secret proxy",
+            "permit(\n  principal == Lattice::User::\"system:serviceaccount:lattice-system:lattice-istiod-proxy\",\n  action == Lattice::Action::\"AccessCluster\",\n  resource\n);\n",
+        )
+        .await?;
 
         // Wait for token controller to populate the Secret
         info!("Waiting for admin token to be populated...");
@@ -1314,6 +1310,35 @@ impl Installer {
 /// Get LatticeCluster phase using dynamic API
 ///
 /// Returns the phase string, or "Unknown" for transient network errors.
+/// Apply a CedarPolicy CRD to the cluster.
+async fn apply_cedar_policy(
+    client: &Client,
+    name: &str,
+    description: &str,
+    policies: &str,
+) -> Result<()> {
+    let yaml = serde_json::json!({
+        "apiVersion": "lattice.dev/v1alpha1",
+        "kind": "CedarPolicy",
+        "metadata": {
+            "name": name,
+            "namespace": LATTICE_SYSTEM_NAMESPACE
+        },
+        "spec": {
+            "description": description,
+            "policies": policies
+        }
+    });
+    let json = serde_json::to_string(&yaml).map_err(|e| {
+        Error::command_failed(format!("failed to serialize CedarPolicy: {}", e))
+    })?;
+    kube_utils::apply_manifests(client, &[&json], &Default::default())
+        .await
+        .cmd_err()?;
+    info!("Created {} CedarPolicy", name);
+    Ok(())
+}
+
 /// The caller should continue polling on "Unknown" - only "Failed" phase
 /// indicates a terminal failure.
 async fn get_latticecluster_phase(client: &Client, name: &str) -> String {

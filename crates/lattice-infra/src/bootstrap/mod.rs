@@ -729,7 +729,7 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
                     port: DEFAULT_AUTH_PROXY_PORT,
                     service_port: None,
                     name: "auth-proxy".to_string(),
-                    peer_auth: PeerAuth::Webhook,
+                    peer_auth: PeerAuth::Permissive,
                 },
                 MeshMemberPort {
                     port: LOCAL_SECRETS_PORT,
@@ -1118,7 +1118,7 @@ mod tests {
             .find(|p| p.name == "auth-proxy")
             .expect("auth-proxy port");
         assert_eq!(auth_proxy.port, DEFAULT_AUTH_PROXY_PORT);
-        assert_eq!(auth_proxy.peer_auth, PeerAuth::Webhook);
+        assert_eq!(auth_proxy.peer_auth, PeerAuth::Permissive);
 
         let secrets = member
             .spec
