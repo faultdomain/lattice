@@ -555,9 +555,18 @@ pub async fn verify_service_stub(
             let ns = namespace.to_string();
             async move {
                 let output = match run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "service", &name, "-n", &ns, "-o", "json",
-                ]).await {
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "service",
+                    &name,
+                    "-n",
+                    &ns,
+                    "-o",
+                    "json",
+                ])
+                .await
+                {
                     Ok(o) => o,
                     Err(_) => return Ok(false),
                 };
@@ -576,7 +585,8 @@ pub async fn verify_service_stub(
                 Ok(is_headless && has_label)
             }
         },
-    ).await?;
+    )
+    .await?;
 
     info!(
         "[RouteDiscovery] Service stub '{}/{}' verified",

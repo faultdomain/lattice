@@ -205,8 +205,7 @@ async fn ensure_service_stubs(client: &Client, source_cluster: &str, routes: &[C
 /// Clean up Service stubs for a cluster that no longer has routes.
 async fn cleanup_service_stubs(client: &Client, source_cluster: &str) {
     let label_selector = format!("{}={}", SERVICE_STUB_LABEL, source_cluster);
-    let svc_api =
-        Api::<k8s_openapi::api::core::v1::Service>::all(client.clone());
+    let svc_api = Api::<k8s_openapi::api::core::v1::Service>::all(client.clone());
     let list = match svc_api
         .list(&kube::api::ListParams::default().labels(&label_selector))
         .await
@@ -221,8 +220,7 @@ async fn cleanup_service_stubs(client: &Client, source_cluster: &str) {
     for svc in list {
         let name = svc.metadata.name.as_deref().unwrap_or_default();
         let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
-        let ns_api =
-            Api::<k8s_openapi::api::core::v1::Service>::namespaced(client.clone(), ns);
+        let ns_api = Api::<k8s_openapi::api::core::v1::Service>::namespaced(client.clone(), ns);
         match ns_api.delete(name, &Default::default()).await {
             Ok(_) => info!(service = %name, namespace = %ns, "deleted service stub"),
             Err(kube::Error::Api(e)) if e.code == 404 => {}

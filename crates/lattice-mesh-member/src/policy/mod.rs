@@ -830,6 +830,22 @@ pub(crate) mod tests {
             .ports
             .iter()
             .any(|p| p.port == "9443"));
+
+        // Should also have an in-cluster ingress rule for webhook ports
+        // (istiod and other in-cluster services need to reach webhook ports)
+        let cluster_rule = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| {
+                !r.from_endpoints.is_empty()
+                    && r.from_endpoints[0].match_labels.is_empty()
+                    && r.to_ports
+                        .iter()
+                        .any(|tp| tp.ports.iter().any(|p| p.port == "9443"))
+            })
+            .expect("should have in-cluster ingress rule for webhook ports");
+        assert!(cluster_rule.from_endpoints[0].match_labels.is_empty());
     }
 
     #[test]

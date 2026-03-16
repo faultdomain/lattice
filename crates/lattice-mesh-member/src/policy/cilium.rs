@@ -156,6 +156,8 @@ impl<'a> PolicyCompiler<'a> {
         // the source identity as remote-node (cross-node) or host (same-node),
         // not kube-apiserver. "world" is needed for child cluster nodes connecting
         // over real networks (Proxmox, AWS, OpenStack).
+        // In-cluster access is also needed (e.g., istiod reaching the auth proxy
+        // for multi-cluster service discovery).
         let webhook_ports = service.webhook_port_numbers();
         if !webhook_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
@@ -165,6 +167,11 @@ impl<'a> PolicyCompiler<'a> {
                     "host".to_string(),
                     "world".to_string(),
                 ],
+                to_ports: build_tcp_port_rules(&webhook_ports),
+                ..Default::default()
+            });
+            ingress_rules.push(CiliumIngressRule {
+                from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
                 to_ports: build_tcp_port_rules(&webhook_ports),
                 ..Default::default()
             });
@@ -317,7 +324,7 @@ impl<'a> PolicyCompiler<'a> {
             });
         }
 
-        // Direct TCP ingress for webhook ports (kube-apiserver, remote-node, host, world)
+        // Direct TCP ingress for webhook ports (external + in-cluster)
         let webhook_ports = service.webhook_port_numbers();
         if !webhook_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
@@ -327,6 +334,11 @@ impl<'a> PolicyCompiler<'a> {
                     "host".to_string(),
                     "world".to_string(),
                 ],
+                to_ports: build_tcp_port_rules(&webhook_ports),
+                ..Default::default()
+            });
+            ingress_rules.push(CiliumIngressRule {
+                from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
                 to_ports: build_tcp_port_rules(&webhook_ports),
                 ..Default::default()
             });
