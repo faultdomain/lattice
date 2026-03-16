@@ -25,16 +25,17 @@ spec:
         sourceNode: "poweredge-lg"
         templateId: 9000
         # kube-vip VIP for K8s API server
-        controlPlaneEndpoint: "10.0.0.110"
-        bridge: "vmbr0"
-        # Node IPs assigned by CAPMOX (extra headroom for failed test cleanup)
+        controlPlaneEndpoint: "10.0.1.110"
+        bridge: "vmbr1"
+        # Node IPs on isolated network (vmbr1 — disconnected from mgmt)
+        # Istio ambient multi-cluster requires clusters on different networks
         ipv4Pool:
-          range: "10.0.0.111-120/24"
-          gateway: "10.0.0.1"
+          range: "10.0.1.111-120/24"
+          gateway: "10.0.1.1"
         dnsServers:
           - "10.0.0.1"
         virtualIpNetworkInterface: "ens18"
-        lbCidr: "10.0.0.216/28"
+        lbCidr: "10.0.1.216/28"
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"
