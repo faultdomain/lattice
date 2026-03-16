@@ -748,11 +748,13 @@ async fn setup_cell_infra(
             client,
             &servers,
             self_cluster_name,
-            &extra_sans,
-            cedar,
-            config.oidc_allow_insecure_http,
-            tx,
-            all_routes_rx.clone(),
+            CellActivationParams {
+                extra_sans,
+                cedar,
+                oidc_allow_insecure_http: config.oidc_allow_insecure_http,
+                route_update_tx: tx,
+                all_routes_rx: all_routes_rx.clone(),
+            },
         )
         .await?
     } else {
@@ -791,21 +793,32 @@ async fn setup_cell_infra(
 ///
 /// Shared by both immediate cell activation (in `setup_cell_infra`) and deferred
 /// promotion (in `cell_activation_watcher`).
-#[allow(clippy::too_many_arguments)]
-async fn activate_cell_services(
-    client: &kube::Client,
-    servers: &Arc<ParentServers<DefaultManifestGenerator>>,
-    cluster_name: &Option<String>,
-    extra_sans: &[String],
+/// Parameters for activating cell services.
+struct CellActivationParams {
+    extra_sans: Vec<String>,
     cedar: Arc<PolicyEngine>,
     oidc_allow_insecure_http: bool,
     route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
+}
+
+async fn activate_cell_services(
+    client: &kube::Client,
+    servers: &Arc<ParentServers<DefaultManifestGenerator>>,
+    cluster_name: &Option<String>,
+    params: CellActivationParams,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    let CellActivationParams {
+        extra_sans,
+        cedar,
+        oidc_allow_insecure_http,
+        route_update_tx,
+        all_routes_rx,
+    } = params;
     servers
         .ensure_running(
             DefaultManifestGenerator::new(),
-            extra_sans,
+            &extra_sans,
             client.clone(),
             route_update_tx,
         )
@@ -816,7 +829,7 @@ async fn activate_cell_services(
         client,
         servers.clone(),
         cluster_name,
-        extra_sans,
+        &extra_sans,
         cedar,
         oidc_allow_insecure_http,
         all_routes_rx,
@@ -916,11 +929,13 @@ async fn cell_activation_watcher(
             &client,
             &servers,
             &cluster_name,
-            &extra_sans,
-            cedar.clone(),
-            oidc_allow_insecure_http,
-            route_update_tx.clone(),
-            all_routes_rx.clone(),
+            CellActivationParams {
+                extra_sans,
+                cedar: cedar.clone(),
+                oidc_allow_insecure_http,
+                route_update_tx: route_update_tx.clone(),
+                all_routes_rx: all_routes_rx.clone(),
+            },
         )
         .await
         {

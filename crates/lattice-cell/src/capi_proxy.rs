@@ -111,6 +111,7 @@ pub async fn start_capi_proxy(
 
     let app = Router::new()
         .route("/clusters/{cluster_name}", any(proxy_handler))
+        .route("/clusters/{cluster_name}/", any(proxy_handler))
         .route("/clusters/{cluster_name}/{*path}", any(proxy_handler))
         .route("/healthz", axum::routing::get(|| async { "ok" }))
         .with_state(state);
