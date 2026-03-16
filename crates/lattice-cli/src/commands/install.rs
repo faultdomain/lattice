@@ -327,8 +327,15 @@ impl Installer {
         info!("[Phase 2/8] Deploying Lattice operator...");
         self.deploy_lattice_operator(&bootstrap_client).await?;
 
-        // InfraProvider must be created AFTER operator deploys CRDs
-        // Operator waits for InfraProvider before installing CAPI
+        // Wait for operator to register Lattice CRDs before creating resources
+        kube_utils::wait_for_crd(
+            &bootstrap_client,
+            "infraproviders.lattice.dev",
+            CRD_APPLY_TIMEOUT,
+        )
+        .await
+        .cmd_err()?;
+
         info!("[Phase 3/8] Creating InfraProvider and credentials...");
         self.create_cloud_provider_with_credentials(&bootstrap_client)
             .await?;
