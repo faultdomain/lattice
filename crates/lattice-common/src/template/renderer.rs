@@ -653,7 +653,7 @@ mod tests {
     use kube::api::ObjectMeta;
 
     fn make_graph_with_db(env: &str) -> ServiceGraph {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
 
         let mut containers = BTreeMap::new();
         containers.insert(
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn test_no_expand_preserves_templates() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
 
         let mut files = BTreeMap::new();
         files.insert(
@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn test_escaped_placeholders_preserved() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
 
         let mut variables = BTreeMap::new();
         variables.insert(
@@ -1096,7 +1096,7 @@ mod tests {
 
     #[test]
     fn test_cluster_and_env_context() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
 
         let mut variables = BTreeMap::new();
         variables.insert(
@@ -1245,7 +1245,7 @@ mod tests {
 
     #[test]
     fn test_image_dot_resolved_from_config() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
 
         let mut containers = BTreeMap::new();
         containers.insert(
@@ -1293,7 +1293,7 @@ mod tests {
 
     #[test]
     fn test_image_dot_resolved_from_container_specific_config() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
 
         let mut containers = BTreeMap::new();
         containers.insert(
@@ -1358,7 +1358,7 @@ mod tests {
 
     #[test]
     fn test_image_dot_without_config_errors() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
 
         let mut containers = BTreeMap::new();
         containers.insert(
@@ -1407,7 +1407,7 @@ mod tests {
 
     #[test]
     fn test_regular_image_not_affected() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
 
         let mut containers = BTreeMap::new();
         containers.insert(

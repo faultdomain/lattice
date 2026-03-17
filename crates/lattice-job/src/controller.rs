@@ -263,7 +263,7 @@ impl JobContext {
     pub fn for_testing(kube: Arc<dyn JobKubeClient>) -> Self {
         Self {
             kube,
-            graph: Arc::new(ServiceGraph::new("lattice.test")),
+            graph: Arc::new(ServiceGraph::new()),
             cluster_name: "test-cluster".to_string(),
             provider_type: ProviderType::Docker,
             cedar: Arc::new(

@@ -102,41 +102,40 @@ pub fn ingress_gateway_sa_name(namespace: &str) -> String {
 
 /// Trust domain module for SPIFFE identity generation.
 ///
-/// Lattice uses per-cluster trust domains: `lattice.{cluster}.local`
-/// This provides multi-cluster isolation while maintaining a consistent format.
-pub mod trust_domain {
+/// SPIFFE principal helpers for Istio AuthorizationPolicy.
+///
+/// Per Istio docs (since 1.4), AuthorizationPolicy should use `cluster.local`
+/// as the trust domain — Istio treats it as a pointer to the actual trust
+/// domain, making policies resilient to trust domain changes and migrations.
+/// The real trust domain (from meshConfig.trustDomain) is only needed for
+/// istiod configuration, NOT for policy generation.
+pub mod principal {
+    /// The trust domain alias used in AuthorizationPolicy principals.
+    /// Istio resolves this to the actual mesh trust domain at evaluation time.
+    const POLICY_TRUST_DOMAIN: &str = "cluster.local";
+
     /// Build a SPIFFE principal for a service account.
     ///
-    /// Format: `{trust_domain}/ns/{namespace}/sa/{service_account}`
-    ///
-    /// The trust domain is derived from the root CA fingerprint
-    /// (e.g., `lattice.{sha256}.local`). All clusters sharing the
-    /// same root CA use the same trust domain.
+    /// Format: `cluster.local/ns/{namespace}/sa/{service_account}`
     ///
     /// Note: The principal does NOT include the `spiffe://` prefix.
     /// Istio adds it internally.
-    pub fn principal(trust_domain: &str, namespace: &str, service_account: &str) -> String {
-        format!("{}/ns/{}/sa/{}", trust_domain, namespace, service_account)
+    pub fn service(namespace: &str, service_account: &str) -> String {
+        format!("{POLICY_TRUST_DOMAIN}/ns/{namespace}/sa/{service_account}")
     }
 
     /// Build a SPIFFE principal for a namespace's waypoint proxy.
     ///
     /// Waypoint service accounts follow the pattern: `{namespace}-waypoint`
-    pub fn waypoint_principal(trust_domain: &str, namespace: &str) -> String {
-        principal(trust_domain, namespace, &super::waypoint_name(namespace))
+    pub fn waypoint(namespace: &str) -> String {
+        service(namespace, &super::waypoint_name(namespace))
     }
 
     /// Build a SPIFFE principal for the namespace's shared ingress gateway proxy.
     ///
-    /// The gateway name is derived deterministically from the namespace
-    /// (`{namespace}-ingress`), so only trust_domain and namespace are needed.
     /// Istio creates a service account `{gateway_name}-istio` for the proxy.
-    pub fn gateway_principal(trust_domain: &str, namespace: &str) -> String {
-        principal(
-            trust_domain,
-            namespace,
-            &super::ingress_gateway_sa_name(namespace),
-        )
+    pub fn gateway(namespace: &str) -> String {
+        service(namespace, &super::ingress_gateway_sa_name(namespace))
     }
 }
 
@@ -155,25 +154,22 @@ mod tests {
     }
 
     #[test]
-    fn principal_format_no_spiffe_prefix() {
-        let principal = trust_domain::principal("lattice.abcd1234.local", "default", "api");
-        assert_eq!(principal, "lattice.abcd1234.local/ns/default/sa/api");
-        assert!(!principal.starts_with("spiffe://"));
+    fn principal_uses_cluster_local() {
+        let p = principal::service("default", "api");
+        assert_eq!(p, "cluster.local/ns/default/sa/api");
+        assert!(!p.starts_with("spiffe://"));
     }
 
     #[test]
     fn waypoint_principal_format() {
-        let principal = trust_domain::waypoint_principal("lattice.abcd1234.local", "myns");
-        assert_eq!(principal, "lattice.abcd1234.local/ns/myns/sa/myns-waypoint");
+        let p = principal::waypoint("myns");
+        assert_eq!(p, "cluster.local/ns/myns/sa/myns-waypoint");
     }
 
     #[test]
     fn gateway_principal_format() {
-        let principal = trust_domain::gateway_principal("lattice.abcd1234.local", "my-ns");
-        assert_eq!(
-            principal,
-            "lattice.abcd1234.local/ns/my-ns/sa/my-ns-ingress-istio"
-        );
+        let p = principal::gateway("my-ns");
+        assert_eq!(p, "cluster.local/ns/my-ns/sa/my-ns-ingress-istio");
     }
 
     #[test]

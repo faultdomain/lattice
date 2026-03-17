@@ -691,7 +691,7 @@ mod tests {
         tasks.insert("worker".to_string(), make_task("worker:latest", 2));
 
         let job = make_job(tasks);
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
         let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
@@ -715,7 +715,7 @@ mod tests {
         tasks.insert("worker".to_string(), make_task("worker:latest", 4));
 
         let job = make_job(tasks);
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
         let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
@@ -733,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn empty_tasks_returns_error() {
         let job = make_job(BTreeMap::new());
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
 
         let result = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar).await;
@@ -750,7 +750,7 @@ mod tests {
         };
         let job = LatticeJob::new("test-job", spec);
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
 
         let result = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar).await;
@@ -771,7 +771,7 @@ mod tests {
         job.metadata.namespace = Some("default".to_string());
         job.metadata.uid = Some("uid-cron".to_string());
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
         let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
@@ -987,7 +987,7 @@ mod tests {
         job.metadata.namespace = Some("default".to_string());
         job.metadata.uid = Some("uid-mesh".to_string());
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
         let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
@@ -1026,7 +1026,7 @@ mod tests {
         job.metadata.namespace = Some("default".to_string());
         job.metadata.uid = Some("uid-ambient".to_string());
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
         let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
@@ -1077,7 +1077,7 @@ mod tests {
         job.metadata.namespace = Some("default".to_string());
         job.metadata.uid = Some("uid-labels".to_string());
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
         let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
@@ -1127,7 +1127,7 @@ mod tests {
         job.metadata.namespace = Some("default".to_string());
         job.metadata.uid = Some("uid-svc".to_string());
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
         let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
@@ -1156,7 +1156,7 @@ mod tests {
         tasks.insert("worker".to_string(), make_task("worker:latest", 2));
 
         let job = make_job(tasks);
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
 
         let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)

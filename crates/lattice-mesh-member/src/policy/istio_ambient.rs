@@ -54,8 +54,7 @@ impl<'a> PolicyCompiler<'a> {
                 let caller = self
                     .graph
                     .get_service(&edge.caller_namespace, &edge.caller_name)?;
-                Some(mesh::trust_domain::principal(
-                    self.graph.trust_domain(),
+                Some(mesh::principal::service(
                     &edge.caller_namespace,
                     caller.sa_name(),
                 ))
@@ -64,11 +63,7 @@ impl<'a> PolicyCompiler<'a> {
 
         // If allow_peer_traffic, add own principal so pods can talk to each other
         if service.allow_peer_traffic {
-            principals.push(mesh::trust_domain::principal(
-                self.graph.trust_domain(),
-                namespace,
-                service.sa_name(),
-            ));
+            principals.push(mesh::principal::service(namespace, service.sa_name()));
         }
 
         let ports: Vec<String> = service
@@ -128,10 +123,7 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![mesh::trust_domain::waypoint_principal(
-                                self.graph.trust_domain(),
-                                namespace,
-                            )],
+                            principals: vec![mesh::principal::waypoint(namespace)],
                             not_principals: vec![],
                         },
                     }],
@@ -217,8 +209,7 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![mesh::trust_domain::principal(
-                                self.graph.trust_domain(),
+                            principals: vec![mesh::principal::service(
                                 namespace,
                                 service.sa_name(),
                             )],

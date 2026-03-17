@@ -220,7 +220,7 @@ mod tests {
         use crate::crd::{MonitoringConfig, ProviderType};
         use crate::graph::ServiceGraph;
 
-        let graph: &'static ServiceGraph = Box::leak(Box::new(ServiceGraph::new("lattice.test")));
+        let graph: &'static ServiceGraph = Box::leak(Box::new(ServiceGraph::new()));
 
         CompilationContext {
             service,

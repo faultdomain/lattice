@@ -760,7 +760,7 @@ mod tests {
             .as_deref()
             .expect("test service must have a namespace");
 
-        let graph = lattice_common::graph::ServiceGraph::new("lattice.test");
+        let graph = lattice_common::graph::ServiceGraph::new();
         let cedar = lattice_cedar::PolicyEngine::with_policies(
             r#"
             permit(

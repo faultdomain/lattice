@@ -14,7 +14,7 @@
 //! # Usage
 //!
 //! ```text
-//! let graph = ServiceGraph::new("lattice.test");
+//! let graph = ServiceGraph::new();
 //! let cedar = PolicyEngine::new();
 //! let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, MonitoringConfig::default());
 //! let output = compiler.compile(&lattice_service).await;
@@ -478,7 +478,7 @@ mod tests {
 
     /// Create a fresh graph + cedar pair for tests.
     fn test_setup() -> (ServiceGraph, PolicyEngine) {
-        (ServiceGraph::new("lattice.test"), PolicyEngine::new())
+        (ServiceGraph::new(), PolicyEngine::new())
     }
 
     /// Set the security context on the "main" container.
@@ -953,7 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn compile_succeeds_when_security_override_permitted() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let cedar = PolicyEngine::with_policies(
             r#"
             permit(

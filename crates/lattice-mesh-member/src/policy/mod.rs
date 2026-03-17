@@ -293,7 +293,7 @@ pub(crate) mod tests {
 
     #[test]
     fn owner_refs_stamped_on_auth_and_peer_auth() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "test-ns";
 
         graph.put_service(ns, "api", &make_service_spec(vec![], vec!["gateway"]));
@@ -325,7 +325,7 @@ pub(crate) mod tests {
 
     #[test]
     fn owner_refs_empty_when_none_provided() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "test-ns";
 
         graph.put_service(ns, "api", &make_service_spec(vec![], vec!["gateway"]));
@@ -341,7 +341,7 @@ pub(crate) mod tests {
 
     #[test]
     fn bilateral_agreement_generates_policy() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -367,7 +367,7 @@ pub(crate) mod tests {
 
     #[test]
     fn no_policy_without_bilateral_agreement() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -384,15 +384,15 @@ pub(crate) mod tests {
 
     #[test]
     fn no_policies_when_not_in_graph() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let compiler = PolicyCompiler::new(&graph, vec![]);
         let output = compiler.compile("nonexistent", "default");
         assert!(output.is_empty());
     }
 
     #[test]
-    fn spiffe_uses_trust_domain() {
-        let graph = ServiceGraph::new("lattice.cafebabe.local");
+    fn spiffe_uses_cluster_local() {
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -407,15 +407,12 @@ pub(crate) mod tests {
         let principals = &output.authorization_policies[0].spec.rules[0].from[0]
             .source
             .principals;
-        assert_eq!(
-            principals[0],
-            "lattice.cafebabe.local/ns/prod-ns/sa/gateway"
-        );
+        assert_eq!(principals[0], "cluster.local/ns/prod-ns/sa/gateway");
     }
 
     #[test]
     fn cilium_policy_always_generated() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "default";
 
         let spec = make_service_spec(vec![], vec![]);
@@ -441,7 +438,7 @@ pub(crate) mod tests {
 
     #[test]
     fn fqdn_egress_generates_service_entry() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
@@ -463,7 +460,7 @@ pub(crate) mod tests {
 
     #[test]
     fn total_count() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
@@ -520,7 +517,7 @@ pub(crate) mod tests {
 
     #[test]
     fn wildcard_inbound_generates_policy() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["*"]);
@@ -542,7 +539,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cilium_hbone_ingress_and_egress_for_mesh_service() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -593,7 +590,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cilium_hbone_with_fqdn_egress() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
@@ -675,7 +672,7 @@ pub(crate) mod tests {
     fn permissive_port_generates_peer_auth_and_authz() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "webhook-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "webhook".to_string())]);
@@ -734,7 +731,7 @@ pub(crate) mod tests {
     fn webhook_port_generates_peer_auth_and_authz() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "webhook-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "admission".to_string())]);
@@ -771,7 +768,7 @@ pub(crate) mod tests {
     fn webhook_port_cilium_restricts_to_kube_apiserver() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "webhook-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "admission".to_string())]);
@@ -826,7 +823,7 @@ pub(crate) mod tests {
     fn permissive_port_cilium_allows_any_source() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "webhook-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "svc".to_string())]);
@@ -862,7 +859,7 @@ pub(crate) mod tests {
     fn mixed_permissive_and_webhook_ports() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "mixed-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "mixed".to_string())]);
@@ -925,7 +922,7 @@ pub(crate) mod tests {
 
     #[test]
     fn strict_only_ports_generate_no_permissive_policies() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "strict-ns";
 
         let spec = make_service_spec(vec![], vec!["gateway"]);
@@ -958,7 +955,7 @@ pub(crate) mod tests {
     fn fqdn_egress_generates_service_entry_and_authz() {
         use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         // Put a mesh member with an FQDN egress rule
@@ -1030,7 +1027,7 @@ pub(crate) mod tests {
     fn fqdn_egress_without_ports_generates_no_to_block() {
         use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "test-ns";
 
         let spec = lattice_common::crd::LatticeMeshMemberSpec {
@@ -1076,7 +1073,7 @@ pub(crate) mod tests {
     fn fqdn_egress_cilium_gets_fqdn_rule() {
         use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "test-ns";
 
         let spec = lattice_common::crd::LatticeMeshMemberSpec {
@@ -1120,7 +1117,7 @@ pub(crate) mod tests {
 
     #[test]
     fn peer_traffic_generates_hbone_ingress_and_egress() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "training-ns";
 
         let labels = BTreeMap::from([("app".to_string(), "worker".to_string())]);
@@ -1173,7 +1170,7 @@ pub(crate) mod tests {
     fn ambient_to_non_ambient_produces_direct_egress_no_hbone() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "kthena-system";
 
         // Router: ambient, depends on serving
@@ -1242,7 +1239,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ambient_to_ambient_produces_hbone_egress_no_direct() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         // Gateway: ambient, depends on api
@@ -1288,7 +1285,7 @@ pub(crate) mod tests {
     fn mixed_ambient_and_non_ambient_callees_produce_both_rules() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
         // Router: ambient, depends on both api (ambient) and serving (non-ambient)
@@ -1360,7 +1357,7 @@ pub(crate) mod tests {
     fn cross_namespace_non_ambient_callee_includes_namespace_label() {
         use lattice_common::crd::{PeerAuth, ServiceRef};
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
 
         // Router in kthena-system, depends on serving in model-ns
         let router_labels = BTreeMap::from([(
@@ -1433,7 +1430,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_produces_only_cilium_policy() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "training-ns";
 
         let labels =
@@ -1468,7 +1465,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_has_no_hbone_rules() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "training-ns";
 
         let labels =
@@ -1511,7 +1508,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_peer_traffic_uses_label_selector() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "training-ns";
 
         let labels =
@@ -1574,7 +1571,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_always_has_dns_egress() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "training-ns";
 
         let labels =
@@ -1598,7 +1595,7 @@ pub(crate) mod tests {
     fn out_of_ambient_bilateral_caller_cross_namespace() {
         use lattice_common::crd::{PeerAuth, ServiceRef};
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "model-ns";
 
         let labels = BTreeMap::from([("lattice.dev/model".to_string(), "my-model".to_string())]);
@@ -1662,7 +1659,7 @@ pub(crate) mod tests {
     fn out_of_ambient_bilateral_caller_ingress() {
         use lattice_common::crd::PeerAuth;
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "model-ns";
 
         // Model serving node (out of ambient)
@@ -1709,7 +1706,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_vmagent_ingress_on_metrics_port() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "training-ns";
 
         let labels =
@@ -1770,7 +1767,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_no_peer_traffic_means_no_peer_rules() {
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "job-ns";
 
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "etl-job".to_string())]);
@@ -1809,7 +1806,7 @@ pub(crate) mod tests {
     fn out_of_ambient_egress_rules_propagate() {
         use lattice_common::crd::EgressRule;
 
-        let graph = ServiceGraph::new("lattice.test");
+        let graph = ServiceGraph::new();
         let ns = "training-ns";
 
         let labels =
